@@ -45,6 +45,7 @@ fn runtime_type_to_capnp(r: RuntimeType) -> capsule_capnp::RuntimeType {
         RuntimeType::Docker => capsule_capnp::RuntimeType::Docker,
         RuntimeType::Native => capsule_capnp::RuntimeType::Native,
         RuntimeType::Youki => capsule_capnp::RuntimeType::Youki,
+        RuntimeType::Wasm => capsule_capnp::RuntimeType::Native, // Treat Wasm as Native for Cap'n Proto
     }
 }
 
