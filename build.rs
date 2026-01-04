@@ -1,0 +1,61 @@
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // =========================================================================
+    // Protobuf / gRPC Code Generation (using UARC proto definitions)
+    // =========================================================================
+    // UARC contains only the specification protos: common/v1, engine/v1
+    // Coordinator API is Ato-specific and lives in ato-coordinator repo
+    std::env::set_var("PROTOC", protobuf_src::protoc());
+    tonic_build::configure()
+        .build_server(true)
+        .compile_well_known_types(false)
+        .out_dir("src/proto")
+        .compile_protos(
+            &[
+                "../uarc/proto/common/v1/common.proto",
+                "../uarc/proto/engine/v1/api.proto",
+            ],
+            &["../uarc/proto"], // .proto ファイルのインクルードパス
+        )?;
+
+    // =========================================================================
+    // Cap'n Proto Code Generation (SSOT for CapsuleManifest)
+    // =========================================================================
+    // Requires `capnp` CLI tool installed: `brew install capnp` or `apt install capnproto`
+    //
+    // Generated code goes to src/ so it can be accessed as `crate::capsule_capnp`
+    let capnp_out_dir = std::path::Path::new("src");
+
+    // `capsule.capnp` includes Go annotations via `go.capnp` import for SSOT.
+    // Rust builds should not depend on the Go toolchain or go.capnp being present,
+    // so we compile from a sanitized copy that strips `$Go.*` lines.
+    let original_schema_path = std::path::Path::new("../uarc/schema/capsule.capnp");
+    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR")?);
+    let sanitized_schema_dir = out_dir.join("capnp_sanitized");
+    std::fs::create_dir_all(&sanitized_schema_dir)?;
+    let sanitized_schema_path = sanitized_schema_dir.join("capsule.capnp");
+    let original_schema = std::fs::read_to_string(original_schema_path)?;
+    let sanitized_schema = original_schema
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            trimmed != "using Go = import \"/go.capnp\";"
+                && !trimmed.starts_with("$Go.")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&sanitized_schema_path, sanitized_schema)?;
+
+    capnpc::CompilerCommand::new()
+        .file(&sanitized_schema_path)
+        .src_prefix(&sanitized_schema_dir)
+        .output_path(capnp_out_dir)
+        .run()?;
+
+    // Rerun if schema changes
+    println!("cargo:rerun-if-changed=../uarc/schema/capsule.capnp");
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=../uarc/proto");
+
+    Ok(())
+}
