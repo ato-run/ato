@@ -21,7 +21,8 @@ tokio = { version = "1", features = ["full"] }
 tonic = "0.12"
 prost = "0.13"
 prost-types = "0.13"
-wasmtime = "16.0"
+wasmtime = { version = "16.0", features = ["component-model", "async"] }
+wasmtime-wasi = "16.0"
 toml = "0.8"
 axum = "0.7"
 tower-http = { version = "0.5", features = ["cors"] }
