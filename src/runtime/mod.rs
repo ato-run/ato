@@ -11,6 +11,7 @@ pub mod dev;
 pub mod docker_cli;
 pub mod native;
 pub mod traits;
+pub mod wasm;
 pub mod youki_adapter;
 
 pub use container::ContainerRuntime;
@@ -18,6 +19,7 @@ pub use dev::DevRuntime;
 pub use docker_cli::DockerCliRuntime;
 pub use native::NativeRuntime;
 pub use traits::Runtime;
+pub use wasm::WasmRuntime;
 pub use youki_adapter::YoukiRuntimeAdapter;
 
 const DEFAULT_HOOK_RETRY_ATTEMPTS: u32 = 1;
@@ -29,6 +31,7 @@ pub enum RuntimeKind {
     Runc,
     Mock,
     Native,
+    Wasm,
 }
 
 impl RuntimeKind {
@@ -38,6 +41,7 @@ impl RuntimeKind {
             "runc" => Some(RuntimeKind::Runc),
             "mock" => Some(RuntimeKind::Mock),
             "native" => Some(RuntimeKind::Native),
+            "wasm" => Some(RuntimeKind::Wasm),
             _ => None,
         }
     }
@@ -48,6 +52,7 @@ impl RuntimeKind {
             RuntimeKind::Runc => &["runc"],
             RuntimeKind::Mock => &["mock_runtime"],
             RuntimeKind::Native => &[], // Internal
+            RuntimeKind::Wasm => &[], // Internal
         }
     }
 }
