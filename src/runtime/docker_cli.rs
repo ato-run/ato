@@ -376,9 +376,10 @@ impl Runtime for DockerCliRuntime {
         std::fs::write(&log_path, log_content).ok();
 
         Ok(LaunchResult {
-            pid,
-            bundle_path: PathBuf::from("/"),
-            log_path,
+            pid: Some(pid),
+            bundle_path: Some(PathBuf::from("/")),
+            log_path: Some(log_path),
+            port: Some(host_port as u16),
         })
     }
 

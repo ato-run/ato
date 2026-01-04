@@ -214,14 +214,27 @@ pub struct LaunchRequest<'a> {
     pub workload_id: &'a str,
     pub spec: &'a Spec,
     pub manifest_json: Option<&'a str>,
+    /// Bundle root directory containing the workload files
+    pub bundle_root: PathBuf,
+    /// Environment variables to pass to the workload
+    pub env: Option<Vec<(String, String)>>,
+    /// Command line arguments for the workload
+    pub args: Option<Vec<String>>,
+    /// Path to the Wasm component file (for Wasm runtime)
+    pub wasm_component_path: Option<PathBuf>,
 }
 
 /// Result details returned after successful launch.
 #[derive(Debug, Clone)]
 pub struct LaunchResult {
-    pub pid: u32,
-    pub bundle_path: PathBuf,
-    pub log_path: PathBuf,
+    /// Process ID (None for Wasm components)
+    pub pid: Option<u32>,
+    /// Bundle path (optional for non-container runtimes)
+    pub bundle_path: Option<PathBuf>,
+    /// Log file path (optional)
+    pub log_path: Option<PathBuf>,
+    /// Allocated port (optional, for network services)
+    pub port: Option<u16>,
 }
 
 /// Errors produced by the runtime launcher.
@@ -262,6 +275,12 @@ pub enum RuntimeError {
         #[source]
         source: serde_json::Error,
     },
+
+    #[error("internal runtime error: {0}")]
+    Internal(String),
+
+    #[error("execution failed: {0}")]
+    ExecutionFailed(String),
 }
 
 #[allow(dead_code)]
@@ -398,13 +417,14 @@ mod tests {
     #[test]
     fn test_launch_result_fields() {
         let result = LaunchResult {
-            pid: 12345,
-            bundle_path: PathBuf::from("/path/to/bundle"),
-            log_path: PathBuf::from("/path/to/log"),
+            pid: Some(12345),
+            bundle_path: Some(PathBuf::from("/path/to/bundle")),
+            log_path: Some(PathBuf::from("/path/to/log")),
+            port: None,
         };
 
-        assert_eq!(result.pid, 12345);
-        assert_eq!(result.bundle_path, PathBuf::from("/path/to/bundle"));
-        assert_eq!(result.log_path, PathBuf::from("/path/to/log"));
+        assert_eq!(result.pid, Some(12345));
+        assert_eq!(result.bundle_path, Some(PathBuf::from("/path/to/bundle")));
+        assert_eq!(result.log_path, Some(PathBuf::from("/path/to/log")));
     }
 }
