@@ -336,9 +336,10 @@ impl Runtime for ContainerRuntime {
                         pid, "runtime launched container"
                     );
                     return Ok(LaunchResult {
-                        pid,
-                        bundle_path,
-                        log_path,
+                        pid: Some(pid),
+                        bundle_path: Some(bundle_path),
+                        log_path: Some(log_path),
+                        port: None,
                     });
                 }
                 Err(err) => {

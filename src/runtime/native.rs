@@ -251,9 +251,10 @@ impl Runtime for NativeRuntime {
                 })?;
 
                 Ok(LaunchResult {
-                    pid,
-                    bundle_path: PathBuf::from("/"),
-                    log_path: log_path_buf,
+                    pid: Some(pid),
+                    bundle_path: Some(PathBuf::from("/")),
+                    log_path: Some(log_path_buf),
+                    port: None,
                 })
             }
             Err(e) => Err(RuntimeError::CommandExecution {
