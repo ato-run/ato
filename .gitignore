@@ -1,0 +1,35 @@
+# Rust build artifacts
+/target/
+Cargo.lock
+*.rlib
+*.rmeta
+
+# IDE and editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.local
+*.pem
+*.key
+
+# Local development
+/local-docs/
+/test-data/
+*.log
+
+# Build outputs
+build/
+dist/
+/u00261
+
+# Docker
+.dockerignore
+
+# Archives
+.archives/
