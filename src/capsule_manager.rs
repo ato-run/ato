@@ -697,6 +697,10 @@ impl CapsuleManager {
             workload_id: &capsule_id,
             spec: &spec,
             manifest_json: Some(manifest_json_for_runtime.as_str()),
+            bundle_root: rootfs_path.clone(),
+            env: None,
+            args: None,
+            wasm_component_path: None,
         };
 
         // Initialize pool if configured (Linux only, Youki runtime)
@@ -746,9 +750,10 @@ impl CapsuleManager {
                                 // Construct LaunchResult from pool acquire result
                                 let log_path = acquire_result.bundle_path.join("container.log");
                                 Some(LaunchResult {
-                                    pid: acquire_result.pid,
-                                    bundle_path: acquire_result.bundle_path,
-                                    log_path,
+                                    pid: Some(acquire_result.pid),
+                                    bundle_path: Some(acquire_result.bundle_path),
+                                    log_path: Some(log_path),
+                                    port: None,
                                 })
                             }
                             Err(e) => {
@@ -908,20 +913,20 @@ impl CapsuleManager {
         entry.adep_json = manifest_json.as_bytes().to_vec();
         entry.oci_image = manifest.execution.entrypoint.clone();
         entry.status = CapsuleStatus::Running;
-        entry.bundle_path = Some(runtime.bundle_path.to_string_lossy().to_string());
-        entry.pid = Some(runtime.pid);
+        entry.bundle_path = runtime.bundle_path.as_ref().map(|p| p.to_string_lossy().to_string());
+        entry.pid = runtime.pid;
         entry.reserved_vram_bytes = reserved_vram_bytes;
         entry.observed_vram_bytes = None;
         entry.last_failure = None;
         entry.last_exit_code = None;
-        entry.log_path = Some(runtime.log_path.to_string_lossy().to_string());
+        entry.log_path = runtime.log_path.as_ref().map(|p| p.to_string_lossy().to_string());
         entry.started_at = Some(std::time::SystemTime::now());
         entry.gpu_indices = gpu_indices;
 
         info!(
             capsule_id = capsule_id,
-            pid = runtime.pid,
-            bundle = %runtime.bundle_path.display(),
+            pid = ?runtime.pid,
+            bundle = ?runtime.bundle_path,
             "Recorded capsule runtime launch"
         );
 
@@ -941,7 +946,7 @@ impl CapsuleManager {
                 .await;
         });
 
-        info!("Started workload {} (pid={})", capsule_id, runtime.pid);
+        info!("Started workload {} (pid={:?})", capsule_id, runtime.pid);
 
         Ok(())
     }
