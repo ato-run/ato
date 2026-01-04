@@ -1,0 +1,122 @@
+# Capsuled Engine - Cloud Deployment
+#
+# Usage:
+#   docker compose -f docker-compose.cloud.yml up -d
+#
+# For GPU:
+#   docker compose -f docker-compose.cloud.yml --profile gpu up -d
+
+# NOTE: This compose file is operational documentation.
+# Prefer comment-only edits unless you also update the referenced Dockerfiles:
+# - engine/Dockerfile (CPU)
+# - engine/Dockerfile.cuda (GPU)
+
+version: "3.8"
+
+services:
+  # ============================================
+  # Capsuled Engine (CPU-only)
+  # ============================================
+  engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/onescluster/capsuled-engine:latest
+    container_name: capsuled-engine
+    ports:
+      - "4500:4500"
+    environment:
+      - RUST_LOG=info
+      - CAPSULED_DATA_DIR=/var/lib/capsuled
+    volumes:
+      - engine-data:/var/lib/capsuled
+      - engine-logs:/var/log/capsuled
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4500/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  # ============================================
+  # Capsuled Engine + vLLM (GPU)
+  # ============================================
+  engine-gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    image: ghcr.io/onescluster/capsuled-engine:cuda
+    container_name: capsuled-engine-gpu
+    profiles:
+      - gpu
+    ports:
+      - "4500:4500"
+      - "8000:8000"
+    environment:
+      - RUST_LOG=info
+      - CAPSULED_DATA_DIR=/var/lib/capsuled
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HF_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - engine-data:/var/lib/capsuled
+      - engine-logs:/var/log/capsuled
+      - model-cache:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4500/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+
+  # ============================================
+  # vLLM Server (Standalone)
+  # ============================================
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-server
+    profiles:
+      - vllm
+    ports:
+      - "8000:8000"
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - model-cache:/root/.cache/huggingface
+    command: >
+      --model ${VLLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      --host 0.0.0.0
+      --port 8000
+      --max-model-len 32768
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+
+volumes:
+  engine-data:
+  engine-logs:
+  model-cache:
+
+networks:
+  default:
+    name: capsuled-network
