@@ -88,6 +88,7 @@ pub struct CapsuleManager {
     native_runtime: Arc<NativeRuntime>,
     dev_runtime: Arc<DevRuntime>,
     youki_runtime: Arc<YoukiRuntimeAdapter>,
+    wasm_runtime: Arc<crate::runtime::WasmRuntime>,
     verifier: Arc<ManifestVerifier>,
     capsules: Arc<RwLock<HashMap<String, Capsule>>>,
 
@@ -157,9 +158,12 @@ impl CapsuleManager {
 
         // Initialize Youki runtime (for direct OCI container execution without Docker)
         // Clone config before passing to container_runtime since it takes ownership
+        let log_dir_clone = runtime_config.log_dir.clone();
+        let bundle_root_clone = runtime_config.bundle_root.clone();
+        
         let youki_runtime = Arc::new(YoukiRuntimeAdapter::new(
-            runtime_config.log_dir.clone(),
-            runtime_config.bundle_root.clone(),
+            log_dir_clone.clone(),
+            bundle_root_clone.clone(),
         ));
 
         let container_runtime = Arc::new(ContainerRuntime::new(
@@ -195,11 +199,18 @@ impl CapsuleManager {
             None
         };
 
+        // Initialize WasmRuntime (UARC V1.1.0 support)
+        let wasm_runtime = Arc::new(
+            crate::runtime::WasmRuntime::new(artifact_manager.clone(), log_dir_clone, egress_proxy_port)
+                .expect("Failed to initialize WasmRuntime"),
+        );
+
         Self {
             docker_runtime: docker_cli_runtime,
             native_runtime,
             dev_runtime,
             youki_runtime,
+            wasm_runtime,
             container_runtime, // Added missing field initialization
             verifier,
             capsules: Arc::new(RwLock::new(HashMap::new())),
@@ -800,6 +811,7 @@ impl CapsuleManager {
                         }
                     }
                 }
+                RuntimeType::Wasm => self.wasm_runtime.clone(),
             };
 
             match runtime.launch(launch_request).await {
@@ -1104,6 +1116,7 @@ impl CapsuleManager {
                         }
                     }
                 }
+                RuntimeType::Wasm => self.wasm_runtime.clone(),
             };
 
             if let Err(e) = runtime.stop(capsule_id).await {
