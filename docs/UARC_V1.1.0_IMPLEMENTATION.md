@@ -137,11 +137,75 @@ CREATE TABLE job_history (
 
 ## テスト結果
 
+**Phase 1 (Steps 1-4):**
 ```
 running 194 tests
 ...
 test result: ok. 194 passed; 0 failed; 1 ignored
 ```
+
+**Phase 2 (Wasm Runtime Integration):**
+```
+running 196 tests
+...
+test result: ok. 196 passed; 0 failed; 1 ignored
+```
+
+### Phase 2: Wasm Runtime 統合 (進行中) 🔄
+
+**変更ファイル:**
+- `src/runtime/wasm.rs` (新規作成)
+- `src/runtime/mod.rs` (修正 - RuntimeKind::Wasm 追加)
+- `capsule-cli/capsule-core/src/capsule_v1.rs` (修正 - RuntimeType::Wasm 追加)
+- `src/capsule_manager.rs` (修正 - wasm_runtime フィールド追加)
+- `Cargo.toml` (修正 - wasmtime 依存追加)
+
+**変更内容:**
+- `WasmRuntime` 構造体の作成
+- `RuntimeType::Wasm` 列挙型バリアントの追加
+- CapsuleManager への統合
+- Component Model 依存の設定
+
+**設計:**
+```rust
+pub struct WasmRuntime {
+    _artifact_manager: Option<Arc<ArtifactManager>>,
+    log_dir: PathBuf,
+    _egress_proxy_port: Option<u16>,
+}
+
+impl Runtime for WasmRuntime {
+    async fn launch(&self, request: LaunchRequest<'_>) -> Result<LaunchResult, RuntimeError>;
+    async fn stop(&self, workload_id: &str) -> Result<(), RuntimeError>;
+    fn get_log_path(&self, workload_id: &str) -> Option<PathBuf>;
+}
+```
+
+**依存:**
+```toml
+wasmtime = { version = "16.0", features = ["component-model", "async"] }
+wasmtime-wasi = "16.0"
+```
+
+**実装計画 (次のステップ):**
+1. ✅ Cargo.toml に wasmtime 依存を追加
+2. ✅ WasmRuntime 構造体の作成
+3. ✅ RuntimeType/RuntimeKind に Wasm バリアント追加
+4. ✅ CapsuleManager への統合
+5. ⏳ Component Model ローディングの実装
+   - `Component::from_file()` with validation
+   - WASI Context 設定 (log redirection)
+   - Resource limits (512MB memory default)
+   - Async execution (wasi:cli/command::run)
+6. ⏳ テストの追加
+7. ⏳ ドキュメントの完成
+
+**機能要件:**
+- **Component Model API**: 旧 Module API ではなく高レベル Component Model 使用
+- **wasi:cli/command world**: 標準エントリーポイント `run` 関数のサポート
+- **Resource Limiting**: ResourceLimiter trait 実装 (メモリ 512MB デフォルト)
+- **Async Execution**: Config::async_support(true) による Tokio ブロッキング防止
+- **Log Redirection**: stdout/stderr をファイルにリダイレクト (inherit_stdio 不使用)
 
 ## 今後の作業
 
