@@ -1,0 +1,47 @@
+[server]
+listen_addr = "0.0.0.0:50051"
+
+[wasm]
+module_path = "../wasm/adep_logic.wasm"
+
+[coordinator]
+grpc_endpoint = "http://127.0.0.1:50052"
+enabled = false
+
+[cloud]
+enabled = false
+api_endpoint = "http://localhost:8000"
+api_key = "sk_test_key"
+
+[status]
+report_interval_secs = 5
+
+[[status.taints]]
+key = "gpu"
+value = "present"
+effect = "NoSchedule"
+
+[runtime]
+preferred = "youki"
+binary_path = "/Users/egamikohsuke/Ekoh/projects/ato/onescluster/capsuled/mock_runtime.sh"
+bundle_root = "/tmp/capsuled/bundles"
+state_root = "/tmp/capsuled/state"
+log_dir = "/tmp/capsuled/logs"
+hook_retry_attempts = 3
+
+[security]
+allowed_host_paths = ["/opt/models", "/mnt/cache", "/tmp"]
+
+# Storage configuration (Phase 5)
+# Uncomment to enable persistent encrypted storage for capsules
+# [storage]
+# enabled = false
+# default_vg = "vg_capsules"
+# key_directory = "/etc/capsuled/keys"
+# enable_encryption = true
+# default_size_bytes = 10737418240  # 10GB
+# mount_base = "/var/lib/capsuled/mounts"
+
+[network]
+local_domain = "local"
+state_dir = "/tmp/capsuled/state"
