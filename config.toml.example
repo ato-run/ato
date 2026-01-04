@@ -1,0 +1,114 @@
+# Capsuled Engine (Agent) Configuration
+# Phase 4 - Updated for production deployment
+
+[server]
+# gRPC server listen address
+listen_addr = "0.0.0.0:50051"
+
+# TLS configuration (optional)
+tls_enabled = true
+tls_cert = "../certs/server-cert.pem"
+tls_key = "../certs/server-key.pem"
+
+# Request timeout in seconds
+timeout = 30
+
+[coordinator]
+# Coordinator gRPC endpoint the agent reports to
+# Override via CLI flag: --coordinator-addr
+grpc_endpoint = "http://127.0.0.1:50052"
+
+[status]
+# Interval (seconds) between status reports sent to the coordinator
+# Override via CLI flag: --status-interval-secs
+report_interval_secs = 30
+
+# Optional static taints to advertise with each status report
+# Supported effects: "Unspecified", "NoSchedule", "PreferNoSchedule"
+[[status.taints]]
+key = "gpu"
+value = "absent"
+effect = "NoSchedule"
+
+[wasm]
+# Path to adep-logic Wasm module
+module_path = "../adep-logic/target/wasm32-unknown-unknown/release/adep_logic.wasm"
+
+# Wasm runtime memory limit (in MB)
+memory_limit = 64
+
+# Wasm execution timeout (in seconds)
+execution_timeout = 5
+
+[storage]
+# Storage backend: "mock" (for testing) or "lvm" (production)
+backend = "mock"
+
+# LVM configuration (for future Phase 5 implementation)
+[storage.lvm]
+volume_group = "capsuled-vg"
+thin_pool = "capsuled-pool"
+
+# LUKS encryption configuration
+[storage.luks]
+enabled = false
+cipher = "aes-xts-plain64"
+key_size = 512
+
+[container]
+# Container runtime: "mock" (testing) or "runc" | "youki" (production)
+runtime = "mock"
+
+# Path to container runtime binary
+runtime_path = "/usr/bin/runc"
+
+# Container root directory
+root_dir = "/var/lib/capsuled/containers"
+
+# OCI bundle directory
+bundle_dir = "/var/lib/capsuled/bundles"
+
+[resources]
+# Default resource limits for capsules
+
+# CPU cores (fraction, e.g., 0.5 = half core)
+default_cpu_limit = 1.0
+
+# Memory limit in MB
+default_memory_limit = 512
+
+# Storage limit in GB
+default_storage_limit = 10
+
+# Maximum capsules per agent
+max_capsules = 100
+
+[logging]
+# Log level: "trace", "debug", "info", "warn", "error"
+level = "info"
+
+# Log format: "text" or "json"
+format = "text"
+
+# Log output: "stdout", "stderr", or file path
+output = "stdout"
+
+[metrics]
+# Enable Prometheus metrics endpoint
+enabled = false
+
+# Metrics HTTP server address
+listen_addr = "0.0.0.0:9090"
+
+# Metrics collection interval (in seconds)
+interval = 15
+
+[health]
+# Health check endpoint configuration
+enabled = true
+
+# Health check listen address (separate from gRPC)
+listen_addr = "0.0.0.0:8081"
+
+# Health check interval (in seconds)
+interval = 30
