@@ -118,11 +118,11 @@ fn canonical_runplan_to_proto(plan: &capsule_core::runplan::RunPlan) -> common::
             common::run_plan::Runtime::Source(common::SourceRuntime {
                 language: "generic".to_string(),  // Generic source runtime
                 entrypoint: native.binary_path.clone(),
-                cmd: Some(vec![native.binary_path.clone()]),
+                cmd: vec![native.binary_path.clone()],
                 args: native.args.clone(),
                 env,
                 working_dir: native.working_dir.clone().unwrap_or_default(),
-                dependencies: None,
+                dev_mode: false,
             })
         }
         capsule_core::runplan::RunPlanRuntime::Source(src) => {
@@ -358,9 +358,9 @@ impl Engine for EngineService {
             return Err(Status::invalid_argument("url is required"));
         }
 
-        let result = crate::model_fetcher::fetch_model(
-            crate::model_fetcher::ModelFetchRequest {
-                model_id: req.model_id,
+        let result = crate::resource::ingest::fetcher::fetch_resource(
+            crate::resource::ingest::fetcher::ResourceFetchRequest {
+                resource_id: req.model_id,
                 url: req.url,
                 expected_sha256: if req.expected_sha256.trim().is_empty() {
                     None
@@ -368,7 +368,7 @@ impl Engine for EngineService {
                     Some(req.expected_sha256)
                 },
             },
-            crate::model_fetcher::ModelFetcherConfig {
+            crate::resource::ingest::fetcher::FetcherConfig {
                 cache_dir: self.models_cache_dir.clone(),
                 allowed_host_paths: self.allowed_host_paths.clone(),
             },
@@ -477,8 +477,8 @@ impl Engine for EngineService {
     ) -> Result<Response<SystemStatus>, Status> {
         info!("GetSystemStatus request");
 
-        // Get VPN IP
-        let vpn_ip = self.tailscale_manager.get_vpn_ip().unwrap_or_default();
+        // UARC V1: VPN IP removed (uses SPIFFE ID instead)
+        let vpn_ip = String::new();
 
         // Get capsule list
         let capsules = match self.capsule_manager.list_capsules() {
@@ -929,7 +929,6 @@ pub async fn start_grpc_server(
     allowed_host_paths: Vec<String>,
     models_cache_dir: PathBuf,
     backend_mode: String,
-    tailscale_manager: Arc<TailscaleManager>,
     service_registry: Arc<ServiceRegistry>,
     gpu_detector: Arc<dyn GpuDetector>,
     artifact_manager: Arc<ArtifactManager>,
@@ -940,7 +939,6 @@ pub async fn start_grpc_server(
         Arc::clone(&capsule_manager),
         Arc::clone(&wasm_host),
         backend_mode,
-        Arc::clone(&tailscale_manager),
         Arc::clone(&service_registry),
         Arc::clone(&runtime),
         allowed_host_paths.clone(),

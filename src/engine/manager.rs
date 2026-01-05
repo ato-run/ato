@@ -90,7 +90,6 @@ pub struct CapsuleManager {
     // Runtimes
     container_runtime: Arc<ContainerRuntime>,
     docker_runtime: Arc<DockerCliRuntime>,
-    native_runtime: Arc<NativeRuntime>,
     dev_runtime: Arc<DevRuntime>,
     source_runtime: Arc<SourceRuntime>,
     youki_runtime: Arc<YoukiRuntimeAdapter>,
@@ -110,7 +109,7 @@ pub struct CapsuleManager {
     gpu_detector: Arc<dyn GpuDetector>,
     service_registry: Option<Arc<ServiceRegistry>>,
     mdns_announcer: Option<Arc<MdnsAnnouncer>>,
-    traefik_manager: Option<Arc<TraefikManager>>,
+    // UARC V1: Traefik removed (Coordinator responsibility)
     artifact_manager: Option<Arc<ArtifactManager>>,
     storage_manager: Option<Arc<StorageManager>>,
 
@@ -126,7 +125,7 @@ impl CapsuleManager {
         gpu_detector: Arc<dyn GpuDetector>,
         service_registry: Option<Arc<ServiceRegistry>>,
         mdns_announcer: Option<Arc<MdnsAnnouncer>>,
-        traefik_manager: Option<Arc<TraefikManager>>,
+        // UARC V1: Traefik removed
         artifact_manager: Option<Arc<ArtifactManager>>,
         process_supervisor: Option<Arc<ProcessSupervisor>>,
         egress_proxy_port: Option<u16>,
@@ -153,7 +152,7 @@ impl CapsuleManager {
                     );
                     // Create minimal config for non-OCI runtimes
                     RuntimeConfig {
-                        kind: RuntimeKind::Native,
+                        kind: RuntimeKind::Source,
                         binary_path: std::path::PathBuf::from("/bin/sh"),
                         bundle_root: std::env::temp_dir().join("capsuled").join("bundles"),
                         state_root: std::env::temp_dir().join("capsuled").join("state"),
@@ -174,16 +173,12 @@ impl CapsuleManager {
             bundle_root_clone.clone(),
         ));
 
-        let source_dev_mode = matches!(runtime_config.kind, RuntimeKind::Native);
+        let source_dev_mode = false; // Always false for UARC V1
 
         let container_runtime = Arc::new(ContainerRuntime::new(
             runtime_config,
             artifact_manager.clone(),
             process_supervisor.clone(),
-            egress_proxy_port,
-        ));
-        let native_runtime = Arc::new(NativeRuntime::new(
-            artifact_manager.clone(),
             egress_proxy_port,
         ));
         let dev_runtime = Arc::new(DevRuntime::new(
@@ -231,7 +226,6 @@ impl CapsuleManager {
 
         Self {
             docker_runtime: docker_cli_runtime,
-            native_runtime,
             dev_runtime,
             source_runtime,
             youki_runtime,
@@ -247,7 +241,7 @@ impl CapsuleManager {
             gpu_detector,
             service_registry,
             mdns_announcer,
-            traefik_manager,
+            // UARC V1: Traefik removed
             artifact_manager,
             storage_manager,
 
@@ -261,7 +255,8 @@ impl CapsuleManager {
         use std::collections::HashSet;
 
         let mut supported_runtimes = HashSet::new();
-        supported_runtimes.insert(RuntimeKind::Native);
+        // UARC V1.1.0: Source, Wasm, OCI only
+        supported_runtimes.insert(RuntimeKind::Source);
         supported_runtimes.insert(RuntimeKind::Wasm);
 
         // Youki only on Linux
@@ -304,7 +299,7 @@ impl CapsuleManager {
                 match language.to_lowercase().as_str() {
                     "python" | "python3" => self.dev_runtime.clone(),
                     "node" | "nodejs" | "deno" => self.dev_runtime.clone(),
-                    _ => self.native_runtime.clone(),
+                    _ => self.source_runtime.clone(), // UARC V1: Use SourceRuntime instead of Native
                 }
             }
             ResolvedTarget::Oci { .. } => {
@@ -320,7 +315,7 @@ impl CapsuleManager {
             ResolvedTarget::Legacy { runtime_type, .. } => {
                 // Legacy mode - use the old runtime selection logic
                 match runtime_type {
-                    RuntimeType::Native => self.native_runtime.clone(),
+                    RuntimeType::Native => self.source_runtime.clone(), // UARC V1: Map Native to Source
                     RuntimeType::Docker => {
                         if cfg!(target_os = "macos") || force_docker_cli {
                             self.docker_runtime.clone()
@@ -1048,13 +1043,7 @@ impl CapsuleManager {
                 }
             }
 
-            // 5. Update Traefik Routes
-            if let Some(traefik) = &self.traefik_manager {
-                let services = registry.get_services();
-                if let Err(e) = traefik.update_routes(&services) {
-                    warn!("Failed to update Traefik routes: {}", e);
-                }
-            }
+            // UARC V1: Traefik routing removed (Coordinator responsibility)
         }
 
         // Record success
@@ -1349,13 +1338,7 @@ impl CapsuleManager {
                 }
             }
 
-            // 4. Update Traefik Routes
-            if let Some(traefik) = &self.traefik_manager {
-                let services = registry.get_services();
-                if let Err(e) = traefik.update_routes(&services) {
-                    warn!("Failed to update Traefik routes: {}", e);
-                }
-            }
+            // UARC V1: Traefik routing removed (Coordinator responsibility)
         }
 
         // Log audit event (async, fire-and-forget)
@@ -1449,7 +1432,7 @@ impl CapsuleManager {
         if !gpu_indices.is_empty() {
             info!("Scrubbing VRAM for GPUs {:?}", gpu_indices);
             let factory = |idx| VramScrubber::new(idx);
-            let stats = crate::security::vram_scrubber::scrub_gpu_indices(&gpu_indices, factory);
+            let stats = crate::verification::vram::scrub_gpu_indices(&gpu_indices, factory);
             for stat in stats {
                 if let Some(msg) = stat.message {
                     warn!("VRAM scrub warning for GPU {}: {}", stat.gpu_index, msg);

@@ -15,30 +15,22 @@ use crate::runtime::{LaunchRequest, LaunchResult, RuntimeConfig, RuntimeError};
 use std::sync::Arc;
 
 /// Container runtime wrapper that launches workloads using runc/youki.
+/// UARC V1: Native runtime removed - only OCI containers supported
 #[derive(Debug, Clone)]
 pub struct ContainerRuntime {
     config: RuntimeConfig,
-    native_runtime: Option<std::sync::Arc<crate::runtime::NativeRuntime>>,
 }
 
 impl ContainerRuntime {
     pub fn new(
         config: RuntimeConfig,
-        artifact_manager: Option<Arc<ArtifactManager>>,
+        _artifact_manager: Option<Arc<ArtifactManager>>,
         _process_supervisor: Option<Arc<ProcessSupervisor>>,
-        egress_proxy_port: Option<u16>,
+        _egress_proxy_port: Option<u16>,
     ) -> Self {
-        let native_runtime = if config.kind == crate::runtime::RuntimeKind::Native {
-            Some(std::sync::Arc::new(crate::runtime::NativeRuntime::new(
-                artifact_manager,
-                egress_proxy_port,
-            )))
-        } else {
-            None
-        };
+        // UARC V1: Native runtime removed
         Self {
             config,
-            native_runtime,
         }
     }
 
@@ -305,10 +297,7 @@ impl ContainerRuntime {
 #[async_trait]
 impl Runtime for ContainerRuntime {
     async fn launch(&self, request: LaunchRequest<'_>) -> Result<LaunchResult, RuntimeError> {
-        if let Some(native) = &self.native_runtime {
-            return native.launch(request).await;
-        }
-
+        // UARC V1: Only OCI containers supported
         let bundle_path = self
             .prepare_bundle(request.workload_id, request.spec)
             .await?;
@@ -388,9 +377,7 @@ impl Runtime for ContainerRuntime {
     }
 
     async fn stop(&self, workload_id: &str) -> Result<(), RuntimeError> {
-        if let Some(native) = &self.native_runtime {
-            return native.stop(workload_id).await;
-        }
+        // UARC V1: Only OCI containers supported
         let mut cmd = Command::new(&self.config.binary_path);
         cmd.arg("delete")
             .arg("--force")
