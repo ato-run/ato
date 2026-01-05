@@ -22,12 +22,12 @@
 pub mod artifact;
 #[allow(dead_code)]
 pub mod capsule_capnp; // Cap'n Proto generated code
-pub mod capsule_manager;
 pub mod capnp_to_manifest; // Cap'n Proto ↔ CapsuleManifestV1 conversion (UARC V1.1.0)
 pub mod cas; // CAS client abstraction (UARC V1.1.0)
 pub mod common;
 // pub mod coordinator_service;  // Disabled: proto definitions not present in capsuled/proto
 pub mod downloader; // Enabled for Phase 2
+pub mod engine; // Capsule execution core (manager, supervisor, pool)
 pub mod interface; // External interfaces (gRPC, HTTP, API, DevServer)
 
 // Re-exports from common for backward compatibility
@@ -40,6 +40,11 @@ pub use interface::api as api_server;
 pub use interface::dev_server;
 pub use interface::grpc as grpc_server;
 pub use interface::http as http_server;
+
+// Re-exports from engine for backward compatibility
+pub use engine::manager as capsule_manager;
+pub use engine::pool as pool_registry;
+pub use engine::supervisor as process_supervisor;
 pub mod hardware;
 pub mod job_history; // Job history persistence (UARC V1.1.0)
 pub mod logs;
@@ -76,8 +81,6 @@ pub mod oci {
         }
     }
 }
-pub mod pool_registry;
-pub mod process_supervisor;
 pub mod proto;
 pub mod runplan;
 pub mod runtime;
