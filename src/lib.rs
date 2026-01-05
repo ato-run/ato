@@ -21,17 +21,20 @@
 
 pub mod api_server;
 pub mod artifact;
-pub mod auth;
 #[allow(dead_code)]
 pub mod capsule_capnp; // Cap'n Proto generated code
 pub mod capsule_manager;
 pub mod capnp_to_manifest; // Cap'n Proto ↔ CapsuleManifestV1 conversion (UARC V1.1.0)
 pub mod cas; // CAS client abstraction (UARC V1.1.0)
-pub mod config;
+pub mod common;
 // pub mod coordinator_service;  // Disabled: proto definitions not present in capsuled/proto
 pub mod dev_server; // Embedded DevServer API for capsule-cli integration
 pub mod downloader; // Enabled for Phase 2
-pub mod failure_codes;
+
+// Re-exports from common for backward compatibility
+pub use common::auth;
+pub use common::config;
+pub use common::failure_codes;
 pub mod grpc_server; // Enabled for Phase 2
 pub mod hardware;
 pub mod job_history; // Job history persistence (UARC V1.1.0)
