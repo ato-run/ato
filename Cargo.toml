@@ -111,11 +111,18 @@ nix = "0.27"
 libc = "0.2"
 
 [features]
-default = ["toml-support"]
+default = ["toml-support", "wasm"]
 toml-support = ["capsule-core/toml-support"]
+# WASM runtime - cross-platform (macOS, Linux, Windows)
+wasm = []
+# OCI container runtime - Linux only (requires libcontainer, cgroups)
+# This feature is automatically disabled on non-Linux platforms
+oci = []
 cuda = ["dep:cudarc"]
 real-gpu = []
 phase2 = []
+# Embedded mode: minimal dependencies for capsule-cli integration
+embedded = ["wasm"]
 
 [dev-dependencies]
 tempfile = "3.8"
