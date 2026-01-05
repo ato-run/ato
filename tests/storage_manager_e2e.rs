@@ -154,7 +154,7 @@ fn test_storage_manager_provision_unencrypted() {
 
     println!("Starting unencrypted storage test...");
 
-    use capsuled_engine::storage::{StorageConfig, StorageManager};
+    use capsuled::storage::{StorageConfig, StorageManager};
 
     let config = StorageConfig {
         enabled: true,

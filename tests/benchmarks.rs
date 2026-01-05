@@ -403,14 +403,14 @@ vram_min = "2GB"
     // Benchmark TOML parsing
     let start = Instant::now();
     for _ in 0..ITERATIONS {
-        let _manifest: Result<libadep_core::capsule_v1::CapsuleManifestV1, _> =
-            libadep_core::capsule_v1::CapsuleManifestV1::from_toml(SAMPLE_TOML);
+        let _manifest: Result<capsule_core::capsule_v1::CapsuleManifestV1, _> =
+            capsule_core::capsule_v1::CapsuleManifestV1::from_toml(SAMPLE_TOML);
     }
     let parse_time = start.elapsed();
     let parse_avg = parse_time / ITERATIONS;
 
     // Benchmark validation (parse once, validate many times)
-    let manifest = libadep_core::capsule_v1::CapsuleManifestV1::from_toml(SAMPLE_TOML).unwrap();
+    let manifest = capsule_core::capsule_v1::CapsuleManifestV1::from_toml(SAMPLE_TOML).unwrap();
     let start = Instant::now();
     for _ in 0..ITERATIONS {
         let _valid = manifest.validate();

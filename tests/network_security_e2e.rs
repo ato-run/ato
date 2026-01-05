@@ -21,7 +21,7 @@ use tempfile::TempDir;
 
 #[test]
 fn test_dns_rule_generation_default_config() {
-    use capsuled_engine::security::dns_monitor::{generate_dns_rules, DnsConfig};
+    use capsuled::security::dns_monitor::{generate_dns_rules, DnsConfig};
 
     let config = DnsConfig::default();
     let rules = generate_dns_rules(&config, "CAPSULE_OUT");
@@ -69,7 +69,7 @@ fn test_dns_rule_generation_default_config() {
 
 #[test]
 fn test_dns_rule_generation_custom_resolvers() {
-    use capsuled_engine::security::dns_monitor::{generate_dns_rules, DnsConfig};
+    use capsuled::security::dns_monitor::{generate_dns_rules, DnsConfig};
 
     // Custom config with corporate DNS
     let config = DnsConfig {
@@ -107,7 +107,7 @@ fn test_dns_rule_generation_custom_resolvers() {
 
 #[test]
 fn test_dns_disabled_generates_no_rules() {
-    use capsuled_engine::security::dns_monitor::{generate_dns_rules, DnsConfig};
+    use capsuled::security::dns_monitor::{generate_dns_rules, DnsConfig};
 
     let config = DnsConfig {
         enabled: false,
@@ -126,7 +126,7 @@ fn test_dns_disabled_generates_no_rules() {
 
 #[test]
 fn test_dns_and_egress_rule_combination() {
-    use capsuled_engine::security::dns_monitor::{generate_dns_rules, DnsConfig};
+    use capsuled::security::dns_monitor::{generate_dns_rules, DnsConfig};
 
     // Generate DNS rules with default config
     let dns_config = DnsConfig::default();
@@ -157,7 +157,7 @@ fn test_dns_and_egress_rule_combination() {
 
 #[test]
 fn test_is_resolver_allowed() {
-    use capsuled_engine::security::dns_monitor::{is_resolver_allowed, DnsConfig};
+    use capsuled::security::dns_monitor::{is_resolver_allowed, DnsConfig};
 
     let config = DnsConfig {
         allowed_resolvers: vec![
@@ -184,7 +184,7 @@ fn test_is_resolver_allowed() {
 
 #[test]
 fn test_dns_rule_format() {
-    use capsuled_engine::security::dns_monitor::{generate_dns_rules, DnsConfig};
+    use capsuled::security::dns_monitor::{generate_dns_rules, DnsConfig};
 
     let config = DnsConfig::default();
     let rules = generate_dns_rules(&config, "TEST_CHAIN");
@@ -228,7 +228,7 @@ fn test_dns_rule_format() {
 
 #[test]
 fn test_dns_config_clone_and_debug() {
-    use capsuled_engine::security::dns_monitor::DnsConfig;
+    use capsuled::security::dns_monitor::DnsConfig;
 
     let config = DnsConfig::default();
 
@@ -252,8 +252,8 @@ fn test_dns_config_clone_and_debug() {
 
 #[tokio::test]
 async fn test_dns_block_audit_logging() {
-    use capsuled_engine::security::audit::{AuditLogger, AuditOperation, AuditStatus};
-    use capsuled_engine::security::dns_monitor::{is_resolver_allowed, DnsConfig};
+    use capsuled::security::audit::{AuditLogger, AuditOperation, AuditStatus};
+    use capsuled::security::dns_monitor::{is_resolver_allowed, DnsConfig};
 
     let tmp = TempDir::new().expect("tempdir");
     let log_path = tmp.path().join("dns_audit.log");

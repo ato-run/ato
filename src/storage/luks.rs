@@ -46,7 +46,7 @@ impl LuksManager {
     ///
     /// # Example
     /// ```
-    /// use capsuled_engine::storage::LuksManager;
+    /// use capsuled::storage::LuksManager;
     /// use std::path::PathBuf;
     /// let manager = LuksManager::new(PathBuf::from("/etc/capsuled/keys"));
     /// ```
@@ -72,7 +72,7 @@ impl LuksManager {
     ///
     /// # Example
     /// ```no_run
-    /// use capsuled_engine::storage::{LuksManager, KeyStorage};
+    /// use capsuled::storage::{LuksManager, KeyStorage};
     /// use std::path::PathBuf;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let manager = LuksManager::new(PathBuf::from("/etc/capsuled/keys"));
@@ -217,7 +217,7 @@ impl LuksManager {
     ///
     /// # Example
     /// ```no_run
-    /// use capsuled_engine::storage::{LuksManager, KeyStorage};
+    /// use capsuled::storage::{LuksManager, KeyStorage};
     /// use std::path::PathBuf;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let manager = LuksManager::new(PathBuf::from("/etc/capsuled/keys"));
@@ -344,7 +344,7 @@ impl LuksManager {
     ///
     /// # Example
     /// ```no_run
-    /// use capsuled_engine::storage::LuksManager;
+    /// use capsuled::storage::LuksManager;
     /// use std::path::PathBuf;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let manager = LuksManager::new(PathBuf::from("/etc/capsuled/keys"));
@@ -474,7 +474,7 @@ impl LuksManager {
     ///
     /// # Example
     /// ```
-    /// use capsuled_engine::storage::LuksManager;
+    /// use capsuled::storage::LuksManager;
     /// use std::path::PathBuf;
     /// let manager = LuksManager::new(PathBuf::from("/etc/capsuled/keys"));
     /// let key = manager.generate_key(32);

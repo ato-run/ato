@@ -113,7 +113,7 @@ fn test_prerequisites_check() {
 
 #[test]
 fn test_key_generation_size() {
-    use capsuled_engine::storage::LuksManager;
+    use capsuled::storage::LuksManager;
 
     let manager = LuksManager::new(PathBuf::from("/tmp"));
 
@@ -141,7 +141,7 @@ fn test_encrypted_volume_creation() {
         return;
     }
 
-    use capsuled_engine::storage::{StorageConfig, StorageManager};
+    use capsuled::storage::{StorageConfig, StorageManager};
 
     println!("=== Test: Encrypted Volume Creation ===");
 
@@ -238,7 +238,7 @@ fn test_thin_plus_encrypted_volume() {
         return;
     }
 
-    use capsuled_engine::storage::{StorageConfig, StorageManager};
+    use capsuled::storage::{StorageConfig, StorageManager};
 
     println!("=== Test: Thin + Encrypted Volume ===");
 
@@ -329,7 +329,7 @@ fn test_encryption_key_persistence() {
         return;
     }
 
-    use capsuled_engine::storage::{KeyStorage, LuksManager, StorageConfig, StorageManager};
+    use capsuled::storage::{KeyStorage, LuksManager, StorageConfig, StorageManager};
 
     println!("=== Test: Encryption Key Persistence ===");
 

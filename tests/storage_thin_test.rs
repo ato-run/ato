@@ -186,7 +186,7 @@ fn test_thin_volume_creation() {
         return;
     }
 
-    use capsuled_engine::storage::{StorageConfig, StorageManager};
+    use capsuled::storage::{StorageConfig, StorageManager};
 
     println!("=== Test: Thin Volume Creation ===");
 
@@ -276,7 +276,7 @@ fn test_thin_vs_thick_volume_comparison() {
         return;
     }
 
-    use capsuled_engine::storage::{StorageConfig, StorageManager};
+    use capsuled::storage::{StorageConfig, StorageManager};
 
     println!("=== Test: Thin vs Thick Volume Comparison ===");
 
@@ -349,7 +349,7 @@ fn test_thin_pool_info() {
         return;
     }
 
-    use capsuled_engine::storage::LvmManager;
+    use capsuled::storage::LvmManager;
 
     println!("=== Test: Thin Pool Info ===");
 
@@ -382,7 +382,7 @@ fn test_thin_volume_extend() {
         return;
     }
 
-    use capsuled_engine::storage::{StorageConfig, StorageManager};
+    use capsuled::storage::{StorageConfig, StorageManager};
 
     println!("=== Test: Thin Volume Extension ===");
 
@@ -414,7 +414,7 @@ fn test_thin_volume_extend() {
     println!("Step 2: Extending to 40MB...");
     let new_size = 40 * 1024 * 1024;
 
-    use capsuled_engine::storage::LvmManager;
+    use capsuled::storage::LvmManager;
     let lvm = LvmManager::new("test_vg".to_string());
     lvm.extend_volume(&storage.lv_name, new_size, None, false)
         .expect("Failed to extend volume");
