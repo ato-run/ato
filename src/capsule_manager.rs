@@ -793,6 +793,7 @@ impl CapsuleManager {
             env: None,
             args: None,
             wasm_component_path: None,
+            source_target: None,
         };
 
         // Initialize pool if configured (Linux only, Youki runtime)

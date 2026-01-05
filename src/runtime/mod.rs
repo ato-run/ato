@@ -11,6 +11,7 @@ pub mod dev;
 pub mod docker_cli;
 pub mod native;
 pub mod resolver;
+pub mod source;
 pub mod traits;
 pub mod wasm;
 pub mod youki_adapter;
@@ -20,6 +21,7 @@ pub use dev::DevRuntime;
 pub use docker_cli::DockerCliRuntime;
 pub use native::NativeRuntime;
 pub use resolver::{resolve_runtime, ResolveContext, ResolveError, ResolvedTarget};
+pub use source::SourceRuntime;
 pub use traits::Runtime;
 pub use wasm::WasmRuntime;
 pub use youki_adapter::YoukiRuntimeAdapter;
@@ -34,6 +36,7 @@ pub enum RuntimeKind {
     Mock,
     Native,
     Wasm,
+    Source,
 }
 
 impl RuntimeKind {
@@ -44,6 +47,7 @@ impl RuntimeKind {
             "mock" => Some(RuntimeKind::Mock),
             "native" => Some(RuntimeKind::Native),
             "wasm" => Some(RuntimeKind::Wasm),
+            "source" => Some(RuntimeKind::Source),
             _ => None,
         }
     }
@@ -55,6 +59,7 @@ impl RuntimeKind {
             RuntimeKind::Mock => &["mock_runtime"],
             RuntimeKind::Native => &[], // Internal
             RuntimeKind::Wasm => &[], // Internal
+            RuntimeKind::Source => &[], // Internal (uses host toolchains)
         }
     }
 }
@@ -224,6 +229,25 @@ pub struct LaunchRequest<'a> {
     pub args: Option<Vec<String>>,
     /// Path to the Wasm component file (for Wasm runtime)
     pub wasm_component_path: Option<PathBuf>,
+    /// Source target configuration (for Source runtime)
+    pub source_target: Option<SourceTarget>,
+}
+
+/// Source target configuration for Source runtime
+#[derive(Debug, Clone)]
+pub struct SourceTarget {
+    /// Language runtime (python, node, etc.)
+    pub language: String,
+    /// Version constraint
+    pub version: Option<String>,
+    /// Entry point file
+    pub entrypoint: String,
+    /// Dependencies file
+    pub dependencies: Option<String>,
+    /// Runtime arguments
+    pub args: Vec<String>,
+    /// Source directory path
+    pub source_dir: PathBuf,
 }
 
 /// Result details returned after successful launch.
@@ -283,6 +307,18 @@ pub enum RuntimeError {
 
     #[error("execution failed: {0}")]
     ExecutionFailed(String),
+
+    #[error("toolchain '{language}' not found on host (version constraint: {version:?})")]
+    ToolchainNotFound {
+        language: String,
+        version: Option<String>,
+    },
+
+    #[error("sandbox setup failed: {0}")]
+    SandboxSetupFailed(String),
+
+    #[error("source target not provided in launch request")]
+    SourceTargetMissing,
 }
 
 #[allow(dead_code)]
