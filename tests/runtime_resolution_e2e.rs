@@ -175,6 +175,7 @@ fn test_legacy_wasm_fallback() {
 fn test_wasm_first_preference() {
     let targets = TargetsConfig {
         preference: vec!["wasm".to_string(), "oci".to_string()],
+        source_digest: None,
         wasm: Some(WasmTarget {
             digest: "sha256:abc123".to_string(),
             world: "wasi:cli/run@0.2.0".to_string(),
@@ -207,6 +208,7 @@ fn test_wasm_first_preference() {
 fn test_oci_first_preference() {
     let targets = TargetsConfig {
         preference: vec!["oci".to_string(), "wasm".to_string()],
+        source_digest: None,
         wasm: Some(WasmTarget {
             digest: "sha256:abc123".to_string(),
             world: "wasi:cli/run@0.2.0".to_string(),
@@ -244,6 +246,7 @@ fn test_oci_first_preference() {
 fn test_wasm_only_engine_selects_wasm() {
     let targets = TargetsConfig {
         preference: vec!["oci".to_string(), "wasm".to_string()],
+        source_digest: None,
         wasm: Some(WasmTarget {
             digest: "sha256:abc123".to_string(),
             world: "wasi:cli/run@0.2.0".to_string(),
@@ -274,6 +277,7 @@ fn test_wasm_only_engine_selects_wasm() {
 fn test_docker_only_engine_selects_oci() {
     let targets = TargetsConfig {
         preference: vec!["wasm".to_string(), "oci".to_string()],
+        source_digest: None,
         wasm: Some(WasmTarget {
             digest: "sha256:abc123".to_string(),
             world: "wasi:cli/run@0.2.0".to_string(),
@@ -308,6 +312,7 @@ fn test_docker_only_engine_selects_oci() {
 fn test_source_target_with_toolchain() {
     let targets = TargetsConfig {
         preference: vec!["source".to_string()],
+        source_digest: Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()),
         wasm: None,
         source: Some(SourceTarget {
             language: "python".to_string(),
@@ -337,6 +342,7 @@ fn test_source_target_with_toolchain() {
 fn test_source_target_without_toolchain_falls_back() {
     let targets = TargetsConfig {
         preference: vec!["source".to_string(), "oci".to_string()],
+        source_digest: None,
         wasm: None,
         source: Some(SourceTarget {
             language: "ruby".to_string(), // Not in available toolchains
@@ -376,6 +382,7 @@ fn test_default_preference_order_wasm_source_oci() {
     // No explicit preference - should use default: wasm -> source -> oci
     let targets = TargetsConfig {
         preference: vec![], // Empty = use default
+        source_digest: None,
         wasm: Some(WasmTarget {
             digest: "sha256:wasm".to_string(),
             world: "test".to_string(),
@@ -416,6 +423,7 @@ fn test_default_preference_order_wasm_source_oci() {
 fn test_no_compatible_target_error() {
     let targets = TargetsConfig {
         preference: vec!["wasm".to_string()],
+        source_digest: None,
         wasm: Some(WasmTarget {
             digest: "sha256:abc".to_string(),
             world: "test".to_string(),

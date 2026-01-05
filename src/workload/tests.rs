@@ -44,7 +44,7 @@ mod manifest_tests {
             source = "hf:foo/bar"
 
             [execution]
-            runtime = "python-uv"
+            runtime = "source"
             entrypoint = "main.py"
         "#;
         let (m, r) = load_manifest_str(None, toml).unwrap();

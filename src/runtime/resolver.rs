@@ -103,7 +103,7 @@ impl ResolvedTarget {
                 RuntimeType::Youki => RuntimeKind::Youki,
                 RuntimeType::Docker => RuntimeKind::Youki,
                 RuntimeType::Native => RuntimeKind::Native,
-                RuntimeType::PythonUv => RuntimeKind::Native,
+                RuntimeType::Source => RuntimeKind::Native,  // Source uses Native process execution
             },
         }
     }
@@ -455,6 +455,7 @@ mod tests {
             pool: None,
             targets: Some(TargetsConfig {
                 preference: vec!["wasm".to_string(), "oci".to_string()],
+                source_digest: None,
                 wasm: Some(WasmTarget {
                     digest: "sha256:abc123".to_string(),
                     world: "wasi:cli/command".to_string(),
