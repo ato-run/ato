@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main, origin ]
+    branches: [main, origin]
   pull_request:
-    branches: [ main, origin ]
+    branches: [main, origin]
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,65 +19,65 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         rust: [stable]
-    
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        toolchain: ${{ matrix.rust }}
-        components: rustfmt, clippy
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt, clippy
 
-    - name: Cache cargo registry
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Cache cargo index
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Cache cargo build
-      uses: actions/cache@v4
-      with:
-        path: target
-        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Install Protocol Buffers (Ubuntu)
-      if: runner.os == 'Linux'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y protobuf-compiler
+      - name: Install Protocol Buffers (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
 
-    - name: Install Protocol Buffers (macOS)
-      if: runner.os == 'macOS'
-      run: brew install protobuf
+      - name: Install Protocol Buffers (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
 
-    - name: Install Protocol Buffers (Windows)
-      if: runner.os == 'Windows'
-      run: |
-        choco install protoc
-        refreshenv
+      - name: Install Protocol Buffers (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install protoc
+          refreshenv
 
-    - name: Check formatting
-      run: cargo fmt --all -- --check
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
-    - name: Run clippy
-      run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
-    - name: Build
-      run: cargo build --verbose
+      - name: Build
+        run: cargo build --verbose
 
-    - name: Run unit tests
-      run: cargo test --lib --bins --verbose
+      - name: Run unit tests
+        run: cargo test --lib --bins --verbose
 
-    - name: Run integration tests (non-ignored)
-      run: cargo test --test '*' --verbose
+      - name: Run integration tests (non-ignored)
+        run: cargo test --test '*' --verbose
 
   source-runtime-e2e:
     name: Source Runtime E2E Tests
@@ -109,101 +109,101 @@ jobs:
             test-filter: "deno"
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-    - name: Cache cargo
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-${{ matrix.runtime.name }}-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.runtime.name }}-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Install Protocol Buffers (Ubuntu)
-      if: runner.os == 'Linux'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y protobuf-compiler
+      - name: Install Protocol Buffers (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
 
-    - name: Install Protocol Buffers (macOS)
-      if: runner.os == 'macOS'
-      run: brew install protobuf
+      - name: Install Protocol Buffers (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
 
-    - name: Install Protocol Buffers (Windows)
-      if: runner.os == 'Windows'
-      run: |
-        choco install protoc
-        refreshenv
+      - name: Install Protocol Buffers (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install protoc
+          refreshenv
 
-    - name: Install ${{ matrix.runtime.name }} (Ubuntu)
-      if: runner.os == 'Linux'
-      run: |
-        sudo apt-get update
-        ${{ matrix.runtime.install-ubuntu }}
+      - name: Install ${{ matrix.runtime.name }} (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          ${{ matrix.runtime.install-ubuntu }}
 
-    - name: Install ${{ matrix.runtime.name }} (macOS)
-      if: runner.os == 'macOS'
-      run: ${{ matrix.runtime.install-macos }}
+      - name: Install ${{ matrix.runtime.name }} (macOS)
+        if: runner.os == 'macOS'
+        run: ${{ matrix.runtime.install-macos }}
 
-    - name: Install ${{ matrix.runtime.name }} (Windows)
-      if: runner.os == 'Windows'
-      run: |
-        ${{ matrix.runtime.install-windows }}
-        refreshenv
+      - name: Install ${{ matrix.runtime.name }} (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          ${{ matrix.runtime.install-windows }}
+          refreshenv
 
-    - name: Verify ${{ matrix.runtime.name }} installation
-      run: |
-        case "${{ matrix.runtime.name }}" in
-          python)
-            python3 --version
-            ;;
-          nodejs)
-            node --version
-            npm --version
-            ;;
-          ruby)
-            ruby --version
-            ;;
-          deno)
-            deno --version
-            ;;
-        esac
+      - name: Verify ${{ matrix.runtime.name }} installation
+        run: |
+          case "${{ matrix.runtime.name }}" in
+            python)
+              python3 --version
+              ;;
+            nodejs)
+              node --version
+              npm --version
+              ;;
+            ruby)
+              ruby --version
+              ;;
+            deno)
+              deno --version
+              ;;
+          esac
 
-    - name: Build capsuled
-      run: cargo build --release
+      - name: Build capsuled
+        run: cargo build --release
 
-    - name: Run ${{ matrix.runtime.name }} E2E tests
-      run: |
-        cargo test --test source_runtime_e2e -- --ignored ${{ matrix.runtime.test-filter }} --nocapture
+      - name: Run ${{ matrix.runtime.name }} E2E tests
+        run: |
+          cargo test --test source_runtime_e2e -- --ignored ${{ matrix.runtime.test-filter }} --nocapture
 
   security:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-    - name: Cache cargo
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-        key: ${{ runner.os }}-cargo-audit-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-audit-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Install cargo-audit
-      run: cargo install cargo-audit
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.21.2
 
-    - name: Run security audit
-      run: cargo audit
+      - name: Run security audit
+        run: cargo audit
 
   build-release:
     name: Build Release
@@ -211,43 +211,43 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-    - name: Install Protocol Buffers (Ubuntu)
-      if: runner.os == 'Linux'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y protobuf-compiler
+      - name: Install Protocol Buffers (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
 
-    - name: Install Protocol Buffers (macOS)
-      if: runner.os == 'macOS'
-      run: brew install protobuf
+      - name: Install Protocol Buffers (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
 
-    - name: Install Protocol Buffers (Windows)
-      if: runner.os == 'Windows'
-      run: |
-        choco install protoc
-        refreshenv
+      - name: Install Protocol Buffers (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install protoc
+          refreshenv
 
-    - name: Build release binary
-      run: cargo build --release --verbose
+      - name: Build release binary
+        run: cargo build --release --verbose
 
-    - name: Upload artifact (Unix)
-      if: runner.os != 'Windows'
-      uses: actions/upload-artifact@v4
-      with:
-        name: capsuled-${{ runner.os }}
-        path: target/release/capsuled
+      - name: Upload artifact (Unix)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: capsuled-${{ runner.os }}
+          path: target/release/capsuled
 
-    - name: Upload artifact (Windows)
-      if: runner.os == 'Windows'
-      uses: actions/upload-artifact@v4
-      with:
-        name: capsuled-${{ runner.os }}
-        path: target/release/capsuled.exe
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: capsuled-${{ runner.os }}
+          path: target/release/capsuled.exe
