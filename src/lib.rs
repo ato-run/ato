@@ -77,8 +77,7 @@ pub use engine::supervisor as process_supervisor;
 // From resource
 pub use resource::artifact;
 pub use resource::cas;
-pub use resource::downloader;
-pub use resource::model_fetcher;
+pub use resource::ingest;
 pub use resource::oci;
 pub use resource::storage;
 

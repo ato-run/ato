@@ -4,39 +4,39 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
-pub struct ModelFetchRequest {
-    pub model_id: String,
+pub struct ResourceFetchRequest {
+    pub resource_id: String,
     pub url: String,
     pub expected_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-pub struct ModelFetcherConfig {
+pub struct FetcherConfig {
     pub cache_dir: PathBuf,
     pub allowed_host_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelFetchResult {
+pub struct ResourceFetchResult {
     pub local_path: PathBuf,
     pub cached: bool,
     pub bytes_downloaded: u64,
 }
 
-pub async fn fetch_model(
-    req: ModelFetchRequest,
-    cfg: ModelFetcherConfig,
-) -> Result<ModelFetchResult> {
-    if req.model_id.trim().is_empty() {
-        return Err(anyhow!("model_id is required"));
+pub async fn fetch_resource(
+    req: ResourceFetchRequest,
+    cfg: FetcherConfig,
+) -> Result<ResourceFetchResult> {
+    if req.resource_id.trim().is_empty() {
+        return Err(anyhow!("resource_id is required"));
     }
     if req.url.trim().is_empty() {
         return Err(anyhow!("url is required"));
     }
 
     let cache_dir = cfg.cache_dir;
-    let file_name = filename_from_url(&req.url).unwrap_or_else(|| "model.bin".to_string());
-    let dest_path = cache_dir.join(&req.model_id).join(file_name);
+    let file_name = filename_from_url(&req.url).unwrap_or_else(|| "resource.bin".to_string());
+    let dest_path = cache_dir.join(&req.resource_id).join(file_name);
 
     let dest_str = dest_path
         .to_str()
@@ -53,7 +53,7 @@ pub async fn fetch_model(
         {
             let actual = sha256_hex_of_file(&dest_path).context("failed to hash cached file")?;
             if normalize_hex(expected) == actual {
-                return Ok(ModelFetchResult {
+                return Ok(ResourceFetchResult {
                     local_path: dest_path,
                     cached: true,
                     bytes_downloaded: 0,
@@ -61,7 +61,7 @@ pub async fn fetch_model(
             }
             // Hash mismatch: fallthrough to re-download.
         } else {
-            return Ok(ModelFetchResult {
+            return Ok(ResourceFetchResult {
                 local_path: dest_path,
                 cached: true,
                 bytes_downloaded: 0,
@@ -70,7 +70,7 @@ pub async fn fetch_model(
     }
 
     let bytes_downloaded =
-        crate::downloader::download_file(&req.url, dest_str, &cfg.allowed_host_paths)
+        super::http::download_file(&req.url, dest_str, &cfg.allowed_host_paths)
             .await
             .context("download failed")?;
 
@@ -90,7 +90,7 @@ pub async fn fetch_model(
         }
     }
 
-    Ok(ModelFetchResult {
+    Ok(ResourceFetchResult {
         local_path: dest_path,
         cached: false,
         bytes_downloaded,
