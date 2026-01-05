@@ -54,7 +54,6 @@ pub use resource::storage;
 
 pub mod job_history; // Job history persistence (UARC V1.1.0)
 pub mod logs;
-pub mod manifest;
 pub mod metrics;
 pub mod system; // System-level modules (hardware, network)
 
@@ -63,12 +62,15 @@ pub use system::hardware;
 pub use system::network;
 
 pub mod proto;
-pub mod runplan;
 pub mod runtime;
 pub mod security;
 // pub mod status_reporter;
 pub mod wasm_host;
 pub mod workload;
+
+// Re-exports from workload for backward compatibility
+pub use workload::manifest;
+pub use workload::runplan;
 
 // Re-export key types for embedded usage
 pub use interface::dev_server::{DevServerConfig, DevServerHandle};
