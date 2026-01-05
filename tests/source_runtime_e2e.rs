@@ -6,7 +6,6 @@
 /// - Ruby (ruby)
 /// - Deno (deno)
 
-use std::path::PathBuf;
 use std::process::Command;
 
 #[cfg(test)]
