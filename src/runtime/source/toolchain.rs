@@ -32,7 +32,11 @@ impl ToolchainManager {
     }
 
     /// Find a compatible toolchain for the given language and version constraint
-    pub fn find_toolchain(&self, language: &str, version_constraint: Option<&str>) -> Option<ToolchainInfo> {
+    pub fn find_toolchain(
+        &self,
+        language: &str,
+        version_constraint: Option<&str>,
+    ) -> Option<ToolchainInfo> {
         // Check cache first
         {
             let cache = self.cache.lock().unwrap();

@@ -103,7 +103,7 @@ impl ResolvedTarget {
                 RuntimeType::Wasm => RuntimeKind::Wasm,
                 RuntimeType::Youki => RuntimeKind::Youki,
                 RuntimeType::Docker => RuntimeKind::Youki,
-                RuntimeType::Native => RuntimeKind::Source,  // Native → Source (UARC V1 migration)
+                RuntimeType::Native => RuntimeKind::Source, // Native → Source (UARC V1 migration)
                 RuntimeType::Source => RuntimeKind::Source,
             },
         }
@@ -282,10 +282,7 @@ fn resolve_multi_target(
                 if let Some(source) = &targets.source {
                     match try_resolve_source(source, context) {
                         Ok(resolved) => {
-                            info!(
-                                "Resolved to Source target (language: {})",
-                                source.language
-                            );
+                            info!("Resolved to Source target (language: {})", source.language);
                             return Ok(resolved);
                         }
                         Err(e) => {
@@ -329,7 +326,10 @@ fn resolve_multi_target(
 }
 
 /// Try to resolve a Wasm target
-fn try_resolve_wasm(wasm: &WasmTarget, context: &ResolveContext) -> Result<ResolvedTarget, ResolveError> {
+fn try_resolve_wasm(
+    wasm: &WasmTarget,
+    context: &ResolveContext,
+) -> Result<ResolvedTarget, ResolveError> {
     // Check if Wasm runtime is supported
     if !context.supported_runtimes.contains(&RuntimeKind::Wasm) {
         return Err(ResolveError::UnsupportedTarget {
@@ -359,7 +359,10 @@ fn try_resolve_wasm(wasm: &WasmTarget, context: &ResolveContext) -> Result<Resol
 }
 
 /// Try to resolve a Source target
-fn try_resolve_source(source: &SourceTarget, context: &ResolveContext) -> Result<ResolvedTarget, ResolveError> {
+fn try_resolve_source(
+    source: &SourceTarget,
+    context: &ResolveContext,
+) -> Result<ResolvedTarget, ResolveError> {
     // Check if the required toolchain is available on the host
     if !context.has_toolchain(&source.language) {
         return Err(ResolveError::ToolchainNotAvailable {
@@ -384,11 +387,12 @@ fn try_resolve_source(source: &SourceTarget, context: &ResolveContext) -> Result
 }
 
 /// Try to resolve an OCI target
-fn try_resolve_oci(oci: &OciTarget, context: &ResolveContext) -> Result<ResolvedTarget, ResolveError> {
+fn try_resolve_oci(
+    oci: &OciTarget,
+    context: &ResolveContext,
+) -> Result<ResolvedTarget, ResolveError> {
     // Check if Docker/OCI runtime is supported
-    if !context.supported_runtimes.contains(&RuntimeKind::Youki)
-        && !context.docker_available
-    {
+    if !context.supported_runtimes.contains(&RuntimeKind::Youki) && !context.docker_available {
         return Err(ResolveError::UnsupportedTarget {
             target: "oci".to_string(),
         });

@@ -1,7 +1,7 @@
-use capsule_core::capsule_v1::{CapsuleExecution, RuntimeType, StorageVolume};
 use crate::security;
 use crate::workload::manifest_loader::ResourceRequirements;
 use capsule_core::capsule_v1::CapsuleManifestV1;
+use capsule_core::capsule_v1::{CapsuleExecution, RuntimeType, StorageVolume};
 use oci_spec::runtime::{
     HookBuilder, HooksBuilder, Linux, LinuxBuilder, LinuxNamespaceBuilder, LinuxNamespaceType,
     Mount, MountBuilder, ProcessBuilder, RootBuilder, Spec, SpecBuilder,

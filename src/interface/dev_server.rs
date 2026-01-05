@@ -32,8 +32,8 @@ use tracing::{info, warn};
 
 use crate::artifact::{manager::ArtifactConfig, ArtifactManager};
 use crate::capsule_manager::CapsuleManager;
-use crate::interface::grpc;
 use crate::hardware;
+use crate::interface::grpc;
 use crate::job_history::SqliteJobHistoryStore;
 use crate::network::service_registry::ServiceRegistry;
 use crate::process_supervisor::ProcessSupervisor;
@@ -73,7 +73,7 @@ impl Default for DevServerConfig {
             .unwrap_or_else(|_| PathBuf::from("/tmp"));
 
         Self {
-            grpc_port: 0, // Auto-select
+            grpc_port: 0,    // Auto-select
             http_port: None, // Disabled by default for embedded mode
             data_dir: home.join(".capsule").join("dev-engine"),
             allowed_host_paths: vec![],
@@ -210,7 +210,9 @@ impl DevServerHandle {
         ));
 
         // Manifest Verifier (permissive for dev)
-        let verifier = Arc::new(crate::security::verifier::ManifestVerifier::new(None, false));
+        let verifier = Arc::new(crate::security::verifier::ManifestVerifier::new(
+            None, false,
+        ));
 
         // Metrics Collector
         let metrics_collector = Arc::new(crate::metrics::collector::MetricsCollector::new());

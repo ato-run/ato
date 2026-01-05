@@ -7,21 +7,23 @@ use crate::artifact::ArtifactManager;
 use crate::capsule_manager::{CapsuleManager, DeployCapsuleRequest};
 use crate::failure_codes;
 use crate::hardware::GpuDetector;
+use crate::job_history::{
+    JobHistory, JobPhase as JobPhaseInternal, JobRecord, SqliteJobHistoryStore,
+};
 use crate::proto::onescluster::common::v1 as common;
 use crate::proto::onescluster::engine::v1::{
     deploy_request::Manifest as DeployManifest,
     engine_server::{Engine, EngineServer},
-    CancelJobRequest, CancelJobResponse, CapsuleInfo, DeployRequest, DeployResponse, EngineLogEntry,
-    FetchModelRequest, FetchModelResponse, GetJobStatusRequest, GetJobStatusResponse,
-    GetResourcesRequest, GetSystemStatusRequest, JobPhase, JobResourceUsage, JobSummary,
-    ListJobsRequest, ListJobsResponse, ResourceInfo, ResourceUsage, StopRequest, StopResponse,
-    SystemStatus, ValidateRequest, ValidationResult,
+    CancelJobRequest, CancelJobResponse, CapsuleInfo, DeployRequest, DeployResponse,
+    EngineLogEntry, FetchModelRequest, FetchModelResponse, GetJobStatusRequest,
+    GetJobStatusResponse, GetResourcesRequest, GetSystemStatusRequest, JobPhase, JobResourceUsage,
+    JobSummary, ListJobsRequest, ListJobsResponse, ResourceInfo, ResourceUsage, StopRequest,
+    StopResponse, SystemStatus, ValidateRequest, ValidationResult,
 };
 use crate::runplan;
 use crate::runtime::ContainerRuntime;
 use crate::wasm_host::AdepLogicHost;
 use crate::workload;
-use crate::job_history::{JobHistory, SqliteJobHistoryStore, JobRecord, JobPhase as JobPhaseInternal};
 
 use capsule_core::capsule_v1::CapsuleManifestV1;
 
@@ -113,10 +115,10 @@ fn canonical_runplan_to_proto(plan: &capsule_core::runplan::RunPlan) -> common::
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            
+
             // Map Native to Source runtime for backward compatibility
             common::run_plan::Runtime::Source(common::SourceRuntime {
-                language: "generic".to_string(),  // Generic source runtime
+                language: "generic".to_string(), // Generic source runtime
                 entrypoint: native.binary_path.clone(),
                 cmd: vec![native.binary_path.clone()],
                 args: native.args.clone(),
@@ -126,8 +128,11 @@ fn canonical_runplan_to_proto(plan: &capsule_core::runplan::RunPlan) -> common::
             })
         }
         capsule_core::runplan::RunPlanRuntime::Source(src) => {
-            let env: HashMap<String, String> =
-                src.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let env: HashMap<String, String> = src
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             common::run_plan::Runtime::Source(common::SourceRuntime {
                 language: src.language.clone().unwrap_or_default(),
                 entrypoint: src.entrypoint.clone(),
@@ -664,7 +669,11 @@ impl Engine for EngineService {
         request: Request<ListJobsRequest>,
     ) -> Result<Response<ListJobsResponse>, Status> {
         let req = request.into_inner();
-        let limit = if req.limit == 0 { 100 } else { req.limit as usize };
+        let limit = if req.limit == 0 {
+            100
+        } else {
+            req.limit as usize
+        };
         let capsule_filter = if req.capsule_name.is_empty() {
             None
         } else {
@@ -714,7 +723,10 @@ impl Engine for EngineService {
         request: Request<CancelJobRequest>,
     ) -> Result<Response<CancelJobResponse>, Status> {
         let req = request.into_inner();
-        info!("CancelJob request for job_id={}, force={}", req.job_id, req.force);
+        info!(
+            "CancelJob request for job_id={}, force={}",
+            req.job_id, req.force
+        );
 
         if req.job_id.trim().is_empty() {
             return Err(Status::invalid_argument("job_id is required"));
@@ -737,7 +749,9 @@ impl Engine for EngineService {
 
         // Check if job is already in a terminal state
         match job_record.phase {
-            JobPhaseInternal::Succeeded | JobPhaseInternal::Failed | JobPhaseInternal::Cancelled => {
+            JobPhaseInternal::Succeeded
+            | JobPhaseInternal::Failed
+            | JobPhaseInternal::Cancelled => {
                 return Ok(Response::new(CancelJobResponse {
                     success: true,
                     message: format!(
@@ -753,7 +767,7 @@ impl Engine for EngineService {
         // Try to stop the capsule (job_id should map to capsule_id in most cases)
         // The job_id is typically the same as capsule_id for running jobs
         let capsule_id = &job_record.capsule_name;
-        
+
         match self.capsule_manager.stop_capsule(capsule_id).await {
             Ok(_) => {
                 // Update job history to Cancelled state
@@ -766,7 +780,10 @@ impl Engine for EngineService {
                     warn!("Failed to update job history after cancel: {}", e);
                 }
 
-                info!("Job '{}' (capsule '{}') cancelled successfully", req.job_id, capsule_id);
+                info!(
+                    "Job '{}' (capsule '{}') cancelled successfully",
+                    req.job_id, capsule_id
+                );
                 Ok(Response::new(CancelJobResponse {
                     success: true,
                     message: format!("Job '{}' cancelled successfully", req.job_id),
@@ -776,7 +793,7 @@ impl Engine for EngineService {
             Err(e) => {
                 let err_msg = e.to_string();
                 warn!("Failed to cancel job '{}': {}", req.job_id, err_msg);
-                
+
                 // If capsule not found, it may have already exited
                 if err_msg.contains("not found") || err_msg.contains("NotFound") {
                     // Update to cancelled anyway since user requested it
@@ -788,12 +805,18 @@ impl Engine for EngineService {
                     );
                     return Ok(Response::new(CancelJobResponse {
                         success: true,
-                        message: format!("Job '{}' marked as cancelled (process already exited)", req.job_id),
+                        message: format!(
+                            "Job '{}' marked as cancelled (process already exited)",
+                            req.job_id
+                        ),
                         previous_phase: previous_phase.into(),
                     }));
                 }
 
-                Err(Status::internal(format!("Failed to cancel job: {}", err_msg)))
+                Err(Status::internal(format!(
+                    "Failed to cancel job: {}",
+                    err_msg
+                )))
             }
         }
     }
@@ -836,13 +859,15 @@ struct ResourceUsageData {
 /// Convert JobRecord to proto GetJobStatusResponse
 fn job_record_to_proto(job: &JobRecord) -> GetJobStatusResponse {
     // Parse resource_usage_json if present
-    let resource_usage = job.resource_usage_json.as_ref().and_then(|json| {
-        serde_json::from_str::<ResourceUsageData>(json).ok()
-    }).map(|r| JobResourceUsage {
-        cpu_time_ms: r.cpu_time_ms,
-        memory_peak_bytes: r.memory_peak_bytes,
-        vram_peak_bytes: r.vram_peak_bytes,
-    });
+    let resource_usage = job
+        .resource_usage_json
+        .as_ref()
+        .and_then(|json| serde_json::from_str::<ResourceUsageData>(json).ok())
+        .map(|r| JobResourceUsage {
+            cpu_time_ms: r.cpu_time_ms,
+            memory_peak_bytes: r.memory_peak_bytes,
+            vram_peak_bytes: r.vram_peak_bytes,
+        });
 
     GetJobStatusResponse {
         job_id: job.job_id.clone(),
@@ -1026,7 +1051,9 @@ mod tests {
             started_at: Some(Utc::now()),
             finished_at: Some(Utc::now()),
             duration_secs: Some(42),
-            resource_usage_json: Some(r#"{"cpu_time_ms": 1000, "memory_peak_bytes": 1048576}"#.to_string()),
+            resource_usage_json: Some(
+                r#"{"cpu_time_ms": 1000, "memory_peak_bytes": 1048576}"#.to_string(),
+            ),
         };
 
         let proto = job_record_to_proto(&job);
@@ -1036,7 +1063,7 @@ mod tests {
         assert_eq!(proto.phase(), JobPhase::Succeeded);
         assert_eq!(proto.exit_code, 0);
         assert_eq!(proto.duration_secs, 42);
-        
+
         let resource = proto.resource_usage.unwrap();
         assert_eq!(resource.cpu_time_ms, 1000);
         assert_eq!(resource.memory_peak_bytes, 1048576);
@@ -1069,7 +1096,8 @@ mod tests {
     #[test]
     fn test_resource_usage_json_parsing() {
         // Valid JSON
-        let valid_json = r#"{"cpu_time_ms": 500, "memory_peak_bytes": 2048, "vram_peak_bytes": 4096}"#;
+        let valid_json =
+            r#"{"cpu_time_ms": 500, "memory_peak_bytes": 2048, "vram_peak_bytes": 4096}"#;
         let parsed: ResourceUsageData = serde_json::from_str(valid_json).unwrap();
         assert_eq!(parsed.cpu_time_ms, 500);
         assert_eq!(parsed.memory_peak_bytes, 2048);
@@ -1088,9 +1116,9 @@ mod tests {
         // Create temp directory for test database
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let db_path = temp_dir.path().join("test_jobs.sqlite");
-        
-        let job_history = SqliteJobHistoryStore::new(&db_path)
-            .expect("Failed to create job history store");
+
+        let job_history =
+            SqliteJobHistoryStore::new(&db_path).expect("Failed to create job history store");
 
         // Insert a test job
         let job = JobRecord {
@@ -1110,14 +1138,16 @@ mod tests {
         job_history.insert_job(&job).expect("Failed to insert job");
 
         // Verify we can retrieve it
-        let retrieved = job_history.get_job("integration-test-001")
+        let retrieved = job_history
+            .get_job("integration-test-001")
             .expect("Failed to get job");
         assert_eq!(retrieved.job_id, "integration-test-001");
         assert_eq!(retrieved.capsule_name, "test-capsule");
         assert!(matches!(retrieved.phase, InternalJobPhase::Running));
 
         // List jobs
-        let jobs = job_history.list_jobs(None, 10)
+        let jobs = job_history
+            .list_jobs(None, 10)
             .expect("Failed to list jobs");
         assert_eq!(jobs.len(), 1);
     }
@@ -1127,9 +1157,9 @@ mod tests {
         // Create temp directory for test database
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let db_path = temp_dir.path().join("test_cancel.sqlite");
-        
-        let job_history = SqliteJobHistoryStore::new(&db_path)
-            .expect("Failed to create job history store");
+
+        let job_history =
+            SqliteJobHistoryStore::new(&db_path).expect("Failed to create job history store");
 
         // Insert a running job
         let job = JobRecord {
@@ -1149,18 +1179,24 @@ mod tests {
         job_history.insert_job(&job).expect("Failed to insert job");
 
         // Simulate cancellation by updating phase
-        job_history.update_phase(
-            "cancel-test-001",
-            InternalJobPhase::Cancelled,
-            Some("Cancelled by user request"),
-            None,
-        ).expect("Failed to update phase");
+        job_history
+            .update_phase(
+                "cancel-test-001",
+                InternalJobPhase::Cancelled,
+                Some("Cancelled by user request"),
+                None,
+            )
+            .expect("Failed to update phase");
 
         // Verify phase was updated
-        let retrieved = job_history.get_job("cancel-test-001")
+        let retrieved = job_history
+            .get_job("cancel-test-001")
             .expect("Failed to get job");
         assert!(matches!(retrieved.phase, InternalJobPhase::Cancelled));
-        assert_eq!(retrieved.error_message, Some("Cancelled by user request".to_string()));
+        assert_eq!(
+            retrieved.error_message,
+            Some("Cancelled by user request".to_string())
+        );
     }
 
     #[test]
@@ -1168,9 +1204,9 @@ mod tests {
         // Create temp directory for test database
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let db_path = temp_dir.path().join("test_idempotent.sqlite");
-        
-        let job_history = SqliteJobHistoryStore::new(&db_path)
-            .expect("Failed to create job history store");
+
+        let job_history =
+            SqliteJobHistoryStore::new(&db_path).expect("Failed to create job history store");
 
         // Insert a succeeded job
         let job = JobRecord {
@@ -1190,7 +1226,8 @@ mod tests {
         job_history.insert_job(&job).expect("Failed to insert job");
 
         // Verify it's in succeeded state (cancel should be a no-op)
-        let retrieved = job_history.get_job("completed-001")
+        let retrieved = job_history
+            .get_job("completed-001")
             .expect("Failed to get job");
         assert!(matches!(retrieved.phase, InternalJobPhase::Succeeded));
     }

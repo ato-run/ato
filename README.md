@@ -12,17 +12,20 @@ capsuled は [UARC (Universal Application Runtime Contract)](../uarc/SPEC.md) V1
 ### UARC V1.1.0 準拠
 
 ✅ **Supported Runtimes**:
+
 - **Wasm**: WebAssembly サンドボックス実行
 - **Source**: インタープリタ言語 (Python, Node.js, Ruby, etc.)
 - **OCI**: コンテナランタイム (Youki, Docker)
 
 ✅ **Security Features**:
+
 - CAS-based resource verification (SHA256)
 - SPIFFE ID network identity (SVID authentication)
 - Path validation & egress policy enforcement
 - GPU VRAM scrubbing (multi-tenant isolation)
 
 ✅ **Architecture Compliance**:
+
 - Layer-based design (L1-L5)
 - Capsule manifest verification
 - Service discovery & registration
@@ -192,7 +195,7 @@ capsuled/
 
 ## UARC V1.1.0 Compliance
 
-Capsuled は以下のUARC仕様要件を満たしています:
+Capsuled は以下の UARC 仕様要件を満たしています:
 
 ### ✅ Supported
 

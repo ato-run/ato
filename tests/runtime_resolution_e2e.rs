@@ -16,7 +16,9 @@ use capsule_core::capsule_v1::{
     CapsuleExecution, CapsuleManifestV1, CapsuleRequirements, CapsuleRouting, CapsuleStorage,
     CapsuleType, OciTarget, RuntimeType, SourceTarget, TargetsConfig, WasmTarget,
 };
-use capsuled::runtime::resolver::{detect_current_platform, resolve_runtime, ResolveContext, ResolvedTarget};
+use capsuled::runtime::resolver::{
+    detect_current_platform, resolve_runtime, ResolveContext, ResolvedTarget,
+};
 use capsuled::runtime::RuntimeKind;
 
 // ============================================================================
@@ -144,7 +146,10 @@ fn test_legacy_fallback_when_no_targets() {
     let resolved = resolve_runtime(&manifest, &context).expect("should resolve");
 
     match resolved {
-        ResolvedTarget::Legacy { runtime_type, entrypoint } => {
+        ResolvedTarget::Legacy {
+            runtime_type,
+            entrypoint,
+        } => {
             assert_eq!(runtime_type, RuntimeType::Docker);
             assert_eq!(entrypoint, "test-entry");
         }
@@ -269,7 +274,10 @@ fn test_wasm_only_engine_selects_wasm() {
     // Even though OCI is preferred, only Wasm is available
     match resolved {
         ResolvedTarget::Wasm { .. } => {}
-        _ => panic!("Expected Wasm target due to engine constraint, got {:?}", resolved),
+        _ => panic!(
+            "Expected Wasm target due to engine constraint, got {:?}",
+            resolved
+        ),
     }
 }
 
@@ -300,7 +308,10 @@ fn test_docker_only_engine_selects_oci() {
     // Even though Wasm is preferred, only OCI is available
     match resolved {
         ResolvedTarget::Oci { .. } => {}
-        _ => panic!("Expected Oci target due to engine constraint, got {:?}", resolved),
+        _ => panic!(
+            "Expected Oci target due to engine constraint, got {:?}",
+            resolved
+        ),
     }
 }
 
@@ -312,7 +323,9 @@ fn test_docker_only_engine_selects_oci() {
 fn test_source_target_with_toolchain() {
     let targets = TargetsConfig {
         preference: vec!["source".to_string()],
-        source_digest: Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()),
+        source_digest: Some(
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+        ),
         wasm: None,
         source: Some(SourceTarget {
             language: "python".to_string(),
@@ -330,7 +343,11 @@ fn test_source_target_with_toolchain() {
     let resolved = resolve_runtime(&manifest, &context).expect("should resolve");
 
     match resolved {
-        ResolvedTarget::Source { language, entrypoint, .. } => {
+        ResolvedTarget::Source {
+            language,
+            entrypoint,
+            ..
+        } => {
             assert_eq!(language, "python");
             assert_eq!(entrypoint, "main.py");
         }
@@ -411,7 +428,10 @@ fn test_default_preference_order_wasm_source_oci() {
     // Default preference should select Wasm first
     match resolved {
         ResolvedTarget::Wasm { .. } => {}
-        _ => panic!("Expected Wasm target with default preference, got {:?}", resolved),
+        _ => panic!(
+            "Expected Wasm target with default preference, got {:?}",
+            resolved
+        ),
     }
 }
 
@@ -485,19 +505,19 @@ fn test_resolved_target_runtime_kind() {
 #[test]
 fn test_platform_detection() {
     let platform = detect_current_platform();
-    
+
     // Should return a valid platform string
     assert!(!platform.is_empty());
-    
+
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     assert_eq!(platform, "darwin-arm64");
-    
+
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     assert_eq!(platform, "darwin-x86_64");
-    
+
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     assert_eq!(platform, "linux-amd64");
-    
+
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     assert_eq!(platform, "linux-arm64");
 }

@@ -21,10 +21,7 @@ pub fn local_gpu_satisfies(
     Ok(false)
 }
 
-pub fn compute_deploy_failure_codes(
-    local_ok: bool,
-    fallback_to_cloud: bool,
-) -> Vec<String> {
+pub fn compute_deploy_failure_codes(local_ok: bool, fallback_to_cloud: bool) -> Vec<String> {
     if local_ok {
         return vec![];
     }

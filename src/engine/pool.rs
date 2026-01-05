@@ -5,12 +5,12 @@
 //! the CapsuleManager to interact with pools.
 
 use anyhow::{anyhow, Result};
-use dashmap::DashMap;
 use capsule_core::capsule_v1::CapsuleManifestV1;
 use capsule_runtime::manifest::{CapsuleManifest, Entrypoint, NetworkConfig, PortMapping};
 use capsule_runtime::pool::{MonitorHandle, PoolConfig, PoolManager, PoolStats};
 use capsule_runtime::runtimes::YoukiRuntime;
 use capsule_runtime::AdepContainerRuntime;
+use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;

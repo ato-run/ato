@@ -496,22 +496,24 @@ pub fn start_daily_signing_scheduler(
                 .and_hms_opt(0, 5, 0) // 00:05 UTC to allow for clock drift
                 .unwrap()
                 .and_utc();
-            let wait_duration = (tomorrow_midnight - now).to_std().unwrap_or(std::time::Duration::from_secs(86400));
-            
+            let wait_duration = (tomorrow_midnight - now)
+                .to_std()
+                .unwrap_or(std::time::Duration::from_secs(86400));
+
             tracing::info!(
                 "Audit batch scheduler: next signing in {:?} at {}",
                 wait_duration,
                 tomorrow_midnight
             );
-            
+
             // Wait until next signing time
             tokio::time::sleep(wait_duration).await;
-            
+
             // Sign yesterday's batch
             let yesterday = (chrono::Utc::now() - chrono::Duration::days(1))
                 .format("%Y-%m-%d")
                 .to_string();
-            
+
             if let Some(ref signer) = signer {
                 match audit_logger.sign_daily_batch(&yesterday, signer) {
                     Ok(sig) => {

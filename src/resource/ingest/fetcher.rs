@@ -69,10 +69,9 @@ pub async fn fetch_resource(
         }
     }
 
-    let bytes_downloaded =
-        super::http::download_file(&req.url, dest_str, &cfg.allowed_host_paths)
-            .await
-            .context("download failed")?;
+    let bytes_downloaded = super::http::download_file(&req.url, dest_str, &cfg.allowed_host_paths)
+        .await
+        .context("download failed")?;
 
     if let Some(expected) = req
         .expected_sha256

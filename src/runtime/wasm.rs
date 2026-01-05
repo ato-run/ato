@@ -160,9 +160,7 @@ impl Runtime for WasmRuntime {
             wasm_path.clone()
         } else {
             // Default: look for main.wasm in bundle root
-            request
-                .bundle_root
-                .join("main.wasm")
+            request.bundle_root.join("main.wasm")
         };
 
         if !component_path.exists() {
@@ -185,9 +183,8 @@ impl Runtime for WasmRuntime {
 
         // 3. Create linker with WASI command world
         let mut linker: Linker<WasmEngineState> = Linker::new(&self.engine);
-        command::add_to_linker(&mut linker).map_err(|e| {
-            RuntimeError::Internal(format!("Failed to add WASI to linker: {}", e))
-        })?;
+        command::add_to_linker(&mut linker)
+            .map_err(|e| RuntimeError::Internal(format!("Failed to add WASI to linker: {}", e)))?;
 
         // 4. Build environment variables
         let env_vars = self.build_env_vars(&request);
@@ -234,13 +231,12 @@ impl Runtime for WasmRuntime {
         store.limiter(|state| &mut state.limits);
 
         // 10. Instantiate and run the component
-        let (command, _instance) =
-            Command::instantiate_async(&mut store, &component, &linker)
-                .await
-                .map_err(|e| {
-                    error!("Failed to instantiate component: {}", e);
-                    RuntimeError::ExecutionFailed(format!("Component instantiation failed: {}", e))
-                })?;
+        let (command, _instance) = Command::instantiate_async(&mut store, &component, &linker)
+            .await
+            .map_err(|e| {
+                error!("Failed to instantiate component: {}", e);
+                RuntimeError::ExecutionFailed(format!("Component instantiation failed: {}", e))
+            })?;
 
         debug!("Component instantiated, executing wasi:cli/command::run");
 
@@ -255,7 +251,10 @@ impl Runtime for WasmRuntime {
 
         // Write logs to file
         let log_path = self.log_dir.join(format!("{}.log", workload_id));
-        if let Err(e) = self.write_logs(&log_path, &stdout_bytes, &stderr_bytes).await {
+        if let Err(e) = self
+            .write_logs(&log_path, &stdout_bytes, &stderr_bytes)
+            .await
+        {
             warn!("Failed to write logs for {}: {}", workload_id, e);
         }
 
@@ -267,7 +266,7 @@ impl Runtime for WasmRuntime {
                     workload_id, elapsed
                 );
                 Ok(LaunchResult {
-                    pid: None, // Wasm components don't have traditional PIDs
+                    pid: None,         // Wasm components don't have traditional PIDs
                     bundle_path: None, // Wasm components don't use bundle directories
                     log_path: Some(log_path),
                     port: None,
