@@ -19,14 +19,12 @@
 //! handle.shutdown().await;
 //! ```
 
-#[allow(dead_code)]
-pub mod capsule_capnp; // Cap'n Proto generated code
-pub mod capnp_to_manifest; // Cap'n Proto ↔ CapsuleManifestV1 conversion (UARC V1.1.0)
 pub mod common;
 // pub mod coordinator_service;  // Disabled: proto definitions not present in capsuled/proto
 pub mod engine; // Capsule execution core (manager, supervisor, pool)
 pub mod interface; // External interfaces (gRPC, HTTP, API, DevServer)
 pub mod resource; // Resource management (artifact, cas, storage, oci, downloader)
+pub mod schema; // Cap'n Proto schema and conversion
 
 // Re-exports from common for backward compatibility
 pub use common::auth;
@@ -38,6 +36,11 @@ pub use interface::api as api_server;
 pub use interface::dev_server;
 pub use interface::grpc as grpc_server;
 pub use interface::http as http_server;
+
+// Re-exports from schema for backward compatibility
+#[allow(dead_code)]
+pub use schema::capnp as capsule_capnp;
+pub use schema::converter as capnp_to_manifest;
 
 // Re-exports from engine for backward compatibility
 pub use engine::manager as capsule_manager;
