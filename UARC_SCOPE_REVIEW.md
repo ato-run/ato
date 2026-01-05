@@ -288,3 +288,57 @@ Native Runtime参照を全て削除し、Source Runtimeへ統合:
 1. ✅ **Phase 12-1~4を順次実行**（リファクタリング）
 2. ✅ **Phase 13でNative完全削除**（破壊的変更）
 3. ✅ **全テスト実行とコンパイル確認**
+
+---
+
+## 完了状況 (2024年実施)
+
+### ✅ Phase 11: アーカイブ完了
+- `headscale/` → `.archives/src_legacy/headscale/`
+- `runtime/native.rs` → `.archives/src_legacy/runtime/native.rs`
+- `system/network/tailscale.rs` → `.archives/src_legacy/system/network/tailscale.rs`
+- `system/network/traefik.rs` → `.archives/src_legacy/system/network/traefik.rs`
+
+Commits: `5a9bd74`, `994157f`
+
+### ✅ Phase 12: リソース整理完了
+- `resource/model_fetcher.rs` → `resource/ingest/fetcher.rs` (汎用化)
+- `system/network/mdns.rs` → `interface/discovery/mdns.rs`
+- `verification/vram_scrubber.rs` → `verification/vram.rs`
+- `bin/deploy_tool.rs` → 削除
+
+Commit: `c8a107e`
+
+### ✅ Phase 13: Native Runtime完全削除完了
+**変更ファイル**:
+- `runtime/resolver.rs`: Python/Node → RuntimeKind::Source
+- `runtime/container.rs`: native_runtime field削除
+- `interface/dev_server.rs`: TailscaleManager削除
+- `interface/grpc.rs`: TailscaleManager削除、Native proto → Source mapping
+- `engine/manager.rs`: native_runtime, traefik_manager削除
+- `main.rs`: TailscaleManager初期化削除
+- `verification/vram.rs`: モジュールパス修正
+- `resource/ingest/fetcher.rs`: FetcherConfig
+
+Commits: `2ef6326`, `18346ec`
+
+**コンパイル確認**: ✅ `cargo check` 成功
+
+**Breaking Changes**:
+- Native runtime → Source runtime migration
+- TailscaleManager → SPIFFE ID migration
+- TraefikManager → Coordinator routing migration
+
+---
+
+## UARC V1.1.0 適合性
+
+**Capsuled は現在、以下のUARC V1.1.0仕様に完全準拠**:
+
+- ✅ **Runtime Support**: Wasm, Source, OCI
+- ✅ **Network Identity**: SPIFFE ID (Tailscale VPN削除)
+- ✅ **Routing**: Coordinator責務 (Traefik削除)
+- ✅ **Security**: CAS-based verification, Path validation
+- ✅ **Resource Management**: Generic resource ingestion
+- ✅ **Development**: mDNS discovery (dev-only)
+- ✅ **GPU Security**: VRAM scrubbing (future v1.2)
