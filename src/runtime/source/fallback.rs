@@ -259,9 +259,11 @@ fn spawn_log_collector(
 
     let mut cmd = Command::new(container_cmd);
     cmd.args(["logs", "-f", container_name]);
-    cmd.stdout(Stdio::from(log_file.try_clone().map_err(|e| RuntimeError::Io {
-        path: log_path.clone(),
-        source: e,
+    cmd.stdout(Stdio::from(log_file.try_clone().map_err(|e| {
+        RuntimeError::Io {
+            path: log_path.clone(),
+            source: e,
+        }
     })?));
     cmd.stderr(Stdio::from(log_file));
 

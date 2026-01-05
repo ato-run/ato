@@ -69,7 +69,7 @@ prometheus = "0.13"
 # capsule libraries (from capsule-cli workspace)
 capsule-core = { path = "../capsule-cli/capsule-core", features = ["toml-support"] }
 capsule-runtime = { path = "../capsule-cli/capsule-runtime" }
-capsule-cas = { path = "../capsule-cli/capsule-cas" }
+# capsule-cas = { path = "../capsule-cli/capsule-cas" }
 dashmap = "6"
 capnp = "0.24"
 tokio-stream = { version = "0.1.17", features = ["sync", "net"] }

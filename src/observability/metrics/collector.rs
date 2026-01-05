@@ -37,12 +37,14 @@ pub struct MetricsCollector {
 impl MetricsCollector {
     /// Create a new MetricsCollector
     pub fn new() -> Self {
-        let prometheus = PrometheusMetrics::new()
-            .unwrap_or_else(|e| {
-                warn!("Failed to initialize Prometheus metrics: {}. Using fallback.", e);
-                // Create a minimal fallback - in production this should not happen
-                PrometheusMetrics::new().expect("Fallback metrics init failed")
-            });
+        let prometheus = PrometheusMetrics::new().unwrap_or_else(|e| {
+            warn!(
+                "Failed to initialize Prometheus metrics: {}. Using fallback.",
+                e
+            );
+            // Create a minimal fallback - in production this should not happen
+            PrometheusMetrics::new().expect("Fallback metrics init failed")
+        });
 
         Self {
             prometheus: Arc::new(prometheus),
@@ -65,7 +67,8 @@ impl MetricsCollector {
         if let Ok(mut sessions) = self.active_sessions.write() {
             sessions.insert(capsule_id.to_string(), record);
             self.prometheus.inc_capsule_count();
-            self.prometheus.set_capsule_status(capsule_id, "running", 1.0);
+            self.prometheus
+                .set_capsule_status(capsule_id, "running", 1.0);
             debug!("Started tracking capsule: {}", capsule_id);
         }
     }
@@ -87,8 +90,10 @@ impl MetricsCollector {
 
         // Update Prometheus metrics
         self.prometheus.dec_capsule_count();
-        self.prometheus.set_capsule_status(capsule_id, "running", 0.0);
-        self.prometheus.set_capsule_status(capsule_id, "stopped", 1.0);
+        self.prometheus
+            .set_capsule_status(capsule_id, "running", 0.0);
+        self.prometheus
+            .set_capsule_status(capsule_id, "stopped", 1.0);
 
         // Store in completed sessions
         if let Ok(mut completed) = self.completed_sessions.write() {
@@ -124,10 +129,7 @@ impl MetricsCollector {
 
     /// Get active session count
     pub fn active_session_count(&self) -> usize {
-        self.active_sessions
-            .read()
-            .map(|s| s.len())
-            .unwrap_or(0)
+        self.active_sessions.read().map(|s| s.len()).unwrap_or(0)
     }
 
     /// Get completed sessions for billing/audit queries
@@ -157,7 +159,7 @@ mod tests {
     #[test]
     fn test_tracking_lifecycle() {
         let collector = MetricsCollector::new();
-        
+
         // Start tracking
         collector.start_tracking("test-capsule-1", Some("user-123".to_string()));
         assert_eq!(collector.active_session_count(), 1);
@@ -169,7 +171,7 @@ mod tests {
         let record = collector.stop_tracking("test-capsule-1");
         assert!(record.is_some());
         assert_eq!(collector.active_session_count(), 0);
-        
+
         let record = record.unwrap();
         assert_eq!(record.capsule_id, "test-capsule-1");
         assert!(record.gpu_hours > 0.0);
@@ -179,10 +181,10 @@ mod tests {
     fn test_prometheus_gather() {
         let collector = MetricsCollector::new();
         collector.start_tracking("test-capsule", None);
-        
+
         let metrics = collector.gather_prometheus();
         assert!(metrics.is_ok());
-        
+
         let text = metrics.unwrap();
         assert!(text.contains("capsule_count"));
     }

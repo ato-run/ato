@@ -18,23 +18,23 @@ use tracing::{debug, warn};
 /// Known dangerous flags that could bypass security or enable RCE
 const DANGEROUS_FLAGS: &[&str] = &[
     // Inline script execution (highest risk)
-    "-c",        // Python, Bash, Shell
-    "-e",        // Perl, Ruby, Node.js
-    "--eval",    // Node.js
-    "-exec",     // Various
+    "-c",     // Python, Bash, Shell
+    "-e",     // Perl, Ruby, Node.js
+    "--eval", // Node.js
+    "-exec",  // Various
     // Debug/Inspect ports (RCE risk)
-    "--inspect",           // Node.js debugger
-    "--inspect-brk",       // Node.js debugger with breakpoint
-    "--inspect-wait",      // Node.js debugger
-    "--debug",             // Various debuggers
-    "--debug-brk",         // Node.js legacy debugger
+    "--inspect",      // Node.js debugger
+    "--inspect-brk",  // Node.js debugger with breakpoint
+    "--inspect-wait", // Node.js debugger
+    "--debug",        // Various debuggers
+    "--debug-brk",    // Node.js legacy debugger
     // Remote execution
     "--remote-debugging-port", // Chromium-based
     // PHP specific
-    "-r",        // PHP inline code
-    "-S",        // PHP built-in server (can expose files)
+    "-r", // PHP inline code
+    "-S", // PHP built-in server (can expose files)
     // Python specific
-    "-m",        // Python module execution (can be abused)
+    "-m", // Python module execution (can be abused)
 ];
 
 /// Flags that are dangerous in production but acceptable in dev mode
@@ -62,10 +62,7 @@ pub fn validate_cmd(cmd: &[String], capsule_root: &Path, dev_mode: bool) -> Resu
         return Err(anyhow!("Security Violation: Empty command specified"));
     }
 
-    debug!(
-        "Validating command: {:?} (dev_mode: {})",
-        cmd, dev_mode
-    );
+    debug!("Validating command: {:?} (dev_mode: {})", cmd, dev_mode);
 
     // Rule 1: Check for dangerous flags
     validate_flags(cmd, dev_mode)?;
@@ -90,10 +87,7 @@ fn validate_flags(cmd: &[String], dev_mode: bool) -> Result<()> {
             if arg == dangerous || arg.starts_with(&format!("{}=", dangerous)) {
                 // In dev mode, some flags are allowed
                 if dev_mode && DEV_ONLY_FLAGS.contains(&dangerous) {
-                    warn!(
-                        "Allowing dev-only flag '{}' in development mode",
-                        dangerous
-                    );
+                    warn!("Allowing dev-only flag '{}' in development mode", dangerous);
                     continue;
                 }
 
@@ -145,8 +139,12 @@ fn validate_file_first(cmd: &[String], capsule_root: &Path) -> Result<()> {
             };
 
             // Security: Path traversal check
-            let canonical_root = capsule_root.canonicalize().unwrap_or_else(|_| capsule_root.to_path_buf());
-            let canonical_target = target_path.canonicalize().unwrap_or_else(|_| target_path.clone());
+            let canonical_root = capsule_root
+                .canonicalize()
+                .unwrap_or_else(|_| capsule_root.to_path_buf());
+            let canonical_target = target_path
+                .canonicalize()
+                .unwrap_or_else(|_| target_path.clone());
 
             if !canonical_target.starts_with(&canonical_root) {
                 return Err(anyhow!(
@@ -230,8 +228,8 @@ fn looks_like_file_path(arg: &str) -> bool {
     if arg.contains('.') {
         let ext = arg.rsplit('.').next().unwrap_or("");
         let common_extensions = [
-            "py", "rb", "js", "ts", "mjs", "cjs", "pl", "php", "sh", "bash", 
-            "lua", "r", "R", "jl", "go", "rs", "java", "kt", "swift", "ex", "exs"
+            "py", "rb", "js", "ts", "mjs", "cjs", "pl", "php", "sh", "bash", "lua", "r", "R", "jl",
+            "go", "rs", "java", "kt", "swift", "ex", "exs",
         ];
         if common_extensions.contains(&ext) {
             return true;
@@ -255,7 +253,7 @@ fn looks_like_file_path(arg: &str) -> bool {
 fn is_inline_code_pattern(arg: &str) -> bool {
     // Check for common inline code indicators
     // These patterns often indicate someone trying to run inline code
-    
+
     // Multi-line code with common language constructs
     let suspicious_patterns = [
         "import ",       // Python import in argument
@@ -301,9 +299,14 @@ fn truncate_for_display(s: &str, max_len: usize) -> String {
 pub fn validate_binary(binary: &str, dev_mode: bool) -> Result<()> {
     const ALLOWED_BINARIES: &[&str] = &[
         // Python
-        "python", "python3", "python3.11", "python3.12", "python3.13",
+        "python",
+        "python3",
+        "python3.11",
+        "python3.12",
+        "python3.13",
         // Node.js
-        "node", "nodejs",
+        "node",
+        "nodejs",
         // Deno
         "deno",
         // Ruby
@@ -321,12 +324,12 @@ pub fn validate_binary(binary: &str, dev_mode: bool) -> Result<()> {
     // In dev mode, allow more flexibility
     const DEV_ALLOWED_BINARIES: &[&str] = &[
         // All production binaries plus:
-        "npx",      // Node package runner
-        "yarn",     // Yarn package manager
-        "pnpm",     // pnpm package manager
-        "uv",       // Python uv
-        "pip",      // Python pip (for dev setup)
-        "poetry",   // Python poetry
+        "npx",    // Node package runner
+        "yarn",   // Yarn package manager
+        "pnpm",   // pnpm package manager
+        "uv",     // Python uv
+        "pip",    // Python pip (for dev setup)
+        "poetry", // Python poetry
     ];
 
     // Check production allowlist
@@ -342,8 +345,16 @@ pub fn validate_binary(binary: &str, dev_mode: bool) -> Result<()> {
 
     // Explicitly deny shell
     const DENIED_BINARIES: &[&str] = &[
-        "sh", "bash", "zsh", "fish", "csh", "tcsh", "dash",
-        "cmd", "powershell", "pwsh",
+        "sh",
+        "bash",
+        "zsh",
+        "fish",
+        "csh",
+        "tcsh",
+        "dash",
+        "cmd",
+        "powershell",
+        "pwsh",
     ];
 
     if DENIED_BINARIES.contains(&binary) {

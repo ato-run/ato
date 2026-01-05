@@ -61,7 +61,7 @@ impl Default for StorageConfig {
 }
 
 /// Directory-based storage manager for capsule workloads
-/// 
+///
 /// This is a simple, cross-platform implementation that creates
 /// directories for each capsule instead of managing LVM volumes.
 pub struct StorageManager {
@@ -262,10 +262,22 @@ mod tests {
 
     #[test]
     fn test_sanitize_dir_name() {
-        assert_eq!(StorageManager::sanitize_dir_name("my-capsule"), "my-capsule");
-        assert_eq!(StorageManager::sanitize_dir_name("my_capsule"), "my_capsule");
-        assert_eq!(StorageManager::sanitize_dir_name("my capsule"), "my_capsule");
-        assert_eq!(StorageManager::sanitize_dir_name("my.capsule"), "my_capsule");
+        assert_eq!(
+            StorageManager::sanitize_dir_name("my-capsule"),
+            "my-capsule"
+        );
+        assert_eq!(
+            StorageManager::sanitize_dir_name("my_capsule"),
+            "my_capsule"
+        );
+        assert_eq!(
+            StorageManager::sanitize_dir_name("my capsule"),
+            "my_capsule"
+        );
+        assert_eq!(
+            StorageManager::sanitize_dir_name("my.capsule"),
+            "my_capsule"
+        );
         assert_eq!(
             StorageManager::sanitize_dir_name("-capsule"),
             "capsule_-capsule"
@@ -273,14 +285,8 @@ mod tests {
         // ".hidden" becomes "_hidden" after sanitization, then gets prefix because starts with underscore? No - starts with '.'
         // Actually the sanitization replaces '.' with '_', so ".hidden" -> "_hidden"
         // Then "_hidden" does NOT start with '.' or '-', so no prefix is added
-        assert_eq!(
-            StorageManager::sanitize_dir_name(".hidden"),
-            "_hidden"
-        );
-        assert_eq!(
-            StorageManager::sanitize_dir_name(""),
-            "capsule_unnamed"
-        );
+        assert_eq!(StorageManager::sanitize_dir_name(".hidden"), "_hidden");
+        assert_eq!(StorageManager::sanitize_dir_name(""), "capsule_unnamed");
     }
 
     #[test]

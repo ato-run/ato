@@ -38,8 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .lines()
         .filter(|line| {
             let trimmed = line.trim_start();
-            trimmed != "using Go = import \"/go.capnp\";"
-                && !trimmed.starts_with("$Go.")
+            trimmed != "using Go = import \"/go.capnp\";" && !trimmed.starts_with("$Go.")
         })
         .collect::<Vec<_>>()
         .join("\n")

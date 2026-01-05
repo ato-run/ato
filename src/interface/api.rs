@@ -129,18 +129,28 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         Some(collector) => match collector.gather_prometheus() {
             Ok(metrics_text) => (
                 StatusCode::OK,
-                [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                )],
                 metrics_text,
             )
                 .into_response(),
             Err(e) => {
                 error!("Failed to gather Prometheus metrics: {}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to gather metrics").into_response()
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to gather metrics",
+                )
+                    .into_response()
             }
         },
         None => (
             StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
             "# Metrics collector not configured\n".to_string(),
         )
             .into_response(),

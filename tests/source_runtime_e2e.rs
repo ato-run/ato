@@ -1,11 +1,10 @@
 /// Source Runtime E2E Tests
-/// 
+///
 /// Tests for Source Runtime with multiple language targets:
 /// - Python (python3)
 /// - Node.js (node)
 /// - Ruby (ruby)
 /// - Deno (deno)
-
 use std::process::Command;
 
 #[cfg(test)]
@@ -16,10 +15,8 @@ mod python_tests {
     #[ignore] // Run with: cargo test --test source_runtime_e2e -- --ignored python
     fn test_python_hello_world() {
         // Check if python3 is available
-        let python_check = Command::new("python3")
-            .arg("--version")
-            .output();
-        
+        let python_check = Command::new("python3").arg("--version").output();
+
         if python_check.is_err() {
             eprintln!("Python3 not found, skipping test");
             return;
@@ -53,10 +50,8 @@ print(f"Python version: {sys.version}")
     #[test]
     #[ignore]
     fn test_python_with_env() {
-        let python_check = Command::new("python3")
-            .arg("--version")
-            .output();
-        
+        let python_check = Command::new("python3").arg("--version").output();
+
         if python_check.is_err() {
             eprintln!("Python3 not found, skipping test");
             return;
@@ -94,10 +89,8 @@ mod nodejs_tests {
     #[ignore] // Run with: cargo test --test source_runtime_e2e -- --ignored node
     fn test_nodejs_hello_world() {
         // Check if node is available
-        let node_check = Command::new("node")
-            .arg("--version")
-            .output();
-        
+        let node_check = Command::new("node").arg("--version").output();
+
         if node_check.is_err() {
             eprintln!("Node.js not found, skipping test");
             return;
@@ -127,10 +120,8 @@ console.log("Node version:", process.version);
     #[test]
     #[ignore]
     fn test_nodejs_with_env() {
-        let node_check = Command::new("node")
-            .arg("--version")
-            .output();
-        
+        let node_check = Command::new("node").arg("--version").output();
+
         if node_check.is_err() {
             eprintln!("Node.js not found, skipping test");
             return;
@@ -166,10 +157,8 @@ mod ruby_tests {
     #[ignore] // Run with: cargo test --test source_runtime_e2e -- --ignored ruby
     fn test_ruby_hello_world() {
         // Check if ruby is available
-        let ruby_check = Command::new("ruby")
-            .arg("--version")
-            .output();
-        
+        let ruby_check = Command::new("ruby").arg("--version").output();
+
         if ruby_check.is_err() {
             eprintln!("Ruby not found, skipping test");
             return;
@@ -199,10 +188,8 @@ puts "Ruby version: #{RUBY_VERSION}"
     #[test]
     #[ignore]
     fn test_ruby_with_env() {
-        let ruby_check = Command::new("ruby")
-            .arg("--version")
-            .output();
-        
+        let ruby_check = Command::new("ruby").arg("--version").output();
+
         if ruby_check.is_err() {
             eprintln!("Ruby not found, skipping test");
             return;
@@ -238,10 +225,8 @@ mod deno_tests {
     #[ignore] // Run with: cargo test --test source_runtime_e2e -- --ignored deno
     fn test_deno_hello_world() {
         // Check if deno is available
-        let deno_check = Command::new("deno")
-            .arg("--version")
-            .output();
-        
+        let deno_check = Command::new("deno").arg("--version").output();
+
         if deno_check.is_err() {
             eprintln!("Deno not found, skipping test");
             return;
@@ -273,10 +258,8 @@ console.log("Deno version:", Deno.version.deno);
     #[test]
     #[ignore]
     fn test_deno_with_env() {
-        let deno_check = Command::new("deno")
-            .arg("--version")
-            .output();
-        
+        let deno_check = Command::new("deno").arg("--version").output();
+
         if deno_check.is_err() {
             eprintln!("Deno not found, skipping test");
             return;

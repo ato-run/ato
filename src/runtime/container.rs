@@ -29,9 +29,7 @@ impl ContainerRuntime {
         _egress_proxy_port: Option<u16>,
     ) -> Self {
         // UARC V1: Native runtime removed
-        Self {
-            config,
-        }
+        Self { config }
     }
 
     pub fn config(&self) -> &RuntimeConfig {

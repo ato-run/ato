@@ -70,7 +70,10 @@ impl JobPhase {
 
     /// Check if this phase represents a terminal state
     pub fn is_terminal(&self) -> bool {
-        matches!(self, JobPhase::Succeeded | JobPhase::Failed | JobPhase::Cancelled)
+        matches!(
+            self,
+            JobPhase::Succeeded | JobPhase::Failed | JobPhase::Cancelled
+        )
     }
 }
 
@@ -225,9 +228,7 @@ impl JobHistory for SqliteJobHistoryStore {
 
         // Calculate duration if transitioning to terminal state
         let mut stmt = conn.prepare("SELECT started_at FROM job_history WHERE job_id = ?1")?;
-        let started_at: Option<String> = stmt
-            .query_row(params![job_id], |row| row.get(0))
-            .ok();
+        let started_at: Option<String> = stmt.query_row(params![job_id], |row| row.get(0)).ok();
 
         let duration_secs = if phase.is_terminal() {
             started_at.as_ref().and_then(|s| {
@@ -336,9 +337,7 @@ impl JobHistory for SqliteJobHistoryStore {
                 "#,
             )?;
 
-            let rows = stmt.query_map(params![name, limit as i64], |row| {
-                parse_job_row(row)
-            })?;
+            let rows = stmt.query_map(params![name, limit as i64], |row| parse_job_row(row))?;
 
             for row_result in rows {
                 jobs.push(row_result?);
@@ -354,9 +353,7 @@ impl JobHistory for SqliteJobHistoryStore {
                 "#,
             )?;
 
-            let rows = stmt.query_map(params![limit as i64], |row| {
-                parse_job_row(row)
-            })?;
+            let rows = stmt.query_map(params![limit as i64], |row| parse_job_row(row))?;
 
             for row_result in rows {
                 jobs.push(row_result?);

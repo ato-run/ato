@@ -109,8 +109,8 @@ fn test_egress_fail_closed_blocks_disallowed_traffic() {
         return;
     }
 
-    use capsuled::security::egress_policy::generate_fw_rules;
     use capsule_core::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
+    use capsuled::security::egress_policy::generate_fw_rules;
 
     // Create manifest with restricted egress (only internal network)
     let mut manifest = create_test_manifest("test-egress-blocked");
@@ -164,8 +164,8 @@ fn test_egress_allows_permitted_traffic() {
         return;
     }
 
-    use capsuled::security::egress_policy::generate_fw_rules;
     use capsule_core::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
+    use capsuled::security::egress_policy::generate_fw_rules;
 
     // Create manifest allowing specific external IP
     let mut manifest = create_test_manifest("test-egress-allowed");
@@ -213,8 +213,8 @@ fn test_egress_allows_permitted_traffic() {
 fn test_signature_verification_priority_over_egress() {
     prereqs::print_status();
 
-    use capsuled::security::verifier::ManifestVerifier;
     use capsule_core::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
+    use capsuled::security::verifier::ManifestVerifier;
 
     // Create verifier with a FAKE trusted key to enable signature enforcement
     // When a trusted key is configured, the verifier will reject invalid signatures
@@ -294,15 +294,15 @@ fn test_storage_vram_lifecycle_cleanup() {
         .provision_capsule_storage(capsule_id, None, None, None)
         .expect("provision");
 
-    assert!(
-        storage.storage_path.exists(),
-        "Storage path should exist"
-    );
+    assert!(storage.storage_path.exists(), "Storage path should exist");
 
     // Phase 2: Verify storage is accessible
     println!("Phase 2: Verifying storage path...");
     let storage_path = storage.storage_path.clone();
-    assert!(storage_path.exists(), "Storage path should exist after provision");
+    assert!(
+        storage_path.exists(),
+        "Storage path should exist after provision"
+    );
 
     // Phase 3: Write data
     println!("Phase 3: Writing test data...");

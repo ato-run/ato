@@ -4,19 +4,20 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tracing::{info, warn};
 
-use capsule_core::capsule_v1::{CapsuleManifestV1, RuntimeType};
-use crate::metrics::collector::MetricsCollector;
 use crate::hardware::GpuDetector;
+use crate::metrics::collector::MetricsCollector;
 use crate::runtime::{
-    youki_adapter::YoukiRuntimeAdapter, ContainerRuntime, DevRuntime, DockerCliRuntime,
-    LaunchRequest, LaunchResult, Runtime, RuntimeConfig, RuntimeError, RuntimeKind,
     resolver::{resolve_runtime, ResolveContext, ResolvedTarget},
     source::{SourceRuntime, SourceRuntimeConfig},
+    youki_adapter::YoukiRuntimeAdapter,
+    ContainerRuntime, DevRuntime, DockerCliRuntime, LaunchRequest, LaunchResult, Runtime,
+    RuntimeConfig, RuntimeError, RuntimeKind,
 };
 use crate::security::audit::{AuditLogger, AuditOperation, AuditStatus};
 use crate::security::vram::VramScrubber;
 use crate::security::ManifestVerifier;
 use crate::storage::{StorageConfig, StorageManager};
+use capsule_core::capsule_v1::{CapsuleManifestV1, RuntimeType};
 
 /// Request parameters for deploying a capsule
 #[derive(Debug, Clone)]
@@ -79,11 +80,11 @@ impl std::fmt::Display for CapsuleStatus {
     }
 }
 
+use super::pool::PoolRegistry;
+use super::supervisor::ProcessSupervisor;
 use crate::artifact::ArtifactManager;
 use crate::interface::discovery::MdnsAnnouncer;
 use crate::network::service_registry::ServiceRegistry;
-use super::pool::PoolRegistry;
-use super::supervisor::ProcessSupervisor;
 
 /// Manages the lifecycle of capsules
 pub struct CapsuleManager {
@@ -167,7 +168,7 @@ impl CapsuleManager {
         // Clone config before passing to container_runtime since it takes ownership
         let log_dir_clone = runtime_config.log_dir.clone();
         let bundle_root_clone = runtime_config.bundle_root.clone();
-        
+
         let youki_runtime = Arc::new(YoukiRuntimeAdapter::new(
             log_dir_clone.clone(),
             bundle_root_clone.clone(),
@@ -220,8 +221,12 @@ impl CapsuleManager {
 
         // Initialize WasmRuntime (UARC V1.1.0 support)
         let wasm_runtime = Arc::new(
-            crate::runtime::WasmRuntime::new(artifact_manager.clone(), log_dir_clone, egress_proxy_port)
-                .expect("Failed to initialize WasmRuntime"),
+            crate::runtime::WasmRuntime::new(
+                artifact_manager.clone(),
+                log_dir_clone,
+                egress_proxy_port,
+            )
+            .expect("Failed to initialize WasmRuntime"),
         );
 
         Self {
@@ -248,7 +253,6 @@ impl CapsuleManager {
             metrics_collector,
         }
     }
-
 
     /// Build a ResolveContext from current engine capabilities
     fn build_resolve_context(&self) -> ResolveContext {
@@ -329,7 +333,9 @@ impl CapsuleManager {
                         if cfg!(target_os = "linux") {
                             self.youki_runtime.clone()
                         } else {
-                            warn!("Youki runtime is only supported on Linux, falling back to Docker");
+                            warn!(
+                                "Youki runtime is only supported on Linux, falling back to Docker"
+                            );
                             if cfg!(target_os = "macos") || force_docker_cli {
                                 self.docker_runtime.clone()
                             } else {
@@ -660,22 +666,22 @@ impl CapsuleManager {
         // =====================================================================
         if matches!(manifest.execution.runtime, RuntimeType::Wasm) {
             info!("Using Wasm Runtime for capsule {}", capsule_id);
-            
+
             // Use source_working_dir from request (set by CLI from capsule.toml [targets.wasm])
             let wasm_dir = source_working_dir
                 .as_ref()
                 .map(|p| PathBuf::from(p))
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-            
+
             // The entrypoint contains the path to the .wasm component file
             let component_path = if manifest.execution.entrypoint.starts_with('/') {
                 PathBuf::from(&manifest.execution.entrypoint)
             } else {
                 wasm_dir.join(&manifest.execution.entrypoint)
             };
-            
+
             let dummy_spec = oci_spec::runtime::Spec::default();
-            
+
             let launch_request = LaunchRequest {
                 workload_id: &capsule_id,
                 spec: &dummy_spec,
@@ -686,10 +692,10 @@ impl CapsuleManager {
                 wasm_component_path: Some(component_path.clone()),
                 source_target: None,
             };
-            
+
             // Launch using WasmRuntime
             let result = self.wasm_runtime.launch(launch_request).await?;
-            
+
             // Register capsule
             let capsule = Capsule {
                 id: capsule_id.clone(),
@@ -710,17 +716,23 @@ impl CapsuleManager {
                 user_id: None,
                 gpu_indices: vec![],
             };
-            
-            self.capsules.write().unwrap().insert(capsule_id.clone(), capsule);
-            
+
+            self.capsules
+                .write()
+                .unwrap()
+                .insert(capsule_id.clone(), capsule);
+
             // Wasm components typically don't expose HTTP ports, but report if configured
             let url = if let Some(port) = host_port {
                 format!("http://localhost:{}", port)
             } else {
                 format!("wasm://{}", capsule_id)
             };
-            
-            info!("Wasm Runtime capsule {} completed, URL: {}", capsule_id, url);
+
+            info!(
+                "Wasm Runtime capsule {} completed, URL: {}",
+                capsule_id, url
+            );
             return Ok(url);
         }
 
@@ -730,24 +742,24 @@ impl CapsuleManager {
         // =====================================================================
         if matches!(manifest.execution.runtime, RuntimeType::Source) {
             info!("Using Source Runtime for capsule {}", capsule_id);
-            
+
             // Use source_working_dir from request (set by CLI from capsule.toml [targets.source])
             let source_dir = source_working_dir
                 .as_ref()
                 .map(|p| PathBuf::from(p))
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-            
+
             let rootfs_path = source_dir.clone();
-            
+
             // Build a minimal OCI spec for SourceRuntime (it doesn't actually use OCI)
             let dummy_spec = oci_spec::runtime::Spec::default();
-            
+
             // Parse entrypoint - it may contain a full command (e.g., "python main.py")
             // passed from runplan.rs when SourceRuntime is used with explicit cmd
             let entrypoint_str = &manifest.execution.entrypoint;
-            let cmd_parts: Vec<String> = shell_words::split(entrypoint_str)
-                .unwrap_or_else(|_| vec![entrypoint_str.clone()]);
-            
+            let cmd_parts: Vec<String> =
+                shell_words::split(entrypoint_str).unwrap_or_else(|_| vec![entrypoint_str.clone()]);
+
             // Determine language and actual entrypoint from parsed command
             let (language, actual_entrypoint, explicit_cmd) = if cmd_parts.len() > 1 {
                 // Full command like ["python", "main.py"]
@@ -758,7 +770,10 @@ impl CapsuleManager {
                     "deno" => "deno",
                     _ => "python", // fallback
                 };
-                let entry = cmd_parts.get(1).cloned().unwrap_or_else(|| "main.py".to_string());
+                let entry = cmd_parts
+                    .get(1)
+                    .cloned()
+                    .unwrap_or_else(|| "main.py".to_string());
                 (lang.to_string(), entry, Some(cmd_parts.clone()))
             } else if entrypoint_str.ends_with(".py") {
                 ("python".to_string(), entrypoint_str.clone(), None)
@@ -769,10 +784,10 @@ impl CapsuleManager {
             } else {
                 ("python".to_string(), entrypoint_str.clone(), None) // default
             };
-            
+
             // Get args from extra_args (passed from CLI)
             let args = request.extra_args.clone().unwrap_or_default();
-            
+
             let source_target = Some(crate::runtime::SourceTarget {
                 language,
                 version: None,
@@ -783,7 +798,7 @@ impl CapsuleManager {
                 cmd: explicit_cmd,
                 dev_mode: true, // Legacy path assumes dev mode
             });
-            
+
             let launch_request = LaunchRequest {
                 workload_id: &capsule_id,
                 spec: &dummy_spec,
@@ -794,10 +809,10 @@ impl CapsuleManager {
                 wasm_component_path: None,
                 source_target,
             };
-            
+
             // Launch using SourceRuntime (handles native sandbox or OCI fallback)
             let result = self.source_runtime.launch(launch_request).await?;
-            
+
             // Register capsule
             let capsule = Capsule {
                 id: capsule_id.clone(),
@@ -818,17 +833,26 @@ impl CapsuleManager {
                 user_id: None,
                 gpu_indices: vec![],
             };
-            
-            self.capsules.write().unwrap().insert(capsule_id.clone(), capsule);
-            
+
+            self.capsules
+                .write()
+                .unwrap()
+                .insert(capsule_id.clone(), capsule);
+
             // Build response URL
             let url = if let Some(port) = host_port {
                 format!("http://localhost:{}", port)
             } else {
-                format!("http://localhost:{}", manifest.execution.port.unwrap_or(8000))
+                format!(
+                    "http://localhost:{}",
+                    manifest.execution.port.unwrap_or(8000)
+                )
             };
-            
-            info!("Source Runtime capsule {} started, URL: {}", capsule_id, url);
+
+            info!(
+                "Source Runtime capsule {} started, URL: {}",
+                capsule_id, url
+            );
             return Ok(url);
         }
 
@@ -888,10 +912,7 @@ impl CapsuleManager {
                         // Update volume source to point to the storage path
                         if let Some(mount_point) = storage.mount_point {
                             volume.name = mount_point.to_string_lossy().to_string();
-                            info!(
-                                "Mapped volume to storage path: {}",
-                                volume.name
-                            );
+                            info!("Mapped volume to storage path: {}", volume.name);
                         }
                     }
                     Err(e) => {
@@ -1111,13 +1132,19 @@ impl CapsuleManager {
         entry.adep_json = manifest_json.as_bytes().to_vec();
         entry.oci_image = manifest.execution.entrypoint.clone();
         entry.status = CapsuleStatus::Running;
-        entry.bundle_path = runtime.bundle_path.as_ref().map(|p| p.to_string_lossy().to_string());
+        entry.bundle_path = runtime
+            .bundle_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
         entry.pid = runtime.pid;
         entry.reserved_vram_bytes = reserved_vram_bytes;
         entry.observed_vram_bytes = None;
         entry.last_failure = None;
         entry.last_exit_code = None;
-        entry.log_path = runtime.log_path.as_ref().map(|p| p.to_string_lossy().to_string());
+        entry.log_path = runtime
+            .log_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
         entry.started_at = Some(std::time::SystemTime::now());
         entry.gpu_indices = gpu_indices;
 
@@ -1291,7 +1318,10 @@ impl CapsuleManager {
             let resolved = match resolve_runtime(manifest, &context) {
                 Ok(r) => r,
                 Err(e) => {
-                    warn!("Runtime resolution failed for stop: {}, using legacy fallback", e);
+                    warn!(
+                        "Runtime resolution failed for stop: {}, using legacy fallback",
+                        e
+                    );
                     // Fallback to legacy on resolution error
                     ResolvedTarget::Legacy {
                         runtime_type: manifest.execution.runtime.clone(),
@@ -1404,7 +1434,10 @@ impl CapsuleManager {
 
             // Get storage info for logging purposes
             if let Ok(Some(storage_info)) = storage_manager.get_capsule_storage(capsule_id) {
-                info!("Storage path for {}: {:?}", capsule_id, storage_info.storage_path);
+                info!(
+                    "Storage path for {}: {:?}",
+                    capsule_id, storage_info.storage_path
+                );
             }
 
             info!("Cleaning up storage for capsule {}", capsule_id);

@@ -254,7 +254,9 @@ pub fn manifest_to_capnp_bytes(
 
             // Preference order
             let prefs = &targets.preference;
-            let mut prefs_builder = targets_builder.reborrow().init_preference(prefs.len() as u32);
+            let mut prefs_builder = targets_builder
+                .reborrow()
+                .init_preference(prefs.len() as u32);
             for (i, pref) in prefs.iter().enumerate() {
                 prefs_builder.set(i as u32, pref);
             }

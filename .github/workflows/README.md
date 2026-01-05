@@ -1,16 +1,17 @@
 # GitHub Actions Workflows
 
-このディレクトリには、capsuledプロジェクトのCI/CDワークフローが含まれています。
+このディレクトリには、capsuled プロジェクトの CI/CD ワークフローが含まれています。
 
 ## ワークフロー一覧
 
-### 1. `ci.yml` - メインCI
+### 1. `ci.yml` - メイン CI
 
-**トリガー**: `main` または `origin` ブランチへのpush/PR
+**トリガー**: `main` または `origin` ブランチへの push/PR
 
 **ジョブ**:
 
 #### `test` - テストスイート
+
 - **OS**: Ubuntu, macOS, Windows
 - **実行内容**:
   - コードフォーマットチェック (`cargo fmt`)
@@ -19,7 +20,8 @@
   - ユニットテスト
   - 統合テスト（non-ignored）
 
-#### `source-runtime-e2e` - Source Runtimeエンドツーエンドテスト
+#### `source-runtime-e2e` - Source Runtime エンドツーエンドテスト
+
 - **OS**: Ubuntu, macOS, Windows
 - **Runtime Matrix**:
   - Python 3
@@ -28,16 +30,18 @@
   - Deno
 - **実行内容**:
   - 各ランタイムのインストール
-  - ランタイム固有のE2Eテスト実行
+  - ランタイム固有の E2E テスト実行
   - 環境変数のテスト
   - スクリプト実行のテスト
 
 #### `security` - セキュリティ監査
+
 - **OS**: Ubuntu
 - **実行内容**:
   - `cargo audit` による依存関係の脆弱性スキャン
 
 #### `build-release` - リリースビルド
+
 - **OS**: Ubuntu, macOS, Windows
 - **実行内容**:
   - リリースビルド (`--release`)
@@ -45,9 +49,10 @@
 
 ### 2. `quick-check.yml` - クイックチェック
 
-**トリガー**: `main`/`origin` 以外のブランチへのpush、または全てのPR
+**トリガー**: `main`/`origin` 以外のブランチへの push、または全ての PR
 
 **ジョブ**:
+
 - フォーマットチェック
 - Clippy
 - ビルド
@@ -58,33 +63,39 @@
 ## ローカルでのテスト実行
 
 ### 全テスト実行
+
 ```bash
 cargo test --verbose
 ```
 
-### Source Runtime E2Eテスト
+### Source Runtime E2E テスト
 
 #### Python
+
 ```bash
 cargo test --test source_runtime_e2e -- --ignored python --nocapture
 ```
 
 #### Node.js
+
 ```bash
 cargo test --test source_runtime_e2e -- --ignored node --nocapture
 ```
 
 #### Ruby
+
 ```bash
 cargo test --test source_runtime_e2e -- --ignored ruby --nocapture
 ```
 
 #### Deno
+
 ```bash
 cargo test --test source_runtime_e2e -- --ignored deno --nocapture
 ```
 
-#### 全てのSource Runtime E2E
+#### 全ての Source Runtime E2E
+
 ```bash
 cargo test --test source_runtime_e2e -- --ignored --nocapture
 ```
@@ -94,6 +105,7 @@ cargo test --test source_runtime_e2e -- --ignored --nocapture
 ### 必要なツール
 
 #### Ubuntu/Debian
+
 ```bash
 sudo apt-get update
 sudo apt-get install -y protobuf-compiler python3 nodejs npm ruby
@@ -103,11 +115,13 @@ curl -fsSL https://deno.land/install.sh | sh
 ```
 
 #### macOS
+
 ```bash
 brew install protobuf python3 node ruby deno
 ```
 
 #### Windows
+
 ```powershell
 # Chocolatey でインストール
 choco install protoc python3 nodejs ruby deno
@@ -116,6 +130,7 @@ choco install protoc python3 nodejs ruby deno
 ## キャッシュ戦略
 
 ワークフローは以下をキャッシュして高速化しています:
+
 - Cargo registry (`~/.cargo/registry`)
 - Cargo git index (`~/.cargo/git`)
 - ビルドアーティファクト (`target/`)
@@ -123,6 +138,7 @@ choco install protoc python3 nodejs ruby deno
 ## トラブルシューティング
 
 ### Protobuf compiler not found
+
 ```bash
 # Ubuntu
 sudo apt-get install -y protobuf-compiler
@@ -135,7 +151,9 @@ choco install protoc
 ```
 
 ### Runtime not found
+
 各ランタイムがシステムにインストールされていることを確認してください:
+
 ```bash
 python3 --version
 node --version
@@ -144,9 +162,10 @@ deno --version
 ```
 
 ### Tests failing locally but passing in CI
+
 - キャッシュをクリアしてみてください: `cargo clean`
 - 環境変数が正しく設定されているか確認してください
-- ローカルのランタイムバージョンがCI環境と一致しているか確認してください
+- ローカルのランタイムバージョンが CI 環境と一致しているか確認してください
 
 ## 拡張
 
@@ -157,6 +176,7 @@ deno --version
 3. インストールコマンドとテストフィルタを設定
 
 例:
+
 ```yaml
 - name: go
   install-ubuntu: "sudo apt-get install -y golang"

@@ -81,7 +81,7 @@ impl LocalCasClient {
         let root = root.as_ref().to_path_buf();
         let blobs_dir = root.join("blobs");
         std::fs::create_dir_all(&blobs_dir)?;
-        
+
         info!("Initialized LocalCasClient at {:?}", root);
         Ok(Self { root, blobs_dir })
     }
@@ -103,7 +103,7 @@ impl LocalCasClient {
         let mut file = std::fs::File::open(path)?;
         let mut hasher = Sha256::new();
         let mut buffer = [0u8; 8192];
-        
+
         loop {
             let bytes_read = file.read(&mut buffer)?;
             if bytes_read == 0 {
@@ -139,7 +139,7 @@ impl CasClient for LocalCasClient {
         // Verify integrity
         self.verify_digest(&path, algorithm, hash)?;
         debug!("Fetched blob from local CAS: {}", digest);
-        
+
         Ok(path)
     }
 
@@ -148,7 +148,7 @@ impl CasClient for LocalCasClient {
         let mut file = std::fs::File::open(source_path)?;
         let mut hasher = Sha256::new();
         let mut buffer = [0u8; 8192];
-        
+
         loop {
             let bytes_read = file.read(&mut buffer)?;
             if bytes_read == 0 {
@@ -231,9 +231,12 @@ impl CasClient for HttpCasClient {
         let url = format!("{}/blobs/{}/{}", self.endpoint, algorithm, hash);
         debug!("Fetching blob from remote: {}", url);
 
-        let response = self.client.get(&url).send().await.map_err(|e| {
-            CasError::Http(format!("Failed to fetch blob: {}", e))
-        })?;
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| CasError::Http(format!("Failed to fetch blob: {}", e)))?;
 
         if !response.status().is_success() {
             if response.status() == reqwest::StatusCode::NOT_FOUND {
@@ -248,9 +251,10 @@ impl CasClient for HttpCasClient {
             )));
         }
 
-        let bytes = response.bytes().await.map_err(|e| {
-            CasError::Http(format!("Failed to read response body: {}", e))
-        })?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| CasError::Http(format!("Failed to read response body: {}", e)))?;
 
         // Verify hash
         let actual_hash = hex::encode(Sha256::digest(&bytes));
@@ -276,7 +280,7 @@ impl CasClient for HttpCasClient {
 
         // Upload to remote
         let url = format!("{}/blobs/sha256/{}", self.endpoint, hash);
-        
+
         let response = self
             .client
             .put(&url)
@@ -305,7 +309,7 @@ impl CasClient for HttpCasClient {
 
     async fn exists(&self, digest: &str) -> CasResult<bool> {
         let (algorithm, hash) = parse_digest(digest)?;
-        
+
         // Check cache first
         let cache_path = self.cache_path(algorithm, hash);
         if cache_path.exists() {
@@ -314,9 +318,12 @@ impl CasClient for HttpCasClient {
 
         // HEAD request to remote
         let url = format!("{}/blobs/{}/{}", self.endpoint, algorithm, hash);
-        let response = self.client.head(&url).send().await.map_err(|e| {
-            CasError::Http(format!("Failed to check blob existence: {}", e))
-        })?;
+        let response = self
+            .client
+            .head(&url)
+            .send()
+            .await
+            .map_err(|e| CasError::Http(format!("Failed to check blob existence: {}", e)))?;
 
         Ok(response.status().is_success())
     }
@@ -331,7 +338,7 @@ impl CasClient for HttpCasClient {
 #[allow(dead_code)] // Will be used when CAS integration is enabled
 pub fn create_cas_client_from_env() -> CasResult<Box<dyn CasClient>> {
     let cas_type = std::env::var("ATO_CAS_TYPE").unwrap_or_else(|_| "local".to_string());
-    
+
     match cas_type.as_str() {
         "http" => {
             let endpoint = std::env::var("ATO_CAS_ENDPOINT")
@@ -389,7 +396,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let cas = LocalCasClient::new(temp_dir.path()).unwrap();
 
-        let result = cas.fetch_blob("sha256:0000000000000000000000000000000000000000000000000000000000000000").await;
+        let result = cas
+            .fetch_blob("sha256:0000000000000000000000000000000000000000000000000000000000000000")
+            .await;
         assert!(matches!(result, Err(CasError::NotFound { .. })));
     }
 

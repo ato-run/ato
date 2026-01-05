@@ -303,7 +303,10 @@ async fn launch_with_sandboxie(
 
     // Build Sandboxie command
     // Format: Start.exe /box:CapsuledBox /wait <program> <args>
-    let box_name = format!("Capsuled_{}", &request.workload_id[..8.min(request.workload_id.len())]);
+    let box_name = format!(
+        "Capsuled_{}",
+        &request.workload_id[..8.min(request.workload_id.len())]
+    );
 
     let mut cmd = Command::new(&start_exe);
     cmd.arg(format!("/box:{}", box_name));
@@ -338,12 +341,12 @@ async fn launch_with_sandboxie(
         source: e,
     })?;
 
-    cmd.stdout(Stdio::from(
-        log_file.try_clone().map_err(|e| RuntimeError::Io {
+    cmd.stdout(Stdio::from(log_file.try_clone().map_err(|e| {
+        RuntimeError::Io {
             path: log_path.clone(),
             source: e,
-        })?,
-    ));
+        }
+    })?));
     cmd.stderr(Stdio::from(log_file));
 
     debug!("Executing Sandboxie command: {:?}", cmd);
