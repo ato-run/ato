@@ -1,9 +1,9 @@
-use anyhow::{anyhow, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use capsule_core::capsule_v1::CapsuleManifestV1;
-use capsule_core::signing::{
+use crate::capsule_types::capsule_v1::CapsuleManifestV1;
+use crate::capsule_types::signing::{
     ensure_signature_matches_manifest, verify_signature_file, SignatureFile,
 };
+use anyhow::{anyhow, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use regex::Regex;
 use tracing::{info, warn};
 

@@ -1,4 +1,4 @@
-use capsule_core::capsule_v1::{CapsuleManifestV1, EgressIdType};
+use crate::capsule_types::capsule_v1::{CapsuleManifestV1, EgressIdType};
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
@@ -235,7 +235,7 @@ mod tests {
 
     #[test]
     fn test_generate_fw_rules() {
-        use capsule_core::capsule_v1::{EgressIdRule, NetworkConfig};
+        use crate::capsule_types::capsule_v1::{EgressIdRule, NetworkConfig};
 
         let mut manifest = CapsuleManifestV1::from_toml(
             r#"

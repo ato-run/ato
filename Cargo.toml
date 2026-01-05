@@ -66,10 +66,7 @@ base64 = "0.22"
 # Metrics
 prometheus = "0.13"
 
-# capsule libraries (from capsule-cli workspace)
-capsule-core = { path = "../capsule-cli/capsule-core", features = ["toml-support"] }
-capsule-runtime = { path = "../capsule-cli/capsule-runtime" }
-# capsule-cas = { path = "../capsule-cli/capsule-cas" }
+# Type definitions and utilities
 dashmap = "6"
 capnp = "0.24"
 tokio-stream = { version = "0.1.17", features = ["sync", "net"] }
@@ -114,13 +111,16 @@ nix = "0.27"
 libc = "0.2"
 
 [features]
-default = ["toml-support", "wasm"]
-toml-support = ["capsule-core/toml-support"]
+default = ["engine"]
+# Engine mode: Full daemon with all runtimes (default for capsuled binary)
+engine = ["wasm", "oci"]
 # WASM runtime - cross-platform (macOS, Linux, Windows)
 wasm = []
 # OCI container runtime - Linux only (requires libcontainer, cgroups)
 # This feature is automatically disabled on non-Linux platforms
 oci = []
+# Library mode: Core types and verification only (for CLI/embedded use)
+library = []
 cuda = ["dep:cudarc"]
 real-gpu = []
 phase2 = []
@@ -137,5 +137,10 @@ tower = { version = "0.4", features = ["util"] }
 tonic-build = "0.12"
 protobuf-src = "1.1.0"
 capnpc = "0.24"
+
+# Workspace configuration
+[workspace]
+members = ["cli"]
+resolver = "2"
 
 
