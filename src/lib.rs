@@ -45,13 +45,16 @@ pub use interface::http as http_server;
 pub use engine::manager as capsule_manager;
 pub use engine::pool as pool_registry;
 pub use engine::supervisor as process_supervisor;
-pub mod hardware;
 pub mod job_history; // Job history persistence (UARC V1.1.0)
 pub mod logs;
 pub mod manifest;
 pub mod metrics;
 pub mod model_fetcher;
-pub mod network;
+pub mod system; // System-level modules (hardware, network)
+
+// Re-exports from system for backward compatibility
+pub use system::hardware;
+pub use system::network;
 #[cfg(target_os = "linux")]
 pub mod oci;
 #[cfg(not(target_os = "linux"))]
