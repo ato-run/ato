@@ -192,9 +192,9 @@ impl DevServerHandle {
                 .map_err(|e| anyhow::anyhow!("Failed to initialize artifact manager: {}", e))?,
         );
 
-        // Runtime config (Native mode for dev - no OCI binary needed)
+        // Runtime config (Source mode for dev - UARC V1 compliant)
         let runtime_config = RuntimeConfig {
-            kind: RuntimeKind::Native,
+            kind: RuntimeKind::Source,
             binary_path: PathBuf::from("/dev/null"),
             bundle_root: config.data_dir.join("bundles"),
             state_root: config.data_dir.join("state"),
