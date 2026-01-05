@@ -222,7 +222,7 @@ impl DevServerHandle {
             gpu_detector.clone(),
             Some(service_registry.clone()),
             None, // mDNS
-            None, // Traefik
+            // UARC V1: Traefik removed
             Some(artifact_manager.clone()),
             Some(process_supervisor.clone()),
             None, // No egress proxy port
@@ -239,9 +239,7 @@ impl DevServerHandle {
                 .map_err(|e| anyhow::anyhow!("Failed to initialize WASM host: {}", e))?,
         );
 
-        // Tailscale Manager (no-op for dev)
-        let tailscale_manager =
-            Arc::new(crate::network::tailscale::TailscaleManager::start(None, None, None));
+        // UARC V1: Tailscale removed (uses SPIFFE ID instead)
 
         // Bind to port (0 = auto-select)
         let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", config.grpc_port))
@@ -263,7 +261,6 @@ impl DevServerHandle {
             let runtime = runtime.clone();
             let allowed_host_paths = config.allowed_host_paths.clone();
             let models_cache_dir = config.models_cache_dir.clone();
-            let tailscale_manager = tailscale_manager.clone();
             let service_registry = service_registry.clone();
             let gpu_detector = gpu_detector.clone();
             let artifact_manager = artifact_manager.clone();
@@ -282,7 +279,6 @@ impl DevServerHandle {
                         allowed_host_paths,
                         models_cache_dir,
                         "native".to_string(),
-                        tailscale_manager,
                         service_registry,
                         gpu_detector,
                         artifact_manager,
