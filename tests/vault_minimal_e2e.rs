@@ -15,14 +15,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-use capsuled_engine::capsule_manager::CapsuleManager;
-use capsuled_engine::grpc_server::EngineService;
-use capsuled_engine::hardware::create_gpu_detector;
-use capsuled_engine::proto::onescluster::engine::v1::deploy_request::Manifest as DeployManifest;
-use capsuled_engine::proto::onescluster::engine::v1::engine_server::EngineServer;
-use capsuled_engine::proto::onescluster::engine::v1::DeployRequest;
-use capsuled_engine::runtime::{ContainerRuntime, RuntimeConfig, RuntimeKind};
-use capsuled_engine::security::audit::AuditLogger;
+use capsuled::capsule_manager::CapsuleManager;
+use capsuled::grpc_server::EngineService;
+use capsuled::hardware::create_gpu_detector;
+use capsuled::proto::onescluster::engine::v1::deploy_request::Manifest as DeployManifest;
+use capsuled::proto::onescluster::engine::v1::engine_server::EngineServer;
+use capsuled::proto::onescluster::engine::v1::DeployRequest;
+use capsuled::runtime::{ContainerRuntime, RuntimeConfig, RuntimeKind};
+use capsuled::security::audit::AuditLogger;
 use tonic::transport::Server;
 use tonic::Request;
 
@@ -101,7 +101,7 @@ async fn test_vault_minimal_hostpath_persistence() {
         None,
     ));
 
-    let verifier = Arc::new(capsuled_engine::security::verifier::ManifestVerifier::new(
+    let verifier = Arc::new(capsuled::security::verifier::ManifestVerifier::new(
         None, false,
     ));
 
@@ -162,7 +162,7 @@ async fn test_vault_minimal_hostpath_persistence() {
         .await
         .unwrap();
 
-    use capsuled_engine::proto::onescluster::engine::v1::engine_client::EngineClient;
+    use capsuled::proto::onescluster::engine::v1::engine_client::EngineClient;
     let mut client = EngineClient::new(channel);
 
     // --- Step 1: Deploy with storage volume ---
@@ -225,7 +225,7 @@ volumes = [
     fs::write(&marker, "persistent-data").expect("write marker");
 
     // --- Step 2: Stop ---
-    use capsuled_engine::proto::onescluster::engine::v1::StopRequest;
+    use capsuled::proto::onescluster::engine::v1::StopRequest;
     let stop_req = StopRequest {
         capsule_id: capsule_id.to_string(),
     };

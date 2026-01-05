@@ -14,24 +14,24 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use capsuled_engine::capsule_manager::CapsuleManager;
-use capsuled_engine::grpc_server::EngineService;
-use capsuled_engine::hardware::create_gpu_detector;
-use capsuled_engine::proto::onescluster::common::v1::run_plan::Runtime as RunPlanRuntime;
-use capsuled_engine::proto::onescluster::common::v1::{DockerRuntime, Mount, Port, RunPlan};
-use capsuled_engine::proto::onescluster::engine::v1::deploy_request::Manifest as DeployManifest;
-use capsuled_engine::proto::onescluster::engine::v1::engine_client::EngineClient;
-use capsuled_engine::proto::onescluster::engine::v1::engine_server::EngineServer;
-use capsuled_engine::proto::onescluster::engine::v1::DeployRequest;
-use capsuled_engine::proto::onescluster::engine::v1::GetSystemStatusRequest;
-use capsuled_engine::runtime::{ContainerRuntime, RuntimeConfig, RuntimeKind};
-use capsuled_engine::security::audit::AuditLogger;
-use capsuled_engine::wasm_host::AdepLogicHost;
-use capsuled_engine::{
+use capsuled::capsule_manager::CapsuleManager;
+use capsuled::grpc_server::EngineService;
+use capsuled::hardware::create_gpu_detector;
+use capsuled::proto::onescluster::common::v1::run_plan::Runtime as RunPlanRuntime;
+use capsuled::proto::onescluster::common::v1::{DockerRuntime, Mount, Port, RunPlan};
+use capsuled::proto::onescluster::engine::v1::deploy_request::Manifest as DeployManifest;
+use capsuled::proto::onescluster::engine::v1::engine_client::EngineClient;
+use capsuled::proto::onescluster::engine::v1::engine_server::EngineServer;
+use capsuled::proto::onescluster::engine::v1::DeployRequest;
+use capsuled::proto::onescluster::engine::v1::GetSystemStatusRequest;
+use capsuled::runtime::{ContainerRuntime, RuntimeConfig, RuntimeKind};
+use capsuled::security::audit::AuditLogger;
+use capsuled::wasm_host::AdepLogicHost;
+use capsuled::{
     artifact::manager::{ArtifactConfig, ArtifactManager},
     network::{service_registry::ServiceRegistry, tailscale::TailscaleManager},
 };
-use libadep_core::mapper::capsule_v1_toml_to_proto_run_plan;
+use capsule_core::mapper::capsule_v1_toml_to_proto_run_plan;
 use tempfile::TempDir;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::time::{sleep, Duration, Instant};
@@ -122,7 +122,7 @@ esac
             None,
         ));
 
-        let verifier = Arc::new(capsuled_engine::security::verifier::ManifestVerifier::new(
+        let verifier = Arc::new(capsuled::security::verifier::ManifestVerifier::new(
             None, false,
         ));
 
@@ -467,8 +467,8 @@ async fn deploys_libadep_generated_proto_runplan() {
     // Load canonical v1 TOML from test-data
     let canonical_toml = include_str!("../test-data/capsule_v1_hello_docker.toml");
 
-    // Convert TOML → proto RunPlan using libadep_core mapper
-    let proto_runplan = libadep_core::mapper::capsule_v1_toml_to_proto_run_plan(canonical_toml)
+    // Convert TOML → proto RunPlan using capsule_core mapper
+    let proto_runplan = capsule_core::mapper::capsule_v1_toml_to_proto_run_plan(canonical_toml)
         .expect("libadep should convert canonical TOML to proto RunPlan");
 
     let req = DeployRequest {

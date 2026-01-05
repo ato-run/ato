@@ -57,7 +57,7 @@ impl LvmManager {
     ///
     /// # Example
     /// ```
-    /// use capsuled_engine::storage::LvmManager;
+    /// use capsuled::storage::LvmManager;
     /// let manager = LvmManager::new("vg_data".to_string());
     /// ```
     pub fn new(default_vg: String) -> Self {
@@ -83,7 +83,7 @@ impl LvmManager {
     ///
     /// # Example
     /// ```no_run
-    /// use capsuled_engine::storage::LvmManager;
+    /// use capsuled::storage::LvmManager;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let manager = LvmManager::new("vg_data".to_string());
     /// let volume = manager.create_volume("my_volume", 1024 * 1024 * 1024, None)?;
@@ -186,7 +186,7 @@ impl LvmManager {
     ///
     /// # Example
     /// ```no_run
-    /// use capsuled_engine::storage::LvmManager;
+    /// use capsuled::storage::LvmManager;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let manager = LvmManager::new("vg_data".to_string());
     /// manager.delete_volume("my_volume", None)?;
@@ -251,7 +251,7 @@ impl LvmManager {
     ///
     /// # Example
     /// ```no_run
-    /// use capsuled_engine::storage::LvmManager;
+    /// use capsuled::storage::LvmManager;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let manager = LvmManager::new("vg_data".to_string());
     /// let snapshot = manager.create_snapshot(
@@ -355,7 +355,7 @@ impl LvmManager {
     ///
     /// # Example
     /// ```no_run
-    /// use capsuled_engine::storage::LvmManager;
+    /// use capsuled::storage::LvmManager;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let manager = LvmManager::new("vg_data".to_string());
     /// let volumes = manager.list_volumes(None)?;
@@ -471,7 +471,7 @@ impl LvmManager {
     ///
     /// # Example
     /// ```no_run
-    /// use capsuled_engine::storage::LvmManager;
+    /// use capsuled::storage::LvmManager;
     /// let manager = LvmManager::new("vg_data".to_string());
     /// let pool = manager.create_thin_pool("capsule_pool", 100 * 1024 * 1024 * 1024, None)?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -558,7 +558,7 @@ impl LvmManager {
     ///
     /// # Example
     /// ```no_run
-    /// use capsuled_engine::storage::LvmManager;
+    /// use capsuled::storage::LvmManager;
     /// let manager = LvmManager::new("vg_data".to_string());
     /// let volume = manager.create_thin_volume(
     ///     "capsule_data",
@@ -653,7 +653,7 @@ impl LvmManager {
     ///
     /// # Example
     /// ```no_run
-    /// use capsuled_engine::storage::LvmManager;
+    /// use capsuled::storage::LvmManager;
     /// let manager = LvmManager::new("vg_data".to_string());
     /// manager.extend_volume("my_volume", 20 * 1024 * 1024 * 1024, None, true)?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
