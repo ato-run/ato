@@ -86,6 +86,11 @@ pub fn from_coordinator(plan: &common::RunPlan) -> RunPlanConversion {
             execution.entrypoint = native.binary_path.clone(); // Assuming this includes args or is just the binary
             execution.env = env.clone();
         }
+        Some(common::run_plan::Runtime::Wasm(wasm)) => {
+            execution.runtime = RuntimeType::Wasm;
+            execution.entrypoint = wasm.component.clone();
+            execution.env = env.clone();
+        }
         None => {
             // Default
         }
@@ -138,6 +143,9 @@ fn runtime_env(plan: &common::RunPlan) -> Option<HashMap<String, String>> {
         ),
         Some(common::run_plan::Runtime::PythonUv(py)) => {
             Some(py.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        }
+        Some(common::run_plan::Runtime::Wasm(wasm)) => {
+            Some(wasm.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         }
         None => None,
     }
