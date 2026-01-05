@@ -83,8 +83,8 @@ use crate::artifact::ArtifactManager;
 use crate::network::mdns::MdnsAnnouncer;
 use crate::network::service_registry::ServiceRegistry;
 use crate::network::traefik::TraefikManager;
-use crate::pool_registry::PoolRegistry;
-use crate::process_supervisor::ProcessSupervisor;
+use super::pool::PoolRegistry;
+use super::supervisor::ProcessSupervisor;
 
 /// Manages the lifecycle of capsules
 pub struct CapsuleManager {
