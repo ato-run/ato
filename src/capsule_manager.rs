@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tracing::{info, warn};
 
@@ -10,6 +11,7 @@ use crate::runtime::{
     youki_adapter::YoukiRuntimeAdapter, ContainerRuntime, DevRuntime, DockerCliRuntime,
     LaunchRequest, LaunchResult, NativeRuntime, Runtime, RuntimeConfig, RuntimeError, RuntimeKind,
     resolver::{resolve_runtime, ResolveContext, ResolvedTarget},
+    source::{SourceRuntime, SourceRuntimeConfig},
 };
 use crate::security::audit::{AuditLogger, AuditOperation, AuditStatus};
 use crate::security::vram_scrubber::VramScrubber;
@@ -28,6 +30,9 @@ pub struct DeployCapsuleRequest {
     pub digest: String,
     pub extra_args: Option<Vec<String>>,
     pub signature: Option<Vec<u8>>,
+    /// Working directory for Source runtime (PythonUv, etc.)
+    /// This is the directory containing the source code.
+    pub source_working_dir: Option<String>,
 }
 
 /// Capsule represents a running capsule instance
@@ -88,6 +93,7 @@ pub struct CapsuleManager {
     docker_runtime: Arc<DockerCliRuntime>,
     native_runtime: Arc<NativeRuntime>,
     dev_runtime: Arc<DevRuntime>,
+    source_runtime: Arc<SourceRuntime>,
     youki_runtime: Arc<YoukiRuntimeAdapter>,
     wasm_runtime: Arc<crate::runtime::WasmRuntime>,
     verifier: Arc<ManifestVerifier>,
@@ -183,6 +189,20 @@ impl CapsuleManager {
         ));
         let docker_cli_runtime = Arc::new(DockerCliRuntime::new(egress_proxy_port));
 
+        // Initialize SourceRuntime (for PythonUv and interpreted languages)
+        let source_runtime_config = SourceRuntimeConfig {
+            dev_mode: true, // Enable dev mode for fast native execution
+            log_dir: log_dir_clone.clone(),
+            state_dir: std::env::temp_dir().join("capsuled").join("state"),
+        };
+        // Youki fallback only on Linux
+        let oci_fallback = if cfg!(target_os = "linux") {
+            Some(youki_runtime.clone())
+        } else {
+            None
+        };
+        let source_runtime = Arc::new(SourceRuntime::new(source_runtime_config, oci_fallback));
+
         // Initialize StorageManager if config provided
         let storage_manager = storage_config.map(|config| {
             info!("Initializing StorageManager with VG: {}", config.default_vg);
@@ -210,6 +230,7 @@ impl CapsuleManager {
             docker_runtime: docker_cli_runtime,
             native_runtime,
             dev_runtime,
+            source_runtime,
             youki_runtime,
             wasm_runtime,
             container_runtime, // Added missing field initialization
@@ -308,7 +329,7 @@ impl CapsuleManager {
                             self.container_runtime.clone()
                         }
                     }
-                    RuntimeType::PythonUv => self.dev_runtime.clone(),
+                    RuntimeType::PythonUv => self.source_runtime.clone(),
                     RuntimeType::Youki => {
                         if cfg!(target_os = "linux") {
                             self.youki_runtime.clone()
@@ -444,7 +465,8 @@ impl CapsuleManager {
             digest,
             extra_args,
             signature,
-        } = request;
+            source_working_dir,
+        } = request.clone();
 
         info!("Deploying capsule {}", capsule_id);
 
@@ -696,6 +718,165 @@ impl CapsuleManager {
 
         // GPU UUIDs for build_oci_spec
         let gpu_uuids = assigned_gpu_index.map(|gpu_idx| vec![gpu_idx.to_string()]);
+
+        // =====================================================================
+        // Wasm Runtime - WebAssembly Component Model execution
+        // =====================================================================
+        if matches!(manifest.execution.runtime, RuntimeType::Wasm) {
+            info!("Using Wasm Runtime for capsule {}", capsule_id);
+            
+            // Use source_working_dir from request (set by CLI from capsule.toml [targets.wasm])
+            let wasm_dir = source_working_dir
+                .as_ref()
+                .map(|p| PathBuf::from(p))
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            
+            // The entrypoint contains the path to the .wasm component file
+            let component_path = if manifest.execution.entrypoint.starts_with('/') {
+                PathBuf::from(&manifest.execution.entrypoint)
+            } else {
+                wasm_dir.join(&manifest.execution.entrypoint)
+            };
+            
+            let dummy_spec = oci_spec::runtime::Spec::default();
+            
+            let launch_request = LaunchRequest {
+                workload_id: &capsule_id,
+                spec: &dummy_spec,
+                manifest_json: Some(manifest_json_for_runtime.as_str()),
+                bundle_root: wasm_dir.clone(),
+                env: None,
+                args: None,
+                wasm_component_path: Some(component_path.clone()),
+                source_target: None,
+            };
+            
+            // Launch using WasmRuntime
+            let result = self.wasm_runtime.launch(launch_request).await?;
+            
+            // Register capsule
+            let capsule = Capsule {
+                id: capsule_id.clone(),
+                adep_json: manifest_json_for_runtime.clone().into_bytes(),
+                oci_image: oci_image.clone(),
+                digest: digest.clone(),
+                status: CapsuleStatus::Running,
+                storage_path: None,
+                bundle_path: result.bundle_path.map(|p| p.to_string_lossy().to_string()),
+                pid: result.pid,
+                reserved_vram_bytes: 0,
+                observed_vram_bytes: None,
+                last_failure: None,
+                last_exit_code: None,
+                log_path: result.log_path.map(|p| p.to_string_lossy().to_string()),
+                started_at: Some(std::time::SystemTime::now()),
+                remote_url: None,
+                user_id: None,
+                gpu_indices: vec![],
+            };
+            
+            self.capsules.write().unwrap().insert(capsule_id.clone(), capsule);
+            
+            // Wasm components typically don't expose HTTP ports, but report if configured
+            let url = if let Some(port) = host_port {
+                format!("http://localhost:{}", port)
+            } else {
+                format!("wasm://{}", capsule_id)
+            };
+            
+            info!("Wasm Runtime capsule {} completed, URL: {}", capsule_id, url);
+            return Ok(url);
+        }
+
+        // =====================================================================
+        // Source Runtime (PythonUv) - Direct process execution (no OCI spec)
+        // =====================================================================
+        if matches!(manifest.execution.runtime, RuntimeType::PythonUv) {
+            info!("Using Source Runtime (PythonUv) for capsule {}", capsule_id);
+            
+            // Use source_working_dir from request (set by CLI from capsule.toml [targets.source])
+            let source_dir = source_working_dir
+                .as_ref()
+                .map(|p| PathBuf::from(p))
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            
+            let rootfs_path = source_dir.clone();
+            
+            // Build a minimal OCI spec for SourceRuntime (it doesn't actually use OCI)
+            let dummy_spec = oci_spec::runtime::Spec::default();
+            
+            // Determine language from entrypoint extension
+            let language = if manifest.execution.entrypoint.ends_with(".py") {
+                "python".to_string()
+            } else if manifest.execution.entrypoint.ends_with(".js") || manifest.execution.entrypoint.ends_with(".ts") {
+                "node".to_string()
+            } else {
+                "python".to_string() // default
+            };
+            
+            // Get args from extra_args (passed from CLI)
+            let args = request.extra_args.clone().unwrap_or_default();
+            
+            let source_target = Some(crate::runtime::SourceTarget {
+                language,
+                version: None,
+                entrypoint: manifest.execution.entrypoint.clone(),
+                dependencies: None,
+                args,
+                source_dir: source_dir.clone(),
+            });
+            
+            let launch_request = LaunchRequest {
+                workload_id: &capsule_id,
+                spec: &dummy_spec,
+                manifest_json: Some(manifest_json_for_runtime.as_str()),
+                bundle_root: rootfs_path.clone(),
+                env: None,
+                args: None,
+                wasm_component_path: None,
+                source_target,
+            };
+            
+            // Launch using SourceRuntime (handles native sandbox or OCI fallback)
+            let result = self.source_runtime.launch(launch_request).await?;
+            
+            // Register capsule
+            let capsule = Capsule {
+                id: capsule_id.clone(),
+                adep_json: manifest_json_for_runtime.clone().into_bytes(),
+                oci_image: oci_image.clone(),
+                digest: digest.clone(),
+                status: CapsuleStatus::Running,
+                storage_path: None,
+                bundle_path: result.bundle_path.map(|p| p.to_string_lossy().to_string()),
+                pid: result.pid,
+                reserved_vram_bytes: 0,
+                observed_vram_bytes: None,
+                last_failure: None,
+                last_exit_code: None,
+                log_path: result.log_path.map(|p| p.to_string_lossy().to_string()),
+                started_at: Some(std::time::SystemTime::now()),
+                remote_url: None,
+                user_id: None,
+                gpu_indices: vec![],
+            };
+            
+            self.capsules.write().unwrap().insert(capsule_id.clone(), capsule);
+            
+            // Build response URL
+            let url = if let Some(port) = host_port {
+                format!("http://localhost:{}", port)
+            } else {
+                format!("http://localhost:{}", manifest.execution.port.unwrap_or(8000))
+            };
+            
+            info!("Source Runtime capsule {} started, URL: {}", capsule_id, url);
+            return Ok(url);
+        }
+
+        // =====================================================================
+        // OCI-based Runtimes (Docker, Youki, Native, Wasm)
+        // =====================================================================
 
         // Build the spec
         let allowed_paths = &self.allowed_host_paths;

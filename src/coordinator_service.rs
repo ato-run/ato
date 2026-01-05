@@ -101,6 +101,7 @@ impl AgentServiceTrait for AgentService {
             digest,
             extra_args: None,
             signature: None,
+            source_working_dir: None, // Not used in coordinator mode
         };
 
         match self.capsule_manager.deploy_capsule(request).await {
