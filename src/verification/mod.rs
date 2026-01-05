@@ -8,9 +8,9 @@
 //! - path: Path validation and security
 //! - dns_monitor: DNS request monitoring
 //! - vram_scrubber: GPU memory security
-//! - audit: Audit logging (L5 observability)
+//!
+//! Note: Audit logging has been moved to the `observability` module.
 
-pub mod audit;
 pub mod dns_monitor;
 pub mod egress_policy;
 pub mod egress_proxy;
@@ -19,7 +19,10 @@ pub mod signing;
 pub mod verifier;
 pub mod vram_scrubber;
 
-pub use audit::*;
+// Re-export audit from observability for backward compatibility
+pub use crate::observability::audit;
+pub use crate::observability::audit::*;
+
 pub use dns_monitor::*;
 pub use egress_policy::*;
 pub use egress_proxy::*;
