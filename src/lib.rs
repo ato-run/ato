@@ -66,10 +66,13 @@ pub use system::network;
 
 pub mod proto;
 pub mod runtime;
-pub mod security;
+pub mod verification; // Verification and security (renamed from security)
 // pub mod status_reporter;
 pub mod wasm_host;
 pub mod workload;
+
+// Re-exports for backward compatibility (security → verification)
+pub use verification as security;
 
 // Re-exports from workload for backward compatibility
 pub use workload::manifest;
