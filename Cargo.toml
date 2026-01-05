@@ -101,6 +101,9 @@ shell-words = "1.1.1"
 # Unit 6: Audit persistence and CAS integration
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# L1 Policy pattern matching
+regex = "1.10"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 nvml-wrapper = "0.9"
 cudarc = { version = "0.17", features = ["driver", "cuda-version-from-build-system"], optional = true }

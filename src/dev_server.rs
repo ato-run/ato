@@ -223,7 +223,6 @@ impl DevServerHandle {
             Some(service_registry.clone()),
             None, // mDNS
             None, // Traefik
-            None, // Cloud
             Some(artifact_manager.clone()),
             Some(process_supervisor.clone()),
             None, // No egress proxy port

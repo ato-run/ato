@@ -1,17 +1,11 @@
-/// Storage management module for LVM and LUKS
+/// Storage management module for Capsule workloads (SPEC V1.1.0)
 ///
-/// This module provides abstractions for:
-/// - LVM (Logical Volume Manager) volume management
-/// - LUKS (Linux Unified Key Setup) encryption
-/// - Unified StorageManager for capsule workloads
-///
-/// All implementations are pure Rust with no CGO dependencies.
+/// This module provides directory-based storage for capsules.
+/// LVM/LUKS has been removed as per SPEC V1.1.0:
+/// - Engine should be stateless  
+/// - Complex block device management is delegated to OS or Coordinator
 pub mod error;
-pub mod luks;
-pub mod lvm;
 pub mod manager;
 
 pub use error::{StorageError, StorageResult};
-pub use luks::{EncryptedVolumeInfo, KeyStorage, LuksManager};
-pub use lvm::{LvmManager, ThinPoolInfo, VolumeInfo};
 pub use manager::{CapsuleStorage, StorageConfig, StorageManager};

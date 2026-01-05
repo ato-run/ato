@@ -24,7 +24,6 @@ pub fn local_gpu_satisfies(
 pub fn compute_deploy_failure_codes(
     local_ok: bool,
     fallback_to_cloud: bool,
-    cloud_configured: bool,
 ) -> Vec<String> {
     if local_ok {
         return vec![];
@@ -32,7 +31,7 @@ pub fn compute_deploy_failure_codes(
 
     let mut codes = vec![INSUFFICIENT_LOCAL_RESOURCES.to_string()];
 
-    if fallback_to_cloud && !cloud_configured {
+    if fallback_to_cloud {
         codes.push(CLOUD_NOT_CONFIGURED.to_string());
     }
 
@@ -60,20 +59,20 @@ mod tests {
 
     #[test]
     fn compute_deploy_failure_codes_returns_both_when_cloud_fallback_and_not_configured() {
-        let codes = compute_deploy_failure_codes(false, true, false);
+        let codes = compute_deploy_failure_codes(false, true);
         assert!(codes.contains(&INSUFFICIENT_LOCAL_RESOURCES.to_string()));
         assert!(codes.contains(&CLOUD_NOT_CONFIGURED.to_string()));
     }
 
     #[test]
     fn compute_deploy_failure_codes_returns_only_insufficient_when_no_fallback() {
-        let codes = compute_deploy_failure_codes(false, false, false);
+        let codes = compute_deploy_failure_codes(false, false);
         assert_eq!(codes, vec![INSUFFICIENT_LOCAL_RESOURCES.to_string()]);
     }
 
     #[test]
     fn compute_deploy_failure_codes_empty_when_local_ok() {
-        let codes = compute_deploy_failure_codes(true, true, false);
+        let codes = compute_deploy_failure_codes(true, true);
         assert!(codes.is_empty());
     }
 }

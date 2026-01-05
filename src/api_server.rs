@@ -255,14 +255,16 @@ async fn apply_handler(
 
     // Map Native vs Docker
     let (runtime_type, entrypoint) = if let Some(native_cfg) = &container_config.native {
-        (RuntimeType::Native, native_cfg.runtime.clone())
-        // TODO: What about native_cfg.args?
-        // Use the shell_words join or assume entrypoint has it?
-        // In runplan we assume binary_path has it.
-        // Here HCL has `runtime` and `args` (Vec<String>).
-        // We should join them: "runtime arg1 arg2"
-        // let full_cmd = format!("{} {}", native_cfg.runtime, native_cfg.args.join(" "));
-        // (RuntimeType::Native, full_cmd)
+        // SPEC V1.1.0: Combine native runtime and args into full command
+        // Example: runtime="python", args=["-m", "server"] -> "python -m server"
+        let full_cmd = if native_cfg.args.is_empty() {
+            native_cfg.runtime.clone()
+        } else {
+            // Use shell_words to properly escape arguments
+            let args_str = shell_words::join(&native_cfg.args);
+            format!("{} {}", native_cfg.runtime, args_str)
+        };
+        (RuntimeType::Native, full_cmd)
     } else {
         (RuntimeType::Docker, container_config.image.clone())
     };

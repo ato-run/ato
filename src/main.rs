@@ -264,19 +264,14 @@ async fn main() -> anyhow::Result<()> {
         _ => match RuntimeConfig::from_section(None) {
             Ok(c) => c,
             Err(e) => {
-                warn!(
+                error!(
                     backend_mode = %backend_mode,
-                    "Failed to detect external OCI runtime: {}. Falling back to Mock runtime",
+                    "Failed to detect OCI runtime (youki/runc): {}. \
+                     UARC V1 requires a valid OCI runtime for container support. \
+                     Wasm and Source runtimes will still work.",
                     e
                 );
-                RuntimeConfig {
-                    kind: RuntimeKind::Mock,
-                    binary_path: std::path::PathBuf::from("/dev/null"),
-                    bundle_root: std::env::temp_dir().join("capsuled").join("bundles"),
-                    state_root: std::env::temp_dir().join("capsuled").join("state"),
-                    log_dir: std::env::temp_dir().join("capsuled").join("logs"),
-                    hook_retry_attempts: 1,
-                }
+                return Err(e.into());
             }
         },
     };
@@ -307,7 +302,6 @@ async fn main() -> anyhow::Result<()> {
         Some(service_registry.clone()),
         None, // mDNS announcer (optional)
         None, // Traefik manager (optional)
-        None, // Cloud client (optional)
         Some(artifact_manager.clone()),
         Some(process_supervisor.clone()),
         Some(proxy_port),
@@ -465,14 +459,10 @@ fn load_storage_config() -> Option<StorageConfig> {
         };
 
         // Override defaults from environment
-        if let Ok(vg) = std::env::var("GUMBALL_STORAGE_VG") {
-            config.default_vg = vg;
-        }
-        if let Ok(key_dir) = std::env::var("GUMBALL_STORAGE_KEY_DIR") {
-            config.key_directory = PathBuf::from(key_dir);
-        }
-        if let Ok(encrypt) = std::env::var("GUMBALL_STORAGE_ENCRYPT") {
-            config.enable_encryption = encrypt == "true" || encrypt == "1";
+        // Note: LVM-specific options (VG, encryption) removed in SPEC V1.1.0
+        // Storage now uses simple directory-based approach
+        if let Ok(storage_base) = std::env::var("GUMBALL_STORAGE_BASE") {
+            config.storage_base = PathBuf::from(storage_base);
         }
 
         return Some(config);

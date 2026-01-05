@@ -38,19 +38,13 @@ mod prereqs {
     }
 
     pub fn has_lvm_tools() -> bool {
-        std::process::Command::new("lvs")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        // LVM is no longer required - using directory-based storage
+        true
     }
 
     pub fn has_test_vg() -> bool {
-        std::process::Command::new("vgs")
-            .arg("test_vg")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        // Test volume group is no longer required - using directory-based storage
+        true
     }
 
     pub fn network_prereqs() -> bool {
@@ -270,29 +264,25 @@ fn test_signature_verification_priority_over_egress() {
 }
 
 // ============================================================================
-// Test 4: Storage/VRAM Lifecycle Cleanup
+// Test 4: Storage Lifecycle Cleanup (Directory-Based)
 // ============================================================================
 
 #[test]
 #[ignore]
 fn test_storage_vram_lifecycle_cleanup() {
     prereqs::print_status();
-    if !prereqs::storage_prereqs() {
-        eprintln!("Skipping: storage prerequisites not met");
-        return;
-    }
 
     use capsuled::storage::{StorageConfig, StorageManager};
+    use tempfile::TempDir;
+
+    // Create a temporary directory for storage
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
 
     let config = StorageConfig {
         enabled: true,
-        default_vg: "test_vg".to_string(),
-        key_directory: PathBuf::from("/tmp/security_e2e_keys"),
-        enable_encryption: false,             // Start simple
+        storage_base: temp_dir.path().to_path_buf(),
         default_size_bytes: 50 * 1024 * 1024, // 50MB
-        mount_base: PathBuf::from("/tmp/security_e2e_mounts"),
-        thin_pool_name: None,
-        use_thin_by_default: false,
+        default_vg: "unused".to_string(),
     };
 
     let manager = StorageManager::new(config);
@@ -300,60 +290,36 @@ fn test_storage_vram_lifecycle_cleanup() {
 
     // Phase 1: Provision
     println!("Phase 1: Provisioning storage...");
-    let mut storage = manager
-        .provision_capsule_storage(capsule_id, None, Some(false), None)
+    let storage = manager
+        .provision_capsule_storage(capsule_id, None, None, None)
         .expect("provision");
 
     assert!(
-        PathBuf::from(&storage.device_path).exists()
-            || storage.device_path.starts_with("/dev/mapper"),
-        "Device path should exist"
+        storage.storage_path.exists(),
+        "Storage path should exist"
     );
 
-    // Phase 2: Mount
-    println!("Phase 2: Mounting volume...");
-    manager.mount_volume(&mut storage).expect("Mount failed");
-
-    let mount_path = storage
-        .mount_point
-        .clone()
-        .expect("Mount point should be set");
-    println!("  Mount point: {:?}", mount_path);
-    assert!(mount_path.exists(), "Mount point should exist after mount");
+    // Phase 2: Verify storage is accessible
+    println!("Phase 2: Verifying storage path...");
+    let storage_path = storage.storage_path.clone();
+    assert!(storage_path.exists(), "Storage path should exist after provision");
 
     // Phase 3: Write data
     println!("Phase 3: Writing test data...");
-    let test_file = mount_path.join("security_test.dat");
+    let test_file = storage_path.join("security_test.dat");
     std::fs::write(&test_file, b"SENSITIVE_DATA_12345").expect("Write failed");
     assert!(test_file.exists(), "Test file should exist");
 
-    // Phase 4: Unmount
-    println!("Phase 4: Unmounting...");
-    manager
-        .unmount_volume(capsule_id, &storage.lv_name)
-        .expect("Unmount failed");
-
-    // Mount point directory should be removed
-    assert!(
-        !mount_path.exists(),
-        "Mount point should be removed after unmount"
-    );
-
-    // Phase 5: Cleanup
-    println!("Phase 5: Cleaning up resources...");
+    // Phase 4: Cleanup
+    println!("Phase 4: Cleaning up resources...");
     manager
         .cleanup_capsule_storage(capsule_id)
         .expect("Cleanup failed");
 
-    // Verify LV no longer exists
-    let lv_check = std::process::Command::new("lvs")
-        .arg(format!("test_vg/{}", storage.lv_name))
-        .output()
-        .expect("lvs command");
-
+    // Verify storage directory no longer exists
     assert!(
-        !lv_check.status.success(),
-        "LV should be deleted after cleanup"
+        !storage_path.exists(),
+        "Storage path should be deleted after cleanup"
     );
 
     println!("✅ Storage lifecycle cleanup verified");

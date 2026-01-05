@@ -259,6 +259,162 @@ impl GpuDetector for NvmlGpuDetector {
     }
 }
 
+/// nvidia-smi based GPU detector (SPEC V1.1.0)
+///
+/// Uses `nvidia-smi --query-gpu=... --format=csv` to detect NVIDIA GPUs
+/// without requiring the NVML library. This provides cross-platform support
+/// for any system with the nvidia-smi tool installed.
+#[derive(Debug, Default)]
+pub struct NvidiaSmiGpuDetector;
+
+impl NvidiaSmiGpuDetector {
+    pub fn new() -> Result<Self, GpuDetectionError> {
+        // Check if nvidia-smi is available
+        let output = std::process::Command::new("nvidia-smi")
+            .arg("--version")
+            .output();
+
+        match output {
+            Ok(o) if o.status.success() => Ok(Self),
+            Ok(_) => Err(GpuDetectionError::NvmlInitFailed(
+                "nvidia-smi returned error".to_string(),
+            )),
+            Err(e) => Err(GpuDetectionError::NvmlInitFailed(format!(
+                "nvidia-smi not found: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Parse nvidia-smi CSV output
+    fn parse_gpu_csv_line(line: &str) -> Option<GpuInfo> {
+        // Expected format: "index, name, memory.total [MiB], memory.used [MiB], uuid, compute_cap"
+        let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+        if parts.len() < 6 {
+            return None;
+        }
+
+        let index = parts[0].parse::<u32>().ok()?;
+        let name = parts[1].to_string();
+
+        // Parse memory (format: "16384 MiB" or just "16384")
+        let total_mib = parts[2]
+            .trim_end_matches(" MiB")
+            .trim()
+            .parse::<u64>()
+            .ok()?;
+        let used_mib = parts[3]
+            .trim_end_matches(" MiB")
+            .trim()
+            .parse::<u64>()
+            .ok()?;
+
+        let uuid = parts[4].to_string();
+        let compute_cap = parts[5].to_string();
+
+        Some(GpuInfo {
+            index,
+            device_name: name,
+            vram_total_bytes: total_mib * 1024 * 1024,
+            cuda_compute_capability: Some(compute_cap),
+            vram_used_bytes: Some(used_mib * 1024 * 1024),
+            uuid,
+        })
+    }
+}
+
+impl GpuDetector for NvidiaSmiGpuDetector {
+    fn detect_gpus(&self) -> Result<RigHardwareReport, GpuDetectionError> {
+        let rig_id = hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "smi-rig".to_string());
+
+        let mut report = RigHardwareReport::new(rig_id);
+        report.is_mock = false;
+
+        // Get CUDA driver version
+        let driver_output = std::process::Command::new("nvidia-smi")
+            .args(["--query-gpu=driver_version", "--format=csv,noheader"])
+            .output()
+            .map_err(|e| GpuDetectionError::SystemInfoFailed(e.to_string()))?;
+
+        if driver_output.status.success() {
+            let driver = String::from_utf8_lossy(&driver_output.stdout)
+                .lines()
+                .next()
+                .map(|s| s.trim().to_string());
+            report.system_driver_version = driver;
+        }
+
+        // Get GPU information
+        let output = std::process::Command::new("nvidia-smi")
+            .args([
+                "--query-gpu=index,name,memory.total,memory.used,uuid,compute_cap",
+                "--format=csv,noheader",
+            ])
+            .output()
+            .map_err(|e| GpuDetectionError::SystemInfoFailed(e.to_string()))?;
+
+        if !output.status.success() {
+            return Err(GpuDetectionError::SystemInfoFailed(
+                "nvidia-smi query failed".to_string(),
+            ));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if let Some(gpu) = Self::parse_gpu_csv_line(line) {
+                report.gpus.push(gpu);
+            }
+        }
+
+        Ok(report)
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    fn name(&self) -> &str {
+        "NvidiaSmiGpuDetector"
+    }
+
+    fn get_available_vram_bytes(&self, index: usize) -> Result<u64, GpuDetectionError> {
+        let output = std::process::Command::new("nvidia-smi")
+            .args([
+                "--query-gpu=memory.free",
+                "--format=csv,noheader",
+                "-i",
+                &index.to_string(),
+            ])
+            .output()
+            .map_err(|e| GpuDetectionError::GpuQueryFailed {
+                index: index as u32,
+                message: e.to_string(),
+            })?;
+
+        if !output.status.success() {
+            return Err(GpuDetectionError::GpuQueryFailed {
+                index: index as u32,
+                message: "nvidia-smi query failed".to_string(),
+            });
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let free_mib = stdout
+            .lines()
+            .next()
+            .and_then(|line| line.trim_end_matches(" MiB").trim().parse::<u64>().ok())
+            .ok_or_else(|| GpuDetectionError::GpuQueryFailed {
+                index: index as u32,
+                message: "Failed to parse memory.free output".to_string(),
+            })?;
+
+        Ok(free_mib * 1024 * 1024)
+    }
+}
+
 /// CPU-only detector for environments without GPUs (e.g., MacBook, non-GPU servers)
 ///
 /// This detector always reports 0 GPUs.
@@ -304,14 +460,12 @@ impl GpuDetector for CpuGpuDetector {
 
 /// Factory function to create the appropriate GPU detector
 ///
-/// With `real-gpu` feature:
-/// - Try NVML detector first
-/// - Fallback to CPU detector if NVML init fails (Graceful Degradation)
-/// - Use Mock detector ONLY if explicitly requested via env var `CAPSULED_USE_MOCK_GPU=1`
-///
-/// Without `real-gpu` feature:
-/// - Default to CPU detector (for MacBook/Dev)
-/// - Use Mock detector ONLY if explicitly requested via env var `CAPSULED_USE_MOCK_GPU=1`
+/// Detection order (SPEC V1.1.0):
+/// 1. Mock detector if explicitly requested via env var `CAPSULED_USE_MOCK_GPU=1`
+/// 2. NVML detector if `real-gpu` feature is enabled (Linux only)
+/// 3. nvidia-smi based detector (cross-platform, no NVML dependency)
+/// 4. Mac GPU detector on macOS
+/// 5. CPU-only detector as final fallback
 pub fn create_gpu_detector() -> Arc<dyn GpuDetector> {
     // Check if Mock is explicitly requested or implied by VRAM config
     if std::env::var("CAPSULED_USE_MOCK_GPU").is_ok()
@@ -326,47 +480,44 @@ pub fn create_gpu_detector() -> Arc<dyn GpuDetector> {
         match NvmlGpuDetector::new() {
             Ok(detector) => {
                 tracing::info!("Using NVML GPU detector");
-                Arc::new(detector)
+                return Arc::new(detector);
             }
             Err(e) => {
-                tracing::warn!("NVML init failed ({}), falling back to CPU-only mode", e);
-                Arc::new(CpuGpuDetector::new())
+                tracing::warn!("NVML init failed ({}), trying nvidia-smi fallback", e);
             }
         }
     }
 
-    #[cfg(all(feature = "real-gpu", not(target_os = "linux")))]
-    {
-        tracing::info!("real-gpu feature enabled on non-Linux; using CPU-only detector");
-        Arc::new(CpuGpuDetector::new())
+    // Try nvidia-smi based detection (works without NVML library)
+    match NvidiaSmiGpuDetector::new() {
+        Ok(detector) => {
+            tracing::info!("Using nvidia-smi GPU detector");
+            return Arc::new(detector);
+        }
+        Err(e) => {
+            tracing::debug!("nvidia-smi not available: {}", e);
+        }
     }
 
-    #[cfg(not(feature = "real-gpu"))]
+    #[cfg(target_os = "macos")]
     {
-        #[cfg(target_os = "macos")]
-        {
-            use super::mac_gpu::MacGpuDetector;
-            match MacGpuDetector::new() {
-                Ok(detector) => {
-                    tracing::info!("Using Mac GPU detector");
-                    Arc::new(detector)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Mac GPU detector failed ({}), falling back to CPU-only mode",
-                        e
-                    );
-                    Arc::new(CpuGpuDetector::new())
-                }
+        use super::mac_gpu::MacGpuDetector;
+        match MacGpuDetector::new() {
+            Ok(detector) => {
+                tracing::info!("Using Mac GPU detector");
+                return Arc::new(detector);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Mac GPU detector failed ({}), falling back to CPU-only mode",
+                    e
+                );
             }
         }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            tracing::info!("Using CPU-only detector (real-gpu feature not enabled)");
-            Arc::new(CpuGpuDetector::new())
-        }
     }
+
+    tracing::info!("Using CPU-only detector (no GPU detection method available)");
+    Arc::new(CpuGpuDetector::new())
 }
 
 #[cfg(test)]

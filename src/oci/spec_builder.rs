@@ -1,4 +1,4 @@
-use crate::adep::{CapsuleExecution, RuntimeType, StorageVolume};
+use capsule_core::capsule_v1::{CapsuleExecution, RuntimeType, StorageVolume};
 use crate::security;
 use crate::workload::manifest_loader::ResourceRequirements;
 use capsule_core::capsule_v1::CapsuleManifestV1;
@@ -385,10 +385,10 @@ mod tests {
             schema_version: "1.0".to_string(),
             name: "test".to_string(),
             version: "0.0.1".to_string(),
-            capsule_type: crate::adep::CapsuleType::App,
+            capsule_type: capsule_core::capsule_v1::CapsuleType::App,
             metadata: CapsuleMetadataV1::default(),
             capabilities: None,
-            requirements: crate::adep::CapsuleRequirements::default(),
+            requirements: capsule_core::capsule_v1::CapsuleRequirements::default(),
             execution: CapsuleExecution {
                 runtime: RuntimeType::Native,
                 entrypoint: "/bin/echo".to_string(),
@@ -398,7 +398,7 @@ mod tests {
                 env: HashMap::new(),
                 signals: Default::default(),
             },
-            storage: crate::adep::CapsuleStorage::default(),
+            storage: capsule_core::capsule_v1::CapsuleStorage::default(),
             routing: CapsuleRouting::default(),
             network: None,
             model: None,

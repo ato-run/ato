@@ -426,29 +426,34 @@ mod tests {
 
         let gpu_detector = crate::hardware::create_gpu_detector();
         
+        // UARC V1: Use Native runtime for tests (no OCI required)
         let runtime_config = crate::runtime::RuntimeConfig {
-            kind: crate::runtime::RuntimeKind::Mock,
-            binary_path: PathBuf::from("/tmp/mock_runtime"),
+            kind: crate::runtime::RuntimeKind::Native,
+            binary_path: PathBuf::from("/bin/sh"), // Native runtime doesn't use binary
             bundle_root: temp_dir.path().join("bundles"),
             state_root: temp_dir.path().join("state"),
             log_dir: temp_dir.path().join("logs"),
             hook_retry_attempts: 1,
         };
 
+        // Create a permissive verifier for testing
+        let verifier = Arc::new(crate::security::verifier::ManifestVerifier::new(None, false));
+
         CapsuleManager::new(
-            logger, 
-            gpu_detector, 
-            None, 
-            None, 
-            None, 
-            None, 
-            None, 
-            None, 
-            None, 
+            logger,
+            vec![], // allowed_host_paths
+            gpu_detector,
+            None, // service_registry
+            None, // mdns_announcer
+            None, // traefik_manager
+            None, // artifact_manager
+            None, // process_supervisor
+            None, // egress_proxy_port
+            verifier,
             Some(runtime_config),
-            None, // usage_reporter
+            None, // metrics_collector
             None, // storage_config
-        ).unwrap()
+        )
     }
 
     fn sample_capsule(status: CapsuleStatus) -> Capsule {

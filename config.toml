@@ -22,8 +22,10 @@ value = "present"
 effect = "NoSchedule"
 
 [runtime]
-preferred = "youki"
-binary_path = "/Users/egamikohsuke/Ekoh/projects/ato/onescluster/capsuled/mock_runtime.sh"
+# UARC V1: Supported runtimes are Wasm, Source, and OCI (youki/runc)
+# preferred = "youki"  # Linux OCI runtime (default on Linux)
+# preferred = "runc"   # Alternative OCI runtime
+# binary_path = "/usr/local/bin/youki"  # Optional: explicit path
 bundle_root = "/tmp/capsuled/bundles"
 state_root = "/tmp/capsuled/state"
 log_dir = "/tmp/capsuled/logs"

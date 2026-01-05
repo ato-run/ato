@@ -41,7 +41,7 @@ fn capsule_type_to_capnp(t: CapsuleType) -> capsule_capnp::CapsuleType {
 
 fn runtime_type_to_capnp(r: RuntimeType) -> capsule_capnp::RuntimeType {
     match r {
-        RuntimeType::PythonUv => capsule_capnp::RuntimeType::PythonUv,
+        RuntimeType::Source => capsule_capnp::RuntimeType::Source,
         RuntimeType::Docker => capsule_capnp::RuntimeType::Docker,
         RuntimeType::Native => capsule_capnp::RuntimeType::Native,
         RuntimeType::Youki => capsule_capnp::RuntimeType::Youki,
@@ -257,6 +257,11 @@ pub fn manifest_to_capnp_bytes(
             let mut prefs_builder = targets_builder.reborrow().init_preference(prefs.len() as u32);
             for (i, pref) in prefs.iter().enumerate() {
                 prefs_builder.set(i as u32, pref);
+            }
+
+            // Source digest (UARC V1.1.0 L1 policy)
+            if let Some(source_digest) = &targets.source_digest {
+                targets_builder.reborrow().set_source_digest(source_digest);
             }
 
             // Wasm target

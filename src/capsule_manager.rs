@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tracing::{info, warn};
 
-use crate::adep::{CapsuleManifestV1, RuntimeType};
+use capsule_core::capsule_v1::{CapsuleManifestV1, RuntimeType};
 use crate::metrics::collector::MetricsCollector;
 use crate::hardware::GpuDetector;
 use crate::runtime::{
@@ -30,7 +30,7 @@ pub struct DeployCapsuleRequest {
     pub digest: String,
     pub extra_args: Option<Vec<String>>,
     pub signature: Option<Vec<u8>>,
-    /// Working directory for Source runtime (PythonUv, etc.)
+    /// Working directory for Source runtime (any interpreted language)
     /// This is the directory containing the source code.
     pub source_working_dir: Option<String>,
 }
@@ -112,7 +112,6 @@ pub struct CapsuleManager {
     service_registry: Option<Arc<ServiceRegistry>>,
     mdns_announcer: Option<Arc<MdnsAnnouncer>>,
     traefik_manager: Option<Arc<TraefikManager>>,
-    cloud_client: Option<Arc<crate::cloud::skypilot::SkyPilotClient>>,
     artifact_manager: Option<Arc<ArtifactManager>>,
     storage_manager: Option<Arc<StorageManager>>,
 
@@ -129,7 +128,6 @@ impl CapsuleManager {
         service_registry: Option<Arc<ServiceRegistry>>,
         mdns_announcer: Option<Arc<MdnsAnnouncer>>,
         traefik_manager: Option<Arc<TraefikManager>>,
-        cloud_client: Option<Arc<crate::cloud::skypilot::SkyPilotClient>>,
         artifact_manager: Option<Arc<ArtifactManager>>,
         process_supervisor: Option<Arc<ProcessSupervisor>>,
         egress_proxy_port: Option<u16>,
@@ -143,17 +141,21 @@ impl CapsuleManager {
             config
         } else {
             // TODO: Load config from file or env
+            // UARC V1: Only Wasm, Source, and OCI runtimes are supported
+            // If no OCI runtime is available, use minimal config
+            // (Wasm and Source runtimes don't need OCI)
             match RuntimeConfig::from_section(None) {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(
-                        "External OCI runtime binary not detected: {}. Falling back to Mock ContainerRuntime (NativeRuntime may still work)",
+                        "OCI runtime not detected: {}. OCI containers will not be available. \
+                         Wasm and Source runtimes will still work.",
                         e
                     );
-                    // Fallback to dummy config to allow Engine to start (e.g. for NativeRuntime usage)
+                    // Create minimal config for non-OCI runtimes
                     RuntimeConfig {
-                        kind: crate::runtime::RuntimeKind::Mock,
-                        binary_path: std::path::PathBuf::from("/dev/null"),
+                        kind: RuntimeKind::Native,
+                        binary_path: std::path::PathBuf::from("/bin/sh"),
                         bundle_root: std::env::temp_dir().join("capsuled").join("bundles"),
                         state_root: std::env::temp_dir().join("capsuled").join("state"),
                         log_dir: std::env::temp_dir().join("capsuled").join("logs"),
@@ -173,6 +175,8 @@ impl CapsuleManager {
             bundle_root_clone.clone(),
         ));
 
+        let source_dev_mode = matches!(runtime_config.kind, RuntimeKind::Native);
+
         let container_runtime = Arc::new(ContainerRuntime::new(
             runtime_config,
             artifact_manager.clone(),
@@ -189,9 +193,9 @@ impl CapsuleManager {
         ));
         let docker_cli_runtime = Arc::new(DockerCliRuntime::new(egress_proxy_port));
 
-        // Initialize SourceRuntime (for PythonUv and interpreted languages)
+        // Initialize SourceRuntime (for interpreted languages: Python, Ruby, Node.js, etc.)
         let source_runtime_config = SourceRuntimeConfig {
-            dev_mode: true, // Enable dev mode for fast native execution
+            dev_mode: source_dev_mode,
             log_dir: log_dir_clone.clone(),
             state_dir: std::env::temp_dir().join("capsuled").join("state"),
         };
@@ -245,7 +249,6 @@ impl CapsuleManager {
             service_registry,
             mdns_announcer,
             traefik_manager,
-            cloud_client,
             artifact_manager,
             storage_manager,
 
@@ -253,9 +256,6 @@ impl CapsuleManager {
         }
     }
 
-    pub fn cloud_configured(&self) -> bool {
-        self.cloud_client.is_some()
-    }
 
     /// Build a ResolveContext from current engine capabilities
     fn build_resolve_context(&self) -> ResolveContext {
@@ -271,9 +271,11 @@ impl CapsuleManager {
             supported_runtimes.insert(RuntimeKind::Youki);
         }
 
-        // Check if docker is available (via container_runtime not being Mock)
-        let docker_available = self.container_runtime.config().kind != RuntimeKind::Mock
-            || cfg!(target_os = "macos"); // Docker Desktop on macOS
+        // Check if OCI runtime is available
+        let oci_available = matches!(
+            self.container_runtime.config().kind,
+            RuntimeKind::Youki | RuntimeKind::Runc
+        ) || cfg!(target_os = "macos"); // Docker Desktop on macOS
 
         // Available toolchains (could be detected dynamically in future)
         let mut available_toolchains = HashSet::new();
@@ -284,7 +286,7 @@ impl CapsuleManager {
             platform: crate::runtime::resolver::detect_current_platform(),
             supported_runtimes,
             wasm_available: true, // WasmRuntime is always initialized
-            docker_available,
+            docker_available: oci_available,
             gpu_available: self.gpu_detector.detect_gpus().is_ok(),
             available_toolchains,
         }
@@ -321,15 +323,14 @@ impl CapsuleManager {
                 match runtime_type {
                     RuntimeType::Native => self.native_runtime.clone(),
                     RuntimeType::Docker => {
-                        if self.container_runtime.config().kind == RuntimeKind::Mock {
-                            self.container_runtime.clone()
-                        } else if cfg!(target_os = "macos") || force_docker_cli {
+                        if cfg!(target_os = "macos") || force_docker_cli {
                             self.docker_runtime.clone()
                         } else {
                             self.container_runtime.clone()
                         }
                     }
-                    RuntimeType::PythonUv => self.source_runtime.clone(),
+                    // Source runtime (formerly PythonUv) for interpreted languages
+                    RuntimeType::Source => self.source_runtime.clone(),
                     RuntimeType::Youki => {
                         if cfg!(target_os = "linux") {
                             self.youki_runtime.clone()
@@ -460,7 +461,7 @@ impl CapsuleManager {
         let DeployCapsuleRequest {
             capsule_id,
             mut manifest,
-            raw_manifest_bytes,
+            raw_manifest_bytes: _raw_manifest_bytes,
             oci_image,
             digest,
             extra_args,
@@ -470,18 +471,18 @@ impl CapsuleManager {
 
         info!("Deploying capsule {}", capsule_id);
 
-        // Signature verification (if signature is provided)
+        // Signature verification
         if let Some(sig_bytes) = &signature {
-            // Use raw_manifest_bytes if provided, otherwise serialize manifest to JSON
-            let verification_bytes = raw_manifest_bytes
-                .clone()
-                .unwrap_or_else(|| serde_json::to_vec(&manifest).unwrap_or_default());
-
-            if !verification_bytes.is_empty() {
-                self.verifier.verify(&verification_bytes, sig_bytes, "")?;
+            // Verify against canonical Cap'n Proto bytes derived from the struct.
+            // This keeps verification stable regardless of the original input format.
+            self.verifier.verify_manifest(&manifest, sig_bytes, "")?;
+        } else {
+            if self.verifier.is_enforcing() {
+                return Err(anyhow!(
+                    "Security: signature is required but missing for capsule {}",
+                    capsule_id
+                ));
             }
-        } else if signature.is_none() {
-            // No signature provided - log warning
             warn!(
                 "Security: No signature provided for capsule {}. Skipping verification.",
                 capsule_id
@@ -538,71 +539,12 @@ impl CapsuleManager {
             // 2. Decision
             if !found_local {
                 info!(
-                    "Local resources insufficient (Required: {} bytes). Checking cloud options...",
+                    "Local resources insufficient (Required: {} bytes). Cloud bursting is handled by Coordinator.",
                     required_vram
                 );
-
-                // Prioritize "fallback_to_cloud" from Routing config
-                if manifest.can_fallback_to_cloud() {
-                    info!("Cloud fallback enabled. Bursting to cloud...");
-                    if let Some(client) = &self.cloud_client {
-                        // 1. Register Capsule as Provisioning
-                        let capsule = Capsule {
-                            id: capsule_id.clone(),
-                            adep_json: manifest_json_str.clone().into_bytes(),
-                            oci_image: oci_image.clone(),
-                            digest: digest.clone(),
-                            status: CapsuleStatus::Provisioning,
-                            storage_path: None,
-                            bundle_path: None,
-                            pid: None,
-                            reserved_vram_bytes: 0, // Cloud VRAM
-                            observed_vram_bytes: None,
-                            last_failure: None,
-                            last_exit_code: None,
-                            log_path: None,
-                            started_at: Some(std::time::SystemTime::now()),
-                            remote_url: None,
-                            user_id: None,
-                            gpu_indices: vec![],
-                        };
-                        self.capsules
-                            .write()
-                            .unwrap()
-                            .insert(capsule_id.clone(), capsule);
-
-                        // 2. Deploy
-                        match client.deploy(&manifest_json_str).await {
-                            Ok(cluster_name) => {
-                                // 3. Update to Running with URL
-                                let url = format!("https://{}.ts.net", cluster_name);
-
-                                if let Some(c) = self.capsules.write().unwrap().get_mut(&capsule_id)
-                                {
-                                    c.status = CapsuleStatus::Running;
-                                    c.remote_url = Some(url.clone());
-                                }
-
-                                return Ok(format!("Cloud deployment started: {}", url));
-                            }
-                            Err(e) => {
-                                // Update to Failed
-                                if let Some(c) = self.capsules.write().unwrap().get_mut(&capsule_id)
-                                {
-                                    c.status = CapsuleStatus::Failed;
-                                    c.last_failure = Some(e.to_string());
-                                }
-                                return Err(anyhow!("Cloud deployment failed: {}", e));
-                            }
-                        }
-                    } else {
-                        return Err(anyhow!(
-                            "Cloud bursting required but Cloud Client is not configured"
-                        ));
-                    }
-                }
-
-                return Err(anyhow!("Insufficient resources: No local GPU with enough VRAM and no cloud configuration found."));
+                // Cloud deployment is no longer handled by Engine (SPEC V1.1.0)
+                // The Coordinator is responsible for cloud bursting decisions
+                return Err(anyhow!("Insufficient resources: No local GPU with enough VRAM. Cloud bursting is handled by Coordinator."));
             } else {
                 info!("Deploying locally to GPU {:?}", assigned_gpu_index);
             }
@@ -789,10 +731,11 @@ impl CapsuleManager {
         }
 
         // =====================================================================
-        // Source Runtime (PythonUv) - Direct process execution (no OCI spec)
+        // Source Runtime - Direct process execution (no OCI spec)
+        // Handles Python, Ruby, Node.js, and any language with explicit cmd
         // =====================================================================
-        if matches!(manifest.execution.runtime, RuntimeType::PythonUv) {
-            info!("Using Source Runtime (PythonUv) for capsule {}", capsule_id);
+        if matches!(manifest.execution.runtime, RuntimeType::Source) {
+            info!("Using Source Runtime for capsule {}", capsule_id);
             
             // Use source_working_dir from request (set by CLI from capsule.toml [targets.source])
             let source_dir = source_working_dir
@@ -805,13 +748,32 @@ impl CapsuleManager {
             // Build a minimal OCI spec for SourceRuntime (it doesn't actually use OCI)
             let dummy_spec = oci_spec::runtime::Spec::default();
             
-            // Determine language from entrypoint extension
-            let language = if manifest.execution.entrypoint.ends_with(".py") {
-                "python".to_string()
-            } else if manifest.execution.entrypoint.ends_with(".js") || manifest.execution.entrypoint.ends_with(".ts") {
-                "node".to_string()
+            // Parse entrypoint - it may contain a full command (e.g., "python main.py")
+            // passed from runplan.rs when SourceRuntime is used with explicit cmd
+            let entrypoint_str = &manifest.execution.entrypoint;
+            let cmd_parts: Vec<String> = shell_words::split(entrypoint_str)
+                .unwrap_or_else(|_| vec![entrypoint_str.clone()]);
+            
+            // Determine language and actual entrypoint from parsed command
+            let (language, actual_entrypoint, explicit_cmd) = if cmd_parts.len() > 1 {
+                // Full command like ["python", "main.py"]
+                let lang = match cmd_parts[0].as_str() {
+                    "python" | "python3" => "python",
+                    "ruby" => "ruby",
+                    "node" | "nodejs" => "node",
+                    "deno" => "deno",
+                    _ => "python", // fallback
+                };
+                let entry = cmd_parts.get(1).cloned().unwrap_or_else(|| "main.py".to_string());
+                (lang.to_string(), entry, Some(cmd_parts.clone()))
+            } else if entrypoint_str.ends_with(".py") {
+                ("python".to_string(), entrypoint_str.clone(), None)
+            } else if entrypoint_str.ends_with(".js") || entrypoint_str.ends_with(".ts") {
+                ("node".to_string(), entrypoint_str.clone(), None)
+            } else if entrypoint_str.ends_with(".rb") {
+                ("ruby".to_string(), entrypoint_str.clone(), None)
             } else {
-                "python".to_string() // default
+                ("python".to_string(), entrypoint_str.clone(), None) // default
             };
             
             // Get args from extra_args (passed from CLI)
@@ -820,11 +782,11 @@ impl CapsuleManager {
             let source_target = Some(crate::runtime::SourceTarget {
                 language,
                 version: None,
-                entrypoint: manifest.execution.entrypoint.clone(),
+                entrypoint: actual_entrypoint,
                 dependencies: None,
                 args,
                 source_dir: source_dir.clone(),
-                cmd: None,      // No explicit command, use language detection
+                cmd: explicit_cmd,
                 dev_mode: true, // Legacy path assumes dev mode
             });
             
@@ -927,24 +889,14 @@ impl CapsuleManager {
                     encrypt,
                     Some(use_thin),
                 ) {
-                    Ok(mut storage) => {
-                        // Mount
-                        if let Err(e) = storage_manager.mount_volume(&mut storage) {
-                            warn!("Failed to mount storage for {}: {}", capsule_id, e);
-                            return Err(anyhow!("Storage mount failed: {}", e));
-                        }
-
-                        // Update volume source to point to the host mount point
+                    Ok(storage) => {
+                        // Directory-based storage is immediately available (no mount needed)
+                        // Update volume source to point to the storage path
                         if let Some(mount_point) = storage.mount_point {
-                            // We need to pass this host path to the OCI builder.
-                            // The `StorageVolume` struct in `libadep` might not have a `source` field we can override directly
-                            // if it's strictly "name".
-                            // `build_oci_spec` uses `name` as source if not a path?
-                            // We need to make `name` the absolute path to the mount.
                             volume.name = mount_point.to_string_lossy().to_string();
                             info!(
-                                "Mapped volume to storage mount: {} (thin: {})",
-                                volume.name, use_thin
+                                "Mapped volume to storage path: {}",
+                                volume.name
                             );
                         }
                     }
@@ -1464,24 +1416,13 @@ impl CapsuleManager {
                 // We don't have public access to `sanitize_lv_name`.
                 // But `cleanup_capsule_storage` expects `capsule_id` and internally calling delete.
                 // We should probably rely on `StorageManager` to handle unmount in `cleanup`?
-                // `StorageManager::cleanup_capsule_storage` does NOT unmount currently (just lock/delete).
-                // We should update `cleanup_capsule_storage` to unmount too?
-                // Yes, simpler.
-
-                // BUT I can't modify `StorageManager` in this call easily without backtracking.
-                // I'll assume `StorageManager` modification in next step if I missed it?
-                // Wait, I updated `StorageManager` to add `unmount_volume`.
-                // I should likely add call `unmount_volume` here.
-                // But I don't know the LV Name without sanitization logic.
-                // `StorageManager::get_capsule_storage(capsule_id)` returns `CapsuleStorage` which has `lv_name`.
-                // That's the way!
+                // `StorageManager::cleanup_capsule_storage` removes the directory
+                // No separate unmount needed for directory-based storage
             }
 
+            // Get storage info for logging purposes
             if let Ok(Some(storage_info)) = storage_manager.get_capsule_storage(capsule_id) {
-                info!("Unmounting storage for {}", capsule_id);
-                if let Err(e) = storage_manager.unmount_volume(capsule_id, &storage_info.lv_name) {
-                    warn!("Failed to unmount volume: {}", e);
-                }
+                info!("Storage path for {}: {:?}", capsule_id, storage_info.storage_path);
             }
 
             info!("Cleaning up storage for capsule {}", capsule_id);

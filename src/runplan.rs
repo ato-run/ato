@@ -73,17 +73,9 @@ pub fn from_coordinator(plan: &common::RunPlan) -> RunPlanConversion {
                 })
                 .collect();
         }
-        Some(common::run_plan::Runtime::PythonUv(py)) => {
-            execution.runtime = RuntimeType::PythonUv;
-            execution.entrypoint = py.entrypoint.clone();
-            execution.env = env.clone();
-            if let Some(port) = first_port(&py.ports) {
-                execution.port = Some(port);
-            }
-        }
         Some(common::run_plan::Runtime::Native(native)) => {
             execution.runtime = RuntimeType::Native;
-            execution.entrypoint = native.binary_path.clone(); // Assuming this includes args or is just the binary
+            execution.entrypoint = native.binary_path.clone();
             execution.env = env.clone();
         }
         Some(common::run_plan::Runtime::Wasm(wasm)) => {
@@ -92,13 +84,13 @@ pub fn from_coordinator(plan: &common::RunPlan) -> RunPlanConversion {
             execution.env = env.clone();
         }
         Some(common::run_plan::Runtime::Source(source)) => {
-            // Use PythonUv as fallback until RuntimeType::Source is added to capnp schema
-            execution.runtime = RuntimeType::Native;
-            execution.entrypoint = if !source.cmd.is_empty() {
-                source.cmd.join(" ")
-            } else {
-                source.entrypoint.clone()
-            };
+            // Generic Source Runtime for interpreted languages
+            execution.runtime = RuntimeType::Source;
+            execution.entrypoint = source.entrypoint.clone();
+            // Store cmd in entrypoint for the SourceRuntime to parse
+            if !source.cmd.is_empty() {
+                execution.entrypoint = source.cmd.join(" ");
+            }
             execution.env = env.clone();
         }
         None => {
@@ -151,9 +143,6 @@ fn runtime_env(plan: &common::RunPlan) -> Option<HashMap<String, String>> {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
         ),
-        Some(common::run_plan::Runtime::PythonUv(py)) => {
-            Some(py.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        }
         Some(common::run_plan::Runtime::Wasm(wasm)) => {
             Some(wasm.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         }

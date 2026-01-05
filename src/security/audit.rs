@@ -470,6 +470,81 @@ impl Default for AuditLogger {
     }
 }
 
+/// Start a background task that runs daily audit batch signing at UTC midnight.
+///
+/// This function spawns a Tokio task that:
+/// 1. Waits until the next UTC midnight
+/// 2. Signs the previous day's audit logs
+/// 3. Repeats daily
+///
+/// # Arguments
+/// * `audit_logger` - The audit logger instance (must be Arc-wrapped)
+/// * `signer` - Optional capsule signer for signing batches
+///
+/// # Returns
+/// A JoinHandle for the spawned background task
+pub fn start_daily_signing_scheduler(
+    audit_logger: std::sync::Arc<AuditLogger>,
+    signer: Option<std::sync::Arc<crate::security::signing::CapsuleSigner>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            // Calculate time until next UTC midnight
+            let now = chrono::Utc::now();
+            let tomorrow_midnight = (now + chrono::Duration::days(1))
+                .date_naive()
+                .and_hms_opt(0, 5, 0) // 00:05 UTC to allow for clock drift
+                .unwrap()
+                .and_utc();
+            let wait_duration = (tomorrow_midnight - now).to_std().unwrap_or(std::time::Duration::from_secs(86400));
+            
+            tracing::info!(
+                "Audit batch scheduler: next signing in {:?} at {}",
+                wait_duration,
+                tomorrow_midnight
+            );
+            
+            // Wait until next signing time
+            tokio::time::sleep(wait_duration).await;
+            
+            // Sign yesterday's batch
+            let yesterday = (chrono::Utc::now() - chrono::Duration::days(1))
+                .format("%Y-%m-%d")
+                .to_string();
+            
+            if let Some(ref signer) = signer {
+                match audit_logger.sign_daily_batch(&yesterday, signer) {
+                    Ok(sig) => {
+                        tracing::info!(
+                            "Successfully signed audit batch for {}: {}...",
+                            yesterday,
+                            &sig[..std::cmp::min(20, sig.len())]
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to sign audit batch for {}: {}", yesterday, e);
+                    }
+                }
+            } else {
+                // No signer available, just create the batch without signing
+                match audit_logger.create_daily_batch(&yesterday) {
+                    Ok(merkle_root) => {
+                        tracing::info!(
+                            "Created unsigned audit batch for {}: merkle_root={}...",
+                            yesterday,
+                            &merkle_root[..std::cmp::min(16, merkle_root.len())]
+                        );
+                    }
+                    Err(e) => {
+                        // It's OK if no events exist for the day
+                        tracing::debug!("No audit batch created for {}: {}", yesterday, e);
+                    }
+                }
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

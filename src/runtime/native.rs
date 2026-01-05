@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use tokio::process::Command;
 use tracing::{info, warn};
 
-use crate::adep::{CapsuleManifestV1, RuntimeType};
+use capsule_core::capsule_v1::{CapsuleManifestV1, RuntimeType};
 use crate::artifact::ArtifactManager;
 use crate::runtime::traits::Runtime;
 use crate::runtime::{LaunchRequest, LaunchResult, RuntimeError};
