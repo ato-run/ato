@@ -3,6 +3,19 @@
 //! This crate provides the core Engine functionality for running Capsules.
 //! It can be used as a library (embedded mode) or as a standalone server.
 //!
+//! ## Module Structure (UARC V1.1.0 Aligned)
+//!
+//! - `common/` - Shared utilities (auth, config, failure_codes)
+//! - `engine/` - Capsule execution core (manager, supervisor, pool)
+//! - `interface/` - External APIs (gRPC, HTTP, REST, DevServer)
+//! - `observability/` - L5 Observability (audit, job_history, logs, metrics)
+//! - `resource/` - Resource management (artifact, cas, storage, oci)
+//! - `runtime/` - Execution runtimes (Wasm, Source, OCI)
+//! - `schema/` - Cap'n Proto schema and conversion
+//! - `system/` - System-level (hardware, network)
+//! - `verification/` - UARC verification layers (L1-L4)
+//! - `workload/` - Workload definitions (manifest, runplan)
+//!
 //! ## Feature Flags
 //!
 //! - `wasm` - WebAssembly runtime support (cross-platform, default)
@@ -19,35 +32,49 @@
 //! handle.shutdown().await;
 //! ```
 
-pub mod common;
-// pub mod coordinator_service;  // Disabled: proto definitions not present in capsuled/proto
-pub mod engine; // Capsule execution core (manager, supervisor, pool)
-pub mod interface; // External interfaces (gRPC, HTTP, API, DevServer)
-pub mod resource; // Resource management (artifact, cas, storage, oci, downloader)
-pub mod schema; // Cap'n Proto schema and conversion
+// =============================================================================
+// Primary Modules (UARC V1.1.0 Architecture)
+// =============================================================================
 
-// Re-exports from common for backward compatibility
+pub mod common;
+pub mod engine;
+pub mod interface;
+pub mod observability;
+pub mod proto;
+pub mod resource;
+pub mod runtime;
+pub mod schema;
+pub mod system;
+pub mod verification;
+pub mod wasm_host;
+pub mod workload;
+
+// =============================================================================
+// Backward Compatibility Re-exports
+// =============================================================================
+
+// From common
 pub use common::auth;
 pub use common::config;
 pub use common::failure_codes;
 
-// Re-exports from interface for backward compatibility
+// From interface
 pub use interface::api as api_server;
 pub use interface::dev_server;
 pub use interface::grpc as grpc_server;
 pub use interface::http as http_server;
 
-// Re-exports from schema for backward compatibility
+// From schema
 #[allow(dead_code)]
 pub use schema::capnp as capsule_capnp;
 pub use schema::converter as capnp_to_manifest;
 
-// Re-exports from engine for backward compatibility
+// From engine
 pub use engine::manager as capsule_manager;
 pub use engine::pool as pool_registry;
 pub use engine::supervisor as process_supervisor;
 
-// Re-exports from resource for backward compatibility
+// From resource
 pub use resource::artifact;
 pub use resource::cas;
 pub use resource::downloader;
@@ -55,35 +82,25 @@ pub use resource::model_fetcher;
 pub use resource::oci;
 pub use resource::storage;
 
-pub mod observability; // Observability modules (audit, job_history, logs, metrics)
-pub mod system; // System-level modules (hardware, network)
-
-// Re-exports from observability for backward compatibility
+// From observability
 pub use observability::job_history;
 pub use observability::logs;
 pub use observability::metrics;
 
-// Re-exports from system for backward compatibility
+// From system
 pub use system::hardware;
 pub use system::network;
 
-pub mod proto;
-pub mod runtime;
-pub mod verification; // Verification and security (renamed from security)
-// pub mod status_reporter;
-pub mod wasm_host;
-pub mod workload;
-
-// Re-exports for backward compatibility (security → verification)
+// From verification (security alias)
 pub use verification as security;
 
-// Re-exports from workload for backward compatibility
+// From workload
 pub use workload::manifest;
 pub use workload::runplan;
 
+// =============================================================================
+// Public API
+// =============================================================================
+
 // Re-export key types for embedded usage
 pub use interface::dev_server::{DevServerConfig, DevServerHandle};
-
-// TODO: Re-enable when capnp proto generation is set up
-// #[cfg(test)]
-// mod capnp_roundtrip_test;
