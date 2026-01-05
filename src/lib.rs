@@ -19,7 +19,6 @@
 //! handle.shutdown().await;
 //! ```
 
-pub mod api_server;
 pub mod artifact;
 #[allow(dead_code)]
 pub mod capsule_capnp; // Cap'n Proto generated code
@@ -28,14 +27,19 @@ pub mod capnp_to_manifest; // Cap'n Proto ↔ CapsuleManifestV1 conversion (UARC
 pub mod cas; // CAS client abstraction (UARC V1.1.0)
 pub mod common;
 // pub mod coordinator_service;  // Disabled: proto definitions not present in capsuled/proto
-pub mod dev_server; // Embedded DevServer API for capsule-cli integration
 pub mod downloader; // Enabled for Phase 2
+pub mod interface; // External interfaces (gRPC, HTTP, API, DevServer)
 
 // Re-exports from common for backward compatibility
 pub use common::auth;
 pub use common::config;
 pub use common::failure_codes;
-pub mod grpc_server; // Enabled for Phase 2
+
+// Re-exports from interface for backward compatibility
+pub use interface::api as api_server;
+pub use interface::dev_server;
+pub use interface::grpc as grpc_server;
+pub use interface::http as http_server;
 pub mod hardware;
 pub mod job_history; // Job history persistence (UARC V1.1.0)
 pub mod logs;
@@ -84,7 +88,7 @@ pub mod wasm_host;
 pub mod workload;
 
 // Re-export key types for embedded usage
-pub use dev_server::{DevServerConfig, DevServerHandle};
+pub use interface::dev_server::{DevServerConfig, DevServerHandle};
 
 // TODO: Re-enable when capnp proto generation is set up
 // #[cfg(test)]

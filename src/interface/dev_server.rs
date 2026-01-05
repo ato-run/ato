@@ -32,7 +32,7 @@ use tracing::{info, warn};
 
 use crate::artifact::{manager::ArtifactConfig, ArtifactManager};
 use crate::capsule_manager::CapsuleManager;
-use crate::grpc_server;
+use crate::interface::grpc;
 use crate::hardware;
 use crate::job_history::SqliteJobHistoryStore;
 use crate::network::service_registry::ServiceRegistry;
@@ -274,7 +274,7 @@ impl DevServerHandle {
 
                 // Run server until shutdown signal
                 tokio::select! {
-                    result = grpc_server::start_grpc_server(
+                    result = grpc::start_grpc_server(
                         &addr_str,
                         capsule_manager,
                         wasm_host,
