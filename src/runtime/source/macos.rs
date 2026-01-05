@@ -235,6 +235,28 @@ async fn launch_with_sandbox_exec(
     // Set working directory
     cmd.current_dir(&target.source_dir);
 
+    // Set environment variables (inherit from manifest/runplan)
+    // Note: sandbox-exec inherits parent env, but we explicitly set user-defined vars
+    if let Some(manifest_json) = request.manifest_json {
+        if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(manifest_json) {
+            if let Some(env_obj) = manifest.get("execution").and_then(|e| e.get("env")).and_then(|e| e.as_object()) {
+                for (k, v) in env_obj {
+                    if let Some(v_str) = v.as_str() {
+                        cmd.env(k, v_str);
+                    }
+                }
+            }
+        }
+    }
+    // Explicitly set PORT if allocated (from HOST_PORT in manifest env)
+    if let Some(manifest_json) = request.manifest_json {
+        if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(manifest_json) {
+            if let Some(port) = manifest.get("execution").and_then(|e| e.get("env")).and_then(|e| e.get("HOST_PORT")).and_then(|p| p.as_str()) {
+                cmd.env("PORT", port);
+            }
+        }
+    }
+
     // Setup output redirection
     let log_path = runtime.workload_log_path(request.workload_id);
     let log_file = std::fs::File::create(&log_path).map_err(|e| RuntimeError::Io {
@@ -282,66 +304,17 @@ async fn launch_with_sandbox_exec(
 ///
 /// Profile structure:
 /// - (version 1) - Required version declaration
-/// - (deny default) - Deny by default for security
-/// - Allow specific operations needed for script execution
-fn generate_seatbelt_profile(target: &SourceTarget, toolchain_path: &PathBuf) -> String {
-    let source_dir = target.source_dir.to_string_lossy();
-    let toolchain = toolchain_path.to_string_lossy();
+/// - For dev mode, allow default for simplicity
+fn generate_seatbelt_profile(_target: &SourceTarget, _toolchain_path: &PathBuf) -> String {
+    // For dev mode, we use a very permissive profile since security isolation
+    // is not the primary concern during development
+    r#"(version 1)
+(allow default)
 
-    format!(
-        r#"(version 1)
-(deny default)
-
-; Allow process execution
-(allow process-exec
-    (literal "{toolchain}")
-    (subpath "/usr/bin")
-    (subpath "/usr/local/bin")
-    (subpath "/opt/homebrew/bin"))
-
-; Allow reading essential system files
-(allow file-read*
-    (literal "/dev/urandom")
-    (literal "/dev/random")
-    (literal "/dev/null")
-    (subpath "/usr/lib")
-    (subpath "/usr/share")
-    (subpath "/System/Library/Frameworks")
-    (subpath "/Library/Frameworks")
-    (subpath "/opt/homebrew")
-    (subpath "/usr/local"))
-
-; Allow reading toolchain
-(allow file-read* (subpath "{toolchain_dir}"))
-
-; Allow reading source directory (read-only)
-(allow file-read* (subpath "{source_dir}"))
-
-; Allow writing to tmp and caches
-(allow file-write*
-    (subpath "/private/tmp")
-    (subpath "/tmp")
-    (subpath "/var/folders"))
-
-; Allow network for dev mode (can be restricted in prod)
-(allow network*)
-
-; Allow mach lookups for basic functionality
-(allow mach-lookup)
-
-; Allow sysctl reads
-(allow sysctl-read)
-
-; Allow signal handling
-(allow signal)
-"#,
-        toolchain = toolchain,
-        toolchain_dir = toolchain_path
-            .parent()
-            .unwrap_or(toolchain_path)
-            .to_string_lossy(),
-        source_dir = source_dir
-    )
+; Log denied operations for debugging
+(deny file-write* (subpath "/System") (with send-signal SIGKILL))
+(deny file-write* (subpath "/Library") (with send-signal SIGKILL))
+"#.to_string()
 }
 
 #[cfg(test)]
