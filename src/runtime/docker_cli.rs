@@ -379,7 +379,7 @@ impl Runtime for DockerCliRuntime {
             pid: Some(pid),
             bundle_path: Some(PathBuf::from("/")),
             log_path: Some(log_path),
-            port: Some(host_port as u16),
+            port: Some(host_port),
         })
     }
 
