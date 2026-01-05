@@ -157,6 +157,7 @@ jobs:
           refreshenv
 
       - name: Verify ${{ matrix.runtime.name }} installation
+        shell: bash
         run: |
           case "${{ matrix.runtime.name }}" in
             python)
