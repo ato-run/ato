@@ -8,7 +8,8 @@ use crate::metrics::collector::MetricsCollector;
 use crate::hardware::GpuDetector;
 use crate::runtime::{
     youki_adapter::YoukiRuntimeAdapter, ContainerRuntime, DevRuntime, DockerCliRuntime,
-    LaunchRequest, LaunchResult, NativeRuntime, Runtime, RuntimeConfig, RuntimeError,
+    LaunchRequest, LaunchResult, NativeRuntime, Runtime, RuntimeConfig, RuntimeError, RuntimeKind,
+    resolver::{resolve_runtime, ResolveContext, ResolvedTarget},
 };
 use crate::security::audit::{AuditLogger, AuditOperation, AuditStatus};
 use crate::security::vram_scrubber::VramScrubber;
@@ -233,6 +234,97 @@ impl CapsuleManager {
 
     pub fn cloud_configured(&self) -> bool {
         self.cloud_client.is_some()
+    }
+
+    /// Build a ResolveContext from current engine capabilities
+    fn build_resolve_context(&self) -> ResolveContext {
+        use std::collections::HashSet;
+
+        let mut supported_runtimes = HashSet::new();
+        supported_runtimes.insert(RuntimeKind::Native);
+        supported_runtimes.insert(RuntimeKind::Wasm);
+
+        // Youki only on Linux
+        let youki_available = cfg!(target_os = "linux");
+        if youki_available {
+            supported_runtimes.insert(RuntimeKind::Youki);
+        }
+
+        // Check if docker is available (via container_runtime not being Mock)
+        let docker_available = self.container_runtime.config().kind != RuntimeKind::Mock
+            || cfg!(target_os = "macos"); // Docker Desktop on macOS
+
+        // Available toolchains (could be detected dynamically in future)
+        let mut available_toolchains = HashSet::new();
+        available_toolchains.insert("python".to_string());
+        available_toolchains.insert("node".to_string());
+
+        ResolveContext {
+            platform: crate::runtime::resolver::detect_current_platform(),
+            supported_runtimes,
+            wasm_available: true, // WasmRuntime is always initialized
+            docker_available,
+            gpu_available: self.gpu_detector.detect_gpus().is_ok(),
+            available_toolchains,
+        }
+    }
+
+    /// Select the appropriate runtime Arc for a resolved target
+    fn select_runtime_for_target(
+        &self,
+        resolved: &ResolvedTarget,
+        force_docker_cli: bool,
+    ) -> Arc<dyn Runtime> {
+        match resolved {
+            ResolvedTarget::Wasm { .. } => self.wasm_runtime.clone(),
+            ResolvedTarget::Source { language, .. } => {
+                // Source targets use DevRuntime (python-uv, node, etc.)
+                match language.to_lowercase().as_str() {
+                    "python" | "python3" => self.dev_runtime.clone(),
+                    "node" | "nodejs" | "deno" => self.dev_runtime.clone(),
+                    _ => self.native_runtime.clone(),
+                }
+            }
+            ResolvedTarget::Oci { .. } => {
+                // OCI targets prefer Youki on Linux, Docker on macOS
+                if cfg!(target_os = "linux") && !force_docker_cli {
+                    self.youki_runtime.clone()
+                } else if cfg!(target_os = "macos") || force_docker_cli {
+                    self.docker_runtime.clone()
+                } else {
+                    self.container_runtime.clone()
+                }
+            }
+            ResolvedTarget::Legacy { runtime_type, .. } => {
+                // Legacy mode - use the old runtime selection logic
+                match runtime_type {
+                    RuntimeType::Native => self.native_runtime.clone(),
+                    RuntimeType::Docker => {
+                        if self.container_runtime.config().kind == RuntimeKind::Mock {
+                            self.container_runtime.clone()
+                        } else if cfg!(target_os = "macos") || force_docker_cli {
+                            self.docker_runtime.clone()
+                        } else {
+                            self.container_runtime.clone()
+                        }
+                    }
+                    RuntimeType::PythonUv => self.dev_runtime.clone(),
+                    RuntimeType::Youki => {
+                        if cfg!(target_os = "linux") {
+                            self.youki_runtime.clone()
+                        } else {
+                            warn!("Youki runtime is only supported on Linux, falling back to Docker");
+                            if cfg!(target_os = "macos") || force_docker_cli {
+                                self.docker_runtime.clone()
+                            } else {
+                                self.container_runtime.clone()
+                            }
+                        }
+                    }
+                    RuntimeType::Wasm => self.wasm_runtime.clone(),
+                }
+            }
+        }
     }
 
     /// Pre-execution analysis hook for obfuscation detection.
@@ -781,43 +873,25 @@ impl CapsuleManager {
 
         // Determine which runtime to use
         let force_docker_cli = std::env::var("FORCE_DOCKER_CLI_RUNTIME").is_ok();
+
+        // Resolve runtime using UARC V1.1.0 algorithm
+        let context = self.build_resolve_context();
+        let resolved = resolve_runtime(&manifest, &context)
+            .map_err(|e| anyhow!("Runtime resolution failed: {}", e))?;
+
         info!(
-            "[DEBUG] Selecting runtime: type={:?}, entrypoint={:?}, force_docker_cli={}",
-            manifest.execution.runtime, manifest.execution.entrypoint, force_docker_cli
+            "[DEBUG] Resolved runtime: target={}, kind={:?}, entrypoint={:?}, force_docker_cli={}",
+            resolved.target_type_name(),
+            resolved.runtime_kind(),
+            manifest.execution.entrypoint,
+            force_docker_cli
         );
 
         // Use pool result if available, otherwise cold start
         let launch_result = if let Some(result) = pool_launch_result {
             result
         } else {
-            let runtime: Arc<dyn Runtime> = match manifest.execution.runtime {
-                RuntimeType::Native => self.native_runtime.clone(),
-                RuntimeType::Docker => {
-                    if self.container_runtime.config().kind == crate::runtime::RuntimeKind::Mock {
-                        self.container_runtime.clone()
-                    } else if cfg!(target_os = "macos") || force_docker_cli {
-                        self.docker_runtime.clone()
-                    } else {
-                        self.container_runtime.clone()
-                    }
-                }
-                RuntimeType::PythonUv => self.dev_runtime.clone(),
-                RuntimeType::Youki => {
-                    // Youki runtime - direct OCI container execution (Linux only)
-                    if cfg!(target_os = "linux") {
-                        self.youki_runtime.clone()
-                    } else {
-                        // Fallback to Docker on non-Linux platforms
-                        warn!("Youki runtime is only supported on Linux, falling back to Docker");
-                        if cfg!(target_os = "macos") || force_docker_cli {
-                            self.docker_runtime.clone()
-                        } else {
-                            self.container_runtime.clone()
-                        }
-                    }
-                }
-                RuntimeType::Wasm => self.wasm_runtime.clone(),
-            };
+            let runtime = self.select_runtime_for_target(&resolved, force_docker_cli);
 
             match runtime.launch(launch_request).await {
                 Ok(res) => res,
@@ -1085,44 +1159,24 @@ impl CapsuleManager {
             .and_then(|json| serde_json::from_slice(json).ok());
 
         if let Some(ref manifest) = manifest {
-            // Match the same runtime selection logic as deploy, otherwise stop may not
-            // target the actual runtime that launched the capsule (e.g., DockerCliRuntime).
+            // Use the same runtime resolution logic as deploy
             let force_docker_cli = std::env::var("FORCE_DOCKER_CLI_RUNTIME").is_ok();
 
-            let runtime: Arc<dyn Runtime> = match manifest.execution.runtime {
-                RuntimeType::Native => {
-                    if cfg!(target_os = "macos") {
-                        self.native_runtime.clone()
-                    } else {
-                        self.dev_runtime.clone()
+            // Resolve runtime using UARC V1.1.0 algorithm
+            let context = self.build_resolve_context();
+            let resolved = match resolve_runtime(manifest, &context) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("Runtime resolution failed for stop: {}, using legacy fallback", e);
+                    // Fallback to legacy on resolution error
+                    ResolvedTarget::Legacy {
+                        runtime_type: manifest.execution.runtime.clone(),
+                        entrypoint: manifest.execution.entrypoint.clone(),
                     }
                 }
-                RuntimeType::Docker => {
-                    if self.container_runtime.config().kind == crate::runtime::RuntimeKind::Mock {
-                        self.container_runtime.clone()
-                    } else if cfg!(target_os = "macos") || force_docker_cli {
-                        self.docker_runtime.clone()
-                    } else {
-                        self.container_runtime.clone()
-                    }
-                }
-                RuntimeType::PythonUv => self.dev_runtime.clone(),
-                RuntimeType::Youki => {
-                    // Youki runtime - direct OCI container execution (Linux only)
-                    if cfg!(target_os = "linux") {
-                        self.youki_runtime.clone()
-                    } else {
-                        // Fallback to Docker on non-Linux platforms
-                        warn!("Youki runtime is only supported on Linux, falling back to Docker for stop");
-                        if cfg!(target_os = "macos") || force_docker_cli {
-                            self.docker_runtime.clone()
-                        } else {
-                            self.container_runtime.clone()
-                        }
-                    }
-                }
-                RuntimeType::Wasm => self.wasm_runtime.clone(),
             };
+
+            let runtime = self.select_runtime_for_target(&resolved, force_docker_cli);
 
             if let Err(e) = runtime.stop(capsule_id).await {
                 warn!("Failed to stop runtime for {}: {}", capsule_id, e);

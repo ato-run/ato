@@ -106,6 +106,7 @@ pub fn from_coordinator(plan: &common::RunPlan) -> RunPlanConversion {
         model: None,
         transparency: None,
         pool: None,
+        targets: None,
     };
 
     RunPlanConversion {

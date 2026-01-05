@@ -300,6 +300,7 @@ async fn apply_handler(
         model: None,
         transparency: None,
         pool: None,
+        targets: None,
     };
 
     // 3. Deploy - pass manifest directly (no JSON serialization!)
