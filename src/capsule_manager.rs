@@ -824,6 +824,8 @@ impl CapsuleManager {
                 dependencies: None,
                 args,
                 source_dir: source_dir.clone(),
+                cmd: None,      // No explicit command, use language detection
+                dev_mode: true, // Legacy path assumes dev mode
             });
             
             let launch_request = LaunchRequest {

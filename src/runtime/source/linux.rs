@@ -27,8 +27,8 @@ pub async fn launch_with_bubblewrap(
         })?;
 
     info!(
-        "Launching with bubblewrap: {} {} (toolchain: {:?})",
-        target.language, target.entrypoint, toolchain.path
+        "Launching with bubblewrap: {} {} (toolchain: {:?}, dev_mode: {})",
+        target.language, target.entrypoint, toolchain.path, target.dev_mode
     );
 
     // Ensure log directory exists
@@ -40,8 +40,12 @@ pub async fn launch_with_bubblewrap(
     // Build bwrap command
     let mut cmd = Command::new("bwrap");
 
-    // Namespace isolation
-    cmd.args(["--unshare-all", "--share-net"]); // Share network for dev convenience
+    // Namespace isolation - production mode disables network
+    if target.dev_mode {
+        cmd.args(["--unshare-all", "--share-net"]); // Share network for dev convenience
+    } else {
+        cmd.args(["--unshare-all"]); // No --share-net in production - network isolated
+    }
     cmd.args(["--die-with-parent"]);
 
     // Basic filesystem setup
@@ -68,9 +72,25 @@ pub async fn launch_with_bubblewrap(
     // Set working directory
     cmd.args(["--chdir", "/app"]);
 
-    // Security hardening
+    // Security hardening - more restrictive in production mode
     cmd.args(["--new-session"]);
     cmd.args(["--cap-drop", "ALL"]);
+
+    // Production mode: additional hardening
+    if !target.dev_mode {
+        // Restrict environment variables
+        cmd.args(["--clearenv"]);
+        // Re-add essential env vars
+        cmd.args(["--setenv", "PATH", "/usr/bin:/bin"]);
+        cmd.args(["--setenv", "HOME", "/tmp"]);
+        cmd.args(["--setenv", "LANG", "C.UTF-8"]);
+
+        // Block access to sensitive kernel interfaces
+        cmd.args(["--ro-bind", "/dev/null", "/dev/kvm"]);
+
+        // Use seccomp filtering (if available)
+        // Note: Would need seccomp-bpf profile file
+    }
 
     // Add the actual command
     cmd.arg("--");

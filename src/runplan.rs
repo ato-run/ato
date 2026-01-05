@@ -91,6 +91,16 @@ pub fn from_coordinator(plan: &common::RunPlan) -> RunPlanConversion {
             execution.entrypoint = wasm.component.clone();
             execution.env = env.clone();
         }
+        Some(common::run_plan::Runtime::Source(source)) => {
+            // Use PythonUv as fallback until RuntimeType::Source is added to capnp schema
+            execution.runtime = RuntimeType::Native;
+            execution.entrypoint = if !source.cmd.is_empty() {
+                source.cmd.join(" ")
+            } else {
+                source.entrypoint.clone()
+            };
+            execution.env = env.clone();
+        }
         None => {
             // Default
         }
@@ -146,6 +156,9 @@ fn runtime_env(plan: &common::RunPlan) -> Option<HashMap<String, String>> {
         }
         Some(common::run_plan::Runtime::Wasm(wasm)) => {
             Some(wasm.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        }
+        Some(common::run_plan::Runtime::Source(source)) => {
+            Some(source.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         }
         None => None,
     }
