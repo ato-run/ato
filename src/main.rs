@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "capsuled_engine=info,tower_http=debug".into()),
+                .unwrap_or_else(|_| "capsuled=info,tower_http=debug".into()),
         )
         .init();
 

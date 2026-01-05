@@ -18,7 +18,7 @@ use tempfile::TempDir;
 
 #[tokio::test]
 async fn test_cas_uri_resolution_success() {
-    use capsuled_engine::artifact::manager::{ArtifactConfig, ArtifactManager};
+    use capsuled::artifact::manager::{ArtifactConfig, ArtifactManager};
 
     // Create temp CAS directory structure
     let tmp = TempDir::new().expect("tempdir");
@@ -74,7 +74,7 @@ async fn test_cas_uri_resolution_success() {
 
 #[tokio::test]
 async fn test_cas_uri_resolution_not_found() {
-    use capsuled_engine::artifact::manager::{ArtifactConfig, ArtifactError, ArtifactManager};
+    use capsuled::artifact::manager::{ArtifactConfig, ArtifactError, ArtifactManager};
 
     let tmp = TempDir::new().expect("tempdir");
     let cas_root = tmp.path().join("cas");
@@ -106,7 +106,7 @@ async fn test_cas_uri_resolution_not_found() {
 
 #[tokio::test]
 async fn test_cas_uri_validation() {
-    use capsuled_engine::artifact::manager::{ArtifactConfig, ArtifactError, ArtifactManager};
+    use capsuled::artifact::manager::{ArtifactConfig, ArtifactError, ArtifactManager};
 
     let tmp = TempDir::new().expect("tempdir");
 
@@ -136,7 +136,7 @@ async fn test_cas_uri_validation() {
 
 #[tokio::test]
 async fn test_cas_root_not_configured() {
-    use capsuled_engine::artifact::manager::{ArtifactConfig, ArtifactError, ArtifactManager};
+    use capsuled::artifact::manager::{ArtifactConfig, ArtifactError, ArtifactManager};
 
     let tmp = TempDir::new().expect("tempdir");
 
@@ -159,7 +159,7 @@ async fn test_cas_root_not_configured() {
 
 #[tokio::test]
 async fn test_audit_log_persistence() {
-    use capsuled_engine::security::audit::{AuditLogger, AuditOperation, AuditStatus};
+    use capsuled::security::audit::{AuditLogger, AuditOperation, AuditStatus};
 
     let tmp = TempDir::new().expect("tempdir");
     let log_path = tmp.path().join("audit.log");
@@ -270,7 +270,7 @@ async fn test_audit_log_persistence() {
 
 #[tokio::test]
 async fn test_audit_content_hash_uniqueness() {
-    use capsuled_engine::security::audit::{AuditLogger, AuditOperation, AuditStatus};
+    use capsuled::security::audit::{AuditLogger, AuditOperation, AuditStatus};
 
     let tmp = TempDir::new().expect("tempdir");
     let log_path = tmp.path().join("audit_unique.log");
@@ -321,7 +321,7 @@ async fn test_audit_content_hash_uniqueness() {
 
 #[tokio::test]
 async fn test_audit_merkle_root_computation() {
-    use capsuled_engine::security::audit::AuditLogger;
+    use capsuled::security::audit::AuditLogger;
 
     // Test Merkle root computation
     let hashes = vec![
@@ -357,8 +357,8 @@ async fn test_audit_merkle_root_computation() {
 
 #[tokio::test]
 async fn test_combined_cas_audit_flow() {
-    use capsuled_engine::artifact::manager::{ArtifactConfig, ArtifactManager};
-    use capsuled_engine::security::audit::{AuditLogger, AuditOperation, AuditStatus};
+    use capsuled::artifact::manager::{ArtifactConfig, ArtifactManager};
+    use capsuled::security::audit::{AuditLogger, AuditOperation, AuditStatus};
 
     let tmp = TempDir::new().expect("tempdir");
 
@@ -433,8 +433,8 @@ async fn test_combined_cas_audit_flow() {
 
 #[tokio::test]
 async fn test_audit_batch_signing() {
-    use capsuled_engine::security::audit::{AuditLogger, AuditOperation, AuditStatus};
-    use capsuled_engine::security::signing::CapsuleSigner;
+    use capsuled::security::audit::{AuditLogger, AuditOperation, AuditStatus};
+    use capsuled::security::signing::CapsuleSigner;
 
     let tmp = TempDir::new().expect("tempdir");
     let log_path = tmp.path().join("signed_audit.log");

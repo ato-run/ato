@@ -27,7 +27,7 @@
 /// Note: These tests are ignored by default to prevent accidental execution
 /// without proper setup. Use `cargo test --test storage_integration -- --ignored`
 /// to run them explicitly.
-use capsuled_engine::storage::{KeyStorage, LuksManager, LvmManager, StorageResult};
+use capsuled::storage::{KeyStorage, LuksManager, LvmManager, StorageResult};
 use tempfile::TempDir;
 
 const TEST_VG: &str = "test_vg";
