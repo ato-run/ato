@@ -14,7 +14,7 @@ use crate::runtime::{
     source::{SourceRuntime, SourceRuntimeConfig},
 };
 use crate::security::audit::{AuditLogger, AuditOperation, AuditStatus};
-use crate::security::vram_scrubber::VramScrubber;
+use crate::security::vram::VramScrubber;
 use crate::security::ManifestVerifier;
 use crate::storage::{StorageConfig, StorageManager};
 
@@ -80,7 +80,7 @@ impl std::fmt::Display for CapsuleStatus {
 }
 
 use crate::artifact::ArtifactManager;
-use crate::network::mdns::MdnsAnnouncer;
+use crate::interface::discovery::MdnsAnnouncer;
 use crate::network::service_registry::ServiceRegistry;
 use super::pool::PoolRegistry;
 use super::supervisor::ProcessSupervisor;

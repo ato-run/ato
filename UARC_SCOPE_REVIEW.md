@@ -180,19 +180,111 @@ use capsuled::proto::onescluster::engine::v1::engine_client::EngineClient;
 
 ---
 
-## 4. 判断基準の提案
+## 4. 最終判断（2026-01-06 決定）
 
-| 機能 | UARC仕様記載 | 実装必須 | 推奨判断 |
-|------|-------------|---------|---------|
-| **model_fetcher** | ❌ (CAS一般論のみ) | ❌ | Coordinatorへ移動 → **アーカイブ** |
-| **mdns** | ❌ | ❌ | Dev専用として**条件付き維持** |
-| **vram_scrubber** | ❌ | ❌ | GPU対応をv1.2で定義 → **暫定維持** |
-| **deploy_tool** | ❌ (onescluster) | ❌ | プロトコル移行後**削除** |
+| 機能 | UARC仕様記載 | 実装必須 | **確定判断** |
+|------|-------------|---------|-------------|
+| **model_fetcher** | ❌ (CAS一般論のみ) | ✅ | **汎用化して維持** → `resource/ingest/` |
+| **downloader** | ✅ (CAS fetch機構) | ✅ | **統合** → `resource/ingest/` に統合 |
+| **mdns** | ❌ | ❌ | **維持** → `interface/discovery/` (Dev専用) |
+| **vram_scrubber** | ❌ | ❌ | **維持** → `verification/vram.rs` (GPU対応) |
+| **deploy_tool** | ❌ (onescluster) | ❌ | **削除** (Coordinator責務) |
+
+### 判断理由
+
+#### ✅ model_fetcher + downloader → `resource/ingest/`
+**汎用データ取り込み（Ingestion）レイヤーとして再設計**
+
+- **model_fetcher.rs**: ML model固有ではなく、任意の外部リソース（HTTP/S3等）をCASに取り込む汎用fetcher
+- **downloader.rs**: 既存のHTTPダウンロード実装
+- **統合方針**: `resource/ingest/fetcher.rs` として統合し、URL → Checksum検証 → CAS保存の統一パイプライン
+
+**UARCとの適合性**:
+- ✅ L1 Source Policy: CAS blobsのfetchはEngine責務
+- ✅ Integrity: `expected_sha256`によるverification
+- ✅ 汎用性: 特定のML frameworkに依存しない
+
+#### ✅ mdns → `interface/discovery/`
+**Desktop統合・Embedded用途で重要**
+
+- Engineが`.local`ドメインで発見可能になることで、Desktop Appとの連携が容易に
+- Dev専用機能として条件付き有効化（production環境では無効化可能）
+
+**UARCとの適合性**:
+- ❌ UARC仕様外だが、**開発体験向上**のための実用機能
+- Interface層に配置することで、CoreロジックとのDecoupling
+
+#### ✅ vram_scrubber → `verification/vram.rs`
+**GPU分離セキュリティの実装**
+
+- マルチテナント環境でのVRAM残留データリスクは実在する
+- UARC v1.2でGPU Isolation要件を正式化する前提で暫定維持
+
+**UARCとの適合性**:
+- ❌ V1.1.0に記載なし
+- ✅ L3 Safety gates / L5 Observabilityの一環として解釈可能
+- Future-proof: GPU対応は必須要件になる見込み
+
+#### ❌ deploy_tool → 削除
+**Coordinator責務 + 旧protocol**
+
+- Engine直接デプロイはアーキテクチャ違反（Coordinator経由が正）
+- `onescluster` protocol は廃止予定
+- 削除して問題なし
+
+---
+
+## 5. Phase 12 実装計画
+
+### Phase 12-1: Resource Ingest 統合
+```bash
+mkdir -p src/resource/ingest
+# model_fetcher.rs をベースに汎用化
+git mv src/resource/model_fetcher.rs src/resource/ingest/fetcher.rs
+git mv src/resource/downloader.rs src/resource/ingest/http.rs
+# 後でfetcher.rs内にhttp.rsのロジックを統合
+```
+
+**コード変更**:
+- `ModelFetchRequest` → `ResourceFetchRequest` (汎用化)
+- `model_id` → `resource_id` (用途非依存)
+- HuggingFace固有のロジックを削除
+
+### Phase 12-2: Interface Discovery
+```bash
+mkdir -p src/interface/discovery
+git mv src/system/network/mdns.rs src/interface/discovery/mdns.rs
+```
+
+### Phase 12-3: Verification VRAM
+```bash
+git mv src/verification/vram_scrubber.rs src/verification/vram.rs
+```
+
+### Phase 12-4: Cleanup
+```bash
+git rm src/bin/deploy_tool.rs
+```
+
+---
+
+## 6. Phase 13: Native Runtime 完全削除
+
+**前提**: Phase 12完了後に実施
+
+Native Runtime参照を全て削除し、Source Runtimeへ統合:
+
+1. `engine/manager.rs`: `native_runtime` field削除
+2. `runtime/resolver.rs`: Python/Node → Source Runtimeへfallback
+3. `runtime/container.rs`: Native条件分岐削除
+4. `main.rs`: NativeRuntime初期化削除
+5. `interface/grpc.rs`: `NativeRuntime` proto変換削除
+6. `workload/runplan.rs`: `Runtime::Native` 削除
 
 ---
 
 ## 次のステップ
 
-1. **このドキュメントをレビュー**して、各項目の判断を決定
-2. 決定した項目からPhase 11としてクリーンアップ実施
-3. 判断保留の項目はIssue化して、UARC v1.2仕様策定時に再検討
+1. ✅ **Phase 12-1~4を順次実行**（リファクタリング）
+2. ✅ **Phase 13でNative完全削除**（破壊的変更）
+3. ✅ **全テスト実行とコンパイル確認**

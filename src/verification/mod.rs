@@ -7,7 +7,7 @@
 //! - egress_proxy: Egress proxy implementation
 //! - path: Path validation and security
 //! - dns_monitor: DNS request monitoring
-//! - vram_scrubber: GPU memory security
+//! - vram: GPU memory security
 //!
 //! Note: Audit logging has been moved to the `observability` module.
 
@@ -17,7 +17,7 @@ pub mod egress_proxy;
 pub mod path;
 pub mod signing;
 pub mod verifier;
-pub mod vram_scrubber;
+pub mod vram;
 
 // Re-export audit from observability for backward compatibility
 pub use crate::observability::audit;
@@ -29,7 +29,7 @@ pub use egress_proxy::*;
 pub use path::*;
 // pub use signing::*; // Avoid conflict with libadep signing if needed?
 pub use verifier::*;
-pub use vram_scrubber::*;
+pub use vram::*;
 
 // Re-export common constants
 pub const ENV_KEY_EGRESS_TOKEN: &str = "CAPSULED_EGRESS_TOKEN";

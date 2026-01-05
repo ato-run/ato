@@ -5,13 +5,11 @@
 //! - CAS: Content-Addressable Storage client
 //! - Storage: Volume and directory management for capsules
 //! - OCI: Container image and spec handling
-//! - Downloader: File download utilities
-//! - Model Fetcher: ML model download and caching
+//! - Ingest: External resource fetching and CAS ingestion
 
 pub mod artifact;
 pub mod cas;
-pub mod downloader;
-pub mod model_fetcher;
+pub mod ingest;
 #[cfg(target_os = "linux")]
 pub mod oci;
 #[cfg(not(target_os = "linux"))]
