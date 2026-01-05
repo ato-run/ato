@@ -8,6 +8,7 @@ use capsuled::api_server;
 use capsuled::artifact::{manager::ArtifactConfig, ArtifactManager};
 use capsuled::capsule_manager::CapsuleManager;
 use capsuled::hardware;
+use capsuled::job_history::SqliteJobHistoryStore;
 use capsuled::network::service_registry::ServiceRegistry;
 use capsuled::process_supervisor::ProcessSupervisor;
 use capsuled::runtime::{ContainerRuntime, RuntimeConfig, RuntimeKind};
@@ -155,6 +156,18 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize Service Registry (for port allocation and mDNS)
     let service_registry = Arc::new(ServiceRegistry::new(None));
+
+    // Initialize Job History (for gRPC GetJobStatus/ListJobs)
+    let data_dir = std::env::var("CAPSULED_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp/capsuled"));
+    std::fs::create_dir_all(&data_dir).expect("Failed to create data directory");
+    let job_history_db = data_dir.join("job_history.sqlite");
+    let job_history = Arc::new(
+        SqliteJobHistoryStore::new(&job_history_db)
+            .expect("Failed to initialize job history store"),
+    );
+    info!("Job history initialized at {:?}", job_history_db);
 
     // Initialize Process Supervisor
     let process_supervisor = Arc::new(ProcessSupervisor::new());
@@ -357,6 +370,7 @@ async fn main() -> anyhow::Result<()> {
     let grpc_service_registry = service_registry.clone();
     let grpc_gpu_detector = gpu_detector.clone();
     let grpc_artifact_manager = artifact_manager.clone();
+    let grpc_job_history = job_history.clone();
 
     tokio::spawn(async move {
         if let Err(e) = capsuled::grpc_server::start_grpc_server(
@@ -371,6 +385,7 @@ async fn main() -> anyhow::Result<()> {
             grpc_service_registry,
             grpc_gpu_detector,
             grpc_artifact_manager,
+            grpc_job_history,
         )
         .await
         {
