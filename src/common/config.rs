@@ -70,8 +70,6 @@ pub struct SecurityConfig {
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct NetworkConfig {
-    pub headscale_url: Option<String>,
-    pub auth_key: Option<String>,
     pub state_dir: Option<String>,
     pub local_domain: Option<String>,
 }

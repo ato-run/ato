@@ -16,9 +16,6 @@ use capsuled::security::audit::AuditLogger;
 use capsuled::security::EgressProxy;
 use capsuled::storage::StorageConfig;
 
-mod headscale;
-use headscale::{HeadscaleClient, HeadscaleConfig};
-
 const DEFAULT_HTTP_PORT: u16 = 4500;
 const DEFAULT_AUDIT_LOG_PATH: &str = "/tmp/capsuled/logs/audit.jsonl";
 const DEFAULT_AUDIT_KEY_PATH: &str = "/tmp/capsuled/keys/node_key.pem";
@@ -128,29 +125,6 @@ async fn main() -> anyhow::Result<()> {
         }
         Err(e) => {
             warn!("GPU detection failed (CPU mode): {}", e);
-        }
-    }
-
-    // Initialize Headscale if configured
-    let headscale_config = load_headscale_config()?;
-    if !headscale_config.server_url.is_empty() {
-        let headscale = HeadscaleClient::new(headscale_config);
-
-        match headscale.connect().await {
-            Ok(info) => {
-                tracing::info!(
-                    tailnet_ip = %info.ip,
-                    hostname = %info.hostname,
-                    peers = info.peers.len(),
-                    "Connected to Tailnet"
-                );
-
-                // Update machine registration with Tailnet IP
-                // update_machine_tailnet_ip(&info.ip).await?;
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to connect to Tailnet, running in local mode");
-            }
         }
     }
 
@@ -393,15 +367,6 @@ async fn main() -> anyhow::Result<()> {
     info!("Shutting down...");
 
     Ok(())
-}
-
-fn load_headscale_config() -> anyhow::Result<HeadscaleConfig> {
-    // Load from environment or config file
-    Ok(HeadscaleConfig {
-        server_url: std::env::var("GUMBALL_HEADSCALE_URL").unwrap_or_default(),
-        auth_key: std::env::var("GUMBALL_HEADSCALE_KEY").ok(),
-        ..Default::default()
-    })
 }
 
 /// Load storage configuration from config.toml or environment
