@@ -278,11 +278,81 @@ cmd = ["python", "main.py"]
 - `test_source_target_without_toolchain_falls_back`: ruby なし → OCI fallback
 - `test_no_compatible_target_error`: 対応ランタイムなし → エラー
 
+### Phase 4: gRPC GetJobStatus/ListJobs ✅
+
+**変更ファイル:**
+- `uarc/proto/engine/v1/api.proto` (修正)
+- `src/grpc_server.rs` (修正)
+- `src/main.rs` (修正)
+
+**Proto 定義:**
+```protobuf
+// 新規 RPC
+rpc GetJobStatus(GetJobStatusRequest) returns (GetJobStatusResponse);
+rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
+
+enum JobPhase {
+  JOB_PHASE_UNSPECIFIED = 0;
+  JOB_PHASE_PENDING = 1;
+  JOB_PHASE_RUNNING = 2;
+  JOB_PHASE_SUCCEEDED = 3;
+  JOB_PHASE_FAILED = 4;
+  JOB_PHASE_CANCELLED = 5;
+}
+
+message GetJobStatusResponse {
+  string job_id = 1;
+  string capsule_name = 2;
+  string capsule_version = 3;
+  JobPhase phase = 4;
+  string error_message = 5;
+  int32 exit_code = 6;
+  string created_at = 7;
+  string started_at = 8;
+  string finished_at = 9;
+  uint64 duration_secs = 10;
+  JobResourceUsage resource_usage = 11;
+}
+
+message JobResourceUsage {
+  uint64 cpu_time_ms = 1;
+  uint64 memory_peak_bytes = 2;
+  uint64 vram_peak_bytes = 3;
+}
+```
+
+**実装内容:**
+1. **EngineService 拡張**: `job_history: Arc<SqliteJobHistoryStore>` フィールド追加
+2. **get_job_status()**: JobHistory から job_id で検索し、proto 変換して返却
+3. **list_jobs()**: capsule_name/phase フィルタでジョブ一覧取得
+4. **Phase 変換ヘルパー**: `internal_phase_to_proto()`, `proto_phase_to_internal()`
+5. **リソース使用量**: JSON から `JobResourceUsage` への変換
+
+**使用例 (grpcurl):**
+```bash
+# ジョブステータス取得
+grpcurl -plaintext -d '{"job_id": "abc-123"}' \
+  localhost:50051 ato.engine.v1.Engine/GetJobStatus
+
+# ジョブ一覧
+grpcurl -plaintext -d '{"limit": 10, "capsule_name": "my-capsule"}' \
+  localhost:50051 ato.engine.v1.Engine/ListJobs
+```
+
+**テスト (6件追加):**
+- `test_internal_phase_to_proto`
+- `test_proto_phase_to_internal`
+- `test_job_record_to_proto`
+- `test_job_record_to_proto_without_resource_usage`
+- `test_resource_usage_json_parsing`
+- `test_job_history_integration`
+
 ## 今後の作業
 
-1. **gRPC GetJobStatus の統合**: `grpc_server.rs` に `GetJobStatus` RPC を追加
+1. ~~**gRPC GetJobStatus の統合**~~: ✅ 完了
 2. **Source Runtime 実装**: Ephemeral Container による Python/Node.js 実行
 3. **SPIFFE 認証**: Engine 間通信に mTLS を導入
+4. **gRPC CancelJob の追加**: 実行中ジョブのキャンセル機能
 
 ## アーキテクチャ図
 

@@ -12,13 +12,16 @@ use crate::proto::onescluster::engine::v1::{
     deploy_request::Manifest as DeployManifest,
     engine_server::{Engine, EngineServer},
     CapsuleInfo, DeployRequest, DeployResponse, EngineLogEntry, FetchModelRequest,
-    FetchModelResponse, GetResourcesRequest, GetSystemStatusRequest, ResourceInfo, ResourceUsage,
-    StopRequest, StopResponse, SystemStatus, ValidateRequest, ValidationResult,
+    FetchModelResponse, GetJobStatusRequest, GetJobStatusResponse, GetResourcesRequest,
+    GetSystemStatusRequest, JobPhase, JobResourceUsage, JobSummary, ListJobsRequest,
+    ListJobsResponse, ResourceInfo, ResourceUsage, StopRequest, StopResponse, SystemStatus,
+    ValidateRequest, ValidationResult,
 };
 use crate::runplan;
 use crate::runtime::ContainerRuntime;
 use crate::wasm_host::AdepLogicHost;
 use crate::workload;
+use crate::job_history::{JobHistory, SqliteJobHistoryStore, JobRecord, JobPhase as JobPhaseInternal};
 
 use capsule_core::capsule_v1::CapsuleManifestV1;
 
@@ -37,6 +40,7 @@ pub struct EngineService {
     allowed_host_paths: Vec<String>,
     models_cache_dir: PathBuf,
     gpu_detector: Arc<dyn GpuDetector>,
+    job_history: Arc<SqliteJobHistoryStore>,
 }
 
 impl EngineService {
@@ -52,6 +56,7 @@ impl EngineService {
         models_cache_dir: PathBuf,
         gpu_detector: Arc<dyn GpuDetector>,
         _artifact_manager: Arc<ArtifactManager>,
+        job_history: Arc<SqliteJobHistoryStore>,
     ) -> Self {
         Self {
             capsule_manager,
@@ -63,6 +68,7 @@ impl EngineService {
             allowed_host_paths,
             models_cache_dir,
             gpu_detector,
+            job_history,
         }
     }
 }
@@ -606,6 +612,146 @@ impl Engine for EngineService {
             tokio_stream::wrappers::ReceiverStream::new(rx),
         )))
     }
+
+    /// Get job execution status
+    async fn get_job_status(
+        &self,
+        request: Request<GetJobStatusRequest>,
+    ) -> Result<Response<GetJobStatusResponse>, Status> {
+        let req = request.into_inner();
+        info!("GetJobStatus request for job_id={}", req.job_id);
+
+        if req.job_id.trim().is_empty() {
+            return Err(Status::invalid_argument("job_id is required"));
+        }
+
+        match self.job_history.get_job(&req.job_id) {
+            Ok(job) => {
+                let response = job_record_to_proto(&job);
+                Ok(Response::new(response))
+            }
+            Err(e) => {
+                // Check if it's a NotFound error
+                let err_str = e.to_string();
+                if err_str.contains("not found") || err_str.contains("NotFound") {
+                    Err(Status::not_found(format!("Job '{}' not found", req.job_id)))
+                } else {
+                    error!("Failed to get job status: {}", e);
+                    Err(Status::internal(format!("Failed to get job status: {}", e)))
+                }
+            }
+        }
+    }
+
+    /// List recent jobs with optional filtering
+    async fn list_jobs(
+        &self,
+        request: Request<ListJobsRequest>,
+    ) -> Result<Response<ListJobsResponse>, Status> {
+        let req = request.into_inner();
+        let limit = if req.limit == 0 { 100 } else { req.limit as usize };
+        let capsule_filter = if req.capsule_name.is_empty() {
+            None
+        } else {
+            Some(req.capsule_name.as_str())
+        };
+        let phase_filter = proto_phase_to_internal(req.phase_filter());
+
+        info!(
+            "ListJobs request: limit={}, capsule_filter={:?}, phase_filter={:?}",
+            limit, capsule_filter, phase_filter
+        );
+
+        // Note: phase_filter is ignored for now (not in JobHistory trait)
+        // TODO: Add phase filtering to JobHistory trait
+        match self.job_history.list_jobs(capsule_filter, limit) {
+            Ok(jobs) => {
+                // Apply phase filter in memory if specified
+                let filtered_jobs: Vec<_> = if let Some(pf) = phase_filter {
+                    jobs.into_iter().filter(|j| j.phase == pf).collect()
+                } else {
+                    jobs
+                };
+
+                let summaries: Vec<JobSummary> = filtered_jobs
+                    .into_iter()
+                    .map(|j| JobSummary {
+                        job_id: j.job_id,
+                        capsule_name: j.capsule_name,
+                        phase: internal_phase_to_proto(&j.phase).into(),
+                        created_at: j.created_at.to_rfc3339(),
+                        duration_secs: j.duration_secs.unwrap_or(0),
+                    })
+                    .collect();
+
+                Ok(Response::new(ListJobsResponse { jobs: summaries }))
+            }
+            Err(e) => {
+                error!("Failed to list jobs: {}", e);
+                Err(Status::internal(format!("Failed to list jobs: {}", e)))
+            }
+        }
+    }
+}
+
+/// Convert internal JobPhase to proto JobPhase
+fn internal_phase_to_proto(phase: &JobPhaseInternal) -> JobPhase {
+    match phase {
+        JobPhaseInternal::Pending => JobPhase::Pending,
+        JobPhaseInternal::Running => JobPhase::Running,
+        JobPhaseInternal::Succeeded => JobPhase::Succeeded,
+        JobPhaseInternal::Failed => JobPhase::Failed,
+        JobPhaseInternal::Cancelled => JobPhase::Cancelled,
+    }
+}
+
+/// Convert proto JobPhase to internal JobPhase (for filtering)
+fn proto_phase_to_internal(phase: JobPhase) -> Option<JobPhaseInternal> {
+    match phase {
+        JobPhase::Unspecified => None,
+        JobPhase::Pending => Some(JobPhaseInternal::Pending),
+        JobPhase::Running => Some(JobPhaseInternal::Running),
+        JobPhase::Succeeded => Some(JobPhaseInternal::Succeeded),
+        JobPhase::Failed => Some(JobPhaseInternal::Failed),
+        JobPhase::Cancelled => Some(JobPhaseInternal::Cancelled),
+    }
+}
+
+/// ResourceUsageData for JSON parsing
+#[derive(serde::Deserialize, Default)]
+struct ResourceUsageData {
+    #[serde(default)]
+    cpu_time_ms: u64,
+    #[serde(default)]
+    memory_peak_bytes: u64,
+    #[serde(default)]
+    vram_peak_bytes: u64,
+}
+
+/// Convert JobRecord to proto GetJobStatusResponse
+fn job_record_to_proto(job: &JobRecord) -> GetJobStatusResponse {
+    // Parse resource_usage_json if present
+    let resource_usage = job.resource_usage_json.as_ref().and_then(|json| {
+        serde_json::from_str::<ResourceUsageData>(json).ok()
+    }).map(|r| JobResourceUsage {
+        cpu_time_ms: r.cpu_time_ms,
+        memory_peak_bytes: r.memory_peak_bytes,
+        vram_peak_bytes: r.vram_peak_bytes,
+    });
+
+    GetJobStatusResponse {
+        job_id: job.job_id.clone(),
+        capsule_name: job.capsule_name.clone(),
+        capsule_version: job.capsule_version.clone(),
+        phase: internal_phase_to_proto(&job.phase).into(),
+        error_message: job.error_message.clone().unwrap_or_default(),
+        exit_code: job.exit_code.unwrap_or(-1),
+        created_at: job.created_at.to_rfc3339(),
+        started_at: job.started_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
+        finished_at: job.finished_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
+        duration_secs: job.duration_secs.unwrap_or(0),
+        resource_usage,
+    }
 }
 
 /// Get system resource information
@@ -682,6 +828,7 @@ pub async fn start_grpc_server(
     service_registry: Arc<ServiceRegistry>,
     gpu_detector: Arc<dyn GpuDetector>,
     artifact_manager: Arc<ArtifactManager>,
+    job_history: Arc<SqliteJobHistoryStore>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr = addr.parse()?;
     let engine_service = EngineService::new(
@@ -695,6 +842,7 @@ pub async fn start_grpc_server(
         models_cache_dir,
         gpu_detector,
         artifact_manager,
+        job_history,
     );
     info!("Engine gRPC server listening on {}", addr);
 
@@ -704,4 +852,170 @@ pub async fn start_grpc_server(
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::job_history::JobPhase as InternalJobPhase;
+    use chrono::Utc;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_internal_phase_to_proto() {
+        assert_eq!(
+            internal_phase_to_proto(&JobPhaseInternal::Pending),
+            JobPhase::Pending
+        );
+        assert_eq!(
+            internal_phase_to_proto(&JobPhaseInternal::Running),
+            JobPhase::Running
+        );
+        assert_eq!(
+            internal_phase_to_proto(&JobPhaseInternal::Succeeded),
+            JobPhase::Succeeded
+        );
+        assert_eq!(
+            internal_phase_to_proto(&JobPhaseInternal::Failed),
+            JobPhase::Failed
+        );
+        assert_eq!(
+            internal_phase_to_proto(&JobPhaseInternal::Cancelled),
+            JobPhase::Cancelled
+        );
+    }
+
+    #[test]
+    fn test_proto_phase_to_internal() {
+        assert_eq!(proto_phase_to_internal(JobPhase::Unspecified), None);
+        assert_eq!(
+            proto_phase_to_internal(JobPhase::Pending),
+            Some(JobPhaseInternal::Pending)
+        );
+        assert_eq!(
+            proto_phase_to_internal(JobPhase::Running),
+            Some(JobPhaseInternal::Running)
+        );
+        assert_eq!(
+            proto_phase_to_internal(JobPhase::Succeeded),
+            Some(JobPhaseInternal::Succeeded)
+        );
+        assert_eq!(
+            proto_phase_to_internal(JobPhase::Failed),
+            Some(JobPhaseInternal::Failed)
+        );
+        assert_eq!(
+            proto_phase_to_internal(JobPhase::Cancelled),
+            Some(JobPhaseInternal::Cancelled)
+        );
+    }
+
+    #[test]
+    fn test_job_record_to_proto() {
+        let job = JobRecord {
+            job_id: "test-job-123".to_string(),
+            capsule_name: "my-capsule".to_string(),
+            capsule_version: "v1.0.0".to_string(),
+            phase: InternalJobPhase::Succeeded,
+            error_message: None,
+            exit_code: Some(0),
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            finished_at: Some(Utc::now()),
+            duration_secs: Some(42),
+            resource_usage_json: Some(r#"{"cpu_time_ms": 1000, "memory_peak_bytes": 1048576}"#.to_string()),
+        };
+
+        let proto = job_record_to_proto(&job);
+        assert_eq!(proto.job_id, "test-job-123");
+        assert_eq!(proto.capsule_name, "my-capsule");
+        assert_eq!(proto.capsule_version, "v1.0.0");
+        assert_eq!(proto.phase(), JobPhase::Succeeded);
+        assert_eq!(proto.exit_code, 0);
+        assert_eq!(proto.duration_secs, 42);
+        
+        let resource = proto.resource_usage.unwrap();
+        assert_eq!(resource.cpu_time_ms, 1000);
+        assert_eq!(resource.memory_peak_bytes, 1048576);
+    }
+
+    #[test]
+    fn test_job_record_to_proto_without_resource_usage() {
+        let job = JobRecord {
+            job_id: "test-job-456".to_string(),
+            capsule_name: "other-capsule".to_string(),
+            capsule_version: "v2.0.0".to_string(),
+            phase: InternalJobPhase::Failed,
+            error_message: Some("Out of memory".to_string()),
+            exit_code: Some(137),
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            finished_at: Some(Utc::now()),
+            duration_secs: Some(10),
+            resource_usage_json: None,
+        };
+
+        let proto = job_record_to_proto(&job);
+        assert_eq!(proto.job_id, "test-job-456");
+        assert_eq!(proto.phase(), JobPhase::Failed);
+        assert_eq!(proto.error_message, "Out of memory");
+        assert_eq!(proto.exit_code, 137);
+        assert!(proto.resource_usage.is_none());
+    }
+
+    #[test]
+    fn test_resource_usage_json_parsing() {
+        // Valid JSON
+        let valid_json = r#"{"cpu_time_ms": 500, "memory_peak_bytes": 2048, "vram_peak_bytes": 4096}"#;
+        let parsed: ResourceUsageData = serde_json::from_str(valid_json).unwrap();
+        assert_eq!(parsed.cpu_time_ms, 500);
+        assert_eq!(parsed.memory_peak_bytes, 2048);
+        assert_eq!(parsed.vram_peak_bytes, 4096);
+
+        // Partial JSON (missing fields default to 0)
+        let partial_json = r#"{"cpu_time_ms": 100}"#;
+        let parsed: ResourceUsageData = serde_json::from_str(partial_json).unwrap();
+        assert_eq!(parsed.cpu_time_ms, 100);
+        assert_eq!(parsed.memory_peak_bytes, 0);
+        assert_eq!(parsed.vram_peak_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn test_job_history_integration() {
+        // Create temp directory for test database
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let db_path = temp_dir.path().join("test_jobs.sqlite");
+        
+        let job_history = SqliteJobHistoryStore::new(&db_path)
+            .expect("Failed to create job history store");
+
+        // Insert a test job
+        let job = JobRecord {
+            job_id: "integration-test-001".to_string(),
+            capsule_name: "test-capsule".to_string(),
+            capsule_version: "v1.0.0".to_string(),
+            phase: InternalJobPhase::Running,
+            error_message: None,
+            exit_code: None,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            finished_at: None,
+            duration_secs: None,
+            resource_usage_json: None,
+        };
+
+        job_history.insert_job(&job).expect("Failed to insert job");
+
+        // Verify we can retrieve it
+        let retrieved = job_history.get_job("integration-test-001")
+            .expect("Failed to get job");
+        assert_eq!(retrieved.job_id, "integration-test-001");
+        assert_eq!(retrieved.capsule_name, "test-capsule");
+        assert!(matches!(retrieved.phase, InternalJobPhase::Running));
+
+        // List jobs
+        let jobs = job_history.list_jobs(None, 10)
+            .expect("Failed to list jobs");
+        assert_eq!(jobs.len(), 1);
+    }
 }
