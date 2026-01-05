@@ -24,14 +24,11 @@ mod windows;
 mod fallback;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use tracing::{info, warn};
 
-use crate::runtime::{
-    LaunchRequest, LaunchResult, Runtime, RuntimeError, SourceTarget, YoukiRuntimeAdapter,
-};
+use crate::runtime::{LaunchRequest, LaunchResult, Runtime, RuntimeError, SourceTarget};
 
 pub use toolchain::{ToolchainInfo, ToolchainManager};
 pub use validator::{validate_binary, validate_cmd};
@@ -72,21 +69,19 @@ impl Default for SourceRuntimeConfig {
 pub struct SourceRuntime {
     config: SourceRuntimeConfig,
     toolchain_manager: ToolchainManager,
-    oci_fallback: Option<Arc<YoukiRuntimeAdapter>>,
+    #[allow(dead_code)]
+    oci_fallback: Option<()>, // Placeholder - OCI fallback removed in UARC V1.1.0
     /// Active workloads (workload_id -> pid)
     active_workloads: std::sync::Mutex<std::collections::HashMap<String, u32>>,
 }
 
 impl SourceRuntime {
     /// Create a new SourceRuntime with the given configuration
-    pub fn new(
-        config: SourceRuntimeConfig,
-        oci_fallback: Option<Arc<YoukiRuntimeAdapter>>,
-    ) -> Self {
+    pub fn new(config: SourceRuntimeConfig, _oci_fallback: Option<()>) -> Self {
         Self {
             config,
             toolchain_manager: ToolchainManager::new(),
-            oci_fallback,
+            oci_fallback: None,
             active_workloads: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -268,13 +263,10 @@ impl Runtime for SourceRuntime {
             }
             Ok(())
         } else {
-            // Workload not found in native tracking, try OCI fallback
-            if let Some(ref oci) = self.oci_fallback {
-                oci.stop(workload_id).await
-            } else {
-                warn!("Workload {} not found", workload_id);
-                Ok(()) // Idempotent
-            }
+            // Workload not found in native tracking
+            // OCI fallback removed in UARC V1.1.0
+            warn!("Workload {} not found", workload_id);
+            Ok(()) // Idempotent
         }
     }
 

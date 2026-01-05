@@ -7,10 +7,10 @@
 //!
 //! Falls back to legacy `execution.runtime` field if no targets are defined.
 
-use crate::runtime::RuntimeKind;
-use capsule_core::capsule_v1::{
+use crate::capsule_types::capsule_v1::{
     CapsuleManifestV1, OciTarget, RuntimeType, SourceTarget, TargetsConfig, WasmTarget,
 };
+use crate::runtime::RuntimeKind;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -433,7 +433,7 @@ mod tests {
     }
 
     fn test_manifest_with_targets() -> CapsuleManifestV1 {
-        use capsule_core::capsule_v1::*;
+        use crate::capsule_types::capsule_v1::*;
 
         CapsuleManifestV1 {
             schema_version: "1.0".to_string(),
@@ -478,7 +478,7 @@ mod tests {
     }
 
     fn test_manifest_legacy() -> CapsuleManifestV1 {
-        use capsule_core::capsule_v1::*;
+        use crate::capsule_types::capsule_v1::*;
 
         CapsuleManifestV1 {
             schema_version: "1.0".to_string(),

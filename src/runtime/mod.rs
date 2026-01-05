@@ -13,7 +13,7 @@ pub mod resolver;
 pub mod source;
 pub mod traits;
 pub mod wasm;
-pub mod youki_adapter;
+// pub mod youki_adapter; // Disabled: requires capsule_runtime dependency
 
 pub use container::ContainerRuntime;
 pub use dev::DevRuntime;
@@ -22,7 +22,7 @@ pub use resolver::{resolve_runtime, ResolveContext, ResolveError, ResolvedTarget
 pub use source::SourceRuntime;
 pub use traits::Runtime;
 pub use wasm::WasmRuntime;
-pub use youki_adapter::YoukiRuntimeAdapter;
+// pub use youki_adapter::YoukiRuntimeAdapter; // Disabled
 
 const DEFAULT_HOOK_RETRY_ATTEMPTS: u32 = 1;
 
