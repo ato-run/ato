@@ -27,7 +27,7 @@ pub struct RunPlan {
     #[prost(string, repeated, tag = "30")]
     pub egress_allowlist: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     /// Runtime selection
-    #[prost(oneof = "run_plan::Runtime", tags = "10, 11, 12, 13")]
+    #[prost(oneof = "run_plan::Runtime", tags = "10, 11, 12, 13, 14")]
     pub runtime: ::core::option::Option<run_plan::Runtime>,
 }
 /// Nested message and enum types in `RunPlan`.
@@ -45,6 +45,9 @@ pub mod run_plan {
         /// WebAssembly Component Model
         #[prost(message, tag = "13")]
         Wasm(super::WasmRuntime),
+        /// Generic Source Runtime (any language)
+        #[prost(message, tag = "14")]
+        Source(super::SourceRuntime),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -120,6 +123,35 @@ pub struct WasmRuntime {
         ::prost::alloc::string::String,
         ::prost::alloc::string::String,
     >,
+}
+/// Generic Source Runtime: Execute any language runtime from host
+/// Supports explicit command specification via `cmd` field
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SourceRuntime {
+    /// Language hint (python, ruby, node, etc.)
+    #[prost(string, tag = "1")]
+    pub language: ::prost::alloc::string::String,
+    /// Entry point file (e.g., "main.py", "app.rb")
+    #[prost(string, tag = "2")]
+    pub entrypoint: ::prost::alloc::string::String,
+    /// Explicit command (e.g., \["ruby", "app.rb"\])
+    #[prost(string, repeated, tag = "3")]
+    pub cmd: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Additional arguments
+    #[prost(string, repeated, tag = "4")]
+    pub args: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Environment variables
+    #[prost(map = "string, string", tag = "5")]
+    pub env: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::prost::alloc::string::String,
+    >,
+    /// Source directory
+    #[prost(string, tag = "6")]
+    pub working_dir: ::prost::alloc::string::String,
+    /// Enable relaxed security for development
+    #[prost(bool, tag = "7")]
+    pub dev_mode: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Port {

@@ -304,17 +304,84 @@ async fn launch_with_sandbox_exec(
 ///
 /// Profile structure:
 /// - (version 1) - Required version declaration
-/// - For dev mode, allow default for simplicity
-fn generate_seatbelt_profile(_target: &SourceTarget, _toolchain_path: &PathBuf) -> String {
-    // For dev mode, we use a very permissive profile since security isolation
-    // is not the primary concern during development
-    r#"(version 1)
+/// - For dev mode: allow default for simplicity
+/// - For production mode: deny default with explicit allowlist
+fn generate_seatbelt_profile(target: &SourceTarget, toolchain_path: &PathBuf) -> String {
+    if target.dev_mode {
+        // Development mode: permissive profile for debugging and rapid iteration
+        r#"(version 1)
 (allow default)
 
-; Log denied operations for debugging
+; Even in dev mode, protect critical system paths
 (deny file-write* (subpath "/System") (with send-signal SIGKILL))
 (deny file-write* (subpath "/Library") (with send-signal SIGKILL))
 "#.to_string()
+    } else {
+        // Production mode: strict deny-default profile with minimal allowlist
+        let source_dir = target.source_dir.to_string_lossy();
+        let toolchain_dir = toolchain_path
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "/usr/bin".to_string());
+
+        format!(
+            r#"(version 1)
+(deny default)
+
+; Allow essential process operations
+(allow process-fork)
+(allow process-exec)
+(allow signal (target self))
+
+; Allow read access to the capsule source directory (read-only)
+(allow file-read* (subpath "{source_dir}"))
+
+; Allow read access to the toolchain binary and its directory
+(allow file-read* (subpath "{toolchain_dir}"))
+(allow file-read* (literal "{toolchain}"))
+
+; Allow read access to essential system libraries
+(allow file-read* (subpath "/usr/lib"))
+(allow file-read* (subpath "/System/Library/Frameworks"))
+(allow file-read* (subpath "/Library/Frameworks"))
+(allow file-read* (subpath "/opt/homebrew"))
+(allow file-read* (subpath "/usr/local"))
+(allow file-read* (regex "^/usr/share/.*"))
+
+; Allow read access to SSL certificates
+(allow file-read* (subpath "/etc/ssl"))
+(allow file-read* (subpath "/private/etc/ssl"))
+
+; Allow read access to essential runtime files
+(allow file-read* (literal "/dev/null"))
+(allow file-read* (literal "/dev/urandom"))
+(allow file-read* (literal "/dev/random"))
+(allow file-write* (literal "/dev/null"))
+
+; Allow tmp directory access (write)
+(allow file-read* (subpath "/tmp"))
+(allow file-read* (subpath "/private/tmp"))
+(allow file-write* (subpath "/tmp"))
+(allow file-write* (subpath "/private/tmp"))
+
+; Allow network access only if needed (commented out by default)
+; To enable: uncomment the following line
+; (allow network*)
+
+; Allow mach ports for basic IPC
+(allow mach-lookup)
+
+; Allow sysctl read for basic system info
+(allow sysctl-read)
+
+; Deny all network by default in production
+(deny network*)
+"#,
+            source_dir = source_dir,
+            toolchain_dir = toolchain_dir,
+            toolchain = toolchain_path.to_string_lossy()
+        )
+    }
 }
 
 #[cfg(test)]
@@ -335,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn test_seatbelt_profile_generation() {
+    fn test_seatbelt_profile_generation_dev_mode() {
         let target = SourceTarget {
             language: "python".to_string(),
             version: Some("3.11".to_string()),
@@ -343,6 +410,28 @@ mod tests {
             dependencies: None,
             args: vec![],
             source_dir: PathBuf::from("/Users/test/project"),
+            cmd: None,
+            dev_mode: true,
+        };
+        let toolchain = PathBuf::from("/usr/bin/python3");
+
+        let profile = generate_seatbelt_profile(&target, &toolchain);
+
+        assert!(profile.contains("(version 1)"));
+        assert!(profile.contains("(allow default)"));
+    }
+
+    #[test]
+    fn test_seatbelt_profile_generation_production_mode() {
+        let target = SourceTarget {
+            language: "python".to_string(),
+            version: Some("3.11".to_string()),
+            entrypoint: "main.py".to_string(),
+            dependencies: None,
+            args: vec![],
+            source_dir: PathBuf::from("/Users/test/project"),
+            cmd: None,
+            dev_mode: false,
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
@@ -351,6 +440,7 @@ mod tests {
         assert!(profile.contains("(version 1)"));
         assert!(profile.contains("(deny default)"));
         assert!(profile.contains("/Users/test/project"));
-        assert!(profile.contains("/usr/bin/python3"));
+        assert!(profile.contains("/usr/bin"));
+        assert!(profile.contains("(deny network*)"));
     }
 }

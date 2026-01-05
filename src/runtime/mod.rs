@@ -248,6 +248,13 @@ pub struct SourceTarget {
     pub args: Vec<String>,
     /// Source directory path
     pub source_dir: PathBuf,
+    /// Explicit command (Generic Source Runtime)
+    /// If specified, overrides language/entrypoint detection
+    /// Example: ["ruby", "app.rb"] or ["deno", "run", "main.ts"]
+    pub cmd: Option<Vec<String>>,
+    /// Development mode flag
+    /// When true, security validation is relaxed
+    pub dev_mode: bool,
 }
 
 /// Result details returned after successful launch.
@@ -319,6 +326,9 @@ pub enum RuntimeError {
 
     #[error("source target not provided in launch request")]
     SourceTargetMissing,
+
+    #[error("security violation: {0}")]
+    SecurityViolation(String),
 }
 
 #[allow(dead_code)]
