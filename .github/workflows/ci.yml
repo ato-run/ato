@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         rust: [stable]
     
     steps:
@@ -58,6 +58,12 @@ jobs:
       if: runner.os == 'macOS'
       run: brew install protobuf
 
+    - name: Install Protocol Buffers (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        choco install protoc
+        refreshenv
+
     - name: Check formatting
       run: cargo fmt --all -- --check
 
@@ -79,23 +85,27 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         runtime:
           - name: python
             install-ubuntu: "sudo apt-get install -y python3"
             install-macos: "brew install python3"
+            install-windows: "choco install python3"
             test-filter: "python"
           - name: nodejs
             install-ubuntu: "sudo apt-get install -y nodejs npm"
             install-macos: "brew install node"
+            install-windows: "choco install nodejs"
             test-filter: "node"
           - name: ruby
             install-ubuntu: "sudo apt-get install -y ruby"
             install-macos: "brew install ruby"
+            install-windows: "choco install ruby"
             test-filter: "ruby"
           - name: deno
             install-ubuntu: "curl -fsSL https://deno.land/install.sh | sh && echo '$HOME/.deno/bin' >> $GITHUB_PATH"
             install-macos: "brew install deno"
+            install-windows: "choco install deno"
             test-filter: "deno"
 
     steps:
@@ -124,6 +134,12 @@ jobs:
       if: runner.os == 'macOS'
       run: brew install protobuf
 
+    - name: Install Protocol Buffers (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        choco install protoc
+        refreshenv
+
     - name: Install ${{ matrix.runtime.name }} (Ubuntu)
       if: runner.os == 'Linux'
       run: |
@@ -133,6 +149,12 @@ jobs:
     - name: Install ${{ matrix.runtime.name }} (macOS)
       if: runner.os == 'macOS'
       run: ${{ matrix.runtime.install-macos }}
+
+    - name: Install ${{ matrix.runtime.name }} (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        ${{ matrix.runtime.install-windows }}
+        refreshenv
 
     - name: Verify ${{ matrix.runtime.name }} installation
       run: |
@@ -188,7 +210,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     
     steps:
     - name: Checkout code
@@ -207,11 +229,25 @@ jobs:
       if: runner.os == 'macOS'
       run: brew install protobuf
 
+    - name: Install Protocol Buffers (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        choco install protoc
+        refreshenv
+
     - name: Build release binary
       run: cargo build --release --verbose
 
-    - name: Upload artifact
+    - name: Upload artifact (Unix)
+      if: runner.os != 'Windows'
       uses: actions/upload-artifact@v4
       with:
         name: capsuled-${{ runner.os }}
         path: target/release/capsuled
+
+    - name: Upload artifact (Windows)
+      if: runner.os == 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: capsuled-${{ runner.os }}
+        path: target/release/capsuled.exe
