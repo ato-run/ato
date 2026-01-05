@@ -189,6 +189,125 @@ pub struct ResourceUsage {
     #[prost(uint64, tag = "6")]
     pub vram_bytes_used: u64,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetJobStatusRequest {
+    /// Unique job identifier (typically capsule_id)
+    #[prost(string, tag = "1")]
+    pub job_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetJobStatusResponse {
+    #[prost(string, tag = "1")]
+    pub job_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub capsule_name: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub capsule_version: ::prost::alloc::string::String,
+    #[prost(enumeration = "JobPhase", tag = "4")]
+    pub phase: i32,
+    /// Empty if no error
+    #[prost(string, tag = "5")]
+    pub error_message: ::prost::alloc::string::String,
+    /// -1 if not applicable
+    #[prost(int32, tag = "6")]
+    pub exit_code: i32,
+    /// ISO8601
+    #[prost(string, tag = "7")]
+    pub created_at: ::prost::alloc::string::String,
+    /// ISO8601, empty if not started
+    #[prost(string, tag = "8")]
+    pub started_at: ::prost::alloc::string::String,
+    /// ISO8601, empty if not finished
+    #[prost(string, tag = "9")]
+    pub finished_at: ::prost::alloc::string::String,
+    /// 0 if still running or not started
+    #[prost(uint64, tag = "10")]
+    pub duration_secs: u64,
+    #[prost(message, optional, tag = "11")]
+    pub resource_usage: ::core::option::Option<JobResourceUsage>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct JobResourceUsage {
+    /// Total CPU time used
+    #[prost(uint64, tag = "1")]
+    pub cpu_time_ms: u64,
+    /// Peak memory usage
+    #[prost(uint64, tag = "2")]
+    pub memory_peak_bytes: u64,
+    /// Peak VRAM usage (if GPU job)
+    #[prost(uint64, tag = "3")]
+    pub vram_peak_bytes: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListJobsRequest {
+    /// Max jobs to return (default: 100)
+    #[prost(uint32, tag = "1")]
+    pub limit: u32,
+    /// Filter by capsule name (optional)
+    #[prost(string, tag = "2")]
+    pub capsule_name: ::prost::alloc::string::String,
+    /// Filter by phase (optional, 0 = all)
+    #[prost(enumeration = "JobPhase", tag = "3")]
+    pub phase_filter: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListJobsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub jobs: ::prost::alloc::vec::Vec<JobSummary>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct JobSummary {
+    #[prost(string, tag = "1")]
+    pub job_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub capsule_name: ::prost::alloc::string::String,
+    #[prost(enumeration = "JobPhase", tag = "3")]
+    pub phase: i32,
+    /// ISO8601
+    #[prost(string, tag = "4")]
+    pub created_at: ::prost::alloc::string::String,
+    /// 0 if still running
+    #[prost(uint64, tag = "5")]
+    pub duration_secs: u64,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum JobPhase {
+    Unspecified = 0,
+    Pending = 1,
+    Running = 2,
+    Succeeded = 3,
+    Failed = 4,
+    Cancelled = 5,
+}
+impl JobPhase {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "JOB_PHASE_UNSPECIFIED",
+            Self::Pending => "JOB_PHASE_PENDING",
+            Self::Running => "JOB_PHASE_RUNNING",
+            Self::Succeeded => "JOB_PHASE_SUCCEEDED",
+            Self::Failed => "JOB_PHASE_FAILED",
+            Self::Cancelled => "JOB_PHASE_CANCELLED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "JOB_PHASE_UNSPECIFIED" => Some(Self::Unspecified),
+            "JOB_PHASE_PENDING" => Some(Self::Pending),
+            "JOB_PHASE_RUNNING" => Some(Self::Running),
+            "JOB_PHASE_SUCCEEDED" => Some(Self::Succeeded),
+            "JOB_PHASE_FAILED" => Some(Self::Failed),
+            "JOB_PHASE_CANCELLED" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
 /// Generated client implementations.
 pub mod engine_client {
     #![allow(
@@ -443,6 +562,56 @@ pub mod engine_client {
                 .insert(GrpcMethod::new("onescluster.engine.v1.Engine", "FetchModel"));
             self.inner.unary(req, path, codec).await
         }
+        /// Get job execution status (Phase 3: Coordinator integration)
+        pub async fn get_job_status(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetJobStatusRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetJobStatusResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/onescluster.engine.v1.Engine/GetJobStatus",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("onescluster.engine.v1.Engine", "GetJobStatus"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// List recent jobs with optional filtering
+        pub async fn list_jobs(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListJobsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListJobsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/onescluster.engine.v1.Engine/ListJobs",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("onescluster.engine.v1.Engine", "ListJobs"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -497,6 +666,22 @@ pub mod engine_server {
             request: tonic::Request<super::FetchModelRequest>,
         ) -> std::result::Result<
             tonic::Response<super::FetchModelResponse>,
+            tonic::Status,
+        >;
+        /// Get job execution status (Phase 3: Coordinator integration)
+        async fn get_job_status(
+            &self,
+            request: tonic::Request<super::GetJobStatusRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetJobStatusResponse>,
+            tonic::Status,
+        >;
+        /// List recent jobs with optional filtering
+        async fn list_jobs(
+            &self,
+            request: tonic::Request<super::ListJobsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListJobsResponse>,
             tonic::Status,
         >;
     }
@@ -869,6 +1054,94 @@ pub mod engine_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = FetchModelSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/onescluster.engine.v1.Engine/GetJobStatus" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetJobStatusSvc<T: Engine>(pub Arc<T>);
+                    impl<
+                        T: Engine,
+                    > tonic::server::UnaryService<super::GetJobStatusRequest>
+                    for GetJobStatusSvc<T> {
+                        type Response = super::GetJobStatusResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetJobStatusRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Engine>::get_job_status(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetJobStatusSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/onescluster.engine.v1.Engine/ListJobs" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListJobsSvc<T: Engine>(pub Arc<T>);
+                    impl<T: Engine> tonic::server::UnaryService<super::ListJobsRequest>
+                    for ListJobsSvc<T> {
+                        type Response = super::ListJobsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListJobsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Engine>::list_jobs(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListJobsSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
