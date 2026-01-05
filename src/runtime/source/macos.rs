@@ -97,19 +97,43 @@ async fn launch_with_alcoholless(
     // Set working directory to source
     cmd.current_dir(&target.source_dir);
 
-    // Add the toolchain and entrypoint
-    cmd.arg(&toolchain.path);
+    // Check if explicit cmd is provided (Generic Source Runtime)
+    if let Some(ref explicit_cmd) = target.cmd {
+        // Use explicit command directly
+        // The first element is the binary, rest are arguments
+        if let Some((binary, args)) = explicit_cmd.split_first() {
+            // Find the actual binary path using toolchain manager or PATH
+            let binary_path = if binary == &target.language || 
+                              binary == "python" || binary == "python3" || 
+                              binary == "node" || binary == "ruby" || binary == "deno" {
+                toolchain.path.clone()
+            } else {
+                which::which(binary).unwrap_or_else(|_| PathBuf::from(binary))
+            };
+            cmd.arg(&binary_path);
+            
+            // For Python, add -B to disable bytecode caching
+            if target.language == "python" {
+                cmd.arg("-B");
+            }
+            
+            cmd.args(args);
+        }
+    } else {
+        // Legacy path: use toolchain + language-specific arguments
+        cmd.arg(&toolchain.path);
 
-    // Add language-specific arguments
-    match target.language.to_lowercase().as_str() {
-        "python" | "python3" => {
-            cmd.args(["-B", &target.entrypoint]); // Disable bytecode caching
-        }
-        "deno" => {
-            cmd.args(["run", "--allow-read=.", &target.entrypoint]);
-        }
-        _ => {
-            cmd.arg(&target.entrypoint);
+        // Add language-specific arguments
+        match target.language.to_lowercase().as_str() {
+            "python" | "python3" => {
+                cmd.args(["-B", &target.entrypoint]); // Disable bytecode caching
+            }
+            "deno" => {
+                cmd.args(["run", "--allow-read=.", &target.entrypoint]);
+            }
+            _ => {
+                cmd.arg(&target.entrypoint);
+            }
         }
     }
 
@@ -213,19 +237,43 @@ async fn launch_with_sandbox_exec(
     let mut cmd = Command::new("sandbox-exec");
     cmd.args(["-f", &profile_path.to_string_lossy()]);
 
-    // Add the toolchain and entrypoint
-    cmd.arg(&toolchain.path);
+    // Check if explicit cmd is provided (Generic Source Runtime)
+    if let Some(ref explicit_cmd) = target.cmd {
+        // Use explicit command directly
+        // The first element is the binary, rest are arguments
+        if let Some((binary, args)) = explicit_cmd.split_first() {
+            // Find the actual binary path using toolchain manager or PATH
+            let binary_path = if binary == &target.language || 
+                              binary == "python" || binary == "python3" || 
+                              binary == "node" || binary == "ruby" || binary == "deno" {
+                toolchain.path.clone()
+            } else {
+                which::which(binary).unwrap_or_else(|_| PathBuf::from(binary))
+            };
+            cmd.arg(&binary_path);
+            
+            // For Python, add -B to disable bytecode caching
+            if target.language == "python" {
+                cmd.arg("-B");
+            }
+            
+            cmd.args(args);
+        }
+    } else {
+        // Legacy path: use toolchain + language-specific arguments
+        cmd.arg(&toolchain.path);
 
-    // Add language-specific arguments
-    match target.language.to_lowercase().as_str() {
-        "python" | "python3" => {
-            cmd.args(["-B", &target.entrypoint]);
-        }
-        "deno" => {
-            cmd.args(["run", "--allow-read=.", &target.entrypoint]);
-        }
-        _ => {
-            cmd.arg(&target.entrypoint);
+        // Add language-specific arguments
+        match target.language.to_lowercase().as_str() {
+            "python" | "python3" => {
+                cmd.args(["-B", &target.entrypoint]);
+            }
+            "deno" => {
+                cmd.args(["run", "--allow-read=.", &target.entrypoint]);
+            }
+            _ => {
+                cmd.arg(&target.entrypoint);
+            }
         }
     }
 

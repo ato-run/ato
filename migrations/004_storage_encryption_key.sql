@@ -1,1 +1,0 @@
-ALTER TABLE deployments ADD COLUMN storage_encryption_key TEXT;

@@ -27,7 +27,7 @@ pub struct RunPlan {
     #[prost(string, repeated, tag = "30")]
     pub egress_allowlist: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     /// Runtime selection
-    #[prost(oneof = "run_plan::Runtime", tags = "10, 11, 12, 13, 14")]
+    #[prost(oneof = "run_plan::Runtime", tags = "10, 11, 13, 14")]
     pub runtime: ::core::option::Option<run_plan::Runtime>,
 }
 /// Nested message and enum types in `RunPlan`.
@@ -39,9 +39,8 @@ pub mod run_plan {
         Docker(super::DockerRuntime),
         #[prost(message, tag = "11")]
         Native(super::NativeRuntime),
-        /// Optional: enable only if supported
-        #[prost(message, tag = "12")]
-        PythonUv(super::PythonUvRuntime),
+        /// DEPRECATED: python_uv = 12 (replaced by source)
+        ///
         /// WebAssembly Component Model
         #[prost(message, tag = "13")]
         Wasm(super::WasmRuntime),
@@ -89,22 +88,6 @@ pub struct NativeRuntime {
     >,
     #[prost(string, tag = "4")]
     pub working_dir: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct PythonUvRuntime {
-    #[prost(string, tag = "1")]
-    pub entrypoint: ::prost::alloc::string::String,
-    #[prost(string, repeated, tag = "2")]
-    pub args: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(map = "string, string", tag = "3")]
-    pub env: ::std::collections::HashMap<
-        ::prost::alloc::string::String,
-        ::prost::alloc::string::String,
-    >,
-    #[prost(string, tag = "4")]
-    pub working_dir: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag = "5")]
-    pub ports: ::prost::alloc::vec::Vec<Port>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct WasmRuntime {

@@ -123,23 +123,17 @@ fn canonical_runplan_to_proto(plan: &capsule_core::runplan::RunPlan) -> common::
                 working_dir: native.working_dir.clone().unwrap_or_default(),
             })
         }
-        capsule_core::runplan::RunPlanRuntime::PythonUv(py) => {
+        capsule_core::runplan::RunPlanRuntime::Source(src) => {
             let env: HashMap<String, String> =
-                py.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            common::run_plan::Runtime::PythonUv(common::PythonUvRuntime {
-                entrypoint: py.entrypoint.clone(),
-                args: py.args.clone(),
+                src.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            common::run_plan::Runtime::Source(common::SourceRuntime {
+                language: src.language.clone().unwrap_or_default(),
+                entrypoint: src.entrypoint.clone(),
+                cmd: src.cmd.clone(),
+                args: src.args.clone(),
                 env,
-                working_dir: py.working_dir.clone().unwrap_or_default(),
-                ports: py
-                    .ports
-                    .iter()
-                    .map(|p| common::Port {
-                        container_port: p.container_port,
-                        host_port: p.host_port.unwrap_or(0),
-                        protocol: p.protocol.clone().unwrap_or_default(),
-                    })
-                    .collect(),
+                working_dir: src.working_dir.clone().unwrap_or_default(),
+                dev_mode: src.dev_mode,
             })
         }
     };
@@ -195,12 +189,12 @@ impl Engine for EngineService {
                     }
                 }
 
-                // Extract working_dir from PythonUvRuntime for source execution
-                if let Some(crate::proto::onescluster::common::v1::run_plan::Runtime::PythonUv(py)) =
+                // Extract working_dir from SourceRuntime for source execution
+                if let Some(crate::proto::onescluster::common::v1::run_plan::Runtime::Source(src)) =
                     plan.runtime.as_ref()
                 {
-                    if !py.working_dir.is_empty() {
-                        source_working_dir = Some(py.working_dir.clone());
+                    if !src.working_dir.is_empty() {
+                        source_working_dir = Some(src.working_dir.clone());
                     }
                 }
 
@@ -303,7 +297,6 @@ impl Engine for EngineService {
                 let codes = failure_codes::compute_deploy_failure_codes(
                     local_ok,
                     manifest.can_fallback_to_cloud(),
-                    self.capsule_manager.cloud_configured(),
                 );
 
                 if !codes.is_empty() {

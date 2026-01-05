@@ -33,7 +33,6 @@ const DEFAULT_HOOK_RETRY_ATTEMPTS: u32 = 1;
 pub enum RuntimeKind {
     Youki,
     Runc,
-    Mock,
     Native,
     Wasm,
     Source,
@@ -44,7 +43,6 @@ impl RuntimeKind {
         match input.to_ascii_lowercase().as_str() {
             "youki" => Some(RuntimeKind::Youki),
             "runc" => Some(RuntimeKind::Runc),
-            "mock" => Some(RuntimeKind::Mock),
             "native" => Some(RuntimeKind::Native),
             "wasm" => Some(RuntimeKind::Wasm),
             "source" => Some(RuntimeKind::Source),
@@ -56,7 +54,6 @@ impl RuntimeKind {
         match self {
             RuntimeKind::Youki => &["youki"],
             RuntimeKind::Runc => &["runc"],
-            RuntimeKind::Mock => &["mock_runtime"],
             RuntimeKind::Native => &[], // Internal
             RuntimeKind::Wasm => &[], // Internal
             RuntimeKind::Source => &[], // Internal (uses host toolchains)
@@ -114,13 +111,7 @@ impl RuntimeConfig {
                         tried: vec![path.to_string_lossy().into_owned()],
                     });
                 }
-                let inferred_kind = infer_kind_from_path(&path).or_else(|| {
-                    if path.to_string_lossy().contains("mock_runtime") {
-                        Some(RuntimeKind::Mock)
-                    } else {
-                        None
-                    }
-                }).ok_or_else(|| {
+                let inferred_kind = infer_kind_from_path(&path).ok_or_else(|| {
                     RuntimeError::InvalidConfig(format!(
                         "Failed to infer runtime kind from binary path {:?}. Specify runtime.preferred",
                         path
@@ -129,7 +120,7 @@ impl RuntimeConfig {
                 (inferred_kind, path)
             }
             (None, None) => {
-                let order = [RuntimeKind::Youki, RuntimeKind::Runc, RuntimeKind::Mock];
+                let order = [RuntimeKind::Youki, RuntimeKind::Runc];
                 let mut attempts = Vec::new();
                 let mut found = None;
                 for kind in order {
@@ -207,10 +198,6 @@ fn find_binary(candidates: &[&str]) -> Result<PathBuf, RuntimeError> {
 
 fn infer_kind_from_path(path: &Path) -> Option<RuntimeKind> {
     let file_name = path.file_stem().and_then(OsStr::to_str)?;
-
-    if file_name == "mock_runtime" {
-        return Some(RuntimeKind::Mock);
-    }
 
     RuntimeKind::from_str(file_name)
 }

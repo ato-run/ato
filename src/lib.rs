@@ -19,17 +19,14 @@
 //! handle.shutdown().await;
 //! ```
 
-pub mod adep;
 pub mod api_server;
 pub mod artifact;
 pub mod auth;
-pub mod billing;
 #[allow(dead_code)]
 pub mod capsule_capnp; // Cap'n Proto generated code
 pub mod capsule_manager;
 pub mod capnp_to_manifest; // Cap'n Proto ↔ CapsuleManifestV1 conversion (UARC V1.1.0)
 pub mod cas; // CAS client abstraction (UARC V1.1.0)
-pub mod cloud;
 pub mod config;
 // pub mod coordinator_service;  // Disabled: proto definitions not present in capsuled/proto
 pub mod dev_server; // Embedded DevServer API for capsule-cli integration
@@ -52,7 +49,7 @@ pub mod oci {
     
     /// Stub module for spec_builder
     pub mod spec_builder {
-        use crate::adep::{CapsuleExecution, StorageVolume};
+        use capsule_core::capsule_v1::{CapsuleExecution, StorageVolume};
         use crate::workload::manifest_loader::ResourceRequirements;
         use capsule_core::capsule_v1::CapsuleManifestV1;
         
