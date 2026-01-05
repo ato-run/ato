@@ -27,14 +27,12 @@ use capsule_core::capsule_v1::CapsuleManifestV1;
 
 /// EngineService implements the Engine gRPC service
 use crate::network::service_registry::ServiceRegistry;
-use crate::network::tailscale::TailscaleManager;
 
 #[derive(Clone)]
 pub struct EngineService {
     capsule_manager: Arc<CapsuleManager>,
     wasm_host: Arc<AdepLogicHost>,
     backend_mode: String,
-    tailscale_manager: Arc<TailscaleManager>,
     service_registry: Arc<ServiceRegistry>,
     _runtime: Arc<ContainerRuntime>,
     allowed_host_paths: Vec<String>,
@@ -49,7 +47,6 @@ impl EngineService {
         capsule_manager: Arc<CapsuleManager>,
         wasm_host: Arc<AdepLogicHost>,
         backend_mode: String,
-        tailscale_manager: Arc<TailscaleManager>,
         service_registry: Arc<ServiceRegistry>,
         runtime: Arc<ContainerRuntime>,
         allowed_host_paths: Vec<String>,
@@ -62,7 +59,6 @@ impl EngineService {
             capsule_manager,
             wasm_host,
             backend_mode,
-            tailscale_manager,
             service_registry,
             _runtime: runtime,
             allowed_host_paths,
@@ -110,17 +106,23 @@ fn canonical_runplan_to_proto(plan: &capsule_core::runplan::RunPlan) -> common::
                     .collect(),
             })
         }
+        // UARC V1: Native runtime removed - convert to Source runtime
         capsule_core::runplan::RunPlanRuntime::Native(native) => {
             let env: HashMap<String, String> = native
                 .env
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            common::run_plan::Runtime::Native(common::NativeRuntime {
-                binary_path: native.binary_path.clone(),
+            
+            // Map Native to Source runtime for backward compatibility
+            common::run_plan::Runtime::Source(common::SourceRuntime {
+                language: "generic".to_string(),  // Generic source runtime
+                entrypoint: native.binary_path.clone(),
+                cmd: Some(vec![native.binary_path.clone()]),
                 args: native.args.clone(),
                 env,
                 working_dir: native.working_dir.clone().unwrap_or_default(),
+                dependencies: None,
             })
         }
         capsule_core::runplan::RunPlanRuntime::Source(src) => {

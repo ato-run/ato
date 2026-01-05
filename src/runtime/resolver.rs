@@ -91,10 +91,11 @@ impl ResolvedTarget {
             ResolvedTarget::Wasm { .. } => RuntimeKind::Wasm,
             ResolvedTarget::Source { language, .. } => {
                 // Map source language to RuntimeKind
+                // UARC V1: Source runtime for interpreted languages
                 match language.to_lowercase().as_str() {
-                    "python" | "python3" => RuntimeKind::Native, // Use Native for python-uv
-                    "node" | "nodejs" | "deno" => RuntimeKind::Native,
-                    _ => RuntimeKind::Native,
+                    "python" | "python3" => RuntimeKind::Source,
+                    "node" | "nodejs" | "deno" => RuntimeKind::Source,
+                    _ => RuntimeKind::Source,
                 }
             }
             ResolvedTarget::Oci { .. } => RuntimeKind::Youki, // Prefer Youki for OCI
@@ -102,8 +103,8 @@ impl ResolvedTarget {
                 RuntimeType::Wasm => RuntimeKind::Wasm,
                 RuntimeType::Youki => RuntimeKind::Youki,
                 RuntimeType::Docker => RuntimeKind::Youki,
-                RuntimeType::Native => RuntimeKind::Native,
-                RuntimeType::Source => RuntimeKind::Native,  // Source uses Native process execution
+                RuntimeType::Native => RuntimeKind::Source,  // Native → Source (UARC V1 migration)
+                RuntimeType::Source => RuntimeKind::Source,
             },
         }
     }
