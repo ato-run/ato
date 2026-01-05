@@ -55,10 +55,13 @@ pub use resource::model_fetcher;
 pub use resource::oci;
 pub use resource::storage;
 
-pub mod job_history; // Job history persistence (UARC V1.1.0)
-pub mod logs;
-pub mod metrics;
+pub mod observability; // Observability modules (audit, job_history, logs, metrics)
 pub mod system; // System-level modules (hardware, network)
+
+// Re-exports from observability for backward compatibility
+pub use observability::job_history;
+pub use observability::logs;
+pub use observability::metrics;
 
 // Re-exports from system for backward compatibility
 pub use system::hardware;
