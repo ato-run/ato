@@ -1,14 +1,12 @@
 name: CI
 
-# Temporarily disabled: This project requires capsule-cli dependencies
-# from the parent monorepo (capsuled-dev) which are not available
-# in standalone CI runs. CI should be configured at the monorepo level.
+# Re-enabled: capsuled is now self-contained with Parent-Child workspace architecture
 on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
-  # push:
-  #   branches: [main, origin]
-  # pull_request:
-  #   branches: [main, origin]
 
 env:
   CARGO_TERM_COLOR: always
