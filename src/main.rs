@@ -219,15 +219,15 @@ async fn main() -> anyhow::Result<()> {
     info!("Models cache dir: {}", models_cache_dir);
 
     // Initialize ContainerRuntime (external OCI runtime) config.
-    // In Native/DirectRuntime mode we intentionally skip binary detection to avoid noisy/misleading warnings.
+    // UARC V1.1.0: Source runtime for direct execution (no OCI)
     let container_runtime_config = match backend_mode.as_str() {
-        "native" | "direct" => {
+        "native" | "direct" | "source" => {
             info!(
                 backend_mode = %backend_mode,
-                "Using internal NativeRuntime; skipping external OCI runtime binary detection"
+                "Using Source Runtime; skipping external OCI runtime binary detection"
             );
             RuntimeConfig {
-                kind: RuntimeKind::Native,
+                kind: RuntimeKind::Source,
                 binary_path: std::path::PathBuf::from("/dev/null"),
                 bundle_root: std::env::temp_dir().join("capsuled").join("bundles"),
                 state_root: std::env::temp_dir().join("capsuled").join("state"),
@@ -275,7 +275,7 @@ async fn main() -> anyhow::Result<()> {
         gpu_detector.clone(),
         Some(service_registry.clone()),
         None, // mDNS announcer (optional)
-        None, // Traefik manager (optional)
+        // UARC V1: Traefik removed
         Some(artifact_manager.clone()),
         Some(process_supervisor.clone()),
         Some(proxy_port),
@@ -322,9 +322,7 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|e| panic!("Failed to initialize WasmHost: {}", e)),
     );
 
-    // Initialize TailscaleManager
-    let tailscale_manager =
-        Arc::new(capsuled::network::tailscale::TailscaleManager::start(None, None, None));
+    // TailscaleManager removed - UARC V1.1.0 uses SPIFFE ID for identity
 
     let allowed_host_paths_for_grpc = allowed_host_paths.clone();
     let models_cache_dir_for_grpc = models_cache_dir.clone();
@@ -349,7 +347,6 @@ async fn main() -> anyhow::Result<()> {
             allowed_host_paths_for_grpc,
             PathBuf::from(models_cache_dir_for_grpc),
             backend_mode,
-            tailscale_manager,
             grpc_service_registry,
             grpc_gpu_detector,
             grpc_artifact_manager,

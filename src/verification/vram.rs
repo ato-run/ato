@@ -146,7 +146,7 @@ impl VramScrubber {
         {
             warn!("VRAM scrubbing backend not available on this platform; using no-op");
             return Ok(Self {
-                backend: crate::security::vram_scrubber::noop_backend::new_backend(gpu_index)?,
+                backend: crate::verification::vram::noop_backend::new_backend(gpu_index)?,
             });
         }
     }

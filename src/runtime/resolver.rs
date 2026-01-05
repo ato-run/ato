@@ -148,7 +148,7 @@ impl ResolveContext {
         let mut supported = HashSet::new();
         supported.insert(RuntimeKind::Wasm);
         supported.insert(RuntimeKind::Youki);
-        supported.insert(RuntimeKind::Native);
+        supported.insert(RuntimeKind::Source); // UARC V1: Native → Source
 
         let mut toolchains = HashSet::new();
         toolchains.insert("python".to_string());
