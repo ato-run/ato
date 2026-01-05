@@ -10,6 +10,7 @@ pub mod container;
 pub mod dev;
 pub mod docker_cli;
 pub mod native;
+pub mod resolver;
 pub mod traits;
 pub mod wasm;
 pub mod youki_adapter;
@@ -18,6 +19,7 @@ pub use container::ContainerRuntime;
 pub use dev::DevRuntime;
 pub use docker_cli::DockerCliRuntime;
 pub use native::NativeRuntime;
+pub use resolver::{resolve_runtime, ResolveContext, ResolveError, ResolvedTarget};
 pub use traits::Runtime;
 pub use wasm::WasmRuntime;
 pub use youki_adapter::YoukiRuntimeAdapter;
@@ -25,7 +27,7 @@ pub use youki_adapter::YoukiRuntimeAdapter;
 const DEFAULT_HOOK_RETRY_ATTEMPTS: u32 = 1;
 
 /// Runtime implementation to use for launching containers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeKind {
     Youki,
     Runc,
