@@ -383,10 +383,12 @@ grpcurl -plaintext -d '{"limit": 10, "capsule_name": "my-capsule"}' \
 ### Phase 5: gRPC CancelJob (Control Plane 完結) ✅
 
 **変更ファイル:**
+
 - `uarc/proto/engine/v1/api.proto` (修正)
 - `src/grpc_server.rs` (修正)
 
 **Proto 定義:**
+
 ```protobuf
 // 新規 RPC
 rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
@@ -404,12 +406,14 @@ message CancelJobResponse {
 ```
 
 **実装内容:**
+
 1. **冪等性**: 既に終了済み (Succeeded/Failed/Cancelled) のジョブへの CancelJob は成功として扱う
 2. **JobHistory 連携**: キャンセル成功時に `phase = Cancelled` へ遷移、error_message に理由記録
 3. **CapsuleManager 連携**: `stop_capsule()` 経由でプロセス停止
 4. **エラーハンドリング**: ジョブが見つからない場合は `NOT_FOUND`、停止失敗は適切なエラーメッセージ
 
 **使用例 (grpcurl):**
+
 ```bash
 # ジョブキャンセル
 grpcurl -plaintext -d '{"job_id": "abc-123"}' \
@@ -420,23 +424,113 @@ grpcurl -plaintext -d '{"job_id": "abc-123", "force": true}' \
   localhost:50051 ato.engine.v1.Engine/CancelJob
 ```
 
-**テスト (2件追加):**
+**テスト (2 件追加):**
+
 - `test_cancel_job_updates_phase`: Running → Cancelled 遷移確認
 - `test_cancel_already_completed_job_is_idempotent`: 完了済みジョブへの冪等性確認
 
 **ジョブ管理ライフサイクル完結:**
+
 ```
 Deploy → GetJobStatus/ListJobs (監視) → CancelJob (停止)
    ↓              ↓                           ↓
  Pending → Running → Succeeded/Failed/Cancelled
 ```
 
+### Phase 6: Hybrid Source Runtime (macOS/Windows) ✅
+
+**変更ファイル:**
+
+- `src/runtime/source/mod.rs` (修正)
+- `src/runtime/source/macos.rs` (書き換え)
+- `src/runtime/source/windows.rs` (新規作成)
+- `src/runtime/source/toolchain.rs` (新規作成)
+
+**実装内容:**
+
+- **macOS**: Alcoholless + sandbox-exec フォールバック
+  - `launch_with_alcoholless()`: ユーザー分離サンドボックス
+  - `launch_with_sandbox_exec()`: 動的 Seatbelt プロファイル生成
+- **Windows**: Windows Sandbox + Sandboxie Plus フォールバック
+  - `launch_with_windows_sandbox()`: .wsb コンフィグ生成 + エフェメラル VM
+  - `launch_with_sandboxie()`: Start.exe CLI
+- **ToolchainManager**: ホスト上のツールチェイン検出
+
+**プラットフォーム優先順位:**
+
+```
+macOS:   Alcoholless → sandbox-exec → (fallback to OCI)
+Windows: Windows Sandbox → Sandboxie Plus → (fallback to OCI)
+Linux:   bubblewrap → user namespace → (fallback to OCI)
+```
+
+**テスト (6 件追加):**
+
+- Seatbelt プロファイル生成
+- WSB コンフィグ生成
+- ツール利用可否チェック
+
+### Phase 7: CLI Integration & E2E Validation ✅
+
+**変更ファイル (capsule-cli):**
+
+- `build.rs` (新規作成) - tonic-build による proto 生成
+- `src/engine_client.rs` (新規作成) - gRPC クライアントラッパー
+- `src/commands/ps.rs` (新規作成) - ListJobs RPC
+- `src/commands/stop.rs` (新規作成) - CancelJob RPC
+- `src/commands/logs.rs` (新規作成) - StreamLogs RPC
+- `src/commands/dev.rs` (新規作成) - ホットリロード
+- `src/commands/run.rs` (修正) - `--engine` フラグ追加
+- `tests/e2e_cli.sh` (新規作成) - E2E テストスクリプト
+
+**新規 CLI コマンド:**
+
+```bash
+# Engine 経由でデプロイ
+capsule run --engine --follow
+
+# 実行中ジョブ一覧
+capsule ps --limit 20 --phase running
+
+# ジョブ停止
+capsule stop <JOB_ID> [--force]
+
+# リアルタイムログ
+capsule logs <JOB_ID> --follow --timestamps
+
+# 開発モード (ファイル監視 + 自動再デプロイ)
+capsule dev --watch "src/**/*"
+```
+
+**engine_client.rs:**
+
+```rust
+pub struct Engine { /* tonic gRPC client wrapper */ }
+
+impl Engine {
+    pub async fn connect(config: EngineConfig) -> Result<Self>;
+    pub async fn deploy_run_plan(&mut self, ...) -> Result<DeployResult>;
+    pub async fn list_jobs(&mut self, ...) -> Result<Vec<JobSummary>>;
+    pub async fn cancel_job(&mut self, ...) -> Result<CancelResult>;
+    pub async fn stream_logs(&mut self, ...) -> Result<LogStream>;
+}
+```
+
+**E2E テスト (13 件):**
+
+- CLI ヘルプ表示
+- 新規コマンド存在確認 (ps, stop, logs, dev)
+- capsule init
+- Engine 未起動時のエラーハンドリング
+- run/dev コマンドオプション確認
+
 ## 今後の作業
 
 1. ~~**gRPC GetJobStatus の統合**~~: ✅ 完了
 2. ~~**gRPC CancelJob の追加**~~: ✅ 完了
-3. **Source Runtime 実装**: Ephemeral Container による Python/Node.js 実行
-4. **SPIFFE 認証**: Engine 間通信に mTLS を導入
+3. ~~**Source Runtime 実装**~~: ✅ 完了 (Hybrid Sandbox)
+4. ~~**CLI Integration**~~: ✅ 完了
+5. **SPIFFE 認証**: Engine 間通信に mTLS を導入
 
 ## アーキテクチャ図
 
