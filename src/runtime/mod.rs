@@ -27,7 +27,7 @@ pub use youki_adapter::YoukiRuntimeAdapter;
 const DEFAULT_HOOK_RETRY_ATTEMPTS: u32 = 1;
 
 /// Runtime implementation to use for launching containers.
-/// 
+///
 /// Note: `Native` runtime has been removed as it's not part of UARC V1.
 /// Use `Source` runtime for interpreted languages instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -53,7 +53,7 @@ impl RuntimeKind {
         match self {
             RuntimeKind::Youki => &["youki"],
             RuntimeKind::Runc => &["runc"],
-            RuntimeKind::Wasm => &[], // Internal
+            RuntimeKind::Wasm => &[],   // Internal
             RuntimeKind::Source => &[], // Internal (uses host toolchains)
         }
     }

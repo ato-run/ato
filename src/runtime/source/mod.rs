@@ -34,7 +34,7 @@ use crate::runtime::{
 };
 
 pub use toolchain::{ToolchainInfo, ToolchainManager};
-pub use validator::{validate_cmd, validate_binary};
+pub use validator::{validate_binary, validate_cmd};
 
 /// Source runtime execution mode
 #[derive(Debug, Clone)]
@@ -79,7 +79,10 @@ pub struct SourceRuntime {
 
 impl SourceRuntime {
     /// Create a new SourceRuntime with the given configuration
-    pub fn new(config: SourceRuntimeConfig, oci_fallback: Option<Arc<YoukiRuntimeAdapter>>) -> Self {
+    pub fn new(
+        config: SourceRuntimeConfig,
+        oci_fallback: Option<Arc<YoukiRuntimeAdapter>>,
+    ) -> Self {
         Self {
             config,
             toolchain_manager: ToolchainManager::new(),
@@ -96,7 +99,10 @@ impl SourceRuntime {
         }
 
         // Check if we have a compatible toolchain
-        match self.toolchain_manager.find_toolchain(&target.language, target.version.as_deref()) {
+        match self
+            .toolchain_manager
+            .find_toolchain(&target.language, target.version.as_deref())
+        {
             Some(toolchain) => {
                 info!(
                     "Found compatible toolchain: {} {} at {:?}",
@@ -218,13 +224,13 @@ impl Runtime for SourceRuntime {
         // Security validation for Generic Source Runtime
         if let Some(ref cmd) = target.cmd {
             info!("Using explicit command (Generic Source Runtime): {:?}", cmd);
-            
+
             // Validate binary is in allowlist
             if let Some(binary) = cmd.first() {
                 validate_binary(binary, target.dev_mode)
                     .map_err(|e| RuntimeError::SecurityViolation(e.to_string()))?;
             }
-            
+
             // Validate command arguments (File-First + Dangerous Flags)
             validate_cmd(cmd, &target.source_dir, target.dev_mode)
                 .map_err(|e| RuntimeError::SecurityViolation(e.to_string()))?;
@@ -255,7 +261,7 @@ impl Runtime for SourceRuntime {
             {
                 use nix::sys::signal::{kill, Signal};
                 use nix::unistd::Pid;
-                
+
                 if let Err(e) = kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
                     warn!("Failed to send SIGTERM to PID {}: {}", pid, e);
                 }

@@ -143,12 +143,19 @@ fn runtime_env(plan: &common::RunPlan) -> Option<HashMap<String, String>> {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
         ),
-        Some(common::run_plan::Runtime::Wasm(wasm)) => {
-            Some(wasm.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        }
-        Some(common::run_plan::Runtime::Source(source)) => {
-            Some(source.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        }
+        Some(common::run_plan::Runtime::Wasm(wasm)) => Some(
+            wasm.env
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        ),
+        Some(common::run_plan::Runtime::Source(source)) => Some(
+            source
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        ),
         None => None,
     }
 }

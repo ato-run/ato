@@ -123,9 +123,11 @@ pub async fn launch_with_bubblewrap(
         source: e,
     })?;
 
-    cmd.stdout(Stdio::from(log_file.try_clone().map_err(|e| RuntimeError::Io {
-        path: log_path.clone(),
-        source: e,
+    cmd.stdout(Stdio::from(log_file.try_clone().map_err(|e| {
+        RuntimeError::Io {
+            path: log_path.clone(),
+            source: e,
+        }
     })?));
     cmd.stderr(Stdio::from(log_file));
 
@@ -138,7 +140,10 @@ pub async fn launch_with_bubblewrap(
     })?;
 
     let pid = child.id();
-    info!("Started source workload {} with PID {}", request.workload_id, pid);
+    info!(
+        "Started source workload {} with PID {}",
+        request.workload_id, pid
+    );
 
     // Track the workload
     {
@@ -163,7 +168,14 @@ pub fn verify_bubblewrap_available() -> Result<(), RuntimeError> {
 
     // Check if we can create user namespaces
     let output = Command::new(&bwrap_path)
-        .args(["--unshare-user", "--uid", "1000", "--gid", "1000", "/bin/true"])
+        .args([
+            "--unshare-user",
+            "--uid",
+            "1000",
+            "--gid",
+            "1000",
+            "/bin/true",
+        ])
         .output();
 
     match output {
@@ -176,7 +188,8 @@ pub fn verify_bubblewrap_available() -> Result<(), RuntimeError> {
             if stderr.contains("permission denied") || stderr.contains("Operation not permitted") {
                 warn!("User namespaces may be disabled. Try: sudo sysctl kernel.unprivileged_userns_clone=1");
                 Err(RuntimeError::SandboxSetupFailed(
-                    "User namespaces not available. Check kernel.unprivileged_userns_clone".to_string(),
+                    "User namespaces not available. Check kernel.unprivileged_userns_clone"
+                        .to_string(),
                 ))
             } else {
                 Err(RuntimeError::SandboxSetupFailed(format!(

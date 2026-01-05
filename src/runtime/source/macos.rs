@@ -103,20 +103,24 @@ async fn launch_with_alcoholless(
         // The first element is the binary, rest are arguments
         if let Some((binary, args)) = explicit_cmd.split_first() {
             // Find the actual binary path using toolchain manager or PATH
-            let binary_path = if binary == &target.language || 
-                              binary == "python" || binary == "python3" || 
-                              binary == "node" || binary == "ruby" || binary == "deno" {
+            let binary_path = if binary == &target.language
+                || binary == "python"
+                || binary == "python3"
+                || binary == "node"
+                || binary == "ruby"
+                || binary == "deno"
+            {
                 toolchain.path.clone()
             } else {
                 which::which(binary).unwrap_or_else(|_| PathBuf::from(binary))
             };
             cmd.arg(&binary_path);
-            
+
             // For Python, add -B to disable bytecode caching
             if target.language == "python" {
                 cmd.arg("-B");
             }
-            
+
             cmd.args(args);
         }
     } else {
@@ -147,12 +151,12 @@ async fn launch_with_alcoholless(
         source: e,
     })?;
 
-    cmd.stdout(Stdio::from(
-        log_file.try_clone().map_err(|e| RuntimeError::Io {
+    cmd.stdout(Stdio::from(log_file.try_clone().map_err(|e| {
+        RuntimeError::Io {
             path: log_path.clone(),
             source: e,
-        })?,
-    ));
+        }
+    })?));
     cmd.stderr(Stdio::from(log_file));
 
     debug!("Executing alcless command: {:?}", cmd);
@@ -243,20 +247,24 @@ async fn launch_with_sandbox_exec(
         // The first element is the binary, rest are arguments
         if let Some((binary, args)) = explicit_cmd.split_first() {
             // Find the actual binary path using toolchain manager or PATH
-            let binary_path = if binary == &target.language || 
-                              binary == "python" || binary == "python3" || 
-                              binary == "node" || binary == "ruby" || binary == "deno" {
+            let binary_path = if binary == &target.language
+                || binary == "python"
+                || binary == "python3"
+                || binary == "node"
+                || binary == "ruby"
+                || binary == "deno"
+            {
                 toolchain.path.clone()
             } else {
                 which::which(binary).unwrap_or_else(|_| PathBuf::from(binary))
             };
             cmd.arg(&binary_path);
-            
+
             // For Python, add -B to disable bytecode caching
             if target.language == "python" {
                 cmd.arg("-B");
             }
-            
+
             cmd.args(args);
         }
     } else {
@@ -287,7 +295,11 @@ async fn launch_with_sandbox_exec(
     // Note: sandbox-exec inherits parent env, but we explicitly set user-defined vars
     if let Some(manifest_json) = request.manifest_json {
         if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(manifest_json) {
-            if let Some(env_obj) = manifest.get("execution").and_then(|e| e.get("env")).and_then(|e| e.as_object()) {
+            if let Some(env_obj) = manifest
+                .get("execution")
+                .and_then(|e| e.get("env"))
+                .and_then(|e| e.as_object())
+            {
                 for (k, v) in env_obj {
                     if let Some(v_str) = v.as_str() {
                         cmd.env(k, v_str);
@@ -299,7 +311,12 @@ async fn launch_with_sandbox_exec(
     // Explicitly set PORT if allocated (from HOST_PORT in manifest env)
     if let Some(manifest_json) = request.manifest_json {
         if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(manifest_json) {
-            if let Some(port) = manifest.get("execution").and_then(|e| e.get("env")).and_then(|e| e.get("HOST_PORT")).and_then(|p| p.as_str()) {
+            if let Some(port) = manifest
+                .get("execution")
+                .and_then(|e| e.get("env"))
+                .and_then(|e| e.get("HOST_PORT"))
+                .and_then(|p| p.as_str())
+            {
                 cmd.env("PORT", port);
             }
         }
@@ -312,12 +329,12 @@ async fn launch_with_sandbox_exec(
         source: e,
     })?;
 
-    cmd.stdout(Stdio::from(
-        log_file.try_clone().map_err(|e| RuntimeError::Io {
+    cmd.stdout(Stdio::from(log_file.try_clone().map_err(|e| {
+        RuntimeError::Io {
             path: log_path.clone(),
             source: e,
-        })?,
-    ));
+        }
+    })?));
     cmd.stderr(Stdio::from(log_file));
 
     debug!("Executing sandbox-exec command: {:?}", cmd);
@@ -363,7 +380,8 @@ fn generate_seatbelt_profile(target: &SourceTarget, toolchain_path: &PathBuf) ->
 ; Even in dev mode, protect critical system paths
 (deny file-write* (subpath "/System") (with send-signal SIGKILL))
 (deny file-write* (subpath "/Library") (with send-signal SIGKILL))
-"#.to_string()
+"#
+        .to_string()
     } else {
         // Production mode: strict deny-default profile with minimal allowlist
         let source_dir = target.source_dir.to_string_lossy();

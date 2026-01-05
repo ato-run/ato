@@ -16,12 +16,12 @@ pub mod oci;
 pub mod oci {
     //! OCI module stub for non-Linux platforms
     //! OCI container runtime is only available on Linux.
-    
+
     /// Stub module for spec_builder
     pub mod spec_builder {
-        use capsule_core::capsule_v1::{CapsuleExecution, StorageVolume, CapsuleManifestV1};
         use crate::workload::manifest_loader::ResourceRequirements;
-        
+        use capsule_core::capsule_v1::{CapsuleExecution, CapsuleManifestV1, StorageVolume};
+
         /// Stub function that returns an error on non-Linux platforms
         #[allow(clippy::too_many_arguments)]
         pub fn build_oci_spec(
@@ -34,7 +34,10 @@ pub mod oci {
             _extra_args: Option<&[String]>,
             _manifest: &CapsuleManifestV1,
         ) -> Result<oci_spec::runtime::Spec, String> {
-            Err("OCI runtime is only available on Linux. Use source or wasm runtime instead.".into())
+            Err(
+                "OCI runtime is only available on Linux. Use source or wasm runtime instead."
+                    .into(),
+            )
         }
     }
 }
