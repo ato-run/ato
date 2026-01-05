@@ -11,7 +11,7 @@
 **ジョブ**:
 
 #### `test` - テストスイート
-- **OS**: Ubuntu, macOS
+- **OS**: Ubuntu, macOS, Windows
 - **実行内容**:
   - コードフォーマットチェック (`cargo fmt`)
   - Clippy linter (`cargo clippy`)
@@ -20,7 +20,7 @@
   - 統合テスト（non-ignored）
 
 #### `source-runtime-e2e` - Source Runtimeエンドツーエンドテスト
-- **OS**: Ubuntu, macOS
+- **OS**: Ubuntu, macOS, Windows
 - **Runtime Matrix**:
   - Python 3
   - Node.js
@@ -38,7 +38,7 @@
   - `cargo audit` による依存関係の脆弱性スキャン
 
 #### `build-release` - リリースビルド
-- **OS**: Ubuntu, macOS
+- **OS**: Ubuntu, macOS, Windows
 - **実行内容**:
   - リリースビルド (`--release`)
   - バイナリのアーティファクトアップロード
@@ -107,6 +107,12 @@ curl -fsSL https://deno.land/install.sh | sh
 brew install protobuf python3 node ruby deno
 ```
 
+#### Windows
+```powershell
+# Chocolatey でインストール
+choco install protoc python3 nodejs ruby deno
+```
+
 ## キャッシュ戦略
 
 ワークフローは以下をキャッシュして高速化しています:
@@ -123,6 +129,9 @@ sudo apt-get install -y protobuf-compiler
 
 # macOS
 brew install protobuf
+
+# Windows
+choco install protoc
 ```
 
 ### Runtime not found
