@@ -197,8 +197,8 @@ wasmtime-wasi = "16.0"
    - WASI Context 設定 (log redirection)
    - Resource limits (512MB memory default)
    - Async execution (wasi:cli/command::run)
-6. ⏳ テストの追加
-7. ⏳ ドキュメントの完成
+6. ✅ テストの追加
+7. ✅ ドキュメントの完成
 
 **機能要件:**
 - **Component Model API**: 旧 Module API ではなく高レベル Component Model 使用
@@ -207,12 +207,82 @@ wasmtime-wasi = "16.0"
 - **Async Execution**: Config::async_support(true) による Tokio ブロッキング防止
 - **Log Redirection**: stdout/stderr をファイルにリダイレクト (inherit_stdio 不使用)
 
+### Phase 3: Runtime Resolution (マルチターゲット解決) ✅
+
+**変更ファイル:**
+- `uarc/schema/capsule.capnp` (修正 - wasm @4 追加)
+- `capsule-cli/capsule-core/src/capsule_v1.rs` (修正 - targets フィールド追加)
+- `src/capnp_to_manifest.rs` (修正 - Wasm マッピングバグ修正)
+- `src/runtime/resolver.rs` (新規作成 - ~450行)
+- `src/capsule_manager.rs` (修正 - Resolver 統合)
+- `tests/runtime_resolution_e2e.rs` (新規作成 - 12テスト)
+
+**変更内容:**
+- Cap'n Proto `RuntimeType` に `wasm @4` を追加
+- `CapsuleManifestV1` に `targets: Option<TargetsConfig>` を追加
+- `TargetsConfig`, `WasmTarget`, `SourceTarget`, `OciTarget` 構造体を定義
+- UARC V1.1.0 Resolution Algorithm 実装 (Filter → Constraint → Preference)
+- レガシーフォールバック (targets 未定義時は execution.runtime を使用)
+
+**Runtime Resolver 設計:**
+```rust
+pub enum ResolvedTarget {
+    Wasm { digest: String, world: String, component_path: Option<PathBuf> },
+    Source { language: String, version: Option<String>, entrypoint: String, ... },
+    Oci { image: String, digest: Option<String>, cmd: Vec<String> },
+    Legacy { runtime_type: RuntimeType, entrypoint: String },
+}
+
+pub struct ResolveContext {
+    pub platform: String,                        // e.g., "darwin-arm64"
+    pub supported_runtimes: HashSet<RuntimeKind>, // Engine capabilities
+    pub wasm_available: bool,
+    pub docker_available: bool,
+    pub available_toolchains: HashSet<String>,   // e.g., {"python", "node"}
+}
+
+pub fn resolve_runtime(
+    manifest: &CapsuleManifestV1,
+    context: &ResolveContext,
+) -> Result<ResolvedTarget, ResolveError>;
+```
+
+**capsule.toml の書き方:**
+```toml
+[targets]
+preference = ["wasm", "oci"]  # 優先順位 (省略時: wasm → source → oci)
+
+[targets.wasm]
+digest = "sha256:abc123..."
+world = "wasi:cli/run@0.2.0"
+
+[targets.source]
+language = "python"
+version = "3.11"
+entrypoint = "main.py"
+dependencies = "requirements.txt"
+
+[targets.oci]
+image = "python:3.11-slim"
+digest = "sha256:xyz789..."
+cmd = ["python", "main.py"]
+```
+
+**E2E テストケース:**
+- `test_legacy_fallback_when_no_targets`: targets 未定義 → Legacy
+- `test_wasm_first_preference`: preference=["wasm", "oci"] → Wasm 選択
+- `test_oci_first_preference`: preference=["oci", "wasm"] → OCI 選択
+- `test_wasm_only_engine_selects_wasm`: OCI 優先だが Wasm のみ対応 → Wasm
+- `test_docker_only_engine_selects_oci`: Wasm 優先だが Docker のみ → OCI
+- `test_source_target_with_toolchain`: python toolchain あり → Source
+- `test_source_target_without_toolchain_falls_back`: ruby なし → OCI fallback
+- `test_no_compatible_target_error`: 対応ランタイムなし → エラー
+
 ## 今後の作業
 
 1. **gRPC GetJobStatus の統合**: `grpc_server.rs` に `GetJobStatus` RPC を追加
-2. **CAS Client の統合**: `capsule_manager.rs` で L1 Policy を呼び出し
+2. **Source Runtime 実装**: Ephemeral Container による Python/Node.js 実行
 3. **SPIFFE 認証**: Engine 間通信に mTLS を導入
-4. **Wasmtime バージョン固定**: `Cargo.toml` で `wasmtime = "=16.0"` に変更検討
 
 ## アーキテクチャ図
 
@@ -229,9 +299,18 @@ wasmtime-wasi = "16.0"
 │         ▼                 ▼                    ▼            │
 │  ┌──────────────────────────────────────────────────────┐  │
 │  │                   CapsuleManager                      │  │
-│  │   • Runtime selection (Docker, PythonUV, Youki)      │  │
-│  │   • Lifecycle management                              │  │
-│  │   • Metrics collection                                │  │
+│  │                         │                             │  │
+│  │            ┌────────────▼────────────┐               │  │
+│  │            │    Runtime Resolver     │               │  │
+│  │            │  (UARC V1.1.0 Algorithm)│               │  │
+│  │            └────────────┬────────────┘               │  │
+│  │                         │                             │  │
+│  │    ┌────────────────────┼────────────────────┐       │  │
+│  │    ▼                    ▼                    ▼       │  │
+│  │ ┌────────┐        ┌──────────┐        ┌──────────┐  │  │
+│  │ │  Wasm  │        │  Docker  │        │  Youki   │  │  │
+│  │ │Runtime │        │  Runtime │        │  Runtime │  │  │
+│  │ └────────┘        └──────────┘        └──────────┘  │  │
 │  └──────────────────────────────────────────────────────┘  │
 │                            │                                │
 │         ┌──────────────────┼──────────────────┐            │
