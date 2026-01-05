@@ -61,6 +61,9 @@ pub struct DevServerConfig {
 
     /// Enable verbose logging
     pub verbose: bool,
+
+    /// Enable development mode (relaxed security, file watching support)
+    pub dev_mode: bool,
 }
 
 impl Default for DevServerConfig {
@@ -76,6 +79,7 @@ impl Default for DevServerConfig {
             allowed_host_paths: vec![],
             models_cache_dir: home.join(".capsule").join("models"),
             verbose: false,
+            dev_mode: false, // Strict security by default
         }
     }
 }
@@ -92,6 +96,12 @@ impl DevServerConfig {
     /// Add allowed host paths
     pub fn with_allowed_paths(mut self, paths: Vec<String>) -> Self {
         self.allowed_host_paths = paths;
+        self
+    }
+
+    /// Set development mode (relaxed security)
+    pub fn with_dev_mode(mut self, dev_mode: bool) -> Self {
+        self.dev_mode = dev_mode;
         self
     }
 

@@ -10,6 +10,7 @@
 //! - Windows: Windows Sandbox (Pro/Enterprise) or Sandboxie Plus (all editions)
 
 mod toolchain;
+mod validator;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -33,6 +34,7 @@ use crate::runtime::{
 };
 
 pub use toolchain::{ToolchainInfo, ToolchainManager};
+pub use validator::{validate_cmd, validate_binary};
 
 /// Source runtime execution mode
 #[derive(Debug, Clone)]
@@ -213,6 +215,21 @@ impl Runtime for SourceRuntime {
             request.workload_id, target.language, target.entrypoint
         );
 
+        // Security validation for Generic Source Runtime
+        if let Some(ref cmd) = target.cmd {
+            info!("Using explicit command (Generic Source Runtime): {:?}", cmd);
+            
+            // Validate binary is in allowlist
+            if let Some(binary) = cmd.first() {
+                validate_binary(binary, target.dev_mode)
+                    .map_err(|e| RuntimeError::SecurityViolation(e.to_string()))?;
+            }
+            
+            // Validate command arguments (File-First + Dangerous Flags)
+            validate_cmd(cmd, &target.source_dir, target.dev_mode)
+                .map_err(|e| RuntimeError::SecurityViolation(e.to_string()))?;
+        }
+
         // Determine execution mode
         let mode = self.determine_mode(target);
         info!("Selected execution mode: {:?}", mode);
@@ -291,6 +308,8 @@ mod tests {
             dependencies: None,
             args: vec![],
             source_dir: PathBuf::from("/tmp"),
+            cmd: None,
+            dev_mode: false,
         };
 
         // Without dev_mode, should always be Containerized
