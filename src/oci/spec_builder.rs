@@ -404,6 +404,7 @@ mod tests {
             model: None,
             transparency: None,
             pool: None,
+            targets: None,
         }
     }
 

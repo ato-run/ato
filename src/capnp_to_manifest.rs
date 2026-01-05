@@ -45,7 +45,7 @@ fn runtime_type_to_capnp(r: RuntimeType) -> capsule_capnp::RuntimeType {
         RuntimeType::Docker => capsule_capnp::RuntimeType::Docker,
         RuntimeType::Native => capsule_capnp::RuntimeType::Native,
         RuntimeType::Youki => capsule_capnp::RuntimeType::Youki,
-        RuntimeType::Wasm => capsule_capnp::RuntimeType::Native, // Treat Wasm as Native for Cap'n Proto
+        RuntimeType::Wasm => capsule_capnp::RuntimeType::Wasm,
     }
 }
 
@@ -245,6 +245,71 @@ pub fn manifest_to_capnp_bytes(
                 .init_allowed_binaries(patterns.len() as u32);
             for (i, pattern) in patterns.iter().enumerate() {
                 patterns_builder.set(i as u32, pattern);
+            }
+        }
+
+        // Targets (optional - UARC V1.1.0 multi-target execution)
+        if let Some(targets) = &manifest.targets {
+            let mut targets_builder = builder.reborrow().init_targets();
+
+            // Preference order
+            let prefs = &targets.preference;
+            let mut prefs_builder = targets_builder.reborrow().init_preference(prefs.len() as u32);
+            for (i, pref) in prefs.iter().enumerate() {
+                prefs_builder.set(i as u32, pref);
+            }
+
+            // Wasm target
+            if let Some(wasm) = &targets.wasm {
+                let mut wasm_builder = targets_builder.reborrow().init_wasm();
+                wasm_builder.set_digest(&wasm.digest);
+                wasm_builder.set_world(&wasm.world);
+                let config = &wasm.config;
+                let mut config_builder = wasm_builder.reborrow().init_config(config.len() as u32);
+                for (i, (k, v)) in config.iter().enumerate() {
+                    let mut entry = config_builder.reborrow().get(i as u32);
+                    entry.set_key(k);
+                    entry.set_value(v);
+                }
+            }
+
+            // Source target
+            if let Some(source) = &targets.source {
+                let mut source_builder = targets_builder.reborrow().init_source();
+                source_builder.set_language(&source.language);
+                if let Some(ver) = &source.version {
+                    source_builder.set_version(ver);
+                }
+                source_builder.set_entrypoint(&source.entrypoint);
+                if let Some(deps) = &source.dependencies {
+                    source_builder.set_dependencies(deps);
+                }
+                let args = &source.args;
+                let mut args_builder = source_builder.reborrow().init_args(args.len() as u32);
+                for (i, arg) in args.iter().enumerate() {
+                    args_builder.set(i as u32, arg);
+                }
+            }
+
+            // OCI target
+            if let Some(oci) = &targets.oci {
+                let mut oci_builder = targets_builder.reborrow().init_oci();
+                oci_builder.set_image(&oci.image);
+                if let Some(digest) = &oci.digest {
+                    oci_builder.set_digest(digest);
+                }
+                let cmd = &oci.cmd;
+                let mut cmd_builder = oci_builder.reborrow().init_cmd(cmd.len() as u32);
+                for (i, c) in cmd.iter().enumerate() {
+                    cmd_builder.set(i as u32, c);
+                }
+                let env = &oci.env;
+                let mut env_builder = oci_builder.reborrow().init_env(env.len() as u32);
+                for (i, (k, v)) in env.iter().enumerate() {
+                    let mut entry = env_builder.reborrow().get(i as u32);
+                    entry.set_key(k);
+                    entry.set_value(v);
+                }
             }
         }
     }

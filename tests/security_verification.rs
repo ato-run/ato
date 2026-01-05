@@ -2,10 +2,10 @@
 mod tests {
 
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-    use capsuled_engine::capnp_to_manifest::manifest_to_capnp_bytes;
-    use capsuled_engine::security::verifier::ManifestVerifier;
+    use capsuled::capnp_to_manifest::manifest_to_capnp_bytes;
+    use capsuled::security::verifier::ManifestVerifier;
     use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-    use libadep_core::capsule_v1::{
+    use capsule_core::capsule_v1::{
         CapsuleExecution, CapsuleManifestV1, CapsuleRequirements, CapsuleRouting, CapsuleStorage,
         CapsuleType, RuntimeType,
     };
@@ -36,6 +36,7 @@ mod tests {
             model: None,
             transparency: None,
             pool: None,
+            targets: None,
         }
     }
 

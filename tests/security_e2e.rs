@@ -72,8 +72,8 @@ mod prereqs {
 }
 
 /// Helper to create a minimal test manifest
-fn create_test_manifest(name: &str) -> libadep_core::capsule_v1::CapsuleManifestV1 {
-    use libadep_core::capsule_v1::*;
+fn create_test_manifest(name: &str) -> capsule_core::capsule_v1::CapsuleManifestV1 {
+    use capsule_core::capsule_v1::*;
 
     CapsuleManifestV1 {
         schema_version: "1.0".to_string(),
@@ -98,6 +98,7 @@ fn create_test_manifest(name: &str) -> libadep_core::capsule_v1::CapsuleManifest
         model: None,
         transparency: None,
         pool: None,
+        targets: None,
     }
 }
 
@@ -114,8 +115,8 @@ fn test_egress_fail_closed_blocks_disallowed_traffic() {
         return;
     }
 
-    use capsuled_engine::security::egress_policy::generate_fw_rules;
-    use libadep_core::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
+    use capsuled::security::egress_policy::generate_fw_rules;
+    use capsule_core::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
 
     // Create manifest with restricted egress (only internal network)
     let mut manifest = create_test_manifest("test-egress-blocked");
@@ -169,8 +170,8 @@ fn test_egress_allows_permitted_traffic() {
         return;
     }
 
-    use capsuled_engine::security::egress_policy::generate_fw_rules;
-    use libadep_core::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
+    use capsuled::security::egress_policy::generate_fw_rules;
+    use capsule_core::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
 
     // Create manifest allowing specific external IP
     let mut manifest = create_test_manifest("test-egress-allowed");
@@ -218,8 +219,8 @@ fn test_egress_allows_permitted_traffic() {
 fn test_signature_verification_priority_over_egress() {
     prereqs::print_status();
 
-    use capsuled_engine::security::verifier::ManifestVerifier;
-    use libadep_core::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
+    use capsuled::security::verifier::ManifestVerifier;
+    use capsule_core::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
 
     // Create verifier with a FAKE trusted key to enable signature enforcement
     // When a trusted key is configured, the verifier will reject invalid signatures
@@ -281,7 +282,7 @@ fn test_storage_vram_lifecycle_cleanup() {
         return;
     }
 
-    use capsuled_engine::storage::{StorageConfig, StorageManager};
+    use capsuled::storage::{StorageConfig, StorageManager};
 
     let config = StorageConfig {
         enabled: true,
@@ -374,8 +375,8 @@ fn test_combined_security_flow() {
     // 4. Capsule runs
     // 5. On stop: VRAM scrub + storage cleanup
 
-    use capsuled_engine::security::egress_policy::generate_fw_rules;
-    use capsuled_engine::security::verifier::ManifestVerifier;
+    use capsuled::security::egress_policy::generate_fw_rules;
+    use capsuled::security::verifier::ManifestVerifier;
 
     // Step 1: Create manifest
     let manifest = create_test_manifest("combined-flow-test");
