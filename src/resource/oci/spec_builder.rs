@@ -1,7 +1,7 @@
+use crate::capsule_types::capsule_v1::CapsuleManifestV1;
+use crate::capsule_types::capsule_v1::{CapsuleExecution, RuntimeType, StorageVolume};
 use crate::security;
 use crate::workload::manifest_loader::ResourceRequirements;
-use capsule_core::capsule_v1::CapsuleManifestV1;
-use capsule_core::capsule_v1::{CapsuleExecution, RuntimeType, StorageVolume};
 use oci_spec::runtime::{
     HookBuilder, HooksBuilder, Linux, LinuxBuilder, LinuxNamespaceBuilder, LinuxNamespaceType,
     Mount, MountBuilder, ProcessBuilder, RootBuilder, Spec, SpecBuilder,
@@ -366,7 +366,7 @@ fn build_default_linux() -> Linux {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::capsule_v1::{CapsuleMetadataV1, CapsuleRouting};
+    use crate::capsule_types::capsule_v1::{CapsuleMetadataV1, CapsuleRouting};
     use std::collections::HashMap;
 
     fn bind_volume(source: &str) -> StorageVolume {
@@ -385,10 +385,10 @@ mod tests {
             schema_version: "1.0".to_string(),
             name: "test".to_string(),
             version: "0.0.1".to_string(),
-            capsule_type: capsule_core::capsule_v1::CapsuleType::App,
+            capsule_type: crate::capsule_types::capsule_v1::CapsuleType::App,
             metadata: CapsuleMetadataV1::default(),
             capabilities: None,
-            requirements: capsule_core::capsule_v1::CapsuleRequirements::default(),
+            requirements: crate::capsule_types::capsule_v1::CapsuleRequirements::default(),
             execution: CapsuleExecution {
                 runtime: RuntimeType::Native,
                 entrypoint: "/bin/echo".to_string(),
@@ -398,7 +398,7 @@ mod tests {
                 env: HashMap::new(),
                 signals: Default::default(),
             },
-            storage: capsule_core::capsule_v1::CapsuleStorage::default(),
+            storage: crate::capsule_types::capsule_v1::CapsuleStorage::default(),
             routing: CapsuleRouting::default(),
             network: None,
             model: None,

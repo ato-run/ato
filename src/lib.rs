@@ -36,6 +36,7 @@
 // Primary Modules (UARC V1.1.0 Architecture)
 // =============================================================================
 
+pub mod capsule_types; // Capsule type definitions (extracted from capsule-core)
 pub mod common;
 pub mod engine;
 pub mod interface;
@@ -71,7 +72,7 @@ pub use schema::converter as capnp_to_manifest;
 
 // From engine
 pub use engine::manager as capsule_manager;
-pub use engine::pool as pool_registry;
+// pub use engine::pool as pool_registry; // Disabled: capsule_runtime dependency removed
 pub use engine::supervisor as process_supervisor;
 
 // From resource

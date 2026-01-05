@@ -14,14 +14,14 @@ use tracing::{error, info};
 
 use crate::auth::AuthManager;
 use crate::capsule_manager::{CapsuleManager, DeployCapsuleRequest};
+use crate::capsule_types::capsule_v1::{
+    CapsuleExecution, CapsuleManifestV1, CapsuleRequirements, CapsuleRouting, CapsuleType,
+    RuntimeType,
+};
 use crate::hardware::GpuDetector;
 use crate::manifest::{Manifest, Resource};
 use crate::metrics::collector::MetricsCollector;
 use crate::network::service_registry::ServiceRegistry;
-use capsule_core::capsule_v1::{
-    CapsuleExecution, CapsuleManifestV1, CapsuleRequirements, CapsuleRouting, CapsuleType,
-    RuntimeType,
-};
 
 #[derive(Clone)]
 pub struct AppState {

@@ -9,15 +9,15 @@ use crate::metrics::collector::MetricsCollector;
 use crate::runtime::{
     resolver::{resolve_runtime, ResolveContext, ResolvedTarget},
     source::{SourceRuntime, SourceRuntimeConfig},
-    youki_adapter::YoukiRuntimeAdapter,
     ContainerRuntime, DevRuntime, DockerCliRuntime, LaunchRequest, LaunchResult, Runtime,
     RuntimeConfig, RuntimeError, RuntimeKind,
 };
+// use crate::runtime::youki_adapter::YoukiRuntimeAdapter; // Disabled: requires capsule_runtime
+use crate::capsule_types::capsule_v1::{CapsuleManifestV1, RuntimeType};
 use crate::security::audit::{AuditLogger, AuditOperation, AuditStatus};
 use crate::security::vram::VramScrubber;
 use crate::security::ManifestVerifier;
 use crate::storage::{StorageConfig, StorageManager};
-use capsule_core::capsule_v1::{CapsuleManifestV1, RuntimeType};
 
 /// Request parameters for deploying a capsule
 #[derive(Debug, Clone)]
@@ -80,7 +80,7 @@ impl std::fmt::Display for CapsuleStatus {
     }
 }
 
-use super::pool::PoolRegistry;
+// use super::pool::PoolRegistry; // Disabled: requires capsule_runtime
 use super::supervisor::ProcessSupervisor;
 use crate::artifact::ArtifactManager;
 use crate::interface::discovery::MdnsAnnouncer;
@@ -93,14 +93,9 @@ pub struct CapsuleManager {
     docker_runtime: Arc<DockerCliRuntime>,
     dev_runtime: Arc<DevRuntime>,
     source_runtime: Arc<SourceRuntime>,
-    youki_runtime: Arc<YoukiRuntimeAdapter>,
     wasm_runtime: Arc<crate::runtime::WasmRuntime>,
     verifier: Arc<ManifestVerifier>,
     capsules: Arc<RwLock<HashMap<String, Capsule>>>,
-
-    // Pre-warmed container pool
-    #[allow(dead_code)]
-    pool_registry: Option<Arc<PoolRegistry>>,
 
     // Security
     allowed_host_paths: Vec<String>,
@@ -164,15 +159,9 @@ impl CapsuleManager {
             }
         };
 
-        // Initialize Youki runtime (for direct OCI container execution without Docker)
         // Clone config before passing to container_runtime since it takes ownership
         let log_dir_clone = runtime_config.log_dir.clone();
-        let bundle_root_clone = runtime_config.bundle_root.clone();
-
-        let youki_runtime = Arc::new(YoukiRuntimeAdapter::new(
-            log_dir_clone.clone(),
-            bundle_root_clone.clone(),
-        ));
+        let _bundle_root_clone = runtime_config.bundle_root.clone();
 
         let source_dev_mode = false; // Always false for UARC V1
 
@@ -194,12 +183,8 @@ impl CapsuleManager {
             log_dir: log_dir_clone.clone(),
             state_dir: std::env::temp_dir().join("capsuled").join("state"),
         };
-        // Youki fallback only on Linux
-        let oci_fallback = if cfg!(target_os = "linux") {
-            Some(youki_runtime.clone())
-        } else {
-            None
-        };
+        // OCI fallback disabled - pool/youki functionality removed for clean dependency
+        let oci_fallback = None;
         let source_runtime = Arc::new(SourceRuntime::new(source_runtime_config, oci_fallback));
 
         // Initialize StorageManager if config provided
@@ -208,16 +193,7 @@ impl CapsuleManager {
             Arc::new(StorageManager::new(config))
         });
 
-        // Initialize PoolRegistry for pre-warmed container pools (Linux only)
-        let pool_registry = if cfg!(target_os = "linux") {
-            let pool_bundle_root = youki_runtime.inner_arc().config().bundle_root.join("pools");
-            Some(Arc::new(PoolRegistry::new(
-                youki_runtime.inner_arc(),
-                pool_bundle_root,
-            )))
-        } else {
-            None
-        };
+        // Pool registry removed in UARC V1.1.0 (capsule_runtime dependency elimination)
 
         // Initialize WasmRuntime (UARC V1.1.0 support)
         let wasm_runtime = Arc::new(
@@ -233,12 +209,10 @@ impl CapsuleManager {
             docker_runtime: docker_cli_runtime,
             dev_runtime,
             source_runtime,
-            youki_runtime,
             wasm_runtime,
-            container_runtime, // Added missing field initialization
+            container_runtime,
             verifier,
             capsules: Arc::new(RwLock::new(HashMap::new())),
-            pool_registry,
 
             allowed_host_paths,
 
@@ -307,10 +281,8 @@ impl CapsuleManager {
                 }
             }
             ResolvedTarget::Oci { .. } => {
-                // OCI targets prefer Youki on Linux, Docker on macOS
-                if cfg!(target_os = "linux") && !force_docker_cli {
-                    self.youki_runtime.clone()
-                } else if cfg!(target_os = "macos") || force_docker_cli {
+                // OCI targets - Docker on macOS, ContainerRuntime on Linux
+                if cfg!(target_os = "macos") || force_docker_cli {
                     self.docker_runtime.clone()
                 } else {
                     self.container_runtime.clone()
@@ -330,17 +302,12 @@ impl CapsuleManager {
                     // Source runtime (formerly PythonUv) for interpreted languages
                     RuntimeType::Source => self.source_runtime.clone(),
                     RuntimeType::Youki => {
-                        if cfg!(target_os = "linux") {
-                            self.youki_runtime.clone()
+                        // UARC V1: Youki runtime removed, fallback to container_runtime
+                        warn!("Youki runtime removed in UARC V1.1.0, using container runtime");
+                        if cfg!(target_os = "macos") || force_docker_cli {
+                            self.docker_runtime.clone()
                         } else {
-                            warn!(
-                                "Youki runtime is only supported on Linux, falling back to Docker"
-                            );
-                            if cfg!(target_os = "macos") || force_docker_cli {
-                                self.docker_runtime.clone()
-                            } else {
-                                self.container_runtime.clone()
-                            }
+                            self.container_runtime.clone()
                         }
                     }
                     RuntimeType::Wasm => self.wasm_runtime.clone(),

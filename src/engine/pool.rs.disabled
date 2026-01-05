@@ -5,7 +5,7 @@
 //! the CapsuleManager to interact with pools.
 
 use anyhow::{anyhow, Result};
-use capsule_core::capsule_v1::CapsuleManifestV1;
+use crate::capsule_types::capsule_v1::CapsuleManifestV1;
 use capsule_runtime::manifest::{CapsuleManifest, Entrypoint, NetworkConfig, PortMapping};
 use capsule_runtime::pool::{MonitorHandle, PoolConfig, PoolManager, PoolStats};
 use capsule_runtime::runtimes::YoukiRuntime;
@@ -43,8 +43,8 @@ impl Default for CapsulePoolConfig {
     }
 }
 
-impl From<capsule_core::capsule_v1::PoolConfig> for CapsulePoolConfig {
-    fn from(config: capsule_core::capsule_v1::PoolConfig) -> Self {
+impl From<crate::capsule_types::capsule_v1::PoolConfig> for CapsulePoolConfig {
+    fn from(config: crate::capsule_types::capsule_v1::PoolConfig) -> Self {
         Self {
             enabled: config.enabled,
             size: config.size,

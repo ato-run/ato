@@ -19,8 +19,10 @@ pub mod oci {
 
     /// Stub module for spec_builder
     pub mod spec_builder {
+        use crate::capsule_types::capsule_v1::{
+            CapsuleExecution, CapsuleManifestV1, StorageVolume,
+        };
         use crate::workload::manifest_loader::ResourceRequirements;
-        use capsule_core::capsule_v1::{CapsuleExecution, CapsuleManifestV1, StorageVolume};
 
         /// Stub function that returns an error on non-Linux platforms
         #[allow(clippy::too_many_arguments)]

@@ -25,7 +25,7 @@ use crate::runtime::ContainerRuntime;
 use crate::wasm_host::AdepLogicHost;
 use crate::workload;
 
-use capsule_core::capsule_v1::CapsuleManifestV1;
+use crate::capsule_types::capsule_v1::CapsuleManifestV1;
 
 /// EngineService implements the Engine gRPC service
 use crate::network::service_registry::ServiceRegistry;
@@ -71,11 +71,11 @@ impl EngineService {
     }
 }
 
-fn canonical_runplan_to_proto(plan: &capsule_core::runplan::RunPlan) -> common::RunPlan {
+fn canonical_runplan_to_proto(plan: &crate::capsule_types::runplan::RunPlan) -> common::RunPlan {
     use std::collections::HashMap;
 
     let runtime = match &plan.runtime {
-        capsule_core::runplan::RunPlanRuntime::Docker(docker) => {
+        crate::capsule_types::runplan::RunPlanRuntime::Docker(docker) => {
             let env: HashMap<String, String> = docker
                 .env
                 .iter()
@@ -109,7 +109,7 @@ fn canonical_runplan_to_proto(plan: &capsule_core::runplan::RunPlan) -> common::
             })
         }
         // UARC V1: Native runtime removed - convert to Source runtime
-        capsule_core::runplan::RunPlanRuntime::Native(native) => {
+        crate::capsule_types::runplan::RunPlanRuntime::Native(native) => {
             let env: HashMap<String, String> = native
                 .env
                 .iter()
@@ -127,7 +127,7 @@ fn canonical_runplan_to_proto(plan: &capsule_core::runplan::RunPlan) -> common::
                 dev_mode: false,
             })
         }
-        capsule_core::runplan::RunPlanRuntime::Source(src) => {
+        crate::capsule_types::runplan::RunPlanRuntime::Source(src) => {
             let env: HashMap<String, String> = src
                 .env
                 .iter()

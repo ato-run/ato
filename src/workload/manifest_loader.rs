@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
-use capsule_core::capsule_v1::CapsuleManifestV1;
+use crate::capsule_types::capsule_v1::CapsuleManifestV1;
 
 /// Resource requirements extracted from capsule
 #[derive(Debug, Clone, Default)]

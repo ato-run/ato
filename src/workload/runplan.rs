@@ -1,8 +1,8 @@
-use crate::proto::onescluster::common::v1 as common;
-use capsule_core::capsule_v1::{
+use crate::capsule_types::capsule_v1::{
     CapsuleExecution, CapsuleManifestV1, CapsuleRequirements, CapsuleRouting, CapsuleStorage,
     CapsuleType, RuntimeType, StorageVolume,
 };
+use crate::proto::onescluster::common::v1 as common;
 use std::collections::HashMap;
 
 /// Result of converting a RunPlan proto into the canonical CapsuleManifestV1.

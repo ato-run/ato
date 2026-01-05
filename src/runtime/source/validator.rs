@@ -213,13 +213,10 @@ fn find_entrypoint(cmd: &[String]) -> Option<&str> {
     }
 
     // Fallback: return last non-flag argument
-    for arg in cmd.iter().rev().skip(0) {
-        if !arg.starts_with('-') && !cmd.first().map(|f| f == arg).unwrap_or(false) {
-            return Some(arg);
-        }
-    }
-
-    None
+    cmd.iter()
+        .rev()
+        .find(|arg| !arg.starts_with('-') && !cmd.first().map(|f| f == *arg).unwrap_or(false))
+        .map(|v| v.as_str())
 }
 
 /// Check if argument looks like a file path

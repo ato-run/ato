@@ -164,14 +164,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cache_dir = tmp.path().join("models");
 
-        let cfg = ModelFetcherConfig {
+        let cfg = FetcherConfig {
             cache_dir: cache_dir.clone(),
             allowed_host_paths: vec![tmp.path().to_string_lossy().to_string()],
         };
 
-        let res = fetch_model(
-            ModelFetchRequest {
-                model_id: "test-model".to_string(),
+        let res = fetch_resource(
+            ResourceFetchRequest {
+                resource_id: "test-model".to_string(),
                 url: url.clone(),
                 expected_sha256: None,
             },
@@ -199,14 +199,14 @@ mod tests {
         fs::create_dir_all(cached_path.parent().unwrap()).unwrap();
         fs::write(&cached_path, b"cached").unwrap();
 
-        let cfg = ModelFetcherConfig {
+        let cfg = FetcherConfig {
             cache_dir: cache_dir.clone(),
             allowed_host_paths: vec![tmp.path().to_string_lossy().to_string()],
         };
 
-        let res = fetch_model(
-            ModelFetchRequest {
-                model_id: "test-model".to_string(),
+        let res = fetch_resource(
+            ResourceFetchRequest {
+                resource_id: "test-model".to_string(),
                 url,
                 expected_sha256: None,
             },
@@ -230,14 +230,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cache_dir = tmp.path().join("models");
 
-        let cfg = ModelFetcherConfig {
+        let cfg = FetcherConfig {
             cache_dir,
             allowed_host_paths: vec!["/opt/models".to_string()],
         };
 
-        let err = fetch_model(
-            ModelFetchRequest {
-                model_id: "test-model".to_string(),
+        let err = fetch_resource(
+            ResourceFetchRequest {
+                resource_id: "test-model".to_string(),
                 url,
                 expected_sha256: None,
             },
