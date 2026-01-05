@@ -3,6 +3,11 @@
 //! Provides fast development experience (3ms startup) using host toolchains
 //! with sandbox isolation, falling back to OCI containers when toolchains
 //! are unavailable or in production mode.
+//!
+//! Platform-specific sandbox implementations:
+//! - Linux: bubblewrap (bwrap) namespace isolation
+//! - macOS: Alcoholless (preferred) or sandbox-exec (fallback)
+//! - Windows: Windows Sandbox (Pro/Enterprise) or Sandboxie Plus (all editions)
 
 mod toolchain;
 
@@ -11,6 +16,9 @@ mod linux;
 
 #[cfg(target_os = "macos")]
 mod macos;
+
+#[cfg(target_os = "windows")]
+mod windows;
 
 mod fallback;
 
@@ -120,12 +128,17 @@ impl SourceRuntime {
 
     #[cfg(target_os = "macos")]
     fn is_native_sandbox_available() -> bool {
-        // sandbox-exec is always available on macOS
-        // but we'll implement it in Phase 2
-        false // For now, fallback to OCI
+        // Alcoholless preferred, sandbox-exec always available as fallback
+        macos::is_native_available()
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(target_os = "windows")]
+    fn is_native_sandbox_available() -> bool {
+        // Windows Sandbox (Pro/Enterprise) or Sandboxie Plus
+        windows::is_native_available()
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     fn is_native_sandbox_available() -> bool {
         false
     }
@@ -135,7 +148,10 @@ impl SourceRuntime {
         self.config.log_dir.join(format!("{}.log", workload_id))
     }
 
-    /// Launch using native sandbox (Linux: bubblewrap)
+    /// Launch using native sandbox
+    /// - Linux: bubblewrap
+    /// - macOS: Alcoholless or sandbox-exec
+    /// - Windows: Windows Sandbox or Sandboxie Plus
     #[cfg(target_os = "linux")]
     async fn launch_native(
         &self,
@@ -145,14 +161,32 @@ impl SourceRuntime {
         linux::launch_with_bubblewrap(self, request, target).await
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    async fn launch_native(
+        &self,
+        request: &LaunchRequest<'_>,
+        target: &SourceTarget,
+    ) -> Result<LaunchResult, RuntimeError> {
+        macos::launch_native_macos(self, request, target).await
+    }
+
+    #[cfg(target_os = "windows")]
+    async fn launch_native(
+        &self,
+        request: &LaunchRequest<'_>,
+        target: &SourceTarget,
+    ) -> Result<LaunchResult, RuntimeError> {
+        windows::launch_native_windows(self, request, target).await
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     async fn launch_native(
         &self,
         _request: &LaunchRequest<'_>,
         _target: &SourceTarget,
     ) -> Result<LaunchResult, RuntimeError> {
         Err(RuntimeError::SandboxSetupFailed(
-            "Native sandbox not supported on this platform".to_string(),
+            "Native sandbox not supported on this platform. Use OCI fallback.".to_string(),
         ))
     }
 
