@@ -637,7 +637,7 @@ impl CapsuleManager {
             // Use source_working_dir from request (set by CLI from capsule.toml [targets.wasm])
             let wasm_dir = source_working_dir
                 .as_ref()
-                .map(|p| PathBuf::from(p))
+                .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
             // The entrypoint contains the path to the .wasm component file
@@ -713,7 +713,7 @@ impl CapsuleManager {
             // Use source_working_dir from request (set by CLI from capsule.toml [targets.source])
             let source_dir = source_working_dir
                 .as_ref()
-                .map(|p| PathBuf::from(p))
+                .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
             let rootfs_path = source_dir.clone();

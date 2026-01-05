@@ -293,6 +293,7 @@ fn get_container_pid(container_cmd: &str, container_name: &str) -> Option<u32> {
 }
 
 /// Stop a running container
+#[allow(dead_code)]
 pub fn stop_container(container_name: &str) -> Result<(), RuntimeError> {
     let container_cmd = detect_container_cli()?;
 

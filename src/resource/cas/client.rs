@@ -353,7 +353,20 @@ pub fn create_cas_client_from_env() -> CasResult<Box<dyn CasClient>> {
                 });
             Ok(Box::new(HttpCasClient::new(endpoint, cache_dir)?))
         }
-        "local" | _ => {
+        "local" => {
+            let root = std::env::var("ATO_CAS_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| {
+                    dirs::home_dir()
+                        .unwrap_or_else(|| PathBuf::from("/tmp"))
+                        .join(".capsuled")
+                        .join("cas")
+                });
+            Ok(Box::new(LocalCasClient::new(root)?))
+        }
+        other => {
+            // Unknown CAS type defaults to local
+            tracing::warn!("Unknown CAS type '{}', defaulting to local", other);
             let root = std::env::var("ATO_CAS_ROOT")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| {

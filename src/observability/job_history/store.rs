@@ -57,7 +57,7 @@ impl JobPhase {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "pending" => Some(JobPhase::Pending),
             "running" => Some(JobPhase::Running),
@@ -299,7 +299,7 @@ impl JobHistory for SqliteJobHistoryStore {
                 job_id: row.get(0)?,
                 capsule_name: row.get(1)?,
                 capsule_version: row.get(2)?,
-                phase: JobPhase::from_str(row.get::<_, String>(3)?.as_str())
+                phase: JobPhase::parse(row.get::<_, String>(3)?.as_str())
                     .unwrap_or(JobPhase::Pending),
                 error_message: row.get(4)?,
                 exit_code: row.get(5)?,
@@ -337,7 +337,7 @@ impl JobHistory for SqliteJobHistoryStore {
                 "#,
             )?;
 
-            let rows = stmt.query_map(params![name, limit as i64], |row| parse_job_row(row))?;
+            let rows = stmt.query_map(params![name, limit as i64], parse_job_row)?;
 
             for row_result in rows {
                 jobs.push(row_result?);
@@ -353,7 +353,7 @@ impl JobHistory for SqliteJobHistoryStore {
                 "#,
             )?;
 
-            let rows = stmt.query_map(params![limit as i64], |row| parse_job_row(row))?;
+            let rows = stmt.query_map(params![limit as i64], parse_job_row)?;
 
             for row_result in rows {
                 jobs.push(row_result?);
@@ -394,7 +394,7 @@ fn parse_job_row(row: &rusqlite::Row) -> Result<JobRecord, rusqlite::Error> {
         job_id: row.get(0)?,
         capsule_name: row.get(1)?,
         capsule_version: row.get(2)?,
-        phase: JobPhase::from_str(row.get::<_, String>(3)?.as_str()).unwrap_or(JobPhase::Pending),
+        phase: JobPhase::parse(row.get::<_, String>(3)?.as_str()).unwrap_or(JobPhase::Pending),
         error_message: row.get(4)?,
         exit_code: row.get(5)?,
         created_at: parse_datetime(&row.get::<_, String>(6)?),

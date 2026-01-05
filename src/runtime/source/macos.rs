@@ -371,7 +371,7 @@ async fn launch_with_sandbox_exec(
 /// - (version 1) - Required version declaration
 /// - For dev mode: allow default for simplicity
 /// - For production mode: deny default with explicit allowlist
-fn generate_seatbelt_profile(target: &SourceTarget, toolchain_path: &PathBuf) -> String {
+fn generate_seatbelt_profile(target: &SourceTarget, toolchain_path: &std::path::Path) -> String {
     if target.dev_mode {
         // Development mode: permissive profile for debugging and rapid iteration
         r#"(version 1)
