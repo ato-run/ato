@@ -19,16 +19,14 @@
 //! handle.shutdown().await;
 //! ```
 
-pub mod artifact;
 #[allow(dead_code)]
 pub mod capsule_capnp; // Cap'n Proto generated code
 pub mod capnp_to_manifest; // Cap'n Proto ↔ CapsuleManifestV1 conversion (UARC V1.1.0)
-pub mod cas; // CAS client abstraction (UARC V1.1.0)
 pub mod common;
 // pub mod coordinator_service;  // Disabled: proto definitions not present in capsuled/proto
-pub mod downloader; // Enabled for Phase 2
 pub mod engine; // Capsule execution core (manager, supervisor, pool)
 pub mod interface; // External interfaces (gRPC, HTTP, API, DevServer)
+pub mod resource; // Resource management (artifact, cas, storage, oci, downloader)
 
 // Re-exports from common for backward compatibility
 pub use common::auth;
@@ -45,51 +43,30 @@ pub use interface::http as http_server;
 pub use engine::manager as capsule_manager;
 pub use engine::pool as pool_registry;
 pub use engine::supervisor as process_supervisor;
+
+// Re-exports from resource for backward compatibility
+pub use resource::artifact;
+pub use resource::cas;
+pub use resource::downloader;
+pub use resource::model_fetcher;
+pub use resource::oci;
+pub use resource::storage;
+
 pub mod job_history; // Job history persistence (UARC V1.1.0)
 pub mod logs;
 pub mod manifest;
 pub mod metrics;
-pub mod model_fetcher;
 pub mod system; // System-level modules (hardware, network)
 
 // Re-exports from system for backward compatibility
 pub use system::hardware;
 pub use system::network;
-#[cfg(target_os = "linux")]
-pub mod oci;
-#[cfg(not(target_os = "linux"))]
-pub mod oci {
-    //! OCI module stub for non-Linux platforms
-    //! OCI container runtime is only available on Linux.
-    
-    /// Stub module for spec_builder
-    pub mod spec_builder {
-        use capsule_core::capsule_v1::{CapsuleExecution, StorageVolume};
-        use crate::workload::manifest_loader::ResourceRequirements;
-        use capsule_core::capsule_v1::CapsuleManifestV1;
-        
-        /// Stub function that returns an error on non-Linux platforms
-        #[allow(clippy::too_many_arguments)]
-        pub fn build_oci_spec(
-            _rootfs_path: &std::path::Path,
-            _execution: &CapsuleExecution,
-            _volumes: &[StorageVolume],
-            _gpu_uuids: Option<&[String]>,
-            _allowed_paths: &[String],
-            _resources: Option<&ResourceRequirements>,
-            _extra_args: Option<&[String]>,
-            _manifest: &CapsuleManifestV1,
-        ) -> Result<oci_spec::runtime::Spec, String> {
-            Err("OCI runtime is only available on Linux. Use source or wasm runtime instead.".into())
-        }
-    }
-}
+
 pub mod proto;
 pub mod runplan;
 pub mod runtime;
 pub mod security;
 // pub mod status_reporter;
-pub mod storage;
 pub mod wasm_host;
 pub mod workload;
 
