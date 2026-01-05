@@ -9,7 +9,6 @@ use crate::config::RuntimeSection;
 pub mod container;
 pub mod dev;
 pub mod docker_cli;
-pub mod native;
 pub mod resolver;
 pub mod source;
 pub mod traits;
@@ -19,7 +18,6 @@ pub mod youki_adapter;
 pub use container::ContainerRuntime;
 pub use dev::DevRuntime;
 pub use docker_cli::DockerCliRuntime;
-pub use native::NativeRuntime;
 pub use resolver::{resolve_runtime, ResolveContext, ResolveError, ResolvedTarget};
 pub use source::SourceRuntime;
 pub use traits::Runtime;
@@ -29,11 +27,13 @@ pub use youki_adapter::YoukiRuntimeAdapter;
 const DEFAULT_HOOK_RETRY_ATTEMPTS: u32 = 1;
 
 /// Runtime implementation to use for launching containers.
+/// 
+/// Note: `Native` runtime has been removed as it's not part of UARC V1.
+/// Use `Source` runtime for interpreted languages instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeKind {
     Youki,
     Runc,
-    Native,
     Wasm,
     Source,
 }
@@ -43,7 +43,6 @@ impl RuntimeKind {
         match input.to_ascii_lowercase().as_str() {
             "youki" => Some(RuntimeKind::Youki),
             "runc" => Some(RuntimeKind::Runc),
-            "native" => Some(RuntimeKind::Native),
             "wasm" => Some(RuntimeKind::Wasm),
             "source" => Some(RuntimeKind::Source),
             _ => None,
@@ -54,7 +53,6 @@ impl RuntimeKind {
         match self {
             RuntimeKind::Youki => &["youki"],
             RuntimeKind::Runc => &["runc"],
-            RuntimeKind::Native => &[], // Internal
             RuntimeKind::Wasm => &[], // Internal
             RuntimeKind::Source => &[], // Internal (uses host toolchains)
         }

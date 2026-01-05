@@ -9,7 +9,7 @@ use crate::metrics::collector::MetricsCollector;
 use crate::hardware::GpuDetector;
 use crate::runtime::{
     youki_adapter::YoukiRuntimeAdapter, ContainerRuntime, DevRuntime, DockerCliRuntime,
-    LaunchRequest, LaunchResult, NativeRuntime, Runtime, RuntimeConfig, RuntimeError, RuntimeKind,
+    LaunchRequest, LaunchResult, Runtime, RuntimeConfig, RuntimeError, RuntimeKind,
     resolver::{resolve_runtime, ResolveContext, ResolvedTarget},
     source::{SourceRuntime, SourceRuntimeConfig},
 };
@@ -82,7 +82,6 @@ impl std::fmt::Display for CapsuleStatus {
 use crate::artifact::ArtifactManager;
 use crate::network::mdns::MdnsAnnouncer;
 use crate::network::service_registry::ServiceRegistry;
-use crate::network::traefik::TraefikManager;
 use super::pool::PoolRegistry;
 use super::supervisor::ProcessSupervisor;
 
