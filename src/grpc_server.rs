@@ -177,6 +177,7 @@ impl Engine for EngineService {
         let mut oci_image = req.oci_image.clone();
         let mut digest = req.digest.clone();
         let mut direct_command: Option<Vec<String>> = None;
+        let mut source_working_dir: Option<String> = None;
 
         // Returns (CapsuleManifestV1, Option<raw_bytes_for_verification>)
         let (manifest, raw_manifest_bytes): (CapsuleManifestV1, Option<Vec<u8>>) = match req
@@ -191,6 +192,24 @@ impl Engine for EngineService {
                 {
                     if !d.command.is_empty() {
                         direct_command = Some(d.command.clone());
+                    }
+                }
+
+                // Extract working_dir from PythonUvRuntime for source execution
+                if let Some(crate::proto::onescluster::common::v1::run_plan::Runtime::PythonUv(py)) =
+                    plan.runtime.as_ref()
+                {
+                    if !py.working_dir.is_empty() {
+                        source_working_dir = Some(py.working_dir.clone());
+                    }
+                }
+
+                // Extract working_dir from WasmRuntime for wasm execution
+                if let Some(crate::proto::onescluster::common::v1::run_plan::Runtime::Wasm(wasm)) =
+                    plan.runtime.as_ref()
+                {
+                    if !wasm.working_dir.is_empty() {
+                        source_working_dir = Some(wasm.working_dir.clone());
                     }
                 }
 
@@ -313,6 +332,7 @@ impl Engine for EngineService {
                 digest,
                 extra_args: direct_command,
                 signature: None, // Signature verification handled internally if needed
+                source_working_dir,
             };
 
             match capsule_manager.deploy_capsule(request).await {

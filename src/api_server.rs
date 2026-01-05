@@ -312,6 +312,7 @@ async fn apply_handler(
         digest: String::new(),
         extra_args: None,
         signature: None,
+        source_working_dir: None, // Not used in API server mode
     };
 
     match state.capsule_manager.deploy_capsule(request).await {
