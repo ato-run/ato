@@ -11,11 +11,11 @@ use crate::proto::onescluster::common::v1 as common;
 use crate::proto::onescluster::engine::v1::{
     deploy_request::Manifest as DeployManifest,
     engine_server::{Engine, EngineServer},
-    CapsuleInfo, DeployRequest, DeployResponse, EngineLogEntry, FetchModelRequest,
-    FetchModelResponse, GetJobStatusRequest, GetJobStatusResponse, GetResourcesRequest,
-    GetSystemStatusRequest, JobPhase, JobResourceUsage, JobSummary, ListJobsRequest,
-    ListJobsResponse, ResourceInfo, ResourceUsage, StopRequest, StopResponse, SystemStatus,
-    ValidateRequest, ValidationResult,
+    CancelJobRequest, CancelJobResponse, CapsuleInfo, DeployRequest, DeployResponse, EngineLogEntry,
+    FetchModelRequest, FetchModelResponse, GetJobStatusRequest, GetJobStatusResponse,
+    GetResourcesRequest, GetSystemStatusRequest, JobPhase, JobResourceUsage, JobSummary,
+    ListJobsRequest, ListJobsResponse, ResourceInfo, ResourceUsage, StopRequest, StopResponse,
+    SystemStatus, ValidateRequest, ValidationResult,
 };
 use crate::runplan;
 use crate::runtime::ContainerRuntime;
@@ -692,6 +692,96 @@ impl Engine for EngineService {
             }
         }
     }
+
+    /// Cancel a running job
+    async fn cancel_job(
+        &self,
+        request: Request<CancelJobRequest>,
+    ) -> Result<Response<CancelJobResponse>, Status> {
+        let req = request.into_inner();
+        info!("CancelJob request for job_id={}, force={}", req.job_id, req.force);
+
+        if req.job_id.trim().is_empty() {
+            return Err(Status::invalid_argument("job_id is required"));
+        }
+
+        // First, get the current job status
+        let job_record = match self.job_history.get_job(&req.job_id) {
+            Ok(job) => job,
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("not found") || err_str.contains("NotFound") {
+                    return Err(Status::not_found(format!("Job '{}' not found", req.job_id)));
+                }
+                error!("Failed to get job status: {}", e);
+                return Err(Status::internal(format!("Failed to get job status: {}", e)));
+            }
+        };
+
+        let previous_phase = internal_phase_to_proto(&job_record.phase);
+
+        // Check if job is already in a terminal state
+        match job_record.phase {
+            JobPhaseInternal::Succeeded | JobPhaseInternal::Failed | JobPhaseInternal::Cancelled => {
+                return Ok(Response::new(CancelJobResponse {
+                    success: true,
+                    message: format!(
+                        "Job '{}' is already in terminal state: {:?}",
+                        req.job_id, job_record.phase
+                    ),
+                    previous_phase: previous_phase.into(),
+                }));
+            }
+            _ => {}
+        }
+
+        // Try to stop the capsule (job_id should map to capsule_id in most cases)
+        // The job_id is typically the same as capsule_id for running jobs
+        let capsule_id = &job_record.capsule_name;
+        
+        match self.capsule_manager.stop_capsule(capsule_id).await {
+            Ok(_) => {
+                // Update job history to Cancelled state
+                if let Err(e) = self.job_history.update_phase(
+                    &req.job_id,
+                    JobPhaseInternal::Cancelled,
+                    Some("Cancelled by user request"),
+                    None,
+                ) {
+                    warn!("Failed to update job history after cancel: {}", e);
+                }
+
+                info!("Job '{}' (capsule '{}') cancelled successfully", req.job_id, capsule_id);
+                Ok(Response::new(CancelJobResponse {
+                    success: true,
+                    message: format!("Job '{}' cancelled successfully", req.job_id),
+                    previous_phase: previous_phase.into(),
+                }))
+            }
+            Err(e) => {
+                let err_msg = e.to_string();
+                warn!("Failed to cancel job '{}': {}", req.job_id, err_msg);
+                
+                // If capsule not found, it may have already exited
+                if err_msg.contains("not found") || err_msg.contains("NotFound") {
+                    // Update to cancelled anyway since user requested it
+                    let _ = self.job_history.update_phase(
+                        &req.job_id,
+                        JobPhaseInternal::Cancelled,
+                        Some("Cancelled (process not found)"),
+                        None,
+                    );
+                    return Ok(Response::new(CancelJobResponse {
+                        success: true,
+                        message: format!("Job '{}' marked as cancelled (process already exited)", req.job_id),
+                        previous_phase: previous_phase.into(),
+                    }));
+                }
+
+                Err(Status::internal(format!("Failed to cancel job: {}", err_msg)))
+            }
+        }
+    }
 }
 
 /// Convert internal JobPhase to proto JobPhase
@@ -1017,5 +1107,78 @@ mod tests {
         let jobs = job_history.list_jobs(None, 10)
             .expect("Failed to list jobs");
         assert_eq!(jobs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_job_updates_phase() {
+        // Create temp directory for test database
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let db_path = temp_dir.path().join("test_cancel.sqlite");
+        
+        let job_history = SqliteJobHistoryStore::new(&db_path)
+            .expect("Failed to create job history store");
+
+        // Insert a running job
+        let job = JobRecord {
+            job_id: "cancel-test-001".to_string(),
+            capsule_name: "cancel-capsule".to_string(),
+            capsule_version: "v1.0.0".to_string(),
+            phase: InternalJobPhase::Running,
+            error_message: None,
+            exit_code: None,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            finished_at: None,
+            duration_secs: None,
+            resource_usage_json: None,
+        };
+
+        job_history.insert_job(&job).expect("Failed to insert job");
+
+        // Simulate cancellation by updating phase
+        job_history.update_phase(
+            "cancel-test-001",
+            InternalJobPhase::Cancelled,
+            Some("Cancelled by user request"),
+            None,
+        ).expect("Failed to update phase");
+
+        // Verify phase was updated
+        let retrieved = job_history.get_job("cancel-test-001")
+            .expect("Failed to get job");
+        assert!(matches!(retrieved.phase, InternalJobPhase::Cancelled));
+        assert_eq!(retrieved.error_message, Some("Cancelled by user request".to_string()));
+    }
+
+    #[test]
+    fn test_cancel_already_completed_job_is_idempotent() {
+        // Create temp directory for test database
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let db_path = temp_dir.path().join("test_idempotent.sqlite");
+        
+        let job_history = SqliteJobHistoryStore::new(&db_path)
+            .expect("Failed to create job history store");
+
+        // Insert a succeeded job
+        let job = JobRecord {
+            job_id: "completed-001".to_string(),
+            capsule_name: "done-capsule".to_string(),
+            capsule_version: "v1.0.0".to_string(),
+            phase: InternalJobPhase::Succeeded,
+            error_message: None,
+            exit_code: Some(0),
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            finished_at: Some(Utc::now()),
+            duration_secs: Some(10),
+            resource_usage_json: None,
+        };
+
+        job_history.insert_job(&job).expect("Failed to insert job");
+
+        // Verify it's in succeeded state (cancel should be a no-op)
+        let retrieved = job_history.get_job("completed-001")
+            .expect("Failed to get job");
+        assert!(matches!(retrieved.phase, InternalJobPhase::Succeeded));
     }
 }

@@ -270,6 +270,29 @@ pub struct JobSummary {
     #[prost(uint64, tag = "5")]
     pub duration_secs: u64,
 }
+/// CancelJob - Request to cancel a running job
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CancelJobRequest {
+    /// Job ID to cancel
+    #[prost(string, tag = "1")]
+    pub job_id: ::prost::alloc::string::String,
+    /// If true, send SIGKILL instead of SIGTERM
+    #[prost(bool, tag = "2")]
+    pub force: bool,
+}
+/// CancelJob - Response after attempting cancellation
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CancelJobResponse {
+    /// True if cancellation was initiated
+    #[prost(bool, tag = "1")]
+    pub success: bool,
+    /// Human-readable status message
+    #[prost(string, tag = "2")]
+    pub message: ::prost::alloc::string::String,
+    /// Phase before cancellation attempt
+    #[prost(enumeration = "JobPhase", tag = "3")]
+    pub previous_phase: i32,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum JobPhase {
@@ -612,6 +635,31 @@ pub mod engine_client {
                 .insert(GrpcMethod::new("onescluster.engine.v1.Engine", "ListJobs"));
             self.inner.unary(req, path, codec).await
         }
+        /// Cancel a running job (Phase 6: Control Plane completion)
+        pub async fn cancel_job(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CancelJobRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CancelJobResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/onescluster.engine.v1.Engine/CancelJob",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("onescluster.engine.v1.Engine", "CancelJob"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -682,6 +730,14 @@ pub mod engine_server {
             request: tonic::Request<super::ListJobsRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ListJobsResponse>,
+            tonic::Status,
+        >;
+        /// Cancel a running job (Phase 6: Control Plane completion)
+        async fn cancel_job(
+            &self,
+            request: tonic::Request<super::CancelJobRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CancelJobResponse>,
             tonic::Status,
         >;
     }
@@ -1142,6 +1198,49 @@ pub mod engine_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = ListJobsSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/onescluster.engine.v1.Engine/CancelJob" => {
+                    #[allow(non_camel_case_types)]
+                    struct CancelJobSvc<T: Engine>(pub Arc<T>);
+                    impl<T: Engine> tonic::server::UnaryService<super::CancelJobRequest>
+                    for CancelJobSvc<T> {
+                        type Response = super::CancelJobResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CancelJobRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Engine>::cancel_job(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CancelJobSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
