@@ -1,10 +1,14 @@
 name: CI
 
+# Temporarily disabled: This project requires capsule-cli dependencies
+# from the parent monorepo (capsuled-dev) which are not available
+# in standalone CI runs. CI should be configured at the monorepo level.
 on:
-  push:
-    branches: [main, origin]
-  pull_request:
-    branches: [main, origin]
+  workflow_dispatch:
+  # push:
+  #   branches: [main, origin]
+  # pull_request:
+  #   branches: [main, origin]
 
 env:
   CARGO_TERM_COLOR: always
