@@ -149,10 +149,10 @@ capsuled は多層防御アーキテクチャを実装し、Verifiable Execution
 
 ソースコードに含まれる危険なパターンを検出・拒否します：
 
-| パターン | 検出理由 |
-|----------|----------|
-| `curl \| sh`, `wget \| bash` | リモートコード注入 |
-| `eval`, `exec` | 動的コード実行 |
+| パターン                       | 検出理由               |
+| ------------------------------ | ---------------------- |
+| `curl \| sh`, `wget \| bash`   | リモートコード注入     |
+| `eval`, `exec`                 | 動的コード実行         |
 | `base64 -d`, `base64 --decode` | 難読化されたペイロード |
 
 ```bash
@@ -168,6 +168,7 @@ capsule open --dev  # → L1 Policy Violation: Obfuscation detected
 ### L4 Network Guard (Egress Policy)
 
 ネットワーク通信は `EgressPolicyRegistry` により制御されます：
+
 - カプセルごとにアイデンティティトークン (`UARC_IDENTITY_TOKEN`) を発行
 - マニフェストで指定された `egress_allow` ルールのみ許可
 - 未許可のアウトバウンド通信はプロキシでブロック
@@ -180,19 +181,19 @@ capsule open --dev  # → L1 Policy Violation: Obfuscation detected
 effective_dev_mode = manifest.dev_mode AND engine.allow_insecure_dev_mode
 ```
 
-| マニフェスト `dev_mode` | Engine `allow_insecure_dev_mode` | 結果 |
-|------------------------|----------------------------------|------|
-| `true` | `true` | ✅ サンドボックス緩和 |
-| `true` | `false` | ❌ サンドボックス維持 (警告出力) |
-| `false` | `true` | ❌ サンドボックス維持 |
-| `false` | `false` | ❌ サンドボックス維持 |
+| マニフェスト `dev_mode` | Engine `allow_insecure_dev_mode` | 結果                             |
+| ----------------------- | -------------------------------- | -------------------------------- |
+| `true`                  | `true`                           | ✅ サンドボックス緩和            |
+| `true`                  | `false`                          | ❌ サンドボックス維持 (警告出力) |
+| `false`                 | `true`                           | ❌ サンドボックス維持            |
+| `false`                 | `false`                          | ❌ サンドボックス維持            |
 
 ### 環境変数
 
-| 変数名 | デフォルト | 説明 |
-|--------|-----------|------|
-| `CAPSULED_ALLOW_DEV_MODE` | `false` | `1` または `true` で開発モードを許可。**本番環境では絶対に設定しない** |
-| `UARC_IDENTITY_TOKEN` | (自動発行) | カプセルのアイデンティティトークン (ランタイムが自動設定) |
+| 変数名                    | デフォルト | 説明                                                                   |
+| ------------------------- | ---------- | ---------------------------------------------------------------------- |
+| `CAPSULED_ALLOW_DEV_MODE` | `false`    | `1` または `true` で開発モードを許可。**本番環境では絶対に設定しない** |
+| `UARC_IDENTITY_TOKEN`     | (自動発行) | カプセルのアイデンティティトークン (ランタイムが自動設定)              |
 
 ```bash
 # 開発環境でのみ使用
@@ -298,5 +299,5 @@ FSL-1.1-ALv2 (Functional Source License 1.1, Apache License Version 2.0)
 
 - [ato-coordinator](../ato-coordinator/) - Cluster orchestration & routing
 - [ato-desktop](../ato-desktop/) - Desktop UI for Capsule management
-- [capsule-cli](../capsule-cli/) - Capsule build & deployment tools
+- [capsule-cli](./cli/) - Capsule CLI (new, init, open, close, pack, keygen, doctor)
 - [uarc](../uarc/) - UARC specification and protocol definitions
