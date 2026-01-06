@@ -1,9 +1,9 @@
-//! Capsule CLI - UARC V1.1.0 Compliant Command Line Tool
+//! Capsule CLI - Universal Application Runtime Contract Manager
 //!
-//! This CLI implements the Launcher Mode architecture:
-//! - Acts as gRPC client to capsuled daemon
-//! - Handles CAS hashing and canonical bytes signing
-//! - Provides developer-friendly workflow (keygen, pack, sign, dev, run)
+//! Clean CLI for managing UARC-compliant applications:
+//! - Lifecycle: new, init, open, close, logs, ps
+//! - Packaging: pack, keygen  
+//! - System: doctor
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -13,8 +13,31 @@ mod engine_client;
 
 #[derive(Parser)]
 #[command(name = "capsule")]
-#[command(version = "0.1.0")]
-#[command(about = "Capsule CLI - UARC V1.1.0 Compliant Management Tool")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
+#[command(about = "Capsule CLI - Universal Application Runtime Contract Manager")]
+#[command(after_help = "\
+LIFECYCLE:
+  new      Create a new Capsule project
+  init     Initialize existing project as Capsule  
+  open     Open and launch a Capsule (--dev for development)
+  close    Close a running Capsule
+  logs     Stream logs from an open Capsule
+  ps       List currently open Capsules
+
+PACKAGING:
+  pack     Build and sign a .capsule archive
+  keygen   Generate developer signing keys
+
+SYSTEM:
+  doctor   Check Engine status and host requirements
+
+EXAMPLES:
+  capsule new my-app --template python
+  capsule init
+  capsule open --dev
+  capsule pack --key ~/.capsule/keys/dev.secret
+  capsule open my-app.capsule
+")]
 struct Cli {
     /// Enable verbose output
     #[arg(short, long, global = true)]
@@ -30,14 +53,69 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Generate a new Ed25519 keypair for signing
-    Keygen {
-        /// Name for the key (default: timestamp-based)
-        #[arg(short, long)]
-        name: Option<String>,
+    // ═══════════════════════════════════════════════════════════════════
+    // LIFECYCLE
+    // ═══════════════════════════════════════════════════════════════════
+    
+    /// Create a new Capsule project from a template
+    New {
+        /// Project name
+        name: String,
+        
+        /// Template type: python, node, rust, shell
+        #[arg(short, long, default_value = "python")]
+        template: String,
     },
 
-    /// Pack a capsule.toml into deployable .capsule format
+    /// Initialize existing project as a Capsule
+    Init {
+        /// Target directory (default: current directory)
+        #[arg(short, long)]
+        path: Option<PathBuf>,
+        
+        /// Skip prompts and use detected defaults
+        #[arg(short, long)]
+        yes: bool,
+    },
+
+    /// Open and launch a Capsule application
+    Open {
+        /// Path to capsule.toml or .capsule file
+        path: Option<PathBuf>,
+        
+        /// Development mode (hot reload, loose security)
+        #[arg(short, long)]
+        dev: bool,
+    },
+
+    /// Close a running Capsule
+    Close {
+        /// Capsule ID to close
+        capsule_id: String,
+    },
+
+    /// Stream logs from an open Capsule
+    Logs {
+        /// Capsule ID
+        capsule_id: String,
+
+        /// Follow log output (like tail -f)
+        #[arg(short, long)]
+        follow: bool,
+    },
+
+    /// List currently open Capsules
+    Ps {
+        /// Show all (including stopped) Capsules
+        #[arg(short, long)]
+        all: bool,
+    },
+
+    // ═══════════════════════════════════════════════════════════════════
+    // PACKAGING
+    // ═══════════════════════════════════════════════════════════════════
+    
+    /// Build and sign a .capsule archive
     Pack {
         /// Path to capsule.toml
         #[arg(short, long, default_value = "capsule.toml")]
@@ -46,53 +124,24 @@ enum Commands {
         /// Output path for .capsule file
         #[arg(short, long)]
         output: Option<PathBuf>,
-    },
-
-    /// Sign a capsule with Ed25519 over canonical bytes
-    Sign {
-        /// Path to .capsule or capsule.toml
+        
+        /// Signing key (.secret file) - if provided, signs the archive
         #[arg(short, long)]
-        manifest: PathBuf,
+        key: Option<PathBuf>,
+    },
 
-        /// Path to private key (.secret file)
+    /// Generate a new Ed25519 keypair for signing
+    Keygen {
+        /// Name for the key (default: timestamp-based)
         #[arg(short, long)]
-        key: PathBuf,
-
-        /// Output path for .sig file
-        #[arg(short, long)]
-        output: Option<PathBuf>,
+        name: Option<String>,
     },
 
-    /// Run capsule in development mode (auto-pack, dev_mode: true)
-    Dev {
-        /// Path to capsule.toml (default: current directory)
-        #[arg(short, long)]
-        manifest: Option<PathBuf>,
-    },
-
-    /// Deploy a signed capsule in production mode
-    Run {
-        /// Path to .capsule file
-        capsule: PathBuf,
-    },
-
-    /// Stop a running capsule
-    Stop {
-        /// Capsule ID
-        capsule_id: String,
-    },
-
-    /// Stream logs from a running capsule
-    Logs {
-        /// Capsule ID
-        capsule_id: String,
-
-        /// Follow log output
-        #[arg(short, long)]
-        follow: bool,
-    },
-
-    /// Run system diagnostics
+    // ═══════════════════════════════════════════════════════════════════
+    // SYSTEM
+    // ═══════════════════════════════════════════════════════════════════
+    
+    /// Check Engine status and host requirements
     Doctor {
         /// Show detailed diagnostic information
         #[arg(short, long)]
@@ -102,12 +151,7 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut cli = Cli::parse();
-
-    // Override engine_url from environment variable if set
-    if let Ok(env_url) = std::env::var("CAPSULE_ENGINE_URL") {
-        cli.engine_url = env_url;
-    }
+    let cli = Cli::parse();
 
     if cli.verbose {
         println!("🔍 Verbose mode enabled");
@@ -115,35 +159,26 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Commands::Keygen { name } => {
-            commands::keygen::execute(commands::keygen::KeygenArgs { name })
-        }
-        Commands::Pack { manifest, output } => {
-            commands::pack::execute(commands::pack::PackArgs { manifest_path: manifest, output })
-        }
-        Commands::Sign { manifest, key, output } => {
-            commands::sign::execute(commands::sign::SignArgs {
-                manifest_path: manifest,
-                key_path: key,
-                output,
+        // Lifecycle
+        Commands::New { name, template } => {
+            commands::new::execute(commands::new::NewArgs {
+                name,
+                template: Some(template),
             })
         }
-        Commands::Dev { manifest } => {
-            commands::dev::execute(commands::dev::DevArgs {
-                manifest_path: manifest,
+        Commands::Init { path, yes } => {
+            commands::init::execute(commands::init::InitArgs { path, yes })
+        }
+        Commands::Open { path, dev } => {
+            commands::open::execute(commands::open::OpenArgs {
+                path,
+                dev,
                 engine_url: Some(cli.engine_url),
             })
             .await
         }
-        Commands::Run { capsule } => {
-            commands::run::execute(commands::run::RunArgs {
-                capsule_path: capsule,
-                engine_url: Some(cli.engine_url),
-            })
-            .await
-        }
-        Commands::Stop { capsule_id } => {
-            commands::stop::execute(commands::stop::StopArgs {
+        Commands::Close { capsule_id } => {
+            commands::close::execute(commands::close::CloseArgs {
                 capsule_id,
                 engine_url: Some(cli.engine_url),
             })
@@ -157,6 +192,27 @@ async fn main() -> anyhow::Result<()> {
             })
             .await
         }
+        Commands::Ps { all } => {
+            commands::ps::execute(commands::ps::PsArgs {
+                all,
+                engine_url: Some(cli.engine_url),
+            })
+            .await
+        }
+        
+        // Packaging
+        Commands::Pack { manifest, output, key } => {
+            commands::pack::execute(commands::pack::PackArgs {
+                manifest_path: manifest,
+                output,
+                key,
+            })
+        }
+        Commands::Keygen { name } => {
+            commands::keygen::execute(commands::keygen::KeygenArgs { name })
+        }
+        
+        // System
         Commands::Doctor { verbose } => {
             commands::doctor::execute(commands::doctor::DoctorArgs { verbose }).await
         }
