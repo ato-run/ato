@@ -2,7 +2,7 @@
 mod tests {
 
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-    use capsule_core::capsule_v1::{
+    use capsuled::capsule_types::capsule_v1::{
         CapsuleExecution, CapsuleManifestV1, CapsuleRequirements, CapsuleRouting, CapsuleStorage,
         CapsuleType, RuntimeType,
     };
