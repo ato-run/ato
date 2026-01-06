@@ -99,13 +99,14 @@ impl ResolvedTarget {
                 }
             }
             ResolvedTarget::Oci { .. } => RuntimeKind::Youki, // Prefer Youki for OCI
-            ResolvedTarget::Legacy { runtime_type, .. } => match runtime_type {
-                RuntimeType::Wasm => RuntimeKind::Wasm,
-                RuntimeType::Youki => RuntimeKind::Youki,
-                RuntimeType::Docker => RuntimeKind::Youki,
-                RuntimeType::Native => RuntimeKind::Source, // Native → Source (UARC V1 migration)
-                RuntimeType::Source => RuntimeKind::Source,
-            },
+            ResolvedTarget::Legacy { runtime_type, .. } => {
+                #[allow(deprecated)]
+                match runtime_type {
+                    RuntimeType::Wasm => RuntimeKind::Wasm,
+                    RuntimeType::Oci | RuntimeType::Youki | RuntimeType::Docker => RuntimeKind::Youki,
+                    RuntimeType::Native | RuntimeType::Source => RuntimeKind::Source,
+                }
+            }
         }
     }
 
@@ -444,7 +445,7 @@ mod tests {
             capabilities: None,
             requirements: CapsuleRequirements::default(),
             execution: CapsuleExecution {
-                runtime: RuntimeType::Docker, // Legacy fallback
+                runtime: RuntimeType::Oci, // UARC V1.1.0: Use Oci instead of deprecated Docker
                 entrypoint: "/app/main".to_string(),
                 port: Some(8080),
                 health_check: None,
@@ -493,7 +494,7 @@ mod tests {
             capabilities: None,
             requirements: CapsuleRequirements::default(),
             execution: CapsuleExecution {
-                runtime: RuntimeType::Docker,
+                runtime: RuntimeType::Oci, // UARC V1.1.0: Use Oci for legacy OCI tests
                 entrypoint: "python:3.11-slim".to_string(),
                 port: Some(8080),
                 health_check: None,
@@ -556,7 +557,7 @@ mod tests {
                 runtime_type,
                 entrypoint,
             } => {
-                assert_eq!(runtime_type, RuntimeType::Docker);
+                assert_eq!(runtime_type, RuntimeType::Oci); // UARC V1.1.0
                 assert_eq!(entrypoint, "python:3.11-slim");
             }
             _ => panic!("Expected Legacy target, got {:?}", result),

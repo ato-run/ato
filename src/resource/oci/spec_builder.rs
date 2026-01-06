@@ -22,7 +22,13 @@ fn validate_mounts(volumes: &[StorageVolume], allowed_paths: &[String]) -> Resul
 }
 
 fn derive_args(execution: &CapsuleExecution, extra_args: Option<&[String]>) -> Vec<String> {
-    if execution.runtime == RuntimeType::Native {
+    // UARC V1.1.0: Native is deprecated, treated same as Source
+    #[allow(deprecated)]
+    let is_native_or_source = matches!(
+        execution.runtime,
+        RuntimeType::Native | RuntimeType::Source
+    );
+    if is_native_or_source {
         let parts = shell_words::split(&execution.entrypoint)
             .unwrap_or_else(|_| vec![execution.entrypoint.clone()]);
         if parts.is_empty() {
@@ -390,7 +396,7 @@ mod tests {
             capabilities: None,
             requirements: crate::capsule_types::capsule_v1::CapsuleRequirements::default(),
             execution: CapsuleExecution {
-                runtime: RuntimeType::Native,
+                runtime: RuntimeType::Source, // UARC V1.1.0: Use Source instead of deprecated Native
                 entrypoint: "/bin/echo".to_string(),
                 port: None,
                 health_check: None,
@@ -443,7 +449,7 @@ mod tests {
         let rootfs = temp.path();
 
         let exec = CapsuleExecution {
-            runtime: RuntimeType::Native,
+            runtime: RuntimeType::Source, // UARC V1.1.0: Use Source instead of deprecated Native
             entrypoint: "/bin/echo".to_string(),
             port: None,
             health_check: None,
