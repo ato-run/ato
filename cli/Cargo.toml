@@ -44,3 +44,4 @@ hex = "0.4"
 dirs = "5.0"
 ignore = "0.4"  # .gitignore support
 walkdir = "2.4"
+which = "6.0"

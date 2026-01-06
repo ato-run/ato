@@ -1,18 +1,22 @@
-//! Stop command - stop a running capsule
+//! Close command - stop a running Capsule
+//!
+//! Replaces the `stop` command with cleaner naming.
 
 use anyhow::{Context, Result};
 
 use crate::engine_client::{resolve_engine_url, CapsuleEngineClient};
 
-/// Arguments for the stop command
-pub struct StopArgs {
+/// Arguments for the close command
+pub struct CloseArgs {
+    /// Capsule ID to close
     pub capsule_id: String,
+    /// Engine gRPC URL
     pub engine_url: Option<String>,
 }
 
-/// Stop a running capsule
-pub async fn execute(args: StopArgs) -> Result<()> {
-    println!("⏹️  Stopping capsule: {}\n", args.capsule_id);
+/// Close a running Capsule
+pub async fn execute(args: CloseArgs) -> Result<()> {
+    println!("⏹️  Closing capsule: {}\n", args.capsule_id);
 
     // Connect to engine
     let engine_url = resolve_engine_url(args.engine_url.as_deref());
@@ -24,9 +28,9 @@ pub async fn execute(args: StopArgs) -> Result<()> {
     let response = client
         .stop_capsule(&args.capsule_id)
         .await
-        .context("Stop request failed")?;
+        .context("Close request failed")?;
 
-    println!("✅ Stopped: {} ({})", response.capsule_id, response.status);
+    println!("✅ Closed: {} ({})", response.capsule_id, response.status);
 
     Ok(())
 }
