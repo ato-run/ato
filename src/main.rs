@@ -269,6 +269,8 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // Initialize CapsuleManager
+    // UARC V1.1.0: Pass runtime section for allow_insecure_dev_mode
+    let runtime_section = file_cfg.as_ref().and_then(|c| c.runtime.as_ref());
     let capsule_manager = Arc::new(CapsuleManager::new(
         audit_logger.clone(),
         allowed_host_paths.clone(),
@@ -283,6 +285,8 @@ async fn main() -> anyhow::Result<()> {
         Some(container_runtime_config),
         Some(metrics_collector.clone()),
         storage_config,
+        None, // CAS client (TODO: initialize from config if needed)
+        runtime_section,
     ));
 
     info!("CapsuleManager initialized");
