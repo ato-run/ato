@@ -6,10 +6,10 @@
 use anyhow::{Context, Result};
 use capsuled::capsule_types::capsule_v1::CapsuleManifestV1;
 use capsuled::proto::onescluster::engine::v1::{
-    engine_client::EngineClient, DeployRequest, DeployResponse, EngineLogEntry, GetSystemStatusRequest,
+    engine_client::EngineClient, deploy_request::Manifest as DeployManifest,
+    DeployRequest, DeployResponse, EngineLogEntry, GetSystemStatusRequest,
     LogRequest, StopRequest, StopResponse, SystemStatus,
 };
-use capsuled::schema::converter::manifest_to_capnp_bytes;
 use std::time::Duration;
 use tonic::transport::Channel;
 use tonic::Streaming;
@@ -67,24 +67,20 @@ impl CapsuleEngineClient {
 
     /// Deploy a capsule to the engine
     ///
-    /// This sends the manifest as Cap'n Proto canonical bytes (UARC V1.1.0 compliant)
+    /// Sends the manifest as TOML content for Engine parsing
     pub async fn deploy_capsule(
         &mut self,
         capsule_id: &str,
         manifest: &CapsuleManifestV1,
         signature: Option<&[u8]>,
     ) -> Result<DeployResponse> {
-        // Convert manifest to canonical Cap'n Proto bytes
-        let capnp_bytes =
-            manifest_to_capnp_bytes(manifest).context("Failed to serialize manifest to Cap'n Proto")?;
+        // Serialize manifest to TOML for Engine processing
+        let toml_content = toml::to_string_pretty(manifest)
+            .context("Failed to serialize manifest to TOML")?;
 
         let request = DeployRequest {
             capsule_id: capsule_id.to_string(),
-            manifest: Some(
-                capsuled::proto::onescluster::engine::v1::deploy_request::Manifest::CapnpManifest(
-                    capnp_bytes,
-                ),
-            ),
+            manifest: Some(DeployManifest::TomlContent(toml_content)),
             oci_image: String::new(),
             digest: String::new(),
             manifest_signature: signature.map(|s| s.to_vec()).unwrap_or_default(),

@@ -5,6 +5,7 @@
 //! - `capsule open --dev` - Open in development mode (auto-pack, hot reload)
 
 use anyhow::{Context, Result};
+use capsuled::capsule_types::capsule_v1::{SourceTarget as ManifestSourceTarget, TargetsConfig};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use tokio::time::{sleep, Duration};
@@ -54,7 +55,44 @@ async fn execute_dev_mode(args: OpenArgs) -> Result<()> {
     let pack_result = pack_in_memory(&manifest_path)?;
     let capsule_id = format!("{}-dev", pack_result.manifest.name);
     
-    println!("   Name: {} v{}", pack_result.manifest.name, pack_result.manifest.version);
+    // Modify manifest for dev mode: set targets.source.dev_mode = true
+    // If targets.source doesn't exist, create it from execution section
+    let mut manifest = pack_result.manifest.clone();
+    
+    if manifest.targets.is_none() {
+        // Create targets from legacy execution section
+        // Infer language from entrypoint extension
+        let entrypoint = &manifest.execution.entrypoint;
+        let language = if entrypoint.ends_with(".py") {
+            "python"
+        } else if entrypoint.ends_with(".js") || entrypoint.ends_with(".ts") {
+            "node"
+        } else if entrypoint.ends_with(".rb") {
+            "ruby"
+        } else {
+            "python" // Default
+        };
+        
+        let source_target = ManifestSourceTarget {
+            language: language.to_string(),
+            version: None,
+            entrypoint: entrypoint.clone(),
+            dependencies: None,
+            args: vec![],
+            dev_mode: true, // Dev mode enabled
+        };
+        manifest.targets = Some(TargetsConfig {
+            preference: vec!["source".to_string()],
+            source: Some(source_target),
+            ..Default::default()
+        });
+    } else if let Some(ref mut targets) = manifest.targets {
+        if let Some(ref mut source) = targets.source {
+            source.dev_mode = true;
+        }
+    }
+    
+    println!("   Name: {} v{}", manifest.name, manifest.version);
     if let Some(ref digest) = pack_result.source_digest {
         println!("   Digest: {}", &digest[..32.min(digest.len())]);
     }
@@ -94,7 +132,7 @@ async fn execute_dev_mode(args: OpenArgs) -> Result<()> {
     let response = client
         .deploy_capsule_with_source(
             &capsule_id,
-            &pack_result.manifest,
+            &manifest, // Use modified manifest with dev_mode=true
             None, // No signature for dev mode
             &source_dir,
         )
