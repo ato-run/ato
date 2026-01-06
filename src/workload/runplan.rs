@@ -36,6 +36,7 @@ pub fn from_coordinator(plan: &common::RunPlan) -> RunPlanConversion {
 
     let mut oci_image = String::new();
     let mut digest = String::new();
+    let mut source_dev_mode = false; // UARC V1.1.0: Track dev_mode for Source runtime
     #[allow(deprecated)]
     let mut execution = CapsuleExecution {
         runtime: RuntimeType::Source, // Default to Source (UARC V1.1.0)
@@ -94,11 +95,32 @@ pub fn from_coordinator(plan: &common::RunPlan) -> RunPlanConversion {
                 execution.entrypoint = source.cmd.join(" ");
             }
             execution.env = env.clone();
+            
+            // UARC V1.1.0: Pass dev_mode to targets.source for proper permission handling
+            source_dev_mode = source.dev_mode;
         }
         None => {
             // Default
         }
     }
+
+    // Build targets config if Source runtime with dev_mode
+    let targets = if source_dev_mode {
+        Some(crate::capsule_types::capsule_v1::TargetsConfig {
+            preference: vec!["source".to_string()],
+            source: Some(crate::capsule_types::capsule_v1::SourceTarget {
+                language: "python".to_string(), // Will be overridden by manager
+                version: None,
+                entrypoint: execution.entrypoint.clone(),
+                dependencies: None,
+                args: vec![],
+                dev_mode: true, // Explicitly set dev_mode
+            }),
+            ..Default::default()
+        })
+    } else {
+        None
+    };
 
     let manifest = CapsuleManifestV1 {
         schema_version: "1.0".to_string(),
@@ -115,7 +137,7 @@ pub fn from_coordinator(plan: &common::RunPlan) -> RunPlanConversion {
         model: None,
         transparency: None,
         pool: None,
-        targets: None,
+        targets, // UARC V1.1.0: Include targets with source.dev_mode from RunPlan
     };
 
     RunPlanConversion {
