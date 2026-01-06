@@ -33,3 +33,10 @@ dist/
 
 # Archives
 .archives/
+
+# Test capsule .gitignore
+*.pyc
+__pycache__/
+.DS_Store
+*.capsule
+*.sig
