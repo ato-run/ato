@@ -173,11 +173,14 @@ async fn launch_with_alcoholless(
         request.workload_id, pid
     );
 
-    // Track the workload
+    // Track the workload (PID for quick lookup)
     {
         let mut workloads = runtime.active_workloads.lock().unwrap();
         workloads.insert(request.workload_id.to_string(), pid);
     }
+    
+    // Register child handle for lifecycle management (keeps process alive)
+    runtime.register_child(request.workload_id.to_string(), child);
 
     Ok(LaunchResult {
         pid: Some(pid),
@@ -351,11 +354,14 @@ async fn launch_with_sandbox_exec(
         request.workload_id, pid
     );
 
-    // Track the workload
+    // Track the workload (PID for quick lookup)
     {
         let mut workloads = runtime.active_workloads.lock().unwrap();
         workloads.insert(request.workload_id.to_string(), pid);
     }
+    
+    // Register child handle for lifecycle management (keeps process alive)
+    runtime.register_child(request.workload_id.to_string(), child);
 
     Ok(LaunchResult {
         pid: Some(pid),

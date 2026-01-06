@@ -23,7 +23,10 @@ mod windows;
 
 mod fallback;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::Child;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tracing::{info, warn};
@@ -72,7 +75,9 @@ pub struct SourceRuntime {
     #[allow(dead_code)]
     oci_fallback: Option<()>, // Placeholder - OCI fallback removed in UARC V1.1.0
     /// Active workloads (workload_id -> pid)
-    active_workloads: std::sync::Mutex<std::collections::HashMap<String, u32>>,
+    active_workloads: Mutex<HashMap<String, u32>>,
+    /// Child process handles - keeps processes alive and allows management
+    active_children: Arc<Mutex<HashMap<String, Child>>>,
 }
 
 impl SourceRuntime {
@@ -82,8 +87,20 @@ impl SourceRuntime {
             config,
             toolchain_manager: ToolchainManager::new(),
             oci_fallback: None,
-            active_workloads: std::sync::Mutex::new(std::collections::HashMap::new()),
+            active_workloads: Mutex::new(HashMap::new()),
+            active_children: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+    
+    /// Register a child process for lifecycle management
+    pub fn register_child(&self, workload_id: String, child: Child) {
+        let mut children = self.active_children.lock().unwrap();
+        children.insert(workload_id, child);
+    }
+    
+    /// Get a reference to active children for external management
+    pub fn active_children(&self) -> Arc<Mutex<HashMap<String, Child>>> {
+        Arc::clone(&self.active_children)
     }
 
     /// Determine the execution mode for a given source target
@@ -244,14 +261,30 @@ impl Runtime for SourceRuntime {
     async fn stop(&self, workload_id: &str) -> Result<(), RuntimeError> {
         info!("Stopping source workload: {}", workload_id);
 
-        // Try to get PID from active workloads
-        let pid = {
+        // Remove from active workloads
+        let _pid = {
             let mut workloads = self.active_workloads.lock().unwrap();
             workloads.remove(workload_id)
         };
 
-        if let Some(pid) = pid {
-            // Send SIGTERM
+        // Kill child process via handle (preferred method)
+        let mut child = {
+            let mut children = self.active_children.lock().unwrap();
+            children.remove(workload_id)
+        };
+
+        if let Some(ref mut child) = child {
+            info!("Killing child process for workload: {}", workload_id);
+            if let Err(e) = child.kill() {
+                warn!("Failed to kill child process for {}: {}", workload_id, e);
+            }
+            // Wait to collect status and prevent zombie
+            let _ = child.wait();
+            return Ok(());
+        }
+
+        // Fallback: signal by PID if we only have PID
+        if let Some(pid) = _pid {
             #[cfg(unix)]
             {
                 use nix::sys::signal::{kill, Signal};
@@ -261,13 +294,11 @@ impl Runtime for SourceRuntime {
                     warn!("Failed to send SIGTERM to PID {}: {}", pid, e);
                 }
             }
-            Ok(())
         } else {
-            // Workload not found in native tracking
-            // OCI fallback removed in UARC V1.1.0
             warn!("Workload {} not found", workload_id);
-            Ok(()) // Idempotent
         }
+
+        Ok(()) // Idempotent
     }
 
     fn get_log_path(&self, workload_id: &str) -> Option<PathBuf> {
