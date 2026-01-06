@@ -1,4 +1,4 @@
-//! Pack command - prepare capsule for deployment
+//! Pack command - build and sign a deployable .capsule archive
 //!
 //! UARC V1.1.0 compliant packing workflow:
 //! 1. Parse capsule.toml into CapsuleManifestV1
@@ -6,9 +6,12 @@
 //! 3. Calculate SHA256 hash of source tree (CAS digest)
 //! 4. Update manifest.targets.source.digest field
 //! 5. Serialize to .capsule file
+//! 6. Optionally sign with Ed25519 key
 
 use anyhow::{Context, Result};
 use capsuled::capsule_types::capsule_v1::CapsuleManifestV1;
+use capsuled::schema::converter::manifest_to_capnp_bytes;
+use ed25519_dalek::{Signature, Signer, SigningKey};
 use ignore::WalkBuilder;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -19,6 +22,8 @@ use std::path::{Path, PathBuf};
 pub struct PackArgs {
     pub manifest_path: PathBuf,
     pub output: Option<PathBuf>,
+    /// Path to signing key (.secret file)
+    pub key: Option<PathBuf>,
 }
 
 /// Pack result for programmatic use
@@ -84,12 +89,79 @@ pub fn execute(args: PackArgs) -> Result<()> {
     // Serialize to .capsule file (JSON format for machine processing)
     let output_json = serde_json::to_string_pretty(&result.manifest)
         .context("Failed to serialize manifest to JSON")?;
-    fs::write(&output_path, output_json).context("Failed to write .capsule file")?;
+    fs::write(&output_path, &output_json).context("Failed to write .capsule file")?;
 
     println!("✅ Packed successfully!");
     println!("Output: {}", output_path.display());
 
+    // Sign if key provided
+    if let Some(key_path) = args.key {
+        sign_capsule(&result.manifest, &key_path, &output_path)?;
+    } else {
+        println!("\n💡 Tip: Use 'capsule pack --key <path>' to sign");
+    }
+
     Ok(())
+}
+
+/// Sign a capsule with Ed25519 over canonical bytes
+fn sign_capsule(manifest: &CapsuleManifestV1, key_path: &Path, capsule_path: &Path) -> Result<()> {
+    println!("\n✍️  Signing with: {}", key_path.display());
+
+    // Generate Cap'n Proto canonical bytes
+    let canonical_bytes = manifest_to_capnp_bytes(manifest)
+        .context("Failed to generate canonical bytes")?;
+    println!("   ✓ Generated canonical bytes ({} bytes)", canonical_bytes.len());
+
+    // Load Ed25519 private key
+    let secret_bytes = fs::read(key_path)
+        .with_context(|| format!("Failed to read private key: {}", key_path.display()))?;
+
+    if secret_bytes.len() != 32 {
+        anyhow::bail!(
+            "Invalid private key length: expected 32 bytes, got {}",
+            secret_bytes.len()
+        );
+    }
+
+    let signing_key = SigningKey::from_bytes(
+        &secret_bytes.try_into().expect("Already verified length is 32"),
+    );
+
+    // Sign canonical bytes
+    let signature: Signature = signing_key.sign(&canonical_bytes);
+    let signature_bytes = signature.to_bytes();
+
+    // Write .sig file
+    let sig_path = capsule_path.with_extension("sig");
+    fs::write(&sig_path, &signature_bytes)
+        .with_context(|| format!("Failed to write signature: {}", sig_path.display()))?;
+
+    println!("   ✓ Signed: {}", sig_path.display());
+    println!("   Signature: {}...", hex::encode(&signature_bytes[..16]));
+
+    Ok(())
+}
+
+/// Pack and sign in one step (for programmatic use)
+pub fn pack_and_sign(manifest_path: &Path, key_path: &Path) -> Result<(PackResult, Vec<u8>)> {
+    let result = pack_in_memory(manifest_path)?;
+    
+    // Generate canonical bytes and sign
+    let canonical_bytes = manifest_to_capnp_bytes(&result.manifest)
+        .context("Failed to generate canonical bytes")?;
+    
+    let secret_bytes = fs::read(key_path)?;
+    if secret_bytes.len() != 32 {
+        anyhow::bail!("Invalid key length");
+    }
+    
+    let signing_key = SigningKey::from_bytes(
+        &secret_bytes.try_into().expect("Length verified"),
+    );
+    let signature: Signature = signing_key.sign(&canonical_bytes);
+    
+    Ok((result, signature.to_bytes().to_vec()))
 }
 
 /// Calculate SHA256 digest of source directory
