@@ -174,7 +174,22 @@ impl CapsuleManager {
         let log_dir_clone = runtime_config.log_dir.clone();
         let _bundle_root_clone = runtime_config.bundle_root.clone();
 
-        let source_dev_mode = false; // Always false for UARC V1
+        // UARC V1.1.0: Determine allow_insecure_dev_mode FIRST (before using it)
+        // Priority: Environment variable > Config file > Default (false)
+        let allow_insecure_dev_mode = std::env::var("CAPSULED_ALLOW_DEV_MODE")
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or_else(|_| {
+                runtime_section
+                    .map(|s| s.allow_insecure_dev_mode)
+                    .unwrap_or(false)
+            });
+
+        if allow_insecure_dev_mode {
+            warn!("SECURITY: allow_insecure_dev_mode is enabled. Source capsules may run without sandboxing.");
+        }
+
+        // UARC V1.1.0: Use the computed allow_insecure_dev_mode for SourceRuntime
+        let source_dev_mode = allow_insecure_dev_mode;
 
         let container_runtime = Arc::new(ContainerRuntime::new(
             runtime_config,
@@ -194,6 +209,10 @@ impl CapsuleManager {
             log_dir: log_dir_clone.clone(),
             state_dir: std::env::temp_dir().join("capsuled").join("state"),
         };
+        warn!(
+            "DEBUG: SourceRuntime initialized with dev_mode={}",
+            source_dev_mode
+        );
         // OCI fallback disabled - pool/youki functionality removed for clean dependency
         let oci_fallback = None;
         let source_runtime = Arc::new(SourceRuntime::new(source_runtime_config, oci_fallback));
@@ -216,19 +235,7 @@ impl CapsuleManager {
             .expect("Failed to initialize WasmRuntime"),
         );
 
-        // UARC V1.1.0: Determine allow_insecure_dev_mode
-        // Priority: Environment variable > Config file > Default (false)
-        let allow_insecure_dev_mode = std::env::var("CAPSULED_ALLOW_DEV_MODE")
-            .map(|v| v == "1" || v.to_lowercase() == "true")
-            .unwrap_or_else(|_| {
-                runtime_section
-                    .map(|s| s.allow_insecure_dev_mode)
-                    .unwrap_or(false)
-            });
-
-        if allow_insecure_dev_mode {
-            warn!("SECURITY: allow_insecure_dev_mode is enabled. Source capsules may run without sandboxing.");
-        }
+        // NOTE: allow_insecure_dev_mode is computed earlier (before source_runtime init)
 
         Self {
             docker_runtime: docker_cli_runtime,
@@ -564,10 +571,20 @@ impl CapsuleManager {
             // Example: "mlx-community/Llama-3.2-3B-Instruct-4bit"
             let runtime_id = manifest.execution.entrypoint.as_str();
 
-            // Skip artifact download for system-level runtimes (mlx, llama, vllm) if they are just shims
-            // But typically native runtime expects an artifact handle.
-            // If it's a file path (starts with / or ./), skip download.
-            if !runtime_id.starts_with('/') && !runtime_id.starts_with("./") {
+            // Skip artifact download for:
+            // 1. File paths (starts with / or ./)
+            // 2. Script files (ends with common script extensions)
+            // 3. Local source files (SourceRuntime handles these directly)
+            let is_local_script = runtime_id.starts_with('/')
+                || runtime_id.starts_with("./")
+                || runtime_id.ends_with(".py")
+                || runtime_id.ends_with(".js")
+                || runtime_id.ends_with(".ts")
+                || runtime_id.ends_with(".rb")
+                || runtime_id.ends_with(".sh")
+                || runtime_id.contains(' '); // Full command like "python main.py"
+
+            if !is_local_script {
                 if let Some(am) = &self.artifact_manager {
                     // Check version from manifest or default to latest
                     let version = "latest"; // Manifest V1 defines version, but that's the capsule version. Artifact version?
