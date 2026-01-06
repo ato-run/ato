@@ -36,8 +36,9 @@ pub fn from_coordinator(plan: &common::RunPlan) -> RunPlanConversion {
 
     let mut oci_image = String::new();
     let mut digest = String::new();
+    #[allow(deprecated)]
     let mut execution = CapsuleExecution {
-        runtime: RuntimeType::Native,
+        runtime: RuntimeType::Source, // Default to Source (UARC V1.1.0)
         entrypoint: "".to_string(),
         port: None,
         health_check: None,
@@ -47,12 +48,13 @@ pub fn from_coordinator(plan: &common::RunPlan) -> RunPlanConversion {
     };
     let mut storage = CapsuleStorage::default();
 
+    #[allow(deprecated)]
     match &plan.runtime {
         Some(common::run_plan::Runtime::Docker(docker)) => {
             oci_image = docker.image.clone();
             digest = docker.digest.clone();
 
-            execution.runtime = RuntimeType::Docker;
+            execution.runtime = RuntimeType::Oci; // UARC V1.1.0: Use Oci instead of Docker
             execution.entrypoint = docker.image.clone();
             execution.env = env.clone();
 
@@ -74,7 +76,7 @@ pub fn from_coordinator(plan: &common::RunPlan) -> RunPlanConversion {
                 .collect();
         }
         Some(common::run_plan::Runtime::Native(native)) => {
-            execution.runtime = RuntimeType::Native;
+            execution.runtime = RuntimeType::Source; // UARC V1.1.0: Map Native to Source
             execution.entrypoint = native.binary_path.clone();
             execution.env = env.clone();
         }
@@ -225,8 +227,8 @@ mod tests {
         assert_eq!(manifest.name, "Test Capsule");
         assert_eq!(manifest.version, "1.0.0");
 
-        // Check Execution
-        assert_eq!(manifest.execution.runtime, RuntimeType::Docker);
+        // Check Execution - UARC V1.1.0: Docker runtime maps to Oci
+        assert_eq!(manifest.execution.runtime, RuntimeType::Oci);
         assert_eq!(manifest.execution.entrypoint, "nginx:latest");
         assert_eq!(manifest.execution.env.get("KEY").unwrap(), "VALUE");
         assert_eq!(manifest.execution.port, Some(8080));
@@ -263,7 +265,8 @@ mod tests {
         let conversion = from_coordinator(&plan);
         let manifest = conversion.adep;
 
-        assert_eq!(manifest.execution.runtime, RuntimeType::Native);
+        // UARC V1.1.0: Native runtime maps to Source
+        assert_eq!(manifest.execution.runtime, RuntimeType::Source);
 
         // This test intentionally documents the behavior: args are NOT in the manifest.
         assert_eq!(manifest.execution.entrypoint, "/usr/bin/python3");

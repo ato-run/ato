@@ -25,21 +25,65 @@ pub enum CapsuleType {
 }
 
 /// Runtime Type - how the Capsule is executed
+///
+/// UARC V1.1.0 defines three runtime classes:
+/// - `Source`: Interpreted source code (Python, JS, etc.)
+/// - `Wasm`: WebAssembly Component Model
+/// - `Oci`: OCI Container Image (Docker, Youki, etc.)
+///
+/// Legacy types (Docker, Native, Youki) are deprecated and mapped to Oci.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum RuntimeType {
-    /// Generic Source Runtime - execute any language runtime from host
-    /// Supports Python, Ruby, Node.js, etc. with explicit cmd or auto-detection
+    /// Interpreted source code runtime (Python, Node.js, Ruby, etc.)
+    /// UARC V1.1.0: Primary runtime for scripting workloads
     #[default]
     Source,
-    /// Docker container
-    Docker,
-    /// Native binary
-    Native,
-    /// Youki OCI runtime (Linux-only, direct container execution without Docker)
-    Youki,
-    /// WebAssembly Component Model (UARC V1.1.0)
+
+    /// WebAssembly Component Model runtime
+    /// UARC V1.1.0: Portable, sandboxed bytecode for edge/latency-sensitive workloads
     Wasm,
+
+    /// OCI Container Image runtime (youki, runc, containerd)
+    /// UARC V1.1.0: Fallback for legacy/GPU applications
+    Oci,
+
+    // === Legacy types (deprecated, for backward compatibility) ===
+    // These will be removed in UARC V2.0
+
+    /// Docker container (deprecated: use `oci` instead)
+    #[deprecated(since = "1.1.0", note = "Use `oci` runtime type instead")]
+    #[serde(rename = "docker")]
+    Docker,
+
+    /// Native binary (deprecated: not supported in UARC V1)
+    #[deprecated(since = "1.1.0", note = "Native runtime is not supported in UARC V1 for security reasons")]
+    #[serde(rename = "native")]
+    Native,
+
+    /// Youki OCI runtime (deprecated: use `oci` instead)
+    #[deprecated(since = "1.1.0", note = "Use `oci` runtime type instead")]
+    #[serde(rename = "youki")]
+    Youki,
+}
+
+impl RuntimeType {
+    /// Normalize legacy runtime types to UARC V1.1.0 types
+    pub fn normalize(&self) -> RuntimeType {
+        #[allow(deprecated)]
+        match self {
+            RuntimeType::Docker => RuntimeType::Oci,
+            RuntimeType::Youki => RuntimeType::Oci,
+            RuntimeType::Native => RuntimeType::Source, // Best-effort fallback
+            other => other.clone(),
+        }
+    }
+
+    /// Check if this is a legacy (deprecated) runtime type
+    #[allow(deprecated)]
+    pub fn is_legacy(&self) -> bool {
+        matches!(self, RuntimeType::Docker | RuntimeType::Native | RuntimeType::Youki)
+    }
 }
 
 /// Routing Weight - determines local vs cloud routing
@@ -745,9 +789,15 @@ impl CapsuleManifestV1 {
             }
         }
 
-        // Storage volumes (minimal): docker-only, unique names, safe absolute mount paths.
+        // Storage volumes (minimal): OCI-only, unique names, safe absolute mount paths.
+        // UARC V1.1.0: Support Docker/Youki as legacy aliases for Oci
+        #[allow(deprecated)]
+        let is_oci_compatible = matches!(
+            self.execution.runtime,
+            RuntimeType::Oci | RuntimeType::Docker | RuntimeType::Youki
+        );
         if !self.storage.volumes.is_empty() {
-            if self.execution.runtime != RuntimeType::Docker {
+            if !is_oci_compatible {
                 errors.push(ValidationError::StorageOnlyForDocker);
             }
 

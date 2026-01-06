@@ -40,12 +40,15 @@ fn capsule_type_to_capnp(t: CapsuleType) -> capsule_capnp::CapsuleType {
 }
 
 fn runtime_type_to_capnp(r: RuntimeType) -> capsule_capnp::RuntimeType {
+    #[allow(deprecated)]
     match r {
         RuntimeType::Source => capsule_capnp::RuntimeType::Source,
+        RuntimeType::Wasm => capsule_capnp::RuntimeType::Wasm,
+        RuntimeType::Oci => capsule_capnp::RuntimeType::Youki, // Map Oci to Youki in Cap'n Proto (closest match)
+        // Legacy types (deprecated)
         RuntimeType::Docker => capsule_capnp::RuntimeType::Docker,
         RuntimeType::Native => capsule_capnp::RuntimeType::Native,
         RuntimeType::Youki => capsule_capnp::RuntimeType::Youki,
-        RuntimeType::Wasm => capsule_capnp::RuntimeType::Wasm,
     }
 }
 

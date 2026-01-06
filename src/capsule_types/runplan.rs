@@ -114,8 +114,10 @@ impl CapsuleManifestV1 {
         let ports = port_list(self.execution.port);
         let env = ordered_env(&self.execution.env);
 
+        #[allow(deprecated)]
         let runtime = match self.execution.runtime {
-            RuntimeType::Docker => {
+            RuntimeType::Docker | RuntimeType::Youki | RuntimeType::Oci => {
+                // OCI container runtime (Docker, Youki, or new Oci type)
                 let mut mounts = Vec::new();
                 if !self.storage.volumes.is_empty() {
                     let base = default_storage_mount_base();
@@ -157,11 +159,16 @@ impl CapsuleManifestV1 {
                     mounts,
                 })
             }
-            RuntimeType::Native => RunPlanRuntime::Native(NativeRuntime {
-                binary_path: self.execution.entrypoint.clone(),
+            // UARC V1.1.0: Native is deprecated, map to Source runtime
+            RuntimeType::Native => RunPlanRuntime::Source(SourceRuntime {
+                language: None,
+                entrypoint: self.execution.entrypoint.clone(),
+                cmd: Vec::new(),
                 args: Vec::new(),
                 env: env.clone(),
                 working_dir: None,
+                ports: ports.clone(),
+                dev_mode: false,
             }),
             RuntimeType::Source => RunPlanRuntime::Source(SourceRuntime {
                 language: None, // Will be set by caller if needed
@@ -173,49 +180,6 @@ impl CapsuleManifestV1 {
                 ports: ports.clone(),
                 dev_mode: false,
             }),
-            RuntimeType::Youki => {
-                // Youki uses the same Docker-like container specification
-                let mut mounts = Vec::new();
-                if !self.storage.volumes.is_empty() {
-                    let base = default_storage_mount_base();
-                    for vol in &self.storage.volumes {
-                        let name = vol.name.trim();
-                        let mount_path = vol.mount_path.trim();
-                        if name.is_empty()
-                            || mount_path.is_empty()
-                            || !mount_path.starts_with('/')
-                            || mount_path.contains("..")
-                        {
-                            return Err(CapsuleError::ValidationError(
-                                "invalid storage volume (requires name and absolute mount_path)"
-                                    .to_string(),
-                            ));
-                        }
-
-                        mounts.push(Mount {
-                            source: format!(
-                                "{}/{}/{}",
-                                base.trim_end_matches('/'),
-                                self.name,
-                                name
-                            ),
-                            target: mount_path.to_string(),
-                            readonly: vol.read_only,
-                        });
-                    }
-                }
-
-                RunPlanRuntime::Docker(DockerRuntime {
-                    image: self.execution.entrypoint.clone(),
-                    digest: None,
-                    command: Vec::new(),
-                    env: env.clone(),
-                    working_dir: None,
-                    user: None,
-                    ports: ports.clone(),
-                    mounts,
-                })
-            }
             RuntimeType::Wasm => RunPlanRuntime::Native(NativeRuntime {
                 // Wasm components are executed as native artifacts by WasmRuntime
                 binary_path: self.execution.entrypoint.clone(),

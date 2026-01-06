@@ -317,9 +317,10 @@ impl CapsuleManager {
             }
             ResolvedTarget::Legacy { runtime_type, .. } => {
                 // Legacy mode - use the old runtime selection logic
+                #[allow(deprecated)]
                 match runtime_type {
-                    RuntimeType::Native => self.source_runtime.clone(), // UARC V1: Map Native to Source
-                    RuntimeType::Docker => {
+                    RuntimeType::Native => self.source_runtime.clone(), // UARC V1.1.0: Map Native to Source
+                    RuntimeType::Docker | RuntimeType::Oci => {
                         if cfg!(target_os = "macos") || force_docker_cli {
                             self.docker_runtime.clone()
                         } else {
@@ -329,7 +330,7 @@ impl CapsuleManager {
                     // Source runtime (formerly PythonUv) for interpreted languages
                     RuntimeType::Source => self.source_runtime.clone(),
                     RuntimeType::Youki => {
-                        // UARC V1: Youki runtime removed, fallback to container_runtime
+                        // UARC V1.1.0: Youki runtime removed, fallback to container_runtime
                         warn!("Youki runtime removed in UARC V1.1.0, using container runtime");
                         if cfg!(target_os = "macos") || force_docker_cli {
                             self.docker_runtime.clone()
@@ -551,8 +552,14 @@ impl CapsuleManager {
             }
         }
 
-        // Ensure Runtime Artifact (if native)
-        if manifest.execution.runtime == RuntimeType::Native {
+        // Ensure Runtime Artifact (if native/source)
+        // UARC V1.1.0: Native is deprecated, mapped to Source
+        #[allow(deprecated)]
+        let is_native_or_source = matches!(
+            manifest.execution.runtime,
+            RuntimeType::Native | RuntimeType::Source
+        );
+        if is_native_or_source {
             // For Native execution, entrypoint is the unique identifier of the artifact (or path).
             // Example: "mlx-community/Llama-3.2-3B-Instruct-4bit"
             let runtime_id = manifest.execution.entrypoint.as_str();
@@ -1056,11 +1063,17 @@ impl CapsuleManager {
             source_target: None,
         };
 
-        // Initialize pool if configured (Linux only, Youki runtime)
+        // Initialize pool if configured (Linux only, OCI runtime)
         #[cfg(target_os = "linux")]
         if let Some(pool_registry) = &self.pool_registry {
             if let Some(ref pool_config) = manifest.pool {
-                if pool_config.enabled && matches!(manifest.execution.runtime, RuntimeType::Youki) {
+                // UARC V1.1.0: Youki deprecated, use Oci; also accept legacy Youki/Docker
+                #[allow(deprecated)]
+                let is_oci_runtime = matches!(
+                    manifest.execution.runtime,
+                    RuntimeType::Oci | RuntimeType::Youki | RuntimeType::Docker
+                );
+                if pool_config.enabled && is_oci_runtime {
                     info!(
                         capsule_id = %capsule_id,
                         pool_size = pool_config.size,
@@ -1082,10 +1095,16 @@ impl CapsuleManager {
             }
         }
 
-        // Try to acquire from pool if available (Linux only, Youki runtime)
+        // Try to acquire from pool if available (Linux only, OCI runtime)
         #[cfg(target_os = "linux")]
         let pool_launch_result: Option<LaunchResult> = {
-            if matches!(manifest.execution.runtime, RuntimeType::Youki) {
+            // UARC V1.1.0: Youki deprecated, use Oci; also accept legacy Youki/Docker
+            #[allow(deprecated)]
+            let is_oci_runtime = matches!(
+                manifest.execution.runtime,
+                RuntimeType::Oci | RuntimeType::Youki | RuntimeType::Docker
+            );
+            if is_oci_runtime {
                 if let Some(pool_registry) = &self.pool_registry {
                     if pool_registry.has_pool(&capsule_id) {
                         info!(

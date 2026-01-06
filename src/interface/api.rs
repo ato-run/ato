@@ -263,7 +263,8 @@ async fn apply_handler(
 
     let vram_string = compute_res.and_then(|c| c.vram_min.as_ref()).cloned();
 
-    // Map Native vs Docker
+    // Map Native vs Docker - UARC V1.1.0: Use Source instead of Native, Oci instead of Docker
+    #[allow(deprecated)]
     let (runtime_type, entrypoint) = if let Some(native_cfg) = &container_config.native {
         // SPEC V1.1.0: Combine native runtime and args into full command
         // Example: runtime="python", args=["-m", "server"] -> "python -m server"
@@ -274,9 +275,9 @@ async fn apply_handler(
             let args_str = shell_words::join(&native_cfg.args);
             format!("{} {}", native_cfg.runtime, args_str)
         };
-        (RuntimeType::Native, full_cmd)
+        (RuntimeType::Source, full_cmd) // UARC V1.1.0: Native → Source
     } else {
-        (RuntimeType::Docker, container_config.image.clone())
+        (RuntimeType::Oci, container_config.image.clone()) // UARC V1.1.0: Docker → Oci
     };
 
     let manifest = CapsuleManifestV1 {

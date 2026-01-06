@@ -66,8 +66,8 @@ mod prereqs {
 }
 
 /// Helper to create a minimal test manifest
-fn create_test_manifest(name: &str) -> capsule_core::capsule_v1::CapsuleManifestV1 {
-    use capsule_core::capsule_v1::*;
+fn create_test_manifest(name: &str) -> capsuled::capsule_types::capsule_v1::CapsuleManifestV1 {
+    use capsuled::capsule_types::capsule_v1::*;
 
     CapsuleManifestV1 {
         schema_version: "1.0".to_string(),
@@ -78,7 +78,7 @@ fn create_test_manifest(name: &str) -> capsule_core::capsule_v1::CapsuleManifest
         capabilities: None,
         requirements: CapsuleRequirements::default(),
         execution: CapsuleExecution {
-            runtime: RuntimeType::Docker,
+            runtime: RuntimeType::Oci, // UARC V1.1.0
             entrypoint: "alpine:latest".to_string(),
             port: None,
             health_check: None,
@@ -109,7 +109,7 @@ fn test_egress_fail_closed_blocks_disallowed_traffic() {
         return;
     }
 
-    use capsule_core::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
+    use capsuled::capsule_types::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
     use capsuled::security::egress_policy::generate_fw_rules;
 
     // Create manifest with restricted egress (only internal network)
@@ -164,7 +164,7 @@ fn test_egress_allows_permitted_traffic() {
         return;
     }
 
-    use capsule_core::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
+    use capsuled::capsule_types::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
     use capsuled::security::egress_policy::generate_fw_rules;
 
     // Create manifest allowing specific external IP
@@ -213,7 +213,7 @@ fn test_egress_allows_permitted_traffic() {
 fn test_signature_verification_priority_over_egress() {
     prereqs::print_status();
 
-    use capsule_core::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
+    use capsuled::capsule_types::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
     use capsuled::security::verifier::ManifestVerifier;
 
     // Create verifier with a FAKE trusted key to enable signature enforcement

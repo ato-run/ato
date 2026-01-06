@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use capsule_core::capsule_v1::{
+use capsuled::capsule_types::capsule_v1::{
     CapsuleExecution, CapsuleManifestV1, CapsuleRequirements, CapsuleRouting, CapsuleStorage,
     CapsuleType, OciTarget, RuntimeType, SourceTarget, TargetsConfig, WasmTarget,
 };
@@ -88,7 +88,7 @@ fn context_all_runtimes() -> ResolveContext {
     let mut supported = HashSet::new();
     supported.insert(RuntimeKind::Wasm);
     supported.insert(RuntimeKind::Youki);
-    supported.insert(RuntimeKind::Native);
+    supported.insert(RuntimeKind::Source);
 
     let mut toolchains = HashSet::new();
     toolchains.insert("python".to_string());
@@ -179,6 +179,10 @@ fn test_legacy_wasm_fallback() {
 #[test]
 fn test_wasm_first_preference() {
     let targets = TargetsConfig {
+        port: None,
+        startup_timeout: 60,
+        env: HashMap::new(),
+        health_check: None,
         preference: vec!["wasm".to_string(), "oci".to_string()],
         source_digest: None,
         wasm: Some(WasmTarget {
@@ -212,6 +216,10 @@ fn test_wasm_first_preference() {
 #[test]
 fn test_oci_first_preference() {
     let targets = TargetsConfig {
+        port: None,
+        startup_timeout: 60,
+        env: HashMap::new(),
+        health_check: None,
         preference: vec!["oci".to_string(), "wasm".to_string()],
         source_digest: None,
         wasm: Some(WasmTarget {
@@ -250,6 +258,10 @@ fn test_oci_first_preference() {
 #[test]
 fn test_wasm_only_engine_selects_wasm() {
     let targets = TargetsConfig {
+        port: None,
+        startup_timeout: 60,
+        env: HashMap::new(),
+        health_check: None,
         preference: vec!["oci".to_string(), "wasm".to_string()],
         source_digest: None,
         wasm: Some(WasmTarget {
@@ -284,6 +296,10 @@ fn test_wasm_only_engine_selects_wasm() {
 #[test]
 fn test_docker_only_engine_selects_oci() {
     let targets = TargetsConfig {
+        port: None,
+        startup_timeout: 60,
+        env: HashMap::new(),
+        health_check: None,
         preference: vec!["wasm".to_string(), "oci".to_string()],
         source_digest: None,
         wasm: Some(WasmTarget {
@@ -322,12 +338,17 @@ fn test_docker_only_engine_selects_oci() {
 #[test]
 fn test_source_target_with_toolchain() {
     let targets = TargetsConfig {
+        port: None,
+        startup_timeout: 60,
+        env: HashMap::new(),
+        health_check: None,
         preference: vec!["source".to_string()],
         source_digest: Some(
             "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
         ),
         wasm: None,
         source: Some(SourceTarget {
+            dev_mode: false,
             language: "python".to_string(),
             version: Some("3.11".to_string()),
             entrypoint: "main.py".to_string(),
@@ -358,10 +379,15 @@ fn test_source_target_with_toolchain() {
 #[test]
 fn test_source_target_without_toolchain_falls_back() {
     let targets = TargetsConfig {
+        port: None,
+        startup_timeout: 60,
+        env: HashMap::new(),
+        health_check: None,
         preference: vec!["source".to_string(), "oci".to_string()],
         source_digest: None,
         wasm: None,
         source: Some(SourceTarget {
+            dev_mode: false,
             language: "ruby".to_string(), // Not in available toolchains
             version: None,
             entrypoint: "main.rb".to_string(),
@@ -398,6 +424,10 @@ fn test_source_target_without_toolchain_falls_back() {
 fn test_default_preference_order_wasm_source_oci() {
     // No explicit preference - should use default: wasm -> source -> oci
     let targets = TargetsConfig {
+        port: None,
+        startup_timeout: 60,
+        env: HashMap::new(),
+        health_check: None,
         preference: vec![], // Empty = use default
         source_digest: None,
         wasm: Some(WasmTarget {
@@ -406,6 +436,7 @@ fn test_default_preference_order_wasm_source_oci() {
             config: HashMap::new(),
         }),
         source: Some(SourceTarget {
+            dev_mode: false,
             language: "python".to_string(),
             version: None,
             entrypoint: "main.py".to_string(),
@@ -442,6 +473,10 @@ fn test_default_preference_order_wasm_source_oci() {
 #[test]
 fn test_no_compatible_target_error() {
     let targets = TargetsConfig {
+        port: None,
+        startup_timeout: 60,
+        env: HashMap::new(),
+        health_check: None,
         preference: vec!["wasm".to_string()],
         source_digest: None,
         wasm: Some(WasmTarget {
@@ -495,7 +530,7 @@ fn test_resolved_target_runtime_kind() {
         args: vec![],
     };
     // Source targets use Native runtime (for python-uv, node, etc.)
-    assert_eq!(source_target.runtime_kind(), RuntimeKind::Native);
+    assert_eq!(source_target.runtime_kind(), RuntimeKind::Source);
 }
 
 // ============================================================================
