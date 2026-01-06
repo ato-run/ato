@@ -232,6 +232,8 @@ impl DevServerHandle {
             Some(runtime_config),
             Some(metrics_collector),
             None, // Storage config
+            None, // CAS client (not configured for dev server)
+            None, // Runtime section (use default)
         ));
 
         // WasmHost (minimal)

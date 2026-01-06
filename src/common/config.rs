@@ -58,6 +58,14 @@ pub struct RuntimeSection {
     pub state_root: Option<String>,
     pub log_dir: Option<String>,
     pub hook_retry_attempts: Option<u32>,
+
+    /// Allow insecure development mode for Source runtime.
+    /// When false (default), dev_mode requests in manifests are ignored and
+    /// source capsules always run in sandboxed mode.
+    /// UARC V1.1.0: Only set to true in development environments.
+    /// Can be overridden by CAPSULED_ALLOW_DEV_MODE environment variable.
+    #[serde(default)]
+    pub allow_insecure_dev_mode: bool,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]

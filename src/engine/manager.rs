@@ -6,6 +6,7 @@ use tracing::{info, warn};
 
 use crate::hardware::GpuDetector;
 use crate::metrics::collector::MetricsCollector;
+use crate::resource::cas::CasClient;
 use crate::runtime::{
     resolver::{resolve_runtime, ResolveContext, ResolvedTarget},
     source::{SourceRuntime, SourceRuntimeConfig},
@@ -100,6 +101,12 @@ pub struct CapsuleManager {
     // Security
     allowed_host_paths: Vec<String>,
 
+    // UARC V1.1.0: CAS client for source code verification (L1 Policy)
+    cas_client: Option<Arc<dyn CasClient>>,
+
+    // UARC V1.1.0: Allow insecure dev mode (from RuntimeConfig or env var)
+    allow_insecure_dev_mode: bool,
+
     // Dependencies
     audit_logger: Arc<AuditLogger>,
     gpu_detector: Arc<dyn GpuDetector>,
@@ -129,6 +136,10 @@ impl CapsuleManager {
         runtime_config: Option<RuntimeConfig>,
         metrics_collector: Option<Arc<MetricsCollector>>,
         storage_config: Option<StorageConfig>,
+        // UARC V1.1.0: CAS client for L1 Source Policy verification
+        cas_client: Option<Arc<dyn CasClient>>,
+        // UARC V1.1.0: Runtime section for allow_insecure_dev_mode
+        runtime_section: Option<&crate::common::config::RuntimeSection>,
     ) -> Self {
         // Initialize runtimes
         let runtime_config = if let Some(config) = runtime_config {
@@ -205,6 +216,20 @@ impl CapsuleManager {
             .expect("Failed to initialize WasmRuntime"),
         );
 
+        // UARC V1.1.0: Determine allow_insecure_dev_mode
+        // Priority: Environment variable > Config file > Default (false)
+        let allow_insecure_dev_mode = std::env::var("CAPSULED_ALLOW_DEV_MODE")
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or_else(|_| {
+                runtime_section
+                    .map(|s| s.allow_insecure_dev_mode)
+                    .unwrap_or(false)
+            });
+
+        if allow_insecure_dev_mode {
+            warn!("SECURITY: allow_insecure_dev_mode is enabled. Source capsules may run without sandboxing.");
+        }
+
         Self {
             docker_runtime: docker_cli_runtime,
             dev_runtime,
@@ -215,6 +240,8 @@ impl CapsuleManager {
             capsules: Arc::new(RwLock::new(HashMap::new())),
 
             allowed_host_paths,
+            cas_client,
+            allow_insecure_dev_mode,
 
             audit_logger,
             gpu_detector,
@@ -316,9 +343,9 @@ impl CapsuleManager {
         }
     }
 
-    /// Pre-execution analysis hook for obfuscation detection.
+    /// Pre-execution analysis hook for obfuscation detection (L3 Safety Gates).
     ///
-    /// Scans manifest execution config for dangerous patterns that could
+    /// UARC V1.1.0: Scans manifest execution config for dangerous patterns that could
     /// indicate obfuscated code or remote code injection attempts.
     ///
     /// # Detected Patterns
@@ -326,7 +353,6 @@ impl CapsuleManager {
     /// - `eval`, `exec`: Dynamic code execution  
     /// - `curl | sh`, `wget | bash`: Remote code injection
     /// - Embedded hex/base64 blobs in environment variables
-    #[allow(dead_code)]
     fn pre_execute_analysis(&self, manifest: &CapsuleManifestV1) -> Result<()> {
         tracing::debug!("Pre-execution analysis for capsule '{}'", manifest.name);
 
@@ -438,7 +464,12 @@ impl CapsuleManager {
 
         info!("Deploying capsule {}", capsule_id);
 
-        // Signature verification
+        // =====================================================================
+        // UARC V1.1.0 Security Verification Pipeline
+        // L2: Signature Verification → L3: Pre-execution Analysis
+        // =====================================================================
+
+        // L2: Signature verification (Authenticity)
         if let Some(sig_bytes) = &signature {
             // Verify against canonical Cap'n Proto bytes derived from the struct.
             // This keeps verification stable regardless of the original input format.
@@ -455,6 +486,9 @@ impl CapsuleManager {
                 capsule_id
             );
         }
+
+        // L3: Pre-execution analysis (Safety gates - obfuscation detection)
+        self.pre_execute_analysis(&manifest)?;
 
         // Manifest JSON string for cloud deploy / record keeping
         let manifest_json_str = serde_json::to_string(&manifest)
@@ -623,7 +657,29 @@ impl CapsuleManager {
         let manifest_json_for_runtime = serde_json::to_string(&manifest)
             .map_err(|e| anyhow!("Failed to serialize manifest for runtime: {}", e))?;
 
-        // Egress policy handling would go here (omitted for now)
+        // =====================================================================
+        // UARC V1.1.0: L4 Egress Policy Registration
+        // =====================================================================
+        if let Some(network) = &manifest.network {
+            if !network.egress_allow.is_empty() {
+                let egress_token = uuid::Uuid::new_v4().to_string();
+                crate::verification::egress_policy::EgressPolicyRegistry::global().register(
+                    &capsule_id,
+                    egress_token.clone(),
+                    network.egress_allow.clone(),
+                );
+                // Inject token into environment for the capsule to use with egress proxy
+                manifest
+                    .execution
+                    .env
+                    .insert(crate::verification::egress_policy::ENV_KEY_EGRESS_TOKEN.to_string(), egress_token);
+                info!(
+                    "L4 Egress Policy: Registered {} allowed domains for capsule {}",
+                    network.egress_allow.len(),
+                    capsule_id
+                );
+            }
+        }
 
         // GPU UUIDs for build_oci_spec
         let gpu_uuids = assigned_gpu_index.map(|gpu_idx| vec![gpu_idx.to_string()]);
@@ -706,15 +762,74 @@ impl CapsuleManager {
         // =====================================================================
         // Source Runtime - Direct process execution (no OCI spec)
         // Handles Python, Ruby, Node.js, and any language with explicit cmd
+        // UARC V1.1.0: Includes L1 Source Policy verification and CAS validation
         // =====================================================================
         if matches!(manifest.execution.runtime, RuntimeType::Source) {
             info!("Using Source Runtime for capsule {}", capsule_id);
 
-            // Use source_working_dir from request (set by CLI from capsule.toml [targets.source])
-            let source_dir = source_working_dir
-                .as_ref()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            // =====================================================================
+            // UARC V1.1.0: L1 Source Policy Verification
+            // =====================================================================
+            
+            // Determine source directory - prefer CAS-verified path in production
+            let source_dir = if let Some(targets) = &manifest.targets {
+                if let Some(source_digest) = &targets.source_digest {
+                    // Production mode: Verify source from CAS
+                    if let Some(cas) = &self.cas_client {
+                        info!("L1 Policy: Fetching source from CAS with digest {}", source_digest);
+                        match cas.fetch_blob(source_digest).await {
+                            Ok(cas_path) => {
+                                info!("L1 Policy: CAS source verified at {:?}", cas_path);
+                                cas_path
+                            }
+                            Err(e) => {
+                                return Err(anyhow!(
+                                    "L1 Policy Violation: Failed to fetch source from CAS ({}): {}",
+                                    source_digest,
+                                    e
+                                ));
+                            }
+                        }
+                    } else {
+                        // No CAS client configured - use local path with warning
+                        warn!(
+                            "L1 Policy: No CAS client configured. Using local path without CAS verification. \
+                             This is acceptable for development but not recommended for production."
+                        );
+                        source_working_dir
+                            .as_ref()
+                            .map(PathBuf::from)
+                            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+                    }
+                } else {
+                    // No source_digest - use local path (dev mode)
+                    source_working_dir
+                        .as_ref()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+                }
+            } else {
+                // Legacy mode - no targets defined
+                source_working_dir
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+            };
+
+            // L1 Source Policy: Scan for dangerous patterns in ALL script files
+            // UARC V1.1.0: Scan is language-agnostic to catch hidden payloads
+            const L1_SCAN_EXTENSIONS: &[&str] = &["py", "sh", "js", "ts", "rb", "pl", "php", "lua"];
+            match crate::verification::verifier::verify_l1_source_policy(&source_dir, L1_SCAN_EXTENSIONS) {
+                Ok(()) => {
+                    info!("L1 Policy: Source verification passed for {:?}", source_dir);
+                }
+                Err(e) => {
+                    return Err(anyhow!(
+                        "L1 Policy Violation: {}",
+                        e
+                    ));
+                }
+            }
 
             let rootfs_path = source_dir.clone();
 
@@ -755,6 +870,34 @@ impl CapsuleManager {
             // Get args from extra_args (passed from CLI)
             let args = request.extra_args.clone().unwrap_or_default();
 
+            // =====================================================================
+            // UARC V1.1.0: Dev Mode Permission Separation
+            // dev_mode = (manifest requests dev_mode) AND (engine allows dev_mode)
+            // =====================================================================
+            let manifest_requests_dev_mode = manifest
+                .targets
+                .as_ref()
+                .and_then(|t| t.source.as_ref())
+                .map(|s| s.dev_mode)
+                .unwrap_or(false);
+
+            let effective_dev_mode = manifest_requests_dev_mode && self.allow_insecure_dev_mode;
+
+            if manifest_requests_dev_mode && !self.allow_insecure_dev_mode {
+                warn!(
+                    "Security: Capsule {} requests dev_mode but engine does not allow it. \
+                     Running in sandboxed mode. Set CAPSULED_ALLOW_DEV_MODE=1 to enable.",
+                    capsule_id
+                );
+            }
+
+            if effective_dev_mode {
+                warn!(
+                    "Security: Capsule {} running in INSECURE dev_mode (no sandboxing)",
+                    capsule_id
+                );
+            }
+
             let source_target = Some(crate::runtime::SourceTarget {
                 language,
                 version: None,
@@ -763,7 +906,7 @@ impl CapsuleManager {
                 args,
                 source_dir: source_dir.clone(),
                 cmd: explicit_cmd,
-                dev_mode: true, // Legacy path assumes dev mode
+                dev_mode: effective_dev_mode,
             });
 
             let launch_request = LaunchRequest {

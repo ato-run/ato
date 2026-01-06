@@ -461,6 +461,10 @@ mod tests {
             targets: Some(TargetsConfig {
                 preference: vec!["wasm".to_string(), "oci".to_string()],
                 source_digest: None,
+                port: None,
+                startup_timeout: 60,
+                env: HashMap::new(),
+                health_check: None,
                 wasm: Some(WasmTarget {
                     digest: "sha256:abc123".to_string(),
                     world: "wasi:cli/command".to_string(),

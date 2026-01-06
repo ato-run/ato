@@ -490,6 +490,22 @@ pub struct TargetsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_digest: Option<String>,
 
+    /// Port the service listens on (global for all targets)
+    #[serde(default)]
+    pub port: Option<u16>,
+
+    /// Startup timeout in seconds (global for all targets)
+    #[serde(default = "default_startup_timeout")]
+    pub startup_timeout: u32,
+
+    /// Environment variables (global for all targets)
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+
+    /// Health check endpoint (global for all targets)
+    #[serde(default)]
+    pub health_check: Option<String>,
+
     /// WebAssembly Component Model target
     #[serde(default)]
     pub wasm: Option<WasmTarget>,
@@ -548,6 +564,12 @@ pub struct SourceTarget {
     /// Optional: runtime-specific arguments
     #[serde(default)]
     pub args: Vec<String>,
+
+    /// Development mode - disables sandboxing for easier debugging.
+    /// WARNING: Only honored when Engine's allow_insecure_dev_mode is true.
+    /// UARC V1.1.0: (manifest.dev_mode) AND (engine.allow_insecure_dev_mode)
+    #[serde(default)]
+    pub dev_mode: bool,
 }
 
 /// OCI container target configuration
