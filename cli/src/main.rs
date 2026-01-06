@@ -1,18 +1,28 @@
-//! UARC CLI - Command Line Interface for UARC Capsule Management
+//! Capsule CLI - UARC V1.1.0 Compliant Command Line Tool
 //!
-//! This CLI uses the capsuled library for all core functionality,
-//! ensuring consistency with the Engine's verification and signing logic.
+//! This CLI implements the Launcher Mode architecture:
+//! - Acts as gRPC client to capsuled daemon
+//! - Handles CAS hashing and canonical bytes signing
+//! - Provides developer-friendly workflow (keygen, pack, sign, dev, run)
 
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+mod commands;
+mod engine_client;
 
 #[derive(Parser)]
-#[command(name = "uarc")]
+#[command(name = "capsule")]
 #[command(version = "0.1.0")]
-#[command(about = "UARC CLI - Capsule Management Tool", long_about = None)]
+#[command(about = "Capsule CLI - UARC V1.1.0 Compliant Management Tool")]
 struct Cli {
     /// Enable verbose output
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    /// Engine gRPC endpoint (can be set via CAPSULE_ENGINE_URL)
+    #[arg(long, global = true, default_value = "http://127.0.0.1:50051")]
+    engine_url: String,
 
     #[command(subcommand)]
     command: Commands,
@@ -20,74 +30,135 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Deploy a capsule to the local engine
-    Deploy {
-        /// Path to the capsule manifest (capsule.toml)
+    /// Generate a new Ed25519 keypair for signing
+    Keygen {
+        /// Name for the key (default: timestamp-based)
         #[arg(short, long)]
-        manifest: String,
-
-        /// Target engine endpoint
-        #[arg(short, long, default_value = "http://localhost:50051")]
-        endpoint: String,
+        name: Option<String>,
     },
 
-    /// Verify a capsule manifest
-    Verify {
-        /// Path to the capsule manifest
+    /// Pack a capsule.toml into deployable .capsule format
+    Pack {
+        /// Path to capsule.toml
+        #[arg(short, long, default_value = "capsule.toml")]
+        manifest: PathBuf,
+
+        /// Output path for .capsule file
         #[arg(short, long)]
-        manifest: String,
+        output: Option<PathBuf>,
     },
 
-    /// Sign a capsule manifest
+    /// Sign a capsule with Ed25519 over canonical bytes
     Sign {
-        /// Path to the capsule manifest
+        /// Path to .capsule or capsule.toml
         #[arg(short, long)]
-        manifest: String,
+        manifest: PathBuf,
 
-        /// Path to the signing key
+        /// Path to private key (.secret file)
         #[arg(short, long)]
-        key: String,
+        key: PathBuf,
+
+        /// Output path for .sig file
+        #[arg(short, long)]
+        output: Option<PathBuf>,
     },
 
-    /// Show CLI version and library info
-    Version,
+    /// Run capsule in development mode (auto-pack, dev_mode: true)
+    Dev {
+        /// Path to capsule.toml (default: current directory)
+        #[arg(short, long)]
+        manifest: Option<PathBuf>,
+    },
+
+    /// Deploy a signed capsule in production mode
+    Run {
+        /// Path to .capsule file
+        capsule: PathBuf,
+    },
+
+    /// Stop a running capsule
+    Stop {
+        /// Capsule ID
+        capsule_id: String,
+    },
+
+    /// Stream logs from a running capsule
+    Logs {
+        /// Capsule ID
+        capsule_id: String,
+
+        /// Follow log output
+        #[arg(short, long)]
+        follow: bool,
+    },
+
+    /// Run system diagnostics
+    Doctor {
+        /// Show detailed diagnostic information
+        #[arg(short, long)]
+        verbose: bool,
+    },
 }
 
-fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut cli = Cli::parse();
+
+    // Override engine_url from environment variable if set
+    if let Ok(env_url) = std::env::var("CAPSULE_ENGINE_URL") {
+        cli.engine_url = env_url;
+    }
 
     if cli.verbose {
-        println!("Verbose mode enabled");
+        println!("🔍 Verbose mode enabled");
+        println!("Engine URL: {}\n", cli.engine_url);
     }
 
     match cli.command {
-        Commands::Deploy { manifest, endpoint } => {
-            println!("📦 Deploying capsule...");
-            println!("   Manifest: {}", manifest);
-            println!("   Endpoint: {}", endpoint);
-            // TODO: Use capsuled::proto for gRPC client
-            // TODO: Use capsuled::capsule_types for manifest parsing
-            println!("   ✅ Deploy command placeholder (implementation pending)");
-            Ok(())
+        Commands::Keygen { name } => {
+            commands::keygen::execute(commands::keygen::KeygenArgs { name })
         }
-        Commands::Verify { manifest } => {
-            println!("🔍 Verifying manifest: {}", manifest);
-            // TODO: Use capsuled::verification for verification
-            println!("   ✅ Verify command placeholder (implementation pending)");
-            Ok(())
+        Commands::Pack { manifest, output } => {
+            commands::pack::execute(commands::pack::PackArgs { manifest_path: manifest, output })
         }
-        Commands::Sign { manifest, key } => {
-            println!("🔐 Signing manifest...");
-            println!("   Manifest: {}", manifest);
-            println!("   Key: {}", key);
-            // TODO: Use capsuled::capsule_types::signing for signing
-            println!("   ✅ Sign command placeholder (implementation pending)");
-            Ok(())
+        Commands::Sign { manifest, key, output } => {
+            commands::sign::execute(commands::sign::SignArgs {
+                manifest_path: manifest,
+                key_path: key,
+                output,
+            })
         }
-        Commands::Version => {
-            println!("UARC CLI v{}", env!("CARGO_PKG_VERSION"));
-            println!("Using capsuled library (UARC V1.1.0 compliant)");
-            Ok(())
+        Commands::Dev { manifest } => {
+            commands::dev::execute(commands::dev::DevArgs {
+                manifest_path: manifest,
+                engine_url: Some(cli.engine_url),
+            })
+            .await
+        }
+        Commands::Run { capsule } => {
+            commands::run::execute(commands::run::RunArgs {
+                capsule_path: capsule,
+                engine_url: Some(cli.engine_url),
+            })
+            .await
+        }
+        Commands::Stop { capsule_id } => {
+            commands::stop::execute(commands::stop::StopArgs {
+                capsule_id,
+                engine_url: Some(cli.engine_url),
+            })
+            .await
+        }
+        Commands::Logs { capsule_id, follow } => {
+            commands::logs::execute(commands::logs::LogsArgs {
+                capsule_id,
+                follow,
+                engine_url: Some(cli.engine_url),
+            })
+            .await
+        }
+        Commands::Doctor { verbose } => {
+            commands::doctor::execute(commands::doctor::DoctorArgs { verbose }).await
         }
     }
 }
