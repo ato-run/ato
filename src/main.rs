@@ -61,15 +61,16 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    // Phase 2: backend selection (Hybrid). Default to Native/DirectRuntime.
+    // UARC V1.1.0: Backend selection. Default to Source Runtime (direct execution).
+    // Environment variable CAPSULED_BACKEND_MODE can override (e.g. "source", "wasm" or "oci").
     let backend_mode =
-        std::env::var("CAPSULED_BACKEND_MODE").unwrap_or_else(|_| "native".to_string());
+        std::env::var("CAPSULED_BACKEND_MODE").unwrap_or_else(|_| "source".to_string());
     let backend_mode = if backend_mode.is_empty() {
-        "native".to_string()
+        "source".to_string()
     } else {
         backend_mode
     };
-    info!("Backend Mode: {}", backend_mode);
+    info!("Backend Mode: {} (UARC V1.1.0 default)", backend_mode);
 
     info!(
         "=== Capsuled Engine v{} (Phase 1.5: HTTP API Only) ===",
