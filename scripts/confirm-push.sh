@@ -45,9 +45,10 @@ git log --oneline origin/main..HEAD 2>/dev/null || echo "  (new branch or no ups
 echo ""
 
 # Interactive confirmation
-# - y: run pre-push verification script, then push
+# - y: skip verification (assuming already done manually)
 # - n: print steps and exit non-zero to cancel push
-if [ -t 0 ]; then
+# Note: Git hooks don't have stdin connected to TTY, so we use /dev/tty
+if [ -t 1 ] && exec < /dev/tty; then
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${YELLOW}確認:${NC} すでに手動で pre-push 検証を実行しましたか？"
     echo -e "${BLUE}y${NC}: 実行済み（push を続行） / ${BLUE}n${NC}: 手順を表示して中断"
@@ -80,7 +81,7 @@ if [ -t 0 ]; then
             ;;
     esac
 else
-    # Non-interactive (CI) - always run checks
+    # Non-interactive (CI or no TTY available) - always run checks
     echo -e "${BLUE}Non-interactive mode: running pre-push verification...${NC}"
     echo ""
     bash "$PROJECT_ROOT/scripts/pre-push-hook.sh"
