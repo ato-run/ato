@@ -36,12 +36,8 @@ impl fmt::Display for CapsuleError {
 impl std::error::Error for CapsuleError {}
 
 /// Structured error used across UARC components.
-///
-/// NOTE: This type retains its historical name for compatibility. Consider
-/// renaming to `EngineError` or `ManifestError` in a future non-backwards-
-/// compatible refactor.
 #[derive(Debug)]
-pub struct AdepError {
+pub struct ManifestError {
     code: String,
     message: String,
     hint: Option<String>,
@@ -49,7 +45,7 @@ pub struct AdepError {
     context: Option<serde_json::Value>,
 }
 
-impl AdepError {
+impl ManifestError {
     /// Create a new error with the given code and message.
     pub fn new<C, M>(code: C, message: M) -> Self
     where
@@ -94,8 +90,8 @@ impl AdepError {
         &self.message
     }
 
-    pub fn into_wire(self) -> AdepErrorWire {
-        AdepErrorWire {
+    pub fn into_wire(self) -> ManifestErrorWire {
+        ManifestErrorWire {
             code: self.code,
             message: self.message,
             hint: self.hint,
@@ -105,7 +101,7 @@ impl AdepError {
     }
 }
 
-impl fmt::Display for AdepError {
+impl fmt::Display for ManifestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.code, self.message)?;
         if let Some(hint) = &self.hint {
@@ -115,12 +111,12 @@ impl fmt::Display for AdepError {
     }
 }
 
-impl std::error::Error for AdepError {}
+impl std::error::Error for ManifestError {}
 
 /// JSON-wire representation of the structured error used by the engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AdepErrorWire {
+pub struct ManifestErrorWire {
     pub code: String,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -231,14 +231,17 @@ mod tests {
 
     #[test]
     fn load_config_returns_none_when_file_missing() {
-        let path = format!("/tmp/capsuled-engine-config-missing-{}", unique_suffix());
+        let path = std::env::temp_dir().join(format!(
+            "capsuled-engine-config-missing-{}",
+            unique_suffix()
+        ));
         let cfg = load_config(&path).expect("missing file should not be an error");
         assert!(cfg.is_none());
     }
 
     #[test]
     fn load_config_parses_expected_fields() {
-        let path = format!("/tmp/capsuled-engine-config-{}", unique_suffix());
+        let path = std::env::temp_dir().join(format!("capsuled-engine-config-{}", unique_suffix()));
         let toml = r#"
             [server]
             listen_addr = "127.0.0.1:6000"
@@ -270,7 +273,6 @@ mod tests {
         let cfg = load_config(&path)
             .expect("parsing should succeed")
             .expect("config should exist");
-
         assert_eq!(cfg.server_listen_addr(), Some("127.0.0.1:6000"));
         assert_eq!(cfg.wasm_module_path(), Some("/tmp/logic.wasm"));
         assert_eq!(
@@ -303,7 +305,10 @@ mod tests {
 
     #[test]
     fn load_config_reports_parse_error() {
-        let path = format!("/tmp/capsuled-engine-config-invalid-{}", unique_suffix());
+        let path = std::env::temp_dir().join(format!(
+            "capsuled-engine-config-invalid-{}",
+            unique_suffix()
+        ));
         fs::write(&path, "not = valid = toml").expect("should write invalid config");
 
         let err = load_config(&path).expect_err("invalid config should error");

@@ -1,0 +1,15 @@
+schema_version = "1.0"
+name = "test-s2"
+version = "0.1.0"
+type = "app"
+
+[execution]
+runtime = "source"
+entrypoint = "main.py"
+
+[targets]
+preference = ["source"]
+
+[targets.source]
+language = "python"
+entrypoint = "main.py"
