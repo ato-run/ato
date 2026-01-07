@@ -21,6 +21,9 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/Koh0920/uarc.git ../uarc
 
+      - name: Install Cap'n Proto
+        run: sudo apt-get update && sudo apt-get install -y capnproto
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -56,6 +59,15 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/Koh0920/uarc.git ../uarc
 
+      - name: Install Cap'n Proto
+        run: |
+          if [ "$RUNNER_OS" == "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y capnproto
+          elif [ "$RUNNER_OS" == "macOS" ]; then
+            brew install capnp
+          fi
+        shell: bash
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -85,6 +97,15 @@ jobs:
       - name: Clone UARC proto definitions
         run: |
           git clone --depth 1 https://github.com/Koh0920/uarc.git ../uarc
+
+      - name: Install Cap'n Proto
+        run: |
+          if [ "$RUNNER_OS" == "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y capnproto
+          elif [ "$RUNNER_OS" == "macOS" ]; then
+            brew install capnp
+          fi
+        shell: bash
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -124,6 +145,9 @@ jobs:
       - name: Clone UARC proto definitions
         run: |
           git clone --depth 1 https://github.com/Koh0920/uarc.git ../uarc
+
+      - name: Install Cap'n Proto
+        run: brew install capnp
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
