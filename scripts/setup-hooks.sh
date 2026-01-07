@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # Git Hooks Setup Script
-# Installs pre-push hook for capsuled
+# Installs pre-commit and pre-push hooks for capsuled
 # =============================================================================
 
 set -e
@@ -15,17 +15,26 @@ echo "Setting up git hooks for capsuled..."
 # Ensure hooks directory exists
 mkdir -p "$GIT_HOOKS_DIR"
 
+# Install pre-commit hook
+if [ -f "$GIT_HOOKS_DIR/pre-commit" ]; then
+    echo "Backing up existing pre-commit hook..."
+    mv "$GIT_HOOKS_DIR/pre-commit" "$GIT_HOOKS_DIR/pre-commit.bak"
+fi
+ln -sf "$SCRIPT_DIR/pre-commit-hook.sh" "$GIT_HOOKS_DIR/pre-commit"
+chmod +x "$SCRIPT_DIR/pre-commit-hook.sh"
+echo "✓ Installed pre-commit hook (format + clippy)"
+
 # Install pre-push hook
 if [ -f "$GIT_HOOKS_DIR/pre-push" ]; then
     echo "Backing up existing pre-push hook..."
     mv "$GIT_HOOKS_DIR/pre-push" "$GIT_HOOKS_DIR/pre-push.bak"
 fi
-
-# Create symlink
 ln -sf "$SCRIPT_DIR/pre-push-hook.sh" "$GIT_HOOKS_DIR/pre-push"
 chmod +x "$SCRIPT_DIR/pre-push-hook.sh"
 chmod +x "$SCRIPT_DIR/e2e-test.sh"
+echo "✓ Installed pre-push hook (full tests + E2E)"
 
+echo ""
 echo "✅ Git hooks installed successfully!"
 echo ""
 echo "Installed hooks:"
