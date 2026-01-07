@@ -85,23 +85,41 @@ capsuled は [UARC (Universal Application Runtime Contract)](../uarc/SPEC.md) V1
 
 ## Building
 
+### Quick Start (macOS)
+
+```bash
+# First time setup
+./scripts/setup-build-env.sh
+
+# Build all platforms
+./scripts/build-release.sh
+```
+
+Binaries will be generated in `./release/`:
+- `capsuled-macos-universal` - macOS Universal Binary
+- `capsuled-linux-x86_64` - Linux x86_64 (static, musl)
+- `capsuled-linux-aarch64` - Linux ARM64 (static, musl)
+- `capsuled-windows-x86_64.exe` - Windows x86_64
+
+See [BUILD.md](BUILD.md) for detailed cross-compilation guide.
+
 ### Prerequisites
 
 - Rust 1.83+ (2021 edition)
 - Protocol Buffers compiler (`protoc`)
+- Cap'n Proto compiler (`capnp`)
+- (macOS) Zig and MinGW-w64 for cross-compilation
 - (Optional) CUDA toolkit for GPU support
 - (Optional) LVM tools for storage management
 
-### Compile
+### Standard Build
 
 ```bash
-cargo build --release
-```
-
-### Development Build
-
-```bash
+# Development build
 cargo build
+
+# Release build (current platform only)
+cargo build --release
 ```
 
 ### Run Tests
