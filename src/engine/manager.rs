@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Result};
+use flate2::read::GzDecoder;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use tar::Archive;
 use tracing::{info, warn};
 
 use crate::hardware::GpuDetector;
@@ -260,6 +262,42 @@ impl CapsuleManager {
 
             metrics_collector,
         }
+    }
+
+    /// Extract a tar.gz archive from CAS to a temporary directory
+    ///
+    /// Returns the path to the extracted directory.
+    fn extract_cas_archive(archive_path: &PathBuf, capsule_id: &str) -> Result<PathBuf> {
+        use std::fs::File;
+        use std::io::BufReader;
+
+        // Create extraction directory: /tmp/capsuled/bundles/<capsule_id>/rootfs
+        let extract_dir = PathBuf::from("/tmp/capsuled/bundles")
+            .join(capsule_id)
+            .join("rootfs");
+        
+        // Clean up existing extraction if present
+        if extract_dir.exists() {
+            std::fs::remove_dir_all(&extract_dir)?;
+        }
+        std::fs::create_dir_all(&extract_dir)?;
+
+        // Open and decompress the tar.gz archive
+        let file = File::open(archive_path)?;
+        let reader = BufReader::new(file);
+        let decoder = GzDecoder::new(reader);
+        let mut archive = Archive::new(decoder);
+
+        // Extract all files
+        archive.unpack(&extract_dir)?;
+
+        info!(
+            "CAS: Extracted archive to {:?} ({} bytes compressed)",
+            extract_dir,
+            std::fs::metadata(archive_path).map(|m| m.len()).unwrap_or(0)
+        );
+
+        Ok(extract_dir)
     }
 
     /// Build a ResolveContext from current engine capabilities
@@ -802,9 +840,22 @@ impl CapsuleManager {
                     if let Some(cas) = &self.cas_client {
                         info!("L1 Policy: Fetching source from CAS with digest {}", source_digest);
                         match cas.fetch_blob(source_digest).await {
-                            Ok(cas_path) => {
-                                info!("L1 Policy: CAS source verified at {:?}", cas_path);
-                                cas_path
+                            Ok(cas_archive_path) => {
+                                info!("L1 Policy: CAS archive fetched at {:?}", cas_archive_path);
+                                
+                                // Extract tar.gz archive to temporary directory
+                                match Self::extract_cas_archive(&cas_archive_path, &capsule_id) {
+                                    Ok(extracted_dir) => {
+                                        info!("L1 Policy: CAS source extracted to {:?}", extracted_dir);
+                                        extracted_dir
+                                    }
+                                    Err(e) => {
+                                        return Err(anyhow!(
+                                            "L1 Policy Violation: Failed to extract CAS archive: {}",
+                                            e
+                                        ));
+                                    }
+                                }
                             }
                             Err(e) => {
                                 return Err(anyhow!(

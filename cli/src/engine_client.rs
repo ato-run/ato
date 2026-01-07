@@ -10,8 +10,10 @@ use capsuled::proto::onescluster::engine::v1::{
     DeployRequest, DeployResponse, EngineLogEntry, GetSystemStatusRequest,
     LogRequest, StopRequest, StopResponse, SystemStatus,
 };
+use std::path::PathBuf;
 use std::time::Duration;
 use tonic::transport::Channel;
+use tonic::metadata::MetadataValue;
 use tonic::Streaming;
 
 /// Default engine endpoint
@@ -21,6 +23,34 @@ pub const DEFAULT_ENGINE_URL: &str = "http://127.0.0.1:50051";
 pub struct CapsuleEngineClient {
     client: EngineClient<Channel>,
     endpoint: String,
+    auth_token: Option<String>,
+}
+
+/// Get the auth token file path for the current platform
+fn get_auth_token_path() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        dirs::home_dir().map(|h| h.join("Library/Application Support/dev.gumball.app/auth_token"))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        dirs::home_dir().map(|h| h.join(".local/share/dev.gumball.app/auth_token"))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        dirs::data_dir().map(|d| d.join("dev.gumball.app/auth_token"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        None
+    }
+}
+
+/// Load the auth token from the file system
+fn load_auth_token() -> Option<String> {
+    get_auth_token_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
 }
 
 impl CapsuleEngineClient {
@@ -35,10 +65,12 @@ impl CapsuleEngineClient {
             .with_context(|| format!("Failed to connect to engine at {}", endpoint))?;
 
         let client = EngineClient::new(channel);
+        let auth_token = load_auth_token();
 
         Ok(Self {
             client,
             endpoint: endpoint.to_string(),
+            auth_token,
         })
     }
 
@@ -53,10 +85,12 @@ impl CapsuleEngineClient {
             .with_context(|| format!("Engine not reachable at {}", endpoint))?;
 
         let client = EngineClient::new(channel);
+        let auth_token = load_auth_token();
 
         Ok(Self {
             client,
             endpoint: endpoint.to_string(),
+            auth_token,
         })
     }
 
@@ -67,28 +101,37 @@ impl CapsuleEngineClient {
 
     /// Deploy a capsule to the engine
     ///
-    /// Sends the manifest as TOML content for Engine parsing
+    /// Sends the manifest as JSON for Engine parsing (preserves structure for signature verification)
     pub async fn deploy_capsule(
         &mut self,
         capsule_id: &str,
         manifest: &CapsuleManifestV1,
         signature: Option<&[u8]>,
     ) -> Result<DeployResponse> {
-        // Serialize manifest to TOML for Engine processing
-        let toml_content = toml::to_string_pretty(manifest)
-            .context("Failed to serialize manifest to TOML")?;
+        // Serialize manifest to JSON for Engine processing
+        // JSON preserves structure better than TOML for signature verification
+        let json_bytes = serde_json::to_vec(manifest)
+            .context("Failed to serialize manifest to JSON")?;
 
         let request = DeployRequest {
             capsule_id: capsule_id.to_string(),
-            manifest: Some(DeployManifest::TomlContent(toml_content)),
+            manifest: Some(DeployManifest::AdepJson(json_bytes)),
             oci_image: String::new(),
             digest: String::new(),
             manifest_signature: signature.map(|s| s.to_vec()).unwrap_or_default(),
         };
 
+        // Build request with auth token if available
+        let mut grpc_request = tonic::Request::new(request);
+        if let Some(token) = &self.auth_token {
+            if let Ok(value) = MetadataValue::try_from(format!("Bearer {}", token)) {
+                grpc_request.metadata_mut().insert("authorization", value);
+            }
+        }
+
         let response = self
             .client
-            .deploy_capsule(request)
+            .deploy_capsule(grpc_request)
             .await
             .context("Deploy capsule RPC failed")?;
 
@@ -117,9 +160,17 @@ impl CapsuleEngineClient {
             capsule_id: capsule_id.to_string(),
         };
 
+        // Build request with auth token if available
+        let mut grpc_request = tonic::Request::new(request);
+        if let Some(token) = &self.auth_token {
+            if let Ok(value) = MetadataValue::try_from(format!("Bearer {}", token)) {
+                grpc_request.metadata_mut().insert("authorization", value);
+            }
+        }
+
         let response = self
             .client
-            .stop_capsule(request)
+            .stop_capsule(grpc_request)
             .await
             .context("Stop capsule RPC failed")?;
 
@@ -130,9 +181,17 @@ impl CapsuleEngineClient {
     pub async fn get_system_status(&mut self) -> Result<SystemStatus> {
         let request = GetSystemStatusRequest {};
 
+        // Build request with auth token if available
+        let mut grpc_request = tonic::Request::new(request);
+        if let Some(token) = &self.auth_token {
+            if let Ok(value) = MetadataValue::try_from(format!("Bearer {}", token)) {
+                grpc_request.metadata_mut().insert("authorization", value);
+            }
+        }
+
         let response = self
             .client
-            .get_system_status(request)
+            .get_system_status(grpc_request)
             .await
             .context("Get system status RPC failed")?;
 
@@ -152,9 +211,17 @@ impl CapsuleEngineClient {
             tail_lines,
         };
 
+        // Build request with auth token if available
+        let mut grpc_request = tonic::Request::new(request);
+        if let Some(token) = &self.auth_token {
+            if let Ok(value) = MetadataValue::try_from(format!("Bearer {}", token)) {
+                grpc_request.metadata_mut().insert("authorization", value);
+            }
+        }
+
         let response = self
             .client
-            .stream_logs(request)
+            .stream_logs(grpc_request)
             .await
             .context("Stream logs RPC failed")?;
 

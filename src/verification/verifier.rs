@@ -52,6 +52,12 @@ impl ManifestVerifier {
         let canonical_bytes = manifest_to_capnp_bytes(manifest)
             .map_err(|e| anyhow!("Failed to generate canonical bytes: {:?}", e))?;
 
+        info!(
+            "Security: Generated canonical bytes for verification ({} bytes, first 16: {:02x?})",
+            canonical_bytes.len(),
+            &canonical_bytes[..16.min(canonical_bytes.len())]
+        );
+
         self.verify_canonical_bytes(&canonical_bytes, signature_bytes, developer_key)
     }
 
