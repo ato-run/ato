@@ -24,10 +24,8 @@ fn validate_mounts(volumes: &[StorageVolume], allowed_paths: &[String]) -> Resul
 fn derive_args(execution: &CapsuleExecution, extra_args: Option<&[String]>) -> Vec<String> {
     // UARC V1.1.0: Native is deprecated, treated same as Source
     #[allow(deprecated)]
-    let is_native_or_source = matches!(
-        execution.runtime,
-        RuntimeType::Native | RuntimeType::Source
-    );
+    let is_native_or_source =
+        matches!(execution.runtime, RuntimeType::Native | RuntimeType::Source);
     if is_native_or_source {
         let parts = shell_words::split(&execution.entrypoint)
             .unwrap_or_else(|_| vec![execution.entrypoint.clone()]);

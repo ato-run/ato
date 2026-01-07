@@ -22,7 +22,6 @@ mod manifest_tests {
         assert!(req.memory_bytes.is_none());
     }
 
-    #[cfg(feature = "toml-support")]
     #[test]
     fn parse_toml_capsule() {
         let toml = r#"

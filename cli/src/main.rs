@@ -56,12 +56,11 @@ enum Commands {
     // ═══════════════════════════════════════════════════════════════════
     // LIFECYCLE
     // ═══════════════════════════════════════════════════════════════════
-    
     /// Create a new Capsule project from a template
     New {
         /// Project name
         name: String,
-        
+
         /// Template type: python, node, rust, shell
         #[arg(short, long, default_value = "python")]
         template: String,
@@ -72,7 +71,7 @@ enum Commands {
         /// Target directory (default: current directory)
         #[arg(short, long)]
         path: Option<PathBuf>,
-        
+
         /// Skip prompts and use detected defaults
         #[arg(short, long)]
         yes: bool,
@@ -82,7 +81,7 @@ enum Commands {
     Open {
         /// Path to capsule.toml or .capsule file
         path: Option<PathBuf>,
-        
+
         /// Development mode (hot reload, loose security)
         #[arg(short, long)]
         dev: bool,
@@ -114,7 +113,6 @@ enum Commands {
     // ═══════════════════════════════════════════════════════════════════
     // PACKAGING
     // ═══════════════════════════════════════════════════════════════════
-    
     /// Build and sign a .capsule archive
     Pack {
         /// Path to capsule.toml
@@ -124,7 +122,7 @@ enum Commands {
         /// Output path for .capsule file
         #[arg(short, long)]
         output: Option<PathBuf>,
-        
+
         /// Signing key (.secret file) - if provided, signs the archive
         #[arg(short, long)]
         key: Option<PathBuf>,
@@ -140,7 +138,6 @@ enum Commands {
     // ═══════════════════════════════════════════════════════════════════
     // SYSTEM
     // ═══════════════════════════════════════════════════════════════════
-    
     /// Check Engine status and host requirements
     Doctor {
         /// Show detailed diagnostic information
@@ -160,12 +157,10 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         // Lifecycle
-        Commands::New { name, template } => {
-            commands::new::execute(commands::new::NewArgs {
-                name,
-                template: Some(template),
-            })
-        }
+        Commands::New { name, template } => commands::new::execute(commands::new::NewArgs {
+            name,
+            template: Some(template),
+        }),
         Commands::Init { path, yes } => {
             commands::init::execute(commands::init::InitArgs { path, yes })
         }
@@ -199,19 +194,21 @@ async fn main() -> anyhow::Result<()> {
             })
             .await
         }
-        
+
         // Packaging
-        Commands::Pack { manifest, output, key } => {
-            commands::pack::execute(commands::pack::PackArgs {
-                manifest_path: manifest,
-                output,
-                key,
-            })
-        }
+        Commands::Pack {
+            manifest,
+            output,
+            key,
+        } => commands::pack::execute(commands::pack::PackArgs {
+            manifest_path: manifest,
+            output,
+            key,
+        }),
         Commands::Keygen { name } => {
             commands::keygen::execute(commands::keygen::KeygenArgs { name })
         }
-        
+
         // System
         Commands::Doctor { verbose } => {
             commands::doctor::execute(commands::doctor::DoctorArgs { verbose }).await

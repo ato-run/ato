@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use tokio::time::{sleep, Duration};
 
-use crate::engine_client::{resolve_engine_url, CapsuleEngineClient};
 use super::pack::pack_in_memory;
+use crate::engine_client::{resolve_engine_url, CapsuleEngineClient};
 
 /// Arguments for the open command
 pub struct OpenArgs {
@@ -46,7 +46,8 @@ async fn execute_dev_mode(args: OpenArgs) -> Result<()> {
         );
     }
 
-    let manifest_path = manifest_path.canonicalize()
+    let manifest_path = manifest_path
+        .canonicalize()
         .context("Failed to resolve manifest path")?;
     println!("📄 Manifest: {}", manifest_path.display());
 
@@ -54,11 +55,11 @@ async fn execute_dev_mode(args: OpenArgs) -> Result<()> {
     println!("📦 Packing...");
     let pack_result = pack_in_memory(&manifest_path)?;
     let capsule_id = format!("{}-dev", pack_result.manifest.name);
-    
+
     // Modify manifest for dev mode: set targets.source.dev_mode = true
     // If targets.source doesn't exist, create it from execution section
     let mut manifest = pack_result.manifest.clone();
-    
+
     if manifest.targets.is_none() {
         // Create targets from legacy execution section
         // Infer language from entrypoint extension
@@ -72,7 +73,7 @@ async fn execute_dev_mode(args: OpenArgs) -> Result<()> {
         } else {
             "python" // Default
         };
-        
+
         let source_target = ManifestSourceTarget {
             language: language.to_string(),
             version: None,
@@ -91,7 +92,7 @@ async fn execute_dev_mode(args: OpenArgs) -> Result<()> {
             source.dev_mode = true;
         }
     }
-    
+
     println!("   Name: {} v{}", manifest.name, manifest.version);
     if let Some(ref digest) = pack_result.source_digest {
         println!("   Digest: {}", &digest[..32.min(digest.len())]);
@@ -109,10 +110,10 @@ async fn execute_dev_mode(args: OpenArgs) -> Result<()> {
         }
         Err(_) => {
             println!("   ⚠ Engine not running, attempting auto-start...");
-            
+
             if try_start_daemon().await? {
                 sleep(Duration::from_secs(2)).await;
-                
+
                 CapsuleEngineClient::connect(&engine_url)
                     .await
                     .context("Failed to connect after starting daemon")?
@@ -127,13 +128,13 @@ async fn execute_dev_mode(args: OpenArgs) -> Result<()> {
 
     // 5. Deploy capsule (dev mode)
     println!("\n🚀 Opening capsule...");
-    
+
     let source_dir = pack_result.source_dir.to_string_lossy().to_string();
     let response = client
         .deploy_capsule_with_source(
             &capsule_id,
             &manifest, // Use modified manifest with dev_mode=true
-            None, // No signature for dev mode
+            None,      // No signature for dev mode
             &source_dir,
         )
         .await
@@ -166,7 +167,7 @@ async fn execute_prod_mode(args: OpenArgs) -> Result<()> {
 
     // 1. Locate .capsule file or capsule.toml
     let path = args.path.unwrap_or_else(|| PathBuf::from("capsule.toml"));
-    
+
     if !path.exists() {
         anyhow::bail!(
             "File not found: {}\n\
@@ -175,7 +176,8 @@ async fn execute_prod_mode(args: OpenArgs) -> Result<()> {
         );
     }
 
-    let is_manifest = path.extension()
+    let is_manifest = path
+        .extension()
         .and_then(|e| e.to_str())
         .map(|e| e == "toml")
         .unwrap_or(false);
@@ -184,7 +186,7 @@ async fn execute_prod_mode(args: OpenArgs) -> Result<()> {
         // Pack and look for signature
         println!("📦 Packing from manifest: {}", path.display());
         let result = pack_in_memory(&path)?;
-        
+
         // Look for existing .sig file
         let sig_path = path.with_extension("sig");
         let sig = if sig_path.exists() {
@@ -199,16 +201,15 @@ async fn execute_prod_mode(args: OpenArgs) -> Result<()> {
             println!("   ⚠ No signature found (running unsigned)");
             None
         };
-        
+
         (result.manifest, sig)
     } else {
         // Load .capsule file directly
         println!("📄 Loading: {}", path.display());
-        let content = std::fs::read_to_string(&path)
-            .context("Failed to read capsule file")?;
-        let manifest = serde_json::from_str(&content)
-            .context("Failed to parse capsule manifest")?;
-        
+        let content = std::fs::read_to_string(&path).context("Failed to read capsule file")?;
+        let manifest =
+            serde_json::from_str(&content).context("Failed to parse capsule manifest")?;
+
         // Look for .sig file
         let sig_path = path.with_extension("sig");
         let sig = if sig_path.exists() {
@@ -223,7 +224,7 @@ async fn execute_prod_mode(args: OpenArgs) -> Result<()> {
             println!("   ⚠ No signature file (running unsigned)");
             None
         };
-        
+
         (manifest, sig)
     };
 
@@ -272,17 +273,17 @@ async fn execute_prod_mode(args: OpenArgs) -> Result<()> {
 async fn try_start_daemon() -> Result<bool> {
     // Check if capsuled binary exists
     let capsuled_path = which::which("capsuled");
-    
+
     match capsuled_path {
         Ok(path) => {
             println!("   Starting daemon: {}", path.display());
-            
+
             Command::new(&path)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
                 .context("Failed to spawn capsuled")?;
-            
+
             Ok(true)
         }
         Err(_) => {
@@ -290,13 +291,13 @@ async fn try_start_daemon() -> Result<bool> {
             let local_path = PathBuf::from("./target/release/capsuled");
             if local_path.exists() {
                 println!("   Starting daemon: {}", local_path.display());
-                
+
                 Command::new(&local_path)
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .spawn()
                     .context("Failed to spawn capsuled")?;
-                
+
                 Ok(true)
             } else {
                 Ok(false)

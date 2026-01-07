@@ -91,13 +91,13 @@ impl SourceRuntime {
             active_children: Arc::new(Mutex::new(HashMap::new())),
         }
     }
-    
+
     /// Register a child process for lifecycle management
     pub fn register_child(&self, workload_id: String, child: Child) {
         let mut children = self.active_children.lock().unwrap();
         children.insert(workload_id, child);
     }
-    
+
     /// Get a reference to active children for external management
     pub fn active_children(&self) -> Arc<Mutex<HashMap<String, Child>>> {
         Arc::clone(&self.active_children)

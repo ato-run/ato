@@ -383,7 +383,8 @@ mod tests {
     fn test_store_limits() {
         let limits = WasmRuntime::create_store_limits();
         // StoreLimits doesn't expose getters, but we can verify it was created
-        drop(limits);
+        // Using _ to silence unused variable warning
+        let _ = limits;
     }
 
     #[test]

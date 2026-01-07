@@ -150,7 +150,7 @@ pub async fn launch_with_bubblewrap(
         let mut workloads = runtime.active_workloads.lock().unwrap();
         workloads.insert(request.workload_id.to_string(), pid);
     }
-    
+
     // Register child handle for lifecycle management (keeps process alive)
     runtime.register_child(request.workload_id.to_string(), child);
 
