@@ -31,6 +31,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Clone UARC repository
+        run: |
+          cd ..
+          git clone https://github.com/koh0920/uarc.git
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
