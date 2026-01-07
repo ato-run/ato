@@ -17,8 +17,15 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
+# Determine project root - handle both direct execution and git hook execution
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+if [[ "$SCRIPT_DIR" == *".git/hooks"* ]]; then
+    # Running as git hook - find project root from git
+    PROJECT_ROOT="$(git rev-parse --show-toplevel)"
+else
+    # Running directly from scripts/
+    PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
 
 log_step() {
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -124,7 +131,8 @@ if [ "${QUICK_MODE:-0}" != "1" ]; then
             FAILED=1
         fi
     else
-        echo -e "${YELLOW}  E2E test script not found at $E2E_SCRIPT - skipping${NC}"
+        log_fail "E2E test script not found at $E2E_SCRIPT"
+        FAILED=1
     fi
 else
     log_step "5/5: E2E tests (skipped in quick mode)"
