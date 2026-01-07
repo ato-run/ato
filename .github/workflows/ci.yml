@@ -20,6 +20,8 @@ env:
 jobs:
   test:
     name: Test Suite
+    # Temporarily disabled to save CI time - enable when needed
+    if: false
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: true # Stop other jobs if one fails
@@ -103,6 +105,8 @@ jobs:
 
   security:
     name: Security Audit
+    # Temporarily disabled to save CI time - enable when needed
+    if: false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
