@@ -252,8 +252,8 @@ impl Engine for EngineService {
                     (manifest, None)
                 }
             }
-            Some(DeployManifest::AdepJson(json_bytes)) => {
-                info!("  Using JSON manifest");
+            Some(DeployManifest::ManifestBytes(json_bytes)) => {
+                info!("  Using legacy JSON manifest bytes");
                 let manifest: CapsuleManifestV1 =
                     serde_json::from_slice(&json_bytes).map_err(|e| {
                         Status::invalid_argument(format!("Failed to parse JSON: {}", e))
@@ -455,9 +455,12 @@ impl Engine for EngineService {
         request: Request<ValidateRequest>,
     ) -> Result<Response<ValidationResult>, Status> {
         let req = request.into_inner();
-        info!("ValidateManifest request ({} bytes)", req.adep_json.len());
+        info!(
+            "ValidateManifest request ({} bytes)",
+            req.manifest_bytes.len()
+        );
 
-        let manifest_str = String::from_utf8(req.adep_json)
+        let manifest_str = String::from_utf8(req.manifest_bytes)
             .map_err(|e| Status::invalid_argument(format!("Invalid UTF-8 in manifest: {}", e)))?;
 
         // Try to parse as TOML/Canonical Capsule manifest using CapsuleManifestV1::from_toml

@@ -71,9 +71,9 @@ pub struct DeployRequest {
 pub mod deploy_request {
     #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Manifest {
-        /// Legacy JSON support
+        /// Legacy JSON bytes (deprecated). Prefer `TomlContent` or `CapnpManifest`.
         #[prost(bytes, tag = "2")]
-        AdepJson(::prost::alloc::vec::Vec<u8>),
+        ManifestBytes(::prost::alloc::vec::Vec<u8>),
         /// TOML manifest content
         #[prost(string, tag = "5")]
         TomlContent(::prost::alloc::string::String),
@@ -131,7 +131,7 @@ pub struct ResourceInfo {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ValidateRequest {
     #[prost(bytes = "vec", tag = "1")]
-    pub adep_json: ::prost::alloc::vec::Vec<u8>,
+    pub manifest_bytes: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ValidationResult {
