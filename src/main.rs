@@ -345,14 +345,6 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Initialize WasmHost
-    // Use minimal valid WASM header (magic + version) as fallback
-    let wasm_bytes = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
-    let wasm_host = Arc::new(
-        capsuled::wasm_host::AdepLogicHost::new(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("Failed to initialize WasmHost: {}", e)),
-    );
-
     // TailscaleManager removed - UARC V1.1.0 uses SPIFFE ID for identity
 
     let allowed_host_paths_for_grpc = allowed_host_paths.clone();
@@ -373,7 +365,6 @@ async fn main() -> anyhow::Result<()> {
         if let Err(e) = capsuled::grpc_server::start_grpc_server(
             &grpc_addr,
             grpc_capsule_manager,
-            wasm_host,
             runtime,
             allowed_host_paths_for_grpc,
             PathBuf::from(models_cache_dir_for_grpc),

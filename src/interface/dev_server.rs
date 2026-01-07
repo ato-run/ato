@@ -39,7 +39,6 @@ use crate::network::service_registry::ServiceRegistry;
 use crate::process_supervisor::ProcessSupervisor;
 use crate::runtime::{ContainerRuntime, RuntimeConfig, RuntimeKind};
 use crate::security::audit::AuditLogger;
-use crate::wasm_host::AdepLogicHost;
 
 /// Configuration for the embedded DevServer
 #[derive(Debug, Clone)]
@@ -236,13 +235,6 @@ impl DevServerHandle {
             None, // Runtime section (use default)
         ));
 
-        // WasmHost (minimal)
-        let wasm_bytes = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
-        let wasm_host = Arc::new(
-            AdepLogicHost::new(&wasm_bytes)
-                .map_err(|e| anyhow::anyhow!("Failed to initialize WASM host: {}", e))?,
-        );
-
         // UARC V1: Tailscale removed (uses SPIFFE ID instead)
 
         // Bind to port (0 = auto-select)
@@ -261,7 +253,6 @@ impl DevServerHandle {
         // Spawn gRPC server with graceful shutdown
         let grpc_handle = {
             let capsule_manager = capsule_manager.clone();
-            let wasm_host = wasm_host.clone();
             let runtime = runtime.clone();
             let allowed_host_paths = config.allowed_host_paths.clone();
             let models_cache_dir = config.models_cache_dir.clone();
@@ -278,7 +269,6 @@ impl DevServerHandle {
                     result = grpc::start_grpc_server(
                         &addr_str,
                         capsule_manager,
-                        wasm_host,
                         runtime,
                         allowed_host_paths,
                         models_cache_dir,
