@@ -35,7 +35,7 @@ pub async fn execute(args: PsArgs) -> Result<()> {
     }
 
     // Print header
-    println!("{:<24} {:<12} {}", "ID", "STATUS", "URL");
+    println!("{:<24} {:<12} URL", "ID", "STATUS");
     println!("{}", "-".repeat(50));
 
     // Print each capsule

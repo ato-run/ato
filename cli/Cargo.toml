@@ -27,7 +27,7 @@ toml = "0.8"
 
 # gRPC client (must match capsuled's tonic version)
 tonic = "0.12"
-prost = "0.12"
+prost = "0.13"
 
 # Cryptography (Ed25519)
 ed25519-dalek = { version = "2.0", features = ["rand_core"] }
