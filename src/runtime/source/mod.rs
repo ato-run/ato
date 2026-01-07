@@ -284,14 +284,14 @@ impl Runtime for SourceRuntime {
         }
 
         // Fallback: signal by PID if we only have PID
-        if let Some(pid) = _pid {
+        if let Some(_pid) = _pid {
             #[cfg(unix)]
             {
                 use nix::sys::signal::{kill, Signal};
                 use nix::unistd::Pid;
 
-                if let Err(e) = kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
-                    warn!("Failed to send SIGTERM to PID {}: {}", pid, e);
+                if let Err(e) = kill(Pid::from_raw(_pid as i32), Signal::SIGTERM) {
+                    warn!("Failed to send SIGTERM to PID {}: {}", _pid, e);
                 }
             }
         } else {
