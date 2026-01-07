@@ -162,6 +162,7 @@ pub async fn launch_with_bubblewrap(
 }
 
 /// Check if bubblewrap is available and properly configured
+#[allow(dead_code)]
 pub fn verify_bubblewrap_available() -> Result<(), RuntimeError> {
     // Check binary exists
     let bwrap_path = which::which("bwrap").map_err(|_| {
