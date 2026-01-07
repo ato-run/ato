@@ -6,6 +6,11 @@ use async_trait::async_trait;
 use tokio::process::Command;
 use tracing::{info, warn};
 
+#[cfg(unix)]
+use nix::sys::signal::{self, Signal};
+#[cfg(unix)]
+use nix::unistd::Pid;
+
 use crate::process_supervisor::ProcessSupervisor;
 use crate::runtime::traits::Runtime;
 use crate::runtime::{LaunchRequest, LaunchResult, RuntimeError};
@@ -210,20 +215,17 @@ impl Runtime for DevRuntime {
         if pid_file.exists() {
             if let Ok(content) = std::fs::read_to_string(&pid_file) {
                 if let Ok(pid) = content.trim().parse::<i32>() {
-                    #[cfg(unix)]
-                    use nix::sys::signal::{self, Signal};
-                    #[cfg(unix)]
-                    use nix::unistd::Pid;
-
                     info!(
                         "Attempting to stop dev runtime PID {} [VERIFY_NEW_CODE]",
                         pid
                     );
 
                     // Check if process exists first (signal 0)
+                    #[cfg(unix)]
                     match signal::kill(Pid::from_raw(pid), None) {
                         Ok(_) => {
                             info!("Process {} exists, sending SIGTERM...", pid);
+                            #[cfg(unix)]
                             match signal::kill(Pid::from_raw(pid), Signal::SIGTERM) {
                                 Ok(_) => {
                                     info!("Successfully sent SIGTERM to PID {}", pid);
