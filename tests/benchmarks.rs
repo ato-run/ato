@@ -410,7 +410,8 @@ vram_min = "2GB"
     let parse_avg = parse_time / ITERATIONS;
 
     // Benchmark validation (parse once, validate many times)
-    let manifest = capsuled::capsule_types::capsule_v1::CapsuleManifestV1::from_toml(SAMPLE_TOML).unwrap();
+    let manifest =
+        capsuled::capsule_types::capsule_v1::CapsuleManifestV1::from_toml(SAMPLE_TOML).unwrap();
     let start = Instant::now();
     for _ in 0..ITERATIONS {
         let _valid = manifest.validate();

@@ -285,7 +285,10 @@ async fn main() -> anyhow::Result<()> {
                 Some(Arc::new(client))
             }
             Err(e) => {
-                warn!("Failed to initialize LocalCasClient: {}. CAS verification will be disabled.", e);
+                warn!(
+                    "Failed to initialize LocalCasClient: {}. CAS verification will be disabled.",
+                    e
+                );
                 None
             }
         }

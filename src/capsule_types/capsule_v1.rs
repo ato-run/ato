@@ -50,14 +50,16 @@ pub enum RuntimeType {
 
     // === Legacy types (deprecated, for backward compatibility) ===
     // These will be removed in UARC V2.0
-
     /// Docker container (deprecated: use `oci` instead)
     #[deprecated(since = "1.1.0", note = "Use `oci` runtime type instead")]
     #[serde(rename = "docker")]
     Docker,
 
     /// Native binary (deprecated: not supported in UARC V1)
-    #[deprecated(since = "1.1.0", note = "Native runtime is not supported in UARC V1 for security reasons")]
+    #[deprecated(
+        since = "1.1.0",
+        note = "Native runtime is not supported in UARC V1 for security reasons"
+    )]
     #[serde(rename = "native")]
     Native,
 
@@ -82,7 +84,10 @@ impl RuntimeType {
     /// Check if this is a legacy (deprecated) runtime type
     #[allow(deprecated)]
     pub fn is_legacy(&self) -> bool {
-        matches!(self, RuntimeType::Docker | RuntimeType::Native | RuntimeType::Youki)
+        matches!(
+            self,
+            RuntimeType::Docker | RuntimeType::Native | RuntimeType::Youki
+        )
     }
 }
 

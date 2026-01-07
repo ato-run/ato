@@ -95,7 +95,7 @@ pub fn from_coordinator(plan: &common::RunPlan) -> RunPlanConversion {
                 execution.entrypoint = source.cmd.join(" ");
             }
             execution.env = env.clone();
-            
+
             // UARC V1.1.0: Pass dev_mode to targets.source for proper permission handling
             source_dev_mode = source.dev_mode;
         }
