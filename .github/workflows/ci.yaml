@@ -17,6 +17,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout UARC proto definitions
+        uses: actions/checkout@v4
+        with:
+          repository: OnesCluster/uarc
+          path: ../uarc
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -29,6 +35,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout UARC proto definitions
+        uses: actions/checkout@v4
+        with:
+          repository: OnesCluster/uarc
+          path: ../uarc
+
       - name: Run unit tests
         run: cargo test --workspace --lib
 
@@ -37,6 +49,12 @@ jobs:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
+
+      - name: Checkout UARC proto definitions
+        uses: actions/checkout@v4
+        with:
+          repository: OnesCluster/uarc
+          path: ../uarc
 
       - name: Build release binaries
         run: |
@@ -58,6 +76,12 @@ jobs:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
+
+      - name: Checkout UARC proto definitions
+        uses: actions/checkout@v4
+        with:
+          repository: OnesCluster/uarc
+          path: ../uarc
 
       - name: Build release binaries
         run: |
