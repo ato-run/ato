@@ -252,8 +252,8 @@ impl Engine for EngineService {
                     (manifest, None)
                 }
             }
-            Some(DeployManifest::ManifestBytes(json_bytes)) => {
-                info!("  Using legacy JSON manifest bytes");
+            Some(DeployManifest::AdepJson(json_bytes)) => {
+                info!("  Using legacy JSON manifest bytes (deprecated)");
                 let manifest: CapsuleManifestV1 =
                     serde_json::from_slice(&json_bytes).map_err(|e| {
                         Status::invalid_argument(format!("Failed to parse JSON: {}", e))
@@ -454,13 +454,31 @@ impl Engine for EngineService {
         &self,
         request: Request<ValidateRequest>,
     ) -> Result<Response<ValidationResult>, Status> {
-        let req = request.into_inner();
-        info!(
-            "ValidateManifest request ({} bytes)",
-            req.manifest_bytes.len()
-        );
+        use crate::proto::onescluster::engine::v1::validate_request::Manifest as ValidateManifest;
 
-        let manifest_str = String::from_utf8(req.manifest_bytes)
+        let req = request.into_inner();
+
+        let manifest_bytes = match req.manifest {
+            Some(ValidateManifest::AdepJson(bytes)) => {
+                info!(
+                    "ValidateManifest request: using legacy JSON ({} bytes)",
+                    bytes.len()
+                );
+                bytes
+            }
+            Some(ValidateManifest::CapnpManifest(_bytes)) => {
+                return Err(Status::unimplemented(
+                    "Cap'n Proto manifest validation is not yet implemented",
+                ));
+            }
+            None => {
+                return Err(Status::invalid_argument(
+                    "manifest is required (adep_json or capnp_manifest)",
+                ));
+            }
+        };
+
+        let manifest_str = String::from_utf8(manifest_bytes)
             .map_err(|e| Status::invalid_argument(format!("Invalid UTF-8 in manifest: {}", e)))?;
 
         // Try to parse as TOML/Canonical Capsule manifest using CapsuleManifestV1::from_toml
