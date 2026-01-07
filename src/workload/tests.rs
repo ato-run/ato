@@ -3,7 +3,7 @@ mod manifest_tests {
     use crate::workload::manifest_loader::load_manifest_str;
 
     #[test]
-    fn parse_json_adep() {
+    fn parse_json_legacy() {
         let json = r#"{
             "schema_version": "1.0",
             "name": "test-app",

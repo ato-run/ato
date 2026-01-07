@@ -18,14 +18,14 @@ See [UARC_V1_COMPLIANCE_CHECKLIST.md](../UARC_V1_COMPLIANCE_CHECKLIST.md) for fu
 
 ---
 
-## 1. ✅ Remove `adep` module
+## 1. ✅ Remove legacy module
 
 **Status**: COMPLETED  
 **Reason**: Unnecessary re-export layer
 
 ### What Was Done
 
-1. ✅ Moved `capsuled/src/adep/` to `.archives/src/adep/`
+1. ✅ Moved legacy module `capsuled/src/adep/` to `.archives/src/adep/`
 2. ✅ Updated imports in 8 locations:
 
    - ✅ `src/lib.rs` - Updated OCI stub imports
@@ -34,7 +34,7 @@ See [UARC_V1_COMPLIANCE_CHECKLIST.md](../UARC_V1_COMPLIANCE_CHECKLIST.md) for fu
    - ✅ `src/oci/spec_builder.rs` (4 uses)
    - ✅ `src/runtime/native.rs`
 
-3. ✅ Replaced all `crate::adep::` with `capsule_core::capsule_v1::`
+3. ✅ Replaced legacy `crate::adep::` imports with `capsule_core::capsule_v1::`
 
 ### Verification
 
@@ -221,7 +221,7 @@ Choose **Option C** for UARC alignment:
 
 | Module         | Status    | Reason                            | Action                                     |
 | -------------- | --------- | --------------------------------- | ------------------------------------------ |
-| `adep`         | ❌ Remove | Unnecessary re-export             | Delete + update imports                    |
+| legacy/adep    | ❌ Remove | Unnecessary re-export             | Delete + update imports                    |
 | `billing`      | ❌ Remove | Out of scope for UARC Engine      | Delete module                              |
 | `cloud`        | ❌ Remove | Coordinator responsibility        | Delete module + refactor preflight         |
 | `provisioning` | ❌ Remove | Infrastructure provisioning       | Move to separate ops repo                  |

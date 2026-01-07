@@ -36,6 +36,10 @@ impl fmt::Display for CapsuleError {
 impl std::error::Error for CapsuleError {}
 
 /// Structured error used across UARC components.
+///
+/// NOTE: This type retains its historical name for compatibility. Consider
+/// renaming to `EngineError` or `ManifestError` in a future non-backwards-
+/// compatible refactor.
 #[derive(Debug)]
 pub struct AdepError {
     code: String,
@@ -113,7 +117,7 @@ impl fmt::Display for AdepError {
 
 impl std::error::Error for AdepError {}
 
-/// JSON-wire representation of an AdepError.
+/// JSON-wire representation of the structured error used by the engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdepErrorWire {

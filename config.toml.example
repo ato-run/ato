@@ -31,8 +31,8 @@ value = "absent"
 effect = "NoSchedule"
 
 [wasm]
-# Path to adep-logic Wasm module
-module_path = "../adep-logic/target/wasm32-unknown-unknown/release/adep_logic.wasm"
+# Path to uarc-logic Wasm module
+module_path = "../uarc-logic/target/wasm32-unknown-unknown/release/uarc_logic.wasm"
 
 # Wasm runtime memory limit (in MB)
 memory_limit = 64

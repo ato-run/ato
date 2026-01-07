@@ -27,7 +27,7 @@ pub use dns_monitor::*;
 pub use egress_policy::*;
 pub use egress_proxy::*;
 pub use path::*;
-// pub use signing::*; // Avoid conflict with libadep signing if needed?
+// pub use signing::*; // Avoid conflict with legacy signing if needed?
 pub use verifier::*;
 pub use vram::*;
 

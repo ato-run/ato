@@ -61,7 +61,7 @@ mod tests {
         // 4. Sign the CANONICAL bytes
         let signature = trusted_signing_key.sign(&canonical_bytes);
 
-        // 5. Create signature file structure (mocking libadep format)
+        // 5. Create signature file structure (mocking legacy signature format)
         let create_sig_bytes = |pk: &VerifyingKey, sig: &ed25519_dalek::Signature| -> Vec<u8> {
             let mut buffer = Vec::new();
             buffer.push(0x01); // Version

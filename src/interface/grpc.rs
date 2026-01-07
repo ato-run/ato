@@ -22,7 +22,6 @@ use crate::proto::onescluster::engine::v1::{
 };
 use crate::runplan;
 use crate::runtime::ContainerRuntime;
-use crate::wasm_host::AdepLogicHost;
 use crate::workload;
 
 use crate::capsule_types::capsule_v1::CapsuleManifestV1;
@@ -33,7 +32,6 @@ use crate::network::service_registry::ServiceRegistry;
 #[derive(Clone)]
 pub struct EngineService {
     capsule_manager: Arc<CapsuleManager>,
-    wasm_host: Arc<AdepLogicHost>,
     backend_mode: String,
     service_registry: Arc<ServiceRegistry>,
     _runtime: Arc<ContainerRuntime>,
@@ -47,7 +45,6 @@ impl EngineService {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         capsule_manager: Arc<CapsuleManager>,
-        wasm_host: Arc<AdepLogicHost>,
         backend_mode: String,
         service_registry: Arc<ServiceRegistry>,
         runtime: Arc<ContainerRuntime>,
@@ -59,7 +56,6 @@ impl EngineService {
     ) -> Self {
         Self {
             capsule_manager,
-            wasm_host,
             backend_mode,
             service_registry,
             _runtime: runtime,
@@ -222,7 +218,7 @@ impl Engine for EngineService {
                     digest = converted.digest;
                 }
                 // RunPlan-generated manifests have no external signature
-                (converted.adep, None)
+                (converted.manifest, None)
             }
             Some(DeployManifest::TomlContent(toml_str)) => {
                 info!("  Parsing TOML manifest");
@@ -245,7 +241,7 @@ impl Engine for EngineService {
                         digest = converted.digest;
                     }
 
-                    (converted.adep, None)
+                    (converted.manifest, None)
                 } else {
                     // Legacy fallback: Convert TOML to CapsuleManifestV1 directly
                     let (manifest, _) =
@@ -274,7 +270,7 @@ impl Engine for EngineService {
             }
             None => {
                 return Err(Status::invalid_argument(
-                    "manifest is required (run_plan, toml_content, adep_json, or capnp_manifest)",
+                    "manifest is required (run_plan, toml_content, manifest_bytes, or capnp_manifest)",
                 ));
             }
         };
@@ -461,10 +457,11 @@ impl Engine for EngineService {
         let req = request.into_inner();
         info!("ValidateManifest request ({} bytes)", req.adep_json.len());
 
-        let adep_json_str = String::from_utf8(req.adep_json)
-            .map_err(|e| Status::invalid_argument(format!("Invalid UTF-8 in adep_json: {}", e)))?;
+        let manifest_str = String::from_utf8(req.adep_json)
+            .map_err(|e| Status::invalid_argument(format!("Invalid UTF-8 in manifest: {}", e)))?;
 
-        match self.wasm_host.validate_manifest(&adep_json_str) {
+        // Try to parse as TOML/Canonical Capsule manifest using CapsuleManifestV1::from_toml
+        match CapsuleManifestV1::from_toml(&manifest_str) {
             Ok(_) => {
                 info!("Manifest validation succeeded");
                 Ok(Response::new(ValidationResult {
@@ -956,7 +953,6 @@ fn get_total_disk_space() -> u64 {
 pub async fn start_grpc_server(
     addr: &str,
     capsule_manager: Arc<CapsuleManager>,
-    wasm_host: Arc<AdepLogicHost>,
     runtime: Arc<ContainerRuntime>,
     allowed_host_paths: Vec<String>,
     models_cache_dir: PathBuf,
@@ -969,7 +965,6 @@ pub async fn start_grpc_server(
     let addr = addr.parse()?;
     let engine_service = EngineService::new(
         Arc::clone(&capsule_manager),
-        Arc::clone(&wasm_host),
         backend_mode,
         Arc::clone(&service_registry),
         Arc::clone(&runtime),

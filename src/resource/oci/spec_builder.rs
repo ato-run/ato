@@ -170,7 +170,7 @@ pub fn build_oci_spec(
             // Let's use `nsenter` assuming `jq` is available on the "Host" (Dev setup).
             // Fallback: A simple rust binary `capsuled-hook` that deserializes OCI state.
             // Let's stick to generating the Spec logic first.
-            // NOTE: In `adep_spec...`, requirement is "Mandatory L3 Egress Control".
+            // NOTE: In legacy spec, requirement is "Mandatory L3 Egress Control".
             // Since we are `capsuled-engine` (Rust), maybe we can apply the logic OURSELVES
             // in `container_runtime.rs` *after* Create and *before* Start?
             // We control the lifecycle in `container.rs`.

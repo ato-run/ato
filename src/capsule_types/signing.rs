@@ -123,7 +123,7 @@ pub fn write_signature_file(
         "timestamp".to_string(),
         Value::String(metadata.timestamp.to_rfc3339()),
     );
-    meta_map.insert("tool".to_string(), Value::String("adep-cli".to_string()));
+    meta_map.insert("tool".to_string(), Value::String("capsule-cli".to_string()));
     meta_map.insert(
         "tool_version".to_string(),
         Value::String(env!("CARGO_PKG_VERSION").to_string()),
