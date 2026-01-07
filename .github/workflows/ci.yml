@@ -59,16 +59,17 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+          sudo apt-get install -y protobuf-compiler capnproto
 
       - name: Install Protocol Buffers (macOS)
         if: runner.os == 'macOS'
-        run: brew install protobuf
+        run: brew install protobuf capnp
 
       - name: Install Protocol Buffers (Windows)
         if: runner.os == 'Windows'
         run: |
           choco install protoc
+          choco install capnp
           refreshenv
 
       - name: Check formatting
@@ -147,16 +148,17 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+          sudo apt-get install -y protobuf-compiler capnproto
 
       - name: Install Protocol Buffers (macOS)
         if: runner.os == 'macOS'
-        run: brew install protobuf
+        run: brew install protobuf capnp
 
       - name: Install Protocol Buffers (Windows)
         if: runner.os == 'Windows'
         run: |
           choco install protoc
+          choco install capnp
           refreshenv
 
       - name: Build release binary
