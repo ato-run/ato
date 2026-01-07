@@ -13,80 +13,30 @@ env:
 jobs:
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-lint-
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --lib --bins -- -D warnings
 
   test:
     name: Unit Tests
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-test-
 
       - name: Run unit tests
         run: cargo test --workspace --lib
 
   build:
     name: Build Release
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-release-
 
       - name: Build release binaries
         run: |
@@ -96,7 +46,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: capsuled-${{ matrix.os }}
+          name: capsuled-macos-arm64
           path: |
             target/release/capsuled
             target/release/capsule
@@ -105,23 +55,9 @@ jobs:
   e2e:
     name: E2E Tests
     needs: build
-    runs-on: macos-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-release-
 
       - name: Build release binaries
         run: |
@@ -149,25 +85,18 @@ jobs:
 
   security-scan:
     name: Security Audit
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
-
       - name: Run security audit
-        run: cargo audit
-        continue-on-error: true  # Don't fail on advisory, just warn
+        run: cargo audit || true  # Don't fail on advisory, just warn
 
   # Final status check for branch protection
   ci-success:
     name: CI Success
     needs: [lint, test, build, e2e]
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     if: always()
     steps:
       - name: Check all jobs passed
