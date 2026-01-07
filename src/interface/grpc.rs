@@ -320,6 +320,13 @@ impl Engine for EngineService {
 
         info!("  Delegating to CapsuleManager (Cloud Bursting Logic)...");
 
+        // Extract signature from request (UARC V1.1.0 L2: Signature Verification)
+        let signature = if req.manifest_signature.is_empty() {
+            None
+        } else {
+            Some(req.manifest_signature.clone())
+        };
+
         let capsule_id = req.capsule_id.clone();
         let capsule_manager = self.capsule_manager.clone();
         tokio::spawn(async move {
@@ -331,7 +338,7 @@ impl Engine for EngineService {
                 oci_image,
                 digest,
                 extra_args: direct_command,
-                signature: None, // Signature verification handled internally if needed
+                signature, // Pass signature from gRPC request for L2 verification
                 source_working_dir,
             };
 

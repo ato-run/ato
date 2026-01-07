@@ -189,8 +189,9 @@ async fn execute_prod_mode(args: OpenArgs) -> Result<()> {
         let sig_path = path.with_extension("sig");
         let sig = if sig_path.exists() {
             let sig_bytes = std::fs::read(&sig_path).context("Failed to read signature")?;
-            if sig_bytes.len() != 64 {
-                anyhow::bail!("Invalid signature file");
+            // Minimum signature file size: 1 + 1 + 32 + 64 + 2 = 100 bytes
+            if sig_bytes.len() < 100 {
+                anyhow::bail!("Invalid signature file (too short)");
             }
             println!("   ✓ Using signature: {}", sig_path.display());
             Some(sig_bytes)
@@ -212,8 +213,9 @@ async fn execute_prod_mode(args: OpenArgs) -> Result<()> {
         let sig_path = path.with_extension("sig");
         let sig = if sig_path.exists() {
             let sig_bytes = std::fs::read(&sig_path).context("Failed to read signature")?;
-            if sig_bytes.len() != 64 {
-                anyhow::bail!("Invalid signature file");
+            // Minimum signature file size: 1 + 1 + 32 + 64 + 2 = 100 bytes
+            if sig_bytes.len() < 100 {
+                anyhow::bail!("Invalid signature file (too short)");
             }
             println!("   ✓ Signature found: {}", sig_path.display());
             Some(sig_bytes)

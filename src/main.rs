@@ -11,12 +11,14 @@ use capsuled::hardware;
 use capsuled::job_history::SqliteJobHistoryStore;
 use capsuled::network::service_registry::ServiceRegistry;
 use capsuled::process_supervisor::ProcessSupervisor;
+use capsuled::resource::cas::LocalCasClient;
 use capsuled::runtime::{ContainerRuntime, RuntimeConfig, RuntimeKind};
 use capsuled::security::audit::AuditLogger;
 use capsuled::security::EgressProxy;
 use capsuled::storage::StorageConfig;
 
 const DEFAULT_HTTP_PORT: u16 = 4500;
+const DEFAULT_GRPC_PORT: u16 = 50051;
 const DEFAULT_AUDIT_LOG_PATH: &str = "/tmp/capsuled/logs/audit.jsonl";
 const DEFAULT_AUDIT_KEY_PATH: &str = "/tmp/capsuled/keys/node_key.pem";
 const DEFAULT_MODELS_CACHE_DIR: &str = "/opt/models";
@@ -28,6 +30,10 @@ struct Args {
     /// HTTP API server port
     #[arg(short, long, default_value_t = DEFAULT_HTTP_PORT)]
     port: u16,
+
+    /// gRPC server port
+    #[arg(long, default_value_t = DEFAULT_GRPC_PORT)]
+    grpc_port: u16,
 
     /// Path to audit log file
     #[arg(long, default_value = DEFAULT_AUDIT_LOG_PATH)]
@@ -268,6 +274,23 @@ async fn main() -> anyhow::Result<()> {
         enforcement_enabled,
     ));
 
+    // Initialize LocalCasClient for UARC V1.1.0 L1 Source Policy verification
+    // CAS directory: ~/.capsule/cas (shared with CLI)
+    let cas_client: Option<Arc<dyn capsuled::resource::cas::CasClient>> = {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+        let cas_root = home.join(".capsule").join("cas");
+        match LocalCasClient::new(&cas_root) {
+            Ok(client) => {
+                info!("Initialized LocalCasClient at {:?}", cas_root);
+                Some(Arc::new(client))
+            }
+            Err(e) => {
+                warn!("Failed to initialize LocalCasClient: {}. CAS verification will be disabled.", e);
+                None
+            }
+        }
+    };
+
     // Initialize CapsuleManager
     // UARC V1.1.0: Pass runtime section for allow_insecure_dev_mode
     let runtime_section = file_cfg.as_ref().and_then(|c| c.runtime.as_ref());
@@ -285,7 +308,7 @@ async fn main() -> anyhow::Result<()> {
         Some(container_runtime_config),
         Some(metrics_collector.clone()),
         storage_config,
-        None, // CAS client (TODO: initialize from config if needed)
+        cas_client, // CAS client for L1 Source Policy verification
         runtime_section,
     ));
 
@@ -331,7 +354,7 @@ async fn main() -> anyhow::Result<()> {
     let allowed_host_paths_for_grpc = allowed_host_paths.clone();
     let models_cache_dir_for_grpc = models_cache_dir.clone();
     // Start gRPC Server (Phase 2)
-    let grpc_port = 50051;
+    let grpc_port = args.grpc_port;
     let grpc_addr = format!("0.0.0.0:{}", grpc_port);
 
     info!("Starting gRPC server on {}...", grpc_addr);
