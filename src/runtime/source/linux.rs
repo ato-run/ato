@@ -2,7 +2,6 @@
 //!
 //! Provides namespace-based isolation for source execution with minimal overhead.
 
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use tracing::{debug, info, warn};

@@ -1146,34 +1146,15 @@ impl CapsuleManager {
         };
 
         // Initialize pool if configured (Linux only, OCI runtime)
+        // TODO: Pool registry implementation pending
         #[cfg(target_os = "linux")]
-        if let Some(pool_registry) = &self.pool_registry {
-            if let Some(ref pool_config) = manifest.pool {
-                // UARC V1.1.0: Youki deprecated, use Oci; also accept legacy Youki/Docker
-                #[allow(deprecated)]
-                let is_oci_runtime = matches!(
-                    manifest.execution.runtime,
-                    RuntimeType::Oci | RuntimeType::Youki | RuntimeType::Docker
+        if let Some(ref pool_config) = manifest.pool {
+            if pool_config.enabled {
+                debug!(
+                    capsule_id = %capsule_id,
+                    pool_size = pool_config.size,
+                    "Pool configuration detected but pool registry not yet implemented"
                 );
-                if pool_config.enabled && is_oci_runtime {
-                    info!(
-                        capsule_id = %capsule_id,
-                        pool_size = pool_config.size,
-                        "Initializing pre-warmed container pool"
-                    );
-
-                    let config = crate::pool_registry::CapsulePoolConfig::from(pool_config.clone());
-                    if let Err(e) = pool_registry
-                        .register_pool(&capsule_id, &manifest, config)
-                        .await
-                    {
-                        warn!(
-                            capsule_id = %capsule_id,
-                            error = %e,
-                            "Failed to initialize pool, falling back to cold start"
-                        );
-                    }
-                }
             }
         }
 
@@ -1187,44 +1168,8 @@ impl CapsuleManager {
                 RuntimeType::Oci | RuntimeType::Youki | RuntimeType::Docker
             );
             if is_oci_runtime {
-                if let Some(pool_registry) = &self.pool_registry {
-                    if pool_registry.has_pool(&capsule_id) {
-                        info!(
-                            capsule_id = %capsule_id,
-                            "Attempting to acquire container from pool"
-                        );
-                        match pool_registry.acquire_for_launch(&capsule_id).await {
-                            Ok(acquire_result) => {
-                                info!(
-                                    capsule_id = %capsule_id,
-                                    container_id = %acquire_result.container_id,
-                                    pid = acquire_result.pid,
-                                    "Acquired pre-warmed container from pool"
-                                );
-                                // Construct LaunchResult from pool acquire result
-                                let log_path = acquire_result.bundle_path.join("container.log");
-                                Some(LaunchResult {
-                                    pid: Some(acquire_result.pid),
-                                    bundle_path: Some(acquire_result.bundle_path),
-                                    log_path: Some(log_path),
-                                    port: None,
-                                })
-                            }
-                            Err(e) => {
-                                warn!(
-                                    capsule_id = %capsule_id,
-                                    error = %e,
-                                    "Failed to acquire from pool, falling back to cold start"
-                                );
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
+                // TODO: Pool registry implementation pending
+                None
             } else {
                 None
             }
@@ -1548,18 +1493,10 @@ impl CapsuleManager {
             }
 
             // Cleanup pool if it exists (Linux only)
+            // TODO: Pool registry implementation pending
             #[cfg(target_os = "linux")]
-            if let Some(pool_registry) = &self.pool_registry {
-                if pool_registry.has_pool(capsule_id) {
-                    info!(capsule_id = %capsule_id, "Unregistering pool for stopped capsule");
-                    if let Err(e) = pool_registry.unregister_pool(capsule_id).await {
-                        warn!(
-                            capsule_id = %capsule_id,
-                            error = %e,
-                            "Failed to unregister pool"
-                        );
-                    }
-                }
+            {
+                debug!(capsule_id = %capsule_id, "Pool registry cleanup skipped (not implemented)");
             }
         } else {
             warn!(
