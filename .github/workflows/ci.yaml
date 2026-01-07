@@ -13,14 +13,29 @@ env:
 jobs:
   lint:
     name: Lint
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Clone UARC proto definitions
         run: |
-          rm -rf ../uarc
-          git clone --depth 1 https://github.com/OnesCluster/uarc.git ../uarc
+          git clone --depth 1 https://github.com/Koh0920/uarc.git ../uarc
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-lint-
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -30,28 +45,60 @@ jobs:
 
   test:
     name: Unit Tests
-    runs-on: self-hosted
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
       - name: Clone UARC proto definitions
         run: |
-          rm -rf ../uarc
-          git clone --depth 1 https://github.com/OnesCluster/uarc.git ../uarc
+          git clone --depth 1 https://github.com/Koh0920/uarc.git ../uarc
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
 
       - name: Run unit tests
         run: cargo test --workspace --lib
 
   build:
     name: Build Release
-    runs-on: self-hosted
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
       - name: Clone UARC proto definitions
         run: |
-          rm -rf ../uarc
-          git clone --depth 1 https://github.com/OnesCluster/uarc.git ../uarc
+          git clone --depth 1 https://github.com/Koh0920/uarc.git ../uarc
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
 
       - name: Build release binaries
         run: |
@@ -61,7 +108,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: capsuled-macos-arm64
+          name: capsuled-${{ matrix.os }}
           path: |
             target/release/capsuled
             target/release/capsule
@@ -70,14 +117,27 @@ jobs:
   e2e:
     name: E2E Tests
     needs: build
-    runs-on: self-hosted
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Clone UARC proto definitions
         run: |
-          rm -rf ../uarc
-          git clone --depth 1 https://github.com/OnesCluster/uarc.git ../uarc
+          git clone --depth 1 https://github.com/Koh0920/uarc.git ../uarc
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
 
       - name: Build release binaries
         run: |
@@ -105,18 +165,24 @@ jobs:
 
   security-scan:
     name: Security Audit
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run security audit
-        run: cargo audit || true  # Don't fail on advisory, just warn
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
 
-  # Final status check for branch protection
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Run security audit
+        run: cargo audit
+        continue-on-error: true
+
   ci-success:
     name: CI Success
     needs: [lint, test, build, e2e]
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     if: always()
     steps:
       - name: Check all jobs passed
