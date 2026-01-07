@@ -25,7 +25,7 @@ See [UARC_V1_COMPLIANCE_CHECKLIST.md](../UARC_V1_COMPLIANCE_CHECKLIST.md) for fu
 
 ### What Was Done
 
-1. ✅ Moved legacy module `capsuled/src/adep/` to `.archives/src/adep/`
+1. ✅ Archived legacy module `capsuled/src/adep/` to `.archives/src/adep/` (legacy; kept for reference)
 2. ✅ Updated imports in 8 locations:
 
    - ✅ `src/lib.rs` - Updated OCI stub imports

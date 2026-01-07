@@ -33,7 +33,7 @@ COPY build.rs ./
 COPY src ./src
 COPY migrations ./migrations
 
-# Copy legacy conversion library (if present)
+# Copy legacy conversion library (if present). This is optional and only required if you depend on an external libadep build.
 COPY ../libadep /libadep
 
 # NOTE: Docker cannot `COPY` from outside the build context.
