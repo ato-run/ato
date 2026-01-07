@@ -122,25 +122,12 @@ else
 fi
 echo ""
 
-# Step 5: E2E tests (only for main branch or explicit request)
-if [ "${QUICK_MODE:-0}" != "1" ]; then
-    log_step "5/5: Running E2E tests"
-    E2E_SCRIPT="$PROJECT_ROOT/scripts/e2e-test.sh"
-    if [ -x "$E2E_SCRIPT" ]; then
-        if "$E2E_SCRIPT" --quick; then
-            log_success "E2E quick tests passed"
-        else
-            log_fail "E2E tests failed"
-            FAILED=1
-        fi
-    else
-        log_fail "E2E test script not found at $E2E_SCRIPT"
-        FAILED=1
-    fi
-else
-    log_step "5/5: E2E tests (skipped in quick mode)"
-    echo -e "${YELLOW}  Run ./scripts/e2e-test.sh manually for full E2E tests${NC}"
-fi
+# Step 5: E2E tests - skipped in pre-push (run on CI instead)
+# E2E tests require 2+ minutes and can have timing issues when run from git hooks
+# They are always run in CI, ensuring coverage without blocking developer workflow
+log_step "5/5: E2E tests (deferred to CI)"
+echo -e "${YELLOW}  ⏭  E2E tests skipped in pre-push (will run on CI)${NC}"
+echo -e "     Run manually: ./scripts/e2e-test.sh --quick"
 echo ""
 
 # Summary
