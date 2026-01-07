@@ -17,11 +17,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout UARC proto definitions
-        uses: actions/checkout@v4
-        with:
-          repository: OnesCluster/uarc
-          path: ../uarc
+      - name: Clone UARC proto definitions
+        run: |
+          rm -rf ../uarc
+          git clone --depth 1 https://github.com/OnesCluster/uarc.git ../uarc
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -35,11 +34,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout UARC proto definitions
-        uses: actions/checkout@v4
-        with:
-          repository: OnesCluster/uarc
-          path: ../uarc
+      - name: Clone UARC proto definitions
+        run: |
+          rm -rf ../uarc
+          git clone --depth 1 https://github.com/OnesCluster/uarc.git ../uarc
 
       - name: Run unit tests
         run: cargo test --workspace --lib
@@ -50,11 +48,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout UARC proto definitions
-        uses: actions/checkout@v4
-        with:
-          repository: OnesCluster/uarc
-          path: ../uarc
+      - name: Clone UARC proto definitions
+        run: |
+          rm -rf ../uarc
+          git clone --depth 1 https://github.com/OnesCluster/uarc.git ../uarc
 
       - name: Build release binaries
         run: |
@@ -77,11 +74,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout UARC proto definitions
-        uses: actions/checkout@v4
-        with:
-          repository: OnesCluster/uarc
-          path: ../uarc
+      - name: Clone UARC proto definitions
+        run: |
+          rm -rf ../uarc
+          git clone --depth 1 https://github.com/OnesCluster/uarc.git ../uarc
 
       - name: Build release binaries
         run: |
