@@ -210,7 +210,9 @@ impl Runtime for DevRuntime {
         if pid_file.exists() {
             if let Ok(content) = std::fs::read_to_string(&pid_file) {
                 if let Ok(pid) = content.trim().parse::<i32>() {
+                    #[cfg(unix)]
                     use nix::sys::signal::{self, Signal};
+                    #[cfg(unix)]
                     use nix::unistd::Pid;
 
                     info!(

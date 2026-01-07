@@ -122,12 +122,19 @@ else
 fi
 echo ""
 
-# Step 5: E2E tests - skipped in pre-push (run on CI instead)
-# E2E tests require 2+ minutes and can have timing issues when run from git hooks
-# They are always run in CI, ensuring coverage without blocking developer workflow
-log_step "5/5: E2E tests (deferred to CI)"
-echo -e "${YELLOW}  ⏭  E2E tests skipped in pre-push (will run on CI)${NC}"
-echo -e "     Run manually: ./scripts/e2e-test.sh --quick"
+# Step 5: E2E tests
+log_step "5/5: Running E2E tests"
+if [ -x "$PROJECT_ROOT/scripts/e2e-test.sh" ]; then
+    if "$PROJECT_ROOT/scripts/e2e-test.sh" --quick; then
+        log_success "E2E tests passed"
+    else
+        log_fail "E2E tests failed"
+        FAILED=1
+    fi
+else
+    echo -e "${YELLOW}  ⚠️  E2E test script not found or not executable${NC}"
+    echo -e "     Expected: $PROJECT_ROOT/scripts/e2e-test.sh"
+fi
 echo ""
 
 # Summary
