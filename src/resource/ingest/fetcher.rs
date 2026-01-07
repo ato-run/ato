@@ -100,7 +100,7 @@ fn filename_from_url(url: &str) -> Option<String> {
     // Minimal parsing: strip query/fragment, then take the last non-empty path segment.
     let no_frag = url.split('#').next().unwrap_or(url);
     let no_query = no_frag.split('?').next().unwrap_or(no_frag);
-    let seg = no_query.split('/').filter(|s| !s.is_empty()).next_back()?;
+    let seg = no_query.split('/').rfind(|s| !s.is_empty())?;
     if seg.is_empty() {
         None
     } else {
