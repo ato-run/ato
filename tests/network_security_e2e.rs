@@ -57,7 +57,7 @@ fn test_dns_rule_generation_default_config() {
     assert!(
         rules
             .iter()
-            .any(|r| r.contains("LOG") && r.contains("ADEP-DNS-BLOCKED")),
+            .any(|r| r.contains("LOG") && r.contains("UARC-DNS-BLOCKED")),
         "Should LOG blocked DNS attempts"
     );
 

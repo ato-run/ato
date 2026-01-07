@@ -43,7 +43,7 @@ pub struct DeployCapsuleRequest {
 #[derive(Clone, Debug)]
 pub struct Capsule {
     pub id: String,
-    pub adep_json: Vec<u8>,
+    pub manifest_bytes: Vec<u8>,
     pub oci_image: String,
     pub digest: String,
     pub status: CapsuleStatus,
@@ -786,7 +786,7 @@ impl CapsuleManager {
             // Register capsule
             let capsule = Capsule {
                 id: capsule_id.clone(),
-                adep_json: manifest_json_for_runtime.clone().into_bytes(),
+                manifest_bytes: manifest_json_for_runtime.clone().into_bytes(),
                 oci_image: oci_image.clone(),
                 digest: digest.clone(),
                 status: CapsuleStatus::Running,
@@ -1015,7 +1015,7 @@ impl CapsuleManager {
             // Register capsule
             let capsule = Capsule {
                 id: capsule_id.clone(),
-                adep_json: manifest_json_for_runtime.clone().into_bytes(),
+                manifest_bytes: manifest_json_for_runtime.clone().into_bytes(),
                 oci_image: oci_image.clone(),
                 digest: digest.clone(),
                 status: CapsuleStatus::Running,
@@ -1267,7 +1267,7 @@ impl CapsuleManager {
             .entry(capsule_id.to_string())
             .or_insert_with(|| Capsule {
                 id: capsule_id.to_string(),
-                adep_json: Vec::new(),
+                manifest_bytes: Vec::new(),
                 oci_image: manifest.execution.entrypoint.clone(),
                 digest: String::new(),
                 status: CapsuleStatus::Pending,
@@ -1285,7 +1285,7 @@ impl CapsuleManager {
                 gpu_indices: Vec::new(),
             });
 
-        entry.adep_json = manifest_json.as_bytes().to_vec();
+        entry.manifest_bytes = manifest_json.as_bytes().to_vec();
         entry.oci_image = manifest.execution.entrypoint.clone();
         entry.status = CapsuleStatus::Running;
         entry.bundle_path = runtime
@@ -1342,7 +1342,7 @@ impl CapsuleManager {
             .entry(capsule_id.to_string())
             .or_insert_with(|| Capsule {
                 id: capsule_id.to_string(),
-                adep_json: Vec::new(),
+                manifest_bytes: Vec::new(),
                 oci_image: String::new(),
                 digest: String::new(),
                 status: CapsuleStatus::Pending,
@@ -1453,15 +1453,15 @@ impl CapsuleManager {
         // Remove any per-capsule egress policy.
         crate::security::EgressPolicyRegistry::global().unregister(capsule_id);
 
-        let adep_json = {
+        let manifest_bytes = {
             let capsules = self
                 .capsules
                 .read()
                 .map_err(|e| anyhow!("Lock error: {}", e))?;
-            capsules.get(capsule_id).map(|c| c.adep_json.clone())
+            capsules.get(capsule_id).map(|c| c.manifest_bytes.clone())
         };
 
-        let manifest: Option<CapsuleManifestV1> = adep_json
+        let manifest: Option<CapsuleManifestV1> = manifest_bytes
             .as_ref()
             .and_then(|json| serde_json::from_slice(json).ok());
 

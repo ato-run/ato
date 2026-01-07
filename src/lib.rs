@@ -47,7 +47,6 @@ pub mod runtime;
 pub mod schema;
 pub mod system;
 pub mod verification;
-pub mod wasm_host;
 pub mod workload;
 
 // =============================================================================
