@@ -1,11 +1,11 @@
-[package]
+schema_version = "1.0"
 name = "test-hello-world"
 version = "0.1.0"
+type = "app"
+
+[metadata]
 description = "Simple test capsule for CLI implementation"
 author = "Test User"
-
-schema_version = "1.0"
-type = "app"
 
 [execution]
 runtime = "source"
