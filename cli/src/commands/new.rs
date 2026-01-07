@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Arguments for the new command
 pub struct NewArgs {
@@ -58,7 +58,7 @@ pub fn execute(args: NewArgs) -> Result<()> {
     Ok(())
 }
 
-fn create_python_project(dir: &PathBuf, name: &str) -> Result<()> {
+fn create_python_project(dir: &Path, name: &str) -> Result<()> {
     // capsule.toml
     let manifest = format!(
         r#"# Capsule Manifest - UARC V1.1.0
@@ -111,7 +111,7 @@ if __name__ == "__main__":
     Ok(())
 }
 
-fn create_nodejs_project(dir: &PathBuf, name: &str) -> Result<()> {
+fn create_nodejs_project(dir: &Path, name: &str) -> Result<()> {
     // capsule.toml
     let manifest = format!(
         r#"# Capsule Manifest - UARC V1.1.0
@@ -167,7 +167,7 @@ console.log("Edit index.js to get started.");
     Ok(())
 }
 
-fn create_rust_project(dir: &PathBuf, name: &str) -> Result<()> {
+fn create_rust_project(dir: &Path, name: &str) -> Result<()> {
     // For Rust, we create a simple source project
 
     // capsule.toml
@@ -228,7 +228,7 @@ edition = "2021"
     Ok(())
 }
 
-fn create_shell_project(dir: &PathBuf, name: &str) -> Result<()> {
+fn create_shell_project(dir: &Path, name: &str) -> Result<()> {
     // capsule.toml
     let manifest = format!(
         r#"# Capsule Manifest - UARC V1.1.0
@@ -279,7 +279,7 @@ echo "Edit main.sh to get started."
     Ok(())
 }
 
-fn create_gitignore(dir: &PathBuf) -> Result<()> {
+fn create_gitignore(dir: &Path) -> Result<()> {
     let content = r#"# Capsule
 .capsule/
 *.capsule
@@ -306,7 +306,7 @@ target/
     Ok(())
 }
 
-fn create_readme(dir: &PathBuf, name: &str) -> Result<()> {
+fn create_readme(dir: &Path, name: &str) -> Result<()> {
     let content = format!(
         r#"# {name}
 

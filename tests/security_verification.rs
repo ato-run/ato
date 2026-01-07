@@ -22,7 +22,7 @@ mod tests {
             capabilities: None,
             requirements: CapsuleRequirements::default(),
             execution: CapsuleExecution {
-                runtime: RuntimeType::Docker,
+                runtime: RuntimeType::Oci,
                 entrypoint: "test:latest".to_string(),
                 port: None,
                 health_check: None,

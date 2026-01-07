@@ -36,7 +36,7 @@ fn create_manifest_with_targets(name: &str, targets: TargetsConfig) -> CapsuleMa
         capabilities: None,
         requirements: CapsuleRequirements::default(),
         execution: CapsuleExecution {
-            runtime: RuntimeType::Docker, // Legacy fallback
+            runtime: RuntimeType::Oci, // Legacy fallback
             entrypoint: "alpine:latest".to_string(),
             port: None,
             health_check: None,
@@ -140,7 +140,7 @@ fn context_docker_only() -> ResolveContext {
 
 #[test]
 fn test_legacy_fallback_when_no_targets() {
-    let manifest = create_legacy_manifest("legacy-app", RuntimeType::Docker);
+    let manifest = create_legacy_manifest("legacy-app", RuntimeType::Oci);
     let context = context_all_runtimes();
 
     let resolved = resolve_runtime(&manifest, &context).expect("should resolve");
@@ -150,7 +150,7 @@ fn test_legacy_fallback_when_no_targets() {
             runtime_type,
             entrypoint,
         } => {
-            assert_eq!(runtime_type, RuntimeType::Docker);
+            assert_eq!(runtime_type, RuntimeType::Oci);
             assert_eq!(entrypoint, "test-entry");
         }
         _ => panic!("Expected Legacy target, got {:?}", resolved),

@@ -107,7 +107,6 @@ cudarc = { version = "0.17", features = ["driver", "cuda-version-from-build-syst
 # Container Runtime (Youki/Libcontainer)
 libcontainer = { version = "0.4", default-features = false, features = ["systemd", "v2"] }
 cgroups-rs = "0.3.3"
-nix = "0.27"
 libc = "0.2"
 
 [features]

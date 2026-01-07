@@ -1150,7 +1150,7 @@ impl CapsuleManager {
         #[cfg(target_os = "linux")]
         if let Some(ref pool_config) = manifest.pool {
             if pool_config.enabled {
-                debug!(
+                tracing::debug!(
                     capsule_id = %capsule_id,
                     pool_size = pool_config.size,
                     "Pool configuration detected but pool registry not yet implemented"
@@ -1496,7 +1496,7 @@ impl CapsuleManager {
             // TODO: Pool registry implementation pending
             #[cfg(target_os = "linux")]
             {
-                debug!(capsule_id = %capsule_id, "Pool registry cleanup skipped (not implemented)");
+                tracing::debug!(capsule_id = %capsule_id, "Pool registry cleanup skipped (not implemented)");
             }
         } else {
             warn!(

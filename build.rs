@@ -4,6 +4,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // =========================================================================
     // UARC contains only the specification protos: common/v1, engine/v1
     // Coordinator API is Ato-specific and lives in ato-coordinator repo
+    let uarc_path = std::env::var("UARC_PATH").unwrap_or_else(|_| "../uarc".to_string());
     std::env::set_var("PROTOC", protobuf_src::protoc());
     tonic_build::configure()
         .build_server(true)
@@ -11,10 +12,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .out_dir("src/proto")
         .compile_protos(
             &[
-                "../uarc/proto/common/v1/common.proto",
-                "../uarc/proto/engine/v1/api.proto",
+                format!("{}/proto/common/v1/common.proto", uarc_path),
+                format!("{}/proto/engine/v1/api.proto", uarc_path),
             ],
-            &["../uarc/proto"], // .proto ファイルのインクルードパス
+            &[format!("{}/proto", uarc_path)], // .proto ファイルのインクルードパス
         )?;
 
     // =========================================================================
@@ -28,7 +29,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `capsule.capnp` includes Go annotations via `go.capnp` import for SSOT.
     // Rust builds should not depend on the Go toolchain or go.capnp being present,
     // so we compile from a sanitized copy that strips `$Go.*` lines.
-    let original_schema_path = std::path::Path::new("../uarc/schema/capsule.capnp");
+    let uarc_schema_path = format!("{}/schema/capsule.capnp", uarc_path);
+    let original_schema_path = std::path::Path::new(&uarc_schema_path);
     let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR")?);
     let sanitized_schema_dir = out_dir.join("capnp_sanitized");
     std::fs::create_dir_all(&sanitized_schema_dir)?;
@@ -52,9 +54,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run()?;
 
     // Rerun if schema changes
-    println!("cargo:rerun-if-changed=../uarc/schema/capsule.capnp");
+    println!("cargo:rerun-if-changed={}/schema/capsule.capnp", uarc_path);
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=../uarc/proto");
+    println!("cargo:rerun-if-changed={}/proto", uarc_path);
 
     Ok(())
 }

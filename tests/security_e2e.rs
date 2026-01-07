@@ -18,7 +18,6 @@
 #![cfg(unix)]
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 // ============================================================================
 // Prerequisites Check
@@ -51,6 +50,7 @@ mod prereqs {
         is_root() && has_iptables()
     }
 
+    #[allow(dead_code)]
     pub fn storage_prereqs() -> bool {
         is_root() && has_lvm_tools() && has_test_vg()
     }

@@ -57,7 +57,7 @@ pub fn execute(args: KeygenArgs) -> Result<()> {
 
     // Calculate public key fingerprint (SHA256)
     let mut hasher = Sha256::new();
-    hasher.update(&public_bytes);
+    hasher.update(public_bytes);
     let fingerprint = hasher.finalize();
     let fingerprint_hex: String = fingerprint.iter().map(|b| format!("{:02x}", b)).collect();
 
