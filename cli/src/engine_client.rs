@@ -6,14 +6,14 @@
 use anyhow::{Context, Result};
 use capsuled::capsule_types::capsule_v1::CapsuleManifestV1;
 use capsuled::proto::onescluster::engine::v1::{
-    engine_client::EngineClient, deploy_request::Manifest as DeployManifest,
-    DeployRequest, DeployResponse, EngineLogEntry, GetSystemStatusRequest,
-    LogRequest, StopRequest, StopResponse, SystemStatus,
+    deploy_request::Manifest as DeployManifest, engine_client::EngineClient, DeployRequest,
+    DeployResponse, EngineLogEntry, GetSystemStatusRequest, LogRequest, StopRequest, StopResponse,
+    SystemStatus,
 };
 use std::path::PathBuf;
 use std::time::Duration;
-use tonic::transport::Channel;
 use tonic::metadata::MetadataValue;
+use tonic::transport::Channel;
 use tonic::Streaming;
 
 /// Default engine endpoint
@@ -112,8 +112,8 @@ impl CapsuleEngineClient {
     ) -> Result<DeployResponse> {
         // Serialize manifest to JSON for Engine processing
         // JSON preserves structure better than TOML for signature verification
-        let json_bytes = serde_json::to_vec(manifest)
-            .context("Failed to serialize manifest to JSON")?;
+        let json_bytes =
+            serde_json::to_vec(manifest).context("Failed to serialize manifest to JSON")?;
 
         let request = DeployRequest {
             capsule_id: capsule_id.to_string(),

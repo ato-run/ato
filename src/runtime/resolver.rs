@@ -99,11 +99,14 @@ impl ResolvedTarget {
                 }
             }
             ResolvedTarget::Oci { .. } => RuntimeKind::Youki, // Prefer Youki for OCI
-            ResolvedTarget::Legacy { runtime_type, .. } => {
+            ResolvedTarget::Legacy { runtime_type, .. } =>
+            {
                 #[allow(deprecated)]
                 match runtime_type {
                     RuntimeType::Wasm => RuntimeKind::Wasm,
-                    RuntimeType::Oci | RuntimeType::Youki | RuntimeType::Docker => RuntimeKind::Youki,
+                    RuntimeType::Oci | RuntimeType::Youki | RuntimeType::Docker => {
+                        RuntimeKind::Youki
+                    }
                     RuntimeType::Native | RuntimeType::Source => RuntimeKind::Source,
                 }
             }

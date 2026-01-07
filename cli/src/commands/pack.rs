@@ -52,9 +52,13 @@ fn get_cas_blobs_dir() -> Result<PathBuf> {
 /// Used by `dev` and `run` commands
 pub fn pack_in_memory(manifest_path: &Path) -> Result<PackResult> {
     // Canonicalize path to handle relative paths correctly
-    let manifest_path = manifest_path.canonicalize()
-        .with_context(|| format!("Failed to canonicalize manifest path: {}", manifest_path.display()))?;
-    
+    let manifest_path = manifest_path.canonicalize().with_context(|| {
+        format!(
+            "Failed to canonicalize manifest path: {}",
+            manifest_path.display()
+        )
+    })?;
+
     let manifest_content =
         fs::read_to_string(&manifest_path).context("Failed to read manifest file")?;
     let mut manifest: CapsuleManifestV1 =
@@ -73,15 +77,19 @@ pub fn pack_in_memory(manifest_path: &Path) -> Result<PackResult> {
         if targets.source.is_some() {
             // Create tar.gz archive of source files
             let (archive_bytes, file_count) = create_source_archive(&source_dir, &manifest_path)?;
-            println!("✓ Archived {} files ({} bytes)", file_count, archive_bytes.len());
-            
+            println!(
+                "✓ Archived {} files ({} bytes)",
+                file_count,
+                archive_bytes.len()
+            );
+
             // Calculate SHA256 hash of archive
             let mut hasher = Sha256::new();
             hasher.update(&archive_bytes);
             let digest_bytes: [u8; 32] = hasher.finalize().into();
             let hash_hex = hex::encode(digest_bytes);
             let digest_str = format!("sha256:{}", hash_hex);
-            
+
             // Store archive in CAS with format: sha256-<hash> (matches LocalCasClient.blob_path)
             let cas_dir = get_cas_blobs_dir()?;
             let blob_filename = format!("sha256-{}", hash_hex);
@@ -89,7 +97,7 @@ pub fn pack_in_memory(manifest_path: &Path) -> Result<PackResult> {
             fs::write(&blob_path, &archive_bytes)
                 .with_context(|| format!("Failed to write CAS blob: {}", blob_path.display()))?;
             println!("✓ Stored in CAS: {}", blob_path.display());
-            
+
             targets.source_digest = Some(digest_str.clone());
             source_digest = Some(digest_str);
             cas_blob_path = Some(blob_path);
@@ -110,9 +118,12 @@ pub fn execute(args: PackArgs) -> Result<()> {
     println!("Manifest: {}", args.manifest_path.display());
 
     let result = pack_in_memory(&args.manifest_path)?;
-    
-    println!("✓ Parsed manifest: {} v{}", result.manifest.name, result.manifest.version);
-    
+
+    println!(
+        "✓ Parsed manifest: {} v{}",
+        result.manifest.name, result.manifest.version
+    );
+
     if let Some(ref digest) = result.source_digest {
         println!("✓ Source target detected, calculating CAS digest...");
         println!("✓ Source digest: {}", digest);
@@ -148,9 +159,12 @@ fn sign_capsule(manifest: &CapsuleManifestV1, key_path: &Path, capsule_path: &Pa
     println!("\n✍️  Signing with: {}", key_path.display());
 
     // Generate Cap'n Proto canonical bytes
-    let canonical_bytes = manifest_to_capnp_bytes(manifest)
-        .context("Failed to generate canonical bytes")?;
-    println!("   ✓ Generated canonical bytes ({} bytes)", canonical_bytes.len());
+    let canonical_bytes =
+        manifest_to_capnp_bytes(manifest).context("Failed to generate canonical bytes")?;
+    println!(
+        "   ✓ Generated canonical bytes ({} bytes)",
+        canonical_bytes.len()
+    );
 
     // Load Ed25519 private key
     let secret_bytes = fs::read(key_path)
@@ -164,7 +178,9 @@ fn sign_capsule(manifest: &CapsuleManifestV1, key_path: &Path, capsule_path: &Pa
     }
 
     let signing_key = SigningKey::from_bytes(
-        &secret_bytes.try_into().expect("Already verified length is 32"),
+        &secret_bytes
+            .try_into()
+            .expect("Already verified length is 32"),
     );
 
     // Get public key for signature file
@@ -186,8 +202,8 @@ fn sign_capsule(manifest: &CapsuleManifestV1, key_path: &Path, capsule_path: &Pa
     let metadata_len = metadata_bytes.len() as u16;
 
     let mut sig_file_bytes = Vec::with_capacity(1 + 1 + 32 + 64 + 2 + metadata_bytes.len());
-    sig_file_bytes.push(1u8);  // version
-    sig_file_bytes.push(1u8);  // key_type: 1 = Ed25519
+    sig_file_bytes.push(1u8); // version
+    sig_file_bytes.push(1u8); // key_type: 1 = Ed25519
     sig_file_bytes.extend_from_slice(&public_key_bytes);
     sig_file_bytes.extend_from_slice(&signature_bytes);
     sig_file_bytes.extend_from_slice(&metadata_len.to_be_bytes());
@@ -209,21 +225,19 @@ fn sign_capsule(manifest: &CapsuleManifestV1, key_path: &Path, capsule_path: &Pa
 #[allow(dead_code)]
 pub fn pack_and_sign(manifest_path: &Path, key_path: &Path) -> Result<(PackResult, Vec<u8>)> {
     let result = pack_in_memory(manifest_path)?;
-    
+
     // Generate canonical bytes and sign
-    let canonical_bytes = manifest_to_capnp_bytes(&result.manifest)
-        .context("Failed to generate canonical bytes")?;
-    
+    let canonical_bytes =
+        manifest_to_capnp_bytes(&result.manifest).context("Failed to generate canonical bytes")?;
+
     let secret_bytes = fs::read(key_path)?;
     if secret_bytes.len() != 32 {
         anyhow::bail!("Invalid key length");
     }
-    
-    let signing_key = SigningKey::from_bytes(
-        &secret_bytes.try_into().expect("Length verified"),
-    );
+
+    let signing_key = SigningKey::from_bytes(&secret_bytes.try_into().expect("Length verified"));
     let signature: Signature = signing_key.sign(&canonical_bytes);
-    
+
     Ok((result, signature.to_bytes().to_vec()))
 }
 
@@ -237,10 +251,10 @@ pub fn pack_and_sign(manifest_path: &Path, key_path: &Path) -> Result<(PackResul
 /// Returns (archive_bytes, file_count)
 pub fn create_source_archive(source_dir: &Path, manifest_path: &Path) -> Result<(Vec<u8>, usize)> {
     let mut file_count = 0usize;
-    
+
     // Collect files first (sorted for reproducibility)
     let mut files: Vec<PathBuf> = Vec::new();
-    
+
     // Use ignore crate for .gitignore support
     let walker = WalkBuilder::new(source_dir)
         .hidden(false) // Include hidden files (they might be important)
@@ -281,36 +295,40 @@ pub fn create_source_archive(source_dir: &Path, manifest_path: &Path) -> Result<
 
         files.push(path.to_path_buf());
     }
-    
+
     // Sort for reproducibility
     files.sort();
-    
+
     // Create tar.gz archive in memory
     let mut archive_buffer = Vec::new();
     {
         let encoder = GzEncoder::new(&mut archive_buffer, Compression::default());
         let mut tar_builder = Builder::new(encoder);
-        
+
         for path in &files {
             let relative_path = path
                 .strip_prefix(source_dir)
                 .context("Failed to compute relative path")?;
-            
+
             let mut file = fs::File::open(path)
                 .with_context(|| format!("Failed to open file: {}", path.display()))?;
-            
+
             // Add file to tar with relative path
-            tar_builder.append_file(relative_path, &mut file)
+            tar_builder
+                .append_file(relative_path, &mut file)
                 .with_context(|| format!("Failed to add file to archive: {}", path.display()))?;
-            
+
             file_count += 1;
         }
-        
+
         // Finish tar and gzip
-        let encoder = tar_builder.into_inner()
+        let encoder = tar_builder
+            .into_inner()
             .context("Failed to finalize tar archive")?;
-        encoder.finish()
+        encoder
+            .finish()
             .context("Failed to finalize gzip compression")?;
     }
-    
-    Ok((archive_buffer, file_count))}
+
+    Ok((archive_buffer, file_count))
+}

@@ -275,7 +275,7 @@ impl CapsuleManager {
         let extract_dir = PathBuf::from("/tmp/capsuled/bundles")
             .join(capsule_id)
             .join("rootfs");
-        
+
         // Clean up existing extraction if present
         if extract_dir.exists() {
             std::fs::remove_dir_all(&extract_dir)?;
@@ -294,7 +294,9 @@ impl CapsuleManager {
         info!(
             "CAS: Extracted archive to {:?} ({} bytes compressed)",
             extract_dir,
-            std::fs::metadata(archive_path).map(|m| m.len()).unwrap_or(0)
+            std::fs::metadata(archive_path)
+                .map(|m| m.len())
+                .unwrap_or(0)
         );
 
         Ok(extract_dir)
@@ -731,10 +733,10 @@ impl CapsuleManager {
                     network.egress_allow.clone(),
                 );
                 // Inject token into environment for the capsule to use with egress proxy
-                manifest
-                    .execution
-                    .env
-                    .insert(crate::verification::egress_policy::ENV_KEY_EGRESS_TOKEN.to_string(), egress_token);
+                manifest.execution.env.insert(
+                    crate::verification::egress_policy::ENV_KEY_EGRESS_TOKEN.to_string(),
+                    egress_token,
+                );
                 info!(
                     "L4 Egress Policy: Registered {} allowed domains for capsule {}",
                     network.egress_allow.len(),
@@ -832,21 +834,27 @@ impl CapsuleManager {
             // =====================================================================
             // UARC V1.1.0: L1 Source Policy Verification
             // =====================================================================
-            
+
             // Determine source directory - prefer CAS-verified path in production
             let source_dir = if let Some(targets) = &manifest.targets {
                 if let Some(source_digest) = &targets.source_digest {
                     // Production mode: Verify source from CAS
                     if let Some(cas) = &self.cas_client {
-                        info!("L1 Policy: Fetching source from CAS with digest {}", source_digest);
+                        info!(
+                            "L1 Policy: Fetching source from CAS with digest {}",
+                            source_digest
+                        );
                         match cas.fetch_blob(source_digest).await {
                             Ok(cas_archive_path) => {
                                 info!("L1 Policy: CAS archive fetched at {:?}", cas_archive_path);
-                                
+
                                 // Extract tar.gz archive to temporary directory
                                 match Self::extract_cas_archive(&cas_archive_path, &capsule_id) {
                                     Ok(extracted_dir) => {
-                                        info!("L1 Policy: CAS source extracted to {:?}", extracted_dir);
+                                        info!(
+                                            "L1 Policy: CAS source extracted to {:?}",
+                                            extracted_dir
+                                        );
                                         extracted_dir
                                     }
                                     Err(e) => {
@@ -874,35 +882,41 @@ impl CapsuleManager {
                         source_working_dir
                             .as_ref()
                             .map(PathBuf::from)
-                            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+                            .unwrap_or_else(|| {
+                                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                            })
                     }
                 } else {
                     // No source_digest - use local path (dev mode)
                     source_working_dir
                         .as_ref()
                         .map(PathBuf::from)
-                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+                        .unwrap_or_else(|| {
+                            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                        })
                 }
             } else {
                 // Legacy mode - no targets defined
                 source_working_dir
                     .as_ref()
                     .map(PathBuf::from)
-                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+                    .unwrap_or_else(|| {
+                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                    })
             };
 
             // L1 Source Policy: Scan for dangerous patterns in ALL script files
             // UARC V1.1.0: Scan is language-agnostic to catch hidden payloads
             const L1_SCAN_EXTENSIONS: &[&str] = &["py", "sh", "js", "ts", "rb", "pl", "php", "lua"];
-            match crate::verification::verifier::verify_l1_source_policy(&source_dir, L1_SCAN_EXTENSIONS) {
+            match crate::verification::verifier::verify_l1_source_policy(
+                &source_dir,
+                L1_SCAN_EXTENSIONS,
+            ) {
                 Ok(()) => {
                     info!("L1 Policy: Source verification passed for {:?}", source_dir);
                 }
                 Err(e) => {
-                    return Err(anyhow!(
-                        "L1 Policy Violation: {}",
-                        e
-                    ));
+                    return Err(anyhow!("L1 Policy Violation: {}", e));
                 }
             }
 

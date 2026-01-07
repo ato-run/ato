@@ -17,13 +17,13 @@ pub struct NewArgs {
 /// Create a new Capsule project
 pub fn execute(args: NewArgs) -> Result<()> {
     let project_dir = PathBuf::from(&args.name);
-    
+
     if project_dir.exists() {
         anyhow::bail!("Directory '{}' already exists!", args.name);
     }
 
     let template = args.template.as_deref().unwrap_or("python");
-    
+
     println!("🎉 Creating new Capsule project: {}", args.name);
     println!("   Template: {}\n", template);
 
@@ -54,13 +54,14 @@ pub fn execute(args: NewArgs) -> Result<()> {
     println!("\nNext steps:");
     println!("   cd {}", args.name);
     println!("   capsule open --dev");
-    
+
     Ok(())
 }
 
 fn create_python_project(dir: &PathBuf, name: &str) -> Result<()> {
     // capsule.toml
-    let manifest = format!(r#"# Capsule Manifest - UARC V1.1.0
+    let manifest = format!(
+        r#"# Capsule Manifest - UARC V1.1.0
 schema_version = "1.0"
 name = "{name}"
 version = "0.1.0"
@@ -78,7 +79,8 @@ entrypoint = "python main.py"
 [storage]
 
 [routing]
-"#);
+"#
+    );
     fs::write(dir.join("capsule.toml"), manifest)?;
 
     // main.py
@@ -97,7 +99,10 @@ if __name__ == "__main__":
     fs::write(dir.join("main.py"), main_py)?;
 
     // requirements.txt
-    fs::write(dir.join("requirements.txt"), "# Add your dependencies here\n")?;
+    fs::write(
+        dir.join("requirements.txt"),
+        "# Add your dependencies here\n",
+    )?;
 
     println!("   ✓ Created capsule.toml");
     println!("   ✓ Created main.py");
@@ -108,7 +113,8 @@ if __name__ == "__main__":
 
 fn create_nodejs_project(dir: &PathBuf, name: &str) -> Result<()> {
     // capsule.toml
-    let manifest = format!(r#"# Capsule Manifest - UARC V1.1.0
+    let manifest = format!(
+        r#"# Capsule Manifest - UARC V1.1.0
 schema_version = "1.0"
 name = "{name}"
 version = "0.1.0"
@@ -126,11 +132,13 @@ entrypoint = "node index.js"
 [storage]
 
 [routing]
-"#);
+"#
+    );
     fs::write(dir.join("capsule.toml"), manifest)?;
 
     // package.json
-    let package_json = format!(r#"{{
+    let package_json = format!(
+        r#"{{
   "name": "{name}",
   "version": "0.1.0",
   "main": "index.js",
@@ -138,7 +146,8 @@ entrypoint = "node index.js"
     "start": "node index.js"
   }}
 }}
-"#);
+"#
+    );
     fs::write(dir.join("package.json"), package_json)?;
 
     // index.js
@@ -160,9 +169,10 @@ console.log("Edit index.js to get started.");
 
 fn create_rust_project(dir: &PathBuf, name: &str) -> Result<()> {
     // For Rust, we create a simple source project
-    
+
     // capsule.toml
-    let manifest = format!(r#"# Capsule Manifest - UARC V1.1.0
+    let manifest = format!(
+        r#"# Capsule Manifest - UARC V1.1.0
 schema_version = "1.0"
 name = "{name}"
 version = "0.1.0"
@@ -185,17 +195,21 @@ entrypoint = "cargo run --release"
 # [targets.wasm]
 # digest = "sha256:..."
 # world = "wasi:cli/command"
-"#);
+"#
+    );
     fs::write(dir.join("capsule.toml"), manifest)?;
 
     // Cargo.toml
-    let cargo_toml = format!(r#"[package]
+    let cargo_toml = format!(
+        r#"[package]
 name = "{}"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-"#, name.replace("-", "_"));
+"#,
+        name.replace("-", "_")
+    );
     fs::write(dir.join("Cargo.toml"), cargo_toml)?;
 
     // src/main.rs
@@ -216,7 +230,8 @@ edition = "2021"
 
 fn create_shell_project(dir: &PathBuf, name: &str) -> Result<()> {
     // capsule.toml
-    let manifest = format!(r#"# Capsule Manifest - UARC V1.1.0
+    let manifest = format!(
+        r#"# Capsule Manifest - UARC V1.1.0
 schema_version = "1.0"
 name = "{name}"
 version = "0.1.0"
@@ -234,7 +249,8 @@ entrypoint = "bash main.sh"
 [storage]
 
 [routing]
-"#);
+"#
+    );
     fs::write(dir.join("capsule.toml"), manifest)?;
 
     // main.sh
@@ -291,7 +307,8 @@ target/
 }
 
 fn create_readme(dir: &PathBuf, name: &str) -> Result<()> {
-    let content = format!(r#"# {name}
+    let content = format!(
+        r#"# {name}
 
 A Capsule application built with UARC V1.1.0.
 
@@ -317,7 +334,8 @@ capsule open
 
 - [UARC Specification](https://uarc.dev)
 - [Capsule Documentation](https://docs.capsule.dev)
-"#);
+"#
+    );
     fs::write(dir.join("README.md"), content)?;
     println!("   ✓ Created README.md");
     Ok(())

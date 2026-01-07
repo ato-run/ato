@@ -5,12 +5,12 @@
 //! - Packaging: pack, keygen
 //! - System: doctor
 
-pub mod new;
-pub mod init;
-pub mod open;
 pub mod close;
-pub mod pack;
+pub mod doctor;
+pub mod init;
 pub mod keygen;
 pub mod logs;
+pub mod new;
+pub mod open;
+pub mod pack;
 pub mod ps;
-pub mod doctor;

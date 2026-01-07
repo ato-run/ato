@@ -67,10 +67,12 @@ pub async fn execute(args: PsArgs) -> Result<()> {
         );
     }
 
-    let running_count = status.capsules.iter()
+    let running_count = status
+        .capsules
+        .iter()
         .filter(|c| c.status.to_lowercase() == "running")
         .count();
-    
+
     println!("\n{} capsule(s) running", running_count);
 
     Ok(())

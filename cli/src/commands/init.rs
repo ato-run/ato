@@ -49,7 +49,8 @@ impl ProjectType {
 
 /// Initialize a project as a Capsule
 pub fn execute(args: InitArgs) -> Result<()> {
-    let project_dir = args.path
+    let project_dir = args
+        .path
         .unwrap_or_else(|| PathBuf::from("."))
         .canonicalize()
         .context("Failed to resolve project directory")?;
@@ -68,7 +69,7 @@ pub fn execute(args: InitArgs) -> Result<()> {
     // Detect project type
     let mut info = detect_project(&project_dir)?;
     println!("   Detected: {} project", info.project_type.as_str());
-    
+
     if !info.entrypoint.is_empty() {
         println!("   Entrypoint: {}", info.entrypoint.join(" "));
     }
@@ -80,8 +81,7 @@ pub fn execute(args: InitArgs) -> Result<()> {
 
     // Generate capsule.toml
     let manifest_content = generate_manifest(&info);
-    fs::write(&manifest_path, &manifest_content)
-        .context("Failed to write capsule.toml")?;
+    fs::write(&manifest_path, &manifest_content).context("Failed to write capsule.toml")?;
 
     println!("\n✨ Created capsule.toml!");
     println!("\nNext steps:");
@@ -105,7 +105,7 @@ fn detect_project(dir: &Path) -> Result<ProjectInfo> {
         .to_string();
 
     // Python detection
-    if dir.join("requirements.txt").exists() 
+    if dir.join("requirements.txt").exists()
         || dir.join("pyproject.toml").exists()
         || dir.join("setup.py").exists()
     {
@@ -171,26 +171,25 @@ fn detect_python_entrypoint(dir: &Path) -> Vec<String> {
             return vec!["python".to_string(), candidate.to_string()];
         }
     }
-    
+
     // Check for __main__.py in package
     if dir.join("__main__.py").exists() {
         return vec!["python".to_string(), ".".to_string()];
     }
-    
+
     // Check pyproject.toml for scripts
     if dir.join("pyproject.toml").exists() {
         // Could parse [tool.poetry.scripts] but keep simple for now
         return vec!["python".to_string(), "-m".to_string(), "app".to_string()];
     }
-    
+
     vec!["python".to_string(), "main.py".to_string()]
 }
 
 fn detect_nodejs_entrypoint(dir: &Path) -> Result<Vec<String>> {
     let package_json_path = dir.join("package.json");
-    let content = fs::read_to_string(&package_json_path)
-        .context("Failed to read package.json")?;
-    
+    let content = fs::read_to_string(&package_json_path).context("Failed to read package.json")?;
+
     // Try to parse and find main or scripts.start
     if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
         // Check scripts.start first
@@ -199,36 +198,40 @@ fn detect_nodejs_entrypoint(dir: &Path) -> Result<Vec<String>> {
                 return Ok(vec!["npm".to_string(), "start".to_string()]);
             }
         }
-        
+
         // Check main field
         if let Some(main) = pkg.get("main").and_then(|m| m.as_str()) {
             return Ok(vec!["node".to_string(), main.to_string()]);
         }
     }
-    
+
     // Fallback
     for candidate in ["index.js", "main.js", "app.js", "server.js"] {
         if dir.join(candidate).exists() {
             return Ok(vec!["node".to_string(), candidate.to_string()]);
         }
     }
-    
+
     Ok(vec!["npm".to_string(), "start".to_string()])
 }
 
 fn detect_ruby_entrypoint(dir: &Path) -> Vec<String> {
     // Check for Rails
     if dir.join("config.ru").exists() {
-        return vec!["bundle".to_string(), "exec".to_string(), "rackup".to_string()];
+        return vec![
+            "bundle".to_string(),
+            "exec".to_string(),
+            "rackup".to_string(),
+        ];
     }
-    
+
     // Check for common entry files
     for candidate in ["app.rb", "main.rb", "server.rb"] {
         if dir.join(candidate).exists() {
             return vec!["ruby".to_string(), candidate.to_string()];
         }
     }
-    
+
     vec!["ruby".to_string(), "app.rb".to_string()]
 }
 
@@ -244,31 +247,34 @@ fn detect_generic_entrypoint(dir: &Path) -> Vec<String> {
             return cmd.iter().map(|s| s.to_string()).collect();
         }
     }
-    
+
     // Check for Dockerfile - might be container-based
     if dir.join("Dockerfile").exists() {
-        return vec!["echo".to_string(), "Container project - specify entrypoint".to_string()];
+        return vec![
+            "echo".to_string(),
+            "Container project - specify entrypoint".to_string(),
+        ];
     }
-    
+
     vec![]
 }
 
 fn prompt_for_details(mut info: ProjectInfo) -> Result<ProjectInfo> {
     print!("\n? Package name: ({}) ", info.name);
     io::stdout().flush()?;
-    
+
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     let input = input.trim();
     if !input.is_empty() {
         info.name = input.to_string();
     }
-    
+
     if !info.entrypoint.is_empty() {
         let default_cmd = info.entrypoint.join(" ");
         print!("? Entry command: ({}) ", default_cmd);
         io::stdout().flush()?;
-        
+
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
         let input = input.trim();
@@ -278,7 +284,7 @@ fn prompt_for_details(mut info: ProjectInfo) -> Result<ProjectInfo> {
     } else {
         print!("? Entry command: ");
         io::stdout().flush()?;
-        
+
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
         let input = input.trim();
@@ -286,7 +292,7 @@ fn prompt_for_details(mut info: ProjectInfo) -> Result<ProjectInfo> {
             info.entrypoint = input.split_whitespace().map(|s| s.to_string()).collect();
         }
     }
-    
+
     Ok(info)
 }
 
@@ -296,8 +302,9 @@ fn generate_manifest(info: &ProjectInfo) -> String {
     } else {
         info.entrypoint.join(" ")
     };
-    
-    format!(r#"# Capsule Manifest - UARC V1.1.0
+
+    format!(
+        r#"# Capsule Manifest - UARC V1.1.0
 # Generated by: capsule init
 
 schema_version = "1.0"
@@ -317,8 +324,8 @@ entrypoint = "{entrypoint}"
 [storage]
 
 [routing]
-"#, 
-        name = info.name, 
+"#,
+        name = info.name,
         project_type = info.project_type.as_str(),
         entrypoint = entrypoint
     )
@@ -326,26 +333,25 @@ entrypoint = "{entrypoint}"
 
 fn add_to_gitignore(dir: &Path) -> Result<()> {
     let gitignore_path = dir.join(".gitignore");
-    
+
     let existing = if gitignore_path.exists() {
         fs::read_to_string(&gitignore_path).unwrap_or_default()
     } else {
         String::new()
     };
-    
+
     // Check if already present
     if existing.contains(".capsule/") || existing.contains("*.capsule") {
         return Ok(());
     }
-    
+
     // Append to .gitignore
     let addition = "\n# Capsule\n.capsule/\n*.capsule\n*.sig\n";
     let new_content = format!("{}{}", existing.trim_end(), addition);
-    
-    fs::write(&gitignore_path, new_content)
-        .context("Failed to update .gitignore")?;
-    
+
+    fs::write(&gitignore_path, new_content).context("Failed to update .gitignore")?;
+
     println!("   ✓ Updated .gitignore");
-    
+
     Ok(())
 }

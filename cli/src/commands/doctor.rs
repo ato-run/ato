@@ -20,27 +20,25 @@ pub async fn execute(args: DoctorArgs) -> Result<()> {
     println!("🔌 Engine Connection:");
     let engine_url = resolve_engine_url(None);
     match CapsuleEngineClient::try_connect(&engine_url).await {
-        Ok(mut client) => {
-            match client.get_system_status().await {
-                Ok(status) => {
-                    println!("   ✅ Connected to {}", engine_url);
-                    println!("      Backend: {}", status.backend_mode);
-                    if !status.vpn_ip.is_empty() {
-                        println!("      VPN IP: {}", status.vpn_ip);
-                    }
-                    println!("      Running capsules: {}", status.capsules.len());
-                    if args.verbose {
-                        for capsule in &status.capsules {
-                            println!("        - {} ({})", capsule.name, capsule.status);
-                        }
-                    }
+        Ok(mut client) => match client.get_system_status().await {
+            Ok(status) => {
+                println!("   ✅ Connected to {}", engine_url);
+                println!("      Backend: {}", status.backend_mode);
+                if !status.vpn_ip.is_empty() {
+                    println!("      VPN IP: {}", status.vpn_ip);
                 }
-                Err(e) => {
-                    println!("   ⚠️  Connected but status check failed: {}", e);
-                    all_ok = false;
+                println!("      Running capsules: {}", status.capsules.len());
+                if args.verbose {
+                    for capsule in &status.capsules {
+                        println!("        - {} ({})", capsule.name, capsule.status);
+                    }
                 }
             }
-        }
+            Err(e) => {
+                println!("   ⚠️  Connected but status check failed: {}", e);
+                all_ok = false;
+            }
+        },
         Err(_) => {
             println!("   ❌ Engine not reachable at {}", engine_url);
             println!("      Start with: capsuled");
@@ -99,7 +97,11 @@ pub async fn execute(args: DoctorArgs) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         // Check for NVIDIA CUDA
-        check_command("nvidia-smi", &["--query-gpu=name", "--format=csv,noheader"], args.verbose);
+        check_command(
+            "nvidia-smi",
+            &["--query-gpu=name", "--format=csv,noheader"],
+            args.verbose,
+        );
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
@@ -124,7 +126,10 @@ fn check_command(cmd: &str, args: &[&str], verbose: bool) {
             let version = version.trim();
             println!("   ✅ {}", version);
             if verbose {
-                println!("      Path: {}", which(cmd).unwrap_or_else(|| "unknown".to_string()));
+                println!(
+                    "      Path: {}",
+                    which(cmd).unwrap_or_else(|| "unknown".to_string())
+                );
             }
         }
         Ok(_) => {
