@@ -19,7 +19,6 @@ use flate2::Compression;
 use ignore::WalkBuilder;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use tar::Builder;
 
@@ -32,6 +31,7 @@ pub struct PackArgs {
 }
 
 /// Pack result for programmatic use
+#[allow(dead_code)]
 pub struct PackResult {
     pub manifest: CapsuleManifestV1,
     pub source_dir: PathBuf,
@@ -206,6 +206,7 @@ fn sign_capsule(manifest: &CapsuleManifestV1, key_path: &Path, capsule_path: &Pa
 }
 
 /// Pack and sign in one step (for programmatic use)
+#[allow(dead_code)]
 pub fn pack_and_sign(manifest_path: &Path, key_path: &Path) -> Result<(PackResult, Vec<u8>)> {
     let result = pack_in_memory(manifest_path)?;
     

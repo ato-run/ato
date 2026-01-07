@@ -20,6 +20,7 @@ use tonic::Streaming;
 pub const DEFAULT_ENGINE_URL: &str = "http://127.0.0.1:50051";
 
 /// Engine client wrapper with high-level operations
+#[allow(dead_code)]
 pub struct CapsuleEngineClient {
     client: EngineClient<Channel>,
     endpoint: String,
@@ -95,6 +96,7 @@ impl CapsuleEngineClient {
     }
 
     /// Get the endpoint this client is connected to
+    #[allow(dead_code)]
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
@@ -229,6 +231,7 @@ impl CapsuleEngineClient {
     }
 
     /// Check if the engine is reachable
+    #[allow(dead_code)]
     pub async fn health_check(&mut self) -> Result<bool> {
         match self.get_system_status().await {
             Ok(_) => Ok(true),
