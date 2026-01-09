@@ -324,33 +324,42 @@ impl Engine for EngineService {
         };
 
         let capsule_id = req.capsule_id.clone();
-        let capsule_manager = self.capsule_manager.clone();
-        tokio::spawn(async move {
-            // Construct DeployCapsuleRequest with parsed manifest directly
-            let request = DeployCapsuleRequest {
-                capsule_id: capsule_id.clone(),
-                manifest,
-                raw_manifest_bytes,
-                oci_image,
-                digest,
-                extra_args: direct_command,
-                signature, // Pass signature from gRPC request for L2 verification
-                source_working_dir,
-            };
 
-            match capsule_manager.deploy_capsule(request).await {
-                Ok(status) => info!("Capsule {} deploy completed: {}", capsule_id, status),
-                Err(e) => error!("Capsule {} deploy failed: {}", capsule_id, e),
+        // Construct DeployCapsuleRequest with parsed manifest directly
+        let request = DeployCapsuleRequest {
+            capsule_id: capsule_id.clone(),
+            manifest,
+            raw_manifest_bytes,
+            oci_image,
+            digest,
+            extra_args: direct_command,
+            signature, // Pass signature from gRPC request for L2 verification
+            source_working_dir,
+        };
+
+        // Run deploy synchronously to get actual URL
+        match self.capsule_manager.deploy_capsule(request).await {
+            Ok(status) => {
+                info!("Capsule {} deploy completed: {}", capsule_id, status);
+                Ok(Response::new(DeployResponse {
+                    capsule_id: req.capsule_id,
+                    status: "running".to_string(),
+                    local_url: status, // status contains the access URL
+                    failure_codes: vec![],
+                    failure_message: String::new(),
+                }))
             }
-        });
-
-        Ok(Response::new(DeployResponse {
-            capsule_id: req.capsule_id,
-            status: "starting".to_string(),
-            local_url: String::new(),
-            failure_codes: vec![],
-            failure_message: String::new(),
-        }))
+            Err(e) => {
+                error!("Capsule {} deploy failed: {}", capsule_id, e);
+                Ok(Response::new(DeployResponse {
+                    capsule_id: req.capsule_id,
+                    status: "failed".to_string(),
+                    local_url: String::new(),
+                    failure_codes: vec!["DEPLOY_FAILED".to_string()],
+                    failure_message: e.to_string(),
+                }))
+            }
+        }
     }
 
     async fn fetch_model(
