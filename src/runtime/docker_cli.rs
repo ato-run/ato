@@ -208,13 +208,21 @@ impl Runtime for DockerCliRuntime {
         // If container_port is still default (80), try to detect from Docker image's EXPOSED ports
         if container_port == 80 && !image.is_empty() {
             if let Ok(output) = std::process::Command::new("docker")
-                .args(["image", "inspect", "--format", "{{json .Config.ExposedPorts}}", &image])
+                .args([
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{json .Config.ExposedPorts}}",
+                    &image,
+                ])
                 .output()
             {
                 if output.status.success() {
                     let exposed_json = String::from_utf8_lossy(&output.stdout);
                     // Parse JSON like {"8080/tcp":{}}
-                    if let Ok(exposed) = serde_json::from_str::<serde_json::Value>(exposed_json.trim()) {
+                    if let Ok(exposed) =
+                        serde_json::from_str::<serde_json::Value>(exposed_json.trim())
+                    {
                         if let Some(obj) = exposed.as_object() {
                             for key in obj.keys() {
                                 // key format: "8080/tcp"

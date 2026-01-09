@@ -32,4 +32,3 @@
 pub mod manager;
 // pub mod pool; // Disabled: requires capsule_runtime dependency
 pub mod supervisor;
-
