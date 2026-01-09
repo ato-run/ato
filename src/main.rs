@@ -227,11 +227,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize ContainerRuntime (external OCI runtime) config.
     // UARC V1.1.0: Source runtime for direct execution (no OCI)
+    // "docker" mode uses DockerCliRuntime (via CapsuleManager) which doesn't need youki/runc.
     let container_runtime_config = match backend_mode.as_str() {
-        "native" | "direct" | "source" => {
+        "native" | "direct" | "source" | "docker" => {
             info!(
                 backend_mode = %backend_mode,
-                "Using Source Runtime; skipping external OCI runtime binary detection"
+                "Using Source/Docker Runtime; skipping external OCI runtime binary detection"
             );
             RuntimeConfig {
                 kind: RuntimeKind::Source,
