@@ -1,5 +1,5 @@
 schema_version = "1.0"
-name = "test-s2"
+name = "test-sec1"
 version = "0.1.0"
 type = "app"
 
@@ -13,3 +13,4 @@ preference = ["source"]
 [targets.source]
 language = "python"
 entrypoint = "main.py"
+dev_mode = true

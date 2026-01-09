@@ -1056,6 +1056,73 @@ impl CapsuleManager {
         }
 
         // =====================================================================
+        // macOS Docker CLI Runtime (uses `docker run` directly, no OCI spec)
+        // =====================================================================
+        #[cfg(target_os = "macos")]
+        #[allow(deprecated)]
+        if matches!(
+            manifest.execution.runtime,
+            RuntimeType::Docker | RuntimeType::Oci | RuntimeType::Youki
+        ) {
+            info!("Using DockerCliRuntime for capsule {} on macOS", capsule_id);
+
+            // Create a minimal OCI spec just for DockerCliRuntime to extract info
+            let dummy_spec = oci_spec::runtime::Spec::default();
+
+            let launch_request = LaunchRequest {
+                workload_id: &capsule_id,
+                spec: &dummy_spec,
+                manifest_json: Some(manifest_json_for_runtime.as_str()),
+                bundle_root: std::env::temp_dir().join("capsuled"),
+                env: None,
+                args: None,
+                wasm_component_path: None,
+                source_target: None,
+            };
+
+            // Launch using DockerCliRuntime
+            let result = self.docker_runtime.launch(launch_request).await?;
+
+            // Register capsule
+            let capsule = Capsule {
+                id: capsule_id.clone(),
+                manifest_bytes: manifest_json_for_runtime.clone().into_bytes(),
+                oci_image: oci_image.clone(),
+                digest: digest.clone(),
+                status: CapsuleStatus::Running,
+                storage_path: None,
+                bundle_path: result.bundle_path.map(|p| p.to_string_lossy().to_string()),
+                pid: result.pid,
+                reserved_vram_bytes: 0,
+                observed_vram_bytes: None,
+                last_failure: None,
+                last_exit_code: None,
+                log_path: result.log_path.map(|p| p.to_string_lossy().to_string()),
+                started_at: Some(std::time::SystemTime::now()),
+                remote_url: None,
+                user_id: None,
+                gpu_indices: assigned_gpu_index.map(|i| vec![i as usize]).unwrap_or_default(),
+            };
+
+            self.capsules
+                .write()
+                .unwrap()
+                .insert(capsule_id.clone(), capsule);
+
+            let url = if let Some(port) = host_port {
+                format!("http://127.0.0.1:{}", port)
+            } else {
+                format!("docker://{}", capsule_id)
+            };
+
+            info!(
+                "DockerCliRuntime capsule {} started, URL: {}",
+                capsule_id, url
+            );
+            return Ok(url);
+        }
+
+        // =====================================================================
         // OCI-based Runtimes (Docker, Youki, Native, Wasm)
         // =====================================================================
 

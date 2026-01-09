@@ -1,3 +1,36 @@
+//! Runtime implementations for executing Capsules.
+//!
+//! This module provides multiple runtime backends for executing Capsule workloads:
+//! - **WasmRuntime**: WebAssembly execution via Wasmtime Component Model
+//! - **SourceRuntime**: Interpreted languages (Python, Node.js, Ruby) with native sandbox
+//! - **ContainerRuntime**: OCI container execution (runc, youki)
+//! - **DockerCliRuntime**: Docker CLI wrapper (development)
+//! - **DevRuntime**: In-process development runtime with hot-reload
+//!
+//! ## Runtime Selection
+//!
+//! The [`resolve_runtime`] function selects the appropriate runtime based on the
+//! workload target. For best performance and compatibility:
+//! - Wasm components → WasmRuntime
+//! - Python/Node/Ruby → SourceRuntime (dev mode) or ContainerRuntime (production)
+//! - OCI images → ContainerRuntime or DockerCliRuntime
+//!
+//! ## Security Model
+//!
+//! All runtimes implement the [`Runtime`] trait with strict isolation:
+//! - **Wasm**: Component Model sandbox, memory/table limits, WASI preview2
+//! - **Source**: Platform-specific sandbox (bubblewrap/sandbox-exec/Windows Sandbox)
+//! - **Container**: OCI runtime isolation (cgroups, namespaces)
+//!
+//! ## UARC V1.1.0 Compliance
+//!
+//! Runtimes must support the UARC execution interface:
+//! - [`Runtime::launch`]: Start a workload with manifest and bundle
+//! - [`Runtime::stop`]: Graceful termination with signal/timeout
+//! - [`Runtime::get_log_path`]: Access structured logs
+//!
+//! Native runtime (local binary execution) is NOT supported in UARC V1.1.0.
+
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
@@ -32,9 +65,13 @@ const DEFAULT_HOOK_RETRY_ATTEMPTS: u32 = 1;
 /// Use `Source` runtime for interpreted languages instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeKind {
+    /// Youki OCI runtime (preferred for production)
     Youki,
+    /// Runc OCI runtime (standard, widely available)
     Runc,
+    /// WebAssembly runtime (Wasmtime Component Model)
     Wasm,
+    /// Source code interpreter runtime (Python, Node.js, Ruby, etc.)
     Source,
 }
 
