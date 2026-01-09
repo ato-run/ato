@@ -1101,7 +1101,9 @@ impl CapsuleManager {
                 started_at: Some(std::time::SystemTime::now()),
                 remote_url: None,
                 user_id: None,
-                gpu_indices: assigned_gpu_index.map(|i| vec![i as usize]).unwrap_or_default(),
+                gpu_indices: assigned_gpu_index
+                    .map(|i| vec![i as usize])
+                    .unwrap_or_default(),
             };
 
             self.capsules
