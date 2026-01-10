@@ -1,11 +1,15 @@
 //! Toolchain detection and version management
 //!
 //! Detects installed language runtimes and validates version compatibility.
+//!
+//! v2.0: JIT Provisioning - Downloads and caches runtimes on-demand
 
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use tracing::{debug, warn};
+use anyhow::{Context, Result};
+use tracing::{debug, info, warn};
 
 /// Information about an installed toolchain
 #[derive(Debug, Clone)]
@@ -268,6 +272,193 @@ impl ToolchainManager {
 impl Default for ToolchainManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v2.0: JIT Provisioning - Runtime Fetcher
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// JIT Fetcher for downloading and caching runtimes on-demand
+pub struct RuntimeFetcher {
+    cache_dir: PathBuf,
+}
+
+impl RuntimeFetcher {
+    /// Create a new RuntimeFetcher with the default cache directory
+    pub fn new() -> Result<Self> {
+        let cache_dir = dirs::home_dir()
+            .context("Failed to determine home directory")?
+            .join(".capsuled")
+            .join("toolchain");
+
+        fs::create_dir_all(&cache_dir).context("Failed to create toolchain cache directory")?;
+
+        Ok(Self { cache_dir })
+    }
+
+    /// Get cache directory path
+    pub fn cache_dir(&self) -> &PathBuf {
+        &self.cache_dir
+    }
+
+    /// Check if a runtime is already cached
+    pub fn is_cached(&self, language: &str, version: &str) -> bool {
+        let runtime_dir = self.cache_dir.join(format!("{}-{}", language, version));
+        runtime_dir.exists()
+    }
+
+    /// Get the path to a cached runtime
+    pub fn get_runtime_path(&self, language: &str, version: &str) -> PathBuf {
+        self.cache_dir.join(format!("{}-{}", language, version))
+    }
+
+    /// Download and extract a Python runtime from indygreg/python-build-standalone
+    ///
+    /// # Arguments
+    /// * `version` - Python version (e.g., "3.11", "3.12.1")
+    ///
+    /// # Returns
+    /// Path to the extracted runtime directory
+    pub async fn download_python_runtime(&self, version: &str) -> Result<PathBuf> {
+        let runtime_dir = self.get_runtime_path("python", version);
+
+        // Check if already cached
+        if runtime_dir.exists() {
+            info!("Python {} already cached at {:?}", version, runtime_dir);
+            return Ok(runtime_dir);
+        }
+
+        info!("Downloading Python {} runtime...", version);
+
+        // Determine the platform-specific URL
+        let (os, arch) = Self::detect_platform()?;
+        let download_url = Self::get_python_download_url(version, &os, &arch)?;
+
+        // Download the archive
+        info!("Fetching from: {}", download_url);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()?;
+
+        let response = client
+            .get(&download_url)
+            .send()
+            .await
+            .context("Failed to download Python runtime")?;
+
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "Failed to download Python runtime: HTTP {}",
+                response.status()
+            );
+        }
+
+        let total_size = response.content_length().unwrap_or(0);
+        info!("Download size: {} MB", total_size / 1_048_576);
+
+        let bytes = response
+            .bytes()
+            .await
+            .context("Failed to read response body")?;
+
+        // Create temporary extraction directory
+        let temp_dir = self.cache_dir.join(format!("tmp-python-{}", version));
+        fs::create_dir_all(&temp_dir)?;
+
+        // Extract the archive
+        info!("Extracting Python {} runtime...", version);
+        Self::extract_archive(&bytes, &temp_dir)?;
+
+        // Move to final location
+        fs::rename(&temp_dir, &runtime_dir).context("Failed to move extracted runtime to cache")?;
+
+        info!("Python {} installed at {:?}", version, runtime_dir);
+        Ok(runtime_dir)
+    }
+
+    /// Detect the current platform (OS and architecture)
+    fn detect_platform() -> Result<(String, String)> {
+        let os = if cfg!(target_os = "linux") {
+            "linux"
+        } else if cfg!(target_os = "macos") {
+            "macos"
+        } else if cfg!(target_os = "windows") {
+            "windows"
+        } else {
+            anyhow::bail!("Unsupported OS");
+        };
+
+        let arch = if cfg!(target_arch = "x86_64") {
+            "x86_64"
+        } else if cfg!(target_arch = "aarch64") {
+            "aarch64"
+        } else {
+            anyhow::bail!("Unsupported architecture");
+        };
+
+        Ok((os.to_string(), arch.to_string()))
+    }
+
+    /// Construct the download URL for indygreg/python-build-standalone
+    fn get_python_download_url(version: &str, os: &str, arch: &str) -> Result<String> {
+        // Map short versions to full versions
+        let full_version = match version {
+            "3.11" => "3.11.10",
+            "3.12" => "3.12.8",
+            "3.13" => "3.13.1",
+            _ => version, // Assume full version is provided
+        };
+
+        // Construct filename based on platform
+        // Format: cpython-{version}+{date}-{triple}-install_only.tar.gz
+        // Using 20241002 release tag
+        let build_date = "20241002";
+
+        let (triple, variant) = match (os, arch) {
+            ("linux", "x86_64") => ("x86_64-unknown-linux-gnu", "install_only"),
+            ("linux", "aarch64") => ("aarch64-unknown-linux-gnu", "install_only"),
+            ("macos", "x86_64") => ("x86_64-apple-darwin", "install_only"),
+            ("macos", "aarch64") => ("aarch64-apple-darwin", "install_only"),
+            ("windows", "x86_64") => ("x86_64-pc-windows-msvc", "shared-install_only"),
+            _ => anyhow::bail!("Unsupported platform: {} {}", os, arch),
+        };
+
+        let filename = format!(
+            "cpython-{}+{}-{}-{}.tar.gz",
+            full_version, build_date, triple, variant
+        );
+
+        // GitHub releases URL pattern
+        let base_url = "https://github.com/indygreg/python-build-standalone/releases/download";
+        let release_tag = build_date;
+
+        Ok(format!("{}/{}/{}", base_url, release_tag, filename))
+    }
+
+    /// Extract a tar.gz archive to the specified directory
+    fn extract_archive(data: &[u8], dest: &PathBuf) -> Result<()> {
+        use flate2::read::GzDecoder;
+        use tar::Archive;
+
+        let decoder = GzDecoder::new(data);
+        let mut archive = Archive::new(decoder);
+
+        archive.unpack(dest).context("Failed to extract archive")?;
+
+        Ok(())
+    }
+
+    /// Download a Node.js runtime (placeholder for future implementation)
+    pub async fn download_node_runtime(&self, _version: &str) -> Result<PathBuf> {
+        // TODO: Implement Node.js download
+        anyhow::bail!("Node.js JIT provisioning not yet implemented")
+    }
+}
+
+impl Default for RuntimeFetcher {
+    fn default() -> Self {
+        Self::new().expect("Failed to initialize RuntimeFetcher")
     }
 }
 

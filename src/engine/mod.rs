@@ -3,6 +3,7 @@
 //! This module contains the core logic for managing and executing capsules:
 //! - [`CapsuleManager`]: Lifecycle management for capsule instances (deploy, stop, query)
 //! - [`ProcessSupervisor`]: Child process monitoring and cleanup
+//! - [`SocketManager`]: Socket Activation for zero-downtime port binding
 //!
 //! ## Architecture
 //!
@@ -28,7 +29,16 @@
 //! - Multi-runtime support (Wasm, Source, OCI)
 //! - SPIFFE ID-based workload identity
 //! - Resource quotas and isolation enforcement
+//!
+//! ## Socket Activation (Phase 2)
+//!
+//! Socket Activation allows the parent process to bind listening sockets before
+//! spawning child processes. This provides:
+//! - Zero port clash risk (parent owns the port)
+//! - Instant request acceptance (no startup delay)
+//! - Systemd-compatible FD passing (LISTEN_FDS environment variable)
 
 pub mod manager;
 // pub mod pool; // Disabled: requires capsule_runtime dependency
+pub mod socket;
 pub mod supervisor;
