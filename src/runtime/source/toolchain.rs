@@ -3,12 +3,28 @@
 //! Detects installed language runtimes and validates version compatibility.
 //!
 //! v2.0: JIT Provisioning - Downloads and caches runtimes on-demand
+//!
+//! # Example
+//! ```no_run
+//! use capsuled::runtime::source::toolchain::RuntimeFetcher;
+//!
+//! #[tokio::main]
+//! async fn main() -> anyhow::Result<()> {
+//!     let fetcher = RuntimeFetcher::new()?;
+//!     let python_path = fetcher.ensure_python("3.11").await?;
+//!     println!("Python installed at: {:?}", python_path);
+//!     Ok(())
+//! }
+//! ```
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use futures::StreamExt;
+use indicatif::{ProgressBar, ProgressStyle};
 use tracing::{debug, info, warn};
 
 /// Information about an installed toolchain
@@ -321,60 +337,184 @@ impl RuntimeFetcher {
     /// # Returns
     /// Path to the extracted runtime directory
     pub async fn download_python_runtime(&self, version: &str) -> Result<PathBuf> {
+        self.download_python_runtime_with_progress(version, true).await
+    }
+
+    /// Ensure Python runtime is available, downloading if necessary
+    ///
+    /// This is the main JIT provisioning entry point.
+    /// Returns the path to the python binary (e.g., ~/.capsuled/toolchain/python-3.11/python/bin/python3)
+    ///
+    /// # Arguments
+    /// * `version` - Python version constraint (e.g., "3.11", "3.12")
+    ///
+    /// # Returns
+    /// PathBuf to the python binary
+    pub async fn ensure_python(&self, version: &str) -> Result<PathBuf> {
+        let runtime_dir = self.download_python_runtime_with_progress(version, true).await?;
+        
+        // Find the python binary in the extracted runtime
+        let python_bin = Self::find_python_binary(&runtime_dir)?;
+        
+        info!("Python {} ready at {:?}", version, python_bin);
+        Ok(python_bin)
+    }
+
+    /// Download Python runtime with optional progress bar
+    async fn download_python_runtime_with_progress(
+        &self,
+        version: &str,
+        show_progress: bool,
+    ) -> Result<PathBuf> {
         let runtime_dir = self.get_runtime_path("python", version);
 
         // Check if already cached
         if runtime_dir.exists() {
-            info!("Python {} already cached at {:?}", version, runtime_dir);
+            info!("✓ Python {} already cached", version);
             return Ok(runtime_dir);
         }
 
-        info!("Downloading Python {} runtime...", version);
+        println!("⬇️  Downloading Python {} runtime...", version);
 
         // Determine the platform-specific URL
         let (os, arch) = Self::detect_platform()?;
         let download_url = Self::get_python_download_url(version, &os, &arch)?;
 
-        // Download the archive
-        info!("Fetching from: {}", download_url);
+        debug!("Fetching from: {}", download_url);
+
+        // Download with progress bar
+        let archive_path = self.cache_dir.join(format!("python-{}.tar.gz", version));
+        self.download_with_progress(&download_url, &archive_path, show_progress).await?;
+
+        // Create temporary extraction directory
+        let temp_dir = self.cache_dir.join(format!("tmp-python-{}", version));
+        if temp_dir.exists() {
+            fs::remove_dir_all(&temp_dir)?;
+        }
+        fs::create_dir_all(&temp_dir)?;
+
+        // Extract the archive
+        println!("📦 Extracting Python {} runtime...", version);
+        Self::extract_archive_from_file(&archive_path, &temp_dir)?;
+
+        // Move to final location
+        if runtime_dir.exists() {
+            fs::remove_dir_all(&runtime_dir)?;
+        }
+        fs::rename(&temp_dir, &runtime_dir).context("Failed to move extracted runtime to cache")?;
+
+        // Clean up archive
+        let _ = fs::remove_file(&archive_path);
+
+        println!("✓ Python {} installed at {:?}", version, runtime_dir);
+        Ok(runtime_dir)
+    }
+
+    /// Download a file with progress bar display
+    async fn download_with_progress(
+        &self,
+        url: &str,
+        dest: &PathBuf,
+        show_progress: bool,
+    ) -> Result<()> {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
+            .timeout(std::time::Duration::from_secs(600))
             .build()?;
 
         let response = client
-            .get(&download_url)
+            .get(url)
             .send()
             .await
-            .context("Failed to download Python runtime")?;
+            .context("Failed to connect to download server")?;
 
         if !response.status().is_success() {
             anyhow::bail!(
-                "Failed to download Python runtime: HTTP {}",
-                response.status()
+                "Download failed: HTTP {} - {}",
+                response.status(),
+                url
             );
         }
 
         let total_size = response.content_length().unwrap_or(0);
-        info!("Download size: {} MB", total_size / 1_048_576);
 
-        let bytes = response
-            .bytes()
-            .await
-            .context("Failed to read response body")?;
+        // Create progress bar
+        let pb = if show_progress && total_size > 0 {
+            let pb = ProgressBar::new(total_size);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+                    .expect("Invalid progress bar template")
+                    .progress_chars("#>-"),
+            );
+            Some(pb)
+        } else {
+            None
+        };
 
-        // Create temporary extraction directory
-        let temp_dir = self.cache_dir.join(format!("tmp-python-{}", version));
-        fs::create_dir_all(&temp_dir)?;
+        // Create parent directory if needed
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
 
-        // Extract the archive
-        info!("Extracting Python {} runtime...", version);
-        Self::extract_archive(&bytes, &temp_dir)?;
+        // Stream download to file
+        let mut file = File::create(dest).context("Failed to create download file")?;
+        let mut stream = response.bytes_stream();
+        let mut downloaded: u64 = 0;
 
-        // Move to final location
-        fs::rename(&temp_dir, &runtime_dir).context("Failed to move extracted runtime to cache")?;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("Error reading download stream")?;
+            file.write_all(&chunk).context("Failed to write to file")?;
+            downloaded += chunk.len() as u64;
 
-        info!("Python {} installed at {:?}", version, runtime_dir);
-        Ok(runtime_dir)
+            if let Some(ref pb) = pb {
+                pb.set_position(downloaded);
+            }
+        }
+
+        if let Some(pb) = pb {
+            pb.finish_with_message("Download complete");
+        }
+
+        Ok(())
+    }
+
+    /// Find the Python binary in the extracted runtime directory
+    fn find_python_binary(runtime_dir: &PathBuf) -> Result<PathBuf> {
+        // Standard locations for indygreg/python-build-standalone
+        let candidates = [
+            runtime_dir.join("python/bin/python3"),
+            runtime_dir.join("python/bin/python"),
+            runtime_dir.join("bin/python3"),
+            runtime_dir.join("bin/python"),
+            runtime_dir.join("python/python.exe"),
+            runtime_dir.join("python.exe"),
+        ];
+
+        for candidate in &candidates {
+            if candidate.exists() {
+                return Ok(candidate.clone());
+            }
+        }
+
+        anyhow::bail!(
+            "Python binary not found in runtime directory: {:?}",
+            runtime_dir
+        )
+    }
+
+    /// Extract a tar.gz archive from file to directory
+    fn extract_archive_from_file(archive_path: &PathBuf, dest: &PathBuf) -> Result<()> {
+        use flate2::read::GzDecoder;
+        use tar::Archive;
+
+        let file = File::open(archive_path)
+            .with_context(|| format!("Failed to open archive: {:?}", archive_path))?;
+        let decoder = GzDecoder::new(file);
+        let mut archive = Archive::new(decoder);
+
+        archive.unpack(dest).context("Failed to extract archive")?;
+
+        Ok(())
     }
 
     /// Detect the current platform (OS and architecture)
@@ -434,19 +574,6 @@ impl RuntimeFetcher {
         let release_tag = build_date;
 
         Ok(format!("{}/{}/{}", base_url, release_tag, filename))
-    }
-
-    /// Extract a tar.gz archive to the specified directory
-    fn extract_archive(data: &[u8], dest: &PathBuf) -> Result<()> {
-        use flate2::read::GzDecoder;
-        use tar::Archive;
-
-        let decoder = GzDecoder::new(data);
-        let mut archive = Archive::new(decoder);
-
-        archive.unpack(dest).context("Failed to extract archive")?;
-
-        Ok(())
     }
 
     /// Download a Node.js runtime (placeholder for future implementation)

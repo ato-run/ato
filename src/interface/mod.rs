@@ -1,44 +1,18 @@
-//! External interfaces for the Capsuled Engine
+//! External interfaces for the Capsuled Engine (v2.0 - Simplified)
 //!
-//! This module contains all server implementations and external API surfaces:
-//! - [`grpc`]: gRPC server implementing the UARC Engine service
-//! - [`dev_server`]: Embedded mode for use in `capsule-cli` with hot-reload support
+//! This module contains HTTP interfaces for the Capsuled runtime:
+//! - [`dev_server`]: Development server with hot-reload support
 //! - [`http`]: HTTP health checks and metrics endpoints
 //! - [`api`]: REST API server (Axum-based)
 //! - [`discovery`]: mDNS announcer for .local domain discovery
 //!
 //! ## Usage Patterns
 //!
-//! ### Standalone Server
-//! Run capsuled as a standalone gRPC service:
-//! ```bash
-//! capsuled server --grpc-port 50051
-//! ```
-//!
-//! ### Embedded Mode (capsule-cli)
-//! Use [`dev_server::DevServerHandle`] to run an in-process engine:
-//! ```ignore
-//! use capsuled::dev_server::{DevServerConfig, DevServerHandle};
-//!
-//! let config = DevServerConfig::default().with_dev_mode(true);
-//! let handle = DevServerHandle::start(config).await?;
-//! println!("Engine at {}", handle.grpc_endpoint());
-//! ```
-//!
-//! ## gRPC API
-//!
-//! The gRPC service implements the UARC Engine specification with methods:
-//! - `DeployCapsule`: Start a new capsule instance
-//! - `StopCapsule`: Terminate a capsule
-//! - `GetResources`: Query available hardware resources
-//! - `ValidateManifest`: Check manifest validity
-//! - `GetSystemStatus`: Query engine health and loaded capsules
-//! - `StreamLogs`: Stream capsule logs in real-time
-//! - `FetchModel`: Download and cache models
-//! - And more...
+//! In v2.0, capsuled operates as a CLI-driven runtime without a central daemon.
+//! Each capsule runs with its own embedded supervisor and can optionally expose
+//! HTTP endpoints for monitoring and control.
 
-pub mod api;
-pub mod dev_server;
+// pub mod api; // Disabled in v2.0: daemon architecture removed
+// pub mod dev_server; // Disabled in v2.0: daemon architecture removed
 pub mod discovery;
-pub mod grpc;
 pub mod http;

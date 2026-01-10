@@ -6,16 +6,14 @@
 //! 3. Result: Single executable with no external dependencies
 
 use anyhow::{Context, Result};
-use capsuled::runtime::source::toolchain::RuntimeFetcher;
-use flate2::write::GzEncoder;
-use flate2::Compression;
+use nacelle::runtime::source::toolchain::RuntimeFetcher;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tar::Builder;
 
 /// Magic bytes to identify self-extracting bundle
-const BUNDLE_MAGIC: &[u8] = b"CAPSULED_V2_BUNDLE";
+const BUNDLE_MAGIC: &[u8] = b"NACELLE_V2_BUNDLE";
 
 /// Arguments for the v2.0 pack command
 pub struct PackV2Args {
@@ -36,7 +34,7 @@ pub async fn execute(args: PackV2Args) -> Result<()> {
 
     let output_path = args
         .output
-        .unwrap_or_else(|| source_dir.join("capsuled-bundle"));
+        .unwrap_or_else(|| source_dir.join("nacelle-bundle"));
 
     // 2. Find or download runtime
     let runtime_dir = if let Some(runtime) = args.runtime_path {
@@ -45,7 +43,7 @@ pub async fn execute(args: PackV2Args) -> Result<()> {
         // Try to find cached runtime, or download if not available
         let cache_dir = dirs::home_dir()
             .context("Failed to get home directory")?
-            .join(".capsuled")
+            .join(".nacelle")
             .join("toolchain");
 
         // For now, use the first available Python runtime
@@ -90,12 +88,15 @@ pub async fn execute(args: PackV2Args) -> Result<()> {
         (compressed.len() as f64 / archive_data.len() as f64) * 100.0
     );
 
-    // 5. Copy capsuled binary and append bundle
+    // 5. Find nacelle runtime binary (not the CLI)
     println!("✓ Creating self-extracting executable...");
-    let capsuled_bin = std::env::current_exe().context("Failed to get current executable path")?;
+    
+    // Look for nacelle binary in standard locations
+    let nacelle_bin = find_nacelle_binary()?;
+    println!("✓ Using nacelle binary: {:?} ({} KB)", nacelle_bin, fs::metadata(&nacelle_bin)?.len() / 1024);
 
     // Copy base binary
-    fs::copy(&capsuled_bin, &output_path).context("Failed to copy capsuled binary")?;
+    fs::copy(&nacelle_bin, &output_path).context("Failed to copy nacelle binary")?;
 
     // Make executable
     #[cfg(unix)]
@@ -142,6 +143,56 @@ fn create_bundle_archive(runtime_dir: &Path, source_dir: &Path) -> Result<Vec<u8
 /// Compress data using Zstd
 fn compress_with_zstd(data: &[u8], level: i32) -> Result<Vec<u8>> {
     zstd::encode_all(data, level).context("Failed to compress with Zstd")
+}
+
+/// Find the nacelle runtime binary
+fn find_nacelle_binary() -> Result<PathBuf> {
+    // Priority order:
+    // 1. NACELLE_BINARY environment variable
+    // 2. Release build in workspace (../target/release/nacelle)
+    // 3. Debug build in workspace (../target/debug/nacelle)
+    // 4. System PATH
+    
+    // Check environment variable
+    if let Ok(path) = std::env::var("NACELLE_BINARY") {
+        let p = PathBuf::from(path);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    
+    // Try to find in workspace target directory
+    let current_exe = std::env::current_exe()?;
+    if let Some(target_dir) = current_exe.parent().and_then(|p| p.parent()) {
+        // Check release first (preferred for smaller size)
+        let release_bin = target_dir.join("release").join("nacelle");
+        if release_bin.exists() {
+            return Ok(release_bin);
+        }
+        
+        // Fall back to debug
+        let debug_bin = target_dir.join("debug").join("nacelle");
+        if debug_bin.exists() {
+            return Ok(debug_bin);
+        }
+    }
+    
+    // Try which command
+    if let Ok(output) = std::process::Command::new("which").arg("nacelle").output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Ok(PathBuf::from(path));
+            }
+        }
+    }
+    
+    anyhow::bail!(
+        "Could not find nacelle binary. Please either:\n\
+         1. Set NACELLE_BINARY environment variable\n\
+         2. Run 'cargo build --release' in the capsuled directory\n\
+         3. Install nacelle to your PATH"
+    )
 }
 
 /// Extract bundle from a self-contained executable

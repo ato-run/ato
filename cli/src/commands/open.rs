@@ -5,7 +5,7 @@
 //! - `capsule open --dev` - Open in development mode (auto-pack, hot reload)
 
 use anyhow::{Context, Result};
-use capsuled::capsule_types::capsule_v1::{SourceTarget as ManifestSourceTarget, TargetsConfig};
+use nacelle::capsule_types::capsule_v1::{SourceTarget as ManifestSourceTarget, TargetsConfig};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use tokio::time::{sleep, Duration};

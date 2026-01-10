@@ -11,8 +11,8 @@
 //! 8. Optionally sign with Ed25519 key
 
 use anyhow::{Context, Result};
-use capsuled::capsule_types::capsule_v1::CapsuleManifestV1;
-use capsuled::schema::converter::manifest_to_capnp_bytes;
+use nacelle::capsule_types::capsule_v1::CapsuleManifestV1;
+use nacelle::schema::converter::manifest_to_capnp_bytes;
 use ed25519_dalek::{Signature, Signer, SigningKey};
 use flate2::write::GzEncoder;
 use flate2::Compression;
