@@ -90,10 +90,14 @@ pub async fn execute(args: PackV2Args) -> Result<()> {
 
     // 5. Find nacelle runtime binary (not the CLI)
     println!("✓ Creating self-extracting executable...");
-    
+
     // Look for nacelle binary in standard locations
     let nacelle_bin = find_nacelle_binary()?;
-    println!("✓ Using nacelle binary: {:?} ({} KB)", nacelle_bin, fs::metadata(&nacelle_bin)?.len() / 1024);
+    println!(
+        "✓ Using nacelle binary: {:?} ({} KB)",
+        nacelle_bin,
+        fs::metadata(&nacelle_bin)?.len() / 1024
+    );
 
     // Copy base binary
     fs::copy(&nacelle_bin, &output_path).context("Failed to copy nacelle binary")?;
@@ -152,7 +156,7 @@ fn find_nacelle_binary() -> Result<PathBuf> {
     // 2. Release build in workspace (../target/release/nacelle)
     // 3. Debug build in workspace (../target/debug/nacelle)
     // 4. System PATH
-    
+
     // Check environment variable
     if let Ok(path) = std::env::var("NACELLE_BINARY") {
         let p = PathBuf::from(path);
@@ -160,7 +164,7 @@ fn find_nacelle_binary() -> Result<PathBuf> {
             return Ok(p);
         }
     }
-    
+
     // Try to find in workspace target directory
     let current_exe = std::env::current_exe()?;
     if let Some(target_dir) = current_exe.parent().and_then(|p| p.parent()) {
@@ -169,14 +173,14 @@ fn find_nacelle_binary() -> Result<PathBuf> {
         if release_bin.exists() {
             return Ok(release_bin);
         }
-        
+
         // Fall back to debug
         let debug_bin = target_dir.join("debug").join("nacelle");
         if debug_bin.exists() {
             return Ok(debug_bin);
         }
     }
-    
+
     // Try which command
     if let Ok(output) = std::process::Command::new("which").arg("nacelle").output() {
         if output.status.success() {
@@ -186,7 +190,7 @@ fn find_nacelle_binary() -> Result<PathBuf> {
             }
         }
     }
-    
+
     anyhow::bail!(
         "Could not find nacelle binary. Please either:\n\
          1. Set NACELLE_BINARY environment variable\n\

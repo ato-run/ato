@@ -337,7 +337,8 @@ impl RuntimeFetcher {
     /// # Returns
     /// Path to the extracted runtime directory
     pub async fn download_python_runtime(&self, version: &str) -> Result<PathBuf> {
-        self.download_python_runtime_with_progress(version, true).await
+        self.download_python_runtime_with_progress(version, true)
+            .await
     }
 
     /// Ensure Python runtime is available, downloading if necessary
@@ -351,11 +352,13 @@ impl RuntimeFetcher {
     /// # Returns
     /// PathBuf to the python binary
     pub async fn ensure_python(&self, version: &str) -> Result<PathBuf> {
-        let runtime_dir = self.download_python_runtime_with_progress(version, true).await?;
-        
+        let runtime_dir = self
+            .download_python_runtime_with_progress(version, true)
+            .await?;
+
         // Find the python binary in the extracted runtime
         let python_bin = Self::find_python_binary(&runtime_dir)?;
-        
+
         info!("Python {} ready at {:?}", version, python_bin);
         Ok(python_bin)
     }
@@ -384,7 +387,8 @@ impl RuntimeFetcher {
 
         // Download with progress bar
         let archive_path = self.cache_dir.join(format!("python-{}.tar.gz", version));
-        self.download_with_progress(&download_url, &archive_path, show_progress).await?;
+        self.download_with_progress(&download_url, &archive_path, show_progress)
+            .await?;
 
         // Create temporary extraction directory
         let temp_dir = self.cache_dir.join(format!("tmp-python-{}", version));
@@ -428,11 +432,7 @@ impl RuntimeFetcher {
             .context("Failed to connect to download server")?;
 
         if !response.status().is_success() {
-            anyhow::bail!(
-                "Download failed: HTTP {} - {}",
-                response.status(),
-                url
-            );
+            anyhow::bail!("Download failed: HTTP {} - {}", response.status(), url);
         }
 
         let total_size = response.content_length().unwrap_or(0);

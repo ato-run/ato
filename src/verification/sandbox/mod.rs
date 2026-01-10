@@ -34,8 +34,8 @@
 //! apply_sandbox(&policy)?;
 //! ```
 
-use std::path::PathBuf;
 use anyhow::Result;
+use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -48,7 +48,7 @@ pub mod macos;
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Sandbox policy configuration
-/// 
+///
 /// Defines which paths are allowed for read-only or read-write access.
 /// All other paths are denied write access by default.
 #[derive(Debug, Clone, Default)]
@@ -75,14 +75,19 @@ impl SandboxPolicy {
     }
 
     /// Add paths for read-write access
-    pub fn allow_read_write<P: Into<PathBuf>>(mut self, paths: impl IntoIterator<Item = P>) -> Self {
-        self.read_write_paths.extend(paths.into_iter().map(|p| p.into()));
+    pub fn allow_read_write<P: Into<PathBuf>>(
+        mut self,
+        paths: impl IntoIterator<Item = P>,
+    ) -> Self {
+        self.read_write_paths
+            .extend(paths.into_iter().map(|p| p.into()));
         self
     }
 
     /// Add paths for read-only access
     pub fn allow_read_only<P: Into<PathBuf>>(mut self, paths: impl IntoIterator<Item = P>) -> Self {
-        self.read_only_paths.extend(paths.into_iter().map(|p| p.into()));
+        self.read_only_paths
+            .extend(paths.into_iter().map(|p| p.into()));
         self
     }
 
@@ -99,14 +104,14 @@ impl SandboxPolicy {
     }
 
     /// Create a default policy for capsule applications
-    /// 
+    ///
     /// This policy:
     /// - Allows read-write to app directory and /tmp
     /// - Allows read-only to system libraries (/usr, /lib, /etc)
     /// - Enables network access
     pub fn for_capsule(app_dir: impl Into<PathBuf>) -> Self {
         let app_dir = app_dir.into();
-        
+
         Self::new()
             .allow_read_write([
                 app_dir,
@@ -178,15 +183,15 @@ impl SandboxResult {
 }
 
 /// Apply sandbox restrictions to the current process
-/// 
+///
 /// This function should be called in the child process after fork()
 /// but before exec(), typically in a `pre_exec` hook.
-/// 
+///
 /// # Platform Behavior
 /// - **Linux**: Uses Landlock LSM (requires kernel 5.13+)
 /// - **macOS**: Uses Seatbelt/sandbox-exec via sandbox_init()
 /// - **Other**: Returns Ok with not_enforced status
-/// 
+///
 /// # Safety
 /// This function must be called in a pre_exec context on Unix.
 /// It will fail if called from a multi-threaded context on some platforms.
@@ -202,7 +207,9 @@ pub fn apply_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn apply_sandbox(_policy: &SandboxPolicy) -> Result<SandboxResult> {
-    Ok(SandboxResult::not_enforced("Sandboxing not supported on this platform"))
+    Ok(SandboxResult::not_enforced(
+        "Sandboxing not supported on this platform",
+    ))
 }
 
 /// Check if the current platform supports sandboxing
@@ -244,7 +251,7 @@ mod tests {
     #[test]
     fn test_capsule_policy() {
         let policy = SandboxPolicy::for_capsule("/my/app");
-        
+
         assert!(policy.read_write_paths.contains(&PathBuf::from("/my/app")));
         assert!(policy.read_write_paths.contains(&PathBuf::from("/tmp")));
         assert!(policy.read_only_paths.contains(&PathBuf::from("/usr")));

@@ -126,12 +126,20 @@ impl SourceRuntime {
         }
 
         // Check if we have a compatible toolchain (local or JIT-provisioned)
-        let has_toolchain = self.toolchain_manager
+        let has_toolchain = self
+            .toolchain_manager
             .find_toolchain(&target.language, target.version.as_deref())
             .is_some();
-        
-        let has_jit_cached = self.runtime_fetcher.as_ref()
-            .map(|f| f.is_cached(&target.language, target.version.as_deref().unwrap_or("3.11")))
+
+        let has_jit_cached = self
+            .runtime_fetcher
+            .as_ref()
+            .map(|f| {
+                f.is_cached(
+                    &target.language,
+                    target.version.as_deref().unwrap_or("3.11"),
+                )
+            })
             .unwrap_or(false);
 
         if has_toolchain || has_jit_cached {
@@ -173,7 +181,8 @@ impl SourceRuntime {
     /// Returns the path to the language binary (e.g., python3)
     pub async fn ensure_toolchain(&self, target: &SourceTarget) -> Result<PathBuf, RuntimeError> {
         // First, check local toolchains
-        if let Some(toolchain) = self.toolchain_manager
+        if let Some(toolchain) = self
+            .toolchain_manager
             .find_toolchain(&target.language, target.version.as_deref())
         {
             info!("Using local toolchain: {:?}", toolchain.path);
@@ -183,15 +192,19 @@ impl SourceRuntime {
         // Try JIT provisioning
         if let Some(ref fetcher) = self.runtime_fetcher {
             let version = target.version.as_deref().unwrap_or("3.11");
-            
+
             match target.language.to_lowercase().as_str() {
                 "python" => {
-                    info!("JIT Provisioning: Ensuring Python {} is available...", version);
-                    let python_path = fetcher.ensure_python(version).await
-                        .map_err(|e| RuntimeError::ToolchainNotFound {
+                    info!(
+                        "JIT Provisioning: Ensuring Python {} is available...",
+                        version
+                    );
+                    let python_path = fetcher.ensure_python(version).await.map_err(|e| {
+                        RuntimeError::ToolchainNotFound {
                             language: target.language.clone(),
                             version: Some(format!("{} (JIT failed: {})", version, e)),
-                        })?;
+                        }
+                    })?;
                     return Ok(python_path);
                 }
                 "node" | "nodejs" => {

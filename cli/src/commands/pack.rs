@@ -11,12 +11,12 @@
 //! 8. Optionally sign with Ed25519 key
 
 use anyhow::{Context, Result};
-use nacelle::capsule_types::capsule_v1::CapsuleManifestV1;
-use nacelle::schema::converter::manifest_to_capnp_bytes;
 use ed25519_dalek::{Signature, Signer, SigningKey};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use ignore::WalkBuilder;
+use nacelle::capsule_types::capsule_v1::CapsuleManifestV1;
+use nacelle::schema::converter::manifest_to_capnp_bytes;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};

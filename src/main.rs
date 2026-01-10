@@ -148,9 +148,8 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
         cmd.process_group(0);
 
         // Phase 3: Apply sandbox for process isolation
-        let sandbox_policy = SandboxPolicy::for_capsule(&source_dir)
-            .with_development_mode(true); // Use dev mode for now (less restrictive)
-        
+        let sandbox_policy = SandboxPolicy::for_capsule(&source_dir).with_development_mode(true); // Use dev mode for now (less restrictive)
+
         let policy_clone = sandbox_policy.clone();
         unsafe {
             cmd.pre_exec(move || {
@@ -169,7 +168,7 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
                 }
             });
         }
-        
+
         println!("🔒 Sandbox: Configured for source directory");
     }
 

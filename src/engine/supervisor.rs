@@ -195,8 +195,14 @@ impl SupervisorActor {
                 sandbox_policy,
                 resp,
             } => {
-                let result =
-                    self.handle_start(&name, &command, &args, &envs, working_dir.as_deref(), sandbox_policy.as_ref());
+                let result = self.handle_start(
+                    &name,
+                    &command,
+                    &args,
+                    &envs,
+                    working_dir.as_deref(),
+                    sandbox_policy.as_ref(),
+                );
                 let _ = resp.send(result);
                 false
             }
@@ -256,10 +262,10 @@ impl SupervisorActor {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            
+
             // Create new process group with child as leader
             cmd.process_group(0);
-            
+
             // Apply sandbox in pre_exec hook if policy is provided
             if let Some(policy) = sandbox_policy {
                 let policy = policy.clone();
@@ -273,7 +279,10 @@ impl SupervisorActor {
                                     Ok(())
                                 } else if result.partially_enforced {
                                     // Sandbox partially applied - continue but log
-                                    eprintln!("Warning: Sandbox partially enforced: {}", result.message);
+                                    eprintln!(
+                                        "Warning: Sandbox partially enforced: {}",
+                                        result.message
+                                    );
                                     Ok(())
                                 } else {
                                     // Sandbox not enforced - continue in dev mode
@@ -286,7 +295,7 @@ impl SupervisorActor {
                                 // Return error to abort exec
                                 Err(std::io::Error::new(
                                     std::io::ErrorKind::PermissionDenied,
-                                    format!("Failed to apply sandbox: {}", e)
+                                    format!("Failed to apply sandbox: {}", e),
                                 ))
                             }
                         }
@@ -298,10 +307,15 @@ impl SupervisorActor {
         match cmd.spawn() {
             Ok(child) => {
                 let pid = child.id();
-                info!("Started process '{}' with PID {}{}", 
-                    name, 
+                info!(
+                    "Started process '{}' with PID {}{}",
+                    name,
                     pid,
-                    if sandbox_policy.is_some() { " (sandboxed)" } else { "" }
+                    if sandbox_policy.is_some() {
+                        " (sandboxed)"
+                    } else {
+                        ""
+                    }
                 );
                 self.children.insert(name.to_string(), child);
                 Ok(pid)
@@ -525,7 +539,8 @@ impl ProcessSupervisor {
         envs: Vec<(String, String)>,
         working_dir: Option<std::path::PathBuf>,
     ) -> Result<u32> {
-        self.start_process_with_sandbox(name, command, args, envs, working_dir, None).await
+        self.start_process_with_sandbox(name, command, args, envs, working_dir, None)
+            .await
     }
 
     /// Start a new process with sandbox isolation

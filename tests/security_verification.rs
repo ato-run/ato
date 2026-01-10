@@ -2,12 +2,12 @@
 mod tests {
 
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-    use capsuled::capnp_to_manifest::manifest_to_capnp_bytes;
-    use capsuled::capsule_types::capsule_v1::{
+    use nacelle::capnp_to_manifest::manifest_to_capnp_bytes;
+    use nacelle::capsule_types::capsule_v1::{
         CapsuleExecution, CapsuleManifestV1, CapsuleRequirements, CapsuleRouting, CapsuleStorage,
         CapsuleType, RuntimeType,
     };
-    use capsuled::security::verifier::ManifestVerifier;
+    use nacelle::security::verifier::ManifestVerifier;
     use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
     use rand::rngs::OsRng;
 
