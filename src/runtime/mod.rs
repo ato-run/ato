@@ -253,6 +253,9 @@ pub struct LaunchRequest<'a> {
     pub wasm_component_path: Option<PathBuf>,
     /// Source target configuration (for Source runtime)
     pub source_target: Option<SourceTarget>,
+    /// Socket manager for socket activation (Phase 2)
+    /// When provided, the runtime should pass the socket FD to the child process
+    pub socket_manager: Option<std::sync::Arc<crate::engine::socket::SocketManager>>,
 }
 
 /// Source target configuration for Source runtime

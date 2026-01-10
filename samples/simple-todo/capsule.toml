@@ -1,0 +1,31 @@
+schema_version = "1.0"
+name = "simple-todo"
+version = "0.1.0"
+type = "app"
+publisher = "capsule-demo"
+
+description = "A simple TODO application capsule built with React and Vite"
+
+[execution]
+runtime = "source"
+entrypoint = "app.py"
+
+[targets]
+preference = ["source"]
+
+[targets.source]
+language = "python"
+entrypoint = "app.py"
+dev_mode = true
+
+[resources]
+fs = [
+  { mount = "/app", path = "dist" }
+]
+
+[network]
+egress_allowed = ["http://localhost:5173"]
+
+[security]
+sandbox = true
+capabilities = ["fs:read"]

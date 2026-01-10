@@ -9,7 +9,7 @@
 //! - macOS: Alcoholless (preferred) or sandbox-exec (fallback)
 //! - Windows: Windows Sandbox (Pro/Enterprise) or Sandboxie Plus (all editions)
 
-mod toolchain;
+pub mod toolchain;
 mod validator;
 
 #[cfg(target_os = "linux")]
