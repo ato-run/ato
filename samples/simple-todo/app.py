@@ -16,7 +16,7 @@ from pathlib import Path
 class TodoHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         """Handle GET requests"""
-        if self.path == "/api/health":
+        if self.path in ("/health", "/api/health"):
             self.send_response(200)
             self.send_header("Content-type", "application/json")
             self.end_headers()

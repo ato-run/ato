@@ -38,7 +38,6 @@
 //! - Instant request acceptance (no startup delay)
 //! - Systemd-compatible FD passing (LISTEN_FDS environment variable)
 
-pub mod manager;
 // pub mod pool; // Disabled: requires capsule_runtime dependency
 pub mod socket;
 pub mod supervisor;

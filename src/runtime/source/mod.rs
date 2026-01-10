@@ -33,7 +33,7 @@ use tracing::{info, warn};
 
 use crate::runtime::{LaunchRequest, LaunchResult, Runtime, RuntimeError, SourceTarget};
 
-pub use toolchain::{ToolchainInfo, ToolchainManager};
+pub use toolchain::{RuntimeFetcher, ToolchainInfo, ToolchainManager};
 pub use validator::{validate_binary, validate_cmd};
 
 /// Source runtime execution mode
@@ -72,6 +72,8 @@ impl Default for SourceRuntimeConfig {
 pub struct SourceRuntime {
     config: SourceRuntimeConfig,
     toolchain_manager: ToolchainManager,
+    /// JIT Provisioning: Downloads runtimes on-demand if not available locally
+    runtime_fetcher: Option<RuntimeFetcher>,
     #[allow(dead_code)]
     oci_fallback: Option<()>, // Placeholder - OCI fallback removed in UARC V1.1.0
     /// Active workloads (workload_id -> pid)
@@ -83,9 +85,22 @@ pub struct SourceRuntime {
 impl SourceRuntime {
     /// Create a new SourceRuntime with the given configuration
     pub fn new(config: SourceRuntimeConfig, _oci_fallback: Option<()>) -> Self {
+        // Try to initialize RuntimeFetcher for JIT provisioning
+        let runtime_fetcher = match RuntimeFetcher::new() {
+            Ok(fetcher) => {
+                info!("JIT Provisioning enabled: {:?}", fetcher.cache_dir());
+                Some(fetcher)
+            }
+            Err(e) => {
+                warn!("JIT Provisioning disabled: {}", e);
+                None
+            }
+        };
+
         Self {
             config,
             toolchain_manager: ToolchainManager::new(),
+            runtime_fetcher,
             oci_fallback: None,
             active_workloads: Mutex::new(HashMap::new()),
             active_children: Arc::new(Mutex::new(HashMap::new())),
@@ -110,33 +125,95 @@ impl SourceRuntime {
             return SourceRuntimeMode::Containerized;
         }
 
-        // Check if we have a compatible toolchain
-        match self
-            .toolchain_manager
+        // Check if we have a compatible toolchain (local or JIT-provisioned)
+        let has_toolchain = self.toolchain_manager
             .find_toolchain(&target.language, target.version.as_deref())
-        {
-            Some(toolchain) => {
-                info!(
-                    "Found compatible toolchain: {} {} at {:?}",
-                    toolchain.language, toolchain.version, toolchain.path
-                );
+            .is_some();
+        
+        let has_jit_cached = self.runtime_fetcher.as_ref()
+            .map(|f| f.is_cached(&target.language, target.version.as_deref().unwrap_or("3.11")))
+            .unwrap_or(false);
 
-                // Check if native sandbox is available on this platform
-                if Self::is_native_sandbox_available() {
-                    SourceRuntimeMode::Native
-                } else {
-                    warn!("Native sandbox not available, falling back to OCI");
-                    SourceRuntimeMode::Containerized
-                }
+        if has_toolchain || has_jit_cached {
+            if has_toolchain {
+                info!("Using local toolchain for {}", target.language);
+            } else {
+                info!("Using JIT-provisioned toolchain for {}", target.language);
             }
-            None => {
-                warn!(
-                    "No compatible toolchain found for {} {:?}, falling back to OCI",
-                    target.language, target.version
-                );
+
+            // Check if native sandbox is available on this platform
+            if Self::is_native_sandbox_available() {
+                SourceRuntimeMode::Native
+            } else {
+                warn!("Native sandbox not available, falling back to OCI");
                 SourceRuntimeMode::Containerized
             }
+        } else if self.runtime_fetcher.is_some() {
+            // JIT provisioning available - will download on demand
+            info!(
+                "No local toolchain for {} {:?}, JIT provisioning will download on launch",
+                target.language, target.version
+            );
+            if Self::is_native_sandbox_available() {
+                SourceRuntimeMode::Native
+            } else {
+                SourceRuntimeMode::Containerized
+            }
+        } else {
+            warn!(
+                "No compatible toolchain found for {} {:?}, falling back to OCI",
+                target.language, target.version
+            );
+            SourceRuntimeMode::Containerized
         }
+    }
+
+    /// Ensure a toolchain is available for the given target, downloading if necessary (JIT provisioning)
+    ///
+    /// Returns the path to the language binary (e.g., python3)
+    pub async fn ensure_toolchain(&self, target: &SourceTarget) -> Result<PathBuf, RuntimeError> {
+        // First, check local toolchains
+        if let Some(toolchain) = self.toolchain_manager
+            .find_toolchain(&target.language, target.version.as_deref())
+        {
+            info!("Using local toolchain: {:?}", toolchain.path);
+            return Ok(toolchain.path);
+        }
+
+        // Try JIT provisioning
+        if let Some(ref fetcher) = self.runtime_fetcher {
+            let version = target.version.as_deref().unwrap_or("3.11");
+            
+            match target.language.to_lowercase().as_str() {
+                "python" => {
+                    info!("JIT Provisioning: Ensuring Python {} is available...", version);
+                    let python_path = fetcher.ensure_python(version).await
+                        .map_err(|e| RuntimeError::ToolchainNotFound {
+                            language: target.language.clone(),
+                            version: Some(format!("{} (JIT failed: {})", version, e)),
+                        })?;
+                    return Ok(python_path);
+                }
+                "node" | "nodejs" => {
+                    // TODO: Implement Node.js JIT provisioning
+                    return Err(RuntimeError::ToolchainNotFound {
+                        language: target.language.clone(),
+                        version: Some("JIT provisioning not yet implemented".to_string()),
+                    });
+                }
+                _ => {
+                    return Err(RuntimeError::ToolchainNotFound {
+                        language: target.language.clone(),
+                        version: Some("JIT provisioning not supported".to_string()),
+                    });
+                }
+            }
+        }
+
+        Err(RuntimeError::ToolchainNotFound {
+            language: target.language.clone(),
+            version: target.version.clone(),
+        })
     }
 
     /// Check if native sandbox is available on this platform
