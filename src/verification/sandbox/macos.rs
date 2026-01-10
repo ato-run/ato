@@ -31,11 +31,11 @@ mod ffi {
 
     // Sandbox profile constants (from sandbox.h)
     pub const SANDBOX_NAMED: u64 = 0x0001;
-    
+
     // Custom profile string flag (undocumented but used by sandbox-exec)
     // This allows passing SBPL directly instead of a profile name
     pub const SANDBOX_NAMED_EXTERNAL: u64 = 0x0003;
-    
+
     extern "C" {
         /// Initialize sandbox with a profile
         /// For SANDBOX_NAMED: profile is one of kSBXProfile* constants
@@ -76,12 +76,12 @@ pub fn apply_seatbelt_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
     // For now, use a predefined profile based on policy settings
     // Custom SBPL profiles require writing to a file and using sandbox-exec
     // which is not suitable for pre_exec hooks
-    
+
     // In development mode, skip sandboxing (macOS sandbox_init is limited)
     if policy.development_mode {
         info!("Skipping sandbox in development mode (macOS)");
         return Ok(SandboxResult::not_enforced(
-            "Development mode: macOS sandbox skipped"
+            "Development mode: macOS sandbox skipped",
         ));
     }
 
@@ -98,7 +98,7 @@ pub fn apply_seatbelt_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
             "macOS sandbox: Custom path policies not fully supported via sandbox_init. \
             Using fallback mode."
         );
-        
+
         // Try no-write-except-temp as a reasonable default
         PROFILE_NO_WRITE_EXCEPT_TEMP
     };
@@ -106,19 +106,14 @@ pub fn apply_seatbelt_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
     debug!("Using predefined sandbox profile: {}", profile_name);
 
     // Convert to C string
-    let profile_cstr = CString::new(profile_name)
-        .context("Failed to convert profile name to C string")?;
+    let profile_cstr =
+        CString::new(profile_name).context("Failed to convert profile name to C string")?;
 
     // Apply sandbox
     let mut error_buf: *mut std::os::raw::c_char = std::ptr::null_mut();
-    
-    let result = unsafe {
-        ffi::sandbox_init(
-            profile_cstr.as_ptr(),
-            ffi::SANDBOX_NAMED,
-            &mut error_buf,
-        )
-    };
+
+    let result =
+        unsafe { ffi::sandbox_init(profile_cstr.as_ptr(), ffi::SANDBOX_NAMED, &mut error_buf) };
 
     if result != 0 {
         // Extract error message
@@ -133,7 +128,7 @@ pub fn apply_seatbelt_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
         };
 
         warn!("Seatbelt sandbox failed: {}", error_msg);
-        
+
         // Return not enforced instead of erroring
         // This allows the process to continue in environments where
         // sandbox_init might fail (e.g., already sandboxed)
@@ -143,7 +138,10 @@ pub fn apply_seatbelt_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
         )));
     }
 
-    info!("Seatbelt sandbox applied successfully (profile: {})", profile_name);
+    info!(
+        "Seatbelt sandbox applied successfully (profile: {})",
+        profile_name
+    );
     Ok(SandboxResult::partially_enforced(format!(
         "macOS sandbox using predefined profile: {}",
         profile_name
@@ -163,7 +161,7 @@ fn generate_sbpl_profile(policy: &SandboxPolicy) -> String {
         // Development mode: more permissive
         profile.push_str("\n; Development mode - permissive sandbox\n");
         profile.push_str("(allow default)\n");
-        
+
         // Only deny writes to system directories
         profile.push_str("(deny file-write*\n");
         profile.push_str("    (subpath \"/System\")\n");
@@ -174,22 +172,22 @@ fn generate_sbpl_profile(policy: &SandboxPolicy) -> String {
     } else {
         // Production mode: restrictive sandbox
         profile.push_str("\n; Production mode - restrictive sandbox\n");
-        
+
         // Start with deny-all, then allow specific access
         profile.push_str("(deny default)\n");
-        
+
         // Always allow essential operations
         profile.push_str("\n; Essential operations\n");
         profile.push_str("(allow process-exec)\n");
         profile.push_str("(allow process-fork)\n");
         profile.push_str("(allow signal (target self))\n");
         profile.push_str("(allow sysctl-read)\n");
-        
+
         // Allow mach ports for IPC (required for basic operation)
         profile.push_str("\n; IPC (required for system operation)\n");
         profile.push_str("(allow mach-lookup)\n");
         profile.push_str("(allow ipc-posix-shm)\n");
-        
+
         // Network access
         if policy.allow_network {
             profile.push_str("\n; Network access\n");
@@ -234,7 +232,7 @@ fn generate_sbpl_profile(policy: &SandboxPolicy) -> String {
         profile.push_str("    (subpath \"/dev/fd\")\n");
         profile.push_str("    (subpath \"/private/var/db/dyld\")\n");
         profile.push_str(")\n");
-        
+
         // Allow writes to essential locations
         profile.push_str("\n; Essential write locations\n");
         profile.push_str("(allow file-write*\n");
@@ -251,14 +249,12 @@ fn generate_sbpl_profile(policy: &SandboxPolicy) -> String {
 fn escape_path_for_sbpl(path: &Path) -> Option<String> {
     // Resolve symlinks (e.g., /tmp -> /private/tmp on macOS)
     let resolved = path.canonicalize().ok()?;
-    
+
     let path_str = resolved.to_str()?;
-    
+
     // Escape special characters for SBPL
-    let escaped = path_str
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
-    
+    let escaped = path_str.replace('\\', "\\\\").replace('"', "\\\"");
+
     Some(escaped)
 }
 
@@ -273,11 +269,10 @@ mod tests {
 
     #[test]
     fn test_generate_sbpl_profile_dev_mode() {
-        let policy = SandboxPolicy::new()
-            .with_development_mode(true);
+        let policy = SandboxPolicy::new().with_development_mode(true);
 
         let profile = generate_sbpl_profile(&policy);
-        
+
         assert!(profile.contains("(version 1)"));
         assert!(profile.contains("(allow default)"));
         assert!(profile.contains("(deny file-write*"));
@@ -291,7 +286,7 @@ mod tests {
             .with_network(true);
 
         let profile = generate_sbpl_profile(&policy);
-        
+
         assert!(profile.contains("(version 1)"));
         assert!(profile.contains("(deny default)"));
         assert!(profile.contains("(allow network-outbound)"));
@@ -302,20 +297,19 @@ mod tests {
         // Test with existing path
         let path = PathBuf::from("/tmp");
         let escaped = escape_path_for_sbpl(&path);
-        
+
         // On macOS, /tmp is symlinked to /private/tmp
         if let Some(p) = escaped {
             assert!(p.contains("tmp"));
         }
     }
-    
+
     #[test]
     fn test_apply_sandbox_dev_mode() {
-        let policy = SandboxPolicy::new()
-            .with_development_mode(true);
-        
+        let policy = SandboxPolicy::new().with_development_mode(true);
+
         let result = apply_seatbelt_sandbox(&policy).unwrap();
-        
+
         // In dev mode, sandbox should be skipped
         assert!(!result.fully_enforced);
         assert!(result.message.contains("Development mode"));

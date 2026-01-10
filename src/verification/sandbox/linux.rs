@@ -15,8 +15,8 @@
 use super::{SandboxPolicy, SandboxResult};
 use anyhow::{Context, Result};
 use landlock::{
-    path_beneath_rules, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr,
-    RulesetStatus, ABI,
+    path_beneath_rules, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus,
+    ABI,
 };
 use std::path::Path;
 use tracing::{debug, info, warn};
@@ -24,9 +24,7 @@ use tracing::{debug, info, warn};
 /// Check if Landlock is supported on this system
 pub fn is_landlock_supported() -> bool {
     // Try to create a minimal ruleset to check support
-    match Ruleset::default()
-        .handle_access(AccessFs::from_all(ABI::V1))
-    {
+    match Ruleset::default().handle_access(AccessFs::from_all(ABI::V1)) {
         Ok(_) => true,
         Err(_) => false,
     }
@@ -118,10 +116,10 @@ where
     T: RulesetCreatedAttr,
 {
     let access = access.into();
-    
+
     // Use path_beneath_rules helper for easy rule creation
     let rules = path_beneath_rules(&[path], access);
-    
+
     for rule_result in rules {
         match rule_result {
             Ok(rule) => {
@@ -138,7 +136,7 @@ where
 }
 
 /// Create a minimal sandbox for testing
-/// 
+///
 /// This is useful for verifying Landlock is working without
 /// being too restrictive.
 #[allow(dead_code)]

@@ -66,8 +66,8 @@ mod prereqs {
 }
 
 /// Helper to create a minimal test manifest
-fn create_test_manifest(name: &str) -> capsuled::capsule_types::capsule_v1::CapsuleManifestV1 {
-    use capsuled::capsule_types::capsule_v1::*;
+fn create_test_manifest(name: &str) -> nacelle::capsule_types::capsule_v1::CapsuleManifestV1 {
+    use nacelle::capsule_types::capsule_v1::*;
 
     CapsuleManifestV1 {
         schema_version: "1.0".to_string(),
@@ -109,8 +109,8 @@ fn test_egress_fail_closed_blocks_disallowed_traffic() {
         return;
     }
 
-    use capsuled::capsule_types::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
-    use capsuled::security::egress_policy::generate_fw_rules;
+    use nacelle::capsule_types::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
+    use nacelle::security::egress_policy::generate_fw_rules;
 
     // Create manifest with restricted egress (only internal network)
     let mut manifest = create_test_manifest("test-egress-blocked");
@@ -164,8 +164,8 @@ fn test_egress_allows_permitted_traffic() {
         return;
     }
 
-    use capsuled::capsule_types::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
-    use capsuled::security::egress_policy::generate_fw_rules;
+    use nacelle::capsule_types::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
+    use nacelle::security::egress_policy::generate_fw_rules;
 
     // Create manifest allowing specific external IP
     let mut manifest = create_test_manifest("test-egress-allowed");
@@ -213,8 +213,8 @@ fn test_egress_allows_permitted_traffic() {
 fn test_signature_verification_priority_over_egress() {
     prereqs::print_status();
 
-    use capsuled::capsule_types::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
-    use capsuled::security::verifier::ManifestVerifier;
+    use nacelle::capsule_types::capsule_v1::{EgressIdRule, EgressIdType, NetworkConfig};
+    use nacelle::security::verifier::ManifestVerifier;
 
     // Create verifier with a FAKE trusted key to enable signature enforcement
     // When a trusted key is configured, the verifier will reject invalid signatures
@@ -272,7 +272,7 @@ fn test_signature_verification_priority_over_egress() {
 fn test_storage_vram_lifecycle_cleanup() {
     prereqs::print_status();
 
-    use capsuled::storage::{StorageConfig, StorageManager};
+    use nacelle::storage::{StorageConfig, StorageManager};
     use tempfile::TempDir;
 
     // Create a temporary directory for storage
@@ -341,8 +341,8 @@ fn test_combined_security_flow() {
     // 4. Capsule runs
     // 5. On stop: VRAM scrub + storage cleanup
 
-    use capsuled::security::egress_policy::generate_fw_rules;
-    use capsuled::security::verifier::ManifestVerifier;
+    use nacelle::security::egress_policy::generate_fw_rules;
+    use nacelle::security::verifier::ManifestVerifier;
 
     // Step 1: Create manifest
     let manifest = create_test_manifest("combined-flow-test");
