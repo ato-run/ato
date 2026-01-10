@@ -83,8 +83,11 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 zip = "2.1"
 tar = "0.4"
 flate2 = "1.0"
+zstd = "0.13"
 async-trait = "0.1.89"
-nix = { version = "0.30.1", features = ["signal"] }
+# Socket Activation (Phase 2): FD inheritance for child processes
+nix = { version = "0.30.1", features = ["signal", "fs", "socket", "net"] }
+libc = "0.2"
 subtle = "2.6.1"
 rust_decimal = { version = "1.39.0", features = ["serde"] }
 rust_decimal_macros = "1.39.0"
@@ -107,7 +110,6 @@ cudarc = { version = "0.17", features = ["driver", "cuda-version-from-build-syst
 # Container Runtime (Youki/Libcontainer)
 libcontainer = { version = "0.4", default-features = false, features = ["systemd", "v2"] }
 cgroups-rs = "0.3.3"
-libc = "0.2"
 
 [features]
 default = ["engine"]
@@ -141,5 +143,13 @@ capnpc = "0.24"
 [workspace]
 members = ["cli"]
 resolver = "2"
+
+# v2.0 Optimization: Tauri-inspired build profiles
+[profile.release]
+opt-level = "s"      # Size optimization
+lto = true            # Link-time optimization
+strip = true          # Strip debug symbols
+panic = "abort"       # Smaller binary size
+codegen-units = 1     # Better optimization
 
 

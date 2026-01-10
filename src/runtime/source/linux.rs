@@ -130,6 +130,20 @@ pub async fn launch_with_bubblewrap(
     })?));
     cmd.stderr(Stdio::from(log_file));
 
+    // Socket Activation (Phase 2): Pass listening socket FD to child process
+    if let Some(ref socket_manager) = request.socket_manager {
+        socket_manager
+            .prepare_command(&mut cmd)
+            .map_err(|e| RuntimeError::CommandExecution {
+                operation: "socket_activation_prepare".to_string(),
+                source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+            })?;
+        tracing::info!(
+            "Socket Activation: Passing FD {} to child process",
+            crate::engine::socket::SD_LISTEN_FDS_START
+        );
+    }
+
     debug!("Executing bwrap command: {:?}", cmd);
 
     // Spawn the process

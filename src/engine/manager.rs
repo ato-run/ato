@@ -778,6 +778,7 @@ impl CapsuleManager {
                 args: None,
                 wasm_component_path: Some(component_path.clone()),
                 source_target: None,
+                socket_manager: None, // Socket activation not applicable for Wasm
             };
 
             // Launch using WasmRuntime
@@ -1007,6 +1008,7 @@ impl CapsuleManager {
                 args: None,
                 wasm_component_path: None,
                 source_target,
+                socket_manager: None, // TODO: Enable socket activation for Source runtime
             };
 
             // Launch using SourceRuntime (handles native sandbox or OCI fallback)
@@ -1078,6 +1080,7 @@ impl CapsuleManager {
                 args: None,
                 wasm_component_path: None,
                 source_target: None,
+                socket_manager: None, // Socket activation not supported for Docker CLI
             };
 
             // Launch using DockerCliRuntime
@@ -1212,6 +1215,7 @@ impl CapsuleManager {
             args: None,
             wasm_component_path: None,
             source_target: None,
+            socket_manager: None, // Socket activation not supported for OCI containers
         };
 
         // Initialize pool if configured (Linux only, OCI runtime)
