@@ -166,7 +166,7 @@ fn is_self_extracting_bundle() -> Result<bool> {
     let len = file_data.len();
 
     // Bundle format: [Binary][Compressed Bundle][MAGIC (18 bytes)][Size (8 bytes)]
-    const BUNDLE_MAGIC: &[u8] = b"CAPSULED_V2_BUNDLE";
+    const BUNDLE_MAGIC: &[u8] = b"NACELLE_V2_BUNDLE";
 
     if len < BUNDLE_MAGIC.len() + 8 {
         return Ok(false);
@@ -183,7 +183,7 @@ async fn run_bundled_application() -> Result<()> {
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;
 
-    println!("🚀 Starting capsuled bundle...");
+    println!("🚀 Starting nacelle bundle...");
 
     let exe_path = std::env::current_exe().context("Failed to get current executable path")?;
 
@@ -192,7 +192,7 @@ async fn run_bundled_application() -> Result<()> {
 
     // Create temporary directory for extraction
     let pid = std::process::id();
-    let extract_dir = std::env::temp_dir().join(format!("capsuled-{}", pid));
+    let extract_dir = std::env::temp_dir().join(format!("nacelle-{}", pid));
     std::fs::create_dir_all(&extract_dir)?;
 
     println!("📦 Extracting to {:?}...", extract_dir);

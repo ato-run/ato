@@ -30,6 +30,12 @@ use tracing::{debug, error, info, warn};
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 
+// Import sandbox module
+use crate::verification::sandbox::SandboxPolicy;
+
+// Re-export sandbox types for convenience
+pub use crate::verification::sandbox::{SandboxPolicy as SandboxConfig, SandboxResult};
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Message Types for Actor Communication
 // ═══════════════════════════════════════════════════════════════════════════
@@ -44,6 +50,8 @@ pub enum SupervisorMessage {
         args: Vec<String>,
         envs: Vec<(String, String)>,
         working_dir: Option<std::path::PathBuf>,
+        /// Optional sandbox policy for process isolation
+        sandbox_policy: Option<SandboxPolicy>,
         resp: oneshot::Sender<Result<u32, String>>, // Returns PID on success
     },
     /// Stop a specific process by name
@@ -184,10 +192,11 @@ impl SupervisorActor {
                 args,
                 envs,
                 working_dir,
+                sandbox_policy,
                 resp,
             } => {
                 let result =
-                    self.handle_start(&name, &command, &args, &envs, working_dir.as_deref());
+                    self.handle_start(&name, &command, &args, &envs, working_dir.as_deref(), sandbox_policy.as_ref());
                 let _ = resp.send(result);
                 false
             }
@@ -224,6 +233,7 @@ impl SupervisorActor {
         args: &[String],
         envs: &[(String, String)],
         working_dir: Option<&std::path::Path>,
+        sandbox_policy: Option<&SandboxPolicy>,
     ) -> Result<u32, String> {
         if self.children.contains_key(name) {
             return Err(format!("Process '{}' already exists", name));
@@ -242,18 +252,57 @@ impl SupervisorActor {
             cmd.current_dir(dir);
         }
 
-        // Setup process group for proper signal propagation
+        // Setup process group and sandbox for proper signal propagation
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
+            
             // Create new process group with child as leader
             cmd.process_group(0);
+            
+            // Apply sandbox in pre_exec hook if policy is provided
+            if let Some(policy) = sandbox_policy {
+                let policy = policy.clone();
+                unsafe {
+                    cmd.pre_exec(move || {
+                        // Apply sandbox before exec
+                        match crate::verification::sandbox::apply_sandbox(&policy) {
+                            Ok(result) => {
+                                if result.fully_enforced {
+                                    // Sandbox applied successfully
+                                    Ok(())
+                                } else if result.partially_enforced {
+                                    // Sandbox partially applied - continue but log
+                                    eprintln!("Warning: Sandbox partially enforced: {}", result.message);
+                                    Ok(())
+                                } else {
+                                    // Sandbox not enforced - continue in dev mode
+                                    eprintln!("Warning: Sandbox not enforced: {}", result.message);
+                                    Ok(())
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Sandbox error: {}", e);
+                                // Return error to abort exec
+                                Err(std::io::Error::new(
+                                    std::io::ErrorKind::PermissionDenied,
+                                    format!("Failed to apply sandbox: {}", e)
+                                ))
+                            }
+                        }
+                    });
+                }
+            }
         }
 
         match cmd.spawn() {
             Ok(child) => {
                 let pid = child.id();
-                info!("Started process '{}' with PID {}", name, pid);
+                info!("Started process '{}' with PID {}{}", 
+                    name, 
+                    pid,
+                    if sandbox_policy.is_some() { " (sandboxed)" } else { "" }
+                );
                 self.children.insert(name.to_string(), child);
                 Ok(pid)
             }
@@ -476,6 +525,19 @@ impl ProcessSupervisor {
         envs: Vec<(String, String)>,
         working_dir: Option<std::path::PathBuf>,
     ) -> Result<u32> {
+        self.start_process_with_sandbox(name, command, args, envs, working_dir, None).await
+    }
+
+    /// Start a new process with sandbox isolation
+    pub async fn start_process_with_sandbox(
+        &self,
+        name: &str,
+        command: &str,
+        args: Vec<String>,
+        envs: Vec<(String, String)>,
+        working_dir: Option<std::path::PathBuf>,
+        sandbox_policy: Option<SandboxPolicy>,
+    ) -> Result<u32> {
         let (resp_tx, resp_rx) = oneshot::channel();
 
         self.sender
@@ -485,6 +547,7 @@ impl ProcessSupervisor {
                 args,
                 envs,
                 working_dir,
+                sandbox_policy,
                 resp: resp_tx,
             })
             .map_err(|e| anyhow::anyhow!("Failed to send start message: {}", e))?;
@@ -645,5 +708,38 @@ mod tests {
 
         // Supervisor should be dead
         assert!(!supervisor.is_alive());
+    }
+
+    #[tokio::test]
+    async fn test_supervisor_with_sandbox_policy() {
+        let supervisor = ProcessSupervisor::new();
+
+        // Create a sandbox policy for the current directory
+        let sandbox_policy = SandboxPolicy::for_capsule(std::env::current_dir().unwrap());
+
+        // Start a process with sandbox (on macOS, this will use Seatbelt)
+        // On Linux, it would use Landlock
+        let pid = supervisor
+            .start_process_with_sandbox(
+                "sandboxed-echo",
+                "echo",
+                vec!["Hello from sandbox".to_string()],
+                vec![],
+                None,
+                Some(sandbox_policy),
+            )
+            .await
+            .expect("Failed to start sandboxed process");
+
+        assert!(pid > 0);
+
+        // Give the process time to complete
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Shutdown
+        supervisor
+            .shutdown_and_wait()
+            .await
+            .expect("Failed to shutdown");
     }
 }

@@ -8,6 +8,7 @@
 //! - path: Path validation and security
 //! - dns_monitor: DNS request monitoring
 //! - vram: GPU memory security
+//! - sandbox: OS-native process sandboxing (Landlock/Seatbelt)
 //!
 //! Note: Audit logging has been moved to the `observability` module.
 
@@ -15,6 +16,7 @@ pub mod dns_monitor;
 pub mod egress_policy;
 pub mod egress_proxy;
 pub mod path;
+pub mod sandbox;
 pub mod signing;
 pub mod verifier;
 pub mod vram;
