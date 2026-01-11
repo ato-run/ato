@@ -53,7 +53,7 @@ pub fn execute(args: NewArgs) -> Result<()> {
     println!("\n✨ Project created successfully!");
     println!("\nNext steps:");
     println!("   cd {}", args.name);
-    println!("   capsule open --dev");
+    println!("   nacelle dev");
 
     Ok(())
 }
@@ -315,14 +315,17 @@ A Capsule application built with UARC V1.1.0.
 ## Quick Start
 
 ```bash
-# Run in development mode
-capsule open --dev
+ # Run locally (no bundling)
+nacelle dev
 
 # Package for deployment
-capsule pack
+nacelle pack
 
-# Run packaged version
-capsule open
+# Create a self-extracting bundle
+nacelle pack --bundle
+
+# Run bundle
+./nacelle-bundle
 ```
 
 ## Project Structure
