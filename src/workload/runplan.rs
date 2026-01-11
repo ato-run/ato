@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 /// Result of converting a RunPlan proto into the canonical CapsuleManifestV1.
 pub struct RunPlanConversion {
-    pub adep: CapsuleManifestV1,
+    pub manifest: CapsuleManifestV1,
     pub oci_image: String, // Kept for convenience
     pub digest: String,
 }
@@ -141,7 +141,7 @@ pub fn from_coordinator(plan: &common::RunPlan) -> RunPlanConversion {
     };
 
     RunPlanConversion {
-        adep: manifest,
+        manifest,
         oci_image,
         digest,
     }
@@ -243,7 +243,7 @@ mod tests {
         };
 
         let conversion = from_coordinator(&plan);
-        let manifest = conversion.adep;
+        let manifest = conversion.manifest;
 
         // Check top-level
         assert_eq!(manifest.name, "Test Capsule");
@@ -285,7 +285,7 @@ mod tests {
         };
 
         let conversion = from_coordinator(&plan);
-        let manifest = conversion.adep;
+        let manifest = conversion.manifest;
 
         // UARC V1.1.0: Native runtime maps to Source
         assert_eq!(manifest.execution.runtime, RuntimeType::Source);

@@ -3,7 +3,7 @@
 #
 # NOTE: This file is not built by the default CI workflow.
 # It is intended for GPU environments and may require a wider build context.
-# If you need `../libadep`, build from repo root instead:
+# If you need the legacy conversion library `../libadep`, build from repo root instead:
 #   docker build -f engine/Dockerfile.cuda -t capsuled-engine:cuda .
 # Run:   docker run --gpus all -p 4500:4500 -p 8000:8000 capsuled-engine:cuda
 
@@ -33,7 +33,7 @@ COPY build.rs ./
 COPY src ./src
 COPY migrations ./migrations
 
-# Copy libadep-core dependency
+# Copy legacy conversion library (if present). This is optional and only required if you depend on an external libadep build.
 COPY ../libadep /libadep
 
 # NOTE: Docker cannot `COPY` from outside the build context.

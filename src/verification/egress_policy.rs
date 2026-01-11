@@ -74,7 +74,7 @@ pub fn generate_fw_rules(manifest: &CapsuleManifestV1) -> Vec<String> {
             match rule.rule_type {
                 EgressIdType::Ip | EgressIdType::Cidr => {
                     // Valid IP/CIDR check should be done ideally, but we pass through for now.
-                    // Prevent command injection? libadep deserialization handles structure, but value might be invalid.
+                    // Prevent command injection? Legacy deserialization handles structure, but value might be invalid.
                     // Simple check: characters allowed in IP/CIDR.
                     if is_safe_ip_string(&rule.value) {
                         rules.push(format!("iptables -A OUTPUT -d {} -j ACCEPT", rule.value));

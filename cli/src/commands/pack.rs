@@ -11,12 +11,12 @@
 //! 8. Optionally sign with Ed25519 key
 
 use anyhow::{Context, Result};
-use capsuled::capsule_types::capsule_v1::CapsuleManifestV1;
-use capsuled::schema::converter::manifest_to_capnp_bytes;
 use ed25519_dalek::{Signature, Signer, SigningKey};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use ignore::WalkBuilder;
+use nacelle::capsule_types::capsule_v1::CapsuleManifestV1;
+use nacelle::schema::converter::manifest_to_capnp_bytes;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -148,7 +148,7 @@ pub fn execute(args: PackArgs) -> Result<()> {
     if let Some(key_path) = args.key {
         sign_capsule(&result.manifest, &key_path, &output_path)?;
     } else {
-        println!("\n💡 Tip: Use 'capsule pack --key <path>' to sign");
+        println!("\n💡 Tip: Use 'nacelle pack --key <path>' to sign");
     }
 
     Ok(())

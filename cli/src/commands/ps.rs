@@ -20,7 +20,7 @@ pub async fn execute(args: PsArgs) -> Result<()> {
     let engine_url = resolve_engine_url(args.engine_url.as_deref());
     let mut client = CapsuleEngineClient::connect(&engine_url)
         .await
-        .context("Failed to connect to engine. Is capsuled running?")?;
+        .context("Failed to connect to engine. Is the legacy engine running?")?;
 
     // Get system status (includes capsule list)
     let status = client
@@ -30,7 +30,7 @@ pub async fn execute(args: PsArgs) -> Result<()> {
 
     if status.capsules.is_empty() {
         println!("No capsules running.");
-        println!("\nRun 'capsule open --dev' to start a capsule.");
+        println!("\nRun 'nacelle dev --manifest capsule.toml' to run locally.");
         return Ok(());
     }
 

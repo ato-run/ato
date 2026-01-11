@@ -94,7 +94,7 @@ fn validate_flags(cmd: &[String], dev_mode: bool) -> Result<()> {
                 return Err(anyhow!(
                     "Security Violation: Dangerous flag '{}' detected.\n\
                      This flag can enable arbitrary code execution.\n\
-                     If you need this for development, use: capsule open --dev",
+                     If you need this for development, use: nacelle dev",
                     dangerous
                 ));
             }
@@ -366,7 +366,7 @@ pub fn validate_binary(binary: &str, dev_mode: bool) -> Result<()> {
     Err(anyhow!(
         "Security Violation: Binary '{}' is not in the allowlist.\n\
          Allowed binaries: {:?}\n\
-         If you need this binary for development, use: capsule open --dev",
+         If you need this binary for development, use: nacelle dev",
         binary,
         ALLOWED_BINARIES
     ))

@@ -110,7 +110,7 @@ impl ManifestVerifier {
             .map_err(|e| anyhow!("Invalid signature format: {}", e))?;
 
         // 3. Ensure the signature's public key matches the trusted key
-        // Note: libadep uses `ensure_signature_matches_manifest` to check if signature.public_key == manifest.developer_key.
+        // Note: legacy tooling used `ensure_signature_matches_manifest` to check if signature.public_key == manifest.developer_key.
         // But if manifest.developer_key is empty (V1), we can't use that check effectively for TRUST.
         // We fundamentally want to know: "Is this signature signed by our Trusted Key?"
 
@@ -124,7 +124,7 @@ impl ManifestVerifier {
             ));
         }
 
-        // 4. If developer_key is provided (from manifest), check it matches too (optional consistency check like libadep)
+        // 4. If developer_key is provided (from manifest), check it matches too (optional consistency check used by legacy tooling)
         if !developer_key.is_empty() {
             ensure_signature_matches_manifest(&sig_file, developer_key).map_err(|e| {
                 anyhow!("Signature key mismatch with manifest developer_key: {}", e)
@@ -162,7 +162,7 @@ impl ManifestVerifier {
     }
 
     fn parse_signature_bytes(&self, data: &[u8]) -> Result<SignatureFile> {
-        // Logic adapted from libadep element `read_signature_file`
+        // Logic adapted from legacy signature format `read_signature_file`
         if data.len() < 1 + 1 + 32 + 64 + 2 {
             return Err(anyhow!("signature file too short"));
         }

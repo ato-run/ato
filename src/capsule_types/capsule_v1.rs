@@ -142,7 +142,7 @@ pub enum TransparencyLevel {
 
 /// Transparency enforcement configuration
 ///
-/// Enforces ADEP's "no binary-only" philosophy by validating that capsules
+/// Enforces UARC's "no binary-only" philosophy by validating that capsules
 /// contain source code and not just compiled binaries.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TransparencyConfig {

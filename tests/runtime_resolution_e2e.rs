@@ -12,14 +12,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use capsuled::capsule_types::capsule_v1::{
+use nacelle::capsule_types::capsule_v1::{
     CapsuleExecution, CapsuleManifestV1, CapsuleRequirements, CapsuleRouting, CapsuleStorage,
     CapsuleType, OciTarget, RuntimeType, SourceTarget, TargetsConfig, WasmTarget,
 };
-use capsuled::runtime::resolver::{
+use nacelle::runtime::resolver::{
     detect_current_platform, resolve_runtime, ResolveContext, ResolvedTarget,
 };
-use capsuled::runtime::RuntimeKind;
+use nacelle::runtime::RuntimeKind;
 
 // ============================================================================
 // Test Helpers
