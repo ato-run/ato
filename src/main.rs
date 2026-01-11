@@ -87,37 +87,53 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     let manifest_content = std::fs::read_to_string(&manifest_path)?;
     let manifest: toml::Value = toml::from_str(&manifest_content)?;
 
+    // Bundle execution prefers a release profile if present.
     let entrypoint = manifest
         .get("execution")
-        .and_then(|e| e.get("entrypoint"))
+        .and_then(|e| {
+            e.get("release")
+                .and_then(|p| p.get("entrypoint"))
+                .or_else(|| e.get("entrypoint"))
+        })
         .and_then(|e| e.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("No entrypoint defined in capsule.toml"))?;
 
-    // Find Python binary in runtime
-    let python_bin = find_python_binary(&runtime_dir)?;
-    println!("🐍 Found Python: {:?}", python_bin);
-    println!("📄 Running: {:?}", source_dir.join(entrypoint));
+    let enable_socket_activation = looks_like_python_file(entrypoint, &source_dir);
 
-    // Parse port from manifest (default 8000)
-    let port = manifest
-        .get("execution")
-        .and_then(|e| e.get("port"))
-        .and_then(|p| p.as_integer())
-        .map(|p| p as u16)
+    // Resolve port: env (CAPSULE_PORT, PORT) > capsule.toml (execution.port) > default
+    let port = std::env::var("CAPSULE_PORT")
+        .ok()
+        .or_else(|| std::env::var("PORT").ok())
+        .and_then(|p| p.parse().ok())
+        .or_else(|| {
+            manifest
+                .get("execution")
+                .and_then(|e| e.get("port"))
+                .and_then(|p| p.as_integer())
+                .and_then(|p| u16::try_from(p).ok())
+        })
         .unwrap_or(8000);
 
-    // Setup Socket Activation
-    let socket_config = SocketConfig {
-        port,
-        host: "0.0.0.0".to_string(),
-        enabled: true,
+    // Setup Socket Activation (Python-only by default)
+    let socket_manager = if enable_socket_activation {
+        let socket_config = SocketConfig {
+            port,
+            host: "0.0.0.0".to_string(),
+            enabled: true,
+        };
+        let socket_manager = SocketManager::new(socket_config)?;
+        println!(
+            "🔌 Socket Activation: Bound to port {} (FD {})",
+            port,
+            socket_manager.raw_fd()
+        );
+        Some(socket_manager)
+    } else {
+        println!("ℹ️  Socket Activation: Disabled (non-Python entrypoint)");
+        None
     };
-    let socket_manager = SocketManager::new(socket_config)?;
-    println!(
-        "🔌 Socket Activation: Bound to port {} (FD {})",
-        port,
-        socket_manager.raw_fd()
-    );
 
     // ⚠️ IMPORTANT: Setup signal handlers BEFORE spawning child process
     // This ensures signals are captured by our handler, not the default termination handler
@@ -133,13 +149,16 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     let supervisor = ProcessSupervisor::new();
 
     // Prepare command with Socket Activation
-    let entrypoint_path = source_dir.join(entrypoint);
-    let mut cmd = std::process::Command::new(&python_bin);
-    cmd.arg(&entrypoint_path);
-    cmd.current_dir(&source_dir);
+    let mut cmd = build_bundle_command(entrypoint, &source_dir, &runtime_dir)?;
 
-    // Pass socket FD to child
-    socket_manager.prepare_command(&mut cmd)?;
+    // Provide a consistent port signal to the child.
+    cmd.env("PORT", port.to_string());
+    cmd.env("CAPSULE_PORT", port.to_string());
+
+    // Pass socket FD to child (if enabled)
+    if let Some(sm) = socket_manager.as_ref() {
+        sm.prepare_command(&mut cmd)?;
+    }
 
     // Set process group and sandbox for signal propagation and isolation
     #[cfg(unix)]
@@ -175,7 +194,9 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     // Spawn the child process
     let child = cmd.spawn()?;
     let child_pid = child.id();
-    println!("🔗 Socket Activation: Passing FD 3 to child process");
+    if socket_manager.is_some() {
+        println!("🔗 Socket Activation: Passing FD 3 to child process");
+    }
 
     // Register with Supervisor
     supervisor.register("main-app".to_string(), child)?;
@@ -236,6 +257,68 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
 
     println!("✅ Shutdown complete");
     Ok(())
+}
+
+fn looks_like_python_file(entrypoint: &str, source_dir: &PathBuf) -> bool {
+    let ep = entrypoint.trim();
+    if ep.ends_with(".py") {
+        return true;
+    }
+
+    let candidate = source_dir.join(ep);
+    candidate.is_file()
+        && candidate
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("py"))
+            .unwrap_or(false)
+}
+
+fn resolve_program(program: &str, source_dir: &PathBuf) -> String {
+    if program.starts_with("./") || program.starts_with("../") || program.contains('/') {
+        let candidate = source_dir.join(program);
+        if candidate.exists() {
+            return candidate.to_string_lossy().to_string();
+        }
+    }
+    program.to_string()
+}
+
+fn build_bundle_command(
+    entrypoint: &str,
+    source_dir: &PathBuf,
+    runtime_dir: &PathBuf,
+) -> anyhow::Result<std::process::Command> {
+    if looks_like_python_file(entrypoint, source_dir) {
+        let python_bin = find_python_binary(runtime_dir)?;
+        println!("🐍 Found Python: {:?}", python_bin);
+        let entrypoint_path = source_dir.join(entrypoint);
+        println!("📄 Running: {:?}", entrypoint_path);
+
+        let mut cmd = std::process::Command::new(&python_bin);
+        cmd.arg(&entrypoint_path);
+        cmd.current_dir(source_dir);
+        cmd.env("PYTHONHOME", runtime_dir.join("python"));
+        cmd.env("PYTHONPATH", source_dir);
+        return Ok(cmd);
+    }
+
+    let parts = shell_words::split(entrypoint).unwrap_or_else(|_| vec![entrypoint.to_string()]);
+    let program = parts
+        .first()
+        .map(|s| s.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("No entrypoint defined in capsule.toml"))?;
+
+    let resolved_program = resolve_program(program, source_dir);
+    println!("📄 Running: {}", entrypoint);
+
+    let mut cmd = std::process::Command::new(resolved_program);
+    if parts.len() > 1 {
+        cmd.args(&parts[1..]);
+    }
+    cmd.current_dir(source_dir);
+    Ok(cmd)
 }
 
 /// Find Python binary in extracted runtime

@@ -7,6 +7,7 @@
 
 use anyhow::{Context, Result};
 use nacelle::runtime::source::toolchain::RuntimeFetcher;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -55,7 +56,6 @@ pub async fn execute(args: PackV2Args) -> Result<()> {
 /// This helper is intentionally quiet (no stdout), so it can be reused by
 /// machine-oriented interfaces like `nacelle internal pack`.
 pub async fn build_bundle(args: PackV2Args) -> Result<PathBuf> {
-
     // 1. Determine paths
     let manifest_path = args.manifest_path.canonicalize()?;
     let source_dir = manifest_path
@@ -66,18 +66,25 @@ pub async fn build_bundle(args: PackV2Args) -> Result<PathBuf> {
         .output
         .unwrap_or_else(|| source_dir.join("nacelle-bundle"));
 
-    // 2. Find or download runtime
+    // 2. Decide whether we need to bundle a runtime.
+    // If the manifest entrypoint is a Python file (or declares python language), bundle Python.
+    // Otherwise (e.g. bun/node), do NOT bundle Python by default.
+    let manifest_entrypoint = read_manifest_entrypoint(&manifest_path)?
+        .unwrap_or_else(|| "".to_string());
+    let needs_python = manifest_needs_python(&manifest_path, source_dir, &manifest_entrypoint)?;
+
+    // 3. Find/download runtime (Python) or create an empty runtime directory.
+    let mut temp_runtime_dir: Option<PathBuf> = None;
+
     let runtime_dir = if let Some(runtime) = args.runtime_path {
         runtime
-    } else {
+    } else if needs_python {
         // Try to find cached runtime, or download if not available
         let cache_dir = dirs::home_dir()
             .context("Failed to get home directory")?
             .join(".nacelle")
             .join("toolchain");
 
-        // For now, use the first available Python runtime
-        // TODO: Parse manifest to determine required runtime
         let runtime_path = if cache_dir.exists() {
             let entries = fs::read_dir(&cache_dir)?;
             let mut found = None;
@@ -95,21 +102,41 @@ pub async fn build_bundle(args: PackV2Args) -> Result<PathBuf> {
         if let Some(path) = runtime_path {
             path
         } else {
-            // Download Python 3.11 runtime
             eprintln!("✓ No cached runtime found. Downloading Python 3.11...");
             let fetcher = RuntimeFetcher::new()?;
             fetcher.download_python_runtime("3.11").await?
         }
+    } else {
+        // Non-Python workload: bundle an empty runtime directory.
+        let dir = std::env::temp_dir().join(format!(
+            "nacelle-empty-runtime-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir)?;
+        temp_runtime_dir = Some(dir.clone());
+        dir
     };
 
-    eprintln!("✓ Using runtime: {:?}", runtime_dir);
+    if needs_python {
+        eprintln!("✓ Using runtime: {:?}", runtime_dir);
+    } else {
+        eprintln!("✓ No runtime bundled (non-Python entrypoint: {:?})", manifest_entrypoint);
+        eprintln!(
+            "ℹ️  Note: This bundle will require the entrypoint program (e.g. bun/node) to be available on the target host."
+        );
+    }
 
-    // 3. Create archive with runtime + source
+    // 4. Create archive with runtime + source
     eprintln!("✓ Creating bundle archive...");
-    let archive_data = create_bundle_archive(&runtime_dir, source_dir)?;
+    let source_ignore = load_capsuleignore(source_dir)?;
+    let archive_data = create_bundle_archive(&runtime_dir, source_dir, source_ignore.as_ref())?;
     eprintln!("✓ Archive size: {} MB", archive_data.len() / 1_048_576);
 
-    // 4. Compress with Zstd (Level 19 for maximum compression)
+    if let Some(dir) = temp_runtime_dir {
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // 5. Compress with Zstd (Level 19 for maximum compression)
     eprintln!("✓ Compressing with Zstd Level 19...");
     let compressed = compress_with_zstd(&archive_data, 19)?;
     eprintln!("✓ Compressed size: {} MB", compressed.len() / 1_048_576);
@@ -118,7 +145,7 @@ pub async fn build_bundle(args: PackV2Args) -> Result<PathBuf> {
         (compressed.len() as f64 / archive_data.len() as f64) * 100.0
     );
 
-    // 5. Find nacelle runtime binary (not the CLI)
+    // 6. Find nacelle runtime binary
     eprintln!("✓ Creating self-extracting executable...");
 
     // Look for nacelle binary in standard locations
@@ -151,8 +178,88 @@ pub async fn build_bundle(args: PackV2Args) -> Result<PathBuf> {
     Ok(output_path)
 }
 
+fn read_manifest_entrypoint(manifest_path: &Path) -> Result<Option<String>> {
+    let content = fs::read_to_string(manifest_path)
+        .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
+    let manifest: toml::Value = toml::from_str(&content)
+        .with_context(|| format!("Failed to parse manifest TOML: {}", manifest_path.display()))?;
+
+    Ok(manifest
+        .get("execution")
+        .and_then(|e| e.get("entrypoint"))
+        .and_then(|e| e.as_str())
+        .map(|s| s.to_string()))
+}
+
+fn manifest_needs_python(
+    manifest_path: &Path,
+    source_dir: &Path,
+    entrypoint: &str,
+) -> Result<bool> {
+    let content = fs::read_to_string(manifest_path)
+        .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
+    let manifest: toml::Value = toml::from_str(&content)
+        .with_context(|| format!("Failed to parse manifest TOML: {}", manifest_path.display()))?;
+
+    // Canonical hint: targets.source.language == "python"
+    let declared_python = manifest
+        .get("targets")
+        .and_then(|t| t.get("source"))
+        .and_then(|s| s.get("language"))
+        .and_then(|l| l.as_str())
+        .map(|l| l.eq_ignore_ascii_case("python"))
+        .unwrap_or(false);
+
+    if declared_python {
+        return Ok(true);
+    }
+
+    let ep = entrypoint.trim();
+    if ep.is_empty() {
+        return Ok(true);
+    }
+
+    // Heuristic: direct .py entrypoint file.
+    if ep.ends_with(".py") {
+        return Ok(true);
+    }
+
+    // If it's a path to an existing file under the source dir and looks like python.
+    let candidate = source_dir.join(ep);
+    if candidate.is_file() {
+        if candidate
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("py"))
+            .unwrap_or(false)
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn load_capsuleignore(source_dir: &Path) -> Result<Option<Gitignore>> {
+    let ignore_path = source_dir.join(".capsuleignore");
+    if !ignore_path.exists() {
+        return Ok(None);
+    }
+
+    let mut builder = GitignoreBuilder::new(source_dir);
+    builder.add(ignore_path);
+    let gitignore = builder
+        .build()
+        .context("Failed to parse .capsuleignore")?;
+    Ok(Some(gitignore))
+}
+
 /// Create a tar archive containing runtime and source code
-fn create_bundle_archive(runtime_dir: &Path, source_dir: &Path) -> Result<Vec<u8>> {
+fn create_bundle_archive(
+    runtime_dir: &Path,
+    source_dir: &Path,
+    source_ignore: Option<&Gitignore>,
+) -> Result<Vec<u8>> {
     let mut archive = Builder::new(Vec::new());
 
     // Add runtime directory
@@ -161,12 +268,58 @@ fn create_bundle_archive(runtime_dir: &Path, source_dir: &Path) -> Result<Vec<u8
         .context("Failed to add runtime to archive")?;
 
     // Add source directory
-    archive
-        .append_dir_all("source", source_dir)
-        .context("Failed to add source to archive")?;
+    // Default behavior stays "include everything"; if `.capsuleignore` exists, we apply it.
+    append_source_dir(&mut archive, source_dir, source_ignore)?;
 
     archive.finish()?;
     Ok(archive.into_inner()?)
+}
+
+fn append_source_dir(
+    archive: &mut Builder<Vec<u8>>,
+    source_dir: &Path,
+    source_ignore: Option<&Gitignore>,
+) -> Result<()> {
+    for entry in ignore::WalkBuilder::new(source_dir)
+        .hidden(false)
+        .ignore(false)
+        .git_ignore(false)
+        .git_exclude(false)
+        .parents(false)
+        .build()
+    {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path == source_dir {
+            continue;
+        }
+
+        let relative = path
+            .strip_prefix(source_dir)
+            .unwrap_or(path)
+            .to_string_lossy();
+
+        if relative.starts_with(".git/") || relative == ".git" {
+            continue;
+        }
+
+        if let Some(ignore) = source_ignore {
+            let matched = ignore.matched_path_or_any_parents(path, path.is_dir());
+            if matched.is_ignore() {
+                continue;
+            }
+        }
+
+        if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            let name_in_archive = format!("source/{}", relative);
+            archive
+                .append_path_with_name(path, name_in_archive)
+                .with_context(|| format!("Failed to add file to archive: {}", path.display()))?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Compress data using Zstd
