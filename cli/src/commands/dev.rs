@@ -6,6 +6,7 @@ use nacelle::verification::sandbox::SandboxPolicy;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::process::Command;
+use toml;
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -83,6 +84,21 @@ fn env_truthy(key: &str) -> bool {
     }
 }
 
+fn looks_like_python_entrypoint(entrypoint: &str, source_dir: &PathBuf) -> bool {
+    let ep = entrypoint.trim();
+    if ep.ends_with(".py") {
+        return true;
+    }
+
+    let candidate = source_dir.join(ep);
+    candidate.is_file()
+        && candidate
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("py"))
+            .unwrap_or(false)
+}
+
 async fn run_and_wait(args: RunDevArgs) -> Result<RunDevOutcome> {
     let manifest_path = args
         .manifest_path
@@ -97,9 +113,15 @@ async fn run_and_wait(args: RunDevArgs) -> Result<RunDevOutcome> {
     let manifest = CapsuleManifestV1::load_from_file(&manifest_path)
         .with_context(|| format!("Failed to load manifest: {}", manifest_path.display()))?;
 
-    let entrypoint = resolve_entrypoint(&manifest);
+    let entrypoint = read_profile_entrypoint(&manifest_path, "dev")?
+        .unwrap_or_else(|| resolve_entrypoint(&manifest));
 
-    let port = manifest.execution.port.unwrap_or(8000);
+    let port = std::env::var("CAPSULE_PORT")
+        .ok()
+        .or_else(|| std::env::var("PORT").ok())
+        .and_then(|p| p.parse().ok())
+        .or(manifest.execution.port)
+        .unwrap_or(8000);
 
     human_out!(args.interactive, "🚀 nacelle dev");
     human_out!(args.interactive, "📄 Manifest: {}", manifest_path.display());
@@ -108,29 +130,36 @@ async fn run_and_wait(args: RunDevArgs) -> Result<RunDevOutcome> {
 
     let mut cmd = build_command(&manifest, &source_dir, &entrypoint).await?;
 
+    let enable_socket_activation = looks_like_python_entrypoint(&entrypoint, &source_dir);
+
     // Socket activation: bind in parent, pass FD 3 to child.
+    // NOTE: only enabled for Python entrypoints by default (others may not consume LISTEN_FDS).
     // If binding fails (e.g. port already in use), fall back to random free port.
-    let socket_manager = match create_socket_manager(SocketConfig {
-        port,
-        host: "0.0.0.0".to_string(),
-        enabled: true,
-    }) {
-        Ok(sm) => Some(sm),
-        Err(e) => {
-            eprintln!("⚠️  Socket Activation: Failed to bind port {}: {}", port, e);
-            eprintln!("    Retrying with an ephemeral port...");
-            match create_socket_manager(SocketConfig {
-                port: 0,
-                host: "0.0.0.0".to_string(),
-                enabled: true,
-            }) {
-                Ok(sm) => Some(sm),
-                Err(e2) => {
-                    eprintln!("⚠️  Socket Activation disabled: {}", e2);
-                    None
+    let socket_manager = if enable_socket_activation {
+        match create_socket_manager(SocketConfig {
+            port,
+            host: "0.0.0.0".to_string(),
+            enabled: true,
+        }) {
+            Ok(sm) => Some(sm),
+            Err(e) => {
+                eprintln!("⚠️  Socket Activation: Failed to bind port {}: {}", port, e);
+                eprintln!("    Retrying with an ephemeral port...");
+                match create_socket_manager(SocketConfig {
+                    port: 0,
+                    host: "0.0.0.0".to_string(),
+                    enabled: true,
+                }) {
+                    Ok(sm) => Some(sm),
+                    Err(e2) => {
+                        eprintln!("⚠️  Socket Activation disabled: {}", e2);
+                        None
+                    }
                 }
             }
         }
+    } else {
+        None
     };
 
     let effective_port = socket_manager.as_ref().map(|sm| sm.port()).unwrap_or(port);
@@ -273,6 +302,27 @@ async fn run_and_wait(args: RunDevArgs) -> Result<RunDevOutcome> {
         port: effective_port,
         exit_status: Some(exit_status),
     })
+}
+
+fn read_profile_entrypoint(manifest_path: &Path, profile: &str) -> Result<Option<String>> {
+    let content = std::fs::read_to_string(manifest_path)
+        .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
+    let manifest = toml::from_str::<toml::Value>(&content)
+        .with_context(|| format!("Failed to parse manifest TOML: {}", manifest_path.display()))?;
+
+    // Prefer execution.<profile>.entrypoint
+    if let Some(ep) = manifest
+        .get("execution")
+        .and_then(|e| e.get(profile))
+        .and_then(|p| p.get("entrypoint"))
+        .and_then(|e| e.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        return Ok(Some(ep.to_string()));
+    }
+
+    Ok(None)
 }
 
 fn resolve_entrypoint(manifest: &CapsuleManifestV1) -> String {
