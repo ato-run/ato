@@ -41,7 +41,7 @@ pub async fn execute(args: DoctorArgs) -> Result<()> {
         },
         Err(_) => {
             println!("   ❌ Engine not reachable at {}", engine_url);
-            println!("      Start with: capsuled");
+            println!("      Note: Engine mode is legacy. 'nacelle dev' does not require it.");
             all_ok = false;
         }
     }
@@ -59,7 +59,7 @@ pub async fn execute(args: DoctorArgs) -> Result<()> {
         println!("      Keys: {}", key_count);
     } else {
         println!("   ⚠️  Keys directory not found: {}", keys_dir.display());
-        println!("      Create keys with: capsule keygen");
+        println!("      Create keys with: nacelle keygen");
     }
 
     // 3. Check Python

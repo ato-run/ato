@@ -1,11 +1,10 @@
-//! Capsule CLI - Universal Application Runtime Contract Manager
+//! Nacelle CLI - Unified Runtime for Capsules
 //!
-//! Clean CLI for managing UARC-compliant applications:
-//! - Lifecycle: new, init, open, close, logs, ps
-//! - Packaging: pack, keygen  
-//! - System: doctor
+//! Engine entrypoint.
 //!
-//! Also supports self-extracting bundle execution (v2.0)
+//! User-facing commands live in `capsule` (meta-CLI). This binary exposes a
+//! machine-oriented interface via `nacelle internal ...` and also supports
+//! self-extracting bundle execution (v2.0).
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -13,43 +12,26 @@ use std::path::PathBuf;
 use std::process::Command;
 
 mod commands;
-mod engine_client;
 
 #[derive(Parser)]
-#[command(name = "capsule")]
+#[command(name = "nacelle")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
-#[command(about = "Capsule CLI - Universal Application Runtime Contract Manager")]
+#[command(about = "Nacelle CLI - Unified Runtime for Capsules")]
 #[command(after_help = "\
-LIFECYCLE:
-  new      Create a new Capsule project
-  init     Initialize existing project as Capsule  
-  open     Open and launch a Capsule (--dev for development)
-  close    Close a running Capsule
-  logs     Stream logs from an open Capsule
-  ps       List currently open Capsules
-
-PACKAGING:
-  pack     Build and sign a .capsule archive
-  keygen   Generate developer signing keys
-
-SYSTEM:
-  doctor   Check Engine status and host requirements
-
 EXAMPLES:
-  capsule new my-app --template python
-  capsule init
-  capsule open --dev
-  capsule pack --key ~/.capsule/keys/dev.secret
-  capsule open my-app.capsule
-")]
+        # Engine features (JSON over stdio)
+        nacelle internal --input - features
+
+        # Build bundle (JSON over stdio)
+        nacelle internal --input - pack
+
+        # Execute workload (streaming; exit status is propagated)
+        nacelle internal --input - exec
+" )]
 struct Cli {
     /// Enable verbose output
     #[arg(short, long, global = true)]
     verbose: bool,
-
-    /// Engine gRPC endpoint (can be set via CAPSULE_ENGINE_URL)
-    #[arg(long, global = true, default_value = "http://127.0.0.1:50051")]
-    engine_url: String,
 
     #[command(subcommand)]
     command: Commands,
@@ -58,104 +40,27 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     // ═══════════════════════════════════════════════════════════════════
-    // LIFECYCLE
+    // INTERNAL (Process Boundary)
     // ═══════════════════════════════════════════════════════════════════
-    /// Create a new Capsule project from a template
-    New {
-        /// Project name
-        name: String,
+    /// Machine-oriented engine interface (JSON over stdio)
+    Internal {
+        /// JSON input file path, or '-' for stdin
+        #[arg(long, default_value = "-")]
+        input: String,
 
-        /// Template type: python, node, rust, shell
-        #[arg(short, long, default_value = "python")]
-        template: String,
+        #[command(subcommand)]
+        command: InternalCommands,
     },
+}
 
-    /// Initialize existing project as a Capsule
-    Init {
-        /// Target directory (default: current directory)
-        #[arg(short, long)]
-        path: Option<PathBuf>,
-
-        /// Skip prompts and use detected defaults
-        #[arg(short, long)]
-        yes: bool,
-    },
-
-    /// Open and launch a Capsule application
-    Open {
-        /// Path to capsule.toml or .capsule file
-        path: Option<PathBuf>,
-
-        /// Development mode (hot reload, loose security)
-        #[arg(short, long)]
-        dev: bool,
-    },
-
-    /// Close a running Capsule
-    Close {
-        /// Capsule ID to close
-        capsule_id: String,
-    },
-
-    /// Stream logs from an open Capsule
-    Logs {
-        /// Capsule ID
-        capsule_id: String,
-
-        /// Follow log output (like tail -f)
-        #[arg(short, long)]
-        follow: bool,
-    },
-
-    /// List currently open Capsules
-    Ps {
-        /// Show all (including stopped) Capsules
-        #[arg(short, long)]
-        all: bool,
-    },
-
-    // ═══════════════════════════════════════════════════════════════════
-    // PACKAGING
-    // ═══════════════════════════════════════════════════════════════════
-    /// Build and sign a .capsule archive
-    Pack {
-        /// Path to capsule.toml
-        #[arg(short, long, default_value = "capsule.toml")]
-        manifest: PathBuf,
-
-        /// Output path for .capsule file
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-
-        /// Signing key (.secret file) - if provided, signs the archive
-        #[arg(short, long)]
-        key: Option<PathBuf>,
-
-        /// v2.0: Create self-extracting bundle instead of .capsule
-        #[arg(long)]
-        bundle: bool,
-
-        /// v2.0: Path to runtime directory (optional, uses cache if not specified)
-        #[arg(long)]
-        runtime: Option<PathBuf>,
-    },
-
-    /// Generate a new Ed25519 keypair for signing
-    Keygen {
-        /// Name for the key (default: timestamp-based)
-        #[arg(short, long)]
-        name: Option<String>,
-    },
-
-    // ═══════════════════════════════════════════════════════════════════
-    // SYSTEM
-    // ═══════════════════════════════════════════════════════════════════
-    /// Check Engine status and host requirements
-    Doctor {
-        /// Show detailed diagnostic information
-        #[arg(short, long)]
-        verbose: bool,
-    },
+#[derive(Subcommand)]
+enum InternalCommands {
+    /// Report engine capabilities for dispatch (JSON)
+    Features,
+    /// Build artifacts (JSON)
+    Pack,
+    /// Execute workload (JSON)
+    Exec,
 }
 
 /// Check if this binary contains a self-extracting bundle
@@ -402,81 +307,22 @@ async fn main() -> anyhow::Result<()> {
 
     if cli.verbose {
         println!("🔍 Verbose mode enabled");
-        println!("Engine URL: {}\n", cli.engine_url);
     }
 
     match cli.command {
-        // Lifecycle
-        Commands::New { name, template } => commands::new::execute(commands::new::NewArgs {
-            name,
-            template: Some(template),
-        }),
-        Commands::Init { path, yes } => {
-            commands::init::execute(commands::init::InitArgs { path, yes })
-        }
-        Commands::Open { path, dev } => {
-            commands::open::execute(commands::open::OpenArgs {
-                path,
-                dev,
-                engine_url: Some(cli.engine_url),
-            })
-            .await
-        }
-        Commands::Close { capsule_id } => {
-            commands::close::execute(commands::close::CloseArgs {
-                capsule_id,
-                engine_url: Some(cli.engine_url),
-            })
-            .await
-        }
-        Commands::Logs { capsule_id, follow } => {
-            commands::logs::execute(commands::logs::LogsArgs {
-                capsule_id,
-                follow,
-                engine_url: Some(cli.engine_url),
-            })
-            .await
-        }
-        Commands::Ps { all } => {
-            commands::ps::execute(commands::ps::PsArgs {
-                all,
-                engine_url: Some(cli.engine_url),
-            })
-            .await
-        }
+        // Internal
+        Commands::Internal { input, command } => {
+            let cmd = match command {
+                InternalCommands::Features => commands::internal::InternalCommand::Features,
+                InternalCommands::Pack => commands::internal::InternalCommand::Pack,
+                InternalCommands::Exec => commands::internal::InternalCommand::Exec,
+            };
 
-        // Packaging
-        Commands::Pack {
-            manifest,
-            output,
-            key,
-            bundle,
-            runtime,
-        } => {
-            if bundle {
-                // v2.0: Create self-extracting bundle
-                commands::pack_v2::execute(commands::pack_v2::PackV2Args {
-                    manifest_path: manifest,
-                    runtime_path: runtime,
-                    output,
-                })
-                .await
-            } else {
-                // Legacy: Create .capsule archive
-                commands::pack::execute(commands::pack::PackArgs {
-                    manifest_path: manifest,
-                    output,
-                    key,
-                })
-            }
-        }
-        Commands::Keygen { name } => {
-            commands::keygen::execute(commands::keygen::KeygenArgs { name })
-        }
-
-        // System
-        Commands::Doctor { verbose } => {
-            commands::doctor::execute(commands::doctor::DoctorArgs { verbose }).await
+            commands::internal::execute(commands::internal::InternalArgs {
+                input,
+                command: cmd,
+            })
+            .await
         }
     }
 }

@@ -96,7 +96,10 @@ impl SocketManager {
 
     /// Get the bound port
     pub fn port(&self) -> u16 {
-        self.config.port
+        self.listener
+            .local_addr()
+            .map(|addr| addr.port())
+            .unwrap_or(self.config.port)
     }
 
     /// Get a reference to the underlying TcpListener

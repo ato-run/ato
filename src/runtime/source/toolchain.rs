@@ -300,6 +300,20 @@ pub struct RuntimeFetcher {
     cache_dir: PathBuf,
 }
 
+fn is_internal_mode() -> bool {
+    std::env::var_os("NACELLE_INTERNAL").is_some()
+}
+
+macro_rules! toolchain_out {
+    ($($arg:tt)*) => {{
+        if is_internal_mode() {
+            eprintln!($($arg)*);
+        } else {
+            println!($($arg)*);
+        }
+    }};
+}
+
 impl RuntimeFetcher {
     /// Create a new RuntimeFetcher with the default cache directory
     pub fn new() -> Result<Self> {
@@ -377,7 +391,7 @@ impl RuntimeFetcher {
             return Ok(runtime_dir);
         }
 
-        println!("⬇️  Downloading Python {} runtime...", version);
+        toolchain_out!("⬇️  Downloading Python {} runtime...", version);
 
         // Determine the platform-specific URL
         let (os, arch) = Self::detect_platform()?;
@@ -398,7 +412,7 @@ impl RuntimeFetcher {
         fs::create_dir_all(&temp_dir)?;
 
         // Extract the archive
-        println!("📦 Extracting Python {} runtime...", version);
+        toolchain_out!("📦 Extracting Python {} runtime...", version);
         Self::extract_archive_from_file(&archive_path, &temp_dir)?;
 
         // Move to final location
@@ -410,7 +424,7 @@ impl RuntimeFetcher {
         // Clean up archive
         let _ = fs::remove_file(&archive_path);
 
-        println!("✓ Python {} installed at {:?}", version, runtime_dir);
+        toolchain_out!("✓ Python {} installed at {:?}", version, runtime_dir);
         Ok(runtime_dir)
     }
 
@@ -570,7 +584,7 @@ impl RuntimeFetcher {
         );
 
         // GitHub releases URL pattern
-        let base_url = "https://github.com/indygreg/python-build-standalone/releases/download";
+        let base_url = "https://github.com/astral-sh/python-build-standalone/releases/download";
         let release_tag = build_date;
 
         Ok(format!("{}/{}/{}", base_url, release_tag, filename))

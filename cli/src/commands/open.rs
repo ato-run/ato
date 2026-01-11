@@ -1,8 +1,8 @@
 //! Open command - unified entry point for running Capsules
 //!
 //! Replaces both `dev` and `run` commands:
-//! - `capsule open` - Open in production mode (requires signed .capsule)
-//! - `capsule open --dev` - Open in development mode (auto-pack, hot reload)
+//! - `nacelle open` - (legacy) Open in production mode (requires signed .capsule)
+//! - `nacelle open --dev` - (legacy) Open in development mode (auto-pack, hot reload)
 
 use anyhow::{Context, Result};
 use nacelle::capsule_types::capsule_v1::{SourceTarget as ManifestSourceTarget, TargetsConfig};
@@ -41,7 +41,7 @@ async fn execute_dev_mode(args: OpenArgs) -> Result<()> {
     if !manifest_path.exists() {
         anyhow::bail!(
             "Manifest not found: {}\n\
-            Run 'capsule init' to create one, or specify a path with 'capsule open --dev <path>'",
+            Run 'nacelle init' to create one, or specify a path with 'nacelle open --dev <path>'",
             manifest_path.display()
         );
     }
@@ -155,8 +155,8 @@ async fn execute_dev_mode(args: OpenArgs) -> Result<()> {
     }
 
     println!("\n✅ Capsule is running in development mode.");
-    println!("   Use 'capsule logs {}' to view logs", response.capsule_id);
-    println!("   Use 'capsule close {}' to stop", response.capsule_id);
+    println!("   Use 'nacelle logs {}' to view logs", response.capsule_id);
+    println!("   Use 'nacelle close {}' to stop", response.capsule_id);
 
     Ok(())
 }
@@ -263,8 +263,8 @@ async fn execute_prod_mode(args: OpenArgs) -> Result<()> {
     }
 
     println!("\n✅ Capsule is running.");
-    println!("   Use 'capsule logs {}' to view logs", response.capsule_id);
-    println!("   Use 'capsule close {}' to stop", response.capsule_id);
+    println!("   Use 'nacelle logs {}' to view logs", response.capsule_id);
+    println!("   Use 'nacelle close {}' to stop", response.capsule_id);
 
     Ok(())
 }

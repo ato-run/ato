@@ -22,9 +22,39 @@ pub struct PackV2Args {
     pub output: Option<PathBuf>,
 }
 
+fn is_internal_mode() -> bool {
+    std::env::var_os("NACELLE_INTERNAL").is_some()
+}
+
+macro_rules! user_out {
+    ($($arg:tt)*) => {
+        if is_internal_mode() {
+            eprintln!($($arg)*);
+        } else {
+            println!($($arg)*);
+        }
+    };
+}
+
 /// Create a self-extracting bundle
 pub async fn execute(args: PackV2Args) -> Result<()> {
-    println!("📦 Building self-extracting bundle (v2.0)...");
+    user_out!("📦 Building self-extracting bundle (v2.0)...");
+
+    let output_path = build_bundle(args).await?;
+
+    user_out!("✅ Self-extracting bundle created!");
+    user_out!("Output: {}", output_path.display());
+    user_out!("Size: {} MB", fs::metadata(&output_path)?.len() / 1_048_576);
+    user_out!("\n💡 Deploy this single binary - no dependencies needed!");
+
+    Ok(())
+}
+
+/// Build a self-extracting bundle and return the output path.
+///
+/// This helper is intentionally quiet (no stdout), so it can be reused by
+/// machine-oriented interfaces like `nacelle internal pack`.
+pub async fn build_bundle(args: PackV2Args) -> Result<PathBuf> {
 
     // 1. Determine paths
     let manifest_path = args.manifest_path.canonicalize()?;
@@ -66,34 +96,34 @@ pub async fn execute(args: PackV2Args) -> Result<()> {
             path
         } else {
             // Download Python 3.11 runtime
-            println!("✓ No cached runtime found. Downloading Python 3.11...");
+            eprintln!("✓ No cached runtime found. Downloading Python 3.11...");
             let fetcher = RuntimeFetcher::new()?;
             fetcher.download_python_runtime("3.11").await?
         }
     };
 
-    println!("✓ Using runtime: {:?}", runtime_dir);
+    eprintln!("✓ Using runtime: {:?}", runtime_dir);
 
     // 3. Create archive with runtime + source
-    println!("✓ Creating bundle archive...");
+    eprintln!("✓ Creating bundle archive...");
     let archive_data = create_bundle_archive(&runtime_dir, source_dir)?;
-    println!("✓ Archive size: {} MB", archive_data.len() / 1_048_576);
+    eprintln!("✓ Archive size: {} MB", archive_data.len() / 1_048_576);
 
     // 4. Compress with Zstd (Level 19 for maximum compression)
-    println!("✓ Compressing with Zstd Level 19...");
+    eprintln!("✓ Compressing with Zstd Level 19...");
     let compressed = compress_with_zstd(&archive_data, 19)?;
-    println!("✓ Compressed size: {} MB", compressed.len() / 1_048_576);
-    println!(
+    eprintln!("✓ Compressed size: {} MB", compressed.len() / 1_048_576);
+    eprintln!(
         "  Compression ratio: {:.1}%",
         (compressed.len() as f64 / archive_data.len() as f64) * 100.0
     );
 
     // 5. Find nacelle runtime binary (not the CLI)
-    println!("✓ Creating self-extracting executable...");
+    eprintln!("✓ Creating self-extracting executable...");
 
     // Look for nacelle binary in standard locations
     let nacelle_bin = find_nacelle_binary()?;
-    println!(
+    eprintln!(
         "✓ Using nacelle binary: {:?} ({} KB)",
         nacelle_bin,
         fs::metadata(&nacelle_bin)?.len() / 1024
@@ -118,12 +148,7 @@ pub async fn execute(args: PackV2Args) -> Result<()> {
     file.write_all(BUNDLE_MAGIC)?;
     file.write_all(&(compressed.len() as u64).to_le_bytes())?;
 
-    println!("✅ Self-extracting bundle created!");
-    println!("Output: {}", output_path.display());
-    println!("Size: {} MB", fs::metadata(&output_path)?.len() / 1_048_576);
-    println!("\n💡 Deploy this single binary - no dependencies needed!");
-
-    Ok(())
+    Ok(output_path)
 }
 
 /// Create a tar archive containing runtime and source code
