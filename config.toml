@@ -2,7 +2,7 @@
 listen_addr = "0.0.0.0:50051"
 
 [wasm]
-module_path = "../wasm/adep_logic.wasm"
+module_path = "../wasm/uarc_logic.wasm"
 
 [coordinator]
 grpc_endpoint = "http://127.0.0.1:50052"

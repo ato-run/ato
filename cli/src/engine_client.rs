@@ -4,8 +4,8 @@
 //! via the onescluster.engine.v1 gRPC service.
 
 use anyhow::{Context, Result};
-use capsuled::capsule_types::capsule_v1::CapsuleManifestV1;
-use capsuled::proto::onescluster::engine::v1::{
+use nacelle::capsule_types::capsule_v1::CapsuleManifestV1;
+use nacelle::proto::onescluster::engine::v1::{
     deploy_request::Manifest as DeployManifest, engine_client::EngineClient, DeployRequest,
     DeployResponse, EngineLogEntry, GetSystemStatusRequest, LogRequest, StopRequest, StopResponse,
     SystemStatus,
@@ -103,21 +103,22 @@ impl CapsuleEngineClient {
 
     /// Deploy a capsule to the engine
     ///
-    /// Sends the manifest as JSON for Engine parsing (preserves structure for signature verification)
+    /// Sends the manifest as TOML (capsule.toml) for Engine parsing. TOML
+    /// preserves the on-disk representation and is preferred for imports.
     pub async fn deploy_capsule(
         &mut self,
         capsule_id: &str,
         manifest: &CapsuleManifestV1,
         signature: Option<&[u8]>,
     ) -> Result<DeployResponse> {
-        // Serialize manifest to JSON for Engine processing
-        // JSON preserves structure better than TOML for signature verification
-        let json_bytes =
-            serde_json::to_vec(manifest).context("Failed to serialize manifest to JSON")?;
+        // Serialize manifest to TOML for Engine processing
+        let toml_str = manifest
+            .to_toml()
+            .context("Failed to serialize manifest to TOML")?;
 
         let request = DeployRequest {
             capsule_id: capsule_id.to_string(),
-            manifest: Some(DeployManifest::AdepJson(json_bytes)),
+            manifest: Some(DeployManifest::TomlContent(toml_str)),
             oci_image: String::new(),
             digest: String::new(),
             manifest_signature: signature.map(|s| s.to_vec()).unwrap_or_default(),

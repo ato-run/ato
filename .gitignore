@@ -40,3 +40,7 @@ __pycache__/
 .DS_Store
 *.capsule
 *.sig
+
+# Ignore self-extracting bundles
+samples/*-bundle
+*.bundle

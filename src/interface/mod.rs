@@ -1,17 +1,18 @@
-//! External interfaces for the Capsuled Engine
+//! External interfaces for the Capsuled Engine (v2.0 - Simplified)
 //!
-//! This module contains all server implementations and external API surfaces:
-//! - gRPC server (Engine service)
-//! - HTTP server (health checks, metrics)
-//! - REST API server (Axum-based)
-//! - DevServer (embedded mode for capsule-cli)
-//! - Discovery (mDNS announcer for .local domain)
+//! This module contains HTTP interfaces for the Capsuled runtime:
+//! - [`dev_server`]: Development server with hot-reload support
+//! - [`http`]: HTTP health checks and metrics endpoints
+//! - [`api`]: REST API server (Axum-based)
+//! - [`discovery`]: mDNS announcer for .local domain discovery
+//!
+//! ## Usage Patterns
+//!
+//! In v2.0, capsuled operates as a CLI-driven runtime without a central daemon.
+//! Each capsule runs with its own embedded supervisor and can optionally expose
+//! HTTP endpoints for monitoring and control.
 
-pub mod api;
-pub mod dev_server;
+// pub mod api; // Disabled in v2.0: daemon architecture removed
+// pub mod dev_server; // Disabled in v2.0: daemon architecture removed
 pub mod discovery;
-pub mod grpc;
 pub mod http;
-
-// Re-export key types for convenience
-pub use dev_server::{DevServerConfig, DevServerHandle};
