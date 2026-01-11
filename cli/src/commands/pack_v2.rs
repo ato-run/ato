@@ -14,13 +14,20 @@ use std::path::{Path, PathBuf};
 use tar::Builder;
 
 /// Magic bytes to identify self-extracting bundle
-const BUNDLE_MAGIC: &[u8] = b"NACELLE_V2_BUNDLE";
+const BUNDLE_MAGIC: &[u8] = nacelle::bundle::BUNDLE_MAGIC;
 
 /// Arguments for the v2.0 pack command
 pub struct PackV2Args {
     pub manifest_path: PathBuf,
     pub runtime_path: Option<PathBuf>,
     pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct SourceTargetHint {
+    language: String,
+    version: Option<String>,
+    entrypoint: Option<String>,
 }
 
 fn is_internal_mode() -> bool {
@@ -67,11 +74,33 @@ pub async fn build_bundle(args: PackV2Args) -> Result<PathBuf> {
         .unwrap_or_else(|| source_dir.join("nacelle-bundle"));
 
     // 2. Decide whether we need to bundle a runtime.
-    // If the manifest entrypoint is a Python file (or declares python language), bundle Python.
-    // Otherwise (e.g. bun/node), do NOT bundle Python by default.
-    let manifest_entrypoint = read_manifest_entrypoint(&manifest_path)?
+    // We use targets.source.{language,version,entrypoint} when present (preferred),
+    // and fall back to legacy execution.entrypoint + heuristics.
+    let source_target_hint = read_manifest_source_target_hint(&manifest_path)?;
+    let manifest_entrypoint = read_manifest_entrypoint(&manifest_path, source_target_hint.as_ref())?
         .unwrap_or_else(|| "".to_string());
-    let needs_python = manifest_needs_python(&manifest_path, source_dir, &manifest_entrypoint)?;
+
+    let needs_python = manifest_needs_python(
+        &manifest_path,
+        source_dir,
+        &manifest_entrypoint,
+        source_target_hint.as_ref(),
+    )?;
+
+    let python_version = if needs_python {
+        source_target_hint
+            .as_ref()
+            .and_then(|h| {
+                if h.language.eq_ignore_ascii_case("python") {
+                    h.version.as_deref().and_then(normalize_python_version_hint)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "3.11".to_string())
+    } else {
+        "3.11".to_string()
+    };
 
     // 3. Find/download runtime (Python) or create an empty runtime directory.
     let mut temp_runtime_dir: Option<PathBuf> = None;
@@ -79,33 +108,11 @@ pub async fn build_bundle(args: PackV2Args) -> Result<PathBuf> {
     let runtime_dir = if let Some(runtime) = args.runtime_path {
         runtime
     } else if needs_python {
-        // Try to find cached runtime, or download if not available
-        let cache_dir = dirs::home_dir()
-            .context("Failed to get home directory")?
-            .join(".nacelle")
-            .join("toolchain");
-
-        let runtime_path = if cache_dir.exists() {
-            let entries = fs::read_dir(&cache_dir)?;
-            let mut found = None;
-            for entry in entries.flatten() {
-                if entry.file_name().to_string_lossy().starts_with("python-") {
-                    found = Some(entry.path());
-                    break;
-                }
-            }
-            found
-        } else {
-            None
-        };
-
-        if let Some(path) = runtime_path {
-            path
-        } else {
-            eprintln!("✓ No cached runtime found. Downloading Python 3.11...");
-            let fetcher = RuntimeFetcher::new()?;
-            fetcher.download_python_runtime("3.11").await?
-        }
+        // Delegate cache lookup + download behavior to RuntimeFetcher.
+        // This keeps cache location consistent across Engine/CLI.
+        eprintln!("✓ Ensuring Python {} runtime is available...", python_version);
+        let fetcher = RuntimeFetcher::new()?;
+        fetcher.download_python_runtime(&python_version).await?
     } else {
         // Non-Python workload: bundle an empty runtime directory.
         let dir = std::env::temp_dir().join(format!(
@@ -120,7 +127,14 @@ pub async fn build_bundle(args: PackV2Args) -> Result<PathBuf> {
     if needs_python {
         eprintln!("✓ Using runtime: {:?}", runtime_dir);
     } else {
-        eprintln!("✓ No runtime bundled (non-Python entrypoint: {:?})", manifest_entrypoint);
+        if let Some(hint) = &source_target_hint {
+            eprintln!(
+                "✓ No runtime bundled (targets.source.language = {}).",
+                hint.language
+            );
+        } else {
+            eprintln!("✓ No runtime bundled (non-Python entrypoint: {:?})", manifest_entrypoint);
+        }
         eprintln!(
             "ℹ️  Note: This bundle will require the entrypoint program (e.g. bun/node) to be available on the target host."
         );
@@ -178,7 +192,61 @@ pub async fn build_bundle(args: PackV2Args) -> Result<PathBuf> {
     Ok(output_path)
 }
 
-fn read_manifest_entrypoint(manifest_path: &Path) -> Result<Option<String>> {
+fn read_manifest_source_target_hint(manifest_path: &Path) -> Result<Option<SourceTargetHint>> {
+    let content = fs::read_to_string(manifest_path)
+        .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
+    let manifest: toml::Value = toml::from_str(&content)
+        .with_context(|| format!("Failed to parse manifest TOML: {}", manifest_path.display()))?;
+
+    let Some(source) = manifest
+        .get("targets")
+        .and_then(|t| t.get("source"))
+    else {
+        return Ok(None);
+    };
+
+    let language = source
+        .get("language")
+        .and_then(|l| l.as_str())
+        .map(|s| s.to_string());
+
+    let language = match language {
+        Some(l) => l,
+        None => return Ok(None),
+    };
+
+    let version = source
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let entrypoint = source
+        .get("entrypoint")
+        .and_then(|e| e.as_str())
+        .map(|s| s.to_string());
+
+    Ok(Some(SourceTargetHint {
+        language,
+        version,
+        entrypoint,
+    }))
+}
+
+fn read_manifest_entrypoint(
+    manifest_path: &Path,
+    source_target_hint: Option<&SourceTargetHint>,
+) -> Result<Option<String>> {
+    // Prefer targets.source.entrypoint when present.
+    if let Some(hint) = source_target_hint {
+        if let Some(ep) = hint.entrypoint.as_deref() {
+            let ep = ep.trim();
+            if !ep.is_empty() {
+                return Ok(Some(ep.to_string()));
+            }
+        }
+    }
+
+    // Fall back to legacy execution.entrypoint.
     let content = fs::read_to_string(manifest_path)
         .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
     let manifest: toml::Value = toml::from_str(&content)
@@ -192,26 +260,18 @@ fn read_manifest_entrypoint(manifest_path: &Path) -> Result<Option<String>> {
 }
 
 fn manifest_needs_python(
-    manifest_path: &Path,
+    _manifest_path: &Path,
     source_dir: &Path,
     entrypoint: &str,
+    source_target_hint: Option<&SourceTargetHint>,
 ) -> Result<bool> {
-    let content = fs::read_to_string(manifest_path)
-        .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
-    let manifest: toml::Value = toml::from_str(&content)
-        .with_context(|| format!("Failed to parse manifest TOML: {}", manifest_path.display()))?;
-
-    // Canonical hint: targets.source.language == "python"
-    let declared_python = manifest
-        .get("targets")
-        .and_then(|t| t.get("source"))
-        .and_then(|s| s.get("language"))
-        .and_then(|l| l.as_str())
-        .map(|l| l.eq_ignore_ascii_case("python"))
-        .unwrap_or(false);
-
-    if declared_python {
-        return Ok(true);
+    // Canonical hint: targets.source.language is authoritative for bundling decisions.
+    if let Some(hint) = source_target_hint {
+        if hint.language.eq_ignore_ascii_case("python") {
+            return Ok(true);
+        }
+        // Explicitly non-python: do not bundle python even if heuristics would.
+        return Ok(false);
     }
 
     let ep = entrypoint.trim();
@@ -238,6 +298,31 @@ fn manifest_needs_python(
     }
 
     Ok(false)
+}
+
+fn normalize_python_version_hint(version: &str) -> Option<String> {
+    let mut v = version.trim();
+    for prefix in ["^", ">=", "==", "=", "~="] {
+        if let Some(rest) = v.strip_prefix(prefix) {
+            v = rest.trim();
+            break;
+        }
+    }
+
+    let mut out = String::new();
+    for ch in v.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            out.push(ch);
+        } else {
+            break;
+        }
+    }
+
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 fn load_capsuleignore(source_dir: &Path) -> Result<Option<Gitignore>> {
