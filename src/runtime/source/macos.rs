@@ -159,6 +159,20 @@ async fn launch_with_alcoholless(
     })?));
     cmd.stderr(Stdio::from(log_file));
 
+    // Socket Activation (Phase 2): Pass listening socket FD to child process
+    if let Some(ref socket_manager) = request.socket_manager {
+        socket_manager
+            .prepare_command(&mut cmd)
+            .map_err(|e| RuntimeError::CommandExecution {
+                operation: "socket_activation_prepare".to_string(),
+                source: std::io::Error::other(e.to_string()),
+            })?;
+        info!(
+            "Socket Activation: Passing FD {} to child process",
+            crate::engine::socket::SD_LISTEN_FDS_START
+        );
+    }
+
     debug!("Executing alcless command: {:?}", cmd);
 
     // Spawn the process
@@ -339,6 +353,20 @@ async fn launch_with_sandbox_exec(
         }
     })?));
     cmd.stderr(Stdio::from(log_file));
+
+    // Socket Activation (Phase 2): Pass listening socket FD to child process
+    if let Some(ref socket_manager) = request.socket_manager {
+        socket_manager
+            .prepare_command(&mut cmd)
+            .map_err(|e| RuntimeError::CommandExecution {
+                operation: "socket_activation_prepare".to_string(),
+                source: std::io::Error::other(e.to_string()),
+            })?;
+        info!(
+            "Socket Activation: Passing FD {} to child process",
+            crate::engine::socket::SD_LISTEN_FDS_START
+        );
+    }
 
     debug!("Executing sandbox-exec command: {:?}", cmd);
 

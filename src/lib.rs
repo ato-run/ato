@@ -1,19 +1,19 @@
-//! Capsuled - UARC-compliant Capsule execution engine
+//! Nacelle - Unified Runtime for Capsules
 //!
-//! This crate provides the core Engine functionality for running Capsules.
-//! It can be used as a library (embedded mode) or as a standalone server.
+//! This crate provides the core Runtime functionality for executing Capsules.
+//! It can be used as a library (embedded mode) or as a standalone executable.
 //!
-//! ## Module Structure (UARC V1.1.0 Aligned)
+//! ## Module Structure (v2.0 Simplified)
 //!
 //! - `common/` - Shared utilities (auth, config, failure_codes)
-//! - `engine/` - Capsule execution core (manager, supervisor, pool)
-//! - `interface/` - External APIs (gRPC, HTTP, REST, DevServer)
+//! - `engine/` - Execution core (supervisor, socket activation)
+//! - `interface/` - External APIs (HTTP, discovery)
 //! - `observability/` - L5 Observability (audit, job_history, logs, metrics)
 //! - `resource/` - Resource management (artifact, cas, storage, oci)
-//! - `runtime/` - Execution runtimes (Wasm, Source, OCI)
+//! - `runtime/` - Execution runtimes (Source, JIT provisioning)
 //! - `schema/` - Cap'n Proto schema and conversion
 //! - `system/` - System-level (hardware, network)
-//! - `verification/` - UARC verification layers (L1-L4)
+//! - `verification/` - Security layers (sandbox, verification)
 //! - `workload/` - Workload definitions (manifest, runplan)
 //!
 //! ## Feature Flags
@@ -21,19 +21,15 @@
 //! - `wasm` - WebAssembly runtime support (cross-platform, default)
 //! - `oci` - OCI container runtime support (Linux only)
 //!
-//! ## Embedded Usage (capsule-cli)
+//! ## CLI Usage
 //!
 //! ```ignore
-//! use capsuled::dev_server::{DevServerConfig, DevServerHandle};
-//!
-//! let config = DevServerConfig::default();
-//! let handle = DevServerHandle::start(config).await?;
-//! // ... use handle.endpoint() to connect
-//! handle.shutdown().await;
+//! nacelle pack --bundle
+//! ./my-app-bundle
 //! ```
 
 // =============================================================================
-// Primary Modules (UARC V1.1.0 Architecture)
+// Primary Modules (v2.0 Simplified Architecture)
 // =============================================================================
 
 pub mod capsule_types; // Capsule type definitions (extracted from capsule-core)
@@ -47,7 +43,6 @@ pub mod runtime;
 pub mod schema;
 pub mod system;
 pub mod verification;
-pub mod wasm_host;
 pub mod workload;
 
 // =============================================================================
@@ -59,10 +54,9 @@ pub use common::auth;
 pub use common::config;
 pub use common::failure_codes;
 
-// From interface
-pub use interface::api as api_server;
-pub use interface::dev_server;
-pub use interface::grpc as grpc_server;
+// From interface (v2.0: gRPC/API removed, daemon removed)
+// pub use interface::api as api_server; // Disabled in v2.0
+// pub use interface::dev_server; // Disabled in v2.0
 pub use interface::http as http_server;
 
 // From schema
@@ -70,8 +64,7 @@ pub use interface::http as http_server;
 pub use schema::capnp as capsule_capnp;
 pub use schema::converter as capnp_to_manifest;
 
-// From engine
-pub use engine::manager as capsule_manager;
+// From engine (v2.0: manager removed, supervisor-based)
 // pub use engine::pool as pool_registry; // Disabled: capsule_runtime dependency removed
 pub use engine::supervisor as process_supervisor;
 
@@ -99,8 +92,5 @@ pub use workload::manifest;
 pub use workload::runplan;
 
 // =============================================================================
-// Public API
+// Public API (v2.0: DevServer disabled, daemon architecture removed)
 // =============================================================================
-
-// Re-export key types for embedded usage
-pub use interface::dev_server::{DevServerConfig, DevServerHandle};

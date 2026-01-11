@@ -130,8 +130,20 @@ pub struct ResourceInfo {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ValidateRequest {
-    #[prost(bytes = "vec", tag = "1")]
-    pub adep_json: ::prost::alloc::vec::Vec<u8>,
+    #[prost(oneof = "validate_request::Manifest", tags = "1, 2")]
+    pub manifest: ::core::option::Option<validate_request::Manifest>,
+}
+/// Nested message and enum types in `ValidateRequest`.
+pub mod validate_request {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Manifest {
+        /// Legacy JSON support (deprecated)
+        #[prost(bytes, tag = "1")]
+        AdepJson(::prost::alloc::vec::Vec<u8>),
+        /// Cap'n Proto SSOT manifest (preferred)
+        #[prost(bytes, tag = "2")]
+        CapnpManifest(::prost::alloc::vec::Vec<u8>),
+    }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ValidationResult {

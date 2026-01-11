@@ -11,7 +11,7 @@ pub struct ResourceRequirements {
     pub gpu_memory_bytes: Option<u64>,
 }
 
-/// Parse a manifest that may be either JSON (adep) or TOML (capsule.toml).
+/// Parse a manifest that may be either JSON (legacy) or TOML (capsule.toml).
 pub fn load_manifest_str(
     path: Option<&Path>,
     text: &str,
@@ -39,7 +39,7 @@ pub fn load_manifest_str(
 }
 
 fn load_toml_manifest(text: &str) -> Result<(CapsuleManifestV1, Option<ResourceRequirements>)> {
-    // Use libadep conversion
+    // Use legacy conversion (TOML parser)
     let manifest =
         CapsuleManifestV1::from_toml(text).map_err(|e| anyhow!("failed to parse TOML: {}", e))?;
 
@@ -58,7 +58,7 @@ fn extract_requirements(manifest: &CapsuleManifestV1) -> ResourceRequirements {
     // CPU/Memory checks if they exist in requirements?
     // CapsuleRequirements has: vram_min, vram_recommended, platform.
     // Doesn't seem to have explicit CPU/RAM requirements yet in V1 spec?
-    // Checking libadep/core/src/capsule_v1.rs...
+    // Checking legacy core implementation `capsule_v1.rs`...
     // It has `vram_min`.
     // Maybe in metadata or assumed default?
     // Engine ResourceRequirements struct has cpu/memory.
