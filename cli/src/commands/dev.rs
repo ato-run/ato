@@ -73,6 +73,16 @@ macro_rules! human_out {
     };
 }
 
+fn env_truthy(key: &str) -> bool {
+    match std::env::var(key) {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
 async fn run_and_wait(args: RunDevArgs) -> Result<RunDevOutcome> {
     let manifest_path = args
         .manifest_path
@@ -139,22 +149,57 @@ async fn run_and_wait(args: RunDevArgs) -> Result<RunDevOutcome> {
     {
         cmd.process_group(0);
 
-        let sandbox_policy = SandboxPolicy::for_capsule(&source_dir);
-        let policy_clone = sandbox_policy.clone();
-        unsafe {
-            cmd.pre_exec(move || {
-                match nacelle::verification::sandbox::apply_sandbox(&policy_clone) {
-                    Ok(_result) => Ok(()),
-                    Err(e) => {
-                        // In dev, prefer continuing rather than hard-failing.
-                        eprintln!("⚠️  Sandbox error (continuing): {}", e);
-                        Ok(())
-                    }
-                }
-            });
-        }
+        // User-configurable disable switch for dev.
+        // (We keep sandbox best-effort by default, but allow explicit opt-out.)
+        let sandbox_disabled = env_truthy("NACELLE_DISABLE_SANDBOX");
 
-        human_out!(args.interactive, "🔒 Sandbox: Enabled (policy rooted at {})", source_dir.display());
+        if sandbox_disabled {
+            human_out!(
+                args.interactive,
+                "⚠️  Sandbox: Disabled (User Config: NACELLE_DISABLE_SANDBOX=1)"
+            );
+        } else {
+            let sandbox_policy = SandboxPolicy::for_capsule(&source_dir);
+            let policy_clone = sandbox_policy.clone();
+            let policy_root = source_dir.display().to_string();
+
+            unsafe {
+                cmd.pre_exec(move || {
+                    match nacelle::verification::sandbox::apply_sandbox(&policy_clone) {
+                        Ok(result) => {
+                            if result.fully_enforced {
+                                eprintln!(
+                                    "🔒 Sandbox: Enabled (policy rooted at {})",
+                                    policy_root
+                                );
+                            } else if result.partially_enforced {
+                                eprintln!(
+                                    "🔒 Sandbox: Enabled (partial; policy rooted at {}) — {}",
+                                    policy_root,
+                                    result.message
+                                );
+                            } else {
+                                // Not enforced means we're effectively running unsandboxed.
+                                eprintln!(
+                                    "💔 Sandbox: Failed to initialize (Run implicitly unsafe) — {}",
+                                    result.message
+                                );
+                            }
+
+                            Ok(())
+                        }
+                        Err(e) => {
+                            // In dev, prefer continuing rather than hard-failing.
+                            eprintln!(
+                                "💔 Sandbox: Failed to initialize (Run implicitly unsafe) — {}",
+                                e
+                            );
+                            Ok(())
+                        }
+                    }
+                });
+            }
+        }
     }
 
     human_out!(args.interactive, "🌐 Listening port: {}", effective_port);
@@ -274,11 +319,20 @@ async fn build_command(
         .and_then(|t| t.source.as_ref())
         .map(|s| s.language.to_ascii_lowercase());
 
+    let entrypoint = entrypoint.trim();
+
+    // Some manifests (e.g. older `capsule init` output) encode entrypoint as a full command
+    // string like `sh -c '...'`. In that case, executing `<source_dir>/<entrypoint>` will
+    // fail with ENOENT. Detect and construct the process properly.
+    let looks_like_command = entrypoint.contains(' ') || entrypoint.contains('\t');
+
     let entrypoint_path = source_dir.join(entrypoint);
 
     // Keep this minimal: support Python source capsules first (matches existing sample).
     // If not source/python, try to exec the entrypoint directly.
-    let mut cmd = if matches!(language.as_deref(), Some("python")) {
+    let mut cmd = if !matches!(language.as_deref(), Some("python")) && looks_like_command {
+        build_command_from_entrypoint_string(source_dir, entrypoint)?
+    } else if matches!(language.as_deref(), Some("python")) {
         let python = match which::which("python3").or_else(|_| which::which("python")) {
             Ok(p) => p,
             Err(_) => {
@@ -317,6 +371,45 @@ async fn build_command(
     }
 
     Ok(cmd)
+}
+
+fn build_command_from_entrypoint_string(source_dir: &Path, entrypoint: &str) -> Result<Command> {
+    let ep = entrypoint.trim();
+
+    // Explicit shell form.
+    for shell in ["sh", "/bin/sh", "bash", "/bin/bash"] {
+        let prefix = format!("{} -c ", shell);
+        if let Some(rest) = ep.strip_prefix(&prefix) {
+            let mut c = Command::new(shell);
+            c.arg("-c").arg(rest.trim());
+            c.current_dir(source_dir);
+            return Ok(c);
+        }
+    }
+
+    // Fallback: minimal argv splitting (no quote handling). Prefer absolute/relative paths.
+    let mut parts = ep.split_whitespace();
+    let program = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("entrypoint is empty"))?;
+
+    let program_path = if program.contains('/') {
+        let p = PathBuf::from(program);
+        if p.is_absolute() {
+            p
+        } else {
+            source_dir.join(p)
+        }
+    } else {
+        PathBuf::from(program)
+    };
+
+    let mut c = Command::new(program_path);
+    for arg in parts {
+        c.arg(arg);
+    }
+    c.current_dir(source_dir);
+    Ok(c)
 }
 
 #[cfg(unix)]
