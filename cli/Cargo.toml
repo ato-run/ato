@@ -49,6 +49,9 @@ ignore = "0.4"  # .gitignore support
 walkdir = "2.4"
 which = "6.0"
 
+# Command parsing (handles quotes properly)
+shell-words = "1.1.1"
+
 # Archive support
 tar = "0.4"
 flate2 = "1.0"  # gzip compression
