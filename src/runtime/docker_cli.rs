@@ -123,20 +123,27 @@ impl Runtime for DockerCliRuntime {
                     );
                 }
 
-                // Canonical env map: execution.env.PORT (container port) / execution.env.HOST_PORT (host publish port)
-                if let Some(p) = manifest
-                    .get("execution")
-                    .and_then(|e| e.get("env"))
-                    .and_then(|env| env.get("PORT"))
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<u16>().ok())
+                // Get container port from docker.ports array (prefer this over env PORT)
+                if let Some(ports) = manifest
+                    .get("docker")
+                    .and_then(|d| d.get("ports"))
+                    .and_then(|p| p.as_array())
                 {
-                    container_port = p;
-                    info!(
-                        "[DockerCliRuntime] Got container PORT={} from canonical manifest env",
-                        p
-                    );
+                    if let Some(first_port) = ports.first() {
+                        if let Some(cp) = first_port.get("containerPort").and_then(|v| v.as_u64()) {
+                            container_port = cp as u16;
+                            info!(
+                                "[DockerCliRuntime] Got container port={} from docker.ports",
+                                container_port
+                            );
+                        }
+                    }
                 }
+
+                // NOTE: We skip using execution.env.PORT as container port since it is
+                // intended to tell the app what port to listen on, not the actual exposed port.
+                // For images like code-server, the app ignores PORT and uses its own config.
+                // Instead, we will auto-detect from Docker image EXPOSE if container_port is still 80.
 
                 if host_port == 0 {
                     if let Some(p) = manifest
@@ -196,6 +203,46 @@ impl Runtime for DockerCliRuntime {
             return Err(RuntimeError::InvalidConfig(
                 "No Docker image specified in manifest".to_string(),
             ));
+        }
+
+        // If container_port is still default (80), try to detect from Docker image's EXPOSED ports
+        if container_port == 80 && !image.is_empty() {
+            if let Ok(output) = std::process::Command::new("docker")
+                .args([
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{json .Config.ExposedPorts}}",
+                    &image,
+                ])
+                .output()
+            {
+                if output.status.success() {
+                    let exposed_json = String::from_utf8_lossy(&output.stdout);
+                    // Parse JSON like {"8080/tcp":{}}
+                    if let Ok(exposed) =
+                        serde_json::from_str::<serde_json::Value>(exposed_json.trim())
+                    {
+                        if let Some(obj) = exposed.as_object() {
+                            for key in obj.keys() {
+                                // key format: "8080/tcp"
+                                if let Some(port_str) = key.split('/').next() {
+                                    if let Ok(p) = port_str.parse::<u16>() {
+                                        if p != 80 {
+                                            container_port = p;
+                                            info!(
+                                                "[DockerCliRuntime] Auto-detected container port={} from image EXPOSE",
+                                                container_port
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         if host_port == 0 {

@@ -1,17 +1,17 @@
 [package]
-name = "capsule-cli"
+name = "nacelle-cli"
 version = "0.1.0"
 edition = "2021"
-description = "Capsule CLI - UARC V1.1.0 Compliant Command Line Tool"
+description = "Nacelle CLI - Unified Runtime for Capsules"
 license = "Apache-2.0"
 
 [[bin]]
-name = "capsule"
+name = "nacelle"
 path = "src/main.rs"
 
 [dependencies]
 # Core library - use library feature only (no engine dependencies)
-capsuled = { path = "..", default-features = false, features = ["library"] }
+nacelle = { path = "..", default-features = false, features = ["library"] }
 
 # CLI framework
 clap = { version = "4.0", features = ["derive"] }
@@ -52,3 +52,8 @@ which = "6.0"
 # Archive support
 tar = "0.4"
 flate2 = "1.0"  # gzip compression
+zstd = "0.13"   # v2.0 compression
+
+# Socket Activation (Phase 2)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
