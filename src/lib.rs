@@ -33,6 +33,7 @@
 // =============================================================================
 
 pub mod capsule_types; // Capsule type definitions (extracted from capsule-core)
+pub mod bundle;
 pub mod common;
 pub mod engine;
 pub mod interface;

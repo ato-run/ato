@@ -134,11 +134,11 @@ impl SourceRuntime {
         let has_jit_cached = self
             .runtime_fetcher
             .as_ref()
-            .map(|f| {
-                f.is_cached(
-                    &target.language,
-                    target.version.as_deref().unwrap_or("3.11"),
-                )
+            .and_then(|f| {
+                target
+                    .version
+                    .as_deref()
+                    .map(|v| f.is_cached(&target.language, v))
             })
             .unwrap_or(false);
 
@@ -191,10 +191,9 @@ impl SourceRuntime {
 
         // Try JIT provisioning
         if let Some(ref fetcher) = self.runtime_fetcher {
-            let version = target.version.as_deref().unwrap_or("3.11");
-
             match target.language.to_lowercase().as_str() {
                 "python" => {
+                    let version = target.version.as_deref().unwrap_or("3.11");
                     info!(
                         "JIT Provisioning: Ensuring Python {} is available...",
                         version
@@ -208,11 +207,53 @@ impl SourceRuntime {
                     return Ok(python_path);
                 }
                 "node" | "nodejs" => {
-                    // TODO: Implement Node.js JIT provisioning
-                    return Err(RuntimeError::ToolchainNotFound {
-                        language: target.language.clone(),
-                        version: Some("JIT provisioning not yet implemented".to_string()),
-                    });
+                    let version = target.version.as_deref().unwrap_or("22");
+                    info!("JIT Provisioning: Ensuring Node {} is available...", version);
+                    let node_path = fetcher.ensure_node(version).await.map_err(|e| {
+                        RuntimeError::ToolchainNotFound {
+                            language: target.language.clone(),
+                            version: Some(format!("{} (JIT failed: {})", version, e)),
+                        }
+                    })?;
+                    return Ok(node_path);
+                }
+                "deno" => {
+                    let version = match target.version.as_deref() {
+                        Some(v) => v,
+                        None => {
+                            return Err(RuntimeError::ToolchainNotFound {
+                                language: target.language.clone(),
+                                version: Some("Deno version is required for JIT provisioning".to_string()),
+                            });
+                        }
+                    };
+                    info!("JIT Provisioning: Ensuring Deno {} is available...", version);
+                    let deno_path = fetcher.ensure_deno(version).await.map_err(|e| {
+                        RuntimeError::ToolchainNotFound {
+                            language: target.language.clone(),
+                            version: Some(format!("{} (JIT failed: {})", version, e)),
+                        }
+                    })?;
+                    return Ok(deno_path);
+                }
+                "bun" => {
+                    let version = match target.version.as_deref() {
+                        Some(v) => v,
+                        None => {
+                            return Err(RuntimeError::ToolchainNotFound {
+                                language: target.language.clone(),
+                                version: Some("Bun version is required for JIT provisioning".to_string()),
+                            });
+                        }
+                    };
+                    info!("JIT Provisioning: Ensuring Bun {} is available...", version);
+                    let bun_path = fetcher.ensure_bun(version).await.map_err(|e| {
+                        RuntimeError::ToolchainNotFound {
+                            language: target.language.clone(),
+                            version: Some(format!("{} (JIT failed: {})", version, e)),
+                        }
+                    })?;
+                    return Ok(bun_path);
                 }
                 _ => {
                     return Err(RuntimeError::ToolchainNotFound {

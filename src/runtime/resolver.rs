@@ -144,6 +144,9 @@ pub struct ResolveContext {
 
     /// Available toolchains on the host (for source targets)
     pub available_toolchains: HashSet<String>,
+
+    /// Toolchains that can be provided via JIT provisioning (engine-managed runtimes)
+    pub jit_toolchains: HashSet<String>,
 }
 
 impl ResolveContext {
@@ -158,6 +161,13 @@ impl ResolveContext {
         toolchains.insert("python".to_string());
         toolchains.insert("node".to_string());
 
+        // JIT-provisionable runtimes (Phase 1)
+        let mut jit_toolchains = HashSet::new();
+        jit_toolchains.insert("python".to_string());
+        jit_toolchains.insert("node".to_string());
+        jit_toolchains.insert("deno".to_string());
+        jit_toolchains.insert("bun".to_string());
+
         Self {
             platform: detect_current_platform(),
             supported_runtimes: supported,
@@ -165,6 +175,7 @@ impl ResolveContext {
             docker_available: true,
             gpu_available: false,
             available_toolchains: toolchains,
+            jit_toolchains,
         }
     }
 
@@ -172,9 +183,15 @@ impl ResolveContext {
     pub fn has_toolchain(&self, language: &str) -> bool {
         let normalized = language.to_lowercase();
         self.available_toolchains.contains(&normalized)
+            || self.jit_toolchains.contains(&normalized)
             || match normalized.as_str() {
-                "python3" => self.available_toolchains.contains("python"),
-                "nodejs" => self.available_toolchains.contains("node"),
+                "python3" => {
+                    self.available_toolchains.contains("python")
+                        || self.jit_toolchains.contains("python")
+                }
+                "nodejs" => {
+                    self.available_toolchains.contains("node") || self.jit_toolchains.contains("node")
+                }
                 _ => false,
             }
     }

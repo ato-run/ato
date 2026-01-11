@@ -26,19 +26,7 @@ async fn main() -> anyhow::Result<()> {
 /// v2.0: Check if this binary contains an embedded bundle
 fn is_self_extracting_bundle() -> anyhow::Result<bool> {
     let exe_path = std::env::current_exe()?;
-    let file_data = std::fs::read(&exe_path)?;
-
-    let len = file_data.len();
-    let magic = b"NACELLE_V2_BUNDLE";
-
-    if len < magic.len() + 8 {
-        return Ok(false);
-    }
-
-    let magic_start = len - magic.len() - 8;
-    let found_magic = &file_data[magic_start..magic_start + magic.len()];
-
-    Ok(found_magic == magic)
+    nacelle::bundle::is_self_extracting_bundle(&exe_path)
 }
 
 /// v2.0: Bootstrap and run embedded runtime
@@ -55,24 +43,7 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     println!("📦 Extracting to {:?}...", temp_dir);
 
     let exe_path = std::env::current_exe()?;
-    let file_data = std::fs::read(&exe_path)?;
-
-    // Parse bundle
-    let len = file_data.len();
-    let magic = b"NACELLE_V2_BUNDLE";
-    let magic_start = len - magic.len() - 8;
-    let size_bytes = &file_data[len - 8..len];
-    let bundle_size = u64::from_le_bytes(size_bytes.try_into()?) as usize;
-    let bundle_start = magic_start - bundle_size;
-    let compressed = &file_data[bundle_start..magic_start];
-
-    // Decompress
-    let decompressed = zstd::decode_all(compressed)?;
-
-    // Extract tar
-    use tar::Archive;
-    let mut archive = Archive::new(decompressed.as_slice());
-    archive.unpack(&temp_dir)?;
+    nacelle::bundle::extract_bundle_to_dir(&exe_path, &temp_dir)?;
 
     // Find entrypoint in source/
     let source_dir = temp_dir.join("source");
@@ -84,23 +55,21 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
         anyhow::bail!("No capsule.toml found in bundle");
     }
 
+    let entrypoint = nacelle::bundle::read_entrypoint_from_manifest(&manifest_path)?;
+
     let manifest_content = std::fs::read_to_string(&manifest_path)?;
     let manifest: toml::Value = toml::from_str(&manifest_content)?;
 
-    // Bundle execution prefers a release profile if present.
-    let entrypoint = manifest
-        .get("execution")
-        .and_then(|e| {
-            e.get("release")
-                .and_then(|p| p.get("entrypoint"))
-                .or_else(|| e.get("entrypoint"))
-        })
-        .and_then(|e| e.as_str())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("No entrypoint defined in capsule.toml"))?;
+    let targets_source_language_is_python = manifest
+        .get("targets")
+        .and_then(|t| t.get("source"))
+        .and_then(|s| s.get("language"))
+        .and_then(|l| l.as_str())
+        .map(|l| l.eq_ignore_ascii_case("python") || l.eq_ignore_ascii_case("python3"))
+        .unwrap_or(false);
 
-    let enable_socket_activation = looks_like_python_file(entrypoint, &source_dir);
+    let enable_socket_activation =
+        targets_source_language_is_python || looks_like_python_file(&entrypoint, &source_dir);
 
     // Resolve port: env (CAPSULE_PORT, PORT) > capsule.toml (execution.port) > default
     let port = std::env::var("CAPSULE_PORT")
@@ -149,7 +118,7 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     let supervisor = ProcessSupervisor::new();
 
     // Prepare command with Socket Activation
-    let mut cmd = build_bundle_command(entrypoint, &source_dir, &runtime_dir)?;
+    let mut cmd = nacelle::bundle::build_bundle_command(&entrypoint, &source_dir, &runtime_dir)?;
 
     // Provide a consistent port signal to the child.
     cmd.env("PORT", port.to_string());
@@ -274,73 +243,4 @@ fn looks_like_python_file(entrypoint: &str, source_dir: &PathBuf) -> bool {
             .unwrap_or(false)
 }
 
-fn resolve_program(program: &str, source_dir: &PathBuf) -> String {
-    if program.starts_with("./") || program.starts_with("../") || program.contains('/') {
-        let candidate = source_dir.join(program);
-        if candidate.exists() {
-            return candidate.to_string_lossy().to_string();
-        }
-    }
-    program.to_string()
-}
-
-fn build_bundle_command(
-    entrypoint: &str,
-    source_dir: &PathBuf,
-    runtime_dir: &PathBuf,
-) -> anyhow::Result<std::process::Command> {
-    if looks_like_python_file(entrypoint, source_dir) {
-        let python_bin = find_python_binary(runtime_dir)?;
-        println!("🐍 Found Python: {:?}", python_bin);
-        let entrypoint_path = source_dir.join(entrypoint);
-        println!("📄 Running: {:?}", entrypoint_path);
-
-        let mut cmd = std::process::Command::new(&python_bin);
-        cmd.arg(&entrypoint_path);
-        cmd.current_dir(source_dir);
-        cmd.env("PYTHONHOME", runtime_dir.join("python"));
-        cmd.env("PYTHONPATH", source_dir);
-        return Ok(cmd);
-    }
-
-    let parts = shell_words::split(entrypoint).unwrap_or_else(|_| vec![entrypoint.to_string()]);
-    let program = parts
-        .first()
-        .map(|s| s.as_str())
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("No entrypoint defined in capsule.toml"))?;
-
-    let resolved_program = resolve_program(program, source_dir);
-    println!("📄 Running: {}", entrypoint);
-
-    let mut cmd = std::process::Command::new(resolved_program);
-    if parts.len() > 1 {
-        cmd.args(&parts[1..]);
-    }
-    cmd.current_dir(source_dir);
-    Ok(cmd)
-}
-
-/// Find Python binary in extracted runtime
-fn find_python_binary(runtime_dir: &PathBuf) -> anyhow::Result<PathBuf> {
-    // Look for python3 or python binary
-    for entry in std::fs::read_dir(runtime_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.is_dir() {
-            // Check in bin/ subdirectory
-            let bin_dir = path.join("bin");
-            if bin_dir.exists() {
-                for name in &["python3", "python"] {
-                    let python_path = bin_dir.join(name);
-                    if python_path.exists() {
-                        return Ok(python_path);
-                    }
-                }
-            }
-        }
-    }
-
-    anyhow::bail!("Python binary not found in runtime directory")
-}
+// NOTE: Command-building and extraction helpers live in `nacelle::bundle` for reuse/testability.
