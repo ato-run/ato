@@ -148,7 +148,7 @@ pub fn execute(args: PackArgs) -> Result<()> {
     if let Some(key_path) = args.key {
         sign_capsule(&result.manifest, &key_path, &output_path)?;
     } else {
-        println!("\n💡 Tip: Use 'capsule pack --key <path>' to sign");
+        println!("\n💡 Tip: Use 'nacelle pack --key <path>' to sign");
     }
 
     Ok(())

