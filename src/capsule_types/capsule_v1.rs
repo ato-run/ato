@@ -157,6 +157,41 @@ pub struct TransparencyConfig {
     pub allowed_binaries: Vec<String>,
 }
 
+/// Build configuration (packaging-time behavior)
+///
+/// These settings affect how capsules are packaged (e.g. bundle/source archive).
+/// They do not change runtime behavior directly.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BuildConfig {
+    /// Glob patterns to exclude from packaged artifacts.
+    ///
+    /// Typical uses:
+    /// - Exclude large ML libraries (torch, jaxlib, etc.) for "Thin Capsule on Fat Container"
+    /// - Exclude host-provided dynamic libs when using passthrough
+    #[serde(default)]
+    pub exclude_libs: Vec<String>,
+
+    /// Sugar syntax: GPU-oriented packaging defaults.
+    ///
+    /// When true, tooling may apply recommended defaults (e.g. docker scaffold template
+    /// and optional exclude patterns) but should remain opt-in.
+    #[serde(default)]
+    pub gpu: bool,
+}
+
+/// Isolation configuration (runtime-time behavior)
+///
+/// This section controls what host environment data is allowed to pass into the
+/// capsule at runtime. This is a security-sensitive opt-in.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IsolationConfig {
+    /// Host environment variables to pass through.
+    ///
+    /// Examples: ["LD_LIBRARY_PATH", "CUDA_HOME", "HF_TOKEN"].
+    #[serde(default)]
+    pub allow_env: Vec<String>,
+}
+
 /// Capsule Manifest v1.0
 ///
 /// The primary configuration format for all Capsules in Gumball v0.3.0+
@@ -213,6 +248,14 @@ pub struct CapsuleManifestV1 {
     /// Pre-warmed container pool configuration
     #[serde(default)]
     pub pool: Option<PoolConfig>,
+
+    /// Build configuration (packaging-time)
+    #[serde(default)]
+    pub build: Option<BuildConfig>,
+
+    /// Isolation configuration (runtime-time)
+    #[serde(default)]
+    pub isolation: Option<IsolationConfig>,
 
     /// Multi-target execution configuration (UARC V1.1.0)
     ///
@@ -1071,6 +1114,26 @@ quantization = "4bit"
 
         assert_eq!(manifest.name, manifest2.name);
         assert_eq!(manifest.version, manifest2.version);
+    }
+
+    #[test]
+    fn test_parse_build_and_isolation_sections() {
+        let toml = format!(
+            "{}\n\n[build]\nexclude_libs = [\"**/site-packages/torch/**\"]\ngpu = true\n\n[isolation]\nallow_env = [\"LD_LIBRARY_PATH\", \"HF_TOKEN\"]\n",
+            VALID_TOML
+        );
+
+        let manifest = CapsuleManifestV1::from_toml(&toml).unwrap();
+
+        let build = manifest.build.as_ref().expect("build section should exist");
+        assert!(build.gpu);
+        assert_eq!(build.exclude_libs, vec!["**/site-packages/torch/**"]);
+
+        let isolation = manifest
+            .isolation
+            .as_ref()
+            .expect("isolation section should exist");
+        assert_eq!(isolation.allow_env, vec!["LD_LIBRARY_PATH", "HF_TOKEN"]);
     }
 
     #[test]

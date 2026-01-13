@@ -497,6 +497,8 @@ mod tests {
             model: None,
             transparency: None,
             pool: None,
+            build: None,
+            isolation: None,
             targets: Some(TargetsConfig {
                 preference: vec!["wasm".to_string(), "oci".to_string()],
                 source_digest: None,
@@ -546,6 +548,8 @@ mod tests {
             model: None,
             transparency: None,
             pool: None,
+            build: None,
+            isolation: None,
             targets: None, // No targets = legacy mode
         }
     }
