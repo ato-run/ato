@@ -17,16 +17,22 @@
 //! }
 //! ```
 
+mod verifier;
+
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
-use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
+
+pub use verifier::{ArtifactVerifier, ChecksumVerifier};
 
 /// Information about an installed toolchain
 #[derive(Debug, Clone)]
@@ -300,6 +306,18 @@ impl Default for ToolchainManager {
 /// JIT Fetcher for downloading and caching runtimes on-demand
 pub struct RuntimeFetcher {
     cache_dir: PathBuf,
+    verifier: Arc<dyn ArtifactVerifier>,
+    fetchers: HashMap<&'static str, Box<dyn fetcher::ToolchainFetcher>>,
+}
+
+struct RuntimeInstallLock {
+    file: File,
+}
+
+impl Drop for RuntimeInstallLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
 }
 
 fn is_internal_mode() -> bool {
@@ -308,13 +326,15 @@ fn is_internal_mode() -> bool {
 
 macro_rules! toolchain_out {
     ($($arg:tt)*) => {{
-        if is_internal_mode() {
+        if $crate::runtime::source::toolchain::is_internal_mode() {
             eprintln!($($arg)*);
         } else {
             println!($($arg)*);
         }
     }};
 }
+
+mod fetcher;
 
 impl RuntimeFetcher {
     /// Create a new RuntimeFetcher with the default cache directory
@@ -323,7 +343,128 @@ impl RuntimeFetcher {
 
         fs::create_dir_all(&cache_dir).context("Failed to create toolchain cache directory")?;
 
-        Ok(Self { cache_dir })
+        Ok(Self {
+            cache_dir,
+            verifier: Arc::new(ChecksumVerifier::default()),
+            fetchers: fetcher::default_fetchers(),
+        })
+    }
+
+    /// Create a RuntimeFetcher with a custom verifier.
+    /// Useful for tests and for swapping in signature-capable verifiers.
+    pub fn new_with_verifier(verifier: Arc<dyn ArtifactVerifier>) -> Result<Self> {
+        let cache_dir = crate::common::paths::toolchain_cache_dir()?;
+
+        fs::create_dir_all(&cache_dir).context("Failed to create toolchain cache directory")?;
+
+        Ok(Self {
+            cache_dir,
+            verifier,
+            fetchers: fetcher::default_fetchers(),
+        })
+    }
+
+    fn canonical_fetcher_key(language: &str) -> Option<&'static str> {
+        match language.to_lowercase().as_str() {
+            "python" => Some("python"),
+            "node" | "nodejs" => Some("node"),
+            "deno" => Some("deno"),
+            "bun" => Some("bun"),
+            _ => None,
+        }
+    }
+
+    async fn download_runtime_with_progress(
+        &self,
+        language: &str,
+        version: &str,
+        show_progress: bool,
+    ) -> Result<PathBuf> {
+        let key = Self::canonical_fetcher_key(language)
+            .with_context(|| format!("Unsupported runtime language: {}", language))?;
+
+        let runtime_dir = self.get_runtime_path(key, version);
+        if runtime_dir.exists() {
+            return Ok(runtime_dir);
+        }
+
+        let _lock = self
+            .acquire_install_lock(key, version)
+            .await
+            .with_context(|| format!("Failed to acquire install lock for {} {}", key, version))?;
+
+        // Double-check after acquiring the lock: another process may have completed the install.
+        if runtime_dir.exists() {
+            return Ok(runtime_dir);
+        }
+
+        let fetcher = self
+            .fetchers
+            .get(key)
+            .with_context(|| format!("No runtime fetcher registered for: {}", key))?;
+
+        debug!("Using runtime fetcher: {}", fetcher.language());
+
+        fetcher
+            .download_runtime(self, version, show_progress)
+            .await
+            .with_context(|| format!("Failed to download runtime: {} {}", key, version))
+    }
+
+    fn sanitize_lock_component(s: &str) -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
+
+    fn lock_path(&self, language: &str, version: &str) -> PathBuf {
+        let lock_dir = self.cache_dir.join(".locks");
+        let v = Self::sanitize_lock_component(version);
+        lock_dir.join(format!("{}-{}.lock", language, v))
+    }
+
+    async fn acquire_install_lock(&self, language: &str, version: &str) -> Result<RuntimeInstallLock> {
+        let lock_path = self.lock_path(language, version);
+        let language = language.to_string();
+        let version = version.to_string();
+
+        tokio::task::spawn_blocking(move || -> Result<RuntimeInstallLock> {
+            if let Some(parent) = lock_path.parent() {
+                fs::create_dir_all(parent).context("Failed to create lock directory")?;
+            }
+
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(&lock_path)
+                .with_context(|| format!("Failed to open lock file: {:?}", lock_path))?;
+
+            match file.try_lock_exclusive() {
+                Ok(()) => Ok(RuntimeInstallLock { file }),
+                Err(e) if e.kind() == fs2::lock_contended_error().kind() => {
+                    toolchain_out!(
+                        "⏳ Another process is provisioning {} {}. Waiting...",
+                        language,
+                        version
+                    );
+
+                    // Block until the other process releases the lock.
+                    file.lock_exclusive()
+                        .with_context(|| format!("Failed to wait for lock: {:?}", lock_path))?;
+                    Ok(RuntimeInstallLock { file })
+                }
+                Err(e) => Err(e).context("Failed to lock runtime install (unexpected error)"),
+            }
+        })
+        .await
+        .context("Failed to join lock acquisition task")?
     }
 
     /// Get cache directory path
@@ -382,59 +523,8 @@ impl RuntimeFetcher {
         version: &str,
         show_progress: bool,
     ) -> Result<PathBuf> {
-        let runtime_dir = self.get_runtime_path("python", version);
-
-        // Check if already cached
-        if runtime_dir.exists() {
-            info!("✓ Python {} already cached", version);
-            return Ok(runtime_dir);
-        }
-
-        toolchain_out!("⬇️  Downloading Python {} runtime...", version);
-
-        // Determine the platform-specific URL
-        let (os, arch) = Self::detect_platform()?;
-        let download_url = Self::get_python_download_url(version, &os, &arch)?;
-
-        debug!("Fetching from: {}", download_url);
-
-        // Resolve and fetch the expected sha256 (python-build-standalone publishes *.sha256 sidecars)
-        let expected_sha256 = self
-            .fetch_expected_sha256(&(download_url.clone() + ".sha256"), None)
+        self.download_runtime_with_progress("python", version, show_progress)
             .await
-            .context("Failed to fetch expected sha256")?;
-
-        // Download with progress bar
-        let archive_path = self.cache_dir.join(format!("python-{}.tar.gz", version));
-        self.download_with_progress(&download_url, &archive_path, show_progress)
-            .await?;
-
-        // Verify integrity
-        self.verify_sha256_of_file(&archive_path, &expected_sha256)
-            .context("Downloaded Python runtime failed sha256 verification")?;
-
-        // Create temporary extraction directory
-        let temp_dir = self.cache_dir.join(format!("tmp-python-{}", version));
-        if temp_dir.exists() {
-            fs::remove_dir_all(&temp_dir)?;
-        }
-        fs::create_dir_all(&temp_dir)?;
-
-        // Extract the archive
-        toolchain_out!("📦 Extracting Python {} runtime...", version);
-        Self::extract_archive_from_file(&archive_path, &temp_dir)?;
-
-        // Move to final location
-        if runtime_dir.exists() {
-            fs::remove_dir_all(&runtime_dir)?;
-        }
-        fs::rename(&temp_dir, &runtime_dir).context("Failed to move extracted runtime to cache")?;
-
-        // Clean up archive
-        let _ = fs::remove_file(&archive_path);
-
-        toolchain_out!("✓ Python {} installed at {:?}", version, runtime_dir);
-        Ok(runtime_dir)
     }
 
     async fn fetch_expected_sha256(&self, url: &str, filename_hint: Option<&str>) -> Result<String> {
@@ -498,24 +588,17 @@ impl RuntimeFetcher {
     }
 
     fn verify_sha256_of_file(&self, path: &PathBuf, expected_hex: &str) -> Result<()> {
-        let mut file = File::open(path).with_context(|| format!("Failed to open {:?}", path))?;
-        let mut hasher = Sha256::new();
-        let mut buf = [0u8; 1024 * 64];
-        loop {
-            let n = file.read(&mut buf)?;
-            if n == 0 {
-                break;
+        match self
+            .verifier
+            .verify_sha256(path.as_path(), expected_hex)
+            .with_context(|| format!("Failed to verify sha256 for {:?}", path))
+        {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = fs::remove_file(path);
+                Err(e)
             }
-            hasher.update(&buf[..n]);
         }
-
-        let actual = hex::encode(hasher.finalize());
-        let expected = expected_hex.trim().to_ascii_lowercase();
-        if actual != expected {
-            let _ = fs::remove_file(path);
-            anyhow::bail!("sha256 mismatch: expected={}, actual={}", expected, actual);
-        }
-        Ok(())
     }
 
     /// Download a file with progress bar display
@@ -914,60 +997,8 @@ impl RuntimeFetcher {
         version: &str,
         show_progress: bool,
     ) -> Result<PathBuf> {
-        let runtime_dir = self.get_runtime_path("node", version);
-        if runtime_dir.exists() {
-            info!("✓ Node {} already cached", version);
-            return Ok(runtime_dir);
-        }
-
-        toolchain_out!("⬇️  Downloading Node {} runtime...", version);
-
-        let (os, arch) = Self::detect_platform()?;
-        let full_version = Self::resolve_node_full_version(version).await?;
-        let (filename, is_zip) = Self::node_artifact_filename(&full_version, &os, &arch)?;
-
-        let base_url = format!("https://nodejs.org/dist/v{}", full_version);
-        let download_url = format!("{}/{}", base_url, filename);
-        let shasums_url = format!("{}/SHASUMS256.txt", base_url);
-
-        let expected_sha256 = self
-            .fetch_expected_sha256(&shasums_url, Some(&filename))
+        self.download_runtime_with_progress("node", version, show_progress)
             .await
-            .context("Failed to fetch Node SHASUMS256.txt")?;
-
-        let archive_path = if is_zip {
-            self.cache_dir.join(format!("node-{}.zip", version))
-        } else {
-            self.cache_dir.join(format!("node-{}.tar.gz", version))
-        };
-
-        self.download_with_progress(&download_url, &archive_path, show_progress)
-            .await?;
-
-        self.verify_sha256_of_file(&archive_path, &expected_sha256)
-            .context("Downloaded Node runtime failed sha256 verification")?;
-
-        let temp_dir = self.cache_dir.join(format!("tmp-node-{}", version));
-        if temp_dir.exists() {
-            fs::remove_dir_all(&temp_dir)?;
-        }
-        fs::create_dir_all(&temp_dir)?;
-
-        toolchain_out!("📦 Extracting Node {} runtime...", version);
-        if is_zip {
-            Self::extract_zip_from_file(&archive_path, &temp_dir)?;
-        } else {
-            Self::extract_archive_from_file(&archive_path, &temp_dir)?;
-        }
-
-        if runtime_dir.exists() {
-            fs::remove_dir_all(&runtime_dir)?;
-        }
-        fs::rename(&temp_dir, &runtime_dir).context("Failed to move extracted Node runtime")?;
-
-        let _ = fs::remove_file(&archive_path);
-        toolchain_out!("✓ Node {} installed at {:?}", version, runtime_dir);
-        Ok(runtime_dir)
     }
 
     async fn download_deno_runtime_with_progress(
@@ -975,62 +1006,8 @@ impl RuntimeFetcher {
         version: &str,
         show_progress: bool,
     ) -> Result<PathBuf> {
-        let runtime_dir = self.get_runtime_path("deno", version);
-        if runtime_dir.exists() {
-            info!("✓ Deno {} already cached", version);
-            return Ok(runtime_dir);
-        }
-
-        toolchain_out!("⬇️  Downloading Deno {} runtime...", version);
-
-        let (os, arch) = Self::detect_platform()?;
-        let deno_version = Self::normalize_semverish(version);
-
-        let target = match (os.as_str(), arch.as_str()) {
-            ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
-            ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
-            ("macos", "x86_64") => "x86_64-apple-darwin",
-            ("macos", "aarch64") => "aarch64-apple-darwin",
-            ("windows", "x86_64") => "x86_64-pc-windows-msvc",
-            _ => anyhow::bail!("Unsupported platform for Deno: {} {}", os, arch),
-        };
-
-        let filename = format!("deno-{}.zip", target);
-        let download_url = format!(
-            "https://github.com/denoland/deno/releases/download/v{}/{}",
-            deno_version, filename
-        );
-        let sha_url = format!("{}.sha256sum", download_url);
-
-        let expected_sha256 = self
-            .fetch_expected_sha256(&sha_url, Some(&filename))
+        self.download_runtime_with_progress("deno", version, show_progress)
             .await
-            .context("Failed to fetch Deno sha256sum")?;
-
-        let archive_path = self.cache_dir.join(format!("deno-{}.zip", version));
-        self.download_with_progress(&download_url, &archive_path, show_progress)
-            .await?;
-
-        self.verify_sha256_of_file(&archive_path, &expected_sha256)
-            .context("Downloaded Deno runtime failed sha256 verification")?;
-
-        let temp_dir = self.cache_dir.join(format!("tmp-deno-{}", version));
-        if temp_dir.exists() {
-            fs::remove_dir_all(&temp_dir)?;
-        }
-        fs::create_dir_all(&temp_dir)?;
-
-        toolchain_out!("📦 Extracting Deno {} runtime...", version);
-        Self::extract_zip_from_file(&archive_path, &temp_dir)?;
-
-        if runtime_dir.exists() {
-            fs::remove_dir_all(&runtime_dir)?;
-        }
-        fs::rename(&temp_dir, &runtime_dir).context("Failed to move extracted Deno runtime")?;
-
-        let _ = fs::remove_file(&archive_path);
-        toolchain_out!("✓ Deno {} installed at {:?}", version, runtime_dir);
-        Ok(runtime_dir)
     }
 
     async fn download_bun_runtime_with_progress(
@@ -1038,62 +1015,8 @@ impl RuntimeFetcher {
         version: &str,
         show_progress: bool,
     ) -> Result<PathBuf> {
-        let runtime_dir = self.get_runtime_path("bun", version);
-        if runtime_dir.exists() {
-            info!("✓ Bun {} already cached", version);
-            return Ok(runtime_dir);
-        }
-
-        toolchain_out!("⬇️  Downloading Bun {} runtime...", version);
-
-        let (os, arch) = Self::detect_platform()?;
-        let bun_version = Self::normalize_semverish(version);
-
-        let filename = match (os.as_str(), arch.as_str()) {
-            ("macos", "x86_64") => "bun-darwin-x64.zip".to_string(),
-            ("macos", "aarch64") => "bun-darwin-aarch64.zip".to_string(),
-            ("linux", "x86_64") => "bun-linux-x64.zip".to_string(),
-            ("linux", "aarch64") => "bun-linux-aarch64.zip".to_string(),
-            ("windows", "x86_64") => "bun-windows-x64.zip".to_string(),
-            _ => anyhow::bail!("Unsupported platform for Bun: {} {}", os, arch),
-        };
-
-        let base_url = format!(
-            "https://github.com/oven-sh/bun/releases/download/bun-v{}",
-            bun_version
-        );
-        let download_url = format!("{}/{}", base_url, filename);
-        let shasums_url = format!("{}/SHASUMS256.txt", base_url);
-
-        let expected_sha256 = self
-            .fetch_expected_sha256(&shasums_url, Some(&filename))
+        self.download_runtime_with_progress("bun", version, show_progress)
             .await
-            .context("Failed to fetch Bun SHASUMS256.txt")?;
-
-        let archive_path = self.cache_dir.join(format!("bun-{}.zip", version));
-        self.download_with_progress(&download_url, &archive_path, show_progress)
-            .await?;
-
-        self.verify_sha256_of_file(&archive_path, &expected_sha256)
-            .context("Downloaded Bun runtime failed sha256 verification")?;
-
-        let temp_dir = self.cache_dir.join(format!("tmp-bun-{}", version));
-        if temp_dir.exists() {
-            fs::remove_dir_all(&temp_dir)?;
-        }
-        fs::create_dir_all(&temp_dir)?;
-
-        toolchain_out!("📦 Extracting Bun {} runtime...", version);
-        Self::extract_zip_from_file(&archive_path, &temp_dir)?;
-
-        if runtime_dir.exists() {
-            fs::remove_dir_all(&runtime_dir)?;
-        }
-        fs::rename(&temp_dir, &runtime_dir).context("Failed to move extracted Bun runtime")?;
-
-        let _ = fs::remove_file(&archive_path);
-        toolchain_out!("✓ Bun {} installed at {:?}", version, runtime_dir);
-        Ok(runtime_dir)
     }
 }
 
@@ -1162,5 +1085,47 @@ mod tests {
         // Comparison
         assert!(tm.version_matches("3.11.4", Some(">=3.11")));
         assert!(!tm.version_matches("3.10.0", Some(">=3.11")));
+    }
+
+    #[tokio::test]
+    async fn test_install_lock_blocks_contenders() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cache_dir = temp.path().join("toolchain");
+        fs::create_dir_all(&cache_dir).expect("create cache dir");
+
+        let fetcher1 = RuntimeFetcher {
+            cache_dir: cache_dir.clone(),
+            verifier: Arc::new(ChecksumVerifier::default()),
+            fetchers: fetcher::default_fetchers(),
+        };
+        let fetcher2 = RuntimeFetcher {
+            cache_dir: cache_dir.clone(),
+            verifier: Arc::new(ChecksumVerifier::default()),
+            fetchers: fetcher::default_fetchers(),
+        };
+
+        let lock1 = fetcher1
+            .acquire_install_lock("python", "3.11")
+            .await
+            .expect("acquire lock1");
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        tokio::spawn(async move {
+            let _lock2 = fetcher2
+                .acquire_install_lock("python", "3.11")
+                .await
+                .expect("acquire lock2");
+            let _ = tx.send(());
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(rx.try_recv().is_err(), "contender should be blocked");
+
+        drop(lock1);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("contender should acquire after release")
+            .expect("contender message");
     }
 }

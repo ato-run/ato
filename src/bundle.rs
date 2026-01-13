@@ -85,6 +85,31 @@ pub fn read_entrypoint_from_manifest(manifest_path: &Path) -> Result<String> {
     Ok(entrypoint.to_string())
 }
 
+/// Read `targets.source.language` from capsule.toml when present.
+pub fn read_source_language_from_manifest(manifest_path: &Path) -> Result<Option<String>> {
+    let manifest_content = std::fs::read_to_string(manifest_path)
+        .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
+    let manifest: toml::Value = toml::from_str(&manifest_content)
+        .with_context(|| format!("Failed to parse manifest TOML: {}", manifest_path.display()))?;
+
+    Ok(manifest
+        .get("targets")
+        .and_then(|t| t.get("source"))
+        .and_then(|s| s.get("language"))
+        .and_then(|l| l.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty()))
+}
+
+fn normalize_language_alias(lang: &str) -> String {
+    let l = lang.trim().to_ascii_lowercase();
+    match l.as_str() {
+        "python3" => "python".to_string(),
+        "nodejs" => "node".to_string(),
+        _ => l,
+    }
+}
+
 fn looks_like_python_file(entrypoint: &str, source_dir: &Path) -> bool {
     let ep = entrypoint.trim();
     if ep.ends_with(".py") {
@@ -114,10 +139,58 @@ fn resolve_program(program: &str, source_dir: &Path) -> String {
 ///
 /// For Python entrypoints, we intentionally prefer the embedded runtime under `runtime_dir`.
 pub fn build_bundle_command(
+    language: Option<&str>,
     entrypoint: &str,
     source_dir: &Path,
     runtime_dir: &Path,
 ) -> Result<std::process::Command> {
+    let language = language.map(normalize_language_alias);
+
+    // Preferred path: manifest declares a source language, so treat entrypoint as a file.
+    if let Some(lang) = language.as_deref() {
+        match lang {
+            "python" => {
+                let python_bin = find_python_binary(runtime_dir)?;
+                let entrypoint_path = source_dir.join(entrypoint);
+                let mut cmd = std::process::Command::new(&python_bin);
+                cmd.arg(&entrypoint_path);
+                cmd.current_dir(source_dir);
+                cmd.env("PYTHONHOME", runtime_dir.join("python"));
+                cmd.env("PYTHONPATH", source_dir);
+                return Ok(cmd);
+            }
+            "node" => {
+                let node_bin = find_binary_recursive(runtime_dir, &["node", "node.exe"])?;
+                let entrypoint_path = source_dir.join(entrypoint);
+                let mut cmd = std::process::Command::new(&node_bin);
+                cmd.arg(&entrypoint_path);
+                cmd.current_dir(source_dir);
+                return Ok(cmd);
+            }
+            "deno" => {
+                let deno_bin = find_binary_recursive(runtime_dir, &["deno", "deno.exe"])?;
+                let entrypoint_path = source_dir.join(entrypoint);
+                let mut cmd = std::process::Command::new(&deno_bin);
+                cmd.arg("run");
+                cmd.arg(&entrypoint_path);
+                cmd.current_dir(source_dir);
+                return Ok(cmd);
+            }
+            "bun" => {
+                let bun_bin = find_binary_recursive(runtime_dir, &["bun", "bun.exe"])?;
+                let entrypoint_path = source_dir.join(entrypoint);
+                let mut cmd = std::process::Command::new(&bun_bin);
+                cmd.arg(&entrypoint_path);
+                cmd.current_dir(source_dir);
+                return Ok(cmd);
+            }
+            _ => {
+                // Unknown language: fall back below.
+            }
+        }
+    }
+
+    // Fallback path: best-effort compatibility for older bundles.
     if looks_like_python_file(entrypoint, source_dir) {
         let python_bin = find_python_binary(runtime_dir)?;
         let entrypoint_path = source_dir.join(entrypoint);
@@ -171,4 +244,41 @@ pub fn find_python_binary(runtime_dir: &Path) -> Result<PathBuf> {
     }
 
     anyhow::bail!("Python binary not found in runtime directory")
+}
+
+fn find_binary_recursive(runtime_dir: &Path, candidates: &[&str]) -> Result<PathBuf> {
+    for candidate in candidates {
+        let direct = runtime_dir.join(candidate);
+        if direct.is_file() {
+            return Ok(direct);
+        }
+    }
+
+    fn walk(dir: &Path, candidates: &[&str]) -> std::io::Result<Option<PathBuf>> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = walk(&path, candidates)? {
+                    return Ok(Some(found));
+                }
+                continue;
+            }
+            if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                if candidates.iter().any(|c| c.eq_ignore_ascii_case(name)) {
+                    return Ok(Some(path));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    match walk(runtime_dir, candidates).context("Failed to search runtime directory")? {
+        Some(p) => Ok(p),
+        None => anyhow::bail!(
+            "Binary not found in runtime directory: {} (candidates={:?})",
+            runtime_dir.display(),
+            candidates
+        ),
+    }
 }

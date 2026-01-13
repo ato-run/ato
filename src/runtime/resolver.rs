@@ -384,6 +384,24 @@ fn try_resolve_source(
     source: &SourceTarget,
     context: &ResolveContext,
 ) -> Result<ResolvedTarget, ResolveError> {
+    let lang = source.language.to_ascii_lowercase();
+
+    // Some runtimes require an explicit version so the engine can fetch deterministically.
+    if (lang == "bun" || lang == "deno")
+        && source
+            .version
+            .as_deref()
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(true)
+    {
+        return Err(ResolveError::InvalidConfiguration {
+            message: format!(
+                "Source target version is required when language = '{}'",
+                source.language
+            ),
+        });
+    }
+
     // Check if the required toolchain is available on the host
     if !context.has_toolchain(&source.language) {
         return Err(ResolveError::ToolchainNotAvailable {

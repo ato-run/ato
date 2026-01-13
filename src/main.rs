@@ -118,7 +118,13 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     let supervisor = ProcessSupervisor::new();
 
     // Prepare command with Socket Activation
-    let mut cmd = nacelle::bundle::build_bundle_command(&entrypoint, &source_dir, &runtime_dir)?;
+    let source_language = nacelle::bundle::read_source_language_from_manifest(&manifest_path)?;
+    let mut cmd = nacelle::bundle::build_bundle_command(
+        source_language.as_deref(),
+        &entrypoint,
+        &source_dir,
+        &runtime_dir,
+    )?;
 
     // Provide a consistent port signal to the child.
     cmd.env("PORT", port.to_string());

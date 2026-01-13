@@ -80,39 +80,41 @@ pub async fn build_bundle(args: PackV2Args) -> Result<PathBuf> {
     let manifest_entrypoint = read_manifest_entrypoint(&manifest_path, source_target_hint.as_ref())?
         .unwrap_or_else(|| "".to_string());
 
-    let needs_python = manifest_needs_python(
+    let runtime_to_bundle = decide_runtime_to_bundle(
         &manifest_path,
         source_dir,
         &manifest_entrypoint,
         source_target_hint.as_ref(),
     )?;
 
-    let python_version = if needs_python {
-        source_target_hint
-            .as_ref()
-            .and_then(|h| {
-                if h.language.eq_ignore_ascii_case("python") {
-                    h.version.as_deref().and_then(normalize_python_version_hint)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| "3.11".to_string())
-    } else {
-        "3.11".to_string()
-    };
-
-    // 3. Find/download runtime (Python) or create an empty runtime directory.
+    // 3. Find/download runtime (Python/Node/Bun/Deno) or create an empty runtime directory.
     let mut temp_runtime_dir: Option<PathBuf> = None;
 
     let runtime_dir = if let Some(runtime) = args.runtime_path {
         runtime
-    } else if needs_python {
+    } else if let Some(spec) = &runtime_to_bundle {
         // Delegate cache lookup + download behavior to RuntimeFetcher.
         // This keeps cache location consistent across Engine/CLI.
-        eprintln!("✓ Ensuring Python {} runtime is available...", python_version);
         let fetcher = RuntimeFetcher::new()?;
-        fetcher.download_python_runtime(&python_version).await?
+        match spec.language.as_str() {
+            "python" => {
+                eprintln!("✓ Ensuring Python {} runtime is available...", spec.version);
+                fetcher.download_python_runtime(&spec.version).await?
+            }
+            "node" => {
+                eprintln!("✓ Ensuring Node {} runtime is available...", spec.version);
+                fetcher.download_node_runtime(&spec.version).await?
+            }
+            "deno" => {
+                eprintln!("✓ Ensuring Deno {} runtime is available...", spec.version);
+                fetcher.download_deno_runtime(&spec.version).await?
+            }
+            "bun" => {
+                eprintln!("✓ Ensuring Bun {} runtime is available...", spec.version);
+                fetcher.download_bun_runtime(&spec.version).await?
+            }
+            other => anyhow::bail!("Unsupported runtime language for bundling: {}", other),
+        }
     } else {
         // Non-Python workload: bundle an empty runtime directory.
         let dir = std::env::temp_dir().join(format!(
@@ -124,20 +126,15 @@ pub async fn build_bundle(args: PackV2Args) -> Result<PathBuf> {
         dir
     };
 
-    if needs_python {
-        eprintln!("✓ Using runtime: {:?}", runtime_dir);
+    if let Some(spec) = &runtime_to_bundle {
+        eprintln!("✓ Using runtime: {:?} ({} {})", runtime_dir, spec.language, spec.version);
     } else {
         if let Some(hint) = &source_target_hint {
-            eprintln!(
-                "✓ No runtime bundled (targets.source.language = {}).",
-                hint.language
-            );
+            eprintln!("✓ No runtime bundled (targets.source.language = {}).", hint.language);
         } else {
-            eprintln!("✓ No runtime bundled (non-Python entrypoint: {:?})", manifest_entrypoint);
+            eprintln!("✓ No runtime bundled (entrypoint: {:?})", manifest_entrypoint);
         }
-        eprintln!(
-            "ℹ️  Note: This bundle will require the entrypoint program (e.g. bun/node) to be available on the target host."
-        );
+        eprintln!("ℹ️  Note: This bundle will require the entrypoint runtime to be available on the target host.");
     }
 
     // 4. Create archive with runtime + source
@@ -323,6 +320,97 @@ fn normalize_python_version_hint(version: &str) -> Option<String> {
     } else {
         Some(out)
     }
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeBundleSpec {
+    language: String,
+    version: String,
+}
+
+fn normalize_language_alias(lang: &str) -> String {
+    let l = lang.trim().to_ascii_lowercase();
+    match l.as_str() {
+        "python3" => "python".to_string(),
+        "nodejs" => "node".to_string(),
+        _ => l,
+    }
+}
+
+fn decide_runtime_to_bundle(
+    manifest_path: &Path,
+    source_dir: &Path,
+    manifest_entrypoint: &str,
+    source_target_hint: Option<&SourceTargetHint>,
+) -> Result<Option<RuntimeBundleSpec>> {
+    // Prefer explicit targets.source.language/version when available.
+    if let Some(hint) = source_target_hint {
+        let language = normalize_language_alias(&hint.language);
+        match language.as_str() {
+            "python" => {
+                let version = hint
+                    .version
+                    .as_deref()
+                    .and_then(normalize_python_version_hint)
+                    .unwrap_or_else(|| "3.11".to_string());
+                return Ok(Some(RuntimeBundleSpec { language, version }));
+            }
+            "node" => {
+                let version = hint
+                    .version
+                    .as_deref()
+                    .map(|v| v.trim())
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or("22")
+                    .to_string();
+                return Ok(Some(RuntimeBundleSpec { language, version }));
+            }
+            "deno" | "bun" => {
+                let version = hint
+                    .version
+                    .as_deref()
+                    .map(|v| v.trim())
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "targets.source.version is required when language = '{}' for bundling",
+                            language
+                        )
+                    })?
+                    .to_string();
+                return Ok(Some(RuntimeBundleSpec { language, version }));
+            }
+            _ => {
+                // Unknown language: fall back to heuristic.
+            }
+        }
+    }
+
+    // Heuristic fallback for legacy manifests (no targets.source).
+    // Python: if entrypoint looks like python file.
+    let needs_python = manifest_needs_python(
+        manifest_path,
+        source_dir,
+        manifest_entrypoint,
+        source_target_hint,
+    )?;
+    if needs_python {
+        return Ok(Some(RuntimeBundleSpec {
+            language: "python".to_string(),
+            version: "3.11".to_string(),
+        }));
+    }
+
+    // Node: entrypoint is a JS/TS file.
+    let ep = manifest_entrypoint.trim();
+    if ep.ends_with(".js") || ep.ends_with(".mjs") || ep.ends_with(".cjs") || ep.ends_with(".ts") {
+        return Ok(Some(RuntimeBundleSpec {
+            language: "node".to_string(),
+            version: "22".to_string(),
+        }));
+    }
+
+    Ok(None)
 }
 
 fn load_capsuleignore(source_dir: &Path) -> Result<Option<Gitignore>> {
