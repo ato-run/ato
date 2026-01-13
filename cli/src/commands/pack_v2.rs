@@ -139,7 +139,8 @@ pub async fn build_bundle(args: PackV2Args) -> Result<PathBuf> {
 
     // 4. Create archive with runtime + source
     eprintln!("✓ Creating bundle archive...");
-    let source_ignore = load_capsuleignore(source_dir)?;
+    let build_excludes = read_build_exclude_patterns(&manifest_path)?;
+    let source_ignore = load_capsuleignore(source_dir, &build_excludes)?;
     let archive_data = create_bundle_archive(&runtime_dir, source_dir, source_ignore.as_ref())?;
     eprintln!("✓ Archive size: {} MB", archive_data.len() / 1_048_576);
 
@@ -413,18 +414,71 @@ fn decide_runtime_to_bundle(
     Ok(None)
 }
 
-fn load_capsuleignore(source_dir: &Path) -> Result<Option<Gitignore>> {
+fn load_capsuleignore(source_dir: &Path, extra_patterns: &[String]) -> Result<Option<Gitignore>> {
     let ignore_path = source_dir.join(".capsuleignore");
-    if !ignore_path.exists() {
+    let mut builder = GitignoreBuilder::new(source_dir);
+
+    let mut has_any = false;
+    if ignore_path.exists() {
+        builder.add(ignore_path);
+        has_any = true;
+    }
+
+    for pattern in extra_patterns {
+        let p = pattern.trim();
+        if p.is_empty() {
+            continue;
+        }
+        // GitignoreBuilder supports adding patterns directly (same syntax as .gitignore).
+        builder
+            .add_line(None, p)
+            .with_context(|| format!("Failed to add exclude pattern: {}", p))?;
+        has_any = true;
+    }
+
+    if !has_any {
         return Ok(None);
     }
 
-    let mut builder = GitignoreBuilder::new(source_dir);
-    builder.add(ignore_path);
     let gitignore = builder
         .build()
         .context("Failed to parse .capsuleignore")?;
     Ok(Some(gitignore))
+}
+
+fn read_build_exclude_patterns(manifest_path: &Path) -> Result<Vec<String>> {
+    let content = fs::read_to_string(manifest_path)
+        .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
+    let manifest: toml::Value = toml::from_str(&content)
+        .with_context(|| format!("Failed to parse manifest TOML: {}", manifest_path.display()))?;
+
+    let mut patterns: Vec<String> = Vec::new();
+
+    let build = manifest.get("build");
+    let gpu = build
+        .and_then(|b| b.get("gpu"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if let Some(list) = build
+        .and_then(|b| b.get("exclude_libs"))
+        .and_then(|v| v.as_array())
+    {
+        for item in list {
+            if let Some(s) = item.as_str() {
+                patterns.push(s.to_string());
+            }
+        }
+    }
+
+    // Optional sugar: if gpu=true and exclude_libs is empty, we do NOT add aggressive defaults.
+    // Tooling (e.g. `capsule scaffold docker`) can propose defaults safely.
+    // Keeping pack deterministic avoids surprising "missing dependency" failures.
+    if gpu {
+        // reserved for future heuristics
+    }
+
+    Ok(patterns)
 }
 
 /// Create a tar archive containing runtime and source code
@@ -504,9 +558,10 @@ fn compress_with_zstd(data: &[u8], level: i32) -> Result<Vec<u8>> {
 fn find_nacelle_binary() -> Result<PathBuf> {
     // Priority order:
     // 1. NACELLE_BINARY environment variable
-    // 2. Release build in workspace (../target/release/nacelle)
-    // 3. Debug build in workspace (../target/debug/nacelle)
-    // 4. System PATH
+    // 2. Current executable (the running nacelle)
+    // 3. Release build in workspace (../target/release/nacelle)
+    // 4. Debug build in workspace (../target/debug/nacelle)
+    // 5. System PATH
 
     // Check environment variable
     if let Ok(path) = std::env::var("NACELLE_BINARY") {
@@ -516,8 +571,14 @@ fn find_nacelle_binary() -> Result<PathBuf> {
         }
     }
 
-    // Try to find in workspace target directory
+    // Prefer the currently running nacelle binary.
+    // This avoids embedding a stale release build (behavior mismatch).
     let current_exe = std::env::current_exe()?;
+    if current_exe.is_file() {
+        return Ok(current_exe);
+    }
+
+    // Try to find in workspace target directory
     if let Some(target_dir) = current_exe.parent().and_then(|p| p.parent()) {
         // Check release first (preferred for smaller size)
         let release_bin = target_dir.join("release").join("nacelle");

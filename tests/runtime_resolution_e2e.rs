@@ -50,6 +50,8 @@ fn create_manifest_with_targets(name: &str, targets: TargetsConfig) -> CapsuleMa
         model: None,
         transparency: None,
         pool: None,
+        build: None,
+        isolation: None,
         targets: Some(targets),
     }
 }
@@ -79,6 +81,8 @@ fn create_legacy_manifest(name: &str, runtime: RuntimeType) -> CapsuleManifestV1
         model: None,
         transparency: None,
         pool: None,
+        build: None,
+        isolation: None,
         targets: None,
     }
 }

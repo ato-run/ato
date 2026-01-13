@@ -146,7 +146,7 @@ async fn run_bundled_application() -> Result<()> {
     };
 
     // Build command
-    let mut cmd = build_bundle_command(&entrypoint, &source_dir, &runtime_dir)?;
+    let mut cmd = build_bundle_command(&entrypoint, &source_dir, &runtime_dir, &extract_dir, &manifest)?;
     cmd.env("PORT", port.to_string());
     cmd.env("CAPSULE_PORT", port.to_string());
 
@@ -330,7 +330,79 @@ fn resolve_program(program: &str, source_dir: &Path) -> String {
     program.to_string()
 }
 
-fn build_bundle_command(entrypoint: &str, source_dir: &PathBuf, runtime_dir: &PathBuf) -> Result<Command> {
+fn read_execution_env(manifest: &toml::Value) -> Vec<(String, String)> {
+    let Some(env) = manifest
+        .get("execution")
+        .and_then(|e| e.get("env"))
+        .and_then(|e| e.as_table())
+    else {
+        return Vec::new();
+    };
+
+    env.iter()
+        .filter_map(|(k, v)| v.as_str().map(|vv| (k.to_string(), vv.to_string())))
+        .collect()
+}
+
+fn read_allow_env(manifest: &toml::Value) -> Vec<String> {
+    let Some(list) = manifest
+        .get("isolation")
+        .and_then(|i| i.get("allow_env"))
+        .and_then(|v| v.as_array())
+    else {
+        return Vec::new();
+    };
+
+    list.iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect()
+}
+
+fn apply_bundle_env_policy(
+    cmd: &mut Command,
+    manifest: &toml::Value,
+    extract_dir: &Path,
+    source_dir: &Path,
+    runtime_dir: &Path,
+) {
+    // Security default: do not leak the host environment into the capsule.
+    // Allow explicit passthrough via [isolation.allow_env].
+    cmd.env_clear();
+
+    // Minimal baseline environment for POSIX-like environments.
+    // Keep it deterministic; do not inherit host PATH.
+    cmd.env(
+        "PATH",
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    );
+    cmd.env("LANG", "C.UTF-8");
+    cmd.env("HOME", extract_dir);
+
+    // Provide deterministic anchors for apps and tooling.
+    cmd.env("CAPSULE_ROOT", extract_dir);
+    cmd.env("CAPSULE_SOURCE", source_dir);
+    cmd.env("CAPSULE_RUNTIME", runtime_dir);
+
+    // Host env passthrough (opt-in)
+    for key in read_allow_env(manifest) {
+        if let Ok(value) = std::env::var(&key) {
+            cmd.env(&key, value);
+        }
+    }
+
+    // Manifest-defined env (wins over passthrough)
+    for (k, v) in read_execution_env(manifest) {
+        cmd.env(k, v);
+    }
+}
+
+fn build_bundle_command(
+    entrypoint: &str,
+    source_dir: &PathBuf,
+    runtime_dir: &PathBuf,
+    extract_dir: &PathBuf,
+    manifest: &toml::Value,
+) -> Result<Command> {
     if looks_like_python_file(entrypoint, source_dir) {
         let python_path = find_python_binary(runtime_dir)?;
         println!("🐍 Found Python: {:?}", python_path);
@@ -338,6 +410,7 @@ fn build_bundle_command(entrypoint: &str, source_dir: &PathBuf, runtime_dir: &Pa
         println!("📄 Running: {:?}", entrypoint_path);
 
         let mut cmd = Command::new(&python_path);
+        apply_bundle_env_policy(&mut cmd, manifest, extract_dir, source_dir, runtime_dir);
         cmd.arg(&entrypoint_path)
             .current_dir(source_dir)
             .env("PYTHONHOME", runtime_dir.join("python"))
@@ -357,6 +430,7 @@ fn build_bundle_command(entrypoint: &str, source_dir: &PathBuf, runtime_dir: &Pa
     println!("📄 Running: {}", entrypoint);
 
     let mut cmd = Command::new(resolved_program);
+    apply_bundle_env_policy(&mut cmd, manifest, extract_dir, source_dir, runtime_dir);
     if parts.len() > 1 {
         cmd.args(&parts[1..]);
     }

@@ -14,6 +14,7 @@ use anyhow::{Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey};
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::WalkBuilder;
 use nacelle::capsule_types::capsule_v1::CapsuleManifestV1;
 use nacelle::schema::converter::manifest_to_capnp_bytes;
@@ -21,6 +22,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tar::Builder;
+use toml;
 
 /// Arguments for the pack command
 pub struct PackArgs {
@@ -252,6 +254,8 @@ pub fn pack_and_sign(manifest_path: &Path, key_path: &Path) -> Result<(PackResul
 pub fn create_source_archive(source_dir: &Path, manifest_path: &Path) -> Result<(Vec<u8>, usize)> {
     let mut file_count = 0usize;
 
+    let extra_ignore = load_pack_ignore(source_dir, manifest_path)?;
+
     // Collect files first (sorted for reproducibility)
     let mut files: Vec<PathBuf> = Vec::new();
 
@@ -271,6 +275,13 @@ pub fn create_source_archive(source_dir: &Path, manifest_path: &Path) -> Result<
         // Skip directories
         if path.is_dir() {
             continue;
+        }
+
+        if let Some(ignore) = extra_ignore.as_ref() {
+            let matched = ignore.matched_path_or_any_parents(path, false);
+            if matched.is_ignore() {
+                continue;
+            }
         }
 
         // Skip .git directory contents (should already be filtered, but double-check)
@@ -331,4 +342,46 @@ pub fn create_source_archive(source_dir: &Path, manifest_path: &Path) -> Result<
     }
 
     Ok((archive_buffer, file_count))
+}
+
+fn load_pack_ignore(source_dir: &Path, manifest_path: &Path) -> Result<Option<Gitignore>> {
+    let mut builder = GitignoreBuilder::new(source_dir);
+    let mut has_any = false;
+
+    let ignore_path = source_dir.join(".capsuleignore");
+    if ignore_path.exists() {
+        builder.add(ignore_path);
+        has_any = true;
+    }
+
+    let content = fs::read_to_string(manifest_path)
+        .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
+    let manifest: toml::Value = toml::from_str(&content)
+        .with_context(|| format!("Failed to parse manifest TOML: {}", manifest_path.display()))?;
+
+    if let Some(list) = manifest
+        .get("build")
+        .and_then(|b| b.get("exclude_libs"))
+        .and_then(|v| v.as_array())
+    {
+        for item in list {
+            if let Some(s) = item.as_str() {
+                let p = s.trim();
+                if p.is_empty() {
+                    continue;
+                }
+                builder
+                    .add_line(None, p)
+                    .with_context(|| format!("Failed to add exclude pattern: {}", p))?;
+                has_any = true;
+            }
+        }
+    }
+
+    if !has_any {
+        return Ok(None);
+    }
+
+    let gi = builder.build().context("Failed to build extra ignore rules")?;
+    Ok(Some(gi))
 }
