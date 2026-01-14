@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use nacelle::capsule_types::capsule_v1::CapsuleManifestV1;
+use nacelle::capsule_types::capsule_v1::{CapsuleManifestV1, RuntimeType};
 use nacelle::engine::socket::{create_socket_manager, SocketConfig};
 use nacelle::runtime::source::toolchain::RuntimeFetcher;
 use nacelle::verification::sandbox::SandboxPolicy;
@@ -116,21 +116,28 @@ async fn run_and_wait(args: RunDevArgs) -> Result<RunDevOutcome> {
     let entrypoint = read_profile_entrypoint(&manifest_path, "dev")?
         .unwrap_or_else(|| resolve_entrypoint(&manifest));
 
-    let port = std::env::var("CAPSULE_PORT")
-        .ok()
-        .or_else(|| std::env::var("PORT").ok())
-        .and_then(|p| p.parse().ok())
-        .or(manifest.execution.port)
-        .unwrap_or(8000);
+    let container_port = manifest.execution.port.unwrap_or(8000);
+
+    // Source capsules respect env override; Docker capsules pick a safe host port.
+    let port = match manifest.execution.runtime {
+        RuntimeType::Docker | RuntimeType::Oci => pick_free_port().unwrap_or(18080).max(1024),
+        _ => std::env::var("CAPSULE_PORT")
+            .ok()
+            .or_else(|| std::env::var("PORT").ok())
+            .and_then(|p| p.parse().ok())
+            .or(manifest.execution.port)
+            .unwrap_or(8000),
+    };
 
     human_out!(args.interactive, "🚀 nacelle dev");
     human_out!(args.interactive, "📄 Manifest: {}", manifest_path.display());
     human_out!(args.interactive, "📁 Working dir: {}", source_dir.display());
     human_out!(args.interactive, "▶️  Entrypoint: {}", entrypoint);
 
-    let mut cmd = build_command(&manifest, &source_dir, &entrypoint).await?;
+    let mut cmd = build_command(&manifest, &source_dir, &entrypoint, port, container_port).await?;
 
-    let enable_socket_activation = looks_like_python_entrypoint(&entrypoint, &source_dir);
+    let enable_socket_activation =
+        manifest.execution.runtime == RuntimeType::Source && looks_like_python_entrypoint(&entrypoint, &source_dir);
 
     // Socket activation: bind in parent, pass FD 3 to child.
     // NOTE: only enabled for Python entrypoints by default (others may not consume LISTEN_FDS).
@@ -243,50 +250,61 @@ async fn run_and_wait(args: RunDevArgs) -> Result<RunDevOutcome> {
     let mut wait_task = tokio::task::spawn_blocking(move || child.wait());
 
     if args.handle_signals {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                eprintln!("\n🛑 Stopping...");
-                terminate_process_group(pid);
-                // Give the process a moment to exit.
-                match tokio::time::timeout(std::time::Duration::from_secs(5), &mut wait_task).await {
-                    Ok(status) => {
-                        let exit_status = match status {
-                            Ok(Ok(s)) => Some(s),
-                            Ok(Err(e)) => return Err(e).context("Failed while waiting for child"),
-                            Err(e) => return Err(anyhow::anyhow!(e)).context("Wait task failed"),
-                        };
+        #[cfg(unix)]
+        {
+            let mut sig_term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .context("Failed to install SIGTERM handler")?;
 
-                        return Ok(RunDevOutcome {
-                            pid,
-                            port: effective_port,
-                            exit_status,
-                        });
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    return stop_and_wait(pid, effective_port, &mut wait_task, "").await;
+                }
+                _ = sig_term.recv() => {
+                    return stop_and_wait(pid, effective_port, &mut wait_task, " (SIGTERM)").await;
+                }
+                status = &mut wait_task => {
+                    let exit_status = match status {
+                        Ok(Ok(s)) => s,
+                        Ok(Err(e)) => return Err(e).context("Failed while waiting for child"),
+                        Err(e) => return Err(anyhow::anyhow!(e)).context("Wait task failed"),
+                    };
+
+                    if exit_status.success() {
+                        human_out!(args.interactive, "✅ Exited successfully");
                     }
-                    Err(_) => {
-                        return Ok(RunDevOutcome {
-                            pid,
-                            port: effective_port,
-                            exit_status: None,
-                        });
-                    }
+
+                    return Ok(RunDevOutcome {
+                        pid,
+                        port: effective_port,
+                        exit_status: Some(exit_status),
+                    });
                 }
             }
-            status = &mut wait_task => {
-                let exit_status = match status {
-                    Ok(Ok(s)) => s,
-                    Ok(Err(e)) => return Err(e).context("Failed while waiting for child"),
-                    Err(e) => return Err(anyhow::anyhow!(e)).context("Wait task failed"),
-                };
+        }
 
-                if exit_status.success() {
-                    human_out!(args.interactive, "✅ Exited successfully");
+        #[cfg(not(unix))]
+        {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    return stop_and_wait(pid, effective_port, &mut wait_task, "").await;
                 }
+                status = &mut wait_task => {
+                    let exit_status = match status {
+                        Ok(Ok(s)) => s,
+                        Ok(Err(e)) => return Err(e).context("Failed while waiting for child"),
+                        Err(e) => return Err(anyhow::anyhow!(e)).context("Wait task failed"),
+                    };
 
-                return Ok(RunDevOutcome {
-                    pid,
-                    port: effective_port,
-                    exit_status: Some(exit_status),
-                });
+                    if exit_status.success() {
+                        human_out!(args.interactive, "✅ Exited successfully");
+                    }
+
+                    return Ok(RunDevOutcome {
+                        pid,
+                        port: effective_port,
+                        exit_status: Some(exit_status),
+                    });
+                }
             }
         }
     }
@@ -358,11 +376,81 @@ fn normalize_python_version(version: Option<&str>) -> String {
     raw.to_string()
 }
 
+async fn stop_and_wait(
+    pid: u32,
+    port: u16,
+    wait_task: &mut tokio::task::JoinHandle<std::io::Result<ExitStatus>>,
+    label: &str,
+) -> Result<RunDevOutcome> {
+    eprintln!("\n🛑 Stopping{}...", label);
+    terminate_process_group(pid);
+
+    match tokio::time::timeout(std::time::Duration::from_secs(5), wait_task).await {
+        Ok(status) => {
+            let exit_status = match status {
+                Ok(Ok(s)) => Some(s),
+                Ok(Err(e)) => return Err(e).context("Failed while waiting for child"),
+                Err(e) => return Err(anyhow::anyhow!(e)).context("Wait task failed"),
+            };
+
+            Ok(RunDevOutcome {
+                pid,
+                port,
+                exit_status,
+            })
+        }
+        Err(_) => Ok(RunDevOutcome {
+            pid,
+            port,
+            exit_status: None,
+        }),
+    }
+}
+
 async fn build_command(
     manifest: &CapsuleManifestV1,
     source_dir: &Path,
     entrypoint: &str,
+    host_port: u16,
+    container_port: u16,
 ) -> Result<Command> {
+    if matches!(manifest.execution.runtime, RuntimeType::Docker | RuntimeType::Oci) {
+        let parts = shell_words::split(entrypoint)
+            .with_context(|| format!("Failed to parse docker entrypoint: {}", entrypoint))?;
+        let image = parts
+            .get(0)
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("docker entrypoint is empty"))?;
+        let extra_args = parts.iter().skip(1);
+
+        let docker = which::which("docker").context("docker not found in PATH")?;
+        let mut cmd = Command::new(docker);
+
+        // Map host_port -> container_port and keep the container lifecycle tied to this process.
+        cmd.arg("run")
+            .arg("--rm")
+            .arg("-p")
+            .arg(format!("127.0.0.1:{}:{}", host_port, container_port));
+
+        // Pass through explicit env from manifest.
+        for (k, v) in &manifest.execution.env {
+            cmd.arg("-e").arg(format!("{}={}", k, v));
+        }
+
+        // Provide a consistent port signal to containers that respect PORT.
+        cmd.arg("-e")
+            .arg(format!("PORT={}", container_port))
+            .arg("-e")
+            .arg(format!("CAPSULE_PORT={}", container_port));
+
+        cmd.arg(image);
+        for a in extra_args {
+            cmd.arg(a);
+        }
+
+        return Ok(cmd);
+    }
+
     let language = manifest
         .targets
         .as_ref()
@@ -421,6 +509,16 @@ async fn build_command(
     }
 
     Ok(cmd)
+}
+
+fn pick_free_port() -> Result<u16> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .context("Failed to bind ephemeral port")?;
+    let port = listener
+        .local_addr()
+        .context("Failed to read local_addr")?
+        .port();
+    Ok(port)
 }
 
 fn build_command_from_entrypoint_string(source_dir: &Path, entrypoint: &str) -> Result<Command> {
