@@ -6,8 +6,8 @@
 //! 3. Result: Single executable with no external dependencies
 
 use anyhow::{Context, Result};
-use nacelle::runtime::source::toolchain::RuntimeFetcher;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use nacelle::runtime::source::toolchain::RuntimeFetcher;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -30,6 +30,13 @@ struct SourceTargetHint {
     entrypoint: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct RuntimeAlias {
+    archive_path: String,
+    source_path: PathBuf,
+}
+
+#[allow(dead_code)]
 fn is_internal_mode() -> bool {
     std::env::var_os("NACELLE_INTERNAL").is_some()
 }
@@ -45,6 +52,7 @@ macro_rules! user_out {
 }
 
 /// Create a self-extracting bundle
+#[allow(dead_code)]
 pub async fn execute(args: PackV2Args) -> Result<()> {
     user_out!("📦 Building self-extracting bundle (v2.0)...");
 
@@ -77,8 +85,9 @@ pub async fn build_bundle(args: PackV2Args) -> Result<PathBuf> {
     // We use targets.source.{language,version,entrypoint} when present (preferred),
     // and fall back to legacy execution.entrypoint + heuristics.
     let source_target_hint = read_manifest_source_target_hint(&manifest_path)?;
-    let manifest_entrypoint = read_manifest_entrypoint(&manifest_path, source_target_hint.as_ref())?
-        .unwrap_or_else(|| "".to_string());
+    let manifest_entrypoint =
+        read_manifest_entrypoint(&manifest_path, source_target_hint.as_ref())?
+            .unwrap_or_else(|| "".to_string());
 
     let runtime_to_bundle = decide_runtime_to_bundle(
         &manifest_path,
@@ -117,31 +126,52 @@ pub async fn build_bundle(args: PackV2Args) -> Result<PathBuf> {
         }
     } else {
         // Non-Python workload: bundle an empty runtime directory.
-        let dir = std::env::temp_dir().join(format!(
-            "nacelle-empty-runtime-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("nacelle-empty-runtime-{}", std::process::id()));
         fs::create_dir_all(&dir)?;
         temp_runtime_dir = Some(dir.clone());
         dir
     };
 
     if let Some(spec) = &runtime_to_bundle {
-        eprintln!("✓ Using runtime: {:?} ({} {})", runtime_dir, spec.language, spec.version);
+        eprintln!(
+            "✓ Using runtime: {:?} ({} {})",
+            runtime_dir, spec.language, spec.version
+        );
     } else {
         if let Some(hint) = &source_target_hint {
-            eprintln!("✓ No runtime bundled (targets.source.language = {}).", hint.language);
+            eprintln!(
+                "✓ No runtime bundled (targets.source.language = {}).",
+                hint.language
+            );
         } else {
-            eprintln!("✓ No runtime bundled (entrypoint: {:?})", manifest_entrypoint);
+            eprintln!(
+                "✓ No runtime bundled (entrypoint: {:?})",
+                manifest_entrypoint
+            );
         }
         eprintln!("ℹ️  Note: This bundle will require the entrypoint runtime to be available on the target host.");
     }
+
+    let runtime_alias = build_runtime_alias(runtime_to_bundle.as_ref(), &runtime_dir)?;
 
     // 4. Create archive with runtime + source
     eprintln!("✓ Creating bundle archive...");
     let build_excludes = read_build_exclude_patterns(&manifest_path)?;
     let source_ignore = load_capsuleignore(source_dir, &build_excludes)?;
-    let archive_data = create_bundle_archive(&runtime_dir, source_dir, source_ignore.as_ref())?;
+    let config_path = source_dir.join("config.json");
+    let config_ref = if config_path.exists() {
+        Some(config_path.as_path())
+    } else {
+        None
+    };
+    let archive_data = create_bundle_archive(
+        &runtime_dir,
+        source_dir,
+        source_ignore.as_ref(),
+        config_ref,
+        runtime_alias.as_ref(),
+    )?;
     eprintln!("✓ Archive size: {} MB", archive_data.len() / 1_048_576);
 
     if let Some(dir) = temp_runtime_dir {
@@ -196,10 +226,7 @@ fn read_manifest_source_target_hint(manifest_path: &Path) -> Result<Option<Sourc
     let manifest: toml::Value = toml::from_str(&content)
         .with_context(|| format!("Failed to parse manifest TOML: {}", manifest_path.display()))?;
 
-    let Some(source) = manifest
-        .get("targets")
-        .and_then(|t| t.get("source"))
-    else {
+    let Some(source) = manifest.get("targets").and_then(|t| t.get("source")) else {
         return Ok(None);
     };
 
@@ -257,6 +284,47 @@ fn read_manifest_entrypoint(
         .map(|s| s.to_string()))
 }
 
+fn build_runtime_alias(
+    runtime_spec: Option<&RuntimeBundleSpec>,
+    runtime_dir: &Path,
+) -> Result<Option<RuntimeAlias>> {
+    let Some(spec) = runtime_spec else {
+        return Ok(None);
+    };
+
+    let (archive_path, source_path) = match spec.language.as_str() {
+        "python" => {
+            let python = nacelle::bundle::find_python_binary(runtime_dir)?;
+            ("runtime/python/bin/python3".to_string(), python)
+        }
+        "node" => {
+            let node = find_binary_recursive(runtime_dir, &["node", "node.exe"])?;
+            ("runtime/node/bin/node".to_string(), node)
+        }
+        "deno" => {
+            let deno = find_binary_recursive(runtime_dir, &["deno", "deno.exe"])?;
+            ("runtime/deno/bin/deno".to_string(), deno)
+        }
+        "bun" => {
+            let bun = find_binary_recursive(runtime_dir, &["bun", "bun.exe"])?;
+            ("runtime/bun/bin/bun".to_string(), bun)
+        }
+        _ => return Ok(None),
+    };
+
+    if runtime_dir
+        .join(archive_path.replace("runtime/", ""))
+        .exists()
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(RuntimeAlias {
+        archive_path,
+        source_path,
+    }))
+}
+
 fn manifest_needs_python(
     _manifest_path: &Path,
     source_dir: &Path,
@@ -284,15 +352,14 @@ fn manifest_needs_python(
 
     // If it's a path to an existing file under the source dir and looks like python.
     let candidate = source_dir.join(ep);
-    if candidate.is_file() {
-        if candidate
+    if candidate.is_file()
+        && candidate
             .extension()
             .and_then(|s| s.to_str())
             .map(|ext| ext.eq_ignore_ascii_case("py"))
             .unwrap_or(false)
-        {
-            return Ok(true);
-        }
+    {
+        return Ok(true);
     }
 
     Ok(false)
@@ -440,9 +507,7 @@ fn load_capsuleignore(source_dir: &Path, extra_patterns: &[String]) -> Result<Op
         return Ok(None);
     }
 
-    let gitignore = builder
-        .build()
-        .context("Failed to parse .capsuleignore")?;
+    let gitignore = builder.build().context("Failed to parse .capsuleignore")?;
     Ok(Some(gitignore))
 }
 
@@ -486,6 +551,8 @@ fn create_bundle_archive(
     runtime_dir: &Path,
     source_dir: &Path,
     source_ignore: Option<&Gitignore>,
+    config_path: Option<&Path>,
+    runtime_alias: Option<&RuntimeAlias>,
 ) -> Result<Vec<u8>> {
     let mut archive = Builder::new(Vec::new());
 
@@ -493,6 +560,29 @@ fn create_bundle_archive(
     archive
         .append_dir_all("runtime", runtime_dir)
         .context("Failed to add runtime to archive")?;
+
+    if let Some(alias) = runtime_alias {
+        archive
+            .append_path_with_name(&alias.source_path, &alias.archive_path)
+            .with_context(|| {
+                format!(
+                    "Failed to add runtime alias {} -> {}",
+                    alias.source_path.display(),
+                    alias.archive_path
+                )
+            })?;
+    }
+
+    if let Some(config_path) = config_path {
+        archive
+            .append_path_with_name(config_path, "config.json")
+            .with_context(|| {
+                format!(
+                    "Failed to add config.json to archive: {}",
+                    config_path.display()
+                )
+            })?;
+    }
 
     // Add source directory
     // Default behavior stays "include everything"; if `.capsuleignore` exists, we apply it.
@@ -527,6 +617,10 @@ fn append_source_dir(
             .unwrap_or(path)
             .to_string_lossy();
 
+        if relative == "config.json" {
+            continue;
+        }
+
         if relative.starts_with(".git/") || relative == ".git" {
             continue;
         }
@@ -547,6 +641,36 @@ fn append_source_dir(
     }
 
     Ok(())
+}
+
+fn find_binary_recursive(runtime_dir: &Path, candidates: &[&str]) -> Result<PathBuf> {
+    for candidate in candidates {
+        let direct = runtime_dir.join(candidate);
+        if direct.is_file() {
+            return Ok(direct);
+        }
+    }
+
+    let mut stack = vec![runtime_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .with_context(|| format!("Failed to read runtime dir: {}", dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                if candidates.contains(&name) {
+                    return Ok(path);
+                }
+            }
+        }
+    }
+
+    anyhow::bail!("Runtime binary not found in {:?}", runtime_dir)
 }
 
 /// Compress data using Zstd

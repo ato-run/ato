@@ -4,7 +4,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
 
-use crate::security::egress_policy::EgressPolicyRegistry;
+// v3.0: EgressPolicyRegistry moved to capsule-cli
+// This proxy is now a standalone component without policy resolution
+// use crate::security::egress_policy::EgressPolicyRegistry;
 use base64::Engine as _;
 
 fn host_matches_domain(host: &str, domain: &str) -> bool {
@@ -77,7 +79,7 @@ async fn handle_connection(
     let request_str = String::from_utf8_lossy(&buf[..n]);
 
     let target_host = extract_target_host(&request_str);
-    let auth = extract_basic_proxy_auth(&request_str);
+    let _auth = extract_basic_proxy_auth(&request_str); // v3.0: Currently unused
 
     if let Some(host) = target_host {
         let allowed_by_default = {
@@ -85,6 +87,10 @@ async fn handle_connection(
             wl.iter().any(|domain| host_matches_domain(&host, domain))
         };
 
+        // v3.0: Policy registry check removed - policies are now resolved by capsule-cli
+        // and passed via sandbox_rules.json
+        let allowed_by_policy = false;
+        /*
         let allowed_by_policy = auth
             .as_ref()
             .and_then(|(u, p)| EgressPolicyRegistry::global().allowlist_for_basic_auth(u, p))
@@ -94,6 +100,7 @@ async fn handle_connection(
                     .any(|domain| host_matches_domain(&host, domain))
             })
             .unwrap_or(false);
+        */
 
         if !(allowed_by_default || allowed_by_policy) {
             warn!(
