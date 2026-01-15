@@ -3,20 +3,15 @@
 
 // Allow clippy warnings for auto-generated code
 #[allow(clippy::large_enum_variant)]
-pub mod onescluster {
+pub mod nacelle {
     pub mod common {
         pub mod v1 {
-            include!("onescluster.common.v1.rs");
+            include!("nacelle.common.v1.rs");
         }
     }
     pub mod engine {
         pub mod v1 {
-            include!("onescluster.engine.v1.rs");
-        }
-    }
-    pub mod coordinator {
-        pub mod v1 {
-            include!("onescluster.coordinator.v1.rs");
+            include!("nacelle.engine.v1.rs");
         }
     }
 }

@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+package nacelle.common.v1;
+
+option go_package = "github.com/capsuled-dev/nacelle/pkg/proto;proto";
+
+// RunPlan v0: normalized execution plan (Phase 2)
+// Shared between coordinator.proto and engine.proto
+message RunPlan {
+    // Traceability
+    string capsule_id = 1;
+    string name = 2;
+    string version = 3;
+
+    // Runtime selection
+    oneof runtime {
+        DockerRuntime docker = 10;
+        NativeRuntime native = 11;
+        // DEPRECATED: python_uv = 12 (replaced by source)
+        WasmRuntime wasm = 13;          // WebAssembly Component Model
+        SourceRuntime source = 14;       // Generic Source Runtime (any language)
+    }
+
+    // Resources
+    uint32 cpu_cores = 20;          // optional
+    uint64 memory_bytes = 21;       // optional
+    string gpu_profile = 22;        // optional, e.g., "none" | "cuda:L4:1"
+
+    // Network
+    repeated string egress_allowlist = 30; // optional CIDR/host list
+}
+
+message DockerRuntime {
+    string image = 1;
+    string digest = 2;                     // optional
+    repeated string command = 3;           // entrypoint/command
+    map<string, string> env = 4;
+    string working_dir = 5;                // optional
+    string user = 6;                       // optional
+    repeated Port ports = 7;
+    repeated Mount mounts = 8;
+}
+
+message NativeRuntime {
+    string binary_path = 1;
+    repeated string args = 2;
+    map<string, string> env = 3;
+    string working_dir = 4;
+}
+
+message WasmRuntime {
+    string component = 1;           // Path to .wasm component file
+    string working_dir = 2;         // Source directory
+    repeated string args = 3;       // Optional CLI arguments
+    map<string, string> env = 4;    // Optional environment variables
+}
+
+// Generic Source Runtime: Execute any language runtime from host
+// Supports explicit command specification via `cmd` field
+message SourceRuntime {
+    string language = 1;              // Language hint (python, ruby, node, etc.)
+    string entrypoint = 2;            // Entry point file (e.g., "main.py", "app.rb")
+    repeated string cmd = 3;          // Explicit command (e.g., ["ruby", "app.rb"])
+    repeated string args = 4;         // Additional arguments
+    map<string, string> env = 5;      // Environment variables
+    string working_dir = 6;           // Source directory
+    bool dev_mode = 7;                // Enable relaxed security for development
+}
+
+message Port {
+    uint32 container_port = 1;
+    uint32 host_port = 2; // optional
+    string protocol = 3;  // optional
+}
+
+message Mount {
+    string source = 1;
+    string target = 2;
+    bool readonly = 3;
+}

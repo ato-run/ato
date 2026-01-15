@@ -1,11 +1,11 @@
 //! Engine gRPC Client
 //!
 //! Provides a client for communicating with the capsuled daemon
-//! via the onescluster.engine.v1 gRPC service.
+//! via the nacelle.engine.v1 gRPC service.
 
 use anyhow::{Context, Result};
 use nacelle::capsule_types::capsule_v1::CapsuleManifestV1;
-use nacelle::proto::onescluster::engine::v1::{
+use nacelle::proto::nacelle::engine::v1::{
     deploy_request::Manifest as DeployManifest, engine_client::EngineClient, DeployRequest,
     DeployResponse, EngineLogEntry, GetSystemStatusRequest, LogRequest, StopRequest, StopResponse,
     SystemStatus,
