@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package nacelle.common.v1;
 
-option go_package = "github.com/capsuled-dev/nacelle/pkg/proto;proto";
+option go_package = "github.com/nacelle-dev/nacelle/pkg/proto;proto";
 
 // RunPlan v0: normalized execution plan (Phase 2)
 // Shared between coordinator.proto and engine.proto

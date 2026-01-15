@@ -119,8 +119,8 @@ async fn execute_dev_mode(args: OpenArgs) -> Result<()> {
                     .context("Failed to connect after starting daemon")?
             } else {
                 anyhow::bail!(
-                    "Could not start capsuled daemon.\n\
-                    Please start it manually: capsuled"
+                    "Could not start nacelle daemon.\n\
+                    Please start it manually: nacelle"
                 );
             }
         }
@@ -236,7 +236,7 @@ async fn execute_prod_mode(args: OpenArgs) -> Result<()> {
 
     let mut client = CapsuleEngineClient::connect(&engine_url)
         .await
-        .context("Failed to connect to engine. Is capsuled running?")?;
+        .context("Failed to connect to engine. Is nacelle running?")?;
     println!("   ✓ Connected");
 
     // 3. Deploy
@@ -269,12 +269,12 @@ async fn execute_prod_mode(args: OpenArgs) -> Result<()> {
     Ok(())
 }
 
-/// Try to start the capsuled daemon
+/// Try to start the nacelle daemon
 async fn try_start_daemon() -> Result<bool> {
-    // Check if capsuled binary exists
-    let capsuled_path = which::which("capsuled");
+    // Check if nacelle binary exists
+    let nacelle_path = which::which("nacelle");
 
-    match capsuled_path {
+    match nacelle_path {
         Ok(path) => {
             println!("   Starting daemon: {}", path.display());
 
@@ -282,13 +282,13 @@ async fn try_start_daemon() -> Result<bool> {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
-                .context("Failed to spawn capsuled")?;
+                .context("Failed to spawn nacelle")?;
 
             Ok(true)
         }
         Err(_) => {
             // Try relative path
-            let local_path = PathBuf::from("./target/release/capsuled");
+            let local_path = PathBuf::from("./target/release/nacelle");
             if local_path.exists() {
                 println!("   Starting daemon: {}", local_path.display());
 
@@ -296,7 +296,7 @@ async fn try_start_daemon() -> Result<bool> {
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .spawn()
-                    .context("Failed to spawn capsuled")?;
+                    .context("Failed to spawn nacelle")?;
 
                 Ok(true)
             } else {

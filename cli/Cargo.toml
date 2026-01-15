@@ -1,6 +1,6 @@
 [package]
 name = "nacelle-cli"
-version = "0.2.0"
+version = "1.0.0"
 edition = "2021"
 description = "Nacelle CLI - Unified Runtime for Capsules"
 license = "Apache-2.0"
@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Core library - use library feature only (no engine dependencies)
-nacelle = { version = "0.2.0", path = "..", default-features = false, features = ["library"] }
+nacelle = { version = "1.0.0", path = "..", default-features = false, features = ["library"] }
 
 # CLI framework
 clap = { version = "4.0", features = ["derive"] }
@@ -31,7 +31,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
 
-# gRPC client (must match capsuled's tonic version)
+# gRPC client (must match nacelle's tonic version)
 tonic = "0.12"
 prost = "0.13"
 

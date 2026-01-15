@@ -1,6 +1,6 @@
 # Storage Management Module
 
-This module provides LVM (Logical Volume Manager) and LUKS (Linux Unified Key Setup) encryption functionality for Capsuled engine.
+This module provides LVM (Logical Volume Manager) and LUKS (Linux Unified Key Setup) encryption functionality for Nacelle engine.
 
 ## Features
 
@@ -35,7 +35,7 @@ sudo apt-get install lvm2 cryptsetup
 ### LVM Manager
 
 ```rust
-use capsuled_engine::storage::{LvmManager, StorageResult};
+use nacelle_engine::storage::{LvmManager, StorageResult};
 
 fn main() -> StorageResult<()> {
     // Create LVM manager with default volume group
@@ -75,12 +75,12 @@ fn main() -> StorageResult<()> {
 ### LUKS Manager
 
 ```rust
-use capsuled_engine::storage::{LuksManager, KeyStorage, StorageResult};
+use nacelle_engine::storage::{LuksManager, KeyStorage, StorageResult};
 use std::path::PathBuf;
 
 fn main() -> StorageResult<()> {
     // Create LUKS manager
-    let luks = LuksManager::new(PathBuf::from("/etc/capsuled/keys"));
+    let luks = LuksManager::new(PathBuf::from("/etc/nacelle/keys"));
 
     // Generate encryption key
     let key = luks.generate_key(32); // 32-byte key
@@ -117,7 +117,7 @@ fn main() -> StorageResult<()> {
 ### Combined LVM + LUKS Example
 
 ```rust
-use capsuled_engine::storage::{LvmManager, LuksManager, KeyStorage, StorageResult};
+use nacelle_engine::storage::{LvmManager, LuksManager, KeyStorage, StorageResult};
 use std::path::PathBuf;
 
 fn create_encrypted_volume() -> StorageResult<()> {
@@ -127,7 +127,7 @@ fn create_encrypted_volume() -> StorageResult<()> {
     println!("Created LVM volume: {}", volume.device_path);
 
     // 2. Encrypt the volume with LUKS
-    let luks = LuksManager::new(PathBuf::from("/etc/capsuled/keys"));
+    let luks = LuksManager::new(PathBuf::from("/etc/nacelle/keys"));
     let key = luks.generate_key(32);
     let key_path = luks.store_key("encrypted_data", &key)?;
     
@@ -154,7 +154,7 @@ fn create_encrypted_volume() -> StorageResult<()> {
 The storage module uses comprehensive error types:
 
 ```rust
-use capsuled_engine::storage::{StorageError, StorageResult};
+use nacelle_engine::storage::{StorageError, StorageResult};
 
 fn handle_errors() -> StorageResult<()> {
     let lvm = LvmManager::new("vg_data".to_string());

@@ -59,8 +59,6 @@ pub use common::config;
 pub use common::failure_codes;
 
 // From interface (v2.0: gRPC/API removed, daemon removed)
-// pub use interface::api as api_server; // Disabled in v2.0
-// pub use interface::dev_server; // Disabled in v2.0
 pub use interface::http as http_server;
 
 // From schema
@@ -69,7 +67,6 @@ pub use schema::capnp as capsule_capnp;
 pub use schema::converter as capnp_to_manifest;
 
 // From engine (v2.0: manager removed, supervisor-based)
-// pub use engine::pool as pool_registry; // Disabled: capsule_runtime dependency removed
 pub use engine::supervisor as process_supervisor;
 
 // From resource

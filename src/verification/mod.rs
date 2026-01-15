@@ -39,4 +39,4 @@ pub use verifier::*;
 pub use vram::*;
 
 // ENV constant kept for runtime use
-pub const ENV_KEY_EGRESS_TOKEN: &str = "CAPSULED_EGRESS_TOKEN";
+pub const ENV_KEY_EGRESS_TOKEN: &str = "NACELLE_EGRESS_TOKEN";

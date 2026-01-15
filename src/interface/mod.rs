@@ -1,6 +1,6 @@
-//! External interfaces for the Capsuled Engine (v2.0 - Simplified)
+//! External interfaces for the nacelle Engine (v2.0 - Simplified)
 //!
-//! This module contains HTTP interfaces for the Capsuled runtime:
+//! This module contains HTTP interfaces for the nacelle runtime:
 //! - [`dev_server`]: Development server with hot-reload support
 //! - [`http`]: HTTP health checks and metrics endpoints
 //! - [`api`]: REST API server (Axum-based)
@@ -8,7 +8,7 @@
 //!
 //! ## Usage Patterns
 //!
-//! In v2.0, capsuled operates as a CLI-driven runtime without a central daemon.
+//! In v2.0, nacelle operates as a CLI-driven runtime without a central daemon.
 //! Each capsule runs with its own embedded supervisor and can optionally expose
 //! HTTP endpoints for monitoring and control.
 

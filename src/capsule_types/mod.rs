@@ -1,5 +1,5 @@
 // Capsule type definitions (extracted from capsule-core to eliminate external dependency)
-// This module provides UARC V1.1.0 compliant types used by both capsuled and CLI.
+// This module provides UARC V1.1.0 compliant types used by both nacelle and CLI.
 
 pub mod capsule_v1;
 pub mod error;
