@@ -2,7 +2,7 @@
 //!
 //! Creates Tauri-style self-contained executables:
 //! 1. Pack runtime + user code + assets into tar.zst
-//! 2. Append to capsuled binary with magic bytes
+//! 2. Append to nacelle binary with magic bytes
 //! 3. Result: Single executable with no external dependencies
 
 use anyhow::{Context, Result};
@@ -730,7 +730,7 @@ fn find_nacelle_binary() -> Result<PathBuf> {
     anyhow::bail!(
         "Could not find nacelle binary. Please either:\n\
          1. Set NACELLE_BINARY environment variable\n\
-         2. Run 'cargo build --release' in the capsuled directory\n\
+         2. Run 'cargo build --release' in the nacelle directory\n\
          3. Install nacelle to your PATH"
     )
 }

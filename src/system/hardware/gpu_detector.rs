@@ -55,7 +55,7 @@ impl MockGpuDetector {
             .and_then(|s| s.parse().ok())
             .unwrap_or(1);
 
-        let vram_gb = std::env::var("CAPSULED_MOCK_VRAM_GB")
+        let vram_gb = std::env::var("NACELLE_MOCK_VRAM_GB")
             .or_else(|_| std::env::var("MOCK_VRAM_GB"))
             .ok()
             .and_then(|s| s.parse().ok())
@@ -461,15 +461,15 @@ impl GpuDetector for CpuGpuDetector {
 /// Factory function to create the appropriate GPU detector
 ///
 /// Detection order (SPEC V1.1.0):
-/// 1. Mock detector if explicitly requested via env var `CAPSULED_USE_MOCK_GPU=1`
+/// 1. Mock detector if explicitly requested via env var `NACELLE_USE_MOCK_GPU=1`
 /// 2. NVML detector if `real-gpu` feature is enabled (Linux only)
 /// 3. nvidia-smi based detector (cross-platform, no NVML dependency)
 /// 4. Mac GPU detector on macOS
 /// 5. CPU-only detector as final fallback
 pub fn create_gpu_detector() -> Arc<dyn GpuDetector> {
     // Check if Mock is explicitly requested or implied by VRAM config
-    if std::env::var("CAPSULED_USE_MOCK_GPU").is_ok()
-        || std::env::var("CAPSULED_MOCK_VRAM_GB").is_ok()
+    if std::env::var("NACELLE_USE_MOCK_GPU").is_ok()
+        || std::env::var("NACELLE_MOCK_VRAM_GB").is_ok()
     {
         tracing::info!("Using mock GPU detector (requested via env var)");
         return Arc::new(MockGpuDetector::new());

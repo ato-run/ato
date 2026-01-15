@@ -17,7 +17,7 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/capsuled-dev/nacelle.git
+git clone https://github.com/nacelle-dev/nacelle.git
 cd nacelle
 
 # Build the CLI

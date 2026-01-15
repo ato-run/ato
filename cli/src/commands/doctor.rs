@@ -16,7 +16,7 @@ pub async fn execute(args: DoctorArgs) -> Result<()> {
 
     let mut all_ok = true;
 
-    // 1. Check capsuled daemon
+    // 1. Check nacelle daemon
     println!("🔌 Engine Connection:");
     let engine_url = resolve_engine_url(None);
     match CapsuleEngineClient::try_connect(&engine_url).await {

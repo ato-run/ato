@@ -160,7 +160,7 @@ impl RegistryClient {
     pub fn new() -> Self {
         Self {
             client: Client::builder()
-                .user_agent("capsuled-engine/0.1.0")
+                .user_agent("nacelle/1.0.0")
                 .build()
                 .expect("Failed to create HTTP client"),
             auth_token: None,

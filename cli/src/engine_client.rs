@@ -1,6 +1,6 @@
 //! Engine gRPC Client
 //!
-//! Provides a client for communicating with the capsuled daemon
+//! Provides a client for communicating with the nacelle daemon
 //! via the nacelle.engine.v1 gRPC service.
 
 use anyhow::{Context, Result};

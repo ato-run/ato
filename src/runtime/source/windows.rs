@@ -305,9 +305,9 @@ async fn launch_with_sandboxie(
     })?;
 
     // Build Sandboxie command
-    // Format: Start.exe /box:CapsuledBox /wait <program> <args>
+    // Format: Start.exe /box:nacelleBox /wait <program> <args>
     let box_name = format!(
-        "Capsuled_{}",
+        "nacelle_{}",
         &request.workload_id[..8.min(request.workload_id.len())]
     );
 
@@ -390,7 +390,7 @@ pub fn stop_sandboxie_box(workload_id: &str) -> Result<(), RuntimeError> {
         None => return Ok(()), // Not installed, nothing to stop
     };
 
-    let box_name = format!("Capsuled_{}", &workload_id[..8.min(workload_id.len())]);
+    let box_name = format!("nacelle_{}", &workload_id[..8.min(workload_id.len())]);
 
     let output = Command::new(&start_exe)
         .args([&format!("/box:{}", box_name), "/terminate"])

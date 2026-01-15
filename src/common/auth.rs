@@ -18,7 +18,7 @@ impl AuthManager {
     /// Create a new AuthManager with a randomly generated token or from env var
     pub fn new() -> Self {
         let token =
-            std::env::var("CAPSULED_AUTH_TOKEN").unwrap_or_else(|_| Uuid::new_v4().to_string());
+            std::env::var("NACELLE_AUTH_TOKEN").unwrap_or_else(|_| Uuid::new_v4().to_string());
 
         tracing::info!("Using API auth token: {}", &token[..8]);
 
