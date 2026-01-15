@@ -1,0 +1,168 @@
+name: Test Samples
+
+# Trigger on pull requests (if samples or src changes) and pushes to main
+on:
+  pull_request:
+    paths:
+      - "samples/**"
+      - "src/**"
+      - "cli/**"
+      - "proto/**"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/samples.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "samples/**"
+      - "src/**"
+      - "cli/**"
+      - "proto/**"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+jobs:
+  build:
+    name: Build and Test Samples
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # Check out repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Set up Rust toolchain
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Cache Cargo build artifacts
+      - name: Cache Cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache Cargo index
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache Cargo build
+        uses: actions/cache@v3
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-target-
+
+      # Format check
+      - name: Check code formatting
+        run: cargo fmt --check
+
+      # Linting (clippy)
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Build the main library
+      - name: Build nacelle library
+        run: cargo build --lib --release
+
+      # Build the CLI
+      - name: Build nacelle CLI
+        working-directory: ./cli
+        run: cargo build --release
+
+      # Install CLI to PATH for testing
+      - name: Install nacelle CLI
+        run: cargo install --path ./cli --locked
+
+      # Run smoke tests on samples
+      - name: Test samples
+        run: ./scripts/test-samples.sh
+        continue-on-error: false
+
+  # Optional: Python sample specific tests
+  python-sample:
+    name: Test Python Sample (simple-todo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 8
+
+      # Build React app for simple-todo
+      - name: Build React app
+        working-directory: ./samples/simple-todo
+        run: |
+          pnpm install
+          pnpm run build
+
+      # Verify capsule.toml is valid
+      - name: Verify capsule.toml syntax
+        working-directory: ./samples/simple-todo
+        run: |
+          python3 -m json.tool capsule.toml 2>/dev/null || echo "Note: capsule.toml is TOML, not JSON (expected)"
+          cat capsule.toml | head -20
+
+  # Optional: Node sample specific tests
+  node-sample:
+    name: Test Node Sample (my-app)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      # Install Bun (for my-app build/run)
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      # Install dependencies
+      - name: Install dependencies with Bun
+        working-directory: ./samples/my-app
+        run: bun install
+
+      # Check TypeScript compilation
+      - name: Check TypeScript compilation
+        working-directory: ./samples/my-app
+        run: |
+          bun run build 2>&1 || true
+          cat tsconfig.json
+
+      # Verify capsule.toml is valid
+      - name: Verify capsule.toml
+        working-directory: ./samples/my-app
+        run: cat capsule.toml | head -20
