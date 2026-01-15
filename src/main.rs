@@ -4,11 +4,6 @@
 //! - Self-extracting bundle (embedded runtime)
 //! - Direct execution with supervisor and sandbox
 
-use std::path::PathBuf;
-use tracing::warn;
-
-use nacelle::verification::sandbox::SandboxPolicy;
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // v2.0: Check if running as self-extracting bundle
@@ -31,12 +26,8 @@ fn is_self_extracting_bundle() -> anyhow::Result<bool> {
 
 /// v2.0: Bootstrap and run embedded runtime
 async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
-    use nacelle::engine::socket::{SocketConfig, SocketManager};
-    use nacelle::engine::supervisor::ProcessSupervisor;
-
     println!("🚀 Starting nacelle bundle...");
 
-    // Extract bundle to temp directory
     let temp_dir = std::env::temp_dir().join(format!("nacelle-{}", std::process::id()));
     std::fs::create_dir_all(&temp_dir)?;
 
@@ -45,240 +36,87 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     let exe_path = std::env::current_exe()?;
     nacelle::bundle::extract_bundle_to_dir(&exe_path, &temp_dir)?;
 
-    // Find entrypoint in source/
-    let source_dir = temp_dir.join("source");
-    let runtime_dir = temp_dir.join("runtime");
-
-    // Look for capsule.toml to determine entrypoint
-    let manifest_path = source_dir.join("capsule.toml");
-    if !manifest_path.exists() {
-        anyhow::bail!("No capsule.toml found in bundle");
+    let config_path = temp_dir.join("config.json");
+    if !config_path.exists() {
+        anyhow::bail!("No config.json found in bundle (R3 requires config.json)");
     }
 
-    let manifest_content = std::fs::read_to_string(&manifest_path)?;
-    let manifest: toml::Value = toml::from_str(&manifest_content)?;
+    let config = nacelle::runtime_config::load_config(&config_path)?;
+    let egress_mode = config
+        .sandbox
+        .network
+        .egress
+        .as_ref()
+        .map(|e| e.mode.as_str())
+        .unwrap_or("allow_all");
 
-    // Supervisor Mode: if [services] exists, run multi-service lifecycle (Step 3).
-    // This is dev-first and does not yet integrate socket activation or sandbox per-service.
-    if let Ok(m) = nacelle::capsule_types::capsule_v1::CapsuleManifestV1::from_toml(&manifest_content)
-    {
-        if let Some(services) = m.services {
-            if !services.is_empty() {
-                println!(
-                    "🧠 Supervisor Mode: Detected {} services in capsule.toml",
-                    services.len()
-                );
-
-                let plan = nacelle::engine::supervisor_mode::build_supervisor_mode_plan(&services)
-                    .map_err(|e| anyhow::anyhow!(e))?;
-                nacelle::engine::supervisor_mode::run_supervisor_mode(
-                    &plan,
-                    &source_dir,
-                    Default::default(),
-                    None,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!(e))?;
-
-                return Ok(());
-            }
-        }
-    }
-
-    let entrypoint = nacelle::bundle::read_entrypoint_from_manifest(&manifest_path)?;
-
-    let targets_source_language_is_python = manifest
-        .get("targets")
-        .and_then(|t| t.get("source"))
-        .and_then(|s| s.get("language"))
-        .and_then(|l| l.as_str())
-        .map(|l| l.eq_ignore_ascii_case("python") || l.eq_ignore_ascii_case("python3"))
-        .unwrap_or(false);
-
-    let enable_socket_activation =
-        targets_source_language_is_python || looks_like_python_file(&entrypoint, &source_dir);
-
-    // Resolve port: env (CAPSULE_PORT, PORT) > capsule.toml (execution.port) > default
-    let port = std::env::var("CAPSULE_PORT")
-        .ok()
-        .or_else(|| std::env::var("PORT").ok())
-        .and_then(|p| p.parse().ok())
-        .or_else(|| {
-            manifest
-                .get("execution")
-                .and_then(|e| e.get("port"))
-                .and_then(|p| p.as_integer())
-                .and_then(|p| u16::try_from(p).ok())
-        })
-        .unwrap_or(8000);
-
-    // Setup Socket Activation (Python-only by default)
-    let socket_manager = if enable_socket_activation {
-        let socket_config = SocketConfig {
-            port,
-            host: "0.0.0.0".to_string(),
-            enabled: true,
-        };
-        let socket_manager = SocketManager::new(socket_config)?;
-        println!(
-            "🔌 Socket Activation: Bound to port {} (FD {})",
-            port,
-            socket_manager.raw_fd()
-        );
-        Some(socket_manager)
+    let mut enforcer: Option<nacelle::engine::ebpf_enforcer::EgressEnforcerHandle> = None;
+    let dns_rules = if config.sandbox.network.allow_domains.is_some() {
+        nacelle::egress::dns_bootstrap::dns_bootstrap_rules()?
     } else {
-        println!("ℹ️  Socket Activation: Disabled (non-Python entrypoint)");
-        None
+        Vec::new()
     };
 
-    // ⚠️ IMPORTANT: Setup signal handlers BEFORE spawning child process
-    // This ensures signals are captured by our handler, not the default termination handler
-    #[cfg(unix)]
-    let (mut sig_term, mut sig_int) = {
-        use tokio::signal::unix::{signal, SignalKind};
-        let sig_term = signal(SignalKind::terminate())?;
-        let sig_int = signal(SignalKind::interrupt())?;
-        (sig_term, sig_int)
-    };
-
-    // Create the Supervisor (Actor-based)
-    let supervisor = ProcessSupervisor::new();
-
-    // Prepare command with Socket Activation
-    let source_language = nacelle::bundle::read_source_language_from_manifest(&manifest_path)?;
-    let mut cmd = nacelle::bundle::build_bundle_command(
-        source_language.as_deref(),
-        &entrypoint,
-        &source_dir,
-        &runtime_dir,
-    )?;
-
-    // Provide a consistent port signal to the child.
-    cmd.env("PORT", port.to_string());
-    cmd.env("CAPSULE_PORT", port.to_string());
-
-    // Pass socket FD to child (if enabled)
-    if let Some(sm) = socket_manager.as_ref() {
-        sm.prepare_command(&mut cmd)?;
-    }
-
-    // Set process group and sandbox for signal propagation and isolation
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-
-        // v3.0: Load pre-validated sandbox rules from capsule-cli
-        // Phase 3: Apply sandbox for process isolation
-        let sandbox_policy = nacelle::bundle_rules::load_sandbox_rules(&source_dir)?
-            .unwrap_or_else(|| {
-                println!("⚠️  No sandbox rules found, using default policy");
-                SandboxPolicy::for_capsule(&source_dir).with_development_mode(true)
-            });
-
-        let policy_clone = sandbox_policy.clone();
-        unsafe {
-            cmd.pre_exec(move || {
-                match nacelle::verification::sandbox::apply_sandbox(&policy_clone) {
-                    Ok(result) => {
-                        if !result.fully_enforced && !result.partially_enforced {
-                            eprintln!("⚠️  Sandbox not enforced: {}", result.message);
-                        }
-                        Ok(())
-                    }
-                    Err(e) => {
-                        eprintln!("⚠️  Sandbox error (continuing): {}", e);
-                        // Continue without sandbox in case of error
-                        Ok(())
-                    }
+    if egress_mode != "allow_all" {
+        let job_id = format!("job-{}", std::process::id());
+        match nacelle::engine::ebpf_enforcer::start_enforcer(&[], &dns_rules, &job_id) {
+            Ok(handle) => {
+                enforcer = Some(handle);
+            }
+            Err(e) => {
+                eprintln!("⚠️  eBPF enforcer unavailable: {}", e);
+                if matches!(
+                    nacelle::engine::enforcement_guard::EnforcementMode::parse_mode(
+                        config.sandbox.network.enforcement.as_str()
+                    ),
+                    nacelle::engine::enforcement_guard::EnforcementMode::Strict
+                ) {
+                    return Err(anyhow::anyhow!(e));
                 }
-            });
-        }
-
-        println!("🔒 Sandbox: Configured for source directory");
-    }
-
-    // Spawn the child process
-    let child = cmd.spawn()?;
-    let child_pid = child.id();
-    if socket_manager.is_some() {
-        println!("🔗 Socket Activation: Passing FD 3 to child process");
-    }
-
-    // Register with Supervisor
-    supervisor.register("main-app".to_string(), child)?;
-
-    // Wait for shutdown signal (SIGTERM or SIGINT)
-    #[cfg(unix)]
-    {
-        tokio::select! {
-            _ = sig_term.recv() => {
-                println!("\n🛑 Received SIGTERM, shutting down gracefully...");
             }
-            _ = sig_int.recv() => {
-                println!("\n🛑 Received SIGINT (Ctrl+C), shutting down gracefully...");
+        }
+    }
+
+    let mut allow_rules = Vec::new();
+    if let Some(egress) = &config.sandbox.network.egress {
+        if let Some(rules) = &egress.rules {
+            allow_rules.extend(rules.iter().cloned());
+        }
+    }
+    if let Some(domains) = &config.sandbox.network.allow_domains {
+        let resolved = nacelle::egress::resolver::resolve_allow_domains(domains)?;
+        allow_rules.extend(resolved);
+    }
+    if !allow_rules.is_empty() {
+        nacelle::egress::validate_egress_rules(&allow_rules)?;
+    }
+    if egress_mode != "allow_all" {
+        if let Some(handle) = enforcer.as_mut() {
+            if !allow_rules.is_empty() || egress_mode == "deny_all" {
+                handle.update_allowlist(&allow_rules)?;
             }
         }
 
-        // Kill the process group directly to ensure child is terminated
-        use nix::sys::signal::{self as nix_signal, Signal};
-        use nix::unistd::Pid;
-
-        println!("📤 Sending SIGTERM to process group (PID {})...", child_pid);
-
-        // Send SIGTERM to child's process group
-        let pgid = Pid::from_raw(child_pid as i32);
-        if let Err(e) = nix_signal::killpg(pgid, Signal::SIGTERM) {
-            warn!("Failed to send SIGTERM to process group: {}", e);
-            // Fallback: try killing just the child
-            if let Err(e) = nix_signal::kill(Pid::from_raw(child_pid as i32), Signal::SIGTERM) {
-                warn!("Failed to send SIGTERM to child: {}", e);
+        if !dns_rules.is_empty() {
+            // Keep DNS rules alongside the final allowlist so domain lookups still work.
+            let job_id = format!("job-{}", std::process::id());
+            if let Ok(handle) =
+                nacelle::engine::ebpf_enforcer::start_enforcer(&allow_rules, &dns_rules, &job_id)
+            {
+                enforcer = Some(handle);
             }
         }
-
-        // Wait briefly for graceful exit
-        println!("⏳ Waiting for processes to exit gracefully...");
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-        // Force kill if still running
-        println!("🔨 Sending SIGKILL to ensure termination...");
-        let _ = nix_signal::killpg(pgid, Signal::SIGKILL);
     }
+    nacelle::engine::startup_gc::cleanup_orphan_cgroups();
+    let enforcement_mode = nacelle::engine::enforcement_guard::EnforcementMode::parse_mode(
+        config.sandbox.network.enforcement.as_str(),
+    );
+    nacelle::engine::enforcement_guard::check_enforcement(enforcement_mode)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let cgroup_path = enforcer.as_ref().map(|h| h.cgroup_path.as_path());
+    nacelle::engine::r3_supervisor::run_services_from_config(&config, &temp_dir, cgroup_path)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
 
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c().await?;
-        println!("\n🛑 Received shutdown signal, cleaning up...");
-    }
-
-    // Graceful shutdown via Supervisor (cleanup internal state)
-    if let Err(e) = supervisor.shutdown_and_wait().await {
-        // Ignore errors - the process may already be gone
-        let _ = e;
-    }
-
-    // Cleanup temp directory
-    if let Err(e) = std::fs::remove_dir_all(&temp_dir) {
-        warn!("Failed to cleanup temp directory: {}", e);
-    }
-
-    println!("✅ Shutdown complete");
     Ok(())
 }
-
-fn looks_like_python_file(entrypoint: &str, source_dir: &PathBuf) -> bool {
-    let ep = entrypoint.trim();
-    if ep.ends_with(".py") {
-        return true;
-    }
-
-    let candidate = source_dir.join(ep);
-    candidate.is_file()
-        && candidate
-            .extension()
-            .and_then(|s| s.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("py"))
-            .unwrap_or(false)
-}
-
-// NOTE: Command-building and extraction helpers live in `nacelle::bundle` for reuse/testability.

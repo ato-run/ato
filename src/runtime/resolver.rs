@@ -190,7 +190,8 @@ impl ResolveContext {
                         || self.jit_toolchains.contains("python")
                 }
                 "nodejs" => {
-                    self.available_toolchains.contains("node") || self.jit_toolchains.contains("node")
+                    self.available_toolchains.contains("node")
+                        || self.jit_toolchains.contains("node")
                 }
                 _ => false,
             }

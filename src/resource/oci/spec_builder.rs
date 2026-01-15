@@ -1,6 +1,6 @@
 use crate::capsule_types::capsule_v1::CapsuleManifestV1;
 use crate::capsule_types::capsule_v1::{CapsuleExecution, RuntimeType, StorageVolume};
-use crate::security;
+use crate::verification::path::validate_path;
 use crate::workload::manifest_loader::ResourceRequirements;
 use oci_spec::runtime::{
     HookBuilder, HooksBuilder, Linux, LinuxBuilder, LinuxNamespaceBuilder, LinuxNamespaceType,
@@ -14,7 +14,7 @@ fn validate_mounts(volumes: &[StorageVolume], allowed_paths: &[String]) -> Resul
         // Validation logic for bind mounts
         if vol.name.starts_with("bind:") {
             let path_str = vol.name.strip_prefix("bind:").unwrap();
-            security::validate_path(path_str, allowed_paths)
+            validate_path(path_str, allowed_paths)
                 .map_err(|e| format!("Volume source error: {}", e))?;
         }
     }
@@ -62,7 +62,7 @@ pub fn build_oci_spec(
     allowed_host_paths: &[String],
     resources: Option<&ResourceRequirements>,
     extra_args: Option<&[String]>,
-    manifest: &CapsuleManifestV1,
+    _manifest: &CapsuleManifestV1,
 ) -> Result<Spec, String> {
     // --- 1. Build Process Configuration ---
     let mut process_envs: Vec<String> = execution
@@ -111,107 +111,7 @@ pub fn build_oci_spec(
         None
     };
 
-    // --- 2.5 Security Hooks (Egress Firewall) ---
-    // Inject IPTables rules via a prestart hook
-    let fw_rules = security::egress_policy::generate_fw_rules(manifest);
-    let mut all_hooks = hooks.unwrap_or_default();
-
-    if !fw_rules.is_empty() {
-        // We need to execute these rules.
-        // Strategy: Use `sh -c "iptables ... && iptables ..."`
-        // Or multiple hooks? OCI hooks are executed in order.
-        // Single hook is reliable atomic script.
-
-        let script = fw_rules.join(" && ");
-        let fw_hook = HookBuilder::default()
-            .path(PathBuf::from("/bin/sh")) // Assumes /bin/sh exists in container or runtime env?
-            // WAIT. Prestart hooks run in the runtime namespace but potentially with host fs?
-            // "The Prestart hooks MUST be called after the start operation is called but before the user-specified program command is executed."
-            // "On Linux, ... hooks are executed in the runtime namespace."
-            // If we use `/bin/sh`, it refers to the CONTAINER'S /bin/sh if we are chrooted?
-            // "Docker's default hooks run in the host namespace" -> Wait.
-            // RunC spec:
-            // "Prestart: List of hooks to be run before the container process is executed. On Linux, they are run after the container namespaces are created."
-            // If the path is /bin/sh, it depends on whether we are pivoting root.
-            // Standard OCI behavior: path must be absolute and resolve in the HOST filesystem,
-            // or the hook is executed in the host namespace but with references to container ns?
-            // Actually, usually Prestart hooks are for setting up networking from the HOST side (e.g. CNI).
-            // BUT here we want to run `iptables` INSIDE the container's new network namespace.
-            // To do that from a Host Hook, we need `nsenter`.
-            // Simpler approach for "Capsuled":
-            // Can we assume the container has `iptables`? Probably not (distroless?).
-            // So we MUST run from Host side using `nsenter`.
-            // However, `spec_builder` builds the config. The RUNTIME executes the hooks.
-            // If we define a hook, the runtime (runc/crun) executes it.
-            // Runc hooks execute in the HOST implementation context, usually.
-            // Let's assume we invoke a helper binary or script on the HOST that `nsenter`s.
-            // For MVP: We will assume we can use `nsenter` found on the host.
-            // Command: `nsenter -t <PID> -n iptables ...`
-            // Constraint: Usage of <PID>. OCI Hooks receive state as JSON on stdin, which includes `pid`.
-            // So we need a standardized hook script that reads stdin, gets PID, and runs the rules.
-            // Implementing a custom binary just for this is heavy for this step.
-            // A shell script hook is easier.
-            // `sh -c 'read state; pid=$(echo $state | jq -r .pid); nsenter -t $pid -n -- iptables ...'`
-            // We need `jq`. If minimal host, might fail.
-            // Better: Use `capsuled-engine` itself as the hook executable?
-            // "capsuled-engine hook --mode=egress --rules=..."
-            // This is clean.
-            // For now, let's try a direct `sh` approach if we can trust `pid` is available or passed?
-            // Spec says "The state of the container MUST be passed to hooks over stdin".
-            // Refined Plan:
-            // Construct a command that reads stdin, ignores it (if we can't parse easily),
-            // WAIT. If we don't know PID, we can't nsenter.
-            // We MUST parse stdin to get PID.
-            // Alternative: `ip netns exec`? No, we don't have named netns for anonymous containers usually.
-            // CRITICAL: We need a way to apply these rules.
-            // If `Capsuled` is the one calling `runc start`, it knows the PID *after* create but *before* start?
-            // No, `runc create` creates the process (paused). `runc start` unpauses.
-            // Prestart hooks run during `runc create` (or start, but before user code).
-            // Let's use `nsenter` assuming `jq` is available on the "Host" (Dev setup).
-            // Fallback: A simple rust binary `capsuled-hook` that deserializes OCI state.
-            // Let's stick to generating the Spec logic first.
-            // NOTE: In legacy spec, requirement is "Mandatory L3 Egress Control".
-            // Since we are `capsuled-engine` (Rust), maybe we can apply the logic OURSELVES
-            // in `container_runtime.rs` *after* Create and *before* Start?
-            // We control the lifecycle in `container.rs`.
-            // If we are using `libcontainer` or calling `runc` directly?
-            // `ContainerRuntime` likely calls Docker or Runc.
-            // If Docker: Docker handles hooks via `--hook`? No, Docker doesn't support OCI hooks nicely per container without runtime config.
-            // BUT `capsuled` seems to use `DockerCliRuntime` or `ContainerRuntime`.
-            // If `DockerCliRuntime` (shelling out to docker run): We can't easily inject OCI hooks without modifying daemon.json.
-            // We might have to rely on `docker run --cap-add=NET_ADMIN` and injecting a startup script wrapper?
-            // Checking `container_runtime.rs`:
-            // Use `view_file` to see how it runs containers.
-            // If it uses `runc` directly, we have full control.
-            // If it uses `docker`, we are limited.
-            // Assumption: `oci/spec_builder.rs` implies we are building a Bundle for `runc` or similar.
-            // So we are likely in a "Native" or "Runc-based" path.
-            // I will inject the hook assuming `runc` behavior (Host execution, State on Stdin).
-            // Let's add a todo warning about Hook Execution Prerequisite (jq/nsenter).
-            .args(vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                format!(
-                    "
-                    # Parse PID from Stdin (OCI State)
-                    pid=$(grep -o '\"pid\":[0-9]*' | cut -d: -f2)
-                    if [ -z \"$pid\" ]; then exit 0; fi
-                    
-                    nsenter -t $pid -n -- sh -c '{}'
-                ",
-                    script
-                ),
-            ])
-            .build()
-            .map_err(|e| format!("Failed to build firewall hook: {}", e))?;
-
-        // Append to existing hooks
-        let mut current_prestart = all_hooks.prestart().as_ref().cloned().unwrap_or_default();
-        current_prestart.push(fw_hook);
-        all_hooks.set_prestart(Some(current_prestart));
-    }
-
-    let hooks = Some(all_hooks);
+    // Egress policy hooks were moved to capsule-cli; runtime enforces via eBPF/guard.
 
     // --- 3. Build Mounts ---
     let mut mounts = build_default_mounts();
