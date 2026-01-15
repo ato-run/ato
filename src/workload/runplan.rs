@@ -2,7 +2,7 @@ use crate::capsule_types::capsule_v1::{
     CapsuleExecution, CapsuleManifestV1, CapsuleRequirements, CapsuleRouting, CapsuleStorage,
     CapsuleType, RuntimeType, StorageVolume,
 };
-use crate::proto::onescluster::common::v1 as common;
+use crate::proto::nacelle::common::v1 as common;
 use std::collections::HashMap;
 
 /// Result of converting a RunPlan proto into the canonical CapsuleManifestV1.
@@ -209,7 +209,7 @@ fn parse_vram_gb_hint(profile: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::onescluster::common::v1::{self as common, run_plan};
+    use crate::proto::nacelle::common::v1::{self as common, run_plan};
 
     #[test]
     fn test_docker_mapping() {

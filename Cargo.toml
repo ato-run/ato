@@ -95,7 +95,7 @@ rust_decimal_macros = "1.39.0"
 # libcryptsetup-rs = "0.9"
 
 # TODO: Re-enable when proto generation is set up
-# onescluster-capsuled-proto = { path = "../proto/rust" }
+# nacelle-capsuled-proto = { path = "../proto/rust" }
 shell-words = "1.1.1"
 
 # Unit 6: Audit persistence and CAS integration
