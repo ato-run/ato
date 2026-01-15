@@ -113,7 +113,7 @@ aya = "0.13"
 
 [features]
 default = ["engine"]
-# Engine mode: Full daemon with all runtimes (default for capsuled binary)
+# Engine mode: Full daemon with all runtimes (default for nacelle binary)
 engine = ["wasm", "oci"]
 # WASM runtime - cross-platform (macOS, Linux, Windows)
 wasm = []
