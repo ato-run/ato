@@ -519,6 +519,7 @@ mod tests {
                     env: HashMap::new(),
                 }),
             }),
+            services: None,
         }
     }
 
@@ -551,6 +552,7 @@ mod tests {
             build: None,
             isolation: None,
             targets: None, // No targets = legacy mode
+            services: None,
         }
     }
 

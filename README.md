@@ -253,6 +253,7 @@ nacelle/
 ### Key Documents
 
 - [docs/ENGINE_INTERFACE_CONTRACT.md](docs/ENGINE_INTERFACE_CONTRACT.md) - Process boundary contract (JSON over stdio) between capsule (meta) and nacelle (engine)
+- [docs/DEV_DOCKER_COMPOSE_WITH_NACELLE.md](docs/DEV_DOCKER_COMPOSE_WITH_NACELLE.md) - Developer guide: run Compose-like multi-service apps with Supervisor Mode
 - [UARC_SCOPE_REVIEW.md](UARC_SCOPE_REVIEW.md) - Scope analysis and compliance review
 - [PHASE13_COMPLETION.md](PHASE13_COMPLETION.md) - Native runtime removal report
 - [MIGRATION_SUMMARY.md](MIGRATION_SUMMARY.md) - Migration guide from legacy architecture
