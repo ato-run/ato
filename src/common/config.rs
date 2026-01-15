@@ -62,7 +62,7 @@ pub struct RuntimeSection {
     /// Allow insecure development mode for Source runtime.
     /// When false (default), dev_mode requests in manifests are ignored and
     /// source capsules always run in sandboxed mode.
-    /// UARC V1.1.0: Only set to true in development environments.
+    /// Nacelle Specification V1.1.0 Compliance: Only set to true in development environments.
     /// Can be overridden by CAPSULED_ALLOW_DEV_MODE environment variable.
     #[serde(default)]
     pub allow_insecure_dev_mode: bool,

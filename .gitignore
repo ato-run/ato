@@ -27,7 +27,6 @@ Cargo.lock
 build/
 dist/
 /release/
-/u00261
 
 # Docker
 .dockerignore
