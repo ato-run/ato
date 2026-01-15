@@ -1,6 +1,6 @@
 [package]
 name = "nacelle-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Nacelle CLI - Unified Runtime for Capsules"
 license = "Apache-2.0"
@@ -48,6 +48,9 @@ dirs = "5.0"
 ignore = "0.4"  # .gitignore support
 walkdir = "2.4"
 which = "6.0"
+
+# Command parsing (handles quotes properly)
+shell-words = "1.1.1"
 
 # Archive support
 tar = "0.4"

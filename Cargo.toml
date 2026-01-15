@@ -1,6 +1,6 @@
 [package]
 name = "nacelle"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.82"
 license = "Apache-2.0"
@@ -85,6 +85,7 @@ tar = "0.4"
 flate2 = "1.0"
 zstd = "0.13"
 async-trait = "0.1.89"
+fs2 = "0.4.3"
 
 # JIT Provisioning (Phase 1): Progress bar for downloads
 indicatif = "0.17"

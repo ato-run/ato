@@ -50,7 +50,10 @@ fn create_manifest_with_targets(name: &str, targets: TargetsConfig) -> CapsuleMa
         model: None,
         transparency: None,
         pool: None,
+        build: None,
+        isolation: None,
         targets: Some(targets),
+        services: None,
     }
 }
 
@@ -79,7 +82,10 @@ fn create_legacy_manifest(name: &str, runtime: RuntimeType) -> CapsuleManifestV1
         model: None,
         transparency: None,
         pool: None,
+        build: None,
+        isolation: None,
         targets: None,
+        services: None,
     }
 }
 
@@ -94,6 +100,12 @@ fn context_all_runtimes() -> ResolveContext {
     toolchains.insert("python".to_string());
     toolchains.insert("node".to_string());
 
+    let mut jit_toolchains = HashSet::new();
+    jit_toolchains.insert("python".to_string());
+    jit_toolchains.insert("node".to_string());
+    jit_toolchains.insert("deno".to_string());
+    jit_toolchains.insert("bun".to_string());
+
     ResolveContext {
         platform: detect_current_platform(),
         supported_runtimes: supported,
@@ -101,6 +113,7 @@ fn context_all_runtimes() -> ResolveContext {
         docker_available: true,
         gpu_available: false,
         available_toolchains: toolchains,
+        jit_toolchains,
     }
 }
 
@@ -116,6 +129,7 @@ fn context_wasm_only() -> ResolveContext {
         docker_available: false,
         gpu_available: false,
         available_toolchains: HashSet::new(),
+        jit_toolchains: HashSet::new(),
     }
 }
 
@@ -131,6 +145,7 @@ fn context_docker_only() -> ResolveContext {
         docker_available: true,
         gpu_available: false,
         available_toolchains: HashSet::new(),
+        jit_toolchains: HashSet::new(),
     }
 }
 

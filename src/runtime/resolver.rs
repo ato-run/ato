@@ -144,6 +144,9 @@ pub struct ResolveContext {
 
     /// Available toolchains on the host (for source targets)
     pub available_toolchains: HashSet<String>,
+
+    /// Toolchains that can be provided via JIT provisioning (engine-managed runtimes)
+    pub jit_toolchains: HashSet<String>,
 }
 
 impl ResolveContext {
@@ -158,6 +161,13 @@ impl ResolveContext {
         toolchains.insert("python".to_string());
         toolchains.insert("node".to_string());
 
+        // JIT-provisionable runtimes (Phase 1)
+        let mut jit_toolchains = HashSet::new();
+        jit_toolchains.insert("python".to_string());
+        jit_toolchains.insert("node".to_string());
+        jit_toolchains.insert("deno".to_string());
+        jit_toolchains.insert("bun".to_string());
+
         Self {
             platform: detect_current_platform(),
             supported_runtimes: supported,
@@ -165,6 +175,7 @@ impl ResolveContext {
             docker_available: true,
             gpu_available: false,
             available_toolchains: toolchains,
+            jit_toolchains,
         }
     }
 
@@ -172,9 +183,15 @@ impl ResolveContext {
     pub fn has_toolchain(&self, language: &str) -> bool {
         let normalized = language.to_lowercase();
         self.available_toolchains.contains(&normalized)
+            || self.jit_toolchains.contains(&normalized)
             || match normalized.as_str() {
-                "python3" => self.available_toolchains.contains("python"),
-                "nodejs" => self.available_toolchains.contains("node"),
+                "python3" => {
+                    self.available_toolchains.contains("python")
+                        || self.jit_toolchains.contains("python")
+                }
+                "nodejs" => {
+                    self.available_toolchains.contains("node") || self.jit_toolchains.contains("node")
+                }
                 _ => false,
             }
     }
@@ -367,6 +384,24 @@ fn try_resolve_source(
     source: &SourceTarget,
     context: &ResolveContext,
 ) -> Result<ResolvedTarget, ResolveError> {
+    let lang = source.language.to_ascii_lowercase();
+
+    // Some runtimes require an explicit version so the engine can fetch deterministically.
+    if (lang == "bun" || lang == "deno")
+        && source
+            .version
+            .as_deref()
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(true)
+    {
+        return Err(ResolveError::InvalidConfiguration {
+            message: format!(
+                "Source target version is required when language = '{}'",
+                source.language
+            ),
+        });
+    }
+
     // Check if the required toolchain is available on the host
     if !context.has_toolchain(&source.language) {
         return Err(ResolveError::ToolchainNotAvailable {
@@ -462,6 +497,8 @@ mod tests {
             model: None,
             transparency: None,
             pool: None,
+            build: None,
+            isolation: None,
             targets: Some(TargetsConfig {
                 preference: vec!["wasm".to_string(), "oci".to_string()],
                 source_digest: None,
@@ -482,6 +519,7 @@ mod tests {
                     env: HashMap::new(),
                 }),
             }),
+            services: None,
         }
     }
 
@@ -511,7 +549,10 @@ mod tests {
             model: None,
             transparency: None,
             pool: None,
+            build: None,
+            isolation: None,
             targets: None, // No targets = legacy mode
+            services: None,
         }
     }
 
