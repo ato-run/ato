@@ -3,7 +3,7 @@
 このディレクトリは **nacelle のCLIバイナリ**（エンジン向けエントリポイント）を提供します。
 
 - このバイナリは `nacelle internal ...` のような **機械向けインターフェース**（JSON over stdio）と、
-  v2.0の **self-extracting bundle 実行**を主に扱います。
+  v0.2.0の **self-extracting bundle 実行**を主に扱います。
 - ユーザー向けの上位CLI（`capsule`）は別レイヤ（別リポジトリ/別パッケージ）として扱う想定です。
 
 ## Build

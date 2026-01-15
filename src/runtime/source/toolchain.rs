@@ -2,7 +2,7 @@
 //!
 //! Detects installed language runtimes and validates version compatibility.
 //!
-//! v2.0: JIT Provisioning - Downloads and caches runtimes on-demand
+//! v0.2.0: JIT Provisioning - Downloads and caches runtimes on-demand
 //!
 //! # Example
 //! ```no_run
@@ -300,7 +300,7 @@ impl Default for ToolchainManager {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// v2.0: JIT Provisioning - Runtime Fetcher
+// v0.2.0: JIT Provisioning - Runtime Fetcher
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// JIT Fetcher for downloading and caching runtimes on-demand

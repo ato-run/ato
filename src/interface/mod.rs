@@ -1,4 +1,4 @@
-//! External interfaces for the nacelle Engine (v2.0 - Simplified)
+//! External interfaces for the nacelle Engine (v0.2.0 - Simplified)
 //!
 //! This module contains HTTP interfaces for the nacelle runtime:
 //! - [`dev_server`]: Development server with hot-reload support
@@ -8,11 +8,11 @@
 //!
 //! ## Usage Patterns
 //!
-//! In v2.0, nacelle operates as a CLI-driven runtime without a central daemon.
+//! In v0.2.0, nacelle operates as a CLI-driven runtime without a central daemon.
 //! Each capsule runs with its own embedded supervisor and can optionally expose
 //! HTTP endpoints for monitoring and control.
 
-// pub mod api; // Disabled in v2.0: daemon architecture removed
-// pub mod dev_server; // Disabled in v2.0: daemon architecture removed
+// pub mod api; // Disabled in v0.2.0: daemon architecture removed
+// pub mod dev_server; // Disabled in v0.2.0: daemon architecture removed
 pub mod discovery;
 pub mod http;

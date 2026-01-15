@@ -1,4 +1,4 @@
-//! v2.0: Actor-based Process Supervisor
+//! v0.2.0: Actor-based Process Supervisor
 //!
 //! Implements the Actor Model (Tokio Task + MPSC Channel) for process management.
 //! Key features:

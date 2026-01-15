@@ -4,7 +4,7 @@
 //!
 //! User-facing commands live in `capsule` (meta-CLI). This binary exposes a
 //! machine-oriented interface via `nacelle internal ...` and also supports
-//! self-extracting bundle execution (v2.0).
+//! self-extracting bundle execution (v0.2.0).
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};

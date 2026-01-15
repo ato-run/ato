@@ -16,7 +16,7 @@
 //! macOS sandbox_init() is DEPRECATED and only supports predefined profiles.
 //! For custom profiles, we generate an SBPL file and execute via sandbox-exec
 //! wrapper, or use the private sandbox_init_with_parameters() function.
-//! In practice, for v2.0 we use a simplified approach with development mode.
+//! In practice, for v0.2.0 we use a simplified approach with development mode.
 
 use super::{SandboxPolicy, SandboxResult};
 use anyhow::{Context, Result};

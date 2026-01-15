@@ -3,7 +3,7 @@
 //! This crate provides the core Runtime functionality for executing Capsules.
 //! It can be used as a library (embedded mode) or as a standalone executable.
 //!
-//! ## Module Structure (v2.0 Simplified)
+//! ## Module Structure (v0.2.0 Simplified)
 //!
 //! - `common/` - Shared utilities (auth, config, failure_codes)
 //! - `engine/` - Execution core (supervisor, socket activation)
@@ -29,7 +29,7 @@
 //! ```
 
 // =============================================================================
-// Primary Modules (v2.0 Simplified Architecture)
+// Primary Modules (v0.2.0 Simplified Architecture)
 // =============================================================================
 
 pub mod bundle;
@@ -58,7 +58,7 @@ pub use common::auth;
 pub use common::config;
 pub use common::failure_codes;
 
-// From interface (v2.0: gRPC/API removed, daemon removed)
+// From interface (v0.2.0: gRPC/API removed, daemon removed)
 pub use interface::http as http_server;
 
 // From schema
@@ -66,7 +66,7 @@ pub use interface::http as http_server;
 pub use schema::capnp as capsule_capnp;
 pub use schema::converter as capnp_to_manifest;
 
-// From engine (v2.0: manager removed, supervisor-based)
+// From engine (v0.2.0: manager removed, supervisor-based)
 pub use engine::supervisor as process_supervisor;
 
 // From resource

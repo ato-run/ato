@@ -49,7 +49,7 @@ pub enum RuntimeType {
     Oci,
 
     // === Legacy types (deprecated, for backward compatibility) ===
-    // These will be removed in UARC V2.0
+    // These will be removed in UARC v0.2.0
     /// Docker container (deprecated: use `oci` instead)
     #[deprecated(since = "1.1.0", note = "Use `oci` runtime type instead")]
     #[serde(rename = "docker")]

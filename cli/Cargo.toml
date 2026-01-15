@@ -61,7 +61,7 @@ shell-words = "1.1.1"
 # Archive support
 tar = "0.4"
 flate2 = "1.0"  # gzip compression
-zstd = "0.13"   # v2.0 compression
+zstd = "0.13"   # v0.2.0 compression
 
 # Socket Activation (Phase 2)
 [target.'cfg(unix)'.dependencies]

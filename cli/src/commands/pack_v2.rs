@@ -1,4 +1,4 @@
-//! v2.0 Pack command - Self-extracting binary bundler
+//! v0.2.0 Pack command - Self-extracting binary bundler
 //!
 //! Creates Tauri-style self-contained executables:
 //! 1. Pack runtime + user code + assets into tar.zst
@@ -16,7 +16,7 @@ use tar::Builder;
 /// Magic bytes to identify self-extracting bundle
 const BUNDLE_MAGIC: &[u8] = nacelle::common::constants::BUNDLE_MAGIC;
 
-/// Arguments for the v2.0 pack command
+/// Arguments for the v0.2.0 pack command
 pub struct PackV2Args {
     pub manifest_path: PathBuf,
     pub runtime_path: Option<PathBuf>,
@@ -54,7 +54,7 @@ macro_rules! user_out {
 /// Create a self-extracting bundle
 #[allow(dead_code)]
 pub async fn execute(args: PackV2Args) -> Result<()> {
-    user_out!("📦 Building self-extracting bundle (v2.0)...");
+    user_out!("📦 Building self-extracting bundle (v0.2.0)...");
 
     let output_path = build_bundle(args).await?;
 
