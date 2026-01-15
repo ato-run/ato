@@ -2,13 +2,13 @@
 mod tests {
 
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
     use nacelle::capnp_to_manifest::manifest_to_capnp_bytes;
     use nacelle::capsule_types::capsule_v1::{
         CapsuleExecution, CapsuleManifestV1, CapsuleRequirements, CapsuleRouting, CapsuleStorage,
         CapsuleType, RuntimeType,
     };
     use nacelle::security::verifier::ManifestVerifier;
-    use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
     use rand::rngs::OsRng;
 
     /// Creates a valid test manifest for signature testing

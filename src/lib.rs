@@ -32,15 +32,18 @@
 // Primary Modules (v2.0 Simplified Architecture)
 // =============================================================================
 
-pub mod capsule_types; // Capsule type definitions (extracted from capsule-core)
 pub mod bundle;
+pub mod bundle_rules; // v3.0: Pre-validated sandbox rules loader
+pub mod capsule_types; // Capsule type definitions (extracted from capsule-core)
 pub mod common;
+pub mod egress;
 pub mod engine;
 pub mod interface;
 pub mod observability;
 pub mod proto;
 pub mod resource;
 pub mod runtime;
+pub mod runtime_config; // R3 config.json loader
 pub mod schema;
 pub mod system;
 pub mod verification;
