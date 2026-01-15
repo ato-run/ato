@@ -145,7 +145,7 @@ aya-build = "0.1"
 members = ["cli", "ebpf"]
 resolver = "2"
 
-# v2.0 Optimization: Tauri-inspired build profiles
+# v0.2.0 Optimization: Tauri-inspired build profiles
 [profile.release]
 opt-level = "s"      # Size optimization
 lto = true            # Link-time optimization

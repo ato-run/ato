@@ -1,30 +1,30 @@
 //! Nacelle Engine - Main Entry Point
 //!
-//! v2.0: Bundle Runtime Model
+//! v0.2.0: Bundle Runtime Model
 //! - Self-extracting bundle (embedded runtime)
 //! - Direct execution with supervisor and sandbox
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // v2.0: Check if running as self-extracting bundle
+    // v0.2.0: Check if running as self-extracting bundle
     if is_self_extracting_bundle()? {
         return bootstrap_bundled_runtime().await;
     }
 
     // If not a bundle, show help message
-    eprintln!("🔴 Nacelle v2.0: Not running as a bundle");
+    eprintln!("🔴 Nacelle v0.2.0: Not running as a bundle");
     eprintln!("This binary should be executed as a self-extracting bundle.");
     eprintln!("Use 'nacelle pack --bundle' to create executable bundles.");
     std::process::exit(1);
 }
 
-/// v2.0: Check if this binary contains an embedded bundle
+/// v0.2.0: Check if this binary contains an embedded bundle
 fn is_self_extracting_bundle() -> anyhow::Result<bool> {
     let exe_path = std::env::current_exe()?;
     nacelle::bundle::is_self_extracting_bundle(&exe_path)
 }
 
-/// v2.0: Bootstrap and run embedded runtime
+/// v0.2.0: Bootstrap and run embedded runtime
 async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     println!("🚀 Starting nacelle bundle...");
 

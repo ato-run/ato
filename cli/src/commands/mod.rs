@@ -5,8 +5,8 @@
 //! - Packaging: pack, keygen
 //! - System: doctor
 //!
-//! v2.0: Self-extracting bundle support
+//! v0.2.0: Self-extracting bundle support
 
 pub mod dev;
 pub mod internal;
-pub mod pack_v2; // v2.0 self-extracting bundler
+pub mod pack_v2; // v0.2.0 self-extracting bundler

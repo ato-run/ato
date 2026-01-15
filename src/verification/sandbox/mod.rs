@@ -1,4 +1,4 @@
-//! v2.0 Phase 3: OS-native Sandbox (Isolation Layer)
+//! v0.2.0 Phase 3: OS-native Sandbox (Isolation Layer)
 //!
 //! Provides OS-native process sandboxing to restrict file system access
 //! for child processes spawned by the Supervisor.
