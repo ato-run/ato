@@ -11,10 +11,6 @@ repository = "https://github.com/nacelle-dev/nacelle"
 name = "nacelle"
 path = "src/lib.rs"
 
-[[bin]]
-name = "nacelle"
-path = "src/main.rs"
-
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

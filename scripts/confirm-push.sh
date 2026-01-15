@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Confirm-push hook for capsuled
+# Confirm-push hook for nacelle
 # Asks for confirmation before running pre-push checks
 # 
 # Installation:
@@ -34,7 +34,7 @@ cd "$PROJECT_ROOT"
 
 echo ""
 echo -e "${YELLOW}╔═══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${YELLOW}║           CAPSULED PRE-PUSH CONFIRMATION                      ║${NC}"
+echo -e "${YELLOW}║           NACELLE PRE-PUSH CONFIRMATION                       ║${NC}"
 echo -e "${YELLOW}╚═══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 

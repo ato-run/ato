@@ -439,9 +439,9 @@ capsule ps
 
 ```bash
 # 全テスト実行
-./scripts/e2e-test.sh
+./scripts/legacy/e2e-test-daemon.sh
 
 # 個別テスト実行
-./scripts/e2e-test.sh --scenario 1
-./scripts/e2e-test.sh --security-only
+./scripts/legacy/e2e-test-daemon.sh --scenario 1
+./scripts/legacy/e2e-test-daemon.sh --security-only
 ```
