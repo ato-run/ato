@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use tar::Builder;
 
 /// Magic bytes to identify self-extracting bundle
-const BUNDLE_MAGIC: &[u8] = nacelle::bundle::BUNDLE_MAGIC;
+const BUNDLE_MAGIC: &[u8] = nacelle::common::constants::BUNDLE_MAGIC;
 
 /// Arguments for the v2.0 pack command
 pub struct PackV2Args {

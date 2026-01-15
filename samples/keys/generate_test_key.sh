@@ -4,6 +4,12 @@
 
 set -e
 
+if [ -t 1 ]; then
+    printf "\033[31mWARNING: DO NOT USE THESE KEYS IN PRODUCTION.\033[0m\n" >&2
+else
+    echo "WARNING: DO NOT USE THESE KEYS IN PRODUCTION." >&2
+fi
+
 if [ $# -ne 1 ]; then
     echo "Usage: $0 <output.json>"
     exit 1

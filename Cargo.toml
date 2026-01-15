@@ -1,12 +1,12 @@
 [package]
 name = "nacelle"
-version = "1.0.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.82"
 license = "Apache-2.0"
 description = "The Unified Runtime for Capsules - Native, Docker, and Wasm execution"
 repository = "https://github.com/nacelle-dev/nacelle"
-authors = ["Nacelle Contributors"]
+authors = ["Koh0920"]
 readme = "README.md"
 keywords = ["runtime", "container", "wasm", "orchestration"]
 categories = ["command-line-utilities", "development-tools"]
@@ -152,5 +152,8 @@ lto = true            # Link-time optimization
 strip = true          # Strip debug symbols
 panic = "abort"       # Smaller binary size
 codegen-units = 1     # Better optimization
+
+[profile.release.package.nacelle-ebpf]
+opt-level = "z"
 
 
