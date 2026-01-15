@@ -26,19 +26,7 @@ async fn main() -> anyhow::Result<()> {
 /// v2.0: Check if this binary contains an embedded bundle
 fn is_self_extracting_bundle() -> anyhow::Result<bool> {
     let exe_path = std::env::current_exe()?;
-    let file_data = std::fs::read(&exe_path)?;
-
-    let len = file_data.len();
-    let magic = b"NACELLE_V2_BUNDLE";
-
-    if len < magic.len() + 8 {
-        return Ok(false);
-    }
-
-    let magic_start = len - magic.len() - 8;
-    let found_magic = &file_data[magic_start..magic_start + magic.len()];
-
-    Ok(found_magic == magic)
+    nacelle::bundle::is_self_extracting_bundle(&exe_path)
 }
 
 /// v2.0: Bootstrap and run embedded runtime
@@ -55,24 +43,7 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     println!("📦 Extracting to {:?}...", temp_dir);
 
     let exe_path = std::env::current_exe()?;
-    let file_data = std::fs::read(&exe_path)?;
-
-    // Parse bundle
-    let len = file_data.len();
-    let magic = b"NACELLE_V2_BUNDLE";
-    let magic_start = len - magic.len() - 8;
-    let size_bytes = &file_data[len - 8..len];
-    let bundle_size = u64::from_le_bytes(size_bytes.try_into()?) as usize;
-    let bundle_start = magic_start - bundle_size;
-    let compressed = &file_data[bundle_start..magic_start];
-
-    // Decompress
-    let decompressed = zstd::decode_all(compressed)?;
-
-    // Extract tar
-    use tar::Archive;
-    let mut archive = Archive::new(decompressed.as_slice());
-    archive.unpack(&temp_dir)?;
+    nacelle::bundle::extract_bundle_to_dir(&exe_path, &temp_dir)?;
 
     // Find entrypoint in source/
     let source_dir = temp_dir.join("source");
@@ -87,37 +58,78 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     let manifest_content = std::fs::read_to_string(&manifest_path)?;
     let manifest: toml::Value = toml::from_str(&manifest_content)?;
 
-    let entrypoint = manifest
-        .get("execution")
-        .and_then(|e| e.get("entrypoint"))
-        .and_then(|e| e.as_str())
-        .ok_or_else(|| anyhow::anyhow!("No entrypoint defined in capsule.toml"))?;
+    // Supervisor Mode: if [services] exists, run multi-service lifecycle (Step 3).
+    // This is dev-first and does not yet integrate socket activation or sandbox per-service.
+    if let Ok(m) = nacelle::capsule_types::capsule_v1::CapsuleManifestV1::from_toml(&manifest_content)
+    {
+        if let Some(services) = m.services {
+            if !services.is_empty() {
+                println!(
+                    "🧠 Supervisor Mode: Detected {} services in capsule.toml",
+                    services.len()
+                );
 
-    // Find Python binary in runtime
-    let python_bin = find_python_binary(&runtime_dir)?;
-    println!("🐍 Found Python: {:?}", python_bin);
-    println!("📄 Running: {:?}", source_dir.join(entrypoint));
+                let plan = nacelle::engine::supervisor_mode::build_supervisor_mode_plan(&services)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                nacelle::engine::supervisor_mode::run_supervisor_mode(
+                    &plan,
+                    &source_dir,
+                    Default::default(),
+                    None,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
 
-    // Parse port from manifest (default 8000)
-    let port = manifest
-        .get("execution")
-        .and_then(|e| e.get("port"))
-        .and_then(|p| p.as_integer())
-        .map(|p| p as u16)
+                return Ok(());
+            }
+        }
+    }
+
+    let entrypoint = nacelle::bundle::read_entrypoint_from_manifest(&manifest_path)?;
+
+    let targets_source_language_is_python = manifest
+        .get("targets")
+        .and_then(|t| t.get("source"))
+        .and_then(|s| s.get("language"))
+        .and_then(|l| l.as_str())
+        .map(|l| l.eq_ignore_ascii_case("python") || l.eq_ignore_ascii_case("python3"))
+        .unwrap_or(false);
+
+    let enable_socket_activation =
+        targets_source_language_is_python || looks_like_python_file(&entrypoint, &source_dir);
+
+    // Resolve port: env (CAPSULE_PORT, PORT) > capsule.toml (execution.port) > default
+    let port = std::env::var("CAPSULE_PORT")
+        .ok()
+        .or_else(|| std::env::var("PORT").ok())
+        .and_then(|p| p.parse().ok())
+        .or_else(|| {
+            manifest
+                .get("execution")
+                .and_then(|e| e.get("port"))
+                .and_then(|p| p.as_integer())
+                .and_then(|p| u16::try_from(p).ok())
+        })
         .unwrap_or(8000);
 
-    // Setup Socket Activation
-    let socket_config = SocketConfig {
-        port,
-        host: "0.0.0.0".to_string(),
-        enabled: true,
+    // Setup Socket Activation (Python-only by default)
+    let socket_manager = if enable_socket_activation {
+        let socket_config = SocketConfig {
+            port,
+            host: "0.0.0.0".to_string(),
+            enabled: true,
+        };
+        let socket_manager = SocketManager::new(socket_config)?;
+        println!(
+            "🔌 Socket Activation: Bound to port {} (FD {})",
+            port,
+            socket_manager.raw_fd()
+        );
+        Some(socket_manager)
+    } else {
+        println!("ℹ️  Socket Activation: Disabled (non-Python entrypoint)");
+        None
     };
-    let socket_manager = SocketManager::new(socket_config)?;
-    println!(
-        "🔌 Socket Activation: Bound to port {} (FD {})",
-        port,
-        socket_manager.raw_fd()
-    );
 
     // ⚠️ IMPORTANT: Setup signal handlers BEFORE spawning child process
     // This ensures signals are captured by our handler, not the default termination handler
@@ -133,13 +145,22 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     let supervisor = ProcessSupervisor::new();
 
     // Prepare command with Socket Activation
-    let entrypoint_path = source_dir.join(entrypoint);
-    let mut cmd = std::process::Command::new(&python_bin);
-    cmd.arg(&entrypoint_path);
-    cmd.current_dir(&source_dir);
+    let source_language = nacelle::bundle::read_source_language_from_manifest(&manifest_path)?;
+    let mut cmd = nacelle::bundle::build_bundle_command(
+        source_language.as_deref(),
+        &entrypoint,
+        &source_dir,
+        &runtime_dir,
+    )?;
 
-    // Pass socket FD to child
-    socket_manager.prepare_command(&mut cmd)?;
+    // Provide a consistent port signal to the child.
+    cmd.env("PORT", port.to_string());
+    cmd.env("CAPSULE_PORT", port.to_string());
+
+    // Pass socket FD to child (if enabled)
+    if let Some(sm) = socket_manager.as_ref() {
+        sm.prepare_command(&mut cmd)?;
+    }
 
     // Set process group and sandbox for signal propagation and isolation
     #[cfg(unix)]
@@ -175,7 +196,9 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     // Spawn the child process
     let child = cmd.spawn()?;
     let child_pid = child.id();
-    println!("🔗 Socket Activation: Passing FD 3 to child process");
+    if socket_manager.is_some() {
+        println!("🔗 Socket Activation: Passing FD 3 to child process");
+    }
 
     // Register with Supervisor
     supervisor.register("main-app".to_string(), child)?;
@@ -238,26 +261,19 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Find Python binary in extracted runtime
-fn find_python_binary(runtime_dir: &PathBuf) -> anyhow::Result<PathBuf> {
-    // Look for python3 or python binary
-    for entry in std::fs::read_dir(runtime_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.is_dir() {
-            // Check in bin/ subdirectory
-            let bin_dir = path.join("bin");
-            if bin_dir.exists() {
-                for name in &["python3", "python"] {
-                    let python_path = bin_dir.join(name);
-                    if python_path.exists() {
-                        return Ok(python_path);
-                    }
-                }
-            }
-        }
+fn looks_like_python_file(entrypoint: &str, source_dir: &PathBuf) -> bool {
+    let ep = entrypoint.trim();
+    if ep.ends_with(".py") {
+        return true;
     }
 
-    anyhow::bail!("Python binary not found in runtime directory")
+    let candidate = source_dir.join(ep);
+    candidate.is_file()
+        && candidate
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("py"))
+            .unwrap_or(false)
 }
+
+// NOTE: Command-building and extraction helpers live in `nacelle::bundle` for reuse/testability.
