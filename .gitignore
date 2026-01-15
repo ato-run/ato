@@ -26,6 +26,7 @@ Cargo.lock
 # Build outputs
 build/
 dist/
+/release/
 /u00261
 
 # Docker

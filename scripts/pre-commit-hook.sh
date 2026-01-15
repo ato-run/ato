@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Pre-commit hook for capsuled
+# Pre-commit hook for nacelle
 # Runs quick checks before each commit (format + clippy)
 # 
 # Installation:
@@ -26,7 +26,7 @@ fi
 
 cd "$PROJECT_ROOT"
 
-echo -e "${YELLOW}⚡ Pre-commit checks...${NC}"
+echo -e "${YELLOW}⚡ Pre-commit checks (nacelle)...${NC}"
 
 # Step 1: Format check (fast)
 echo -n "  Formatting... "

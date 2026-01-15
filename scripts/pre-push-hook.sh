@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Pre-push hook for capsuled
+# Pre-push hook for nacelle
 # Runs all checks before pushing to main branch
 # 
 # Installation:
@@ -74,7 +74,7 @@ cd "$PROJECT_ROOT"
 
 echo ""
 echo -e "${YELLOW}╔═══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${YELLOW}║           CAPSULED PRE-PUSH VERIFICATION                      ║${NC}"
+echo -e "${YELLOW}║           NACELLE PRE-PUSH VERIFICATION                       ║${NC}"
 echo -e "${YELLOW}╚═══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -103,8 +103,8 @@ fi
 echo ""
 
 # Step 3: Unit tests
-log_step "3/5: Running unit tests"
-if cargo test --workspace --lib 2>/dev/null; then
+log_step "3/5: Running tests"
+if cargo test --workspace 2>/dev/null; then
     log_success "Unit tests passed"
 else
     log_fail "Unit tests failed"
@@ -114,7 +114,7 @@ echo ""
 
 # Step 4: Build release
 log_step "4/5: Building release binaries"
-if cargo build --release --bin capsuled -p capsuled && cargo build --release --bin capsule -p capsule-cli 2>/dev/null; then
+if cargo build --release -p nacelle-cli --bin nacelle 2>/dev/null; then
     log_success "Release build succeeded"
 else
     log_fail "Release build failed"
@@ -123,17 +123,16 @@ fi
 echo ""
 
 # Step 5: E2E tests
-log_step "5/5: Running E2E tests"
-if [ -x "$PROJECT_ROOT/scripts/e2e-test.sh" ]; then
-    if "$PROJECT_ROOT/scripts/e2e-test.sh" --quick; then
-        log_success "E2E tests passed"
+log_step "5/5: (Optional) Legacy daemon E2E tests"
+if [ "${RUN_LEGACY_DAEMON_E2E:-0}" = "1" ] && [ -x "$PROJECT_ROOT/scripts/legacy/e2e-test-daemon.sh" ]; then
+    if "$PROJECT_ROOT/scripts/legacy/e2e-test-daemon.sh" --quick; then
+        log_success "Legacy daemon E2E tests passed"
     else
-        log_fail "E2E tests failed"
+        log_fail "Legacy daemon E2E tests failed"
         FAILED=1
     fi
 else
-    echo -e "${YELLOW}  ⚠️  E2E test script not found or not executable${NC}"
-    echo -e "     Expected: $PROJECT_ROOT/scripts/e2e-test.sh"
+    log_success "Skipped (set RUN_LEGACY_DAEMON_E2E=1 to run)"
 fi
 echo ""
 
