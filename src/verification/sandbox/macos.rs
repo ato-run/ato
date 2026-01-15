@@ -32,10 +32,6 @@ mod ffi {
     // Sandbox profile constants (from sandbox.h)
     pub const SANDBOX_NAMED: u64 = 0x0001;
 
-    // Custom profile string flag (undocumented but used by sandbox-exec)
-    // This allows passing SBPL directly instead of a profile name
-    pub const SANDBOX_NAMED_EXTERNAL: u64 = 0x0003;
-
     extern "C" {
         /// Initialize sandbox with a profile
         /// For SANDBOX_NAMED: profile is one of kSBXProfile* constants
@@ -110,9 +106,8 @@ pub fn apply_seatbelt_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
             CString::new(profile_name).context("Failed to convert profile name to C string")?;
 
         let mut error_buf: *mut std::os::raw::c_char = std::ptr::null_mut();
-        let result = unsafe {
-            ffi::sandbox_init(profile_cstr.as_ptr(), ffi::SANDBOX_NAMED, &mut error_buf)
-        };
+        let result =
+            unsafe { ffi::sandbox_init(profile_cstr.as_ptr(), ffi::SANDBOX_NAMED, &mut error_buf) };
 
         if result == 0 {
             info!(
@@ -136,7 +131,10 @@ pub fn apply_seatbelt_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
         };
 
         last_error = Some(format!("{}: {}", profile_name, error_msg));
-        debug!("Seatbelt sandbox profile failed: {}", last_error.as_deref().unwrap_or(""));
+        debug!(
+            "Seatbelt sandbox profile failed: {}",
+            last_error.as_deref().unwrap_or("")
+        );
     }
 
     // Return not enforced instead of erroring.

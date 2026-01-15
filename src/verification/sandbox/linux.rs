@@ -15,8 +15,8 @@
 use super::{SandboxPolicy, SandboxResult};
 use anyhow::{Context, Result};
 use landlock::{
-    path_beneath_rules, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr,
-    RulesetStatus, ABI,
+    path_beneath_rules, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus,
+    ABI,
 };
 use std::path::Path;
 use tracing::{debug, info, warn};

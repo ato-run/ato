@@ -21,17 +21,17 @@ use crate::verification::sandbox::SandboxPolicy;
 pub struct SandboxRules {
     /// Paths allowed for read-write access
     pub read_write_paths: Vec<PathBuf>,
-    
+
     /// Paths allowed for read-only access
     pub read_only_paths: Vec<PathBuf>,
-    
+
     /// Whether network access is permitted
     pub allow_network: bool,
-    
+
     /// Pre-resolved egress allowlist (optional)
     #[serde(default)]
     pub egress_allow: Vec<EgressRule>,
-    
+
     /// Development mode flag (more permissive)
     #[serde(default)]
     pub development_mode: bool,
@@ -43,7 +43,7 @@ pub struct EgressRule {
     /// Rule type: "domain", "ip", or "cidr"
     #[serde(rename = "type")]
     pub rule_type: String,
-    
+
     /// Rule value (e.g., "api.example.com", "1.1.1.1", "10.0.0.0/8")
     pub value: String,
 }
@@ -76,7 +76,7 @@ impl SandboxRules {
 /// ```
 pub fn load_sandbox_rules(source_dir: &Path) -> Result<Option<SandboxPolicy>> {
     let rules_path = source_dir.join(".nacelle/sandbox_rules.json");
-    
+
     if !rules_path.exists() {
         tracing::warn!(
             "No sandbox_rules.json found at {:?}, using default policy",
@@ -84,22 +84,30 @@ pub fn load_sandbox_rules(source_dir: &Path) -> Result<Option<SandboxPolicy>> {
         );
         return Ok(None);
     }
-    
+
     tracing::info!("Loading sandbox rules from {:?}", rules_path);
-    
-    let content = std::fs::read_to_string(&rules_path)
-        .with_context(|| format!("Failed to read sandbox_rules.json: {}", rules_path.display()))?;
-    
-    let rules: SandboxRules = serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse sandbox_rules.json: {}", rules_path.display()))?;
-    
+
+    let content = std::fs::read_to_string(&rules_path).with_context(|| {
+        format!(
+            "Failed to read sandbox_rules.json: {}",
+            rules_path.display()
+        )
+    })?;
+
+    let rules: SandboxRules = serde_json::from_str(&content).with_context(|| {
+        format!(
+            "Failed to parse sandbox_rules.json: {}",
+            rules_path.display()
+        )
+    })?;
+
     tracing::info!(
         "Loaded sandbox rules: {} read-write paths, {} read-only paths, network: {}",
         rules.read_write_paths.len(),
         rules.read_only_paths.len(),
         rules.allow_network
     );
-    
+
     Ok(Some(rules.to_policy()))
 }
 
@@ -119,8 +127,14 @@ mod tests {
         }"#;
 
         let rules: SandboxRules = serde_json::from_str(json).unwrap();
-        assert_eq!(rules.read_write_paths, vec![PathBuf::from("/app"), PathBuf::from("/tmp")]);
-        assert_eq!(rules.read_only_paths, vec![PathBuf::from("/usr"), PathBuf::from("/lib")]);
+        assert_eq!(
+            rules.read_write_paths,
+            vec![PathBuf::from("/app"), PathBuf::from("/tmp")]
+        );
+        assert_eq!(
+            rules.read_only_paths,
+            vec![PathBuf::from("/usr"), PathBuf::from("/lib")]
+        );
         assert!(rules.allow_network);
         assert!(!rules.development_mode);
     }

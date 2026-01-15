@@ -27,7 +27,7 @@ EXAMPLES:
 
         # Execute workload (streaming; exit status is propagated)
         nacelle internal --input - exec
-" )]
+")]
 struct Cli {
     /// Enable verbose output
     #[arg(short, long, global = true)]
@@ -146,7 +146,13 @@ async fn run_bundled_application() -> Result<()> {
     };
 
     // Build command
-    let mut cmd = build_bundle_command(&entrypoint, &source_dir, &runtime_dir, &extract_dir, &manifest)?;
+    let mut cmd = build_bundle_command(
+        &entrypoint,
+        &source_dir,
+        &runtime_dir,
+        &extract_dir,
+        &manifest,
+    )?;
     cmd.env("PORT", port.to_string());
     cmd.env("CAPSULE_PORT", port.to_string());
 

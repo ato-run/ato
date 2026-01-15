@@ -1,4 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::{
+    env,
+    ffi::OsString,
+    fs,
+    io::{BufRead as _, BufReader},
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+};
 
 fn find_in_path(executable: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
@@ -23,7 +30,7 @@ fn resolve_protoc() -> Option<PathBuf> {
     }
 
     // Fallback: protobuf-src bundled protoc (may not exist in all environments).
-    let bundled = PathBuf::from(protobuf_src::protoc());
+    let bundled = protobuf_src::protoc();
     if bundled.is_file() {
         return Some(bundled);
     }
@@ -31,16 +38,124 @@ fn resolve_protoc() -> Option<PathBuf> {
     None
 }
 
+fn target_arch_fixup(target_arch: &str) -> &str {
+    if target_arch.starts_with("riscv64") {
+        "riscv64"
+    } else {
+        target_arch
+    }
+}
+
+fn build_ebpf_program() -> Result<(), Box<dyn std::error::Error>> {
+    let out_dir = PathBuf::from(env::var("OUT_DIR")?);
+    let endian = env::var("CARGO_CFG_TARGET_ENDIAN")?;
+    let target = match endian.as_str() {
+        "big" => "bpfeb",
+        "little" => "bpfel",
+        _ => return Err(format!("unsupported endian={endian}").into()),
+    };
+    let target = format!("{target}-unknown-none");
+
+    let bpf_target_arch =
+        env::var("AYA_BPF_TARGET_ARCH").or_else(|_| env::var("CARGO_CFG_TARGET_ARCH"))?;
+    let bpf_target_arch = target_arch_fixup(&bpf_target_arch).to_string();
+
+    println!("cargo:rerun-if-changed=ebpf");
+
+    let target_dir = out_dir.join("ebpf-target");
+    let mut cmd = Command::new("rustup");
+    cmd.args([
+        "run",
+        "nightly",
+        "cargo",
+        "build",
+        "--package",
+        "nacelle-ebpf",
+        "-Z",
+        "build-std=core",
+        "--bins",
+        "--release",
+        "--target",
+        &target,
+        "--no-default-features",
+    ]);
+    cmd.arg("--target-dir").arg(&target_dir);
+
+    const SEPARATOR: &str = "\x1f";
+    let mut rustflags = OsString::new();
+    for s in [
+        "--cfg=bpf_target_arch=\"",
+        &bpf_target_arch,
+        "\"",
+        SEPARATOR,
+        "-Cdebuginfo=2",
+        SEPARATOR,
+        "-Clink-arg=--btf",
+    ] {
+        rustflags.push(s);
+    }
+    cmd.env("CARGO_ENCODED_RUSTFLAGS", rustflags);
+    for key in ["RUSTC", "RUSTC_WORKSPACE_WRAPPER"] {
+        cmd.env_remove(key);
+    }
+
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn()?;
+    let stdout = child.stdout.take().expect("stdout");
+    let stderr = child.stderr.take().expect("stderr");
+
+    let stdout_handle = std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().map_while(Result::ok) {
+            println!("cargo:warning={line}");
+        }
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().map_while(Result::ok) {
+            println!("cargo:warning={line}");
+        }
+    });
+
+    let status = child.wait()?;
+    let _ = stdout_handle.join();
+    let _ = stderr_handle.join();
+
+    if !status.success() {
+        return Err(format!("ebpf build failed: {status}").into());
+    }
+
+    let built = target_dir
+        .join(&target)
+        .join("release")
+        .join("nacelle-ebpf");
+    let dst = out_dir.join("nacelle-ebpf");
+    if dst.is_dir() {
+        fs::remove_dir_all(&dst)?;
+    }
+    fs::copy(&built, &dst)?;
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    aya_build::emit_bpf_target_arch_cfg();
+
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "linux" {
+        build_ebpf_program().expect("Failed to build eBPF program");
+    }
+
     // =========================================================================
     // Protobuf / gRPC Code Generation (using UARC proto definitions)
     // =========================================================================
     // UARC contains only the specification protos: common/v1, engine/v1
     // Coordinator API is Ato-specific and lives in ato-coordinator repo
-    let uarc_path = std::env::var("UARC_PATH").unwrap_or_else(|_| "../uarc".to_string());
+    let uarc_path = env::var("UARC_PATH").unwrap_or_else(|_| "../uarc".to_string());
 
     if let Some(protoc_path) = resolve_protoc() {
-        std::env::set_var("PROTOC", protoc_path);
+        env::set_var("PROTOC", protoc_path);
     }
 
     tonic_build::configure()
@@ -68,7 +183,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // so we compile from a sanitized copy that strips `$Go.*` lines.
     let uarc_schema_path = format!("{}/schema/capsule.capnp", uarc_path);
     let original_schema_path = Path::new(&uarc_schema_path);
-    let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
+    let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     let sanitized_schema_dir = out_dir.join("capnp_sanitized");
     std::fs::create_dir_all(&sanitized_schema_dir)?;
     let sanitized_schema_path = sanitized_schema_dir.join("capsule.capnp");
