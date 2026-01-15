@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::io::Read;
+use std::path::PathBuf;
 
 use super::{dev, pack_v2};
 
@@ -313,7 +313,9 @@ fn read_input(input: &str) -> Result<String> {
     if input == "-" {
         let mut buf = String::new();
         let mut stdin = std::io::stdin();
-        stdin.read_to_string(&mut buf).context("Failed to read stdin")?;
+        stdin
+            .read_to_string(&mut buf)
+            .context("Failed to read stdin")?;
         if buf.trim().is_empty() {
             return Ok("{}".to_string());
         }
@@ -336,7 +338,12 @@ fn write_ok<T: Serialize>(spec_version: String, data: T) {
     println!("{}", serde_json::to_string(&resp).unwrap());
 }
 
-fn write_error(spec_version: String, code: &str, message: String, details: Option<serde_json::Value>) {
+fn write_error(
+    spec_version: String,
+    code: &str,
+    message: String,
+    details: Option<serde_json::Value>,
+) {
     let resp: Response<serde_json::Value> = Response {
         ok: false,
         spec_version,

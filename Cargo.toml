@@ -111,11 +111,10 @@ regex = "1.10"
 [target.'cfg(target_os = "linux")'.dependencies]
 nvml-wrapper = "0.9"
 cudarc = { version = "0.17", features = ["driver", "cuda-version-from-build-system"], optional = true }
-# Container Runtime (Youki/Libcontainer)
-libcontainer = { version = "0.4", default-features = false, features = ["systemd", "v2"] }
 cgroups-rs = "0.3.3"
 # Phase 3: Sandbox (Linux Landlock LSM)
 landlock = "0.4"
+aya = "0.13"
 
 [features]
 default = ["engine"]
@@ -144,10 +143,11 @@ tower = { version = "0.4", features = ["util"] }
 tonic-build = "0.12"
 protobuf-src = "1.1.0"
 capnpc = "0.24"
+aya-build = "0.1"
 
 # Workspace configuration
 [workspace]
-members = ["cli"]
+members = ["cli", "ebpf"]
 resolver = "2"
 
 # v2.0 Optimization: Tauri-inspired build profiles

@@ -4,8 +4,8 @@ use nacelle::engine::socket::{create_socket_manager, SocketConfig};
 use nacelle::runtime::source::toolchain::RuntimeFetcher;
 use nacelle::verification::sandbox::SandboxPolicy;
 use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
 use std::process::Command;
+use std::process::ExitStatus;
 use toml;
 
 #[cfg(unix)]
@@ -100,10 +100,12 @@ fn looks_like_python_entrypoint(entrypoint: &str, source_dir: &PathBuf) -> bool 
 }
 
 async fn run_and_wait(args: RunDevArgs) -> Result<RunDevOutcome> {
-    let manifest_path = args
-        .manifest_path
-        .canonicalize()
-        .with_context(|| format!("Failed to resolve manifest path: {}", args.manifest_path.display()))?;
+    let manifest_path = args.manifest_path.canonicalize().with_context(|| {
+        format!(
+            "Failed to resolve manifest path: {}",
+            args.manifest_path.display()
+        )
+    })?;
 
     let source_dir = manifest_path
         .parent()
@@ -136,8 +138,8 @@ async fn run_and_wait(args: RunDevArgs) -> Result<RunDevOutcome> {
 
     let mut cmd = build_command(&manifest, &source_dir, &entrypoint, port, container_port).await?;
 
-    let enable_socket_activation =
-        manifest.execution.runtime == RuntimeType::Source && looks_like_python_entrypoint(&entrypoint, &source_dir);
+    let enable_socket_activation = manifest.execution.runtime == RuntimeType::Source
+        && looks_like_python_entrypoint(&entrypoint, &source_dir);
 
     // Socket activation: bind in parent, pass FD 3 to child.
     // NOTE: only enabled for Python entrypoints by default (others may not consume LISTEN_FDS).
@@ -204,15 +206,11 @@ async fn run_and_wait(args: RunDevArgs) -> Result<RunDevOutcome> {
                     match nacelle::verification::sandbox::apply_sandbox(&policy_clone) {
                         Ok(result) => {
                             if result.fully_enforced {
-                                eprintln!(
-                                    "🔒 Sandbox: Enabled (policy rooted at {})",
-                                    policy_root
-                                );
+                                eprintln!("🔒 Sandbox: Enabled (policy rooted at {})", policy_root);
                             } else if result.partially_enforced {
                                 eprintln!(
                                     "🔒 Sandbox: Enabled (partial; policy rooted at {}) — {}",
-                                    policy_root,
-                                    result.message
+                                    policy_root, result.message
                                 );
                             } else {
                                 // Not enforced means we're effectively running unsandboxed.
@@ -252,8 +250,9 @@ async fn run_and_wait(args: RunDevArgs) -> Result<RunDevOutcome> {
     if args.handle_signals {
         #[cfg(unix)]
         {
-            let mut sig_term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .context("Failed to install SIGTERM handler")?;
+            let mut sig_term =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .context("Failed to install SIGTERM handler")?;
 
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
@@ -414,7 +413,10 @@ async fn build_command(
     host_port: u16,
     container_port: u16,
 ) -> Result<Command> {
-    if matches!(manifest.execution.runtime, RuntimeType::Docker | RuntimeType::Oci) {
+    if matches!(
+        manifest.execution.runtime,
+        RuntimeType::Docker | RuntimeType::Oci
+    ) {
         let parts = shell_words::split(entrypoint)
             .with_context(|| format!("Failed to parse docker entrypoint: {}", entrypoint))?;
         let image = parts
@@ -484,7 +486,10 @@ async fn build_command(
                         .and_then(|s| s.version.as_deref()),
                 );
 
-                eprintln!("⚠️  Host python not found. JIT provisioning Python {}...", version);
+                eprintln!(
+                    "⚠️  Host python not found. JIT provisioning Python {}...",
+                    version
+                );
 
                 let fetcher = RuntimeFetcher::new()
                     .context("Failed to initialize runtime fetcher for JIT python")?;
@@ -512,8 +517,8 @@ async fn build_command(
 }
 
 fn pick_free_port() -> Result<u16> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .context("Failed to bind ephemeral port")?;
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").context("Failed to bind ephemeral port")?;
     let port = listener
         .local_addr()
         .context("Failed to read local_addr")?

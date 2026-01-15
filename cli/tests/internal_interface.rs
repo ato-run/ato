@@ -20,13 +20,21 @@ fn internal_features_accepts_file_input_and_returns_json() {
     // Cleanup best-effort.
     let _ = std::fs::remove_file(&path);
 
-    assert!(out.status.success(), "status={:?} stderr={}", out.status, String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "status={:?} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let stdout = String::from_utf8(out.stdout).expect("stdout utf8");
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is json");
 
     assert_eq!(json.get("ok").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(json.get("spec_version").and_then(|v| v.as_str()), Some("0.1.0"));
+    assert_eq!(
+        json.get("spec_version").and_then(|v| v.as_str()),
+        Some("0.1.0")
+    );
 
     let engine_name = json
         .get("engine")
