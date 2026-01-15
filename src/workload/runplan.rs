@@ -140,6 +140,7 @@ pub fn from_coordinator(plan: &common::RunPlan) -> RunPlanConversion {
         build: None,
         isolation: None,
         targets, // UARC V1.1.0: Include targets with source.dev_mode from RunPlan
+        services: None,
     };
 
     RunPlanConversion {

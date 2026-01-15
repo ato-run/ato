@@ -192,6 +192,47 @@ pub struct IsolationConfig {
     pub allow_env: Vec<String>,
 }
 
+/// Service specification for Supervisor Mode (multi-process orchestration).
+///
+/// This is intentionally minimal in Step 1: schema + dependency graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceSpec {
+    /// Command line to execute.
+    ///
+    /// Accept both `entrypoint` (preferred) and `command` (alias) for compatibility
+    /// with early drafts.
+    #[serde(alias = "command")]
+    pub entrypoint: String,
+
+    /// Service dependencies by name.
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+
+    /// Placeholders to allocate and inject as ports (Step 2).
+    #[serde(default)]
+    pub expose: Option<Vec<String>>,
+
+    /// Environment variables to inject into this service.
+    #[serde(default)]
+    pub env: Option<HashMap<String, String>>,
+
+    /// Readiness probe (Step 2/3).
+    #[serde(default)]
+    pub readiness_probe: Option<ReadinessProbe>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadinessProbe {
+    #[serde(default)]
+    pub http_get: Option<String>,
+
+    #[serde(default)]
+    pub tcp_connect: Option<String>,
+
+    /// Placeholder name that resolves to a concrete port (e.g., "PORT").
+    pub port: String,
+}
+
 /// Capsule Manifest v1.0
 ///
 /// The primary configuration format for all Capsules in Gumball v0.3.0+
@@ -263,6 +304,12 @@ pub struct CapsuleManifestV1 {
     /// Engine performs runtime resolution to select the most appropriate target.
     #[serde(default)]
     pub targets: Option<TargetsConfig>,
+
+    /// Supervisor Mode: Multi-service definition.
+    ///
+    /// Optional and dev-first: absence means single-process execution via `execution`.
+    #[serde(default)]
+    pub services: Option<HashMap<String, ServiceSpec>>,
 }
 
 /// Pre-warmed container pool configuration

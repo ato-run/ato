@@ -55,10 +55,37 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
         anyhow::bail!("No capsule.toml found in bundle");
     }
 
-    let entrypoint = nacelle::bundle::read_entrypoint_from_manifest(&manifest_path)?;
-
     let manifest_content = std::fs::read_to_string(&manifest_path)?;
     let manifest: toml::Value = toml::from_str(&manifest_content)?;
+
+    // Supervisor Mode: if [services] exists, run multi-service lifecycle (Step 3).
+    // This is dev-first and does not yet integrate socket activation or sandbox per-service.
+    if let Ok(m) = nacelle::capsule_types::capsule_v1::CapsuleManifestV1::from_toml(&manifest_content)
+    {
+        if let Some(services) = m.services {
+            if !services.is_empty() {
+                println!(
+                    "🧠 Supervisor Mode: Detected {} services in capsule.toml",
+                    services.len()
+                );
+
+                let plan = nacelle::engine::supervisor_mode::build_supervisor_mode_plan(&services)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                nacelle::engine::supervisor_mode::run_supervisor_mode(
+                    &plan,
+                    &source_dir,
+                    Default::default(),
+                    None,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+
+                return Ok(());
+            }
+        }
+    }
+
+    let entrypoint = nacelle::bundle::read_entrypoint_from_manifest(&manifest_path)?;
 
     let targets_source_language_is_python = manifest
         .get("targets")

@@ -411,6 +411,7 @@ mod tests {
             build: None,
             isolation: None,
             targets: None,
+            services: None,
         }
     }
 
