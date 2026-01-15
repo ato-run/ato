@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Push helper script for capsuled
+# Push helper script for nacelle
 # Asks for confirmation before pushing
 # =============================================================================
 
@@ -20,7 +20,7 @@ cd "$PROJECT_ROOT"
 
 echo ""
 echo -e "${YELLOW}╔═══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${YELLOW}║              CAPSULED PUSH CONFIRMATION                        ║${NC}"
+echo -e "${YELLOW}║              NACELLE PUSH CONFIRMATION                         ║${NC}"
 echo -e "${YELLOW}╚═══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -35,8 +35,8 @@ echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━�
 echo -e "${YELLOW}Pre-push checklist:${NC}"
 echo "  1. cargo fmt --all -- --check"
 echo "  2. cargo clippy --lib --bins -- -D warnings"
-echo "  3. cargo test --workspace --lib"
-echo "  4. cargo build --release"
+echo "  3. cargo test --workspace"
+echo "  4. cargo build -p nacelle-cli --release --bin nacelle"
 echo ""
 echo -e "Run checks now? ${BLUE}(y)${NC} Run checks / ${BLUE}(s)${NC} Skip and push / ${BLUE}(n)${NC} Cancel"
 echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -68,9 +68,9 @@ case "$choice" in
             exit 1
         fi
         
-        # Unit tests
+        # Tests
         echo -n "  Unit tests... "
-        if cargo test --workspace --lib 2>/dev/null; then
+        if cargo test --workspace 2>/dev/null; then
             echo -e "${GREEN}✓${NC}"
         else
             echo -e "${RED}✗${NC}"
@@ -79,8 +79,7 @@ case "$choice" in
         
         # Build
         echo -n "  Build... "
-        if cargo build --release --bin capsuled -p capsuled 2>/dev/null && \
-           cargo build --release --bin capsule -p capsule-cli 2>/dev/null; then
+        if cargo build -p nacelle-cli --release --bin nacelle 2>/dev/null; then
             echo -e "${GREEN}✓${NC}"
         else
             echo -e "${RED}✗${NC}"
