@@ -71,16 +71,16 @@ fn is_self_extracting_bundle() -> Result<bool> {
     let len = file_data.len();
 
     // Bundle format: [Binary][Compressed Bundle][MAGIC (18 bytes)][Size (8 bytes)]
-    const BUNDLE_MAGIC: &[u8] = b"NACELLE_V2_BUNDLE";
+    let bundle_magic = nacelle::common::constants::BUNDLE_MAGIC;
 
-    if len < BUNDLE_MAGIC.len() + 8 {
+    if len < bundle_magic.len() + 8 {
         return Ok(false);
     }
 
-    let magic_start = len - BUNDLE_MAGIC.len() - 8;
-    let magic = &file_data[magic_start..magic_start + BUNDLE_MAGIC.len()];
+    let magic_start = len - bundle_magic.len() - 8;
+    let magic = &file_data[magic_start..magic_start + bundle_magic.len()];
 
-    Ok(magic == BUNDLE_MAGIC)
+    Ok(magic == bundle_magic)
 }
 
 /// Extract and run the bundled application

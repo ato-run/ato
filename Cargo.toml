@@ -6,6 +6,10 @@ rust-version = "1.82"
 license = "Apache-2.0"
 description = "The Unified Runtime for Capsules - Native, Docker, and Wasm execution"
 repository = "https://github.com/nacelle-dev/nacelle"
+authors = ["Nacelle Contributors"]
+readme = "README.md"
+keywords = ["runtime", "container", "wasm", "orchestration"]
+categories = ["command-line-utilities", "development-tools"]
 
 [lib]
 name = "nacelle"
@@ -91,11 +95,6 @@ libc = "0.2"
 subtle = "2.6.1"
 rust_decimal = { version = "1.39.0", features = ["serde"] }
 rust_decimal_macros = "1.39.0"
-# lvm-sys2 = "0.2"
-# libcryptsetup-rs = "0.9"
-
-# TODO: Re-enable when proto generation is set up
-# nacelle-capsuled-proto = { path = "../proto/rust" }
 shell-words = "1.1.1"
 
 # Unit 6: Audit persistence and CAS integration
