@@ -167,8 +167,13 @@ pub async fn run_supervisor_mode(
 
         // Readiness check (if configured)
         if let Some(probe) = &spec.readiness_probe {
-            wait_for_readiness(probe, svc_name, options.readiness_timeout, options.readiness_interval)
-                .await?;
+            wait_for_readiness(
+                probe,
+                svc_name,
+                options.readiness_timeout,
+                options.readiness_interval,
+            )
+            .await?;
         }
     }
 
@@ -219,7 +224,10 @@ pub async fn run_supervisor_mode(
 #[derive(Debug, Clone)]
 enum ShutdownReason {
     Signal,
-    ServiceExited { service: String, status: std::process::ExitStatus },
+    ServiceExited {
+        service: String,
+        status: std::process::ExitStatus,
+    },
 }
 
 fn build_shell_command(command: &str) -> tokio::process::Command {
@@ -273,11 +281,12 @@ async fn wait_for_readiness(
     use tokio::time::{sleep, Instant};
 
     let deadline = Instant::now() + timeout;
-    let port: u16 = probe
-        .port
-        .trim()
-        .parse()
-        .map_err(|_| format!("Invalid readiness_probe.port for '{service}': {}", probe.port))?;
+    let port: u16 = probe.port.trim().parse().map_err(|_| {
+        format!(
+            "Invalid readiness_probe.port for '{service}': {}",
+            probe.port
+        )
+    })?;
 
     loop {
         if Instant::now() > deadline {
@@ -291,11 +300,7 @@ async fn wait_for_readiness(
             }
         } else {
             // Default: TCP connect
-            let host = probe
-                .tcp_connect
-                .as_deref()
-                .unwrap_or("127.0.0.1")
-                .trim();
+            let host = probe.tcp_connect.as_deref().unwrap_or("127.0.0.1").trim();
 
             if readiness_tcp_ok(host, port).await {
                 return Ok(());
@@ -369,7 +374,6 @@ async fn shutdown_all(running: &[(String, u32)], grace: Duration, kill_wait: Dur
         }
 
         sleep(kill_wait).await;
-        return;
     }
 
     #[cfg(not(unix))]
@@ -378,14 +382,15 @@ async fn shutdown_all(running: &[(String, u32)], grace: Duration, kill_wait: Dur
     }
 }
 
-
 /// Resolve `depends_on` into a deterministic startup order.
 ///
 /// Semantics (Step 1):
 /// - Unknown dependency => error
 /// - Cycle => error
 /// - Order is topologically sorted (dependency comes before dependent)
-pub fn resolve_dependencies(services: &HashMap<String, ServiceSpec>) -> Result<Vec<String>, String> {
+pub fn resolve_dependencies(
+    services: &HashMap<String, ServiceSpec>,
+) -> Result<Vec<String>, String> {
     let mut visited: HashSet<String> = HashSet::new();
     let mut visiting: HashSet<String> = HashSet::new();
     let mut sorted: Vec<String> = Vec::new();
@@ -409,12 +414,9 @@ pub fn resolve_dependencies(services: &HashMap<String, ServiceSpec>) -> Result<V
             ));
         }
 
-        let spec = services.get(name).ok_or_else(|| {
-            format!(
-                "Unknown service '{}' (referenced by depends_on)",
-                name
-            )
-        })?;
+        let spec = services
+            .get(name)
+            .ok_or_else(|| format!("Unknown service '{}' (referenced by depends_on)", name))?;
 
         visiting.insert(name.to_string());
         stack.push(name.to_string());
@@ -444,7 +446,14 @@ pub fn resolve_dependencies(services: &HashMap<String, ServiceSpec>) -> Result<V
 
     for name in names {
         let mut stack = Vec::new();
-        visit(name, services, &mut visited, &mut visiting, &mut sorted, &mut stack)?;
+        visit(
+            name,
+            services,
+            &mut visited,
+            &mut visiting,
+            &mut sorted,
+            &mut stack,
+        )?;
     }
 
     Ok(sorted)
@@ -553,7 +562,11 @@ fn resolve_port_field(port: &str, my_name: &str, ports: &PortRegistry) -> Result
     Ok(port_num.to_string())
 }
 
-fn replace_placeholders(input: &str, my_name: &str, ports: &PortRegistry) -> Result<String, String> {
+fn replace_placeholders(
+    input: &str,
+    my_name: &str,
+    ports: &PortRegistry,
+) -> Result<String, String> {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
 
@@ -590,7 +603,9 @@ fn resolve_placeholder(key: &str, my_name: &str, ports: &PortRegistry) -> Result
             .next()
             .ok_or_else(|| format!("Invalid placeholder '{{{{{key}}}}}'"))?;
         if kind != "ports" {
-            return Err(format!("Invalid placeholder '{{{{{key}}}}}': expected 'ports'"));
+            return Err(format!(
+                "Invalid placeholder '{{{{{key}}}}}': expected 'ports'"
+            ));
         }
         let port_name = parts
             .next()
@@ -617,14 +632,10 @@ fn resolve_placeholder(key: &str, my_name: &str, ports: &PortRegistry) -> Result
 
 fn lookup_local_port(my_name: &str, port_name: &str, ports: &PortRegistry) -> Result<u16, String> {
     let svc_ports = ports.get(my_name).ok_or_else(|| {
-        format!(
-            "No ports allocated for service '{my_name}' (needed for placeholder '{port_name}')"
-        )
+        format!("No ports allocated for service '{my_name}' (needed for placeholder '{port_name}')")
     })?;
     let port_num = svc_ports.get(port_name).ok_or_else(|| {
-        format!(
-            "Service '{my_name}' has no exposed port named '{port_name}' (add to expose=...)"
-        )
+        format!("Service '{my_name}' has no exposed port named '{port_name}' (add to expose=...)")
     })?;
     Ok(*port_num)
 }
@@ -733,7 +744,10 @@ mod tests {
         services.insert("web".to_string(), web);
 
         let ports: PortRegistry = HashMap::from([
-            ("llm".to_string(), HashMap::from([("PORT".to_string(), 54321)])),
+            (
+                "llm".to_string(),
+                HashMap::from([("PORT".to_string(), 54321)]),
+            ),
             (
                 "web".to_string(),
                 HashMap::from([("WEB_PORT".to_string(), 40000)]),

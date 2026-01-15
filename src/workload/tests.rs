@@ -80,12 +80,7 @@ mod manifest_tests {
         assert!(services.contains_key("llm"));
         assert!(services.contains_key("web"));
         assert_eq!(
-            services
-                .get("web")
-                .unwrap()
-                .depends_on
-                .clone()
-                .unwrap(),
+            services.get("web").unwrap().depends_on.clone().unwrap(),
             vec!["llm".to_string()]
         );
     }

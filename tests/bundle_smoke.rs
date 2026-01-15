@@ -14,11 +14,7 @@ fn test_extract_and_run_embedded_python_from_bundle() {
     // Create a fake embedded python binary (shell script) so we can verify
     // the bundle runs WITHOUT relying on host python.
     let python_bin = runtime_root.join("python/bin/python3");
-    fs::write(
-        &python_bin,
-        "#!/bin/sh\necho EMBEDDED_PYTHON\nexit 0\n",
-    )
-    .unwrap();
+    fs::write(&python_bin, "#!/bin/sh\necho EMBEDDED_PYTHON\nexit 0\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -50,9 +46,7 @@ entrypoint = "main.py"
     tar_builder
         .append_dir_all("runtime", &runtime_root)
         .unwrap();
-    tar_builder
-        .append_dir_all("source", &source_root)
-        .unwrap();
+    tar_builder.append_dir_all("source", &source_root).unwrap();
     tar_builder.finish().unwrap();
     let tar_bytes = tar_builder.into_inner().unwrap();
 
@@ -81,11 +75,11 @@ entrypoint = "main.py"
     assert!(extracted_runtime.join("python/bin/python3").exists());
 
     // Build command using embedded runtime and execute.
-    let entrypoint = bundle::read_entrypoint_from_manifest(&extracted_source.join("capsule.toml"))
-        .unwrap();
+    let entrypoint =
+        bundle::read_entrypoint_from_manifest(&extracted_source.join("capsule.toml")).unwrap();
 
-    let language = bundle::read_source_language_from_manifest(&extracted_source.join("capsule.toml"))
-        .unwrap();
+    let language =
+        bundle::read_source_language_from_manifest(&extracted_source.join("capsule.toml")).unwrap();
     let mut cmd = bundle::build_bundle_command(
         language.as_deref(),
         &entrypoint,
@@ -141,7 +135,9 @@ entrypoint = "main.js"
     fs::write(source_root.join("main.js"), "console.log('hello')\n").unwrap();
 
     let mut tar_builder = tar::Builder::new(Vec::new());
-    tar_builder.append_dir_all("runtime", &runtime_root).unwrap();
+    tar_builder
+        .append_dir_all("runtime", &runtime_root)
+        .unwrap();
     tar_builder.append_dir_all("source", &source_root).unwrap();
     tar_builder.finish().unwrap();
     let tar_bytes = tar_builder.into_inner().unwrap();
@@ -164,10 +160,10 @@ entrypoint = "main.js"
     let extracted_source = extract_dir.join("source");
     let extracted_runtime = extract_dir.join("runtime");
 
-    let entrypoint = bundle::read_entrypoint_from_manifest(&extracted_source.join("capsule.toml"))
-        .unwrap();
-    let language = bundle::read_source_language_from_manifest(&extracted_source.join("capsule.toml"))
-        .unwrap();
+    let entrypoint =
+        bundle::read_entrypoint_from_manifest(&extracted_source.join("capsule.toml")).unwrap();
+    let language =
+        bundle::read_source_language_from_manifest(&extracted_source.join("capsule.toml")).unwrap();
 
     let mut cmd = bundle::build_bundle_command(
         language.as_deref(),

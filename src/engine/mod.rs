@@ -39,6 +39,10 @@
 //! - Systemd-compatible FD passing (LISTEN_FDS environment variable)
 
 // pub mod pool; // Disabled: requires capsule_runtime dependency
+pub mod ebpf_enforcer;
+pub mod enforcement_guard;
+pub mod r3_supervisor;
 pub mod socket;
+pub mod startup_gc;
 pub mod supervisor;
 pub mod supervisor_mode;

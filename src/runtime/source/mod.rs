@@ -208,7 +208,10 @@ impl SourceRuntime {
                 }
                 "node" | "nodejs" => {
                     let version = target.version.as_deref().unwrap_or("22");
-                    info!("JIT Provisioning: Ensuring Node {} is available...", version);
+                    info!(
+                        "JIT Provisioning: Ensuring Node {} is available...",
+                        version
+                    );
                     let node_path = fetcher.ensure_node(version).await.map_err(|e| {
                         RuntimeError::ToolchainNotFound {
                             language: target.language.clone(),
@@ -223,11 +226,16 @@ impl SourceRuntime {
                         None => {
                             return Err(RuntimeError::ToolchainNotFound {
                                 language: target.language.clone(),
-                                version: Some("Deno version is required for JIT provisioning".to_string()),
+                                version: Some(
+                                    "Deno version is required for JIT provisioning".to_string(),
+                                ),
                             });
                         }
                     };
-                    info!("JIT Provisioning: Ensuring Deno {} is available...", version);
+                    info!(
+                        "JIT Provisioning: Ensuring Deno {} is available...",
+                        version
+                    );
                     let deno_path = fetcher.ensure_deno(version).await.map_err(|e| {
                         RuntimeError::ToolchainNotFound {
                             language: target.language.clone(),
@@ -242,7 +250,9 @@ impl SourceRuntime {
                         None => {
                             return Err(RuntimeError::ToolchainNotFound {
                                 language: target.language.clone(),
-                                version: Some("Bun version is required for JIT provisioning".to_string()),
+                                version: Some(
+                                    "Bun version is required for JIT provisioning".to_string(),
+                                ),
                             });
                         }
                     };

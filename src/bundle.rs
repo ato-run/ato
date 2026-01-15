@@ -28,7 +28,9 @@ pub fn extract_bundle_to_dir(exe_path: &Path, dest: &Path) -> Result<()> {
 
     use tar::Archive;
     let mut archive = Archive::new(decompressed.as_slice());
-    archive.unpack(dest).context("Failed to unpack bundle tar")?;
+    archive
+        .unpack(dest)
+        .context("Failed to unpack bundle tar")?;
     Ok(())
 }
 
