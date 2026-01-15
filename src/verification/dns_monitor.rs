@@ -68,11 +68,11 @@ pub fn generate_dns_rules(config: &DnsConfig, chain_name: &str) -> Vec<String> {
     // Log blocked DNS attempts (if enabled)
     if config.log_blocked {
         rules.push(format!(
-            "iptables -A {} -p udp --dport 53 -j LOG --log-prefix '[UARC-DNS-BLOCKED] '",
+            "iptables -A {} -p udp --dport 53 -j LOG --log-prefix '[NACELLE-DNS-BLOCKED] '",
             chain_name
         ));
         rules.push(format!(
-            "iptables -A {} -p tcp --dport 53 -j LOG --log-prefix '[UARC-DNS-BLOCKED] '",
+            "iptables -A {} -p tcp --dport 53 -j LOG --log-prefix '[NACELLE-DNS-BLOCKED] '",
             chain_name
         ));
     }
@@ -135,7 +135,7 @@ mod tests {
             .any(|r| r.contains("100.100.100.100") && r.contains("tcp")));
         assert!(rules
             .iter()
-            .any(|r| r.contains("LOG") && r.contains("UARC-DNS-BLOCKED")));
+            .any(|r| r.contains("LOG") && r.contains("NACELLE-DNS-BLOCKED")));
         assert!(rules
             .iter()
             .any(|r| r.contains("-j DROP") && r.contains("--dport 53")));

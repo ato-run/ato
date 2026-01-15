@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// Magic bytes to identify self-extracting v2 bundles.
-pub const BUNDLE_MAGIC: &[u8] = b"NACELLE_V2_BUNDLE";
+use crate::common::constants::BUNDLE_MAGIC;
 
 /// Check if the given executable path contains an embedded bundle.
 pub fn is_self_extracting_bundle(exe_path: &Path) -> Result<bool> {

@@ -4,6 +4,10 @@ version = "0.2.0"
 edition = "2021"
 description = "Nacelle CLI - Unified Runtime for Capsules"
 license = "Apache-2.0"
+authors = ["Nacelle Contributors"]
+readme = "../README.md"
+keywords = ["runtime", "container", "wasm", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "nacelle"
