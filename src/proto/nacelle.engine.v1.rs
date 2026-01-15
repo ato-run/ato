@@ -448,13 +448,11 @@ pub mod engine_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/onescluster.engine.v1.Engine/DeployCapsule",
+                "/nacelle.engine.v1.Engine/DeployCapsule",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("onescluster.engine.v1.Engine", "DeployCapsule"),
-                );
+                .insert(GrpcMethod::new("nacelle.engine.v1.Engine", "DeployCapsule"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn stop_capsule(
@@ -471,11 +469,11 @@ pub mod engine_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/onescluster.engine.v1.Engine/StopCapsule",
+                "/nacelle.engine.v1.Engine/StopCapsule",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("onescluster.engine.v1.Engine", "StopCapsule"));
+                .insert(GrpcMethod::new("nacelle.engine.v1.Engine", "StopCapsule"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn get_resources(
@@ -492,11 +490,11 @@ pub mod engine_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/onescluster.engine.v1.Engine/GetResources",
+                "/nacelle.engine.v1.Engine/GetResources",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("onescluster.engine.v1.Engine", "GetResources"));
+                .insert(GrpcMethod::new("nacelle.engine.v1.Engine", "GetResources"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn validate_manifest(
@@ -516,13 +514,11 @@ pub mod engine_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/onescluster.engine.v1.Engine/ValidateManifest",
+                "/nacelle.engine.v1.Engine/ValidateManifest",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("onescluster.engine.v1.Engine", "ValidateManifest"),
-                );
+                .insert(GrpcMethod::new("nacelle.engine.v1.Engine", "ValidateManifest"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn get_system_status(
@@ -539,13 +535,11 @@ pub mod engine_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/onescluster.engine.v1.Engine/GetSystemStatus",
+                "/nacelle.engine.v1.Engine/GetSystemStatus",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("onescluster.engine.v1.Engine", "GetSystemStatus"),
-                );
+                .insert(GrpcMethod::new("nacelle.engine.v1.Engine", "GetSystemStatus"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn stream_logs(
@@ -565,11 +559,11 @@ pub mod engine_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/onescluster.engine.v1.Engine/StreamLogs",
+                "/nacelle.engine.v1.Engine/StreamLogs",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("onescluster.engine.v1.Engine", "StreamLogs"));
+                .insert(GrpcMethod::new("nacelle.engine.v1.Engine", "StreamLogs"));
             self.inner.server_streaming(req, path, codec).await
         }
         /// Model prefetch/cache: download (if missing) to an allowlisted host path.
@@ -590,11 +584,11 @@ pub mod engine_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/onescluster.engine.v1.Engine/FetchModel",
+                "/nacelle.engine.v1.Engine/FetchModel",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("onescluster.engine.v1.Engine", "FetchModel"));
+                .insert(GrpcMethod::new("nacelle.engine.v1.Engine", "FetchModel"));
             self.inner.unary(req, path, codec).await
         }
         /// Get job execution status (Phase 3: Coordinator integration)
@@ -615,11 +609,11 @@ pub mod engine_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/onescluster.engine.v1.Engine/GetJobStatus",
+                "/nacelle.engine.v1.Engine/GetJobStatus",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("onescluster.engine.v1.Engine", "GetJobStatus"));
+                .insert(GrpcMethod::new("nacelle.engine.v1.Engine", "GetJobStatus"));
             self.inner.unary(req, path, codec).await
         }
         /// List recent jobs with optional filtering
@@ -640,11 +634,11 @@ pub mod engine_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/onescluster.engine.v1.Engine/ListJobs",
+                "/nacelle.engine.v1.Engine/ListJobs",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("onescluster.engine.v1.Engine", "ListJobs"));
+                .insert(GrpcMethod::new("nacelle.engine.v1.Engine", "ListJobs"));
             self.inner.unary(req, path, codec).await
         }
         /// Cancel a running job (Phase 6: Control Plane completion)
@@ -665,11 +659,11 @@ pub mod engine_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/onescluster.engine.v1.Engine/CancelJob",
+                "/nacelle.engine.v1.Engine/CancelJob",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("onescluster.engine.v1.Engine", "CancelJob"));
+                .insert(GrpcMethod::new("nacelle.engine.v1.Engine", "CancelJob"));
             self.inner.unary(req, path, codec).await
         }
     }
@@ -829,7 +823,7 @@ pub mod engine_server {
         }
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             match req.uri().path() {
-                "/onescluster.engine.v1.Engine/DeployCapsule" => {
+                "/nacelle.engine.v1.Engine/DeployCapsule" => {
                     #[allow(non_camel_case_types)]
                     struct DeployCapsuleSvc<T: Engine>(pub Arc<T>);
                     impl<T: Engine> tonic::server::UnaryService<super::DeployRequest>
@@ -872,7 +866,7 @@ pub mod engine_server {
                     };
                     Box::pin(fut)
                 }
-                "/onescluster.engine.v1.Engine/StopCapsule" => {
+                "/nacelle.engine.v1.Engine/StopCapsule" => {
                     #[allow(non_camel_case_types)]
                     struct StopCapsuleSvc<T: Engine>(pub Arc<T>);
                     impl<T: Engine> tonic::server::UnaryService<super::StopRequest>
@@ -915,7 +909,7 @@ pub mod engine_server {
                     };
                     Box::pin(fut)
                 }
-                "/onescluster.engine.v1.Engine/GetResources" => {
+                "/nacelle.engine.v1.Engine/GetResources" => {
                     #[allow(non_camel_case_types)]
                     struct GetResourcesSvc<T: Engine>(pub Arc<T>);
                     impl<
@@ -960,7 +954,7 @@ pub mod engine_server {
                     };
                     Box::pin(fut)
                 }
-                "/onescluster.engine.v1.Engine/ValidateManifest" => {
+                "/nacelle.engine.v1.Engine/ValidateManifest" => {
                     #[allow(non_camel_case_types)]
                     struct ValidateManifestSvc<T: Engine>(pub Arc<T>);
                     impl<T: Engine> tonic::server::UnaryService<super::ValidateRequest>
@@ -1003,7 +997,7 @@ pub mod engine_server {
                     };
                     Box::pin(fut)
                 }
-                "/onescluster.engine.v1.Engine/GetSystemStatus" => {
+                "/nacelle.engine.v1.Engine/GetSystemStatus" => {
                     #[allow(non_camel_case_types)]
                     struct GetSystemStatusSvc<T: Engine>(pub Arc<T>);
                     impl<
@@ -1048,7 +1042,7 @@ pub mod engine_server {
                     };
                     Box::pin(fut)
                 }
-                "/onescluster.engine.v1.Engine/StreamLogs" => {
+                "/nacelle.engine.v1.Engine/StreamLogs" => {
                     #[allow(non_camel_case_types)]
                     struct StreamLogsSvc<T: Engine>(pub Arc<T>);
                     impl<
@@ -1094,7 +1088,7 @@ pub mod engine_server {
                     };
                     Box::pin(fut)
                 }
-                "/onescluster.engine.v1.Engine/FetchModel" => {
+                "/nacelle.engine.v1.Engine/FetchModel" => {
                     #[allow(non_camel_case_types)]
                     struct FetchModelSvc<T: Engine>(pub Arc<T>);
                     impl<T: Engine> tonic::server::UnaryService<super::FetchModelRequest>
@@ -1137,7 +1131,7 @@ pub mod engine_server {
                     };
                     Box::pin(fut)
                 }
-                "/onescluster.engine.v1.Engine/GetJobStatus" => {
+                "/nacelle.engine.v1.Engine/GetJobStatus" => {
                     #[allow(non_camel_case_types)]
                     struct GetJobStatusSvc<T: Engine>(pub Arc<T>);
                     impl<
@@ -1182,7 +1176,7 @@ pub mod engine_server {
                     };
                     Box::pin(fut)
                 }
-                "/onescluster.engine.v1.Engine/ListJobs" => {
+                "/nacelle.engine.v1.Engine/ListJobs" => {
                     #[allow(non_camel_case_types)]
                     struct ListJobsSvc<T: Engine>(pub Arc<T>);
                     impl<T: Engine> tonic::server::UnaryService<super::ListJobsRequest>
@@ -1225,7 +1219,7 @@ pub mod engine_server {
                     };
                     Box::pin(fut)
                 }
-                "/onescluster.engine.v1.Engine/CancelJob" => {
+                "/nacelle.engine.v1.Engine/CancelJob" => {
                     #[allow(non_camel_case_types)]
                     struct CancelJobSvc<T: Engine>(pub Arc<T>);
                     impl<T: Engine> tonic::server::UnaryService<super::CancelJobRequest>
@@ -1301,7 +1295,7 @@ pub mod engine_server {
         }
     }
     /// Generated gRPC service name
-    pub const SERVICE_NAME: &str = "onescluster.engine.v1.Engine";
+    pub const SERVICE_NAME: &str = "nacelle.engine.v1.Engine";
     impl<T> tonic::server::NamedService for EngineServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }

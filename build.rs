@@ -148,11 +148,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // =========================================================================
-    // Protobuf / gRPC Code Generation (using UARC proto definitions)
+    // Protobuf / gRPC Code Generation (using local proto definitions)
     // =========================================================================
-    // UARC contains only the specification protos: common/v1, engine/v1
-    // Coordinator API is Ato-specific and lives in ato-coordinator repo
-    let uarc_path = env::var("UARC_PATH").unwrap_or_else(|_| "../uarc".to_string());
+    // Proto definitions are now self-contained in the proto/ directory (nacelle package)
+    let proto_dir = "proto";
 
     if let Some(protoc_path) = resolve_protoc() {
         env::set_var("PROTOC", protoc_path);
@@ -164,10 +163,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .out_dir("src/proto")
         .compile_protos(
             &[
-                format!("{}/proto/common/v1/common.proto", uarc_path),
-                format!("{}/proto/engine/v1/api.proto", uarc_path),
+                format!("{}/common/v1/common.proto", proto_dir),
+                format!("{}/engine/v1/api.proto", proto_dir),
             ],
-            &[format!("{}/proto", uarc_path)], // .proto ファイルのインクルードパス
+            &[proto_dir], // .proto ファイルのインクルードパス
         )?;
 
     // =========================================================================
@@ -178,39 +177,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Generated code goes to src/ so it can be accessed as `crate::capsule_capnp`
     let capnp_out_dir = Path::new("src");
 
-    // `capsule.capnp` includes Go annotations via `go.capnp` import for SSOT.
-    // Rust builds should not depend on the Go toolchain or go.capnp being present,
-    // so we compile from a sanitized copy that strips `$Go.*` lines.
-    let uarc_schema_path = format!("{}/schema/capsule.capnp", uarc_path);
-    let original_schema_path = Path::new(&uarc_schema_path);
-    let out_dir = PathBuf::from(env::var("OUT_DIR")?);
-    let sanitized_schema_dir = out_dir.join("capnp_sanitized");
-    std::fs::create_dir_all(&sanitized_schema_dir)?;
-    let sanitized_schema_path = sanitized_schema_dir.join("capsule.capnp");
-    let original_schema = std::fs::read_to_string(original_schema_path)?;
-    let sanitized_schema = original_schema
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim_start();
-            trimmed != "using Go = import \"/go.capnp\";" && !trimmed.starts_with("$Go.")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
-    std::fs::write(&sanitized_schema_path, sanitized_schema)?;
-
-    capnpc::CompilerCommand::new()
-        .file(&sanitized_schema_path)
-        .src_prefix(&sanitized_schema_dir)
-        .output_path(capnp_out_dir)
-        .run()?;
-
-    // Rerun if schema changes
-    println!("cargo:rerun-if-changed={}/schema/capsule.capnp", uarc_path);
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed={}/proto", uarc_path);
-    println!("cargo:rerun-if-env-changed=PROTOC");
-    println!("cargo:rerun-if-env-changed=PATH");
+    // For now, using a local capsule.capnp if needed, or skipping if not available
+    // TODO: Consider adding capsule.capnp to this repository if needed for standalone builds
+    let capnp_schema_path = "schema/capsule.capnp";
+    
+    if Path::new(capnp_schema_path).exists() {
+        capnpc::CompilerCommand::new()
+            .file(capnp_schema_path)
+            .src_prefix("schema")
+            .output_path(capnp_out_dir)
+            .run()?;
+        
+        // Rerun if schema changes
+        println!("cargo:rerun-if-changed={}", capnp_schema_path);
+    }
 
     Ok(())
 }
