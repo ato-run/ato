@@ -91,7 +91,3 @@ pub use verification as security;
 // From workload
 pub use workload::manifest;
 pub use workload::runplan;
-
-// =============================================================================
-// Public API (v2.0: DevServer disabled, daemon architecture removed)
-// =============================================================================
