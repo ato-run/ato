@@ -1,5 +1,5 @@
 <p align="center">
-	<img src="docs/nacelle_logo.png" alt="nacelle" width="96" height="96">
+	<img src="docs/nacelle_logo.png" alt="nacelle"　height="96">
 </p>
 
 # nacelle
