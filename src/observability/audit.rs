@@ -4,12 +4,15 @@
 //! for RFC 9421 compliance and daily signature batches.
 
 use anyhow::{anyhow, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::verification::signing::CapsuleSigner;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AuditOperation {
@@ -348,19 +351,50 @@ impl AuditLogger {
     }
 
     /// Sign a daily audit batch using Ed25519 (RFC 9421 compliance)
-    ///
-    /// v3.0 NOTE: Signing functionality moved to capsule-cli.
-    /// This method is kept for API compatibility but returns an error.
-    /// Audit log signing should be done by capsule-cli.
-    pub fn sign_daily_batch(
-        &self,
-        _date: &str,
-        _signer: &str, // Placeholder type
-    ) -> Result<String> {
-        Err(anyhow!(
-            "Audit signing has been moved to capsule-cli. \
-             Please use 'capsule sign-audit' command instead."
-        ))
+    pub fn sign_daily_batch(&self, date: &str, signer: &CapsuleSigner) -> Result<String> {
+        let events = self.get_events_for_date(date)?;
+        if events.is_empty() {
+            return Err(anyhow!("No events for date {}", date));
+        }
+
+        let hashes: Vec<String> = events.iter().map(|(_, h)| h.clone()).collect();
+        let merkle_root = Self::compute_merkle_root(&hashes);
+
+        let signature = signer.sign(merkle_root.as_bytes());
+        let signature_b64 = BASE64.encode(signature.to_bytes());
+
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| anyhow!("Database not initialized"))?;
+        let conn = db
+            .lock()
+            .map_err(|e| anyhow!("Database lock error: {}", e))?;
+
+        let first_id = events.first().map(|(id, _)| *id);
+        let last_id = events.last().map(|(id, _)| *id);
+        let signed_at = chrono::Utc::now().to_rfc3339();
+
+        conn.execute(
+            r#"
+            INSERT OR REPLACE INTO audit_signatures 
+                (date, events_count, first_event_id, last_event_id, merkle_root, signature, signed_at, signer_key_fingerprint)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                date,
+                events.len() as i64,
+                first_id,
+                last_id,
+                merkle_root,
+                signature_b64,
+                signed_at,
+                signer.fingerprint(),
+            ],
+        )
+        .map_err(|e| anyhow!("Failed to store audit signature: {}", e))?;
+
+        Ok(signature_b64)
     }
 
     /// Verify a daily batch signature (for auditors)
@@ -408,14 +442,14 @@ impl Default for AuditLogger {
 #[allow(dead_code)]
 pub fn start_daily_signing_scheduler(
     audit_logger: std::sync::Arc<AuditLogger>,
-    _signer: Option<std::sync::Arc<String>>, // v3.0: Placeholder type
+    _signer: Option<std::sync::Arc<CapsuleSigner>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         tracing::warn!(
             "Daily signing scheduler is deprecated. \
              Audit signing should be done by capsule-cli."
         );
-        
+
         loop {
             // Calculate time until next UTC midnight
             let now = chrono::Utc::now();
