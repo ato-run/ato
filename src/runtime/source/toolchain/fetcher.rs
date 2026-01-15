@@ -80,7 +80,9 @@ impl ToolchainFetcher for PythonFetcher {
             .await
             .context("Failed to fetch expected sha256")?;
 
-        let archive_path = provider.cache_dir().join(format!("python-{}.tar.gz", version));
+        let archive_path = provider
+            .cache_dir()
+            .join(format!("python-{}.tar.gz", version));
         provider
             .download_with_progress(&download_url, &archive_path, show_progress)
             .await?;
@@ -153,7 +155,9 @@ impl ToolchainFetcher for NodeFetcher {
         let archive_path = if is_zip {
             provider.cache_dir().join(format!("node-{}.zip", version))
         } else {
-            provider.cache_dir().join(format!("node-{}.tar.gz", version))
+            provider
+                .cache_dir()
+                .join(format!("node-{}.tar.gz", version))
         };
 
         provider
@@ -180,7 +184,8 @@ impl ToolchainFetcher for NodeFetcher {
         if runtime_dir.exists() {
             std::fs::remove_dir_all(&runtime_dir)?;
         }
-        std::fs::rename(&temp_dir, &runtime_dir).context("Failed to move extracted Node runtime")?;
+        std::fs::rename(&temp_dir, &runtime_dir)
+            .context("Failed to move extracted Node runtime")?;
 
         let _ = std::fs::remove_file(&archive_path);
         toolchain_out!("✓ Node {} installed at {:?}", version, runtime_dir);
@@ -335,8 +340,7 @@ impl ToolchainFetcher for BunFetcher {
         if runtime_dir.exists() {
             std::fs::remove_dir_all(&runtime_dir)?;
         }
-        std::fs::rename(&temp_dir, &runtime_dir)
-            .context("Failed to move extracted Bun runtime")?;
+        std::fs::rename(&temp_dir, &runtime_dir).context("Failed to move extracted Bun runtime")?;
 
         let _ = std::fs::remove_file(&archive_path);
         toolchain_out!("✓ Bun {} installed at {:?}", version, runtime_dir);

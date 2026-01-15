@@ -19,11 +19,11 @@
 
 mod verifier;
 
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -311,13 +311,7 @@ pub struct RuntimeFetcher {
 }
 
 struct RuntimeInstallLock {
-    file: File,
-}
-
-impl Drop for RuntimeInstallLock {
-    fn drop(&mut self) {
-        let _ = self.file.unlock();
-    }
+    _file: File,
 }
 
 fn is_internal_mode() -> bool {
@@ -345,7 +339,7 @@ impl RuntimeFetcher {
 
         Ok(Self {
             cache_dir,
-            verifier: Arc::new(ChecksumVerifier::default()),
+            verifier: Arc::new(ChecksumVerifier),
             fetchers: fetcher::default_fetchers(),
         })
     }
@@ -429,7 +423,11 @@ impl RuntimeFetcher {
         lock_dir.join(format!("{}-{}.lock", language, v))
     }
 
-    async fn acquire_install_lock(&self, language: &str, version: &str) -> Result<RuntimeInstallLock> {
+    async fn acquire_install_lock(
+        &self,
+        language: &str,
+        version: &str,
+    ) -> Result<RuntimeInstallLock> {
         let lock_path = self.lock_path(language, version);
         let language = language.to_string();
         let version = version.to_string();
@@ -443,11 +441,12 @@ impl RuntimeFetcher {
                 .read(true)
                 .write(true)
                 .create(true)
+                .truncate(true)
                 .open(&lock_path)
                 .with_context(|| format!("Failed to open lock file: {:?}", lock_path))?;
 
             match file.try_lock_exclusive() {
-                Ok(()) => Ok(RuntimeInstallLock { file }),
+                Ok(()) => Ok(RuntimeInstallLock { _file: file }),
                 Err(e) if e.kind() == fs2::lock_contended_error().kind() => {
                     toolchain_out!(
                         "⏳ Another process is provisioning {} {}. Waiting...",
@@ -458,7 +457,7 @@ impl RuntimeFetcher {
                     // Block until the other process releases the lock.
                     file.lock_exclusive()
                         .with_context(|| format!("Failed to wait for lock: {:?}", lock_path))?;
-                    Ok(RuntimeInstallLock { file })
+                    Ok(RuntimeInstallLock { _file: file })
                 }
                 Err(e) => Err(e).context("Failed to lock runtime install (unexpected error)"),
             }
@@ -527,7 +526,11 @@ impl RuntimeFetcher {
             .await
     }
 
-    async fn fetch_expected_sha256(&self, url: &str, filename_hint: Option<&str>) -> Result<String> {
+    async fn fetch_expected_sha256(
+        &self,
+        url: &str,
+        filename_hint: Option<&str>,
+    ) -> Result<String> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()?;
@@ -546,7 +549,10 @@ impl RuntimeFetcher {
             );
         }
 
-        let text = response.text().await.context("Failed to read sha256 body")?;
+        let text = response
+            .text()
+            .await
+            .context("Failed to read sha256 body")?;
         Self::parse_sha256_from_text(&text, filename_hint)
     }
 
@@ -690,7 +696,7 @@ impl RuntimeFetcher {
     }
 
     /// Extract a tar.gz archive from file to directory
-    fn extract_archive_from_file(archive_path: &PathBuf, dest: &PathBuf) -> Result<()> {
+    fn extract_archive_from_file(archive_path: &Path, dest: &Path) -> Result<()> {
         use flate2::read::GzDecoder;
         use tar::Archive;
 
@@ -705,7 +711,7 @@ impl RuntimeFetcher {
     }
 
     /// Extract a zip archive from file to directory.
-    fn extract_zip_from_file(archive_path: &PathBuf, dest: &PathBuf) -> Result<()> {
+    fn extract_zip_from_file(archive_path: &Path, dest: &Path) -> Result<()> {
         use std::io::copy;
         use zip::ZipArchive;
 
@@ -874,7 +880,9 @@ impl RuntimeFetcher {
     /// Ensure Node.js runtime is available, downloading if necessary.
     /// Returns the path to the `node` binary.
     pub async fn ensure_node(&self, version: &str) -> Result<PathBuf> {
-        let runtime_dir = self.download_node_runtime_with_progress(version, true).await?;
+        let runtime_dir = self
+            .download_node_runtime_with_progress(version, true)
+            .await?;
         let node_bin = Self::find_binary_recursive(&runtime_dir, &["node", "node.exe"])?;
         info!("Node {} ready at {:?}", version, node_bin);
         Ok(node_bin)
@@ -883,7 +891,9 @@ impl RuntimeFetcher {
     /// Ensure Deno runtime is available, downloading if necessary.
     /// Returns the path to the `deno` binary.
     pub async fn ensure_deno(&self, version: &str) -> Result<PathBuf> {
-        let runtime_dir = self.download_deno_runtime_with_progress(version, true).await?;
+        let runtime_dir = self
+            .download_deno_runtime_with_progress(version, true)
+            .await?;
         let deno_bin = Self::find_binary_recursive(&runtime_dir, &["deno", "deno.exe"])?;
         info!("Deno {} ready at {:?}", version, deno_bin);
         Ok(deno_bin)
@@ -892,7 +902,9 @@ impl RuntimeFetcher {
     /// Ensure Bun runtime is available, downloading if necessary.
     /// Returns the path to the `bun` binary.
     pub async fn ensure_bun(&self, version: &str) -> Result<PathBuf> {
-        let runtime_dir = self.download_bun_runtime_with_progress(version, true).await?;
+        let runtime_dir = self
+            .download_bun_runtime_with_progress(version, true)
+            .await?;
         let bun_bin = Self::find_binary_recursive(&runtime_dir, &["bun", "bun.exe"])?;
         info!("Bun {} ready at {:?}", version, bun_bin);
         Ok(bun_bin)
@@ -900,12 +912,14 @@ impl RuntimeFetcher {
 
     /// Download a Node.js runtime and return the extracted runtime directory.
     pub async fn download_node_runtime(&self, version: &str) -> Result<PathBuf> {
-        self.download_node_runtime_with_progress(version, true).await
+        self.download_node_runtime_with_progress(version, true)
+            .await
     }
 
     /// Download a Deno runtime and return the extracted runtime directory.
     pub async fn download_deno_runtime(&self, version: &str) -> Result<PathBuf> {
-        self.download_deno_runtime_with_progress(version, true).await
+        self.download_deno_runtime_with_progress(version, true)
+            .await
     }
 
     /// Download a Bun runtime and return the extracted runtime directory.
@@ -949,9 +963,7 @@ impl RuntimeFetcher {
             .json()
             .await
             .context("Failed to parse Node index.json")?;
-        let arr = json
-            .as_array()
-            .context("Node index.json is not an array")?;
+        let arr = json.as_array().context("Node index.json is not an array")?;
 
         for item in arr {
             let v = match item.get("version").and_then(|v| v.as_str()) {
@@ -1095,12 +1107,12 @@ mod tests {
 
         let fetcher1 = RuntimeFetcher {
             cache_dir: cache_dir.clone(),
-            verifier: Arc::new(ChecksumVerifier::default()),
+            verifier: Arc::new(ChecksumVerifier),
             fetchers: fetcher::default_fetchers(),
         };
         let fetcher2 = RuntimeFetcher {
             cache_dir: cache_dir.clone(),
-            verifier: Arc::new(ChecksumVerifier::default()),
+            verifier: Arc::new(ChecksumVerifier),
             fetchers: fetcher::default_fetchers(),
         };
 
