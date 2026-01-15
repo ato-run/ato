@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # Git Hooks Setup Script
-# Installs pre-commit and pre-push hooks for capsuled
+# Installs pre-commit and pre-push hooks for nacelle
 # =============================================================================
 
 set -e
@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 GIT_HOOKS_DIR="$PROJECT_ROOT/.git/hooks"
 
-echo "Setting up git hooks for capsuled..."
+echo "Setting up git hooks for nacelle..."
 
 # Ensure hooks directory exists
 mkdir -p "$GIT_HOOKS_DIR"
@@ -31,8 +31,7 @@ if [ -f "$GIT_HOOKS_DIR/pre-push" ]; then
 fi
 ln -sf "$SCRIPT_DIR/pre-push-hook.sh" "$GIT_HOOKS_DIR/pre-push"
 chmod +x "$SCRIPT_DIR/pre-push-hook.sh"
-chmod +x "$SCRIPT_DIR/e2e-test.sh"
-echo "✓ Installed pre-push hook (full tests + E2E)"
+echo "✓ Installed pre-push hook (format + clippy + tests + release build)"
 
 echo ""
 echo "✅ Git hooks installed successfully!"
