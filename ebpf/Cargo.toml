@@ -1,8 +1,9 @@
 [package]
 name = "nacelle-ebpf"
-version = "1.0.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
+publish = false
 
 [[bin]]
 name = "nacelle-ebpf"
@@ -11,8 +12,3 @@ path = "src/main.rs"
 [dependencies]
 aya-ebpf = "0.1.1"
 aya-ebpf-macros = "0.1.2"
-
-[profile.release]
-opt-level = "z"
-lto = true
-codegen-units = 1
