@@ -180,14 +180,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // For now, using a local capsule.capnp if needed, or skipping if not available
     // TODO: Consider adding capsule.capnp to this repository if needed for standalone builds
     let capnp_schema_path = "schema/capsule.capnp";
-    
+
     if Path::new(capnp_schema_path).exists() {
         capnpc::CompilerCommand::new()
             .file(capnp_schema_path)
             .src_prefix("schema")
             .output_path(capnp_out_dir)
             .run()?;
-        
+
         // Rerun if schema changes
         println!("cargo:rerun-if-changed={}", capnp_schema_path);
     }
