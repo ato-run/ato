@@ -1,5 +1,5 @@
 <p align="center">
-	<img src="docs/A.png" alt="nacelle" width="96" height="96">
+	<img src="docs/nacelle_logo.png" alt="nacelle" width="96" height="96">
 </p>
 
 # nacelle
@@ -104,11 +104,14 @@ cd samples/simple-todo
 ### Standard Build
 
 ```bash
-# Development build
-cargo build
+# Build nacelle CLI binary (recommended entrypoint)
+cargo build -p nacelle-cli --bin nacelle
 
 # Release build (current platform only)
-cargo build --release
+cargo build -p nacelle-cli --release --bin nacelle
+
+# Library-only build
+cargo build -p nacelle
 ```
 
 ### Run Tests
