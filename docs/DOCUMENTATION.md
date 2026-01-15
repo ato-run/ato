@@ -106,6 +106,6 @@ handle.shutdown().await;
 
 ## 参考
 
-- [UARC Specification](../uarc/SPEC.md)
-- [README.md](README.md) - プロジェクト概要
+- [UARC Specification](../../uarc/SPEC.md)
+- [README.md](../README.md) - プロジェクト概要
 - [BUILD.md](BUILD.md) - ビルド手順
