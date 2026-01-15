@@ -278,7 +278,7 @@ See [UARC SPEC.md](../uarc/SPEC.md) for detailed specification.
 
 ## License
 
-FSL-1.1-ALv2 (Functional Source License 1.1, Apache License Version 2.0)
+Apache License 2.0 (SPDX: Apache-2.0). See [LICENSE](LICENSE).
 
 ## Contributing
 
