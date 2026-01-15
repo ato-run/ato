@@ -92,7 +92,10 @@ fn create_test_manifest(name: &str) -> nacelle::capsule_types::capsule_v1::Capsu
         model: None,
         transparency: None,
         pool: None,
+        build: None,
+        isolation: None,
         targets: None,
+        services: None,
     }
 }
 

@@ -41,3 +41,4 @@
 // pub mod pool; // Disabled: requires capsule_runtime dependency
 pub mod socket;
 pub mod supervisor;
+pub mod supervisor_mode;

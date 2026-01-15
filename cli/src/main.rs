@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 mod commands;
@@ -107,47 +107,48 @@ async fn run_bundled_application() -> Result<()> {
     let mut archive = tar::Archive::new(cursor);
     archive.unpack(&extract_dir)?;
 
-    // Find Python binary
     let runtime_dir = extract_dir.join("runtime");
-    let python_path = find_python_binary(&runtime_dir)?;
-
-    println!("🐍 Found Python: {:?}", python_path);
-
-    // Find entrypoint (capsule.toml or default to main.py)
     let source_dir = extract_dir.join("source");
-    let entrypoint = find_entrypoint(&source_dir)?;
 
-    println!("📄 Running: {:?}", entrypoint);
+    let manifest = read_manifest(&source_dir)?;
+    let entrypoint = read_entrypoint_from_manifest(&manifest)?;
 
-    // Socket Activation (Phase 2): Bind socket before spawning child process
-    // This ensures the parent process owns the port and passes it to the child
+    let enable_socket_activation = looks_like_python_file(&entrypoint, &source_dir);
+
+    // Socket Activation (Phase 2): Bind socket before spawning child process.
+    // Precedence: env (CAPSULE_PORT, PORT) > capsule.toml (execution.port) > default.
     let port: u16 = std::env::var("CAPSULE_PORT")
         .ok()
+        .or_else(|| std::env::var("PORT").ok())
         .and_then(|p| p.parse().ok())
+        .or_else(|| read_port_from_manifest(&manifest))
         .unwrap_or(8000);
 
-    let socket_manager = match create_socket_manager(port) {
-        Ok(sm) => {
-            println!(
-                "🔌 Socket Activation: Bound to port {} (FD {})",
-                port,
-                sm.raw_fd()
-            );
-            Some(sm)
+    let socket_manager = if enable_socket_activation {
+        match create_socket_manager(port) {
+            Ok(sm) => {
+                println!(
+                    "🔌 Socket Activation: Bound to port {} (FD {})",
+                    port,
+                    sm.raw_fd()
+                );
+                Some(sm)
+            }
+            Err(e) => {
+                eprintln!("⚠️  Socket Activation: Failed to bind port {}: {}", port, e);
+                eprintln!("    Child process will bind its own socket.");
+                None
+            }
         }
-        Err(e) => {
-            eprintln!("⚠️  Socket Activation: Failed to bind port {}: {}", port, e);
-            eprintln!("    Child process will attempt to bind socket directly.");
-            None
-        }
+    } else {
+        println!("ℹ️  Socket Activation: Disabled (non-Python entrypoint)");
+        None
     };
 
     // Build command
-    let mut cmd = Command::new(&python_path);
-    cmd.arg(&entrypoint)
-        .current_dir(&source_dir)
-        .env("PYTHONHOME", &runtime_dir.join("python"))
-        .env("PYTHONPATH", &source_dir);
+    let mut cmd = build_bundle_command(&entrypoint, &source_dir, &runtime_dir, &extract_dir, &manifest)?;
+    cmd.env("PORT", port.to_string());
+    cmd.env("CAPSULE_PORT", port.to_string());
 
     // Apply socket activation if available
     #[cfg(unix)]
@@ -187,7 +188,7 @@ async fn run_bundled_application() -> Result<()> {
     }
 
     // Run the application
-    let status = cmd.status().context("Failed to execute Python")?;
+    let status = cmd.status().context("Failed to execute entrypoint")?;
 
     // Cleanup
     if let Err(e) = std::fs::remove_dir_all(&extract_dir) {
@@ -263,36 +264,178 @@ fn find_python_binary(runtime_dir: &PathBuf) -> Result<PathBuf> {
     anyhow::bail!("Python binary not found in runtime directory")
 }
 
-/// Find entrypoint script in the source directory
-fn find_entrypoint(source_dir: &PathBuf) -> Result<PathBuf> {
-    // Try to read capsule.toml for entrypoint
+fn read_entrypoint(source_dir: &PathBuf) -> Result<String> {
+    let manifest = read_manifest(source_dir)?;
+    read_entrypoint_from_manifest(&manifest)
+}
+
+fn read_manifest(source_dir: &PathBuf) -> Result<toml::Value> {
     let manifest_path = source_dir.join("capsule.toml");
-    if manifest_path.exists() {
-        let content = std::fs::read_to_string(&manifest_path)?;
-        if let Ok(manifest) = toml::from_str::<toml::Value>(&content) {
-            if let Some(entrypoint) = manifest
-                .get("execution")
-                .and_then(|e| e.get("entrypoint"))
-                .and_then(|e| e.as_str())
-            {
-                let ep_path = source_dir.join(entrypoint);
-                if ep_path.exists() {
-                    return Ok(ep_path);
-                }
-            }
+    if !manifest_path.exists() {
+        anyhow::bail!("No capsule.toml found in bundle");
+    }
+
+    let content = std::fs::read_to_string(&manifest_path)?;
+    toml::from_str::<toml::Value>(&content).context("Failed to parse capsule.toml in bundle")
+}
+
+fn read_entrypoint_from_manifest(manifest: &toml::Value) -> Result<String> {
+    // Bundle execution prefers a release profile if present.
+    let entrypoint = manifest
+        .get("execution")
+        .and_then(|e| {
+            e.get("release")
+                .and_then(|p| p.get("entrypoint"))
+                .or_else(|| e.get("entrypoint"))
+        })
+        .and_then(|e| e.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("No entrypoint defined in capsule.toml"))?;
+
+    Ok(entrypoint.to_string())
+}
+
+fn read_port_from_manifest(manifest: &toml::Value) -> Option<u16> {
+    manifest
+        .get("execution")
+        .and_then(|e| e.get("port"))
+        .and_then(|p| p.as_integer())
+        .and_then(|p| u16::try_from(p).ok())
+}
+
+fn looks_like_python_file(entrypoint: &str, source_dir: &Path) -> bool {
+    let ep = entrypoint.trim();
+    if ep.ends_with(".py") {
+        return true;
+    }
+
+    let candidate = source_dir.join(ep);
+    candidate.is_file()
+        && candidate
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("py"))
+            .unwrap_or(false)
+}
+
+fn resolve_program(program: &str, source_dir: &Path) -> String {
+    // If program looks like a relative/explicit path, resolve it against the extracted source.
+    if program.starts_with("./") || program.starts_with("../") || program.contains('/') {
+        let candidate = source_dir.join(program);
+        if candidate.exists() {
+            return candidate.to_string_lossy().to_string();
+        }
+    }
+    program.to_string()
+}
+
+fn read_execution_env(manifest: &toml::Value) -> Vec<(String, String)> {
+    let Some(env) = manifest
+        .get("execution")
+        .and_then(|e| e.get("env"))
+        .and_then(|e| e.as_table())
+    else {
+        return Vec::new();
+    };
+
+    env.iter()
+        .filter_map(|(k, v)| v.as_str().map(|vv| (k.to_string(), vv.to_string())))
+        .collect()
+}
+
+fn read_allow_env(manifest: &toml::Value) -> Vec<String> {
+    let Some(list) = manifest
+        .get("isolation")
+        .and_then(|i| i.get("allow_env"))
+        .and_then(|v| v.as_array())
+    else {
+        return Vec::new();
+    };
+
+    list.iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect()
+}
+
+fn apply_bundle_env_policy(
+    cmd: &mut Command,
+    manifest: &toml::Value,
+    extract_dir: &Path,
+    source_dir: &Path,
+    runtime_dir: &Path,
+) {
+    // Security default: do not leak the host environment into the capsule.
+    // Allow explicit passthrough via [isolation.allow_env].
+    cmd.env_clear();
+
+    // Minimal baseline environment for POSIX-like environments.
+    // Keep it deterministic; do not inherit host PATH.
+    cmd.env(
+        "PATH",
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    );
+    cmd.env("LANG", "C.UTF-8");
+    cmd.env("HOME", extract_dir);
+
+    // Provide deterministic anchors for apps and tooling.
+    cmd.env("CAPSULE_ROOT", extract_dir);
+    cmd.env("CAPSULE_SOURCE", source_dir);
+    cmd.env("CAPSULE_RUNTIME", runtime_dir);
+
+    // Host env passthrough (opt-in)
+    for key in read_allow_env(manifest) {
+        if let Ok(value) = std::env::var(&key) {
+            cmd.env(&key, value);
         }
     }
 
-    // Default entrypoints
-    let defaults = ["main.py", "app.py", "__main__.py", "server.py"];
-    for default in &defaults {
-        let path = source_dir.join(default);
-        if path.exists() {
-            return Ok(path);
-        }
+    // Manifest-defined env (wins over passthrough)
+    for (k, v) in read_execution_env(manifest) {
+        cmd.env(k, v);
+    }
+}
+
+fn build_bundle_command(
+    entrypoint: &str,
+    source_dir: &PathBuf,
+    runtime_dir: &PathBuf,
+    extract_dir: &PathBuf,
+    manifest: &toml::Value,
+) -> Result<Command> {
+    if looks_like_python_file(entrypoint, source_dir) {
+        let python_path = find_python_binary(runtime_dir)?;
+        println!("🐍 Found Python: {:?}", python_path);
+        let entrypoint_path = source_dir.join(entrypoint);
+        println!("📄 Running: {:?}", entrypoint_path);
+
+        let mut cmd = Command::new(&python_path);
+        apply_bundle_env_policy(&mut cmd, manifest, extract_dir, source_dir, runtime_dir);
+        cmd.arg(&entrypoint_path)
+            .current_dir(source_dir)
+            .env("PYTHONHOME", runtime_dir.join("python"))
+            .env("PYTHONPATH", source_dir);
+        return Ok(cmd);
     }
 
-    anyhow::bail!("No entrypoint found in source directory")
+    // Command entrypoint (e.g. bun/node); do not require embedded Python.
+    let parts = shell_words::split(entrypoint).unwrap_or_else(|_| vec![entrypoint.to_string()]);
+    let program = parts
+        .first()
+        .map(|s| s.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("No entrypoint defined in capsule.toml"))?;
+
+    let resolved_program = resolve_program(program, source_dir);
+    println!("📄 Running: {}", entrypoint);
+
+    let mut cmd = Command::new(resolved_program);
+    apply_bundle_env_policy(&mut cmd, manifest, extract_dir, source_dir, runtime_dir);
+    if parts.len() > 1 {
+        cmd.args(&parts[1..]);
+    }
+    cmd.current_dir(source_dir);
+    Ok(cmd)
 }
 
 #[tokio::main]

@@ -36,7 +36,10 @@ mod tests {
             model: None,
             transparency: None,
             pool: None,
+            build: None,
+            isolation: None,
             targets: None,
+            services: None,
         }
     }
 

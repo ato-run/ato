@@ -52,12 +52,14 @@ mod ffi {
     }
 }
 
-/// Predefined sandbox profile names (from sandbox.h)
-const PROFILE_NO_INTERNET: &str = "kSBXProfileNoInternet";
-const PROFILE_NO_NETWORK: &str = "kSBXProfileNoNetwork";
-const PROFILE_NO_WRITE: &str = "kSBXProfileNoWrite";
-const PROFILE_NO_WRITE_EXCEPT_TEMP: &str = "kSBXProfileNoWriteExceptTemporary";
-const PROFILE_PURE_COMPUTATION: &str = "kSBXProfilePureComputation";
+/// Predefined sandbox profile names for sandbox_init()/sandbox-exec.
+///
+/// IMPORTANT: These are *profile string names* (e.g. "no-network"), not the
+/// C identifier names (e.g. kSBXProfileNoNetwork).
+const PROFILE_NO_INTERNET: &str = "no-internet";
+const PROFILE_NO_NETWORK: &str = "no-network";
+const PROFILE_NO_WRITE: &str = "no-write";
+const PROFILE_NO_WRITE_EXCEPT_TEMP: &str = "no-write-except-temporary";
 
 /// Apply Seatbelt sandbox to the current process
 ///
@@ -85,38 +87,44 @@ pub fn apply_seatbelt_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
         ));
     }
 
-    // Choose the most appropriate predefined profile
-    let profile_name = if !policy.allow_network {
-        PROFILE_NO_NETWORK
+    // Choose candidate profiles. Some profiles are not available on all macOS versions,
+    // and sandbox_init may emit noise to stderr when a profile is unknown.
+    // We try a short list and pick the first that works.
+    let candidates: Vec<&str> = if !policy.allow_network {
+        vec![PROFILE_NO_NETWORK, PROFILE_NO_INTERNET]
     } else if policy.read_write_paths.is_empty() {
-        // No write paths specified - use no-write-except-temp
-        PROFILE_NO_WRITE_EXCEPT_TEMP
+        // Prefer no-write-except-temp, but fall back to no-write.
+        vec![PROFILE_NO_WRITE_EXCEPT_TEMP, PROFILE_NO_WRITE]
     } else {
-        // For custom policies with specific paths, we can't use predefined profiles
-        // Return partially enforced with a warning
         warn!(
-            "macOS sandbox: Custom path policies not fully supported via sandbox_init. \
-            Using fallback mode."
+            "macOS sandbox: Custom path policies not fully supported via sandbox_init. Using fallback mode."
         );
-
-        // Try no-write-except-temp as a reasonable default
-        PROFILE_NO_WRITE_EXCEPT_TEMP
+        vec![PROFILE_NO_WRITE_EXCEPT_TEMP, PROFILE_NO_WRITE]
     };
 
-    debug!("Using predefined sandbox profile: {}", profile_name);
+    let mut last_error: Option<String> = None;
+    for profile_name in candidates {
+        debug!("Trying predefined sandbox profile: {}", profile_name);
 
-    // Convert to C string
-    let profile_cstr =
-        CString::new(profile_name).context("Failed to convert profile name to C string")?;
+        let profile_cstr =
+            CString::new(profile_name).context("Failed to convert profile name to C string")?;
 
-    // Apply sandbox
-    let mut error_buf: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut error_buf: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let result = unsafe {
+            ffi::sandbox_init(profile_cstr.as_ptr(), ffi::SANDBOX_NAMED, &mut error_buf)
+        };
 
-    let result =
-        unsafe { ffi::sandbox_init(profile_cstr.as_ptr(), ffi::SANDBOX_NAMED, &mut error_buf) };
+        if result == 0 {
+            info!(
+                "Seatbelt sandbox applied successfully (profile: {})",
+                profile_name
+            );
+            return Ok(SandboxResult::partially_enforced(format!(
+                "macOS sandbox using predefined profile: {}",
+                profile_name
+            )));
+        }
 
-    if result != 0 {
-        // Extract error message
         let error_msg = if !error_buf.is_null() {
             let msg = unsafe { std::ffi::CStr::from_ptr(error_buf) }
                 .to_string_lossy()
@@ -127,24 +135,14 @@ pub fn apply_seatbelt_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
             "Unknown sandbox error".to_string()
         };
 
-        warn!("Seatbelt sandbox failed: {}", error_msg);
-
-        // Return not enforced instead of erroring
-        // This allows the process to continue in environments where
-        // sandbox_init might fail (e.g., already sandboxed)
-        return Ok(SandboxResult::not_enforced(format!(
-            "macOS sandbox failed: {}",
-            error_msg
-        )));
+        last_error = Some(format!("{}: {}", profile_name, error_msg));
+        debug!("Seatbelt sandbox profile failed: {}", last_error.as_deref().unwrap_or(""));
     }
 
-    info!(
-        "Seatbelt sandbox applied successfully (profile: {})",
-        profile_name
-    );
-    Ok(SandboxResult::partially_enforced(format!(
-        "macOS sandbox using predefined profile: {}",
-        profile_name
+    // Return not enforced instead of erroring.
+    Ok(SandboxResult::not_enforced(format!(
+        "macOS sandbox failed: {}",
+        last_error.unwrap_or_else(|| "Unknown sandbox error".to_string())
     )))
 }
 

@@ -8,3 +8,4 @@
 pub mod auth;
 pub mod config;
 pub mod failure_codes;
+pub mod paths;

@@ -1,3 +1,36 @@
+use std::path::{Path, PathBuf};
+
+fn find_in_path(executable: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(executable);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn resolve_protoc() -> Option<PathBuf> {
+    if let Some(existing) = std::env::var_os("PROTOC").map(PathBuf::from) {
+        if existing.is_file() {
+            return Some(existing);
+        }
+    }
+
+    if let Some(found) = find_in_path("protoc") {
+        return Some(found);
+    }
+
+    // Fallback: protobuf-src bundled protoc (may not exist in all environments).
+    let bundled = PathBuf::from(protobuf_src::protoc());
+    if bundled.is_file() {
+        return Some(bundled);
+    }
+
+    None
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // =========================================================================
     // Protobuf / gRPC Code Generation (using UARC proto definitions)
@@ -5,7 +38,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // UARC contains only the specification protos: common/v1, engine/v1
     // Coordinator API is Ato-specific and lives in ato-coordinator repo
     let uarc_path = std::env::var("UARC_PATH").unwrap_or_else(|_| "../uarc".to_string());
-    std::env::set_var("PROTOC", protobuf_src::protoc());
+
+    if let Some(protoc_path) = resolve_protoc() {
+        std::env::set_var("PROTOC", protoc_path);
+    }
+
     tonic_build::configure()
         .build_server(true)
         .compile_well_known_types(false)
@@ -24,14 +61,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Requires `capnp` CLI tool installed: `brew install capnp` or `apt install capnproto`
     //
     // Generated code goes to src/ so it can be accessed as `crate::capsule_capnp`
-    let capnp_out_dir = std::path::Path::new("src");
+    let capnp_out_dir = Path::new("src");
 
     // `capsule.capnp` includes Go annotations via `go.capnp` import for SSOT.
     // Rust builds should not depend on the Go toolchain or go.capnp being present,
     // so we compile from a sanitized copy that strips `$Go.*` lines.
     let uarc_schema_path = format!("{}/schema/capsule.capnp", uarc_path);
-    let original_schema_path = std::path::Path::new(&uarc_schema_path);
-    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR")?);
+    let original_schema_path = Path::new(&uarc_schema_path);
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
     let sanitized_schema_dir = out_dir.join("capnp_sanitized");
     std::fs::create_dir_all(&sanitized_schema_dir)?;
     let sanitized_schema_path = sanitized_schema_dir.join("capsule.capnp");
@@ -57,6 +94,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed={}/schema/capsule.capnp", uarc_path);
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}/proto", uarc_path);
+    println!("cargo:rerun-if-env-changed=PROTOC");
+    println!("cargo:rerun-if-env-changed=PATH");
 
     Ok(())
 }

@@ -15,8 +15,8 @@
 use super::{SandboxPolicy, SandboxResult};
 use anyhow::{Context, Result};
 use landlock::{
-    path_beneath_rules, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus,
-    ABI,
+    path_beneath_rules, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr,
+    RulesetStatus, ABI,
 };
 use std::path::Path;
 use tracing::{debug, info, warn};
@@ -49,7 +49,7 @@ pub fn apply_landlock_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
     debug!("Applying Landlock sandbox with ABI {:?}", abi);
 
     // Create ruleset handling all file system access rights
-    let mut ruleset = Ruleset::default()
+    let ruleset = Ruleset::default()
         .handle_access(AccessFs::from_all(abi))
         .context("Failed to create Landlock ruleset")?;
 
@@ -62,9 +62,8 @@ pub fn apply_landlock_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
     for path in &policy.read_write_paths {
         if path.exists() {
             debug!("Adding read-write access to: {:?}", path);
-            if let Err(e) = add_path_rules(&mut created_ruleset, path, AccessFs::from_all(abi)) {
-                warn!("Failed to add read-write rule for {:?}: {}", path, e);
-            }
+            created_ruleset = add_path_rules(created_ruleset, path, AccessFs::from_all(abi))
+                .with_context(|| format!("Failed to add read-write rule for {:?}", path))?;
         } else {
             debug!("Skipping non-existent read-write path: {:?}", path);
         }
@@ -74,9 +73,8 @@ pub fn apply_landlock_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
     for path in &policy.read_only_paths {
         if path.exists() {
             debug!("Adding read-only access to: {:?}", path);
-            if let Err(e) = add_path_rules(&mut created_ruleset, path, AccessFs::from_read(abi)) {
-                warn!("Failed to add read-only rule for {:?}: {}", path, e);
-            }
+            created_ruleset = add_path_rules(created_ruleset, path, AccessFs::from_read(abi))
+                .with_context(|| format!("Failed to add read-only rule for {:?}", path))?;
         } else {
             debug!("Skipping non-existent read-only path: {:?}", path);
         }
@@ -107,23 +105,23 @@ pub fn apply_landlock_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
 }
 
 /// Add path rules to the ruleset
-fn add_path_rules<T>(
-    ruleset: &mut T,
+fn add_path_rules(
+    ruleset: landlock::RulesetCreated,
     path: &Path,
     access: impl Into<landlock::BitFlags<AccessFs>>,
-) -> Result<()>
-where
-    T: RulesetCreatedAttr,
-{
+) -> Result<landlock::RulesetCreated> {
     let access = access.into();
 
     // Use path_beneath_rules helper for easy rule creation
-    let rules = path_beneath_rules(&[path], access);
+    let paths = [path];
+    let rules = path_beneath_rules(&paths, access);
+
+    let mut ruleset = ruleset;
 
     for rule_result in rules {
         match rule_result {
             Ok(rule) => {
-                ruleset.add_rule(rule)?;
+                ruleset = ruleset.add_rule(rule)?;
             }
             Err(e) => {
                 // Log but don't fail - path might not be accessible
@@ -132,7 +130,7 @@ where
         }
     }
 
-    Ok(())
+    Ok(ruleset)
 }
 
 /// Create a minimal sandbox for testing
