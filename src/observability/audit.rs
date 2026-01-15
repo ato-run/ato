@@ -349,113 +349,33 @@ impl AuditLogger {
 
     /// Sign a daily audit batch using Ed25519 (RFC 9421 compliance)
     ///
-    /// This method:
-    /// 1. Creates a batch if not exists
-    /// 2. Signs the Merkle root with the provided signer
-    /// 3. Stores signature in audit_signatures table
+    /// v3.0 NOTE: Signing functionality moved to capsule-cli.
+    /// This method is kept for API compatibility but returns an error.
+    /// Audit log signing should be done by capsule-cli.
     pub fn sign_daily_batch(
         &self,
-        date: &str,
-        signer: &crate::security::signing::CapsuleSigner,
+        _date: &str,
+        _signer: &str, // Placeholder type
     ) -> Result<String> {
-        // Create batch first (computes Merkle root)
-        let merkle_root = self.create_daily_batch(date)?;
-
-        // Sign the Merkle root bytes
-        let merkle_bytes =
-            hex::decode(&merkle_root).map_err(|e| anyhow!("Invalid merkle root hex: {}", e))?;
-
-        let signature = signer
-            .sign(&merkle_bytes)
-            .map_err(|e| anyhow!("Signing failed: {}", e))?;
-
-        // Get signer's public key fingerprint
-        let signer_fingerprint = format!("ed25519:{}", signer.public_key());
-
-        // Store signature in database
-        let db = self
-            .db
-            .as_ref()
-            .ok_or_else(|| anyhow!("Database not initialized"))?;
-        let conn = db
-            .lock()
-            .map_err(|e| anyhow!("Database lock error: {}", e))?;
-
-        let signed_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-
-        conn.execute(
-            r#"
-            UPDATE audit_signatures 
-            SET signature = ?1, signed_at = datetime(?2, 'unixepoch'), signer_key_fingerprint = ?3
-            WHERE date = ?4
-            "#,
-            params![
-                signature.signature, // Base64 encoded signature
-                signed_at,
-                signer_fingerprint,
-                date,
-            ],
-        )
-        .map_err(|e| anyhow!("Failed to store signature: {}", e))?;
-
-        tracing::info!(
-            "Signed daily audit batch for {}: {} events, merkle_root={}, signer={}",
-            date,
-            self.get_events_for_date(date).map(|e| e.len()).unwrap_or(0),
-            &merkle_root[..16],
-            &signer_fingerprint[..20]
-        );
-
-        Ok(signature.signature)
+        Err(anyhow!(
+            "Audit signing has been moved to capsule-cli. \
+             Please use 'capsule sign-audit' command instead."
+        ))
     }
 
     /// Verify a daily batch signature (for auditors)
+    ///
+    /// v3.0 NOTE: Verification functionality moved to capsule-cli.
     #[allow(dead_code)]
     pub fn verify_batch_signature(
         &self,
-        date: &str,
-        verifier: &crate::security::signing::CapsuleVerifier,
+        _date: &str,
+        _verifier: &str, // Placeholder type
     ) -> Result<()> {
-        let db = self
-            .db
-            .as_ref()
-            .ok_or_else(|| anyhow!("Database not initialized"))?;
-        let conn = db
-            .lock()
-            .map_err(|e| anyhow!("Database lock error: {}", e))?;
-
-        let (merkle_root, signature_b64): (String, String) = conn
-            .query_row(
-                "SELECT merkle_root, signature FROM audit_signatures WHERE date = ?",
-                [date],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|e| anyhow!("Batch not found for {}: {}", date, e))?;
-
-        // Decode merkle root
-        let merkle_bytes =
-            hex::decode(&merkle_root).map_err(|e| anyhow!("Invalid merkle root: {}", e))?;
-
-        // Create signature struct for verification
-        let sig = crate::security::signing::CapsuleSignature {
-            algorithm: "ed25519".to_string(),
-            signature: signature_b64,
-            content_hash: merkle_root.clone(),
-            public_key: String::new(), // Will be matched against trusted keys
-            signer: String::new(),
-            signed_at: 0,
-            transparency_log_url: None,
-        };
-
-        verifier
-            .verify(&merkle_bytes, &sig)
-            .map_err(|e| anyhow!("Signature verification failed: {}", e))?;
-
-        tracing::info!("Verified audit batch signature for {}", date);
-        Ok(())
+        Err(anyhow!(
+            "Audit verification has been moved to capsule-cli. \
+             Please use 'capsule verify-audit' command instead."
+        ))
     }
 }
 
@@ -480,67 +400,51 @@ impl Default for AuditLogger {
 /// # Arguments
 /// * `audit_logger` - The audit logger instance (must be Arc-wrapped)
 /// * `signer` - Optional capsule signer for signing batches
-///
 /// # Returns
 /// A JoinHandle for the spawned background task
+///
+/// v3.0 NOTE: This function is deprecated. Signing should be done by capsule-cli.
+#[deprecated(note = "Audit signing has been moved to capsule-cli")]
+#[allow(dead_code)]
 pub fn start_daily_signing_scheduler(
     audit_logger: std::sync::Arc<AuditLogger>,
-    signer: Option<std::sync::Arc<crate::security::signing::CapsuleSigner>>,
+    _signer: Option<std::sync::Arc<String>>, // v3.0: Placeholder type
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        tracing::warn!(
+            "Daily signing scheduler is deprecated. \
+             Audit signing should be done by capsule-cli."
+        );
+        
         loop {
             // Calculate time until next UTC midnight
             let now = chrono::Utc::now();
             let tomorrow_midnight = (now + chrono::Duration::days(1))
                 .date_naive()
-                .and_hms_opt(0, 5, 0) // 00:05 UTC to allow for clock drift
+                .and_hms_opt(0, 5, 0)
                 .unwrap()
                 .and_utc();
             let wait_duration = (tomorrow_midnight - now)
                 .to_std()
                 .unwrap_or(std::time::Duration::from_secs(86400));
 
-            tracing::info!(
-                "Audit batch scheduler: next signing in {:?} at {}",
-                wait_duration,
-                tomorrow_midnight
-            );
-
-            // Wait until next signing time
             tokio::time::sleep(wait_duration).await;
 
-            // Sign yesterday's batch
+            // Create batches without signing (v3.0: signing moved to CLI)
             let yesterday = (chrono::Utc::now() - chrono::Duration::days(1))
                 .format("%Y-%m-%d")
                 .to_string();
 
-            if let Some(ref signer) = signer {
-                match audit_logger.sign_daily_batch(&yesterday, signer) {
-                    Ok(sig) => {
-                        tracing::info!(
-                            "Successfully signed audit batch for {}: {}...",
-                            yesterday,
-                            &sig[..std::cmp::min(20, sig.len())]
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to sign audit batch for {}: {}", yesterday, e);
-                    }
+            match audit_logger.create_daily_batch(&yesterday) {
+                Ok(merkle_root) => {
+                    tracing::info!(
+                        "Created unsigned audit batch for {}: merkle_root={}...",
+                        yesterday,
+                        &merkle_root[..std::cmp::min(16, merkle_root.len())]
+                    );
                 }
-            } else {
-                // No signer available, just create the batch without signing
-                match audit_logger.create_daily_batch(&yesterday) {
-                    Ok(merkle_root) => {
-                        tracing::info!(
-                            "Created unsigned audit batch for {}: merkle_root={}...",
-                            yesterday,
-                            &merkle_root[..std::cmp::min(16, merkle_root.len())]
-                        );
-                    }
-                    Err(e) => {
-                        // It's OK if no events exist for the day
-                        tracing::debug!("No audit batch created for {}: {}", yesterday, e);
-                    }
+                Err(e) => {
+                    tracing::debug!("No audit batch created for {}: {}", yesterday, e);
                 }
             }
         }
