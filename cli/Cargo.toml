@@ -4,6 +4,8 @@ version = "0.2.0"
 edition = "2021"
 description = "Nacelle CLI - Unified Runtime for Capsules"
 license = "Apache-2.0"
+repository = "https://github.com/nacelle-dev/nacelle"
+homepage = "https://github.com/nacelle-dev/nacelle"
 authors = ["Nacelle Contributors"]
 readme = "../README.md"
 keywords = ["runtime", "container", "wasm", "cli"]
@@ -15,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Core library - use library feature only (no engine dependencies)
-nacelle = { path = "..", default-features = false, features = ["library"] }
+nacelle = { version = "0.2.0", path = "..", default-features = false, features = ["library"] }
 
 # CLI framework
 clap = { version = "4.0", features = ["derive"] }
