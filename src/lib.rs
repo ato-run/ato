@@ -34,6 +34,7 @@
 
 pub mod capsule_types; // Capsule type definitions (extracted from capsule-core)
 pub mod bundle;
+pub mod bundle_rules; // v3.0: Pre-validated sandbox rules loader
 pub mod common;
 pub mod engine;
 pub mod interface;

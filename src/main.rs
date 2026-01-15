@@ -168,8 +168,13 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
 
+        // v3.0: Load pre-validated sandbox rules from capsule-cli
         // Phase 3: Apply sandbox for process isolation
-        let sandbox_policy = SandboxPolicy::for_capsule(&source_dir).with_development_mode(true); // Use dev mode for now (less restrictive)
+        let sandbox_policy = nacelle::bundle_rules::load_sandbox_rules(&source_dir)?
+            .unwrap_or_else(|| {
+                println!("⚠️  No sandbox rules found, using default policy");
+                SandboxPolicy::for_capsule(&source_dir).with_development_mode(true)
+            });
 
         let policy_clone = sandbox_policy.clone();
         unsafe {
