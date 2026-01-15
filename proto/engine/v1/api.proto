@@ -1,7 +1,7 @@
 syntax = "proto3";
 package nacelle.engine.v1;
 
-option go_package = "github.com/capsuled-dev/nacelle/pkg/proto;proto";
+option go_package = "github.com/nacelle-dev/nacelle/pkg/proto;proto";
 
 import "common/v1/common.proto";
 

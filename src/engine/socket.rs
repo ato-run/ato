@@ -1,7 +1,7 @@
 //! Socket Activation Manager
 //!
 //! Implements Systemd-compatible Socket Activation for zero-downtime port binding.
-//! The parent process (capsuled) binds the listening socket and passes it to child
+//! The parent process (nacelle) binds the listening socket and passes it to child
 //! processes via file descriptor inheritance, eliminating port clash risks.
 //!
 //! ## Reference

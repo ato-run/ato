@@ -1,7 +1,7 @@
 # Storage Management Implementation Summary
 
 ## Overview
-This document summarizes the implementation of Phase 3, Week 9 storage management features for the Capsuled Engine.
+This document summarizes the implementation of Phase 3, Week 9 storage management features for the nacelle Engine.
 
 ## Implementation Status
 
@@ -274,7 +274,7 @@ serde = { version = "1.0", features = ["derive"] }  # Serialization
 ### Project Documents
 - `TODO.md` - Week 9 tasks
 - `ARCHITECTURE.md` - System architecture
-- `CAPSULED_ROADMAP.md` - Project roadmap
+- `nacelle_ROADMAP.md` - Project roadmap
 - `engine/src/storage/README.md` - Usage guide
 
 ## Conclusion
@@ -288,4 +288,4 @@ The storage management implementation successfully delivers both LVM and LUKS fu
 ✅ **Secure**: Best practices for key management  
 ✅ **Production-ready**: Error handling and validation  
 
-The module is ready for integration with the Capsule deployment workflow and provides a solid foundation for persistent storage and data encryption in the Capsuled engine.
+The module is ready for integration with the Capsule deployment workflow and provides a solid foundation for persistent storage and data encryption in the nacelle engine.

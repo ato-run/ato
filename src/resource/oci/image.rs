@@ -131,7 +131,7 @@ impl ImageManager {
 
             // Download layer
             let temp_path = std::env::temp_dir()
-                .join("capsuled")
+                .join("nacelle")
                 .join("downloads")
                 .join(layer.digest.replace("sha256:", ""));
 

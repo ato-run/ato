@@ -55,7 +55,7 @@ impl Runtime for DevRuntime {
             (dir, false)
         } else {
             let temp_dir = std::env::temp_dir()
-                .join("capsuled_mock_apps")
+                .join("nacelle_mock_apps")
                 .join(request.workload_id);
             if let Err(e) = std::fs::create_dir_all(&temp_dir) {
                 warn!("Failed to create temp dir: {}", e);
@@ -90,7 +90,7 @@ impl Runtime for DevRuntime {
         }
 
         // Create log file
-        let log_dir = std::env::temp_dir().join("capsuled").join("logs");
+        let log_dir = std::env::temp_dir().join("nacelle").join("logs");
         std::fs::create_dir_all(&log_dir).map_err(|e| RuntimeError::Io {
             path: log_dir.clone(),
             source: e,
@@ -161,7 +161,7 @@ impl Runtime for DevRuntime {
                 info!("Dev runtime started with PID {}", pid);
 
                 // Write PID file
-                let state_dir = std::env::temp_dir().join("capsuled").join("state");
+                let state_dir = std::env::temp_dir().join("nacelle").join("state");
                 if let Err(e) = std::fs::create_dir_all(&state_dir) {
                     warn!("Failed to create state dir: {}", e);
                 } else {
@@ -209,7 +209,7 @@ impl Runtime for DevRuntime {
         //
         // We should probably write a PID file for DevRuntime too to be consistent.
         let pid_file = std::env::temp_dir()
-            .join("capsuled")
+            .join("nacelle")
             .join("state")
             .join(format!("{}.pid", workload_id));
         if pid_file.exists() {
@@ -250,7 +250,7 @@ impl Runtime for DevRuntime {
     }
 
     fn get_log_path(&self, workload_id: &str) -> Option<PathBuf> {
-        let log_dir = std::env::temp_dir().join("capsuled").join("logs");
+        let log_dir = std::env::temp_dir().join("nacelle").join("logs");
         Some(log_dir.join(format!("{}.log", workload_id)))
     }
 }

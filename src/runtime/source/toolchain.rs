@@ -497,7 +497,7 @@ impl RuntimeFetcher {
     /// Ensure Python runtime is available, downloading if necessary
     ///
     /// This is the main JIT provisioning entry point.
-    /// Returns the path to the python binary (e.g., ~/.capsuled/toolchain/python-3.11/python/bin/python3)
+    /// Returns the path to the python binary (e.g., ~/.nacelle/toolchain/python-3.11/python/bin/python3)
     ///
     /// # Arguments
     /// * `version` - Python version constraint (e.g., "3.11", "3.12")

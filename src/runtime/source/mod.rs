@@ -62,8 +62,8 @@ impl Default for SourceRuntimeConfig {
             dev_mode: std::env::var("ATO_DEV_MODE")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
-            log_dir: PathBuf::from("/tmp/capsuled/logs"),
-            state_dir: PathBuf::from("/tmp/capsuled/state"),
+            log_dir: PathBuf::from("/tmp/nacelle/logs"),
+            state_dir: PathBuf::from("/tmp/nacelle/state"),
         }
     }
 }
@@ -492,12 +492,12 @@ mod tests {
     #[test]
     fn test_workload_log_path() {
         let config = SourceRuntimeConfig {
-            log_dir: PathBuf::from("/var/log/capsuled"),
+            log_dir: PathBuf::from("/var/log/nacelle"),
             ..Default::default()
         };
         let runtime = SourceRuntime::new(config, None);
 
         let path = runtime.workload_log_path("test-123");
-        assert_eq!(path, PathBuf::from("/var/log/capsuled/test-123.log"));
+        assert_eq!(path, PathBuf::from("/var/log/nacelle/test-123.log"));
     }
 }

@@ -17,6 +17,8 @@ Cargo.lock
 .env.local
 *.pem
 *.key
+samples/keys/*.json
+!samples/keys/*.sample.json
 
 # Local development
 /local-docs/

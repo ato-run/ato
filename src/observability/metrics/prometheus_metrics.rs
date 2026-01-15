@@ -24,31 +24,31 @@ impl MetricsCollector {
         // Create custom metrics
         let capsule_count = IntGauge::with_opts(
             Opts::new("capsule_count", "Total number of capsules")
-                .namespace("capsuled")
+                .namespace("nacelle")
                 .subsystem("engine"),
         )?;
 
         let gpu_vram_total_bytes = Gauge::with_opts(
             Opts::new("gpu_vram_total_bytes", "Total GPU VRAM in bytes")
-                .namespace("capsuled")
+                .namespace("nacelle")
                 .subsystem("engine"),
         )?;
 
         let gpu_vram_used_bytes = Gauge::with_opts(
             Opts::new("gpu_vram_used_bytes", "Used GPU VRAM in bytes")
-                .namespace("capsuled")
+                .namespace("nacelle")
                 .subsystem("engine"),
         )?;
 
         let gpu_vram_available_bytes = Gauge::with_opts(
             Opts::new("gpu_vram_available_bytes", "Available GPU VRAM in bytes")
-                .namespace("capsuled")
+                .namespace("nacelle")
                 .subsystem("engine"),
         )?;
 
         let container_cpu_usage = GaugeVec::new(
             Opts::new("container_cpu_usage", "CPU usage per container")
-                .namespace("capsuled")
+                .namespace("nacelle")
                 .subsystem("engine"),
             &["capsule_id"],
         )?;
@@ -58,7 +58,7 @@ impl MetricsCollector {
                 "capsule_status",
                 "Status of capsules (1=running, 0=stopped)",
             )
-            .namespace("capsuled")
+            .namespace("nacelle")
             .subsystem("engine"),
             &["capsule_id", "status"],
         )?;
@@ -181,7 +181,7 @@ mod tests {
 
         collector.set_capsule_count(5);
         let metrics = collector.gather().unwrap();
-        assert!(metrics.contains("capsuled_engine_capsule_count 5"));
+        assert!(metrics.contains("nacelle_engine_capsule_count 5"));
     }
 
     #[test]
@@ -193,11 +193,11 @@ mod tests {
         collector.inc_capsule_count();
 
         let metrics = collector.gather().unwrap();
-        assert!(metrics.contains("capsuled_engine_capsule_count 2"));
+        assert!(metrics.contains("nacelle_engine_capsule_count 2"));
 
         collector.dec_capsule_count();
         let metrics = collector.gather().unwrap();
-        assert!(metrics.contains("capsuled_engine_capsule_count 1"));
+        assert!(metrics.contains("nacelle_engine_capsule_count 1"));
     }
 
     #[test]
@@ -211,9 +211,9 @@ mod tests {
         collector.set_gpu_vram_metrics(total, used, available);
 
         let metrics = collector.gather().unwrap();
-        assert!(metrics.contains("capsuled_engine_gpu_vram_total_bytes"));
-        assert!(metrics.contains("capsuled_engine_gpu_vram_used_bytes"));
-        assert!(metrics.contains("capsuled_engine_gpu_vram_available_bytes"));
+        assert!(metrics.contains("nacelle_engine_gpu_vram_total_bytes"));
+        assert!(metrics.contains("nacelle_engine_gpu_vram_used_bytes"));
+        assert!(metrics.contains("nacelle_engine_gpu_vram_available_bytes"));
     }
 
     #[test]
@@ -223,7 +223,7 @@ mod tests {
         collector.set_container_cpu_usage("capsule-123", 75.5);
 
         let metrics = collector.gather().unwrap();
-        assert!(metrics.contains("capsuled_engine_container_cpu_usage"));
+        assert!(metrics.contains("nacelle_engine_container_cpu_usage"));
         assert!(metrics.contains("capsule-123"));
     }
 
@@ -235,7 +235,7 @@ mod tests {
         collector.set_capsule_status("capsule-456", "stopped", 1.0);
 
         let metrics = collector.gather().unwrap();
-        assert!(metrics.contains("capsuled_engine_capsule_status"));
+        assert!(metrics.contains("nacelle_engine_capsule_status"));
         assert!(metrics.contains("capsule-123"));
         assert!(metrics.contains("running"));
         assert!(metrics.contains("capsule-456"));
@@ -271,6 +271,6 @@ mod tests {
         // Check for Prometheus format markers
         assert!(metrics.contains("# HELP"));
         assert!(metrics.contains("# TYPE"));
-        assert!(metrics.contains("capsuled_engine_capsule_count"));
+        assert!(metrics.contains("nacelle_engine_capsule_count"));
     }
 }

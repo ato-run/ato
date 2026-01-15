@@ -6,7 +6,7 @@ The Nacelle project takes security seriously. If you discover a security vulnera
 
 ### How to Report
 
-1. **Email Security Team:** Send a detailed report to `security@capsuled.dev` (if available) or create a **private security advisory** on GitHub:
+1. **Email Security Team:** Send a detailed report to `security@nacelle.dev` (if available) or create a **private security advisory** on GitHub:
    - Navigate to: **Settings → Security → Private Vulnerability Reporting**
    - Report the vulnerability using GitHub's Security Advisory form
 

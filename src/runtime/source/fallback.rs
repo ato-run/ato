@@ -48,7 +48,7 @@ pub async fn launch_with_oci(
     let entrypoint = build_entrypoint(&target.language, &target.entrypoint, &target.args);
 
     // Create container spec
-    let container_name = format!("capsuled-source-{}", request.workload_id);
+    let container_name = format!("nacelle-source-{}", request.workload_id);
 
     // For OCI fallback, we use docker/podman CLI directly
     // This is simpler than going through the full OCI spec for dev scenarios

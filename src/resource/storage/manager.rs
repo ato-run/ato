@@ -53,7 +53,7 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            storage_base: PathBuf::from("/var/lib/capsuled/storage"),
+            storage_base: PathBuf::from("/var/lib/nacelle/storage"),
             default_size_bytes: 10 * 1024 * 1024 * 1024, // 10GB
             default_vg: default_vg(),
         }

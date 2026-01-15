@@ -19,7 +19,7 @@ This project adheres to the Rust Code of Conduct. By participating, you are expe
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/capsuled-dev/nacelle.git
+   git clone https://github.com/nacelle-dev/nacelle.git
    cd nacelle
    ```
 
@@ -398,9 +398,9 @@ Include:
 ## Getting Help
 
 - **Documentation:** [docs/](docs/) and [SECURITY.md](SECURITY.md)
-- **GitHub Issues:** [Bug reports and feature requests](https://github.com/capsuled-dev/nacelle/issues)
-- **Discussions:** [Community questions](https://github.com/capsuled-dev/nacelle/discussions)
-- **Email:** [Contact the team](mailto:hello@capsuled.dev)
+- **GitHub Issues:** [Bug reports and feature requests](https://github.com/nacelle-dev/nacelle/issues)
+- **Discussions:** [Community questions](https://github.com/nacelle-dev/nacelle/discussions)
+- **Email:** [Contact the team](mailto:hello@nacelle.dev)
 
 ---
 

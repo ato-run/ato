@@ -267,7 +267,7 @@ impl Runtime for DockerCliRuntime {
         }
 
         // Create log directory and file
-        let log_dir = std::env::temp_dir().join("capsuled").join("logs");
+        let log_dir = std::env::temp_dir().join("nacelle").join("logs");
         std::fs::create_dir_all(&log_dir).map_err(|e| RuntimeError::Io {
             path: log_dir.clone(),
             source: e,
@@ -408,7 +408,7 @@ impl Runtime for DockerCliRuntime {
             .unwrap_or(0);
 
         // Write container ID to state file for stop operation
-        let state_dir = std::env::temp_dir().join("capsuled").join("state");
+        let state_dir = std::env::temp_dir().join("nacelle").join("state");
         std::fs::create_dir_all(&state_dir).ok();
         let container_id_file = state_dir.join(format!("{}.container_id", workload_id));
         if let Err(e) = std::fs::write(&container_id_file, &container_id) {
@@ -449,7 +449,7 @@ impl Runtime for DockerCliRuntime {
             }
             _ => {
                 // Fallback: try container ID from state file
-                let state_dir = std::env::temp_dir().join("capsuled").join("state");
+                let state_dir = std::env::temp_dir().join("nacelle").join("state");
                 let container_id_file = state_dir.join(format!("{}.container_id", workload_id));
 
                 if let Ok(container_id) = std::fs::read_to_string(&container_id_file) {
@@ -487,7 +487,7 @@ impl Runtime for DockerCliRuntime {
     }
 
     fn get_log_path(&self, workload_id: &str) -> Option<PathBuf> {
-        let log_dir = std::env::temp_dir().join("capsuled").join("logs");
+        let log_dir = std::env::temp_dir().join("nacelle").join("logs");
         Some(log_dir.join(format!("{}.log", workload_id)))
     }
 }

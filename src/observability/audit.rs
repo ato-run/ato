@@ -20,7 +20,7 @@ pub enum AuditOperation {
     StartCapsule,
     CapsuleStop,
     StopCapsule,
-    CapsuleDelete,
+    nacelleelete,
     DeployCapsule,
     FileAccess,
     NetworkAccess,
@@ -38,7 +38,7 @@ impl std::fmt::Display for AuditOperation {
         let s = match self {
             AuditOperation::CapsuleStart | AuditOperation::StartCapsule => "capsule_start",
             AuditOperation::CapsuleStop | AuditOperation::StopCapsule => "capsule_stop",
-            AuditOperation::CapsuleDelete => "capsule_delete",
+            AuditOperation::nacelleelete => "capsule_delete",
             AuditOperation::DeployCapsule => "deploy_capsule",
             AuditOperation::FileAccess => "file_access",
             AuditOperation::NetworkAccess => "network_access",

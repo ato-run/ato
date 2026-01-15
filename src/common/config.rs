@@ -63,7 +63,7 @@ pub struct RuntimeSection {
     /// When false (default), dev_mode requests in manifests are ignored and
     /// source capsules always run in sandboxed mode.
     /// Nacelle Specification V1.1.0 Compliance: Only set to true in development environments.
-    /// Can be overridden by CAPSULED_ALLOW_DEV_MODE environment variable.
+    /// Can be overridden by NACELLE_ALLOW_DEV_MODE environment variable.
     #[serde(default)]
     pub allow_insecure_dev_mode: bool,
 }
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn load_config_returns_none_when_file_missing() {
         let path = std::env::temp_dir().join(format!(
-            "capsuled-engine-config-missing-{}",
+            "nacelle-engine-config-missing-{}",
             unique_suffix()
         ));
         let cfg = load_config(&path).expect("missing file should not be an error");
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn load_config_parses_expected_fields() {
-        let path = std::env::temp_dir().join(format!("capsuled-engine-config-{}", unique_suffix()));
+        let path = std::env::temp_dir().join(format!("nacelle-engine-config-{}", unique_suffix()));
         let toml = r#"
             [server]
             listen_addr = "127.0.0.1:6000"
@@ -263,9 +263,9 @@ mod tests {
             [runtime]
             preferred = "youki"
             binary_path = "/usr/bin/youki"
-            bundle_root = "/var/lib/capsuled/bundles"
-            state_root = "/run/capsuled"
-            log_dir = "/var/log/capsuled"
+            bundle_root = "/var/lib/nacelle/bundles"
+            state_root = "/run/nacelle"
+            log_dir = "/var/log/nacelle"
             hook_retry_attempts = 2
         "#;
         fs::write(&path, toml).expect("should write test config");
@@ -294,10 +294,10 @@ mod tests {
         assert_eq!(runtime.binary_path.as_deref(), Some("/usr/bin/youki"));
         assert_eq!(
             runtime.bundle_root.as_deref(),
-            Some("/var/lib/capsuled/bundles")
+            Some("/var/lib/nacelle/bundles")
         );
-        assert_eq!(runtime.state_root.as_deref(), Some("/run/capsuled"));
-        assert_eq!(runtime.log_dir.as_deref(), Some("/var/log/capsuled"));
+        assert_eq!(runtime.state_root.as_deref(), Some("/run/nacelle"));
+        assert_eq!(runtime.log_dir.as_deref(), Some("/var/log/nacelle"));
         assert_eq!(runtime.hook_retry_attempts, Some(2));
 
         fs::remove_file(&path).ok();
@@ -306,7 +306,7 @@ mod tests {
     #[test]
     fn load_config_reports_parse_error() {
         let path = std::env::temp_dir().join(format!(
-            "capsuled-engine-config-invalid-{}",
+            "nacelle-engine-config-invalid-{}",
             unique_suffix()
         ));
         fs::write(&path, "not = valid = toml").expect("should write invalid config");
