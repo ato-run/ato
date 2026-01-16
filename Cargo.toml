@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2021"
 rust-version = "1.82"
 license = "Apache-2.0"
-description = "The Unified Runtime for Capsules - Native, Docker, and Wasm execution"
+description = "The Source Runtime for Capsules"
 repository = "https://github.com/nacelle-dev/nacelle"
 authors = ["Koh0920"]
 readme = "README.md"
@@ -18,14 +18,8 @@ path = "src/lib.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-tonic = "0.12"
-prost = "0.13"
-prost-types = "0.13"
-wasmtime = { version = "16.0", features = ["component-model", "async"] }
-wasmtime-wasi = "16.0"
 toml = "0.8"
 axum = "0.7"
-tower-http = { version = "0.5", features = ["cors"] }
 
 # 既存の依存関係
 serde = { version = "1.0", features = ["derive"] }
@@ -40,21 +34,14 @@ num_cpus = "1.16"
 which = "5.0"
 chrono = { version = "0.4", features = ["serde"] }
 
-# Hardware detection
-hostname = "0.4"
 dirs = "5.0"
-mdns-sd = "0.10"
 serde_yaml = "0.9"
 
 
-# OCI runtime specification
-oci-spec = "0.6"
 
 # Storage management
 uuid = { version = "1.10", features = ["v4"] }
 
-# Log monitoring
-notify = "6"
 
 # Cryptography & Audit
 ed25519-dalek = { version = "2.1", features = ["rand_core", "pkcs8"] }
@@ -63,8 +50,6 @@ hex = "0.4"
 hmac = "0.12"
 base64 = "0.22"
 
-# Metrics
-prometheus = "0.13"
 
 # Type definitions and utilities
 dashmap = "6"
@@ -73,7 +58,6 @@ tokio-stream = { version = "0.1.17", features = ["sync", "net"] }
 hcl-rs = "0.17"
 async-stream = "0.3.6"
 futures = "0.3.31"
-serde_urlencoded = "0.7.1"
 sha2 = "0.10.9"
 
 bytes = "1.11.0"
@@ -97,52 +81,39 @@ rust_decimal = { version = "1.39.0", features = ["serde"] }
 rust_decimal_macros = "1.39.0"
 shell-words = "1.1.1"
 
-# Unit 6: Audit persistence and CAS integration
-rusqlite = { version = "0.32", features = ["bundled"] }
 
 # L1 Policy pattern matching
 regex = "1.10"
+ctrlc = "3.4"
+ignore = "0.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nvml-wrapper = "0.9"
-cudarc = { version = "0.17", features = ["driver", "cuda-version-from-build-system"], optional = true }
-cgroups-rs = "0.3.3"
 # Phase 3: Sandbox (Linux Landlock LSM)
 landlock = "0.4"
 aya = "0.13"
 
 [features]
 default = ["engine"]
-# Engine mode: Full daemon with all runtimes (default for nacelle binary)
-engine = ["wasm", "oci"]
-# WASM runtime - cross-platform (macOS, Linux, Windows)
-wasm = []
-# OCI container runtime - Linux only (requires libcontainer, cgroups)
-# This feature is automatically disabled on non-Linux platforms
-oci = []
+# Engine mode: Source-only runtime
+engine = []
 # Library mode: Core types and verification only (for CLI/embedded use)
 library = []
-cuda = ["dep:cudarc"]
-real-gpu = []
 phase2 = []
 # Embedded mode: minimal dependencies for capsule-cli integration
-embedded = ["wasm"]
+embedded = []
+# Optional CUDA support for VRAM checks
+cuda = []
 
 [dev-dependencies]
 tempfile = "3.8"
-colored = "2.1"
-sysinfo = "0.30"
 tower = { version = "0.4", features = ["util"] }
 
 [build-dependencies]
-tonic-build = "0.12"
-protobuf-src = "1.1.0"
-capnpc = "0.24"
 aya-build = "0.1"
 
 # Workspace configuration
 [workspace]
-members = ["cli", "ebpf"]
+members = ["ebpf"]
 resolver = "2"
 
 # v0.2.0 Optimization: Tauri-inspired build profiles

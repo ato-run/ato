@@ -4,11 +4,12 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use crate::runtime_config::{RuntimeConfig, ServiceConfig};
+use crate::system::NetworkSandbox;
 
 pub async fn run_services_from_config(
     config: &RuntimeConfig,
     bundle_root: &Path,
-    cgroup_path: Option<&Path>,
+    sandbox: Option<&dyn NetworkSandbox>,
 ) -> Result<(), String> {
     if config.services.is_empty() {
         return Err("config.json has no services".to_string());
@@ -27,6 +28,11 @@ pub async fn run_services_from_config(
             .ok_or_else(|| format!("Service '{}' missing from config", name))?;
 
         let mut cmd = build_command(bundle_root, svc)?;
+        if let Some(sandbox) = sandbox {
+            sandbox
+                .apply_to_child(&mut cmd)
+                .map_err(|e| format!("Failed to apply sandbox: {e}"))?;
+        }
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::inherit());
         cmd.stderr(Stdio::inherit());
@@ -34,22 +40,12 @@ pub async fn run_services_from_config(
         let child = cmd
             .spawn()
             .map_err(|e| format!("Failed to spawn service '{}': {}", name, e))?;
-        if let Some(cgroup) = cgroup_path {
-            let pid = child.id();
-            add_pid_to_cgroup(cgroup, pid)
-                .map_err(|e| format!("Failed to add pid to cgroup: {}", e))?;
-        }
         children.insert(name.clone(), child);
     }
 
     supervise_children(children).await
 }
 
-fn add_pid_to_cgroup(cgroup_path: &Path, pid: u32) -> anyhow::Result<()> {
-    let procs_path = cgroup_path.join("cgroup.procs");
-    std::fs::write(&procs_path, pid.to_string())?;
-    Ok(())
-}
 async fn supervise_children(mut children: HashMap<String, Child>) -> Result<(), String> {
     loop {
         let mut exited: Option<(String, std::process::ExitStatus)> = None;

@@ -5,21 +5,19 @@
 //!
 //! ## Module Structure (v0.2.0 Simplified)
 //!
-//! - `common/` - Shared utilities (auth, config, failure_codes)
+//! - `common/` - Shared utilities (config, constants, paths)
 //! - `engine/` - Execution core (supervisor, socket activation)
-//! - `interface/` - External APIs (HTTP, discovery)
-//! - `observability/` - L5 Observability (audit, job_history, logs, metrics)
-//! - `resource/` - Resource management (artifact, cas, storage, oci)
+//! - `resource/` - Resource management (artifact, cas, storage)
 //! - `runtime/` - Execution runtimes (Source, JIT provisioning)
 //! - `schema/` - Cap'n Proto schema and conversion
-//! - `system/` - System-level (hardware, network)
+//! - `system/` - OS-specific system abstractions (eBPF/WFP/PF)
 //! - `verification/` - Security layers (sandbox, verification)
-//! - `workload/` - Workload definitions (manifest, runplan)
+//! - `workload/` - Workload definitions (manifest)
 //!
 //! ## Feature Flags
 //!
 //! - `wasm` - WebAssembly runtime support (cross-platform, default)
-//! - `oci` - OCI container runtime support (Linux only)
+//! - `source` - Source runtime support (native sandbox)
 //!
 //! ## CLI Usage
 //!
@@ -38,9 +36,6 @@ pub mod capsule_types; // Capsule type definitions (extracted from capsule-core)
 pub mod common;
 pub mod egress;
 pub mod engine;
-pub mod interface;
-pub mod observability;
-pub mod proto;
 pub mod resource;
 pub mod runtime;
 pub mod runtime_config; // R3 config.json loader
@@ -54,12 +49,7 @@ pub mod workload;
 // =============================================================================
 
 // From common
-pub use common::auth;
 pub use common::config;
-pub use common::failure_codes;
-
-// From interface (v0.2.0: gRPC/API removed, daemon removed)
-pub use interface::http as http_server;
 
 // From schema
 #[allow(dead_code)]
@@ -73,21 +63,10 @@ pub use engine::supervisor as process_supervisor;
 pub use resource::artifact;
 pub use resource::cas;
 pub use resource::ingest;
-pub use resource::oci;
 pub use resource::storage;
-
-// From observability
-pub use observability::job_history;
-pub use observability::logs;
-pub use observability::metrics;
-
-// From system
-pub use system::hardware;
-pub use system::network;
 
 // From verification (security alias)
 pub use verification as security;
 
 // From workload
 pub use workload::manifest;
-pub use workload::runplan;

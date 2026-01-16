@@ -11,7 +11,7 @@
 //! - **Runtimes** (via [`crate::runtime::Runtime`]) for workload execution
 //! - **Artifact Manager** (via [`crate::resource::artifact::ArtifactManager`]) for CAS lookups
 //! - **Manifest Verifier** (via [`crate::verification::verifier::ManifestVerifier`]) for security
-//! - **Service Registry** (via [`crate::network::service_registry::ServiceRegistry`]) for networking
+//! - **Service Registry**: removed in v0.2.0
 //!
 //! ## Workload Lifecycle
 //!
@@ -39,10 +39,7 @@
 //! - Systemd-compatible FD passing (LISTEN_FDS environment variable)
 
 // pub mod pool; // Disabled: requires capsule_runtime dependency
-pub mod ebpf_enforcer;
-pub mod enforcement_guard;
 pub mod r3_supervisor;
 pub mod socket;
-pub mod startup_gc;
 pub mod supervisor;
 pub mod supervisor_mode;

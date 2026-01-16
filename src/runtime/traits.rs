@@ -3,18 +3,14 @@ use std::path::PathBuf;
 
 use crate::runtime::{LaunchRequest, LaunchResult, RuntimeError};
 
-/// Unified interface for different runtime backends (Container, Wasm, Source, etc.)
+/// Unified interface for runtime backends (Source-only in nacelle).
 ///
 /// All UARC-compliant runtimes must implement this trait to provide a consistent
 /// interface for launching, stopping, and monitoring Capsule workloads.
 ///
 /// # Implementations
 ///
-/// - [`crate::runtime::WasmRuntime`]: WebAssembly via Wasmtime
 /// - [`crate::runtime::SourceRuntime`]: Interpreted languages with platform sandbox
-/// - [`crate::runtime::ContainerRuntime`]: OCI containers (runc/youki)
-/// - [`crate::runtime::DockerCliRuntime`]: Docker CLI wrapper
-/// - [`crate::runtime::DevRuntime`]: Development mode with hot-reload
 #[async_trait]
 pub trait Runtime: Send + Sync {
     /// Launch a workload with the given configuration.

@@ -3,40 +3,9 @@ use std::{
     ffi::OsString,
     fs,
     io::{BufRead as _, BufReader},
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Command, Stdio},
 };
-
-fn find_in_path(executable: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(executable);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-fn resolve_protoc() -> Option<PathBuf> {
-    if let Some(existing) = std::env::var_os("PROTOC").map(PathBuf::from) {
-        if existing.is_file() {
-            return Some(existing);
-        }
-    }
-
-    if let Some(found) = find_in_path("protoc") {
-        return Some(found);
-    }
-
-    // Fallback: protobuf-src bundled protoc (may not exist in all environments).
-    let bundled = protobuf_src::protoc();
-    if bundled.is_file() {
-        return Some(bundled);
-    }
-
-    None
-}
 
 fn target_arch_fixup(target_arch: &str) -> &str {
     if target_arch.starts_with("riscv64") {
@@ -145,51 +114,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "linux" {
         build_ebpf_program().expect("Failed to build eBPF program");
-    }
-
-    // =========================================================================
-    // Protobuf / gRPC Code Generation (using local proto definitions)
-    // =========================================================================
-    // Proto definitions are now self-contained in the proto/ directory (nacelle package)
-    let proto_dir = "proto";
-
-    if let Some(protoc_path) = resolve_protoc() {
-        env::set_var("PROTOC", protoc_path);
-    }
-
-    tonic_build::configure()
-        .build_server(true)
-        .compile_well_known_types(false)
-        .out_dir("src/proto")
-        .compile_protos(
-            &[
-                format!("{}/common/v1/common.proto", proto_dir),
-                format!("{}/engine/v1/api.proto", proto_dir),
-            ],
-            &[proto_dir], // .proto ファイルのインクルードパス
-        )?;
-
-    // =========================================================================
-    // Cap'n Proto Code Generation (SSOT for CapsuleManifest)
-    // =========================================================================
-    // Requires `capnp` CLI tool installed: `brew install capnp` or `apt install capnproto`
-    //
-    // Generated code goes to src/ so it can be accessed as `crate::capsule_capnp`
-    let capnp_out_dir = Path::new("src");
-
-    // For now, using a local capsule.capnp if needed, or skipping if not available
-    // TODO: Consider adding capsule.capnp to this repository if needed for standalone builds
-    let capnp_schema_path = "schema/capsule.capnp";
-
-    if Path::new(capnp_schema_path).exists() {
-        capnpc::CompilerCommand::new()
-            .file(capnp_schema_path)
-            .src_prefix("schema")
-            .output_path(capnp_out_dir)
-            .run()?;
-
-        // Rerun if schema changes
-        println!("cargo:rerun-if-changed={}", capnp_schema_path);
     }
 
     Ok(())

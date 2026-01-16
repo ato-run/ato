@@ -181,7 +181,7 @@ impl CapsuleManifestV1 {
                 dev_mode: false,
             }),
             RuntimeType::Wasm => RunPlanRuntime::Native(NativeRuntime {
-                // Wasm components are executed as native artifacts by WasmRuntime
+                // Wasm components are routed by capsule-cli; nacelle does not execute them
                 binary_path: self.execution.entrypoint.clone(),
                 args: Vec::new(),
                 env: env.clone(),

@@ -4,6 +4,8 @@
 //! - Self-extracting bundle (embedded runtime)
 //! - Direct execution with supervisor and sandbox
 
+mod cli;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // v0.2.0: Check if running as self-extracting bundle
@@ -11,11 +13,8 @@ async fn main() -> anyhow::Result<()> {
         return bootstrap_bundled_runtime().await;
     }
 
-    // If not a bundle, show help message
-    eprintln!("🔴 Nacelle v0.2.0: Not running as a bundle");
-    eprintln!("This binary should be executed as a self-extracting bundle.");
-    eprintln!("Use 'nacelle pack --bundle' to create executable bundles.");
-    std::process::exit(1);
+    // If not a bundle, dispatch to CLI
+    cli::execute().await
 }
 
 /// v0.2.0: Check if this binary contains an embedded bundle
@@ -50,27 +49,28 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
         .map(|e| e.mode.as_str())
         .unwrap_or("allow_all");
 
-    let mut enforcer: Option<nacelle::engine::ebpf_enforcer::EgressEnforcerHandle> = None;
     let dns_rules = if config.sandbox.network.allow_domains.is_some() {
         nacelle::egress::dns_bootstrap::dns_bootstrap_rules()?
     } else {
         Vec::new()
     };
+    let enforcement_str = config.sandbox.network.enforcement.as_str();
+    let strict_enforcement = enforcement_str == "strict";
+    let job_id = format!("job-{}", std::process::id());
+    let mut sandbox = nacelle::system::new_network_sandbox();
+    let mut sandbox_enabled = false;
 
     if egress_mode != "allow_all" {
-        let job_id = format!("job-{}", std::process::id());
-        match nacelle::engine::ebpf_enforcer::start_enforcer(&[], &dns_rules, &job_id) {
-            Ok(handle) => {
-                enforcer = Some(handle);
-            }
+        let initial_rule = nacelle::system::common::IsolationRule {
+            allow_rules: Vec::new(),
+            dns_rules: dns_rules.clone(),
+            job_id: job_id.clone(),
+        };
+        match sandbox.prepare(initial_rule).await {
+            Ok(_) => sandbox_enabled = true,
             Err(e) => {
-                eprintln!("⚠️  eBPF enforcer unavailable: {}", e);
-                if matches!(
-                    nacelle::engine::enforcement_guard::EnforcementMode::parse_mode(
-                        config.sandbox.network.enforcement.as_str()
-                    ),
-                    nacelle::engine::enforcement_guard::EnforcementMode::Strict
-                ) {
+                eprintln!("⚠️  Sandbox unavailable: {}", e);
+                if strict_enforcement {
                     return Err(anyhow::anyhow!(e));
                 }
             }
@@ -90,31 +90,37 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     if !allow_rules.is_empty() {
         nacelle::egress::validate_egress_rules(&allow_rules)?;
     }
-    if egress_mode != "allow_all" {
-        if let Some(handle) = enforcer.as_mut() {
-            if !allow_rules.is_empty() || egress_mode == "deny_all" {
-                handle.update_allowlist(&allow_rules)?;
-            }
-        }
-
-        if !dns_rules.is_empty() {
-            // Keep DNS rules alongside the final allowlist so domain lookups still work.
-            let job_id = format!("job-{}", std::process::id());
-            if let Ok(handle) =
-                nacelle::engine::ebpf_enforcer::start_enforcer(&allow_rules, &dns_rules, &job_id)
-            {
-                enforcer = Some(handle);
+    if egress_mode != "allow_all" && sandbox_enabled {
+        let update_rule = nacelle::system::common::IsolationRule {
+            allow_rules: allow_rules.clone(),
+            dns_rules: dns_rules.clone(),
+            job_id: job_id.clone(),
+        };
+        if !allow_rules.is_empty() || egress_mode == "deny_all" {
+            if let Err(e) = sandbox.update_rules(update_rule).await {
+                eprintln!("⚠️  Sandbox rule update failed: {}", e);
+                if strict_enforcement {
+                    return Err(anyhow::anyhow!(e));
+                }
             }
         }
     }
-    nacelle::engine::startup_gc::cleanup_orphan_cgroups();
-    let enforcement_mode = nacelle::engine::enforcement_guard::EnforcementMode::parse_mode(
-        config.sandbox.network.enforcement.as_str(),
-    );
-    nacelle::engine::enforcement_guard::check_enforcement(enforcement_mode)
-        .map_err(|e| anyhow::anyhow!(e))?;
-    let cgroup_path = enforcer.as_ref().map(|h| h.cgroup_path.as_path());
-    nacelle::engine::r3_supervisor::run_services_from_config(&config, &temp_dir, cgroup_path)
+
+    #[cfg(target_os = "linux")]
+    {
+        nacelle::system::linux::cgroup::cleanup_orphan_cgroups();
+        let enforcement_mode =
+            nacelle::system::linux::enforcement::EnforcementMode::parse_mode(enforcement_str);
+        nacelle::system::linux::enforcement::check_enforcement(enforcement_mode)
+            .map_err(|e| anyhow::anyhow!(e))?;
+    }
+
+    let sandbox_ref = if sandbox_enabled {
+        Some(sandbox.as_ref())
+    } else {
+        None
+    };
+    nacelle::engine::r3_supervisor::run_services_from_config(&config, &temp_dir, sandbox_ref)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 

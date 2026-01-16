@@ -15,7 +15,7 @@
 //! - signing: Ed25519 signature generation
 //! - egress_policy: L4 Egress policy resolution (domain → IP)
 //!
-//! Note: Audit logging is in the `observability` module.
+//! Note: Audit logging is handled by the caller (capsule-cli).
 
 pub mod dns_monitor;
 pub mod egress_policy;
@@ -25,10 +25,6 @@ pub mod sandbox;
 pub mod signing;
 pub mod verifier;
 pub mod vram;
-
-// Re-export audit from observability for backward compatibility
-pub use crate::observability::audit;
-pub use crate::observability::audit::*;
 
 pub use dns_monitor::*;
 pub use egress_policy::*;
