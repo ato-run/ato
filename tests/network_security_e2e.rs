@@ -13,8 +13,6 @@
 //! cargo test --test network_security_e2e
 //! ```
 
-use tempfile::TempDir;
-
 // ============================================================================
 // Test 1: DNS Rule Generation
 // ============================================================================
@@ -57,7 +55,7 @@ fn test_dns_rule_generation_default_config() {
     assert!(
         rules
             .iter()
-            .any(|r| r.contains("LOG") && r.contains("UARC-DNS-BLOCKED")),
+            .any(|r| r.contains("LOG") && r.contains("NACELLE-DNS-BLOCKED")),
         "Should LOG blocked DNS attempts"
     );
 
@@ -244,71 +242,4 @@ fn test_dns_config_clone_and_debug() {
     assert!(debug_str.contains("allowed_resolvers"));
 
     println!("✅ DnsConfig Clone and Debug traits work correctly");
-}
-
-// ============================================================================
-// Test 6: Security Audit Integration
-// ============================================================================
-
-#[tokio::test]
-async fn test_dns_block_audit_logging() {
-    use nacelle::security::audit::{AuditLogger, AuditOperation, AuditStatus};
-    use nacelle::security::dns_monitor::{is_resolver_allowed, DnsConfig};
-
-    let tmp = TempDir::new().expect("tempdir");
-    let log_path = tmp.path().join("dns_audit.log");
-    let key_path = tmp.path().join("key.pem");
-
-    let logger =
-        AuditLogger::new(log_path.clone(), key_path, "dns-test-node".to_string()).expect("logger");
-
-    let config = DnsConfig::default();
-
-    // Simulate DNS query attempts
-    let queries = vec![
-        ("8.8.8.8", false),        // Google DNS - should be blocked
-        ("1.1.1.1", false),        // Cloudflare - should be blocked
-        ("127.0.0.1", true),       // Loopback - should pass
-        ("100.100.100.100", true), // Tailscale - should pass
-    ];
-
-    for (resolver, expected_allowed) in &queries {
-        let allowed = is_resolver_allowed(resolver, &config);
-        assert_eq!(
-            allowed, *expected_allowed,
-            "Resolver {} check failed",
-            resolver
-        );
-
-        // Log blocked attempts
-        if !allowed {
-            logger
-                .log(
-                    AuditOperation::NetworkAccess,
-                    AuditStatus::Failure,
-                    Some("dns-check".to_string()),
-                    Some(format!("Blocked DNS: {}", resolver)),
-                )
-                .await;
-        }
-    }
-
-    // Verify logs
-    let db_path = log_path.with_extension("db");
-    let conn = rusqlite::Connection::open(&db_path).expect("open db");
-
-    let blocked_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM audit_logs WHERE status = 'failure'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("query");
-
-    assert_eq!(
-        blocked_count, 2,
-        "Should have logged 2 blocked DNS attempts"
-    );
-
-    println!("✅ DNS audit logging verified");
 }

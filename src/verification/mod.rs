@@ -8,7 +8,6 @@
 //! - dns_monitor: DNS request monitoring
 //! - egress_proxy: Egress proxy implementation  
 //! - path: Path validation and security
-//! - vram: GPU memory security
 //!
 //! Moved to capsule-cli:
 //! - verifier: L1 Source Policy + L2 Signature Verification
@@ -24,7 +23,6 @@ pub mod path;
 pub mod sandbox;
 pub mod signing;
 pub mod verifier;
-pub mod vram;
 
 pub use dns_monitor::*;
 pub use egress_policy::*;
@@ -32,7 +30,6 @@ pub use egress_proxy::*;
 pub use path::*;
 pub use signing::*;
 pub use verifier::*;
-pub use vram::*;
 
 // ENV constant kept for runtime use
 pub const ENV_KEY_EGRESS_TOKEN: &str = "NACELLE_EGRESS_TOKEN";

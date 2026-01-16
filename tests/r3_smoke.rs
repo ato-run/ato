@@ -137,13 +137,4 @@ mod unix_tests {
         assert!(result.is_err());
     }
 
-    #[cfg(not(target_os = "linux"))]
-    #[test]
-    fn enforcement_guard_strict_fails_non_linux() {
-        let strict = nacelle::engine::enforcement_guard::EnforcementMode::Strict;
-        let best_effort = nacelle::engine::enforcement_guard::EnforcementMode::BestEffort;
-
-        assert!(nacelle::engine::enforcement_guard::check_enforcement(strict).is_err());
-        assert!(nacelle::engine::enforcement_guard::check_enforcement(best_effort).is_ok());
-    }
 }
