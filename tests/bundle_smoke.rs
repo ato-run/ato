@@ -56,7 +56,7 @@ entrypoint = "main.py"
     let mut fake_exe: Vec<u8> = Vec::new();
     fake_exe.extend_from_slice(b"FAKE_EXE\0\0\0");
     fake_exe.extend_from_slice(&compressed);
-    fake_exe.extend_from_slice(bundle::BUNDLE_MAGIC);
+    fake_exe.extend_from_slice(nacelle::common::constants::BUNDLE_MAGIC);
     fake_exe.extend_from_slice(&(compressed.len() as u64).to_le_bytes());
 
     let bundle_path = temp.path().join("bundle.bin");
@@ -147,7 +147,7 @@ entrypoint = "main.js"
     let mut fake_exe: Vec<u8> = Vec::new();
     fake_exe.extend_from_slice(b"FAKE_EXE\0\0\0");
     fake_exe.extend_from_slice(&compressed);
-    fake_exe.extend_from_slice(bundle::BUNDLE_MAGIC);
+    fake_exe.extend_from_slice(nacelle::common::constants::BUNDLE_MAGIC);
     fake_exe.extend_from_slice(&(compressed.len() as u64).to_le_bytes());
 
     let bundle_path = temp.path().join("bundle.bin");
