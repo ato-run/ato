@@ -54,7 +54,7 @@ pub struct LaunchRequest<'a> {
     pub source_target: Option<SourceTarget>,
     /// Socket manager for socket activation (Phase 2)
     /// When provided, the runtime should pass the socket FD to the child process
-    pub socket_manager: Option<Arc<crate::engine::socket::SocketManager>>,
+    pub socket_manager: Option<Arc<crate::manager::socket::SocketManager>>,
 }
 
 /// Source target configuration for Source runtime

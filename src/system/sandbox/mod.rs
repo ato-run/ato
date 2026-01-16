@@ -24,7 +24,7 @@
 //!
 //! ## Usage
 //! ```ignore
-//! use nacelle::verification::sandbox::{SandboxPolicy, apply_sandbox};
+//! use nacelle::system::sandbox::{SandboxPolicy, apply_sandbox};
 //!
 //! let policy = SandboxPolicy::default()
 //!     .allow_read_write(&["/app", "/tmp"])

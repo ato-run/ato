@@ -1,4 +1,4 @@
-//! Capsule execution engine core
+//! Capsule execution manager core
 //!
 //! This module contains the core logic for managing and executing capsules:
 //! - [`CapsuleManager`]: Lifecycle management for capsule instances (deploy, stop, query)
@@ -7,17 +7,17 @@
 //!
 //! ## Architecture
 //!
-//! The engine acts as the main orchestrator for running Capsules. It coordinates with:
-//! - **Runtimes** (via [`crate::runtime::Runtime`]) for workload execution
+//! The manager acts as the main orchestrator for running Capsules. It coordinates with:
+//! - **Runtimes** (via [`crate::launcher::Runtime`]) for workload execution
 //! - **Artifact Manager** (via [`crate::resource::artifact::ArtifactManager`]) for CAS lookups
-//! - **Manifest Verifier** (via [`crate::verification::verifier::ManifestVerifier`]) for security
+//! - **Manifest Verifier** (via [`crate::system::verifier::ManifestVerifier`]) for security
 //! - **Service Registry**: removed in v0.2.0
 //!
 //! ## Workload Lifecycle
 //!
 //! 1. **DeployCapsule**: Receive deployment request with manifest & resources
 //! 2. **Verify**: Check signatures, validate manifest, verify CAS digests
-//! 3. **Launch**: Select runtime, prepare bundle, start process via [`crate::runtime::Runtime`]
+//! 3. **Launch**: Select runtime, prepare bundle, start process via [`crate::launcher::Runtime`]
 //! 4. **Monitor**: Track resource usage, collect logs, handle failures
 //! 5. **Stop**: Gracefully terminate, cleanup resources, archive logs
 //!
