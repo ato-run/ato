@@ -3,6 +3,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
+pub const MAX_EGRESS_RULES: usize = 4096;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct RuntimeConfig {
     pub version: String,
@@ -72,8 +74,6 @@ pub struct FilesystemConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct NetworkConfig {
     pub enabled: bool,
-    #[serde(default)]
-    pub allow_domains: Option<Vec<String>>,
     pub enforcement: String,
     #[serde(default)]
     pub egress: Option<EgressConfig>,
@@ -113,4 +113,59 @@ pub fn load_config(path: &Path) -> Result<RuntimeConfig> {
     let config: RuntimeConfig = serde_json::from_str(&content)
         .with_context(|| format!("Failed to parse config.json: {}", path.display()))?;
     Ok(config)
+}
+
+pub fn validate_egress_rules(rules: &[EgressRuleEntry]) -> Result<()> {
+    if rules.len() > MAX_EGRESS_RULES {
+        anyhow::bail!(
+            "Egress allowlist exceeds {} entries (fail-closed)",
+            MAX_EGRESS_RULES
+        );
+    }
+
+    for rule in rules {
+        match rule.rule_type.as_str() {
+            "ip" => {
+                rule.value
+                    .parse::<std::net::IpAddr>()
+                    .with_context(|| format!("Invalid IP address: {}", rule.value))?;
+            }
+            "cidr" => {
+                validate_cidr(&rule.value)?;
+            }
+            other => {
+                anyhow::bail!("Unsupported egress rule type: {}", other);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_cidr(cidr: &str) -> Result<()> {
+    let (addr, prefix) = cidr
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("Invalid CIDR (missing '/'): {cidr}"))?;
+
+    let ip: std::net::IpAddr = addr
+        .parse()
+        .with_context(|| format!("Invalid CIDR address: {cidr}"))?;
+    let prefix: u32 = prefix
+        .parse()
+        .with_context(|| format!("Invalid CIDR prefix: {cidr}"))?;
+
+    match ip {
+        std::net::IpAddr::V4(_) => {
+            if prefix > 32 {
+                anyhow::bail!("Invalid IPv4 CIDR prefix: {cidr}");
+            }
+        }
+        std::net::IpAddr::V6(_) => {
+            if prefix > 128 {
+                anyhow::bail!("Invalid IPv6 CIDR prefix: {cidr}");
+            }
+        }
+    }
+
+    Ok(())
 }

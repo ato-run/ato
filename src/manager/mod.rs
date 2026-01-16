@@ -9,26 +9,19 @@
 //!
 //! The manager acts as the main orchestrator for running Capsules. It coordinates with:
 //! - **Runtimes** (via [`crate::launcher::Runtime`]) for workload execution
-//! - **Artifact Manager** (via [`crate::resource::artifact::ArtifactManager`]) for CAS lookups
-//! - **Manifest Verifier** (via [`crate::system::verifier::ManifestVerifier`]) for security
 //! - **Service Registry**: removed in v0.2.0
 //!
 //! ## Workload Lifecycle
 //!
-//! 1. **DeployCapsule**: Receive deployment request with manifest & resources
-//! 2. **Verify**: Check signatures, validate manifest, verify CAS digests
-//! 3. **Launch**: Select runtime, prepare bundle, start process via [`crate::launcher::Runtime`]
-//! 4. **Monitor**: Track resource usage, collect logs, handle failures
-//! 5. **Stop**: Gracefully terminate, cleanup resources, archive logs
+//! 1. **Launch**: Start process via [`crate::launcher::Runtime`]
+//! 2. **Monitor**: Track status, collect logs, handle failures
+//! 3. **Stop**: Gracefully terminate
 //!
 //! ## UARC V1.1.0 Compliance
 //!
-//! The engine implements all UARC Layer 4 (Engine) responsibilities:
-//! - Manifest validation and signature verification
-//! - CAS resource management and integrity checking
-//! - Multi-runtime support (Wasm, Source, OCI)
-//! - SPIFFE ID-based workload identity
-//! - Resource quotas and isolation enforcement
+//! The engine implements UARC Layer 4 (Engine) runtime responsibilities:
+//! - Source runtime execution
+//! - Isolation enforcement
 //!
 //! ## Socket Activation (Phase 2)
 //!
@@ -42,4 +35,3 @@
 pub mod r3_supervisor;
 pub mod socket;
 pub mod supervisor;
-pub mod supervisor_mode;

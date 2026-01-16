@@ -16,12 +16,12 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
     if !args.config_path.exists() {
         anyhow::bail!(
-            "config.json not found: {} (run capsule pack to generate it)",
+            "config.json not found: {} (capsule-cli で生成してください)",
             args.config_path.display()
         );
     }
 
-    let config = nacelle::runtime_config::load_config(&args.config_path)
+    let config = nacelle::config::load_config(&args.config_path)
         .with_context(|| format!("Failed to load config.json: {}", args.config_path.display()))?;
 
     let network_enabled = config.sandbox.network.enabled;
@@ -35,11 +35,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         .map(|e| e.mode.as_str())
         .unwrap_or("allow_all");
 
-    let dns_rules = if config.sandbox.network.allow_domains.is_some() {
-        nacelle::egress::dns_bootstrap::dns_bootstrap_rules()?
-    } else {
-        Vec::new()
-    };
+    let dns_rules = Vec::new();
 
     let job_id = format!("job-{}", std::process::id());
     let mut sandbox = new_network_sandbox();
@@ -69,12 +65,8 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             allow_rules.extend(rules.iter().cloned());
         }
     }
-    if let Some(domains) = &config.sandbox.network.allow_domains {
-        let resolved = nacelle::egress::resolver::resolve_allow_domains(domains)?;
-        allow_rules.extend(resolved);
-    }
     if !allow_rules.is_empty() {
-        nacelle::egress::validate_egress_rules(&allow_rules)?;
+        nacelle::config::validate_egress_rules(&allow_rules)?;
     }
 
     if network_enabled && egress_mode != "allow_all" && sandbox_enabled {

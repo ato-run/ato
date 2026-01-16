@@ -4,8 +4,8 @@ mod unix_tests {
     use std::path::Path;
     use std::time::Duration;
 
+    use nacelle::config::{NetworkConfig, RuntimeConfig, SandboxConfig, ServiceConfig};
     use nacelle::manager::r3_supervisor::run_services_from_config;
-    use nacelle::runtime_config::{RuntimeConfig, SandboxConfig};
 
     fn write_executable(path: &Path, content: &str) {
         fs::write(path, content).unwrap();
@@ -22,9 +22,8 @@ mod unix_tests {
             sandbox: SandboxConfig {
                 enabled: false,
                 filesystem: None,
-                network: nacelle::runtime_config::NetworkConfig {
+                network: NetworkConfig {
                     enabled: false,
-                    allow_domains: None,
                     enforcement: "best_effort".to_string(),
                     egress: None,
                 },
@@ -50,7 +49,7 @@ mod unix_tests {
         let mut config = base_config();
         config.services.insert(
             "main".to_string(),
-            nacelle::runtime_config::ServiceConfig {
+            ServiceConfig {
                 executable: "source/main.sh".to_string(),
                 args: vec![],
                 cwd: Some("source".to_string()),
@@ -63,7 +62,7 @@ mod unix_tests {
         );
         config.services.insert(
             "side".to_string(),
-            nacelle::runtime_config::ServiceConfig {
+            ServiceConfig {
                 executable: "source/side.sh".to_string(),
                 args: vec![],
                 cwd: Some("source".to_string()),
@@ -102,7 +101,7 @@ mod unix_tests {
         let mut config = base_config();
         config.services.insert(
             "main".to_string(),
-            nacelle::runtime_config::ServiceConfig {
+            ServiceConfig {
                 executable: "source/main.sh".to_string(),
                 args: vec![],
                 cwd: Some("source".to_string()),
@@ -115,7 +114,7 @@ mod unix_tests {
         );
         config.services.insert(
             "side".to_string(),
-            nacelle::runtime_config::ServiceConfig {
+            ServiceConfig {
                 executable: "source/side.sh".to_string(),
                 args: vec![],
                 cwd: Some("source".to_string()),
