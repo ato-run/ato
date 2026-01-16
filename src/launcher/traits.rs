@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use std::path::PathBuf;
 
-use crate::runtime::{LaunchRequest, LaunchResult, RuntimeError};
+use crate::launcher::{LaunchRequest, LaunchResult, RuntimeError};
 
 /// Unified interface for runtime backends (Source-only in nacelle).
 ///
@@ -10,7 +10,7 @@ use crate::runtime::{LaunchRequest, LaunchResult, RuntimeError};
 ///
 /// # Implementations
 ///
-/// - [`crate::runtime::SourceRuntime`]: Interpreted languages with platform sandbox
+/// - [`crate::launcher::SourceRuntime`]: Interpreted languages with platform sandbox
 #[async_trait]
 pub trait Runtime: Send + Sync {
     /// Launch a workload with the given configuration.

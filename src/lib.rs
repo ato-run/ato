@@ -6,12 +6,11 @@
 //! ## Module Structure (v0.2.0 Simplified)
 //!
 //! - `common/` - Shared utilities (config, constants, paths)
-//! - `engine/` - Execution core (supervisor, socket activation)
+//! - `manager/` - Execution management (supervisor, socket activation)
 //! - `resource/` - Resource management (artifact, cas, storage)
-//! - `runtime/` - Execution runtimes (Source, JIT provisioning)
+//! - `launcher/` - Execution runtimes (Source, JIT provisioning)
 //! - `schema/` - Cap'n Proto schema and conversion
-//! - `system/` - OS-specific system abstractions (eBPF/WFP/PF)
-//! - `verification/` - Security layers (sandbox, verification)
+//! - `system/` - OS-specific system abstractions + security (sandbox, verification)
 //! - `workload/` - Workload definitions (manifest)
 //!
 //! ## Feature Flags
@@ -35,13 +34,12 @@ pub mod bundle_rules; // v3.0: Pre-validated sandbox rules loader
 pub mod capsule_types; // Capsule type definitions (extracted from capsule-core)
 pub mod common;
 pub mod egress;
-pub mod engine;
+pub mod manager;
 pub mod resource;
-pub mod runtime;
+pub mod launcher;
 pub mod runtime_config; // R3 config.json loader
 pub mod schema;
 pub mod system;
-pub mod verification;
 pub mod workload;
 
 // =============================================================================
@@ -56,8 +54,8 @@ pub use common::config;
 pub use schema::capnp as capsule_capnp;
 pub use schema::converter as capnp_to_manifest;
 
-// From engine (v0.2.0: manager removed, supervisor-based)
-pub use engine::supervisor as process_supervisor;
+// From manager (v0.2.0: manager removed, supervisor-based)
+pub use manager::supervisor as process_supervisor;
 
 // From resource
 pub use resource::artifact;
@@ -65,8 +63,8 @@ pub use resource::cas;
 pub use resource::ingest;
 pub use resource::storage;
 
-// From verification (security alias)
-pub use verification as security;
+// From system (security alias)
+pub use system as security;
 
 // From workload
 pub use workload::manifest;

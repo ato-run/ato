@@ -2,9 +2,9 @@
 
 use anyhow::{Context, Result};
 use nacelle::capsule_types::capsule_v1::{CapsuleManifestV1, RuntimeType};
-use nacelle::engine::socket::{create_socket_manager, SocketConfig};
-use nacelle::runtime::source::toolchain::RuntimeFetcher;
-use nacelle::verification::sandbox::SandboxPolicy;
+use nacelle::launcher::source::toolchain::RuntimeFetcher;
+use nacelle::manager::socket::{create_socket_manager, SocketConfig};
+use nacelle::system::sandbox::SandboxPolicy;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::ExitStatus;
@@ -255,7 +255,7 @@ async fn build_command(
         human_out!(true, "⚠️  Sandbox disabled via NACELLE_DISABLE_SANDBOX");
     } else {
         let policy = SandboxPolicy::for_capsule(source_dir.to_path_buf());
-        if let Err(err) = nacelle::verification::sandbox::apply_sandbox(&policy) {
+        if let Err(err) = nacelle::system::sandbox::apply_sandbox(&policy) {
             human_out!(true, "⚠️  Sandbox apply failed: {}", err);
         }
     }

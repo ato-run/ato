@@ -4,7 +4,7 @@ mod unix_tests {
     use std::path::Path;
     use std::time::Duration;
 
-    use nacelle::engine::r3_supervisor::run_services_from_config;
+    use nacelle::manager::r3_supervisor::run_services_from_config;
     use nacelle::runtime_config::{RuntimeConfig, SandboxConfig};
 
     fn write_executable(path: &Path, content: &str) {

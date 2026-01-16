@@ -6,7 +6,7 @@
 //!
 //! # Example
 //! ```no_run
-//! use nacelle::runtime::source::toolchain::RuntimeFetcher;
+//! use nacelle::launcher::source::toolchain::RuntimeFetcher;
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
@@ -320,7 +320,7 @@ fn is_internal_mode() -> bool {
 
 macro_rules! toolchain_out {
     ($($arg:tt)*) => {{
-        if $crate::runtime::source::toolchain::is_internal_mode() {
+        if $crate::launcher::source::toolchain::is_internal_mode() {
             eprintln!($($arg)*);
         } else {
             println!($($arg)*);

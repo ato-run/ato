@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use nacelle::runtime::source::toolchain::RuntimeFetcher;
+use nacelle::launcher::source::toolchain::RuntimeFetcher;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
