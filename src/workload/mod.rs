@@ -3,11 +3,10 @@
 //! This module handles capsule workload specifications:
 //! - Manifest: Legacy manifest types and resource definitions
 //! - ManifestLoader: Capsule manifest loading and parsing
-//! - RunPlan: Coordinator RunPlan to CapsuleManifestV1 conversion
+//! - RunPlan: (removed) proto-based conversion was deprecated
 
 pub mod manifest;
 pub mod manifest_loader;
-pub mod runplan;
 
 #[cfg(test)]
 mod tests;
