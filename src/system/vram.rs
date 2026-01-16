@@ -138,7 +138,7 @@ impl VramScrubber {
         #[cfg(all(target_os = "linux", feature = "cuda"))]
         {
             return Ok(Self {
-                backend: crate::security::vram_scrubber::cuda_backend::new_backend(gpu_index)?,
+                backend: self::cuda_backend::new_backend(gpu_index)?,
             });
         }
 
@@ -146,7 +146,7 @@ impl VramScrubber {
         {
             warn!("VRAM scrubbing backend not available on this platform; using no-op");
             return Ok(Self {
-                backend: crate::verification::vram::noop_backend::new_backend(gpu_index)?,
+                backend: self::noop_backend::new_backend(gpu_index)?,
             });
         }
     }

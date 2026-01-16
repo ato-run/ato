@@ -120,7 +120,7 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     } else {
         None
     };
-    nacelle::engine::r3_supervisor::run_services_from_config(&config, &temp_dir, sandbox_ref)
+    nacelle::manager::r3_supervisor::run_services_from_config(&config, &temp_dir, sandbox_ref)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 

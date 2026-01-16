@@ -6,7 +6,7 @@
 use crate::capsule_types::capsule_v1::{
     CapsuleManifestV1, RuntimeType, SourceTarget, TargetsConfig,
 };
-use crate::runtime::RuntimeKind;
+use crate::launcher::RuntimeKind;
 use std::collections::HashSet;
 use thiserror::Error;
 use tracing::{debug, info, warn};

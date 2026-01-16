@@ -214,5 +214,5 @@ expose = ["PORT"]
 ## 参考
 
 - `reports/ADR-003-nacelle-supervisor-mode.md`（Supervisor Mode の設計背景）
-- `nacelle/src/engine/supervisor_mode.rs`（depends_on / expose / readiness_probe の実装）
+- `nacelle/src/manager/supervisor_mode.rs`（depends_on / expose / readiness_probe の実装）
 - Docker Compose 仕様（depends_on / healthcheck 等の意味）

@@ -146,11 +146,11 @@ nacelle dev --manifest capsule.toml
 ```
 nacelle/
 ├── src/
-│   ├── engine/         # Process supervision and lifecycle
-│   ├── runtime/        # Language runtimes (Python, Node.js, etc.)
+│   ├── manager/        # Process supervision and lifecycle
+│   ├── launcher/       # Language runtimes (Python, Node.js, etc.)
 │   ├── resource/       # Artifact management and CAS
 │   ├── common/         # Shared types and utilities
-│   ├── security/       # Policy validation and sandboxing
+│   ├── system/         # OS integration + sandboxing + verification
 │   └── observability/  # Metrics, audit, and logging
 ├── cli/                # Command-line interface
 ├── proto/              # gRPC service definitions

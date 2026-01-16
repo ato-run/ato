@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 
 use tracing::{debug, info, warn};
 
-use crate::runtime::{LaunchRequest, LaunchResult, RuntimeError, SourceTarget};
+use crate::launcher::{LaunchRequest, LaunchResult, RuntimeError, SourceTarget};
 
 use super::SourceRuntime;
 
@@ -169,7 +169,7 @@ async fn launch_with_alcoholless(
             })?;
         info!(
             "Socket Activation: Passing FD {} to child process",
-            crate::engine::socket::SD_LISTEN_FDS_START
+            crate::manager::socket::SD_LISTEN_FDS_START
         );
     }
 
@@ -364,7 +364,7 @@ async fn launch_with_sandbox_exec(
             })?;
         info!(
             "Socket Activation: Passing FD {} to child process",
-            crate::engine::socket::SD_LISTEN_FDS_START
+            crate::manager::socket::SD_LISTEN_FDS_START
         );
     }
 

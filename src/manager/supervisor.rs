@@ -31,10 +31,10 @@ use tracing::{debug, error, info, warn};
 use tokio::signal::unix::{signal, SignalKind};
 
 // Import sandbox module
-use crate::verification::sandbox::SandboxPolicy;
+use crate::system::sandbox::SandboxPolicy;
 
 // Re-export sandbox types for convenience
-pub use crate::verification::sandbox::{SandboxPolicy as SandboxConfig, SandboxResult};
+pub use crate::system::sandbox::{SandboxPolicy as SandboxConfig, SandboxResult};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Message Types for Actor Communication
@@ -272,7 +272,7 @@ impl SupervisorActor {
                 unsafe {
                     cmd.pre_exec(move || {
                         // Apply sandbox before exec
-                        match crate::verification::sandbox::apply_sandbox(&policy) {
+                        match crate::system::sandbox::apply_sandbox(&policy) {
                             Ok(result) => {
                                 if result.fully_enforced {
                                     // Sandbox applied successfully
