@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use crate::runtime_config::{RuntimeConfig, ServiceConfig};
+use crate::config::{RuntimeConfig, ServiceConfig};
 use crate::system::NetworkSandbox;
 
 pub async fn run_services_from_config(

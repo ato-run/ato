@@ -14,11 +14,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub mod resolver;
 pub mod source;
 pub mod traits;
-
-pub use resolver::{resolve_runtime, ResolveContext, ResolveError, ResolvedTarget};
 pub use source::SourceRuntime;
 pub use traits::Runtime;
 
@@ -43,7 +40,6 @@ impl RuntimeKind {
 #[derive(Debug)]
 pub struct LaunchRequest<'a> {
     pub workload_id: &'a str,
-    pub manifest_json: Option<&'a str>,
     /// Bundle root directory containing the workload files
     pub bundle_root: PathBuf,
     /// Environment variables to pass to the workload

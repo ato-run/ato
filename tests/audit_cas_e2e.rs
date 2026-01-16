@@ -1,3 +1,6 @@
+#![cfg(feature = "legacy-manifest-tests")]
+// Legacy artifact/CAS tests moved to capsule-cli.
+
 //! Unit 6.1: CAS Resolution & Audit Log Persistence E2E Tests
 //!
 //! These tests verify that:

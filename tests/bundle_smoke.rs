@@ -1,3 +1,6 @@
+#![cfg(feature = "legacy-manifest-tests")]
+// Legacy bundle smoke tests (capsule.toml-based) moved to capsule-cli.
+
 use std::fs;
 
 use nacelle::bundle;

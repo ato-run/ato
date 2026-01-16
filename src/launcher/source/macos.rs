@@ -308,36 +308,7 @@ async fn launch_with_sandbox_exec(
     // Set working directory
     cmd.current_dir(&target.source_dir);
 
-    // Set environment variables (inherit from manifest/runplan)
-    // Note: sandbox-exec inherits parent env, but we explicitly set user-defined vars
-    if let Some(manifest_json) = request.manifest_json {
-        if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(manifest_json) {
-            if let Some(env_obj) = manifest
-                .get("execution")
-                .and_then(|e| e.get("env"))
-                .and_then(|e| e.as_object())
-            {
-                for (k, v) in env_obj {
-                    if let Some(v_str) = v.as_str() {
-                        cmd.env(k, v_str);
-                    }
-                }
-            }
-        }
-    }
-    // Explicitly set PORT if allocated (from HOST_PORT in manifest env)
-    if let Some(manifest_json) = request.manifest_json {
-        if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(manifest_json) {
-            if let Some(port) = manifest
-                .get("execution")
-                .and_then(|e| e.get("env"))
-                .and_then(|e| e.get("HOST_PORT"))
-                .and_then(|p| p.as_str())
-            {
-                cmd.env("PORT", port);
-            }
-        }
-    }
+    // Note: sandbox-exec inherits parent env; config-driven env injection is handled upstream.
 
     // Setup output redirection
     let log_path = runtime.workload_log_path(request.workload_id);

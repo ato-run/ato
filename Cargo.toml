@@ -18,8 +18,6 @@ path = "src/lib.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-toml = "0.8"
-axum = "0.7"
 
 # 既存の依存関係
 serde = { version = "1.0", features = ["derive"] }
@@ -30,37 +28,19 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 anyhow = "1.0"
 thiserror = "1.0"
-num_cpus = "1.16"
 which = "5.0"
-chrono = { version = "0.4", features = ["serde"] }
 
 dirs = "5.0"
-serde_yaml = "0.9"
 
-
-
-# Storage management
-uuid = { version = "1.10", features = ["v4"] }
 
 
 # Cryptography & Audit
-ed25519-dalek = { version = "2.1", features = ["rand_core", "pkcs8"] }
-rand = "0.8"
 hex = "0.4"
-hmac = "0.12"
-base64 = "0.22"
 
 
 # Type definitions and utilities
-dashmap = "6"
-capnp = "0.24"
-tokio-stream = { version = "0.1.17", features = ["sync", "net"] }
-hcl-rs = "0.17"
-async-stream = "0.3.6"
 futures = "0.3.31"
 sha2 = "0.10.9"
-
-bytes = "1.11.0"
 # Cross-compiling for Linux guest (musl) should not depend on host OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 
@@ -76,16 +56,9 @@ indicatif = "0.17"
 # Socket Activation (Phase 2): FD inheritance for child processes
 nix = { version = "0.30.1", features = ["signal", "fs", "socket", "net"] }
 libc = "0.2"
-subtle = "2.6.1"
-rust_decimal = { version = "1.39.0", features = ["serde"] }
-rust_decimal_macros = "1.39.0"
 shell-words = "1.1.1"
 
 
-# L1 Policy pattern matching
-regex = "1.10"
-ctrlc = "3.4"
-ignore = "0.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Phase 3: Sandbox (Linux Landlock LSM)
@@ -103,10 +76,10 @@ phase2 = []
 embedded = []
 # Optional CUDA support for VRAM checks
 cuda = []
+legacy-manifest-tests = []
 
 [dev-dependencies]
 tempfile = "3.8"
-tower = { version = "0.4", features = ["util"] }
 
 [build-dependencies]
 aya-build = "0.1"

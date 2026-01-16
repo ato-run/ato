@@ -7,8 +7,7 @@ use anyhow::Context;
 use std::net::IpAddr;
 
 #[cfg(target_os = "linux")]
-use crate::egress::MAX_EGRESS_RULES;
-use crate::runtime_config::EgressRuleEntry;
+use crate::config::{EgressRuleEntry, MAX_EGRESS_RULES};
 
 #[cfg(target_os = "linux")]
 use aya::maps::lpm_trie::{Key as LpmKey, LpmTrie};

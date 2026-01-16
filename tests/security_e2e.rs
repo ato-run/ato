@@ -1,3 +1,6 @@
+#![cfg(feature = "legacy-manifest-tests")]
+// Legacy security tests moved to capsule-cli.
+
 //! Security Integration E2E Tests
 //!
 //! These tests verify the complete security stack:

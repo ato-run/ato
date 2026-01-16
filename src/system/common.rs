@@ -1,4 +1,4 @@
-use crate::runtime_config::EgressRuleEntry;
+use crate::config::EgressRuleEntry;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
