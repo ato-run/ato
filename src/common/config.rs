@@ -231,10 +231,8 @@ mod tests {
 
     #[test]
     fn load_config_returns_none_when_file_missing() {
-        let path = std::env::temp_dir().join(format!(
-            "nacelle-engine-config-missing-{}",
-            unique_suffix()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("nacelle-engine-config-missing-{}", unique_suffix()));
         let cfg = load_config(&path).expect("missing file should not be an error");
         assert!(cfg.is_none());
     }
@@ -305,10 +303,8 @@ mod tests {
 
     #[test]
     fn load_config_reports_parse_error() {
-        let path = std::env::temp_dir().join(format!(
-            "nacelle-engine-config-invalid-{}",
-            unique_suffix()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("nacelle-engine-config-invalid-{}", unique_suffix()));
         fs::write(&path, "not = valid = toml").expect("should write invalid config");
 
         let err = load_config(&path).expect_err("invalid config should error");

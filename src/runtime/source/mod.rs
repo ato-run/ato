@@ -1,8 +1,8 @@
-//! Source Runtime - Hybrid Native/OCI execution for interpreted languages
+//! Source Runtime - Native execution for interpreted languages
 //!
 //! Provides fast development experience (3ms startup) using host toolchains
-//! with sandbox isolation, falling back to OCI containers when toolchains
-//! are unavailable or in production mode.
+//! with sandbox isolation. OCI fallback is removed; capsule-cli is responsible
+//! for routing to other runtimes.
 //!
 //! Platform-specific sandbox implementations:
 //! - Linux: bubblewrap (bwrap) namespace isolation
@@ -20,8 +20,6 @@ mod macos;
 
 #[cfg(target_os = "windows")]
 mod windows;
-
-mod fallback;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -41,8 +39,6 @@ pub use validator::{validate_binary, validate_cmd};
 pub enum SourceRuntimeMode {
     /// Native execution with platform sandbox (fast, dev-friendly)
     Native,
-    /// OCI container execution (secure, cross-platform fallback)
-    Containerized,
 }
 
 /// Configuration for SourceRuntime
@@ -68,14 +64,12 @@ impl Default for SourceRuntimeConfig {
     }
 }
 
-/// Hybrid Source Runtime supporting both native and containerized execution
+/// Source Runtime supporting native sandbox execution
 pub struct SourceRuntime {
     config: SourceRuntimeConfig,
     toolchain_manager: ToolchainManager,
     /// JIT Provisioning: Downloads runtimes on-demand if not available locally
     runtime_fetcher: Option<RuntimeFetcher>,
-    #[allow(dead_code)]
-    oci_fallback: Option<()>, // Placeholder - OCI fallback removed in UARC V1.1.0
     /// Active workloads (workload_id -> pid)
     active_workloads: Mutex<HashMap<String, u32>>,
     /// Child process handles - keeps processes alive and allows management
@@ -84,7 +78,7 @@ pub struct SourceRuntime {
 
 impl SourceRuntime {
     /// Create a new SourceRuntime with the given configuration
-    pub fn new(config: SourceRuntimeConfig, _oci_fallback: Option<()>) -> Self {
+    pub fn new(config: SourceRuntimeConfig) -> Self {
         // Try to initialize RuntimeFetcher for JIT provisioning
         let runtime_fetcher = match RuntimeFetcher::new() {
             Ok(fetcher) => {
@@ -101,7 +95,6 @@ impl SourceRuntime {
             config,
             toolchain_manager: ToolchainManager::new(),
             runtime_fetcher,
-            oci_fallback: None,
             active_workloads: Mutex::new(HashMap::new()),
             active_children: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -119,61 +112,42 @@ impl SourceRuntime {
     }
 
     /// Determine the execution mode for a given source target
-    pub fn determine_mode(&self, target: &SourceTarget) -> SourceRuntimeMode {
-        // If not in dev mode, always use containerized
-        if !self.config.dev_mode {
-            return SourceRuntimeMode::Containerized;
-        }
-
-        // Check if we have a compatible toolchain (local or JIT-provisioned)
-        let has_toolchain = self
+    pub fn determine_mode(&self, target: &SourceTarget) -> Result<SourceRuntimeMode, RuntimeError> {
+        // Log toolchain availability for debugging
+        if self
             .toolchain_manager
             .find_toolchain(&target.language, target.version.as_deref())
-            .is_some();
-
-        let has_jit_cached = self
-            .runtime_fetcher
-            .as_ref()
-            .and_then(|f| {
-                target
-                    .version
-                    .as_deref()
-                    .map(|v| f.is_cached(&target.language, v))
-            })
-            .unwrap_or(false);
-
-        if has_toolchain || has_jit_cached {
-            if has_toolchain {
-                info!("Using local toolchain for {}", target.language);
-            } else {
+            .is_some()
+        {
+            info!("Using local toolchain for {}", target.language);
+        } else if let Some(fetcher) = self.runtime_fetcher.as_ref() {
+            if target
+                .version
+                .as_deref()
+                .map(|v| fetcher.is_cached(&target.language, v))
+                .unwrap_or(false)
+            {
                 info!("Using JIT-provisioned toolchain for {}", target.language);
-            }
-
-            // Check if native sandbox is available on this platform
-            if Self::is_native_sandbox_available() {
-                SourceRuntimeMode::Native
             } else {
-                warn!("Native sandbox not available, falling back to OCI");
-                SourceRuntimeMode::Containerized
-            }
-        } else if self.runtime_fetcher.is_some() {
-            // JIT provisioning available - will download on demand
-            info!(
-                "No local toolchain for {} {:?}, JIT provisioning will download on launch",
-                target.language, target.version
-            );
-            if Self::is_native_sandbox_available() {
-                SourceRuntimeMode::Native
-            } else {
-                SourceRuntimeMode::Containerized
+                info!(
+                    "No local toolchain for {} {:?}, JIT provisioning may download on launch",
+                    target.language, target.version
+                );
             }
         } else {
             warn!(
-                "No compatible toolchain found for {} {:?}, falling back to OCI",
+                "No compatible toolchain found for {} {:?}; launch may fail",
                 target.language, target.version
             );
-            SourceRuntimeMode::Containerized
         }
+
+        if !Self::is_native_sandbox_available() {
+            return Err(RuntimeError::SandboxSetupFailed(
+                "Native sandbox not supported on this platform; OCI fallback removed".to_string(),
+            ));
+        }
+
+        Ok(SourceRuntimeMode::Native)
     }
 
     /// Ensure a toolchain is available for the given target, downloading if necessary (JIT provisioning)
@@ -347,18 +321,11 @@ impl SourceRuntime {
         _target: &SourceTarget,
     ) -> Result<LaunchResult, RuntimeError> {
         Err(RuntimeError::SandboxSetupFailed(
-            "Native sandbox not supported on this platform. Use OCI fallback.".to_string(),
+            "Native sandbox not supported on this platform.".to_string(),
         ))
     }
 
-    /// Launch using OCI container fallback
-    async fn launch_containerized(
-        &self,
-        request: &LaunchRequest<'_>,
-        target: &SourceTarget,
-    ) -> Result<LaunchResult, RuntimeError> {
-        fallback::launch_with_oci(self, request, target).await
-    }
+    // OCI fallback removed; only native sandbox is supported.
 }
 
 #[async_trait]
@@ -390,12 +357,11 @@ impl Runtime for SourceRuntime {
         }
 
         // Determine execution mode
-        let mode = self.determine_mode(target);
+        let mode = self.determine_mode(target)?;
         info!("Selected execution mode: {:?}", mode);
 
         match mode {
             SourceRuntimeMode::Native => self.launch_native(&request, target).await,
-            SourceRuntimeMode::Containerized => self.launch_containerized(&request, target).await,
         }
     }
 
@@ -464,38 +430,12 @@ mod tests {
     }
 
     #[test]
-    fn test_determine_mode_without_dev_mode() {
-        let config = SourceRuntimeConfig {
-            dev_mode: false,
-            ..Default::default()
-        };
-        let runtime = SourceRuntime::new(config, None);
-
-        let target = SourceTarget {
-            language: "python".to_string(),
-            version: Some("3.11".to_string()),
-            entrypoint: "main.py".to_string(),
-            dependencies: None,
-            args: vec![],
-            source_dir: PathBuf::from("/tmp"),
-            cmd: None,
-            dev_mode: false,
-        };
-
-        // Without dev_mode, should always be Containerized
-        assert!(matches!(
-            runtime.determine_mode(&target),
-            SourceRuntimeMode::Containerized
-        ));
-    }
-
-    #[test]
     fn test_workload_log_path() {
         let config = SourceRuntimeConfig {
             log_dir: PathBuf::from("/var/log/nacelle"),
             ..Default::default()
         };
-        let runtime = SourceRuntime::new(config, None);
+        let runtime = SourceRuntime::new(config);
 
         let path = runtime.workload_log_path("test-123");
         assert_eq!(path, PathBuf::from("/var/log/nacelle/test-123.log"));
