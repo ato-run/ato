@@ -57,51 +57,6 @@ pub fn extract_bundle_bytes(file_data: &[u8]) -> Result<Vec<u8>> {
     zstd::decode_all(compressed).context("Failed to decompress bundle")
 }
 
-/// Read entrypoint from capsule.toml.
-///
-/// Prefers `targets.source.entrypoint` (UARC V1.1+), falls back to legacy `execution.entrypoint`.
-pub fn read_entrypoint_from_manifest(manifest_path: &Path) -> Result<String> {
-    let manifest_content = std::fs::read_to_string(manifest_path)
-        .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
-    let manifest: toml::Value = toml::from_str(&manifest_content)
-        .with_context(|| format!("Failed to parse manifest TOML: {}", manifest_path.display()))?;
-
-    let entrypoint = manifest
-        .get("targets")
-        .and_then(|t| t.get("source"))
-        .and_then(|s| s.get("entrypoint"))
-        .and_then(|e| e.as_str())
-        .or_else(|| {
-            manifest.get("execution").and_then(|e| {
-                e.get("release")
-                    .and_then(|p| p.get("entrypoint"))
-                    .or_else(|| e.get("entrypoint"))
-                    .and_then(|e| e.as_str())
-            })
-        })
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("No entrypoint defined in capsule.toml"))?;
-
-    Ok(entrypoint.to_string())
-}
-
-/// Read `targets.source.language` from capsule.toml when present.
-pub fn read_source_language_from_manifest(manifest_path: &Path) -> Result<Option<String>> {
-    let manifest_content = std::fs::read_to_string(manifest_path)
-        .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
-    let manifest: toml::Value = toml::from_str(&manifest_content)
-        .with_context(|| format!("Failed to parse manifest TOML: {}", manifest_path.display()))?;
-
-    Ok(manifest
-        .get("targets")
-        .and_then(|t| t.get("source"))
-        .and_then(|s| s.get("language"))
-        .and_then(|l| l.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty()))
-}
-
 fn normalize_language_alias(lang: &str) -> String {
     let l = lang.trim().to_ascii_lowercase();
     match l.as_str() {
@@ -209,7 +164,7 @@ pub fn build_bundle_command(
         .first()
         .map(|s| s.as_str())
         .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("No entrypoint defined in capsule.toml"))?;
+        .ok_or_else(|| anyhow::anyhow!("No entrypoint provided"))?;
 
     let resolved_program = resolve_program(program, source_dir);
 

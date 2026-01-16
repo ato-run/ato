@@ -1,3 +1,6 @@
+#![cfg(feature = "legacy-manifest-tests")]
+// Legacy manifest benchmarks moved to capsule-cli.
+
 //! Performance Benchmarks for Storage and Container Runtime
 //!
 //! These benchmarks measure:

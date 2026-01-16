@@ -40,7 +40,8 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
         anyhow::bail!("No config.json found in bundle (R3 requires config.json)");
     }
 
-    let config = nacelle::runtime_config::load_config(&config_path)?;
+    let config = nacelle::config::load_config(&config_path)?;
+    let network_enabled = config.sandbox.network.enabled;
     let egress_mode = config
         .sandbox
         .network
@@ -49,18 +50,14 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
         .map(|e| e.mode.as_str())
         .unwrap_or("allow_all");
 
-    let dns_rules = if config.sandbox.network.allow_domains.is_some() {
-        nacelle::egress::dns_bootstrap::dns_bootstrap_rules()?
-    } else {
-        Vec::new()
-    };
+    let dns_rules = Vec::new();
     let enforcement_str = config.sandbox.network.enforcement.as_str();
     let strict_enforcement = enforcement_str == "strict";
     let job_id = format!("job-{}", std::process::id());
     let mut sandbox = nacelle::system::new_network_sandbox();
     let mut sandbox_enabled = false;
 
-    if egress_mode != "allow_all" {
+    if network_enabled && egress_mode != "allow_all" {
         let initial_rule = nacelle::system::common::IsolationRule {
             allow_rules: Vec::new(),
             dns_rules: dns_rules.clone(),
@@ -83,14 +80,10 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
             allow_rules.extend(rules.iter().cloned());
         }
     }
-    if let Some(domains) = &config.sandbox.network.allow_domains {
-        let resolved = nacelle::egress::resolver::resolve_allow_domains(domains)?;
-        allow_rules.extend(resolved);
-    }
     if !allow_rules.is_empty() {
-        nacelle::egress::validate_egress_rules(&allow_rules)?;
+        nacelle::config::validate_egress_rules(&allow_rules)?;
     }
-    if egress_mode != "allow_all" && sandbox_enabled {
+    if network_enabled && egress_mode != "allow_all" && sandbox_enabled {
         let update_rule = nacelle::system::common::IsolationRule {
             allow_rules: allow_rules.clone(),
             dns_rules: dns_rules.clone(),
@@ -107,7 +100,7 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     }
 
     #[cfg(target_os = "linux")]
-    {
+    if network_enabled && sandbox_enabled {
         nacelle::system::linux::cgroup::cleanup_orphan_cgroups();
         let enforcement_mode =
             nacelle::system::linux::enforcement::EnforcementMode::parse_mode(enforcement_str);

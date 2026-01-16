@@ -10,8 +10,6 @@
 //!
 //! Remaining components:
 //! - sandbox: OS-native process sandboxing (Landlock/Seatbelt)
-//! - dns_monitor: DNS request monitoring
-//! - egress_proxy: Egress proxy implementation
 //! - path: Path validation and security
 //!
 //! Moved to capsule-cli:
@@ -34,21 +32,10 @@ pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-pub mod dns_monitor;
-pub mod egress_policy;
-pub mod egress_proxy;
 pub mod path;
 pub mod sandbox;
-pub mod signing;
-pub mod verifier;
 pub mod vram;
-
-pub use dns_monitor::*;
-pub use egress_policy::*;
-pub use egress_proxy::*;
 pub use path::*;
-pub use signing::*;
-pub use verifier::*;
 pub use vram::*;
 
 use common::{IsolationRule, SystemError};
@@ -110,5 +97,3 @@ pub fn new_network_sandbox() -> Box<dyn NetworkSandbox> {
 	}
 }
 
-// ENV constant kept for runtime use
-pub const ENV_KEY_EGRESS_TOKEN: &str = "NACELLE_EGRESS_TOKEN";

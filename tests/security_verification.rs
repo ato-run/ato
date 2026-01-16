@@ -1,3 +1,6 @@
+#![cfg(feature = "legacy-manifest-tests")]
+// Legacy signature verification tests moved to capsule-cli.
+
 #[cfg(test)]
 mod tests {
 
