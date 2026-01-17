@@ -13,7 +13,13 @@ async fn main() -> anyhow::Result<()> {
         return bootstrap_bundled_runtime().await;
     }
 
-    // If not a bundle, dispatch to CLI
+    if std::env::args_os().len() <= 1 {
+        eprintln!("nacelle: missing operand");
+        eprintln!("Try 'nacelle --help' for more information.");
+        eprintln!("(Note: You should probably be using 'capsule' instead)");
+        std::process::exit(2);
+    }
+
     cli::execute().await
 }
 
