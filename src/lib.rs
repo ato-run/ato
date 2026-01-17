@@ -19,8 +19,7 @@
 //! ## CLI Usage
 //!
 //! ```ignore
-//! nacelle pack --bundle
-//! ./my-app-bundle
+//! nacelle internal features
 //! ```
 
 // =============================================================================

@@ -29,7 +29,7 @@ A minimal yet functional TODO application showcasing Capsule deployment with a R
 
 - Node.js 18+ and pnpm
 - Python 3.9+
-- Nacelle CLI tools (`cargo install --path ./cli`)
+- capsule CLI tools (`cargo build -p capsule-cli`)
 
 ### Quick Start
 
@@ -39,11 +39,8 @@ cd samples/simple-todo
 # Build the React application
 ./build.sh
 
-# Verify the Capsule manifest
-nacelle verify ./capsule.toml
-
 # Package as a Capsule
-nacelle package ./capsule.toml --output simple-todo.capsule
+capsule pack --bundle --manifest ./capsule.toml --output simple-todo.capsule
 ```
 
 ### Project Structure
@@ -95,7 +92,7 @@ bun install
 bun run dev
 
 # Build Capsule
-nacelle package ./capsule.toml --output my-app.capsule
+capsule pack --bundle --manifest ./capsule.toml --output my-app.capsule
 ```
 
 ### Project Structure
@@ -142,7 +139,7 @@ cargo test
 
 For production key generation, use:
 ```bash
-nacelle keygen my-production-key
+capsule keygen --name my-production-key
 ```
 
 See [keys/README.md](./keys/README.md) for details.
@@ -153,11 +150,11 @@ See [keys/README.md](./keys/README.md) for details.
 
 ### 1. Prerequisites
 
-Ensure you have the Nacelle toolchain installed:
+Ensure you have the capsule CLI built:
 
 ```bash
 cd ../..  # Navigate to repo root
-cargo install --path ./cli
+cargo build -p capsule-cli
 ```
 
 ### 2. Choose a Sample
