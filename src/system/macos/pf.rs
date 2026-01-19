@@ -103,3 +103,25 @@ fn format_pf_target(rule: &EgressRuleEntry) -> Result<String, SystemError> {
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pf_rules_block_by_default_and_allow_list() {
+        let rule = IsolationRule {
+            allow_rules: vec![EgressRuleEntry {
+                rule_type: "ip".to_string(),
+                value: "127.0.0.1".to_string(),
+            }],
+            dns_rules: vec![],
+            job_id: "job-test".to_string(),
+        };
+
+        let rules = build_pf_rules("test", &rule).expect("build_pf_rules failed");
+        assert!(rules.contains("block drop out all"));
+        assert!(rules.contains("pass out inet proto udp to any port 53"));
+        assert!(rules.contains("pass out to 127.0.0.1"));
+    }
+}

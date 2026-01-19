@@ -127,11 +127,22 @@ fn build_command(bundle_root: &Path, svc: &ServiceConfig) -> Result<Command, Str
 
 fn resolve_path(bundle_root: &Path, path: &str) -> PathBuf {
     let trimmed = path.trim();
+
+    // If the config provides an absolute path, trust it.
     if trimmed.starts_with('/') {
-        PathBuf::from(trimmed)
-    } else {
-        bundle_root.join(trimmed)
+        return PathBuf::from(trimmed);
     }
+
+    // If the config provides a bare executable name (e.g. "bash"), resolve it from PATH
+    // so that host-provided runtimes work in bundle mode.
+    if !trimmed.contains('/') {
+        if let Ok(found) = which::which(trimmed) {
+            return found;
+        }
+    }
+
+    // Otherwise, treat it as a path relative to the extracted bundle root.
+    bundle_root.join(trimmed)
 }
 
 fn resolve_arg(bundle_root: &Path, arg: &str) -> String {
