@@ -17,17 +17,21 @@ pub async fn launch_with_bubblewrap(
     target: &SourceTarget,
 ) -> Result<LaunchResult, RuntimeError> {
     // Find toolchain binary
-    let toolchain = runtime
-        .toolchain_manager
-        .find_toolchain(&target.language, target.version.as_deref())
-        .ok_or_else(|| RuntimeError::ToolchainNotFound {
-            language: target.language.clone(),
-            version: target.version.clone(),
+    let toolchain_path = runtime
+        .ensure_toolchain(target)
+        .await
+        .map_err(|e| RuntimeError::ToolchainError {
+            message: format!("Failed to ensure {} toolchain", target.language),
+            technical_reason: Some(e.to_string()),
+            cloud_upsell: Some(
+                "💡 This app requires a cloud environment. Run with '--mode=cloud' (Pro) to execute in a managed Linux VM with guaranteed compatibility."
+                    .to_string(),
+            ),
         })?;
 
     info!(
         "Launching with bubblewrap: {} {} (toolchain: {:?}, dev_mode: {})",
-        target.language, target.entrypoint, toolchain.path, target.dev_mode
+        target.language, target.entrypoint, toolchain_path, target.dev_mode
     );
 
     // Ensure log directory exists
@@ -61,7 +65,7 @@ pub async fn launch_with_bubblewrap(
     cmd.args(["--ro-bind", "/etc/ssl", "/etc/ssl"]);
 
     // Bind mount the toolchain binary
-    let toolchain_path_str = toolchain.path.to_string_lossy();
+    let toolchain_path_str = toolchain_path.to_string_lossy();
     cmd.args(["--ro-bind", &toolchain_path_str, &toolchain_path_str]);
 
     // Bind mount the source directory read-only
@@ -84,16 +88,42 @@ pub async fn launch_with_bubblewrap(
         cmd.args(["--setenv", "HOME", "/tmp"]);
         cmd.args(["--setenv", "LANG", "C.UTF-8"]);
 
+        // Apply sidecar (SOCKS5 proxy) environment variables
+        if let Some(ref sidecar) = runtime.config.sidecar_config {
+            let proxy_url = format!("socks5h://127.0.0.1:{}", sidecar.socks_port);
+            cmd.args(["--setenv", "HTTP_PROXY", &proxy_url]);
+            cmd.args(["--setenv", "HTTPS_PROXY", &proxy_url]);
+            cmd.args(["--setenv", "ALL_PROXY", &proxy_url]);
+
+            // Build NO_PROXY list
+            let mut no_proxy = vec![
+                "localhost".to_string(),
+                "127.0.0.1".to_string(),
+                "::1".to_string(),
+            ];
+            no_proxy.extend(sidecar.no_proxy.clone());
+            no_proxy.push(".local".to_string());
+
+            let no_proxy_str = no_proxy.join(",");
+            cmd.args(["--setenv", "NO_PROXY", &no_proxy_str]);
+            cmd.args(["--setenv", "no_proxy", &no_proxy_str]);
+
+            info!("Applied SOCKS5 proxy {} to sandboxed process", proxy_url);
+        }
+
         // Block access to sensitive kernel interfaces
         cmd.args(["--ro-bind", "/dev/null", "/dev/kvm"]);
 
         // Use seccomp filtering (if available)
         // Note: Would need seccomp-bpf profile file
+    } else {
+        // Development mode: apply proxy env vars without clearing
+        runtime.apply_sidecar_env(&mut cmd);
     }
 
     // Add the actual command
     cmd.arg("--");
-    cmd.arg(&toolchain.path);
+    cmd.arg(&toolchain_path);
 
     // Add language-specific arguments
     match target.language.to_lowercase().as_str() {

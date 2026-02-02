@@ -64,18 +64,22 @@ async fn launch_with_alcoholless(
     request: &LaunchRequest<'_>,
     target: &SourceTarget,
 ) -> Result<LaunchResult, RuntimeError> {
-    // Find toolchain binary
-    let toolchain = runtime
-        .toolchain_manager
-        .find_toolchain(&target.language, target.version.as_deref())
-        .ok_or_else(|| RuntimeError::ToolchainNotFound {
-            language: target.language.clone(),
-            version: target.version.clone(),
+    // Find toolchain binary with JIT provisioning
+    let toolchain_path = runtime
+        .ensure_toolchain(target)
+        .await
+        .map_err(|e| RuntimeError::ToolchainError {
+            message: format!("Failed to ensure {} toolchain", target.language),
+            technical_reason: Some(e.to_string()),
+            cloud_upsell: Some(
+                "💡 This app requires a cloud environment. Run with '--mode=cloud' (Pro) to execute in a managed Linux VM with guaranteed compatibility."
+                    .to_string(),
+            ),
         })?;
 
     info!(
         "Launching with Alcoholless: {} {} (toolchain: {:?})",
-        target.language, target.entrypoint, toolchain.path
+        target.language, target.entrypoint, toolchain_path
     );
 
     // Ensure log directory exists
@@ -110,7 +114,7 @@ async fn launch_with_alcoholless(
                 || binary == "ruby"
                 || binary == "deno"
             {
-                toolchain.path.clone()
+                toolchain_path.clone()
             } else {
                 which::which(binary).unwrap_or_else(|_| PathBuf::from(binary))
             };
@@ -125,7 +129,7 @@ async fn launch_with_alcoholless(
         }
     } else {
         // Legacy path: use toolchain + language-specific arguments
-        cmd.arg(&toolchain.path);
+        cmd.arg(&toolchain_path);
 
         // Add language-specific arguments
         match target.language.to_lowercase().as_str() {
@@ -143,6 +147,9 @@ async fn launch_with_alcoholless(
 
     // Add user-provided arguments
     cmd.args(&target.args);
+
+    // Apply sidecar (SOCKS5 proxy) environment variables
+    runtime.apply_sidecar_env(&mut cmd);
 
     // Setup output redirection
     let log_path = runtime.workload_log_path(request.workload_id);
@@ -217,18 +224,22 @@ async fn launch_with_sandbox_exec(
     request: &LaunchRequest<'_>,
     target: &SourceTarget,
 ) -> Result<LaunchResult, RuntimeError> {
-    // Find toolchain binary
-    let toolchain = runtime
-        .toolchain_manager
-        .find_toolchain(&target.language, target.version.as_deref())
-        .ok_or_else(|| RuntimeError::ToolchainNotFound {
-            language: target.language.clone(),
-            version: target.version.clone(),
+    // Find toolchain binary with JIT provisioning
+    let toolchain_path = runtime
+        .ensure_toolchain(target)
+        .await
+        .map_err(|e| RuntimeError::ToolchainError {
+            message: format!("Failed to ensure {} toolchain", target.language),
+            technical_reason: Some(e.to_string()),
+            cloud_upsell: Some(
+                "💡 This app requires a cloud environment. Run with '--mode=cloud' (Pro) to execute in a managed Linux VM with guaranteed compatibility."
+                    .to_string(),
+            ),
         })?;
 
     info!(
         "Launching with sandbox-exec: {} {} (toolchain: {:?})",
-        target.language, target.entrypoint, toolchain.path
+        target.language, target.entrypoint, toolchain_path
     );
 
     // Ensure log directory exists
@@ -238,7 +249,7 @@ async fn launch_with_sandbox_exec(
     })?;
 
     // Generate dynamic Seatbelt profile
-    let profile = generate_seatbelt_profile(target, &toolchain.path);
+    let profile = generate_seatbelt_profile(target, &toolchain_path);
 
     // Write profile to temp file
     let profile_path = runtime
@@ -271,7 +282,7 @@ async fn launch_with_sandbox_exec(
                 || binary == "ruby"
                 || binary == "deno"
             {
-                toolchain.path.clone()
+                toolchain_path.clone()
             } else {
                 which::which(binary).unwrap_or_else(|_| PathBuf::from(binary))
             };
@@ -286,7 +297,7 @@ async fn launch_with_sandbox_exec(
         }
     } else {
         // Legacy path: use toolchain + language-specific arguments
-        cmd.arg(&toolchain.path);
+        cmd.arg(&toolchain_path);
 
         // Add language-specific arguments
         match target.language.to_lowercase().as_str() {
@@ -308,7 +319,8 @@ async fn launch_with_sandbox_exec(
     // Set working directory
     cmd.current_dir(&target.source_dir);
 
-    // Note: sandbox-exec inherits parent env; config-driven env injection is handled upstream.
+    // Apply sidecar (SOCKS5 proxy) environment variables
+    runtime.apply_sidecar_env(&mut cmd);
 
     // Setup output redirection
     let log_path = runtime.workload_log_path(request.workload_id);

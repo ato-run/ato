@@ -133,18 +133,22 @@ async fn launch_with_windows_sandbox(
     request: &LaunchRequest<'_>,
     target: &SourceTarget,
 ) -> Result<LaunchResult, RuntimeError> {
-    // Find toolchain binary
-    let toolchain = runtime
-        .toolchain_manager
-        .find_toolchain(&target.language, target.version.as_deref())
-        .ok_or_else(|| RuntimeError::ToolchainNotFound {
-            language: target.language.clone(),
-            version: target.version.clone(),
+    // Find toolchain binary with JIT provisioning
+    let toolchain_path = runtime
+        .ensure_toolchain(target)
+        .await
+        .map_err(|e| RuntimeError::ToolchainError {
+            message: format!("Failed to ensure {} toolchain", target.language),
+            technical_reason: Some(e.to_string()),
+            cloud_upsell: Some(
+                "💡 This app requires a cloud environment. Run with '--mode=cloud' (Pro) to execute in a managed Linux VM with guaranteed compatibility."
+                    .to_string(),
+            ),
         })?;
 
     info!(
         "Launching with Windows Sandbox: {} {} (toolchain: {:?})",
-        target.language, target.entrypoint, toolchain.path
+        target.language, target.entrypoint, toolchain_path
     );
 
     // Ensure directories exist
@@ -158,7 +162,7 @@ async fn launch_with_windows_sandbox(
     })?;
 
     // Generate .wsb configuration file
-    let wsb_content = generate_wsb_config(target, &toolchain.path);
+    let wsb_content = generate_wsb_config(target, &toolchain_path);
     let wsb_path = runtime
         .config
         .state_dir
@@ -284,18 +288,22 @@ async fn launch_with_sandboxie(
         ))
     })?;
 
-    // Find toolchain binary
-    let toolchain = runtime
-        .toolchain_manager
-        .find_toolchain(&target.language, target.version.as_deref())
-        .ok_or_else(|| RuntimeError::ToolchainNotFound {
-            language: target.language.clone(),
-            version: target.version.clone(),
+    // Find toolchain binary with JIT provisioning
+    let toolchain_path = runtime
+        .ensure_toolchain(target)
+        .await
+        .map_err(|e| RuntimeError::ToolchainError {
+            message: format!("Failed to ensure {} toolchain", target.language),
+            technical_reason: Some(e.to_string()),
+            cloud_upsell: Some(
+                "💡 This app requires a cloud environment. Run with '--mode=cloud' (Pro) to execute in a managed Linux VM with guaranteed compatibility."
+                    .to_string(),
+            ),
         })?;
 
     info!(
         "Launching with Sandboxie Plus: {} {} (toolchain: {:?})",
-        target.language, target.entrypoint, toolchain.path
+        target.language, target.entrypoint, toolchain_path
     );
 
     // Ensure log directory exists
@@ -316,7 +324,7 @@ async fn launch_with_sandboxie(
     cmd.arg("/silent"); // Suppress error dialogs
 
     // Add the toolchain
-    cmd.arg(&toolchain.path);
+    cmd.arg(&toolchain_path);
 
     // Add language-specific arguments
     match target.language.to_lowercase().as_str() {
