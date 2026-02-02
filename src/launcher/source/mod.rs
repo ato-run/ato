@@ -50,6 +50,17 @@ pub struct SourceRuntimeConfig {
     pub log_dir: PathBuf,
     /// State directory for runtime data
     pub state_dir: PathBuf,
+    /// Sidecar (SOCKS5 proxy) configuration
+    pub sidecar_config: Option<SidecarConfig>,
+}
+
+/// Sidecar proxy configuration
+#[derive(Debug, Clone)]
+pub struct SidecarConfig {
+    /// SOCKS5 proxy port (e.g., 1080)
+    pub socks_port: u16,
+    /// Additional hosts to exclude from proxy (comma-separated)
+    pub no_proxy: Vec<String>,
 }
 
 impl Default for SourceRuntimeConfig {
@@ -60,6 +71,7 @@ impl Default for SourceRuntimeConfig {
                 .unwrap_or(false),
             log_dir: PathBuf::from("/tmp/nacelle/logs"),
             state_dir: PathBuf::from("/tmp/nacelle/state"),
+            sidecar_config: None,
         }
     }
 }
@@ -111,6 +123,40 @@ impl SourceRuntime {
         Arc::clone(&self.active_children)
     }
 
+    /// Apply sidecar (SOCKS5 proxy) environment variables to a command
+    ///
+    /// This ensures all network traffic from the child process goes through
+    /// the sidecar proxy, enabling network isolation and monitoring.
+    pub fn apply_sidecar_env(&self, cmd: &mut std::process::Command) {
+        if let Some(ref sidecar) = self.config.sidecar_config {
+            let proxy_url = format!("socks5h://127.0.0.1:{}", sidecar.socks_port);
+            cmd.env("HTTP_PROXY", &proxy_url);
+            cmd.env("HTTPS_PROXY", &proxy_url);
+            cmd.env("ALL_PROXY", &proxy_url);
+
+            // Build NO_PROXY list: localhost + configured exclusions + capsule internal hosts
+            let mut no_proxy = vec![
+                "localhost".to_string(),
+                "127.0.0.1".to_string(),
+                "::1".to_string(),
+            ];
+            no_proxy.extend(sidecar.no_proxy.clone());
+
+            // Add capsule internal service endpoints
+            no_proxy.push(".local".to_string());
+
+            cmd.env("NO_PROXY", no_proxy.join(","));
+            cmd.env("no_proxy", no_proxy.join(","));
+
+            info!("Applied SOCKS5 proxy {} to command env", proxy_url);
+        }
+    }
+
+    /// Check if sidecar is configured and active
+    pub fn is_sidecar_configured(&self) -> bool {
+        self.config.sidecar_config.is_some()
+    }
+
     /// Determine the execution mode for a given source target
     pub fn determine_mode(&self, target: &SourceTarget) -> Result<SourceRuntimeMode, RuntimeError> {
         // Log toolchain availability for debugging
@@ -154,6 +200,11 @@ impl SourceRuntime {
     ///
     /// Returns the path to the language binary (e.g., python3)
     pub async fn ensure_toolchain(&self, target: &SourceTarget) -> Result<PathBuf, RuntimeError> {
+        info!(
+            "ensure_toolchain: language={}, version={:?}",
+            target.language, target.version
+        );
+
         // First, check local toolchains
         if let Some(toolchain) = self
             .toolchain_manager
@@ -163,94 +214,124 @@ impl SourceRuntime {
             return Ok(toolchain.path);
         }
 
+        info!(
+            "No local toolchain found for {} {:?}, attempting JIT provisioning",
+            target.language, target.version
+        );
+
         // Try JIT provisioning
         if let Some(ref fetcher) = self.runtime_fetcher {
-            match target.language.to_lowercase().as_str() {
+            let result = match target.language.to_lowercase().as_str() {
                 "python" => {
                     let version = target.version.as_deref().unwrap_or("3.11");
-                    info!(
-                        "JIT Provisioning: Ensuring Python {} is available...",
-                        version
-                    );
-                    let python_path = fetcher.ensure_python(version).await.map_err(|e| {
-                        RuntimeError::ToolchainNotFound {
-                            language: target.language.clone(),
-                            version: Some(format!("{} (JIT failed: {})", version, e)),
-                        }
-                    })?;
-                    return Ok(python_path);
+                    info!("JIT Provisioning: Downloading Python {}...", version);
+                    fetcher.ensure_python(version).await
                 }
                 "node" | "nodejs" => {
                     let version = target.version.as_deref().unwrap_or("22");
-                    info!(
-                        "JIT Provisioning: Ensuring Node {} is available...",
-                        version
-                    );
-                    let node_path = fetcher.ensure_node(version).await.map_err(|e| {
-                        RuntimeError::ToolchainNotFound {
-                            language: target.language.clone(),
-                            version: Some(format!("{} (JIT failed: {})", version, e)),
-                        }
-                    })?;
-                    return Ok(node_path);
+                    info!("JIT Provisioning: Downloading Node {}...", version);
+                    fetcher.ensure_node(version).await
                 }
                 "deno" => {
                     let version = match target.version.as_deref() {
                         Some(v) => v,
                         None => {
-                            return Err(RuntimeError::ToolchainNotFound {
-                                language: target.language.clone(),
-                                version: Some(
-                                    "Deno version is required for JIT provisioning".to_string(),
+                            return Err(RuntimeError::ToolchainError {
+                                message: "Deno version is required for JIT provisioning".to_string(),
+                                technical_reason: Some("Version constraint is missing".to_string()),
+                                cloud_upsell: Some(
+                                    "💡 This app requires Deno runtime. Try specifying a version in capsule.toml, or run with a cloud environment (Pro plan).".to_string(),
                                 ),
                             });
                         }
                     };
-                    info!(
-                        "JIT Provisioning: Ensuring Deno {} is available...",
-                        version
-                    );
-                    let deno_path = fetcher.ensure_deno(version).await.map_err(|e| {
-                        RuntimeError::ToolchainNotFound {
-                            language: target.language.clone(),
-                            version: Some(format!("{} (JIT failed: {})", version, e)),
-                        }
-                    })?;
-                    return Ok(deno_path);
+                    info!("JIT Provisioning: Downloading Deno {}...", version);
+                    fetcher.ensure_deno(version).await
                 }
                 "bun" => {
                     let version = match target.version.as_deref() {
                         Some(v) => v,
                         None => {
-                            return Err(RuntimeError::ToolchainNotFound {
-                                language: target.language.clone(),
-                                version: Some(
-                                    "Bun version is required for JIT provisioning".to_string(),
+                            return Err(RuntimeError::ToolchainError {
+                                message: "Bun version is required for JIT provisioning".to_string(),
+                                technical_reason: Some("Version constraint is missing".to_string()),
+                                cloud_upsell: Some(
+                                    "💡 This app requires Bun runtime. Try specifying a version in capsule.toml, or run with a cloud environment (Pro plan).".to_string(),
                                 ),
                             });
                         }
                     };
-                    info!("JIT Provisioning: Ensuring Bun {} is available...", version);
-                    let bun_path = fetcher.ensure_bun(version).await.map_err(|e| {
-                        RuntimeError::ToolchainNotFound {
-                            language: target.language.clone(),
-                            version: Some(format!("{} (JIT failed: {})", version, e)),
-                        }
-                    })?;
-                    return Ok(bun_path);
+                    info!("JIT Provisioning: Downloading Bun {}...", version);
+                    fetcher.ensure_bun(version).await
                 }
                 _ => {
-                    return Err(RuntimeError::ToolchainNotFound {
-                        language: target.language.clone(),
-                        version: Some("JIT provisioning not supported".to_string()),
+                    return Err(RuntimeError::ToolchainError {
+                        message: format!(
+                            "JIT provisioning not supported for language: {}",
+                            target.language
+                        ),
+                        technical_reason: Some(
+                            "Unsupported language for local JIT provisioning".to_string(),
+                        ),
+                        cloud_upsell: Some(
+                            "💡 This app requires a runtime that needs cloud environment. \
+                             Run with 'capsule run --mode=cloud' (Pro plan) to execute in a managed Linux VM."
+                                .to_string(),
+                        ),
                     });
                 }
-            }
+            };
+
+            return result.map_err(|e| {
+                let error_msg = format!("{}", e);
+                let technical_reason = if error_msg.contains("glibc") {
+                    Some(format!(
+                        "glibc version mismatch: {} - the runtime requires a newer glibc version than available on this system",
+                        error_msg
+                    ))
+                } else if error_msg.contains("Unsupported") && error_msg.contains("platform") {
+                    Some(format!(
+                        "Platform not supported: {} - this runtime is not available for your OS/architecture",
+                        error_msg
+                    ))
+                } else if error_msg.contains("network") || error_msg.contains("connection") {
+                    Some("Network error: Unable to download runtime".to_string())
+                } else if error_msg.contains("timeout") {
+                    Some("Timeout: Runtime download took too long".to_string())
+                } else {
+                    Some(format!("JIT provisioning failed: {}", error_msg))
+                };
+
+                RuntimeError::ToolchainError {
+                    message: format!(
+                        "Failed to provision {} runtime",
+                        target.language
+                    ),
+                    technical_reason,
+                    cloud_upsell: Some(
+                        "💡 This app requires a cloud environment. Run with '--mode=cloud' (Pro) to execute in a managed Linux VM with guaranteed compatibility."
+                            .to_string(),
+                    ),
+                }
+            });
         }
 
-        Err(RuntimeError::ToolchainNotFound {
-            language: target.language.clone(),
-            version: target.version.clone(),
+        Err(RuntimeError::ToolchainError {
+            message: format!(
+                "{} runtime not found on host",
+                target.language
+            ),
+            technical_reason: Some(
+                format!(
+                    "No local {} installation found (version: {:?})",
+                    target.language, target.version
+                )
+                .to_string(),
+            ),
+            cloud_upsell: Some(
+                "💡 This app requires a cloud environment. Run with '--mode=cloud' (Pro) to execute in a managed Linux VM with guaranteed compatibility."
+                    .to_string(),
+            ),
         })
     }
 

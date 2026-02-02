@@ -30,8 +30,11 @@ pub mod bundle;
 pub mod bundle_rules; // v3.0: Pre-validated sandbox rules loader
 pub mod common;
 pub mod config; // R3 config.json loader
-pub mod manager;
 pub mod launcher;
+pub mod lockfile;
+pub mod manager;
+pub mod sync;
+pub mod guest;
 pub mod system;
 
 // =============================================================================
@@ -43,4 +46,3 @@ pub use manager::supervisor as process_supervisor;
 
 // From system (security alias)
 pub use system as security;
-

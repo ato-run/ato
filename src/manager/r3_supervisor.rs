@@ -4,6 +4,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use crate::config::{RuntimeConfig, ServiceConfig};
+use crate::lockfile;
 use crate::system::NetworkSandbox;
 
 pub async fn run_services_from_config(
@@ -11,6 +12,11 @@ pub async fn run_services_from_config(
     bundle_root: &Path,
     sandbox: Option<&dyn NetworkSandbox>,
 ) -> Result<(), String> {
+    lockfile::enforce_lockfile_allowlist(bundle_root)
+        .map_err(|e| format!("capsule.lock allowlist check failed: {}", e))?;
+    lockfile::hydrate_bundle(bundle_root)
+        .await
+        .map_err(|e| format!("capsule.lock hydration failed: {}", e))?;
     if config.services.is_empty() {
         return Err("config.json has no services".to_string());
     }
@@ -98,8 +104,11 @@ fn terminate_all(children: &mut HashMap<String, Child>, exclude: &str) {
 }
 
 fn build_command(bundle_root: &Path, svc: &ServiceConfig) -> Result<Command, String> {
-    let executable = resolve_path(bundle_root, &svc.executable);
-    let mut cmd = Command::new(executable);
+    let cwd = svc.cwd.as_deref().unwrap_or("source");
+    let cwd_path = resolve_path(bundle_root, cwd);
+
+    let executable = resolve_path_with_cwd(bundle_root, cwd_path.clone(), &svc.executable);
+    let mut cmd = Command::new(&executable);
 
     let args: Vec<String> = svc
         .args
@@ -108,8 +117,7 @@ fn build_command(bundle_root: &Path, svc: &ServiceConfig) -> Result<Command, Str
         .collect();
     cmd.args(&args);
 
-    let cwd = svc.cwd.as_deref().unwrap_or("source");
-    cmd.current_dir(resolve_path(bundle_root, cwd));
+    cmd.current_dir(cwd_path);
 
     if let Some(envs) = &svc.env {
         for (key, value) in envs {
@@ -123,6 +131,34 @@ fn build_command(bundle_root: &Path, svc: &ServiceConfig) -> Result<Command, Str
     }
 
     Ok(cmd)
+}
+
+fn resolve_path_with_cwd(bundle_root: &Path, cwd: PathBuf, path: &str) -> PathBuf {
+    let trimmed = path.trim();
+
+    if trimmed.starts_with('/') {
+        return PathBuf::from(trimmed);
+    }
+
+    if trimmed.starts_with("source/") || trimmed.starts_with("runtime/") {
+        return bundle_root.join(trimmed);
+    }
+
+    if trimmed.starts_with("./") {
+        return cwd.join(trimmed.trim_start_matches("./"));
+    }
+
+    if !trimmed.contains('/') {
+        let with_cwd = cwd.join(trimmed);
+        if with_cwd.exists() {
+            return with_cwd;
+        }
+        if let Ok(found) = which::which(trimmed) {
+            return found;
+        }
+    }
+
+    bundle_root.join(trimmed)
 }
 
 fn resolve_path(bundle_root: &Path, path: &str) -> PathBuf {
