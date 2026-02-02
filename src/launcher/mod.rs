@@ -141,6 +141,13 @@ pub enum RuntimeError {
         version: Option<String>,
     },
 
+    #[error("toolchain error: {message}")]
+    ToolchainError {
+        message: String,
+        technical_reason: Option<String>,
+        cloud_upsell: Option<String>,
+    },
+
     #[error("sandbox setup failed: {0}")]
     SandboxSetupFailed(String),
 

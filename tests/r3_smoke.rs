@@ -30,6 +30,7 @@ mod unix_tests {
                 development_mode: None,
             },
             metadata: None,
+            sidecar: None,
         }
     }
 
@@ -135,5 +136,4 @@ mod unix_tests {
 
         assert!(result.is_err());
     }
-
 }

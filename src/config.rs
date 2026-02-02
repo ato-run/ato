@@ -12,6 +12,8 @@ pub struct RuntimeConfig {
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub metadata: Option<MetadataConfig>,
+    #[serde(default)]
+    pub sidecar: Option<SidecarConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -105,6 +107,21 @@ pub struct MetadataConfig {
     pub generated_by: Option<String>,
     #[serde(default)]
     pub source_manifest: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SidecarConfig {
+    pub tsnet: TsnetSidecarConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TsnetSidecarConfig {
+    pub enabled: bool,
+    pub control_url: String,
+    pub auth_key: String,
+    pub hostname: String,
+    pub socks_port: u16,
+    pub allow_net: Vec<String>,
 }
 
 pub fn load_config(path: &Path) -> Result<RuntimeConfig> {

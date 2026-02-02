@@ -46,7 +46,14 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
         anyhow::bail!("No config.json found in bundle (R3 requires config.json)");
     }
 
-    let config = nacelle::config::load_config(&config_path)?;
+    let mut config = nacelle::config::load_config(&config_path)?;
+
+    if let Some(main_svc) = config.services.get_mut("main") {
+        if main_svc.cwd == Some("source".to_string()) && !temp_dir.join("source").is_dir() {
+            main_svc.cwd = Some(".".to_string());
+        }
+    }
+
     let network_enabled = config.sandbox.network.enabled;
     let egress_mode = config
         .sandbox

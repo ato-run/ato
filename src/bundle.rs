@@ -56,4 +56,3 @@ pub fn extract_bundle_bytes(file_data: &[u8]) -> Result<Vec<u8>> {
     let compressed = &file_data[bundle_start..magic_start];
     zstd::decode_all(compressed).context("Failed to decompress bundle")
 }
-
