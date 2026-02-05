@@ -34,6 +34,9 @@ use crate::launcher::{LaunchRequest, LaunchResult, Runtime, RuntimeError, Source
 pub use toolchain::{RuntimeFetcher, ToolchainInfo, ToolchainManager};
 pub use validator::{validate_binary, validate_cmd};
 
+/// Async child process handle for supervisor mode
+pub type AsyncChild = tokio::process::Child;
+
 /// Source runtime execution mode
 #[derive(Debug, Clone)]
 pub enum SourceRuntimeMode {
@@ -84,8 +87,10 @@ pub struct SourceRuntime {
     runtime_fetcher: Option<RuntimeFetcher>,
     /// Active workloads (workload_id -> pid)
     active_workloads: Mutex<HashMap<String, u32>>,
-    /// Child process handles - keeps processes alive and allows management
+    /// Child process handles - keeps processes alive and allows management (sync, for sandbox modes)
     active_children: Arc<Mutex<HashMap<String, Child>>>,
+    /// Async child process handles for dev mode (tokio::process::Child)
+    async_children: Arc<tokio::sync::Mutex<HashMap<String, AsyncChild>>>,
 }
 
 impl SourceRuntime {
@@ -109,6 +114,7 @@ impl SourceRuntime {
             runtime_fetcher,
             active_workloads: Mutex::new(HashMap::new()),
             active_children: Arc::new(Mutex::new(HashMap::new())),
+            async_children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -116,6 +122,18 @@ impl SourceRuntime {
     pub fn register_child(&self, workload_id: String, child: Child) {
         let mut children = self.active_children.lock().unwrap();
         children.insert(workload_id, child);
+    }
+
+    /// Register an async child process for dev mode
+    pub async fn register_async_child(&self, workload_id: String, child: AsyncChild) {
+        let mut children = self.async_children.lock().await;
+        children.insert(workload_id, child);
+    }
+
+    /// Take an async child for waiting (removes from registry)
+    pub async fn take_async_child(&self, workload_id: &str) -> Option<AsyncChild> {
+        let mut children = self.async_children.lock().await;
+        children.remove(workload_id)
     }
 
     /// Get a reference to active children for external management
