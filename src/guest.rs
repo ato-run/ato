@@ -23,8 +23,8 @@ impl GuestManager {
         let runtime = SyncRuntime::open(&sync_path)?;
         self.sync_runtime = Some(runtime);
 
-        let mut session = GuestSession::new(sync_path)
-            .map_err(|e| anyhow::anyhow!(format!("{:?}", e)))?;
+        let mut session =
+            GuestSession::new(sync_path).map_err(|e| anyhow::anyhow!(format!("{:?}", e)))?;
         session.mode = GuestMode::Widget;
         session.role = GuestContextRole::Consumer;
         self.session = Some(session);
@@ -179,10 +179,7 @@ impl GuestManager {
             }
             return Err(anyhow::anyhow!(
                 "Read failed: {}",
-                response
-                    .error
-                    .map(|e| e.message)
-                    .unwrap_or_default()
+                response.error.map(|e| e.message).unwrap_or_default()
             ));
         }
         Err(anyhow::anyhow!("No active session"))
@@ -209,10 +206,7 @@ impl GuestManager {
             }
             return Err(anyhow::anyhow!(
                 "Read context failed: {}",
-                response
-                    .error
-                    .map(|e| e.message)
-                    .unwrap_or_default()
+                response.error.map(|e| e.message).unwrap_or_default()
             ));
         }
         Err(anyhow::anyhow!("No active session"))
@@ -226,10 +220,7 @@ impl GuestManager {
             if !response.ok {
                 return Err(anyhow::anyhow!(
                     "Write failed: {}",
-                    response
-                        .error
-                        .map(|e| e.message)
-                        .unwrap_or_default()
+                    response.error.map(|e| e.message).unwrap_or_default()
                 ));
             }
         }
@@ -244,10 +235,7 @@ impl GuestManager {
             if !response.ok {
                 return Err(anyhow::anyhow!(
                     "Update failed: {}",
-                    response
-                        .error
-                        .map(|e| e.message)
-                        .unwrap_or_default()
+                    response.error.map(|e| e.message).unwrap_or_default()
                 ));
             }
         }
@@ -262,10 +250,7 @@ impl GuestManager {
             if !response.ok {
                 return Err(anyhow::anyhow!(
                     "Write context failed: {}",
-                    response
-                        .error
-                        .map(|e| e.message)
-                        .unwrap_or_default()
+                    response.error.map(|e| e.message).unwrap_or_default()
                 ));
             }
         }
@@ -280,10 +265,7 @@ impl GuestManager {
             if !response.ok {
                 return Err(anyhow::anyhow!(
                     "Wasm execution failed: {}",
-                    response
-                        .error
-                        .map(|e| e.message)
-                        .unwrap_or_default()
+                    response.error.map(|e| e.message).unwrap_or_default()
                 ));
             }
 
