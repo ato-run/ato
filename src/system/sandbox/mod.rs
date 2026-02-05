@@ -136,6 +136,22 @@ impl SandboxPolicy {
             ])
             .with_network(true)
     }
+
+    /// Create a policy from IsolationPolicy (from capsule.toml)
+    ///
+    /// This converts the manifest-level isolation configuration
+    /// into a concrete SandboxPolicy for enforcement.
+    pub fn from_isolation_policy(
+        isolation: &crate::launcher::IsolationPolicy,
+        dev_mode: bool,
+    ) -> Self {
+        Self {
+            read_write_paths: isolation.read_write_paths.clone(),
+            read_only_paths: isolation.read_only_paths.clone(),
+            allow_network: isolation.network_enabled,
+            development_mode: dev_mode || !isolation.sandbox_enabled,
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

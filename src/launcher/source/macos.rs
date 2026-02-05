@@ -20,12 +20,126 @@ use super::SourceRuntime;
 /// Alcoholless installation guide URL
 const ALCOHOLLESS_INSTALL_URL: &str = "https://github.com/AkihiroSuda/alcless#install";
 
+/// Resolve the executable and arguments based on target.cmd or language detection
+///
+/// This function handles various scenarios:
+/// 1. Explicit cmd (Generic Source Runtime): Use cmd[0] as executable, cmd[1..] as args
+/// 2. Known language with toolchain: Use JIT-provisioned toolchain binary
+/// 3. Unknown command: Try to find it in PATH
+///
+/// Returns (executable_path, arguments)
+async fn resolve_executable_and_args(
+    runtime: &SourceRuntime,
+    target: &SourceTarget,
+) -> Result<(PathBuf, Vec<String>), RuntimeError> {
+    // Case 1: Explicit cmd provided (Generic Source Runtime)
+    if let Some(ref explicit_cmd) = target.cmd {
+        if let Some((binary, args)) = explicit_cmd.split_first() {
+            // Check if the binary needs JIT provisioning (python, node, etc.)
+            let executable = resolve_binary(runtime, target, binary).await?;
+
+            // Prepare arguments
+            let mut final_args: Vec<String> = Vec::new();
+
+            // Add language-specific flags
+            if target.language == "python" && !args.iter().any(|a| a == "-B") {
+                final_args.push("-B".to_string()); // Disable bytecode caching
+            }
+
+            final_args.extend(args.iter().cloned());
+
+            return Ok((executable, final_args));
+        }
+    }
+
+    // Case 2: No explicit cmd, use language + entrypoint
+    let toolchain_path = runtime
+        .ensure_toolchain(target)
+        .await
+        .map_err(|e| RuntimeError::ToolchainError {
+            message: format!("Failed to ensure {} toolchain", target.language),
+            technical_reason: Some(e.to_string()),
+            cloud_upsell: Some(
+                "💡 This app requires a cloud environment. Run with '--mode=cloud' (Pro) to execute in a managed Linux VM with guaranteed compatibility."
+                    .to_string(),
+            ),
+        })?;
+
+    let args = match target.language.to_lowercase().as_str() {
+        "python" | "python3" => vec!["-B".to_string(), target.entrypoint.clone()],
+        "deno" => vec![
+            "run".to_string(),
+            "--allow-read=.".to_string(),
+            target.entrypoint.clone(),
+        ],
+        _ => vec![target.entrypoint.clone()],
+    };
+
+    Ok((toolchain_path, args))
+}
+
+/// Resolve a binary name to an executable path
+///
+/// Priority:
+/// 1. If it's a known runtime (python, node), use JIT provisioning
+/// 2. If it's a tool that depends on a runtime (npm → node), ensure the runtime first
+/// 3. Otherwise, look for it in PATH
+async fn resolve_binary(
+    runtime: &SourceRuntime,
+    target: &SourceTarget,
+    binary: &str,
+) -> Result<PathBuf, RuntimeError> {
+    let normalized = binary.to_lowercase();
+
+    // Known language runtimes that can be JIT-provisioned
+    match normalized.as_str() {
+        "python" | "python3" => {
+            return runtime.ensure_toolchain(target).await.map_err(|e| {
+                RuntimeError::ToolchainError {
+                    message: "Failed to ensure python toolchain".to_string(),
+                    technical_reason: Some(e.to_string()),
+                    cloud_upsell: None,
+                }
+            });
+        }
+        "node" => {
+            return runtime.ensure_toolchain(target).await.map_err(|e| {
+                RuntimeError::ToolchainError {
+                    message: "Failed to ensure node toolchain".to_string(),
+                    technical_reason: Some(e.to_string()),
+                    cloud_upsell: None,
+                }
+            });
+        }
+        _ => {}
+    }
+
+    // For npm, yarn, pnpm, etc. - these are found via PATH but need node available
+    if matches!(normalized.as_str(), "npm" | "yarn" | "pnpm" | "npx") {
+        // Ensure node is available first (for proper npm execution)
+        let _ = runtime.ensure_toolchain(target).await;
+        // But use the system npm/yarn/pnpm
+    }
+
+    // Look for the binary in PATH
+    which::which(binary).map_err(|_| RuntimeError::BinaryNotFound {
+        tried: vec![binary.to_string()],
+    })
+}
+
 /// Launch with native macOS sandbox (Alcoholless preferred, sandbox-exec fallback)
+/// In dev_mode, skip sandbox entirely for better debugging and log forwarding
 pub async fn launch_native_macos(
     runtime: &SourceRuntime,
     request: &LaunchRequest<'_>,
     target: &SourceTarget,
 ) -> Result<LaunchResult, RuntimeError> {
+    // Dev mode: skip sandbox for better debugging and log forwarding
+    if target.dev_mode || runtime.config.dev_mode {
+        info!("Dev mode: skipping sandbox, launching directly");
+        return launch_direct(runtime, request, target).await;
+    }
+
     // Try Alcoholless first (preferred)
     if is_alcoholless_available() {
         info!("Using Alcoholless sandbox for macOS");
@@ -147,6 +261,13 @@ async fn launch_with_alcoholless(
 
     // Add user-provided arguments
     cmd.args(&target.args);
+
+    // Apply user-provided environment variables
+    if let Some(ref envs) = request.env {
+        for (key, value) in envs {
+            cmd.env(key, value);
+        }
+    }
 
     // Apply sidecar (SOCKS5 proxy) environment variables
     runtime.apply_sidecar_env(&mut cmd);
@@ -319,6 +440,13 @@ async fn launch_with_sandbox_exec(
     // Set working directory
     cmd.current_dir(&target.source_dir);
 
+    // Apply user-provided environment variables
+    if let Some(ref envs) = request.env {
+        for (key, value) in envs {
+            cmd.env(key, value);
+        }
+    }
+
     // Apply sidecar (SOCKS5 proxy) environment variables
     runtime.apply_sidecar_env(&mut cmd);
 
@@ -382,13 +510,101 @@ async fn launch_with_sandbox_exec(
     })
 }
 
+/// Launch directly without sandbox (dev mode only)
+///
+/// This is used in development mode for:
+/// - Better debugging experience
+/// - Real-time log forwarding to parent process (nacelle)
+/// - Simpler process management
+///
+/// Uses `tokio::process` for non-blocking I/O and proper async waiting.
+async fn launch_direct(
+    runtime: &SourceRuntime,
+    request: &LaunchRequest<'_>,
+    target: &SourceTarget,
+) -> Result<LaunchResult, RuntimeError> {
+    use std::process::Stdio;
+    use tokio::process::Command as TokioCommand;
+
+    // Determine the executable and arguments based on cmd or language
+    let (executable, args) = resolve_executable_and_args(runtime, target).await?;
+
+    info!("Launching directly (dev mode): {:?} {:?}", executable, args);
+
+    // Build command using tokio::process::Command for async I/O
+    let mut cmd = TokioCommand::new(&executable);
+
+    // Set working directory to source
+    cmd.current_dir(&target.source_dir);
+
+    // Add arguments
+    cmd.args(&args);
+
+    // Add user-provided arguments
+    cmd.args(&target.args);
+
+    // Apply user-provided environment variables
+    if let Some(ref envs) = request.env {
+        for (key, value) in envs {
+            cmd.env(key, value);
+        }
+    }
+
+    // CRITICAL: Use piped stdout/stderr for log forwarding
+    // nacelle will forward these to its own stderr so Ato Desktop can capture them
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    // Prevent child from being killed when nacelle's stdin closes
+    cmd.kill_on_drop(false);
+
+    debug!("Executing direct command (tokio): {:?}", cmd);
+
+    // Spawn the process
+    let child = cmd.spawn().map_err(|e| RuntimeError::CommandExecution {
+        operation: "direct spawn (tokio)".to_string(),
+        source: e,
+    })?;
+
+    let pid = child.id().ok_or_else(|| RuntimeError::CommandExecution {
+        operation: "get pid".to_string(),
+        source: std::io::Error::other("Failed to get child PID"),
+    })?;
+
+    info!(
+        "Started source workload {} directly (dev mode, async), PID {}",
+        request.workload_id, pid
+    );
+
+    // Track the workload (PID for quick lookup)
+    {
+        let mut workloads = runtime.active_workloads.lock().unwrap();
+        workloads.insert(request.workload_id.to_string(), pid);
+    }
+
+    // Register async child handle for supervisor mode
+    runtime
+        .register_async_child(request.workload_id.to_string(), child)
+        .await;
+
+    Ok(LaunchResult {
+        pid: Some(pid),
+        bundle_path: None,
+        log_path: None, // No log file in direct mode - logs forwarded via pipes
+        port: None,
+    })
+}
+
 /// Generate a dynamic Seatbelt profile for sandbox-exec
 ///
 /// Profile structure:
 /// - (version 1) - Required version declaration
 /// - For dev mode: allow default for simplicity
-/// - For production mode: deny default with explicit allowlist
+/// - For production mode: deny default with explicit allowlist based on IsolationPolicy
 fn generate_seatbelt_profile(target: &SourceTarget, toolchain_path: &std::path::Path) -> String {
+    // Get isolation policy from target, or use default
+    let isolation = target.isolation.as_ref();
+
     if target.dev_mode {
         // Development mode: permissive profile for debugging and rapid iteration
         r#"(version 1)
@@ -400,71 +616,150 @@ fn generate_seatbelt_profile(target: &SourceTarget, toolchain_path: &std::path::
 "#
         .to_string()
     } else {
-        // Production mode: strict deny-default profile with minimal allowlist
-        let source_dir = target.source_dir.to_string_lossy();
-        let toolchain_dir = toolchain_path
-            .parent()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| "/usr/bin".to_string());
-
-        format!(
-            r#"(version 1)
-(deny default)
-
-; Allow essential process operations
-(allow process-fork)
-(allow process-exec)
-(allow signal (target self))
-
-; Allow read access to the capsule source directory (read-only)
-(allow file-read* (subpath "{source_dir}"))
-
-; Allow read access to the toolchain binary and its directory
-(allow file-read* (subpath "{toolchain_dir}"))
-(allow file-read* (literal "{toolchain}"))
-
-; Allow read access to essential system libraries
-(allow file-read* (subpath "/usr/lib"))
-(allow file-read* (subpath "/System/Library/Frameworks"))
-(allow file-read* (subpath "/Library/Frameworks"))
-(allow file-read* (subpath "/opt/homebrew"))
-(allow file-read* (subpath "/usr/local"))
-(allow file-read* (regex "^/usr/share/.*"))
-
-; Allow read access to SSL certificates
-(allow file-read* (subpath "/etc/ssl"))
-(allow file-read* (subpath "/private/etc/ssl"))
-
-; Allow read access to essential runtime files
-(allow file-read* (literal "/dev/null"))
-(allow file-read* (literal "/dev/urandom"))
-(allow file-read* (literal "/dev/random"))
-(allow file-write* (literal "/dev/null"))
-
-; Allow tmp directory access (write)
-(allow file-read* (subpath "/tmp"))
-(allow file-read* (subpath "/private/tmp"))
-(allow file-write* (subpath "/tmp"))
-(allow file-write* (subpath "/private/tmp"))
-
-; Allow network access only if needed (commented out by default)
-; To enable: uncomment the following line
-; (allow network*)
-
-; Allow mach ports for basic IPC
-(allow mach-lookup)
-
-; Allow sysctl read for basic system info
-(allow sysctl-read)
-
-; Deny all network by default in production
-(deny network*)
-"#,
-            source_dir = source_dir,
-            toolchain_dir = toolchain_dir,
-            toolchain = toolchain_path.to_string_lossy()
-        )
+        // Production mode: build profile from IsolationPolicy
+        generate_production_seatbelt_profile(target, toolchain_path, isolation)
     }
+}
+
+/// Generate production Seatbelt profile from IsolationPolicy
+fn generate_production_seatbelt_profile(
+    target: &SourceTarget,
+    toolchain_path: &std::path::Path,
+    isolation: Option<&crate::launcher::IsolationPolicy>,
+) -> String {
+    let source_dir = target.source_dir.to_string_lossy();
+    let toolchain_dir = toolchain_path
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "/usr/bin".to_string());
+
+    let mut profile = String::new();
+
+    // Version declaration (required)
+    profile.push_str("(version 1)\n");
+    profile.push_str("(deny default)\n\n");
+
+    // Essential process operations
+    profile.push_str("; Allow essential process operations\n");
+    profile.push_str("(allow process-fork)\n");
+    profile.push_str("(allow process-exec)\n");
+    profile.push_str("(allow process-exec-interpreter)\n");
+    profile.push_str("(allow signal (target self))\n\n");
+
+    // Mach ports for basic IPC (required for Python, Ruby, etc.)
+    profile.push_str("; Allow mach ports for basic IPC\n");
+    profile.push_str("(allow mach-lookup)\n");
+    profile.push_str("(allow mach-register)\n");
+    profile.push_str("(allow ipc-posix-shm-read*)\n");
+    profile.push_str("(allow ipc-posix-shm-write-create)\n");
+    profile.push_str("(allow ipc-posix-shm-write-data)\n");
+    profile.push_str("(allow ipc-posix-shm-write-unlink)\n");
+    profile.push_str("(allow sysctl-read)\n");
+    profile.push_str("(allow sysctl-write)\n\n");
+
+    // Allow user environment access (for getpwuid, etc.)
+    profile.push_str("; Allow user environment access\n");
+    profile.push_str("(allow user-preference-read)\n");
+    profile.push_str("(allow file-read-metadata)\n\n");
+
+    // Toolchain access
+    profile.push_str("; Toolchain access\n");
+    profile.push_str(&format!(
+        "(allow file-read* (subpath \"{}\"))\n",
+        toolchain_dir
+    ));
+    profile.push_str(&format!(
+        "(allow file-read* (literal \"{}\"))\n\n",
+        toolchain_path.to_string_lossy()
+    ));
+
+    // Essential system libraries (always allowed read)
+    profile.push_str("; Essential system libraries\n");
+    profile.push_str("(allow file-read*\n");
+    profile.push_str("    (subpath \"/usr/lib\")\n");
+    profile.push_str("    (subpath \"/usr/share\")\n");
+    profile.push_str("    (subpath \"/usr/local\")\n");
+    profile.push_str("    (subpath \"/System\")\n");
+    profile.push_str("    (subpath \"/Library\")\n");
+    profile.push_str("    (subpath \"/opt/homebrew\")\n");
+    profile.push_str("    (subpath \"/etc\")\n");
+    profile.push_str("    (subpath \"/private/etc\")\n");
+    profile.push_str("    (subpath \"/var\")\n");
+    profile.push_str("    (subpath \"/private/var\")\n");
+    profile.push_str(")\n\n");
+
+    // Essential runtime files
+    profile.push_str("; Essential runtime files\n");
+    profile.push_str("(allow file-read* (literal \"/\"))\n");
+    profile.push_str("(allow file-read* (literal \"/dev/null\"))\n");
+    profile.push_str("(allow file-read* (literal \"/dev/urandom\"))\n");
+    profile.push_str("(allow file-read* (literal \"/dev/random\"))\n");
+    profile.push_str("(allow file-read* (literal \"/dev/tty\"))\n");
+    profile.push_str("(allow file-read* (subpath \"/dev/fd\"))\n");
+    profile.push_str("(allow file-write* (literal \"/dev/null\"))\n");
+    profile.push_str("(allow file-write* (subpath \"/dev/fd\"))\n\n");
+
+    // Apply IsolationPolicy paths
+    if let Some(iso) = isolation {
+        // Read-only paths from policy
+        if !iso.read_only_paths.is_empty() {
+            profile.push_str("; Read-only paths from capsule.toml [isolation.filesystem.read_only]\n");
+            for path in &iso.read_only_paths {
+                if let Some(escaped) = escape_path_for_sbpl(path) {
+                    profile.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", escaped));
+                }
+            }
+            profile.push('\n');
+        }
+
+        // Read-write paths from policy
+        if !iso.read_write_paths.is_empty() {
+            profile.push_str("; Read-write paths from capsule.toml [isolation.filesystem.read_write]\n");
+            for path in &iso.read_write_paths {
+                if let Some(escaped) = escape_path_for_sbpl(path) {
+                    profile.push_str(&format!(
+                        "(allow file-read* file-write* (subpath \"{}\"))\n",
+                        escaped
+                    ));
+                }
+            }
+            profile.push('\n');
+        }
+
+        // Network policy
+        if iso.network_enabled {
+            profile.push_str("; Network access enabled (from capsule.toml [isolation.network.enabled])\n");
+            profile.push_str("(allow network-outbound)\n");
+            profile.push_str("(allow network-inbound)\n");
+            profile.push_str("(allow system-socket)\n");
+        } else {
+            profile.push_str("; Network access DENIED (from capsule.toml [isolation.network.enabled = false])\n");
+            profile.push_str("(deny network*)\n");
+        }
+    } else {
+        // Default behavior: source dir read-only, tmp read-write, no network
+        profile.push_str("; Default policy (no [isolation] section in capsule.toml)\n");
+        profile.push_str(&format!(
+            "(allow file-read* (subpath \"{}\"))\n",
+            source_dir
+        ));
+        profile.push_str("(allow file-read* file-write* (subpath \"/tmp\"))\n");
+        profile.push_str("(allow file-read* file-write* (subpath \"/private/tmp\"))\n");
+        profile.push_str("(deny network*)\n");
+    }
+
+    profile
+}
+
+/// Escape path for SBPL profile (resolve symlinks, escape special chars)
+fn escape_path_for_sbpl(path: &std::path::Path) -> Option<String> {
+    // Try to canonicalize (resolve symlinks like /tmp -> /private/tmp on macOS)
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let path_str = resolved.to_str()?;
+
+    // Escape special characters for SBPL
+    let escaped = path_str.replace('\\', "\\\\").replace('"', "\\\"");
+    Some(escaped)
 }
 
 #[cfg(test)]

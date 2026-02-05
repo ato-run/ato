@@ -536,7 +536,7 @@ fn find_binary_recursive(root: &Path, candidates: &[&str]) -> Option<PathBuf> {
             if path.is_dir() {
                 stack.push(path);
             } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if candidates.iter().any(|c| *c == name) {
+                if candidates.contains(&name) {
                     return Some(path);
                 }
             }
@@ -564,7 +564,7 @@ fn artifact_relative_path(entry: &UrlEntry) -> Result<PathBuf, String> {
         Url::parse(&entry.url).map_err(|e| format!("Invalid artifact URL {}: {}", entry.url, e))?;
     let name = parsed
         .path_segments()
-        .and_then(|segments| segments.last())
+        .and_then(|mut segments| segments.next_back())
         .filter(|segment| !segment.is_empty())
         .ok_or_else(|| format!("Artifact URL missing filename: {}", entry.url))?;
     Ok(PathBuf::from(name))

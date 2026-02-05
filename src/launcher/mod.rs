@@ -75,6 +75,23 @@ pub struct SourceTarget {
     /// Development mode flag
     /// When true, security validation is relaxed
     pub dev_mode: bool,
+    /// Isolation/Sandbox configuration from capsule.toml
+    pub isolation: Option<IsolationPolicy>,
+}
+
+/// Isolation policy derived from capsule.toml [isolation] section
+#[derive(Debug, Clone, Default)]
+pub struct IsolationPolicy {
+    /// Enable sandbox enforcement
+    pub sandbox_enabled: bool,
+    /// Paths with read-only access
+    pub read_only_paths: Vec<PathBuf>,
+    /// Paths with read-write access
+    pub read_write_paths: Vec<PathBuf>,
+    /// Enable network access
+    pub network_enabled: bool,
+    /// Allowed egress domains (for R3 domain filtering)
+    pub egress_allow: Vec<String>,
 }
 
 /// Result details returned after successful launch.

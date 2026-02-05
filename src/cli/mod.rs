@@ -43,6 +43,8 @@ enum Commands {
 enum InternalCommands {
     /// Report engine capabilities for dispatch (JSON, internal use)
     Features,
+    /// Execute a workload from JSON spec (internal use)
+    Exec,
 }
 
 pub async fn execute() -> anyhow::Result<()> {
@@ -56,6 +58,7 @@ pub async fn execute() -> anyhow::Result<()> {
         Commands::Internal { input, command } => {
             let cmd = match command {
                 InternalCommands::Features => commands::internal::InternalCommand::Features,
+                InternalCommands::Exec => commands::internal::InternalCommand::Exec,
             };
 
             commands::internal::execute(commands::internal::InternalArgs {
