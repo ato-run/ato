@@ -437,8 +437,13 @@ async fn launch_with_sandbox_exec(
     // Add user-provided arguments
     cmd.args(&target.args);
 
-    // Set working directory
-    cmd.current_dir(&target.source_dir);
+    // Set working directory (canonicalize for macOS symlink resolution)
+    // e.g., /tmp -> /private/tmp
+    let canonical_source_dir = target
+        .source_dir
+        .canonicalize()
+        .unwrap_or_else(|_| target.source_dir.clone());
+    cmd.current_dir(&canonical_source_dir);
 
     // Apply user-provided environment variables
     if let Some(ref envs) = request.env {
@@ -622,88 +627,54 @@ fn generate_seatbelt_profile(target: &SourceTarget, toolchain_path: &std::path::
 }
 
 /// Generate production Seatbelt profile from IsolationPolicy
+///
+/// Strategy: "Allow by default, deny sensitive paths"
+/// This approach is more practical for complex runtimes (Python, Node.js)
+/// that need access to many system resources.
 fn generate_production_seatbelt_profile(
     target: &SourceTarget,
-    toolchain_path: &std::path::Path,
+    _toolchain_path: &std::path::Path,
     isolation: Option<&crate::launcher::IsolationPolicy>,
 ) -> String {
     let source_dir = target.source_dir.to_string_lossy();
-    let toolchain_dir = toolchain_path
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "/usr/bin".to_string());
 
     let mut profile = String::new();
 
-    // Version declaration (required)
-    profile.push_str("(version 1)\n");
-    profile.push_str("(deny default)\n\n");
+    // =========================================================================
+    // Version declaration
+    // =========================================================================
+    profile.push_str("(version 1)\n\n");
 
-    // Essential process operations
-    profile.push_str("; Allow essential process operations\n");
-    profile.push_str("(allow process-fork)\n");
-    profile.push_str("(allow process-exec)\n");
-    profile.push_str("(allow process-exec-interpreter)\n");
-    profile.push_str("(allow signal (target self))\n\n");
+    // =========================================================================
+    // Default policy: Allow most operations
+    // This is more practical than (deny default) for complex runtimes
+    // =========================================================================
+    profile.push_str("; Default: allow most operations, deny specific dangerous paths\n");
+    profile.push_str("(allow default)\n\n");
 
-    // Mach ports for basic IPC (required for Python, Ruby, etc.)
-    profile.push_str("; Allow mach ports for basic IPC\n");
-    profile.push_str("(allow mach-lookup)\n");
-    profile.push_str("(allow mach-register)\n");
-    profile.push_str("(allow ipc-posix-shm-read*)\n");
-    profile.push_str("(allow ipc-posix-shm-write-create)\n");
-    profile.push_str("(allow ipc-posix-shm-write-data)\n");
-    profile.push_str("(allow ipc-posix-shm-write-unlink)\n");
-    profile.push_str("(allow sysctl-read)\n");
-    profile.push_str("(allow sysctl-write)\n\n");
+    // =========================================================================
+    // Debug: Trace denied operations to system log
+    // View with: log stream --predicate 'process == "sandboxd"'
+    // =========================================================================
+    profile.push_str("; Debug: log denied operations\n");
+    profile.push_str("(trace deny)\n\n");
 
-    // Allow user environment access (for getpwuid, etc.)
-    profile.push_str("; Allow user environment access\n");
-    profile.push_str("(allow user-preference-read)\n");
-    profile.push_str("(allow file-read-metadata)\n\n");
-
-    // Toolchain access
-    profile.push_str("; Toolchain access\n");
+    // =========================================================================
+    // Capsule source directory - explicitly allow (for clarity)
+    // =========================================================================
+    profile.push_str("; Capsule source directory (always allowed)\n");
     profile.push_str(&format!(
-        "(allow file-read* (subpath \"{}\"))\n",
-        toolchain_dir
-    ));
-    profile.push_str(&format!(
-        "(allow file-read* (literal \"{}\"))\n\n",
-        toolchain_path.to_string_lossy()
+        "(allow file-read* file-write* (subpath \"{}\"))\n\n",
+        source_dir
     ));
 
-    // Essential system libraries (always allowed read)
-    profile.push_str("; Essential system libraries\n");
-    profile.push_str("(allow file-read*\n");
-    profile.push_str("    (subpath \"/usr/lib\")\n");
-    profile.push_str("    (subpath \"/usr/share\")\n");
-    profile.push_str("    (subpath \"/usr/local\")\n");
-    profile.push_str("    (subpath \"/System\")\n");
-    profile.push_str("    (subpath \"/Library\")\n");
-    profile.push_str("    (subpath \"/opt/homebrew\")\n");
-    profile.push_str("    (subpath \"/etc\")\n");
-    profile.push_str("    (subpath \"/private/etc\")\n");
-    profile.push_str("    (subpath \"/var\")\n");
-    profile.push_str("    (subpath \"/private/var\")\n");
-    profile.push_str(")\n\n");
-
-    // Essential runtime files
-    profile.push_str("; Essential runtime files\n");
-    profile.push_str("(allow file-read* (literal \"/\"))\n");
-    profile.push_str("(allow file-read* (literal \"/dev/null\"))\n");
-    profile.push_str("(allow file-read* (literal \"/dev/urandom\"))\n");
-    profile.push_str("(allow file-read* (literal \"/dev/random\"))\n");
-    profile.push_str("(allow file-read* (literal \"/dev/tty\"))\n");
-    profile.push_str("(allow file-read* (subpath \"/dev/fd\"))\n");
-    profile.push_str("(allow file-write* (literal \"/dev/null\"))\n");
-    profile.push_str("(allow file-write* (subpath \"/dev/fd\"))\n\n");
-
-    // Apply IsolationPolicy paths
+    // =========================================================================
+    // Apply IsolationPolicy from capsule.toml
+    // =========================================================================
     if let Some(iso) = isolation {
         // Read-only paths from policy
         if !iso.read_only_paths.is_empty() {
-            profile.push_str("; Read-only paths from capsule.toml [isolation.filesystem.read_only]\n");
+            profile.push_str("; Read-only paths from capsule.toml\n");
             for path in &iso.read_only_paths {
                 if let Some(escaped) = escape_path_for_sbpl(path) {
                     profile.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", escaped));
@@ -714,7 +685,7 @@ fn generate_production_seatbelt_profile(
 
         // Read-write paths from policy
         if !iso.read_write_paths.is_empty() {
-            profile.push_str("; Read-write paths from capsule.toml [isolation.filesystem.read_write]\n");
+            profile.push_str("; Read-write paths from capsule.toml\n");
             for path in &iso.read_write_paths {
                 if let Some(escaped) = escape_path_for_sbpl(path) {
                     profile.push_str(&format!(
@@ -727,25 +698,51 @@ fn generate_production_seatbelt_profile(
         }
 
         // Network policy
-        if iso.network_enabled {
-            profile.push_str("; Network access enabled (from capsule.toml [isolation.network.enabled])\n");
-            profile.push_str("(allow network-outbound)\n");
-            profile.push_str("(allow network-inbound)\n");
-            profile.push_str("(allow system-socket)\n");
-        } else {
-            profile.push_str("; Network access DENIED (from capsule.toml [isolation.network.enabled = false])\n");
-            profile.push_str("(deny network*)\n");
+        if !iso.network_enabled {
+            profile.push_str(
+                "; Network DENIED (from capsule.toml [isolation.network.enabled = false])\n",
+            );
+            profile.push_str("(deny network*)\n\n");
         }
     } else {
-        // Default behavior: source dir read-only, tmp read-write, no network
-        profile.push_str("; Default policy (no [isolation] section in capsule.toml)\n");
+        // Default behavior: network denied for safety
+        profile.push_str("; Network DENIED (default when no [isolation] section)\n");
+        profile.push_str("(deny network*)\n\n");
+    }
+
+    // =========================================================================
+    // CRITICAL: Deny access to sensitive user paths
+    // This is the core security boundary - protect user's secrets
+    // =========================================================================
+    if let Ok(home) = std::env::var("HOME") {
+        let home_escaped = home.replace('\\', "\\\\").replace('"', "\\\"");
+        profile.push_str("; SECURITY: Deny access to sensitive user directories\n");
+        profile.push_str("(deny file-read* file-write*\n");
+        profile.push_str(&format!("    (subpath \"{}/.ssh\")\n", home_escaped));
+        profile.push_str(&format!("    (subpath \"{}/.gnupg\")\n", home_escaped));
+        profile.push_str(&format!("    (subpath \"{}/.aws\")\n", home_escaped));
+        profile.push_str(&format!("    (subpath \"{}/.kube\")\n", home_escaped));
         profile.push_str(&format!(
-            "(allow file-read* (subpath \"{}\"))\n",
-            source_dir
+            "    (subpath \"{}/.config/gcloud\")\n",
+            home_escaped
         ));
-        profile.push_str("(allow file-read* file-write* (subpath \"/tmp\"))\n");
-        profile.push_str("(allow file-read* file-write* (subpath \"/private/tmp\"))\n");
-        profile.push_str("(deny network*)\n");
+        profile.push_str(&format!(
+            "    (subpath \"{}/Library/Keychains\")\n",
+            home_escaped
+        ));
+        profile.push_str(&format!(
+            "    (subpath \"{}/Library/Cookies\")\n",
+            home_escaped
+        ));
+        profile.push_str(&format!(
+            "    (subpath \"{}/Library/Application Support/Google/Chrome\")\n",
+            home_escaped
+        ));
+        profile.push_str(&format!(
+            "    (subpath \"{}/Library/Application Support/Firefox\")\n",
+            home_escaped
+        ));
+        profile.push_str(")\n");
     }
 
     profile
@@ -765,6 +762,7 @@ fn escape_path_for_sbpl(path: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::launcher::IsolationPolicy;
 
     #[test]
     fn test_native_available() {
@@ -790,6 +788,7 @@ mod tests {
             source_dir: PathBuf::from("/Users/test/project"),
             cmd: None,
             dev_mode: true,
+            isolation: None,
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
@@ -810,15 +809,75 @@ mod tests {
             source_dir: PathBuf::from("/Users/test/project"),
             cmd: None,
             dev_mode: false,
+            isolation: None,
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
         let profile = generate_seatbelt_profile(&target, &toolchain);
 
         assert!(profile.contains("(version 1)"));
-        assert!(profile.contains("(deny default)"));
+        // New approach: allow default, deny specific paths
+        assert!(profile.contains("(allow default)"));
         assert!(profile.contains("/Users/test/project"));
-        assert!(profile.contains("/usr/bin"));
+        // Default policy denies network
         assert!(profile.contains("(deny network*)"));
+        // Check for trace directive
+        assert!(profile.contains("(trace deny)"));
+        // Check sensitive paths are denied
+        assert!(profile.contains("/.ssh"));
+    }
+
+    #[test]
+    fn test_seatbelt_profile_with_isolation_policy() {
+        let isolation = IsolationPolicy {
+            sandbox_enabled: true,
+            read_only_paths: vec![PathBuf::from("/data/readonly")],
+            read_write_paths: vec![PathBuf::from("/data/writable")],
+            network_enabled: true,
+            egress_allow: vec!["api.example.com".to_string()],
+        };
+
+        let target = SourceTarget {
+            language: "node".to_string(),
+            version: Some("20".to_string()),
+            entrypoint: "index.js".to_string(),
+            dependencies: None,
+            args: vec![],
+            source_dir: PathBuf::from("/Users/test/app"),
+            cmd: Some(vec![
+                "npm".to_string(),
+                "run".to_string(),
+                "dev".to_string(),
+            ]),
+            dev_mode: false,
+            isolation: Some(isolation),
+        };
+        let toolchain = PathBuf::from("/usr/local/bin/node");
+
+        let profile = generate_seatbelt_profile(&target, &toolchain);
+
+        // New approach: allow default, network not denied when enabled
+        assert!(profile.contains("(allow default)"));
+        // When network_enabled = true, there's no deny network* line
+        assert!(!profile.contains("(deny network*)"));
+        // Check capsule source dir
+        assert!(profile.contains("/Users/test/app"));
+        // Check sensitive paths are denied
+        assert!(profile.contains("/.ssh"));
+        assert!(profile.contains("/.aws"));
+    }
+
+    #[test]
+    fn test_escape_path_for_sbpl() {
+        // Test basic path
+        let path = PathBuf::from("/tmp/test");
+        let escaped = escape_path_for_sbpl(&path);
+        assert!(escaped.is_some());
+
+        // Test path with quotes (edge case)
+        let path_with_quotes = PathBuf::from("/tmp/test\"file");
+        if let Some(escaped) = escape_path_for_sbpl(&path_with_quotes) {
+            assert!(escaped.contains("\\\""));
+        }
     }
 }
