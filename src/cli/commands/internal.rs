@@ -542,8 +542,8 @@ async fn handle_exec(input: String) -> Result<()> {
 
     // Determine dev_mode: if sandbox is explicitly disabled in manifest, use dev_mode
     // Otherwise, respect the DEV_MODE env var or default to production
-    let is_dev_mode = !isolation_policy.sandbox_enabled
-        || std::env::var("NACELLE_DEV_MODE").is_ok();
+    let is_dev_mode =
+        !isolation_policy.sandbox_enabled || std::env::var("NACELLE_DEV_MODE").is_ok();
 
     let source_target = SourceTarget {
         language: resolution.language.unwrap_or_else(|| "generic".to_string()),
