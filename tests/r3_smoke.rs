@@ -77,7 +77,7 @@ mod unix_tests {
 
         let result = tokio::time::timeout(
             Duration::from_secs(3),
-            run_services_from_config(&config, root, None),
+            run_services_from_config(&config, root, None, false),
         )
         .await
         .unwrap();
@@ -129,7 +129,7 @@ mod unix_tests {
 
         let result = tokio::time::timeout(
             Duration::from_secs(3),
-            run_services_from_config(&config, root, None),
+            run_services_from_config(&config, root, None, false),
         )
         .await
         .unwrap();

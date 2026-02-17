@@ -84,6 +84,12 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
             Err(e) => {
                 eprintln!("⚠️  Sandbox unavailable: {}", e);
                 if strict_enforcement {
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    {
+                        eprintln!(
+                            "Hint: This OS may not support strict sandbox yet. If you trust this code, retry with '--unsafe-bypass-sandbox' from ato-cli."
+                        );
+                    }
                     return Err(anyhow::anyhow!(e));
                 }
             }

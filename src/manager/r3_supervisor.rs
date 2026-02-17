@@ -14,10 +14,15 @@ pub async fn run_services_from_config(
     strict_sandbox_required: bool,
 ) -> Result<(), String> {
     if strict_sandbox_required && sandbox.is_none() {
-        return Err(
-            "Strict sandbox enforcement is enabled but sandbox backend is not available"
-                .to_string(),
-        );
+        let mut msg = "Strict sandbox enforcement is enabled but sandbox backend is not available"
+            .to_string();
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            msg.push_str(
+                ". Hint: If you trust this code, rerun via ato-cli with --unsafe-bypass-sandbox",
+            );
+        }
+        return Err(msg);
     }
 
     lockfile::enforce_lockfile_allowlist(bundle_root)
