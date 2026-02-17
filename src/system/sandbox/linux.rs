@@ -80,6 +80,23 @@ pub fn apply_landlock_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
         }
     }
 
+    // Add IPC socket paths (injected by ato-cli IPC Broker)
+    for path in &policy.ipc_socket_paths {
+        if path.exists() || path.parent().map_or(false, |p| p.exists()) {
+            debug!("Adding IPC socket read-write access to: {:?}", path);
+            // IPC sockets need full read-write access
+            let target = if path.exists() {
+                path.as_path()
+            } else {
+                path.parent().unwrap()
+            };
+            created_ruleset = add_path_rules(created_ruleset, target, AccessFs::from_all(abi))
+                .with_context(|| format!("Failed to add IPC socket rule for {:?}", path))?;
+        } else {
+            debug!("Skipping non-existent IPC socket path: {:?}", path);
+        }
+    }
+
     // Restrict the current thread
     let status = created_ruleset
         .restrict_self()

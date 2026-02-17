@@ -1,7 +1,7 @@
 //! Runtime implementations for executing Capsules.
 //!
 //! nacelle is now a **Source Runtime** only. OCI/Wasm routing and execution
-//! are handled by capsule-cli. This module provides the minimal runtime
+//! are handled by ato-cli. This module provides the minimal runtime
 //! surface for source workloads.
 //!
 //! ## UARC V1.1.0 Compliance
@@ -77,6 +77,9 @@ pub struct SourceTarget {
     pub dev_mode: bool,
     /// Isolation/Sandbox configuration from capsule.toml
     pub isolation: Option<IsolationPolicy>,
+    /// IPC socket paths injected by ato-cli (IPC Broker).
+    /// Added to the Sandbox policy read-write allow-list.
+    pub ipc_socket_paths: Vec<PathBuf>,
 }
 
 /// Isolation policy derived from capsule.toml [isolation] section

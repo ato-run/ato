@@ -108,6 +108,16 @@ pub struct ExecEnvelope {
     /// Environment variables to pass to the workload
     #[serde(default)]
     pub env: Option<Vec<(String, String)>>,
+    /// IPC environment variables injected by ato-cli (IPC Broker).
+    /// nacelle transparently passes these to the child process without
+    /// interpreting them (Smart Build, Dumb Runtime).
+    #[serde(default)]
+    pub ipc_env: Option<Vec<(String, String)>>,
+    /// IPC socket paths that must be allowed through the Sandbox.
+    /// ato-cli generates these paths; nacelle adds them to the
+    /// Sandbox policy's read-write list.
+    #[serde(default)]
+    pub ipc_socket_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,6 +161,52 @@ struct Response<T> {
     data: Option<T>,
 }
 
+/// Streaming event emitted on stdout during exec for ato-cli consumption.
+///
+/// After the initial `Response<ExecResult>` (which carries the PID), nacelle
+/// may emit zero or more `NacelleEvent` lines (one JSON object per line).
+/// ato-cli reads these to track IPC readiness, service health, etc.
+///
+/// # Wire Format
+/// ```json
+/// {"event":"ipc_ready","service":"llm-service","endpoint":"unix:///tmp/capsule-ipc/llm.sock","port":54321}
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum NacelleEvent {
+    /// A service's readiness probe succeeded and its IPC endpoint is available.
+    IpcReady {
+        /// Service name as declared in the manifest
+        service: String,
+        /// IPC endpoint URI (e.g., "unix:///tmp/capsule-ipc/svc.sock" or "tcp://127.0.0.1:54321")
+        endpoint: String,
+        /// Port number (if TCP-based)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        port: Option<u16>,
+    },
+    /// A service has exited (fail-fast notification)
+    ServiceExited {
+        service: String,
+        exit_code: Option<i32>,
+    },
+}
+
+impl NacelleEvent {
+    /// Write the event as a single JSON line to stdout.
+    ///
+    /// Each event is a separate line so ato-cli can read them
+    /// incrementally (newline-delimited JSON).
+    #[allow(dead_code)]
+    pub fn emit(&self) {
+        if let Ok(json) = serde_json::to_string(self) {
+            println!("{}", json);
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct FeaturesData {
     engine: EngineInfo,
@@ -173,6 +229,10 @@ struct Capabilities {
     sandbox: Vec<String>,
     socket_activation: bool,
     jit_provisioning: bool,
+    /// Whether this engine supports IPC socket path injection into Sandbox.
+    /// When true, ato-cli can pass `ipc_socket_paths` in the exec request
+    /// and nacelle will add them to the Sandbox policy's allow-list.
+    ipc_sandbox: bool,
 }
 
 pub async fn execute(args: InternalArgs) -> Result<()> {
@@ -212,6 +272,7 @@ async fn handle_features(input: String) -> Result<()> {
             sandbox,
             socket_activation: true,
             jit_provisioning: true,
+            ipc_sandbox: true,
         },
     };
 
@@ -431,7 +492,10 @@ fn find_entrypoint_file(tokens: &[String]) -> String {
 }
 
 /// Convert IsolationConfig from capsule.toml to IsolationPolicy for runtime
-fn convert_isolation_config(config: &IsolationConfig, source_dir: &PathBuf) -> IsolationPolicy {
+fn convert_isolation_config(
+    config: &IsolationConfig,
+    source_dir: &std::path::Path,
+) -> IsolationPolicy {
     // Convert string paths to PathBuf, resolving relative paths against source_dir
     let resolve_path = |path: &str| -> PathBuf {
         let p = PathBuf::from(path);
@@ -479,7 +543,7 @@ fn convert_isolation_config(config: &IsolationConfig, source_dir: &PathBuf) -> I
 
     // Source directory should be read-write by default (for dev mode)
     // In production, this could be read-only with explicit write paths
-    read_write_paths.push(source_dir.clone());
+    read_write_paths.push(source_dir.to_path_buf());
 
     IsolationPolicy {
         sandbox_enabled: config.sandbox,
@@ -545,6 +609,31 @@ async fn handle_exec(input: String) -> Result<()> {
     let is_dev_mode =
         !isolation_policy.sandbox_enabled || std::env::var("NACELLE_DEV_MODE").is_ok();
 
+    // Merge IPC environment variables into the workload env.
+    // nacelle does NOT interpret these values (Smart Build, Dumb Runtime).
+    // ato-cli (IPC Broker) generates them; we just pass them through.
+    let mut merged_env: Vec<(String, String)> = envelope.env.clone().unwrap_or_default();
+    if let Some(ref ipc_env) = envelope.ipc_env {
+        info!(
+            "Passing {} IPC environment variables to workload",
+            ipc_env.len()
+        );
+        merged_env.extend(ipc_env.iter().cloned());
+    }
+
+    // Collect IPC socket paths for Sandbox policy
+    let ipc_socket_paths: Vec<PathBuf> = envelope
+        .ipc_socket_paths
+        .as_ref()
+        .map(|paths| paths.iter().map(PathBuf::from).collect())
+        .unwrap_or_default();
+    if !ipc_socket_paths.is_empty() {
+        info!(
+            "IPC socket paths for sandbox allow-list: {:?}",
+            ipc_socket_paths
+        );
+    }
+
     let source_target = SourceTarget {
         language: resolution.language.unwrap_or_else(|| "generic".to_string()),
         version: manifest.language.as_ref().and_then(|l| l.version.clone()),
@@ -555,6 +644,7 @@ async fn handle_exec(input: String) -> Result<()> {
         cmd: Some(resolution.full_command),
         dev_mode: is_dev_mode,
         isolation: Some(isolation_policy),
+        ipc_socket_paths,
     };
 
     // Create runtime config
@@ -568,19 +658,26 @@ async fn handle_exec(input: String) -> Result<()> {
     // Create runtime
     let runtime = SourceRuntime::new(config);
 
-    // Create launch request with environment variables
+    // Create launch request with merged environment variables (workload + IPC)
     let workload_id = format!("exec-{}", std::process::id());
     let request = LaunchRequest {
         workload_id: &workload_id,
         bundle_root: source_dir.clone(),
-        env: envelope.env.clone(),
+        env: if merged_env.is_empty() {
+            None
+        } else {
+            Some(merged_env)
+        },
         args: None,
         source_target: Some(source_target.clone()),
         socket_manager: None,
     };
 
     // Launch the workload
-    info!("Launching workload with env: {:?}", envelope.env);
+    info!(
+        "Launching workload with env count: {}",
+        request.env.as_ref().map_or(0, |e| e.len())
+    );
     let result = runtime
         .launch(request)
         .await
@@ -690,4 +787,164 @@ async fn handle_exec(input: String) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tests (Phase 13a: IPC support)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_exec_envelope_without_ipc_fields() {
+        let json = r#"{
+            "spec_version": "0.1.0",
+            "workload": { "type": "source", "manifest": "/app/capsule.toml" },
+            "env": [["FOO", "bar"]]
+        }"#;
+
+        let envelope: ExecEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(envelope.spec_version, "0.1.0");
+        assert!(envelope.ipc_env.is_none());
+        assert!(envelope.ipc_socket_paths.is_none());
+        assert_eq!(envelope.env.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_exec_envelope_with_ipc_env() {
+        let json = r#"{
+            "spec_version": "0.1.0",
+            "workload": { "type": "source", "manifest": "/app/capsule.toml" },
+            "ipc_env": [
+                ["CAPSULE_IPC_GREETER_URL", "unix:///tmp/capsule-ipc/greeter.sock"],
+                ["CAPSULE_IPC_GREETER_TOKEN", "tok_abc123"]
+            ]
+        }"#;
+
+        let envelope: ExecEnvelope = serde_json::from_str(json).unwrap();
+        let ipc_env = envelope.ipc_env.unwrap();
+        assert_eq!(ipc_env.len(), 2);
+        assert_eq!(ipc_env[0].0, "CAPSULE_IPC_GREETER_URL");
+        assert_eq!(ipc_env[0].1, "unix:///tmp/capsule-ipc/greeter.sock");
+        assert_eq!(ipc_env[1].0, "CAPSULE_IPC_GREETER_TOKEN");
+        assert_eq!(ipc_env[1].1, "tok_abc123");
+    }
+
+    #[test]
+    fn test_exec_envelope_with_ipc_socket_paths() {
+        let json = r#"{
+            "spec_version": "0.1.0",
+            "workload": { "type": "source", "manifest": "/app/capsule.toml" },
+            "ipc_socket_paths": [
+                "/tmp/capsule-ipc/greeter.sock",
+                "/tmp/capsule-ipc/db-service.sock"
+            ]
+        }"#;
+
+        let envelope: ExecEnvelope = serde_json::from_str(json).unwrap();
+        let paths = envelope.ipc_socket_paths.unwrap();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], "/tmp/capsule-ipc/greeter.sock");
+        assert_eq!(paths[1], "/tmp/capsule-ipc/db-service.sock");
+    }
+
+    #[test]
+    fn test_exec_envelope_full_ipc_request() {
+        let json = r#"{
+            "spec_version": "0.1.0",
+            "workload": { "type": "source", "manifest": "/app/capsule.toml" },
+            "env": [["APP_PORT", "3000"]],
+            "ipc_env": [
+                ["CAPSULE_IPC_GREETER_URL", "unix:///tmp/capsule-ipc/greeter.sock"],
+                ["CAPSULE_IPC_GREETER_TOKEN", "tok_abc123"]
+            ],
+            "ipc_socket_paths": [
+                "/tmp/capsule-ipc/greeter.sock"
+            ]
+        }"#;
+
+        let envelope: ExecEnvelope = serde_json::from_str(json).unwrap();
+        // Regular env
+        assert_eq!(envelope.env.as_ref().unwrap().len(), 1);
+        // IPC env
+        assert_eq!(envelope.ipc_env.as_ref().unwrap().len(), 2);
+        // IPC socket paths
+        assert_eq!(envelope.ipc_socket_paths.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_capabilities_includes_ipc_sandbox() {
+        let caps = Capabilities {
+            workloads: vec!["source".to_string()],
+            languages: vec!["python".to_string()],
+            sandbox: vec!["macos-seatbelt".to_string()],
+            socket_activation: true,
+            jit_provisioning: true,
+            ipc_sandbox: true,
+        };
+
+        let json = serde_json::to_string(&caps).unwrap();
+        assert!(json.contains("\"ipc_sandbox\":true"));
+    }
+
+    #[test]
+    fn test_nacelle_event_ipc_ready_serialization() {
+        let event = NacelleEvent::IpcReady {
+            service: "llm-service".to_string(),
+            endpoint: "unix:///tmp/capsule-ipc/llm.sock".to_string(),
+            port: None,
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"ipc_ready\""));
+        assert!(json.contains("\"service\":\"llm-service\""));
+        assert!(json.contains("\"endpoint\":\"unix:///tmp/capsule-ipc/llm.sock\""));
+        // port is None, should be omitted
+        assert!(!json.contains("\"port\""));
+    }
+
+    #[test]
+    fn test_nacelle_event_ipc_ready_with_port() {
+        let event = NacelleEvent::IpcReady {
+            service: "db-service".to_string(),
+            endpoint: "tcp://127.0.0.1:54321".to_string(),
+            port: Some(54321),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"port\":54321"));
+    }
+
+    #[test]
+    fn test_nacelle_event_service_exited() {
+        let event = NacelleEvent::ServiceExited {
+            service: "my-service".to_string(),
+            exit_code: Some(1),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"service_exited\""));
+        assert!(json.contains("\"exit_code\":1"));
+    }
+
+    #[test]
+    fn test_nacelle_event_deserialization() {
+        let json =
+            r#"{"event":"ipc_ready","service":"greeter","endpoint":"unix:///tmp/test.sock"}"#;
+        let event: NacelleEvent = serde_json::from_str(json).unwrap();
+        match event {
+            NacelleEvent::IpcReady {
+                service,
+                endpoint,
+                port,
+            } => {
+                assert_eq!(service, "greeter");
+                assert_eq!(endpoint, "unix:///tmp/test.sock");
+                assert!(port.is_none());
+            }
+            _ => panic!("Expected IpcReady event"),
+        }
+    }
 }

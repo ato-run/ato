@@ -1,14 +1,115 @@
 //! Linux-specific sandbox implementation using bubblewrap (bwrap)
 //!
 //! Provides namespace-based isolation for source execution with minimal overhead.
+//!
+//! ## Security Layers
+//! 1. **Bubblewrap (Namespace)**: Primary isolation — PID/mount/net namespaces,
+//!    explicit bind-mounts only.  Sensitive paths are hidden via `--tmpfs` overlay.
+//! 2. **Landlock LSM** (optional, kernel 5.13+): Supplementary file-system
+//!    access control applied inside the namespace via `pre_exec`.
+//!
+//! ## Sensitive Path Protection
+//! Sensitive user directories (`.ssh`, `.aws`, etc.) are protected at the
+//! **Bubblewrap level** by explicitly *not* bind-mounting them.  When the
+//! user requests the entire home directory, the launcher additionally hides
+//! those paths with `--tmpfs` so they appear as empty directories inside
+//! the sandbox.
 
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use tracing::{debug, info, warn};
 
 use crate::launcher::{LaunchRequest, LaunchResult, RuntimeError, SourceTarget};
+use crate::system::sandbox::{filter_sensitive_paths, sensitive_paths};
 
 use super::SourceRuntime;
+
+/// Generate a `SandboxPolicy` from `IsolationPolicy` for Landlock enforcement.
+///
+/// The allow-list is constructed from the manifest's `read_only` / `read_write`
+/// paths **after** filtering out any paths that overlap with sensitive
+/// directories.  This ensures that even if the user specifies `~` as an
+/// allowed path, `~/.ssh` will not be granted access via Landlock.
+#[allow(dead_code)]
+pub fn generate_landlock_policy(target: &SourceTarget) -> crate::system::sandbox::SandboxPolicy {
+    use crate::system::sandbox::SandboxPolicy;
+
+    let iso = match target.isolation.as_ref() {
+        Some(iso) if iso.sandbox_enabled => iso,
+        _ => return SandboxPolicy::for_capsule(&target.source_dir),
+    };
+
+    // Start from the manifest-level policy, which already filters
+    // sensitive paths via `from_isolation_policy`.
+    let mut policy = SandboxPolicy::from_isolation_policy(iso, target.dev_mode);
+
+    // Ensure source_dir is always in the RW list (it is safe — it's the
+    // capsule's own working directory).
+    if !policy.read_write_paths.contains(&target.source_dir) {
+        policy.read_write_paths.push(target.source_dir.clone());
+    }
+
+    // Ensure essential system directories are in the RO list so that
+    // Landlock doesn't block basic process execution.
+    let system_ro = [
+        PathBuf::from("/usr"),
+        PathBuf::from("/lib"),
+        PathBuf::from("/lib64"),
+        PathBuf::from("/etc"),
+        PathBuf::from("/dev"),
+        PathBuf::from("/proc"),
+        PathBuf::from("/sys"),
+        PathBuf::from("/bin"),
+        PathBuf::from("/sbin"),
+    ];
+    for p in &system_ro {
+        if !policy.read_only_paths.contains(p) {
+            policy.read_only_paths.push(p.clone());
+        }
+    }
+
+    // Ensure /tmp paths are writable
+    for tmp in ["/tmp", "/var/tmp"] {
+        let p = PathBuf::from(tmp);
+        if !policy.read_write_paths.contains(&p) {
+            policy.read_write_paths.push(p);
+        }
+    }
+
+    // Forward IPC socket paths from ato-cli (IPC Broker)
+    if !target.ipc_socket_paths.is_empty() {
+        debug!(
+            "Adding {} IPC socket paths to Landlock policy",
+            target.ipc_socket_paths.len()
+        );
+        policy.ipc_socket_paths = target.ipc_socket_paths.clone();
+    }
+
+    policy
+}
+
+/// Add bubblewrap arguments that hide sensitive paths inside the namespace.
+///
+/// When the user's bind-mount set would expose a sensitive directory
+/// (e.g., `$HOME` is bound, so `$HOME/.ssh` would be visible), this
+/// function emits `--tmpfs <sensitive_path>` arguments that overlay
+/// the sensitive directory with an empty tmpfs, effectively hiding it.
+fn add_sensitive_path_hiding(cmd: &mut Command, bind_mounted_parents: &[&str]) {
+    let sensitive = sensitive_paths();
+
+    for sp in &sensitive {
+        // Only hide if a parent of this sensitive path is actually bound
+        let dominated = bind_mounted_parents
+            .iter()
+            .any(|parent| sp.starts_with(parent));
+        if dominated && sp.exists() {
+            let sp_str = sp.to_string_lossy();
+            debug!("Hiding sensitive path in sandbox: {}", sp_str);
+            cmd.args(["--tmpfs", &sp_str]);
+        }
+    }
+}
 
 /// Launch a source workload using bubblewrap sandbox
 pub async fn launch_with_bubblewrap(
@@ -34,6 +135,19 @@ pub async fn launch_with_bubblewrap(
         target.language, target.entrypoint, toolchain_path, target.dev_mode
     );
 
+    // =====================================================================
+    // Egress Warning: domain-level filtering cannot be enforced by bwrap
+    // =====================================================================
+    if let Some(ref iso) = target.isolation {
+        if iso.network_enabled && !iso.egress_allow.is_empty() {
+            warn!(
+                "Domain-level egress filtering (egress_allow: {:?}) is not enforceable via Bubblewrap/Landlock. \
+                 Relies on Sidecar Proxy (tsnet/SOCKS5).",
+                iso.egress_allow
+            );
+        }
+    }
+
     // Ensure log directory exists
     std::fs::create_dir_all(&runtime.config.log_dir).map_err(|e| RuntimeError::Io {
         path: runtime.config.log_dir.clone(),
@@ -43,11 +157,19 @@ pub async fn launch_with_bubblewrap(
     // Build bwrap command
     let mut cmd = Command::new("bwrap");
 
-    // Namespace isolation - production mode disables network
-    if target.dev_mode {
-        cmd.args(["--unshare-all", "--share-net"]); // Share network for dev convenience
+    // Namespace isolation — network policy from IsolationPolicy or dev_mode
+    let share_network = if target.dev_mode {
+        true // Dev mode always shares network
+    } else if let Some(ref iso) = target.isolation {
+        iso.network_enabled
     } else {
-        cmd.args(["--unshare-all"]); // No --share-net in production - network isolated
+        false // Default: no network in production
+    };
+
+    if share_network {
+        cmd.args(["--unshare-all", "--share-net"]);
+    } else {
+        cmd.args(["--unshare-all"]); // No --share-net → network isolated
     }
     cmd.args(["--die-with-parent"]);
 
@@ -71,6 +193,46 @@ pub async fn launch_with_bubblewrap(
     // Bind mount the source directory read-only
     let source_dir_str = target.source_dir.to_string_lossy();
     cmd.args(["--ro-bind", &source_dir_str, "/app"]);
+
+    // =====================================================================
+    // Apply IsolationPolicy bind-mounts (if provided in capsule.toml)
+    // Paths overlapping with sensitive directories are pre-filtered.
+    // =====================================================================
+    let mut extra_bound_parents: Vec<String> = Vec::new();
+    if let Some(ref iso) = target.isolation {
+        let (clean_ro, removed_ro) = filter_sensitive_paths(&iso.read_only_paths);
+        let (clean_rw, removed_rw) = filter_sensitive_paths(&iso.read_write_paths);
+        for p in &removed_ro {
+            warn!(
+                "Sensitive path excluded from RO bind-mounts: {}",
+                p.display()
+            );
+        }
+        for p in &removed_rw {
+            warn!(
+                "Sensitive path excluded from RW bind-mounts: {}",
+                p.display()
+            );
+        }
+        for p in &clean_ro {
+            if p.exists() {
+                let ps = p.to_string_lossy();
+                cmd.args(["--ro-bind", &ps, &ps]);
+                extra_bound_parents.push(ps.to_string());
+            }
+        }
+        for p in &clean_rw {
+            if p.exists() {
+                let ps = p.to_string_lossy();
+                cmd.args(["--bind", &ps, &ps]);
+                extra_bound_parents.push(ps.to_string());
+            }
+        }
+    }
+
+    // Hide sensitive paths that would be reachable via any parent bind-mount
+    let all_parents: Vec<&str> = extra_bound_parents.iter().map(|s| s.as_str()).collect();
+    add_sensitive_path_hiding(&mut cmd, &all_parents);
 
     // Set working directory
     cmd.args(["--chdir", "/app"]);
@@ -255,6 +417,7 @@ pub fn verify_bubblewrap_available() -> Result<(), RuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::launcher::IsolationPolicy;
 
     #[test]
     fn test_bubblewrap_command_construction() {
@@ -271,5 +434,156 @@ mod tests {
         // Command can be constructed without errors
         let program = cmd.get_program();
         assert_eq!(program, "bwrap");
+    }
+
+    #[test]
+    fn test_generate_landlock_policy_default() {
+        let target = SourceTarget {
+            language: "python".to_string(),
+            version: Some("3.11".to_string()),
+            entrypoint: "main.py".to_string(),
+            dependencies: None,
+            args: vec![],
+            source_dir: PathBuf::from("/app/my-capsule"),
+            cmd: None,
+            dev_mode: false,
+            isolation: None, // no isolation config → default policy
+            ipc_socket_paths: vec![],
+        };
+
+        let policy = generate_landlock_policy(&target);
+
+        // Should use for_capsule defaults
+        assert!(policy.read_write_paths.contains(&PathBuf::from("/tmp")));
+        assert!(policy.read_only_paths.contains(&PathBuf::from("/usr")));
+        assert!(policy.allow_network);
+    }
+
+    #[test]
+    fn test_generate_landlock_policy_with_isolation() {
+        let target = SourceTarget {
+            language: "node".to_string(),
+            version: Some("20".to_string()),
+            entrypoint: "index.js".to_string(),
+            dependencies: None,
+            args: vec![],
+            source_dir: PathBuf::from("/app/project"),
+            cmd: None,
+            dev_mode: false,
+            isolation: Some(IsolationPolicy {
+                sandbox_enabled: true,
+                read_only_paths: vec![PathBuf::from("/data/ro")],
+                read_write_paths: vec![PathBuf::from("/data/rw")],
+                network_enabled: false,
+                egress_allow: vec![],
+            }),
+            ipc_socket_paths: vec![],
+        };
+
+        let policy = generate_landlock_policy(&target);
+
+        // Source dir always present
+        assert!(policy
+            .read_write_paths
+            .contains(&PathBuf::from("/app/project")));
+        // System dirs added
+        assert!(policy.read_only_paths.contains(&PathBuf::from("/usr")));
+        // Network from isolation policy
+        assert!(!policy.allow_network);
+    }
+
+    #[test]
+    fn test_generate_landlock_policy_filters_home() {
+        if let Some(home) = dirs::home_dir() {
+            let target = SourceTarget {
+                language: "python".to_string(),
+                version: None,
+                entrypoint: "main.py".to_string(),
+                dependencies: None,
+                args: vec![],
+                source_dir: PathBuf::from("/app/proj"),
+                cmd: None,
+                dev_mode: false,
+                isolation: Some(IsolationPolicy {
+                    sandbox_enabled: true,
+                    read_only_paths: vec![],
+                    read_write_paths: vec![home.clone()],
+                    network_enabled: true,
+                    egress_allow: vec![],
+                }),
+                ipc_socket_paths: vec![],
+            };
+
+            let policy = generate_landlock_policy(&target);
+
+            // Home directory should be filtered out (it's a parent of ~/.ssh)
+            assert!(
+                !policy.read_write_paths.contains(&home),
+                "Home directory should be filtered from Landlock allow-list"
+            );
+        }
+    }
+
+    #[test]
+    fn test_add_sensitive_path_hiding_no_parents() {
+        let mut cmd = Command::new("echo");
+        // No bound parents → nothing to hide
+        add_sensitive_path_hiding(&mut cmd, &[]);
+        // Just ensure it doesn't panic
+    }
+
+    #[test]
+    fn test_generate_landlock_policy_with_ipc_socket_paths() {
+        let target = SourceTarget {
+            language: "python".to_string(),
+            version: None,
+            entrypoint: "main.py".to_string(),
+            dependencies: None,
+            args: vec![],
+            source_dir: PathBuf::from("/app/my-service"),
+            cmd: None,
+            dev_mode: false,
+            isolation: Some(IsolationPolicy {
+                sandbox_enabled: true,
+                read_only_paths: vec![],
+                read_write_paths: vec![],
+                network_enabled: true,
+                egress_allow: vec![],
+            }),
+            ipc_socket_paths: vec![
+                PathBuf::from("/tmp/capsule-ipc/greeter.sock"),
+                PathBuf::from("/tmp/capsule-ipc/db-service.sock"),
+            ],
+        };
+
+        let policy = generate_landlock_policy(&target);
+
+        // IPC socket paths should be forwarded to the policy
+        assert_eq!(policy.ipc_socket_paths.len(), 2);
+        assert!(policy
+            .ipc_socket_paths
+            .contains(&PathBuf::from("/tmp/capsule-ipc/greeter.sock")));
+        assert!(policy
+            .ipc_socket_paths
+            .contains(&PathBuf::from("/tmp/capsule-ipc/db-service.sock")));
+    }
+
+    #[test]
+    fn test_generate_landlock_policy_empty_ipc_paths() {
+        let target = SourceTarget {
+            language: "python".to_string(),
+            version: None,
+            entrypoint: "main.py".to_string(),
+            dependencies: None,
+            args: vec![],
+            source_dir: PathBuf::from("/app/my-capsule"),
+            cmd: None,
+            dev_mode: false,
+            isolation: None,
+            ipc_socket_paths: vec![],
+        };
+
+        let policy = generate_landlock_policy(&target);
+        assert!(policy.ipc_socket_paths.is_empty());
     }
 }

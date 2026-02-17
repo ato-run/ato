@@ -218,6 +218,27 @@ fn generate_sbpl_profile(policy: &SandboxPolicy) -> String {
             }
         }
 
+        // IPC socket paths (injected by ato-cli IPC Broker)
+        if !policy.ipc_socket_paths.is_empty() {
+            profile.push_str("\n; IPC socket paths (ato-cli IPC Broker)\n");
+            for path in &policy.ipc_socket_paths {
+                if let Some(escaped_path) = escape_path_for_sbpl(path) {
+                    profile.push_str(&format!(
+                        "(allow file-read* file-write* (subpath \"{}\"))\n",
+                        escaped_path
+                    ));
+                } else if let Some(parent) = path.parent() {
+                    // Socket may not exist yet; allow the parent directory
+                    if let Some(escaped_parent) = escape_path_for_sbpl(parent) {
+                        profile.push_str(&format!(
+                            "(allow file-read* file-write* (subpath \"{}\"))\n",
+                            escaped_parent
+                        ));
+                    }
+                }
+            }
+        }
+
         // Essential system paths (always needed)
         profile.push_str("\n; Essential system paths\n");
         profile.push_str("(allow file-read*\n");

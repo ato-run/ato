@@ -87,7 +87,7 @@ engine = []
 # Library mode: Core types and verification only (for CLI/embedded use)
 library = []
 phase2 = []
-# Embedded mode: minimal dependencies for capsule-cli integration
+# Embedded mode: minimal dependencies for ato-cli integration
 embedded = []
 # Optional CUDA support for VRAM checks
 cuda = []

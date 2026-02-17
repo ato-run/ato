@@ -66,11 +66,14 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     let dns_rules = Vec::new();
     let enforcement_str = config.sandbox.network.enforcement.as_str();
     let strict_enforcement = enforcement_str == "strict";
+    if strict_enforcement && !network_enabled {
+        anyhow::bail!("Strict sandbox enforcement requires sandbox.network.enabled=true");
+    }
     let job_id = format!("job-{}", std::process::id());
     let mut sandbox = nacelle::system::new_network_sandbox();
     let mut sandbox_enabled = false;
 
-    if network_enabled && egress_mode != "allow_all" {
+    if network_enabled && (egress_mode != "allow_all" || strict_enforcement) {
         let initial_rule = nacelle::system::common::IsolationRule {
             allow_rules: Vec::new(),
             dns_rules: dns_rules.clone(),
@@ -126,9 +129,14 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     } else {
         None
     };
-    nacelle::manager::r3_supervisor::run_services_from_config(&config, &temp_dir, sandbox_ref)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+    nacelle::manager::r3_supervisor::run_services_from_config(
+        &config,
+        &temp_dir,
+        sandbox_ref,
+        strict_enforcement,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!(e))?;
 
     Ok(())
 }

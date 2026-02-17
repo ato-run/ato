@@ -1,5 +1,5 @@
 #![cfg(feature = "legacy-manifest-tests")]
-// Legacy signature verification tests moved to capsule-cli.
+// Legacy signature verification tests moved to ato-cli.
 
 #[cfg(test)]
 mod tests {

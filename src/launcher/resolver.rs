@@ -1,10 +1,10 @@
 //! Runtime Resolution Logic for Source-only nacelle
 //!
 //! nacelle only supports Source runtime targets. OCI/Wasm targets are rejected
-//! and should be routed by capsule-cli.
+//! and should be routed by ato-cli.
 
 use crate::capsule_types::capsule_v1::{
-    CapsuleManifestV1, RuntimeType, SourceTarget, TargetsConfig,
+    CapsuleManifestV1, SourceTarget, TargetsConfig,
 };
 use crate::launcher::RuntimeKind;
 use std::collections::HashSet;
@@ -102,37 +102,56 @@ impl ResolveContext {
 /// Resolve the runtime target from a manifest.
 ///
 /// Source-only behavior:
-/// - If `manifest.targets.source` exists, resolve it.
-/// - If only OCI/Wasm targets exist, return UnsupportedTarget.
-/// - Legacy execution.runtime must be Source/Native, otherwise UnsupportedTarget.
+/// - Resolve `default_target` under `targets.<label>`.
+/// - Only `runtime="source"` is supported by nacelle.
+/// - Legacy `[execution]` fallback is not supported in schema v0.2.
 pub fn resolve_runtime(
     manifest: &CapsuleManifestV1,
     context: &ResolveContext,
 ) -> Result<ResolvedTarget, ResolveError> {
     if let Some(targets) = &manifest.targets {
+        if !targets.named.is_empty() {
+            let label = manifest.default_target.trim();
+            if label.is_empty() {
+                return Err(ResolveError::InvalidConfiguration {
+                    message: "default_target is required".to_string(),
+                });
+            }
+            let target = targets
+                .named_target(label)
+                .ok_or_else(|| ResolveError::InvalidConfiguration {
+                    message: format!("default_target '{}' not found in [targets]", label),
+                })?;
+            let runtime = target.runtime.trim().to_ascii_lowercase();
+            if runtime != "source" {
+                return Err(ResolveError::UnsupportedTarget { target: runtime });
+            }
+            if target.entrypoint.trim().is_empty() {
+                return Err(ResolveError::InvalidConfiguration {
+                    message: format!(
+                        "targets.{}.entrypoint is required for runtime=source",
+                        label
+                    ),
+                });
+            }
+            let language = infer_language_from_entrypoint(&target.entrypoint);
+            return Ok(ResolvedTarget::Source {
+                language,
+                version: None,
+                entrypoint: target.entrypoint.clone(),
+                dependencies: None,
+                args: target.cmd.clone(),
+                dev_mode: false,
+            });
+        }
+
         if targets.has_any_target() {
             return resolve_source_target(targets, context);
         }
     }
-
-    debug!(
-        "No targets defined, falling back to legacy execution.runtime: {:?}",
-        manifest.execution.runtime
-    );
-
-    #[allow(deprecated)]
-    match manifest.execution.runtime {
-        RuntimeType::Source | RuntimeType::Native => Err(ResolveError::InvalidConfiguration {
-            message:
-                "Source runtime requires targets.source; legacy execution.runtime is not enough"
-                    .to_string(),
-        }),
-        RuntimeType::Wasm | RuntimeType::Oci | RuntimeType::Docker | RuntimeType::Youki => {
-            Err(ResolveError::UnsupportedTarget {
-                target: format!("{:?}", manifest.execution.runtime),
-            })
-        }
-    }
+    Err(ResolveError::InvalidConfiguration {
+        message: "No targets defined".to_string(),
+    })
 }
 
 fn resolve_source_target(
@@ -193,6 +212,20 @@ fn try_resolve_source(
         args: source.args.clone(),
         dev_mode: source.dev_mode,
     })
+}
+
+fn infer_language_from_entrypoint(entrypoint: &str) -> String {
+    let lower = entrypoint.to_ascii_lowercase();
+    if lower.ends_with(".py") {
+        return "python".to_string();
+    }
+    if lower.ends_with(".js") || lower.ends_with(".mjs") || lower.ends_with(".cjs") {
+        return "node".to_string();
+    }
+    if lower.ends_with(".ts") {
+        return "node".to_string();
+    }
+    "source".to_string()
 }
 
 #[cfg(test)]

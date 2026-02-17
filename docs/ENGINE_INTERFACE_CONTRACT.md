@@ -141,7 +141,7 @@ nacelle internal --input - exec
 
 `exec` は 2 モードを持ちます:
 
-- `interactive=true`（推奨: `capsule dev`）
+- `interactive=true`（推奨: `ato dev`）
   - **stdout/stderr をアプリのログとしてストリーミング**する
   - **stdout に JSON を出さない**（ログ汚染を避ける）
   - 終了状態は **engine プロセスの exit code** で返す

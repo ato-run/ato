@@ -6,18 +6,18 @@
 //! - Windows: WFP + AppContainer (planned)
 //!
 //! v3.0: This module contains OS-native sandbox enforcement and verification
-//! utilities. Validation/policy resolution has been moved to capsule-cli.
+//! utilities. Validation/policy resolution has been moved to ato-cli.
 //!
 //! Remaining components:
 //! - sandbox: OS-native process sandboxing (Landlock/Seatbelt)
 //! - path: Path validation and security
 //!
-//! Moved to capsule-cli:
+//! Moved to ato-cli:
 //! - verifier: L1 Source Policy + L2 Signature Verification
 //! - signing: Ed25519 signature generation
 //! - egress_policy: L4 Egress policy resolution (domain → IP)
 //!
-//! Note: Audit logging is handled by the caller (capsule-cli).
+//! Note: Audit logging is handled by the caller (ato-cli).
 
 use async_trait::async_trait;
 use std::process::Command;

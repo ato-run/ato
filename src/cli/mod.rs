@@ -9,8 +9,8 @@ use clap::{Parser, Subcommand};
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Nacelle engine CLI (internal plumbing only)")]
 #[command(
-    long_about = "nacelle is the low-level execution engine for capsule bundles. It is intended to be invoked by capsule-cli or as a self-extracting bundle, not directly by users.",
-    after_help = "See `capsule --help` for development and packaging commands."
+    long_about = "nacelle is the low-level execution engine for capsule bundles. It is intended to be invoked by ato-cli or as a self-extracting bundle, not directly by users.",
+    after_help = "See `ato --help` for development and packaging commands."
 )]
 struct Cli {
     /// Enable verbose output
@@ -24,7 +24,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Machine-oriented engine interface (JSON over stdio)
-    /// Use capsule-cli for human-facing workflows.
+    /// Use ato-cli for human-facing workflows.
     Internal {
         /// JSON input file path, or '-' for stdin
         #[arg(long, default_value = "-")]
@@ -34,7 +34,7 @@ enum Commands {
         command: InternalCommands,
     },
 
-    /// (Hidden: legacy command, use capsule dev instead)
+    /// (Hidden: legacy command, use ato dev instead)
     #[command(hide = true)]
     Dev,
 }
@@ -68,7 +68,7 @@ pub async fn execute() -> anyhow::Result<()> {
             .await
         }
         Commands::Dev => {
-            anyhow::bail!("`nacelle dev` is deprecated. Use `capsule dev` instead.");
+            anyhow::bail!("`nacelle dev` is deprecated. Use `ato dev` instead.");
         }
     }
 }

@@ -44,11 +44,11 @@ The Nacelle project takes security seriously. If you discover a security vulnera
 
 ### Supported Versions
 
-| Version | Supported | End of Support |
-|---------|-----------|----------------|
-| 0.2.x   | ✅ Yes    | N/A (current)  |
+| Version | Supported  | End of Support |
+| ------- | ---------- | -------------- |
+| 0.2.x   | ✅ Yes     | N/A (current)  |
 | 0.1.x   | ⚠️ Limited | 2025-12-31     |
-| < 0.1   | ❌ No     | Unsupported    |
+| < 0.1   | ❌ No      | Unsupported    |
 
 **Security patches are provided for the current version and the previous minor version only.**
 
@@ -59,19 +59,20 @@ The Nacelle project takes security seriously. If you discover a security vulnera
 ### For Production Deployment
 
 1. **Keep Nacelle Updated**
+
    ```bash
    # Check for updates
-   cargo install --path ./capsule-cli --force
+   cargo install --path ./ato-cli --force
    ```
 
 2. **Key Management**
    - Never commit private keys to version control
    - Use environment variables or secure vaults for key storage
-   - Regenerate keys if compromised: `capsule keygen --name <name>`
+   - Regenerate keys if compromised: `ato keygen --name <name>`
 
 3. **Capsule Signing**
    - Always sign capsules with a private key
-   - Verify signature before deployment: `capsule pack --bundle --manifest ./capsule.toml --key <key>`
+   - Verify signature before deployment: `ato pack --bundle --manifest ./capsule.toml --key <key>`
 
 4. **Network Security**
    - Use HTTPS/TLS for all remote capsule downloads
@@ -114,16 +115,119 @@ The Nacelle project takes security seriously. If you discover a security vulnera
 - ✅ **Capsule Manifest Signing:** Tamper detection
 - ✅ **gRPC/TLS Support:** Encrypted communication
 - ✅ **Input Validation:** Manifest parsing and validation
-- ✅ **Sandboxing:** Container isolation (eBPF-based on Linux)
+- ✅ **OS-Native Sandboxing:** Seatbelt (macOS) / Bubblewrap + Landlock (Linux)
+- ✅ **Sensitive Path Protection:** `~/.ssh`, `~/.aws`, `~/.gnupg` etc. auto-denied
+- ✅ **Network Isolation:** Per-capsule network access control
 - ✅ **Audit Logging:** Deployment and execution logging
 
 ### In Development / Planned
 
-- 🔄 **SELinux/AppArmor Integration:** Enhanced kernel-level isolation
+- 🔄 **Domain-level Egress Filtering:** Via Sidecar Proxy (tsnet/SOCKS5)
 - 🔄 **Encrypted Secrets Management:** Secure secret handling for capsules
 - 🔄 **Rate Limiting:** Engine API protection
 - 🔄 **Certificate Pinning:** Secure gRPC communication
 - 🔄 **Hardware Security Module (HSM) Support:** Key management
+
+---
+
+## Runtime Security Model
+
+### Command Execution Policy: "Allow Any Command"
+
+nacelle does **not** maintain a binary allowlist for capsule commands.
+Any command specified in `capsule.toml` (`execution.entrypoint` /
+`execution.command`) is permitted to execute.
+
+**Rationale:** Allowing `npm` or `python` already means arbitrary code
+can run — `npm run dev` executes whatever is in `package.json`, and
+`python script.py` can do anything Python can do. A binary allowlist
+creates a false sense of security and breaks extensibility. The real
+security boundary is the OS sandbox.
+
+Only basic portability checks are enforced:
+
+- No absolute paths (`/usr/bin/python` → use `python`)
+- No directory traversal (`../../../bin/sh`)
+
+### Security Boundary: OS-level Sandbox
+
+The **sole security enforcement** is the OS-native process sandbox:
+
+| Platform | Primary            | Supplementary |
+| -------- | ------------------ | ------------- |
+| macOS    | Seatbelt (SBPL)    | —             |
+| Linux    | Bubblewrap (bwrap) | Landlock LSM  |
+
+#### macOS (Seatbelt / sandbox-exec)
+
+**Strategy: "Allow Default, Deny Sensitive"**
+
+- `(allow default)` — permits general file/process/IPC operations.
+- `(deny file-read* file-write* (subpath "~/.ssh") ...)` — blocks
+  access to sensitive user directories.
+- `(deny network*)` — applied when `isolation.network.enabled = false`.
+
+#### Linux (Bubblewrap + Landlock)
+
+**Strategy: "Namespace Isolation + Filesystem Allow-list"**
+
+1. **Bubblewrap** provides PID/mount/net namespace isolation:
+   - Only explicitly bind-mounted paths are visible.
+   - Sensitive paths are hidden with `--tmpfs` overlays.
+   - `--unshare-all` without `--share-net` blocks network.
+2. **Landlock LSM** (kernel 5.13+) adds filesystem access control:
+   - Allow-list constructed from `capsule.toml` after filtering
+     sensitive paths.
+   - Applied as a supplementary layer inside the namespace.
+
+### Sensitive Paths (Default Deny List)
+
+The following user directories are blocked by default across all platforms.
+Defined in `src/system/sandbox/mod.rs::sensitive_paths()`.
+
+| Path                                              | Reason              |
+| ------------------------------------------------- | ------------------- |
+| `~/.ssh`                                          | SSH keys            |
+| `~/.gnupg`                                        | GPG keys            |
+| `~/.aws`                                          | AWS credentials     |
+| `~/.kube`                                         | Kubernetes config   |
+| `~/.config/gcloud`                                | GCP credentials     |
+| `~/.azure`                                        | Azure credentials   |
+| `~/.docker`                                       | Docker credentials  |
+| `~/.npmrc`                                        | npm tokens          |
+| `~/.pypirc`                                       | PyPI tokens         |
+| `~/.bash_history` / `~/.zsh_history`              | May contain secrets |
+| `~/Library/Keychains` _(macOS)_                   | System keychain     |
+| `~/Library/Cookies` _(macOS)_                     | Browser cookies     |
+| `~/Library/Application Support/Chrome` _(macOS)_  | Browser profile     |
+| `~/Library/Application Support/Firefox` _(macOS)_ | Browser profile     |
+
+**Behavior when user specifies a parent path:**
+
+If `capsule.toml` contains `read_write = ["~"]` (home directory),
+the sandbox automatically excludes sensitive sub-directories:
+
+- **macOS:** Seatbelt `(deny ...)` rules override the parent `(allow ...)`.
+- **Linux:** `filter_sensitive_paths()` removes the home directory from
+  the Landlock allow-list; Bubblewrap applies `--tmpfs` overlays.
+
+A `WARN` log is emitted when paths are filtered.
+
+### Network Egress Control
+
+| Mechanism                        | Scope            | Status      |
+| -------------------------------- | ---------------- | ----------- |
+| `isolation.network.enabled`      | All traffic      | ✅ Enforced |
+| `isolation.network.egress_allow` | Domain filtering | ⚠️ Sidecar  |
+
+Domain-level egress filtering (`egress_allow`) **cannot** be enforced
+at the OS sandbox level (Seatbelt supports only IP-based rules;
+Landlock has no network filtering). When `egress_allow` is configured:
+
+1. A `WARN` log is emitted: _"Domain-level egress filtering is not
+   enforceable via Seatbelt/Bubblewrap. Relies on Sidecar Proxy."_
+2. The Seatbelt profile includes a comment noting the delegation.
+3. Actual enforcement is performed by the **Sidecar Proxy (tsnet/SOCKS5)**.
 
 ---
 
@@ -160,6 +264,7 @@ All are vetted for security and maintained actively.
 ### Before Submitting a PR
 
 1. Run security checks:
+
    ```bash
    cargo fmt --check
    cargo clippy --all-targets -- -D warnings
@@ -204,5 +309,5 @@ Thank you to the security researchers who responsibly report vulnerabilities and
 
 ---
 
-**Last Updated:** January 2026  
+**Last Updated:** February 2026  
 **Maintainers:** Nacelle Security Team

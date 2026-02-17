@@ -41,9 +41,13 @@ async fn resolve_executable_and_args(
             // Prepare arguments
             let mut final_args: Vec<String> = Vec::new();
 
-            // Add language-specific flags
-            if target.language == "python" && !args.iter().any(|a| a == "-B") {
-                final_args.push("-B".to_string()); // Disable bytecode caching
+            // Add -B (disable bytecode caching) only for the Python interpreter itself,
+            // not for Python ecosystem tools like uv, pip, etc.
+            if target.language == "python"
+                && is_python_interpreter(binary)
+                && !args.iter().any(|a| a == "-B")
+            {
+                final_args.push("-B".to_string());
             }
 
             final_args.extend(args.iter().cloned());
@@ -76,6 +80,27 @@ async fn resolve_executable_and_args(
     };
 
     Ok((toolchain_path, args))
+}
+
+/// Check if the binary name is a Python interpreter (not a tool like uv/pip)
+///
+/// `-B` (disable .pyc bytecode caching) is a Python interpreter flag and must
+/// NOT be passed to ecosystem tools like `uv`, `pip`, `pipx`, etc.
+fn is_python_interpreter(binary: &str) -> bool {
+    let basename = std::path::Path::new(binary)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| binary.to_string());
+    matches!(
+        basename.to_lowercase().as_str(),
+        "python"
+            | "python3"
+            | "python3.10"
+            | "python3.11"
+            | "python3.12"
+            | "python3.13"
+            | "python3.14"
+    )
 }
 
 /// Resolve a binary name to an executable path
@@ -234,8 +259,9 @@ async fn launch_with_alcoholless(
             };
             cmd.arg(&binary_path);
 
-            // For Python, add -B to disable bytecode caching
-            if target.language == "python" {
+            // For Python interpreter, add -B to disable bytecode caching
+            // Skip for tools like uv, pip that are not the interpreter itself
+            if target.language == "python" && is_python_interpreter(binary) {
                 cmd.arg("-B");
             }
 
@@ -409,8 +435,9 @@ async fn launch_with_sandbox_exec(
             };
             cmd.arg(&binary_path);
 
-            // For Python, add -B to disable bytecode caching
-            if target.language == "python" {
+            // For Python interpreter, add -B to disable bytecode caching
+            // Skip for tools like uv, pip that are not the interpreter itself
+            if target.language == "python" && is_python_interpreter(binary) {
                 cmd.arg("-B");
             }
 
@@ -703,7 +730,21 @@ fn generate_production_seatbelt_profile(
                 "; Network DENIED (from capsule.toml [isolation.network.enabled = false])\n",
             );
             profile.push_str("(deny network*)\n\n");
+        } else if !iso.egress_allow.is_empty() {
+            // Network enabled with domain restrictions – Seatbelt cannot
+            // enforce domain-level filtering (only IP-based). The actual
+            // filtering is delegated to the Sidecar Proxy (tsnet/SOCKS5).
+            profile
+                .push_str(";; Note: egress_allow domains are handled by Sidecar Proxy (tsnet),\n");
+            profile.push_str(";; not enforced at the Seatbelt sandbox level.\n");
+            profile.push_str(&format!(";; Configured domains: {:?}\n", iso.egress_allow));
+            profile.push_str("(allow network*)\n\n");
+            warn!(
+                "Domain-level egress filtering (egress_allow: {:?}) is not enforceable via Seatbelt. Relies on Sidecar Proxy.",
+                iso.egress_allow
+            );
         }
+        // else: network enabled, no egress restrictions → full network via (allow default)
     } else {
         // Default behavior: network denied for safety
         profile.push_str("; Network DENIED (default when no [isolation] section)\n");
@@ -711,37 +752,43 @@ fn generate_production_seatbelt_profile(
     }
 
     // =========================================================================
-    // CRITICAL: Deny access to sensitive user paths
-    // This is the core security boundary - protect user's secrets
+    // IPC socket paths (injected by ato-cli IPC Broker)
     // =========================================================================
-    if let Ok(home) = std::env::var("HOME") {
-        let home_escaped = home.replace('\\', "\\\\").replace('"', "\\\"");
+    if !target.ipc_socket_paths.is_empty() {
+        profile.push_str("; IPC socket paths (ato-cli IPC Broker)\n");
+        for path in &target.ipc_socket_paths {
+            if let Some(escaped) = escape_path_for_sbpl(path) {
+                profile.push_str(&format!(
+                    "(allow file-read* file-write* (subpath \"{}\"))\n",
+                    escaped
+                ));
+            } else if let Some(parent) = path.parent() {
+                // Socket may not exist yet; allow the parent directory
+                if let Some(escaped_parent) = escape_path_for_sbpl(parent) {
+                    profile.push_str(&format!(
+                        "(allow file-read* file-write* (subpath \"{}\"))\n",
+                        escaped_parent
+                    ));
+                }
+            }
+        }
+        profile.push('\n');
+    }
+
+    // =========================================================================
+    // CRITICAL: Deny access to sensitive user paths
+    // Uses the shared sensitive_paths() from system::sandbox
+    // This is the core security boundary – protect user's secrets
+    // =========================================================================
+    let sensitive = crate::system::sandbox::sensitive_paths();
+    if !sensitive.is_empty() {
         profile.push_str("; SECURITY: Deny access to sensitive user directories\n");
         profile.push_str("(deny file-read* file-write*\n");
-        profile.push_str(&format!("    (subpath \"{}/.ssh\")\n", home_escaped));
-        profile.push_str(&format!("    (subpath \"{}/.gnupg\")\n", home_escaped));
-        profile.push_str(&format!("    (subpath \"{}/.aws\")\n", home_escaped));
-        profile.push_str(&format!("    (subpath \"{}/.kube\")\n", home_escaped));
-        profile.push_str(&format!(
-            "    (subpath \"{}/.config/gcloud\")\n",
-            home_escaped
-        ));
-        profile.push_str(&format!(
-            "    (subpath \"{}/Library/Keychains\")\n",
-            home_escaped
-        ));
-        profile.push_str(&format!(
-            "    (subpath \"{}/Library/Cookies\")\n",
-            home_escaped
-        ));
-        profile.push_str(&format!(
-            "    (subpath \"{}/Library/Application Support/Google/Chrome\")\n",
-            home_escaped
-        ));
-        profile.push_str(&format!(
-            "    (subpath \"{}/Library/Application Support/Firefox\")\n",
-            home_escaped
-        ));
+        for path in &sensitive {
+            let path_str = path.to_string_lossy();
+            let escaped = path_str.replace('\\', "\\\\").replace('"', "\\\"");
+            profile.push_str(&format!("    (subpath \"{}\")\n", escaped));
+        }
         profile.push_str(")\n");
     }
 
@@ -789,6 +836,7 @@ mod tests {
             cmd: None,
             dev_mode: true,
             isolation: None,
+            ipc_socket_paths: vec![],
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
@@ -810,6 +858,7 @@ mod tests {
             cmd: None,
             dev_mode: false,
             isolation: None,
+            ipc_socket_paths: vec![],
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
@@ -851,6 +900,7 @@ mod tests {
             ]),
             dev_mode: false,
             isolation: Some(isolation),
+            ipc_socket_paths: vec![],
         };
         let toolchain = PathBuf::from("/usr/local/bin/node");
 
@@ -860,11 +910,52 @@ mod tests {
         assert!(profile.contains("(allow default)"));
         // When network_enabled = true, there's no deny network* line
         assert!(!profile.contains("(deny network*)"));
-        // Check capsule source dir
+        // Check ato source dir
         assert!(profile.contains("/Users/test/app"));
         // Check sensitive paths are denied
         assert!(profile.contains("/.ssh"));
         assert!(profile.contains("/.aws"));
+        // Check egress_allow generates a sidecar proxy comment
+        assert!(
+            profile.contains("egress_allow domains are handled by Sidecar Proxy"),
+            "Profile should contain egress_allow sidecar note"
+        );
+        assert!(
+            profile.contains("api.example.com"),
+            "Profile should list the configured domain in comments"
+        );
+    }
+
+    #[test]
+    fn test_seatbelt_profile_network_enabled_no_egress() {
+        // network_enabled=true but egress_allow is empty -> no warning/comment
+        let isolation = IsolationPolicy {
+            sandbox_enabled: true,
+            read_only_paths: vec![],
+            read_write_paths: vec![],
+            network_enabled: true,
+            egress_allow: vec![],
+        };
+
+        let target = SourceTarget {
+            language: "python".to_string(),
+            version: Some("3.11".to_string()),
+            entrypoint: "main.py".to_string(),
+            dependencies: None,
+            args: vec![],
+            source_dir: PathBuf::from("/Users/test/app"),
+            cmd: None,
+            dev_mode: false,
+            isolation: Some(isolation),
+            ipc_socket_paths: vec![],
+        };
+        let toolchain = PathBuf::from("/usr/bin/python3");
+
+        let profile = generate_seatbelt_profile(&target, &toolchain);
+
+        // No deny network, no egress comment
+        assert!(!profile.contains("(deny network*)"));
+        assert!(!profile.contains("egress_allow"));
     }
 
     #[test]

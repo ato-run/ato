@@ -29,7 +29,7 @@ A minimal yet functional TODO application showcasing Capsule deployment with a R
 
 - Node.js 18+ and pnpm
 - Python 3.9+
-- capsule CLI tools (`cargo build -p capsule-cli`)
+- ato CLI tools (`cargo build -p ato-cli`)
 
 ### Quick Start
 
@@ -40,7 +40,7 @@ cd samples/simple-todo
 ./build.sh
 
 # Package as a Capsule
-capsule pack --bundle --manifest ./capsule.toml --output simple-todo.capsule
+ato pack --bundle --manifest ./capsule.toml --output simple-todo.capsule
 ```
 
 ### Project Structure
@@ -92,7 +92,7 @@ bun install
 bun run dev
 
 # Build Capsule
-capsule pack --bundle --manifest ./capsule.toml --output my-app.capsule
+ato pack --bundle --manifest ./capsule.toml --output my-app.capsule
 ```
 
 ### Project Structure
@@ -139,7 +139,7 @@ cargo test
 
 For production key generation, use:
 ```bash
-capsule keygen --name my-production-key
+ato keygen --name my-production-key
 ```
 
 See [keys/README.md](./keys/README.md) for details.
@@ -150,11 +150,11 @@ See [keys/README.md](./keys/README.md) for details.
 
 ### 1. Prerequisites
 
-Ensure you have the capsule CLI built:
+Ensure you have the ato CLI built:
 
 ```bash
 cd ../..  # Navigate to repo root
-cargo build -p capsule-cli
+cargo build -p ato-cli
 ```
 
 ### 2. Choose a Sample
