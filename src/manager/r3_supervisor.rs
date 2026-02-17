@@ -11,7 +11,15 @@ pub async fn run_services_from_config(
     config: &RuntimeConfig,
     bundle_root: &Path,
     sandbox: Option<&dyn NetworkSandbox>,
+    strict_sandbox_required: bool,
 ) -> Result<(), String> {
+    if strict_sandbox_required && sandbox.is_none() {
+        return Err(
+            "Strict sandbox enforcement is enabled but sandbox backend is not available"
+                .to_string(),
+        );
+    }
+
     lockfile::enforce_lockfile_allowlist(bundle_root)
         .map_err(|e| format!("capsule.lock allowlist check failed: {}", e))?;
     lockfile::hydrate_bundle(bundle_root)

@@ -429,6 +429,10 @@ mod tests {
             dependencies: None,
             args: vec!["--debug".to_string()],
             source_dir: PathBuf::from(r"C:\Users\test\project"),
+            cmd: None,
+            dev_mode: false,
+            isolation: None,
+            ipc_socket_paths: vec![],
         };
         let toolchain = PathBuf::from(r"C:\Python311\python.exe");
 

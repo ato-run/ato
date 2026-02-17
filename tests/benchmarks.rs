@@ -1,5 +1,5 @@
 #![cfg(feature = "legacy-manifest-tests")]
-// Legacy manifest benchmarks moved to capsule-cli.
+// Legacy manifest benchmarks moved to ato-cli.
 
 //! Performance Benchmarks for Storage and Container Runtime
 //!

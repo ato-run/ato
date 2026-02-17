@@ -1,6 +1,6 @@
 # nacelle
 
-`nacelle` は **Capsule を実行するためのエンジン（internal runtime）**です。エンドユーザーが直接触る入口は `capsule-cli` を想定し、`capsule-cli` がプロセス境界（JSON over stdio）で `nacelle internal ...` を呼び出して実行します。
+`nacelle` は **Capsule を実行するためのエンジン（internal runtime）**です。エンドユーザーが直接触る入口は `ato-cli` を想定し、`ato-cli` がプロセス境界（JSON over stdio）で `nacelle internal ...` を呼び出して実行します。
 
 ## 役割
 

@@ -1,5 +1,5 @@
 #![cfg(feature = "legacy-manifest-tests")]
-// Legacy artifact/CAS tests moved to capsule-cli.
+// Legacy artifact/CAS tests moved to ato-cli.
 
 //! Unit 6.1: CAS Resolution & Audit Log Persistence E2E Tests
 //!

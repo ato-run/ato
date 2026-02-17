@@ -1,5 +1,5 @@
 #![cfg(feature = "legacy-manifest-tests")]
-// Legacy security tests moved to capsule-cli.
+// Legacy security tests moved to ato-cli.
 
 //! Security Integration E2E Tests
 //!

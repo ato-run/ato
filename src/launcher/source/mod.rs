@@ -1,7 +1,7 @@
 //! Source Runtime - Native execution for interpreted languages
 //!
 //! Provides fast development experience (3ms startup) using host toolchains
-//! with sandbox isolation. OCI fallback is removed; capsule-cli is responsible
+//! with sandbox isolation. OCI fallback is removed; ato-cli is responsible
 //! for routing to other runtimes.
 //!
 //! Platform-specific sandbox implementations:
@@ -293,7 +293,7 @@ impl SourceRuntime {
                         ),
                         cloud_upsell: Some(
                             "💡 This app requires a runtime that needs cloud environment. \
-                             Run with 'capsule run --mode=cloud' (Pro plan) to execute in a managed Linux VM."
+                             Run with 'ato run --mode=cloud' (Pro plan) to execute in a managed Linux VM."
                                 .to_string(),
                         ),
                     });

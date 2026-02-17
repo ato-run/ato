@@ -1,5 +1,5 @@
 #![cfg(feature = "legacy-manifest-tests")]
-// Legacy DNS/egress policy tests moved to capsule-cli.
+// Legacy DNS/egress policy tests moved to ato-cli.
 
 //! Unit 7.1: DNS Control & Network Security E2E Tests
 //!

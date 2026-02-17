@@ -26,7 +26,7 @@ simple-todo/
 
 - Node.js and pnpm (for building the React app)
 - Python 3.9+ (for the runtime)
-- capsule CLI tools (optional, for capsule verification)
+- ato CLI tools (optional, for capsule verification)
 
 ### Build Steps
 
@@ -41,11 +41,11 @@ pnpm run build
 2. **Package as a Capsule**:
 
 ```bash
-# Using the capsule CLI
-capsule pack --bundle --manifest ./capsule.toml
+# Using the ato CLI
+ato pack --bundle --manifest ./capsule.toml
 
 # Or build a signed package
-capsule pack --bundle --manifest ./capsule.toml --key ./keys/signing.key
+ato pack --bundle --manifest ./capsule.toml --key ./keys/signing.key
 ```
 
 ## Running the Capsule
@@ -64,7 +64,7 @@ python3 app.py
 
 ```bash
 # Deploy to a capsule runtime
-capsule open simple-todo-v0.1.0.capsule
+ato open simple-todo-v0.1.0.capsule
 
 # Verify deployment
 curl http://localhost:8000/api/health
@@ -107,12 +107,12 @@ Response (201):
 
 1. **Package the capsule**:
    ```bash
-   capsule pack --bundle --manifest ./capsule.toml --output simple-todo.capsule
+   ato pack --bundle --manifest ./capsule.toml --output simple-todo.capsule
    ```
 
 2. **Sign the package**:
    ```bash
-   capsule pack --bundle --manifest ./capsule.toml --key ./my-signing-key
+   ato pack --bundle --manifest ./capsule.toml --key ./my-signing-key
    ```
 
 3. **Deploy to coordinator**:
@@ -175,5 +175,5 @@ curl -X POST http://localhost:8000/api/todos \
 
 - [UARC Specification](../../uarc/SPEC.md)
 - [nacelle Runtime](../README.md)
-- [capsule CLI](../../capsule-cli/README.md)
+- [ato CLI](../../ato-cli/README.md)
 - [React + Vite](../../ato-desktop/README.md)
