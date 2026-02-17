@@ -1,10 +1,10 @@
 #![cfg(feature = "legacy-manifest-tests")]
-// Legacy manifest/runtime resolution tests moved to capsule-cli.
+// Legacy manifest/runtime resolution tests moved to ato-cli.
 
 //! Runtime Resolution E2E Tests (Source-only)
 //!
 //! v0.2.0: nacelle supports Source targets only. OCI/Wasm targets are rejected
-//! and must be handled by capsule-cli.
+//! and must be handled by ato-cli.
 //!
 //! To run:
 //! ```bash
