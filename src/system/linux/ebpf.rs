@@ -17,6 +17,8 @@ use aya::programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType};
 use aya::Pod;
 #[cfg(target_os = "linux")]
 use aya::{include_bytes_aligned, Ebpf};
+#[cfg(target_os = "linux")]
+const EMBEDDED_EBPF_OBJECT: &[u8] = include_bytes_aligned!(concat!(env!("OUT_DIR"), "/nacelle-ebpf"));
 
 pub struct EgressEnforcerHandle {
     #[cfg(target_os = "linux")]
@@ -34,7 +36,7 @@ impl EgressEnforcerHandle {
 
         #[cfg(target_os = "linux")]
         {
-            load_rules(&mut self.bpf, "IPV4_ALLOW", "IPV6_ALLOW", rules)
+            load_rules(&mut self.bpf, "IPV4_ALLOW", "IPV6_ALLOW", rules, true)
         }
     }
 }
@@ -81,11 +83,13 @@ pub fn start_enforcer(
 
         let cgroup_path = create_cgroup(job_id)?;
 
-        let mut bpf = Ebpf::load(include_bytes_aligned!(concat!(
-            env!("OUT_DIR"),
-            "/nacelle-ebpf"
-        )))
-        .context("Failed to load eBPF object")?;
+        if EMBEDDED_EBPF_OBJECT.is_empty() {
+            anyhow::bail!(
+                "eBPF object is not embedded in this build; build nacelle natively on Linux with eBPF toolchain"
+            );
+        }
+
+        let mut bpf = Ebpf::load(EMBEDDED_EBPF_OBJECT).context("Failed to load eBPF object")?;
 
         let program: &mut CgroupSkb = bpf
             .program_mut("nacelle_egress")
@@ -100,8 +104,8 @@ pub fn start_enforcer(
             CgroupAttachMode::Single,
         )?;
 
-        load_rules(&mut bpf, "IPV4_ALLOW", "IPV6_ALLOW", rules)?;
-        load_rules(&mut bpf, "DNS_IPV4_ALLOW", "DNS_IPV6_ALLOW", dns_rules)?;
+        load_rules(&mut bpf, "IPV4_ALLOW", "IPV6_ALLOW", rules, true)?;
+        load_rules(&mut bpf, "DNS_IPV4_ALLOW", "DNS_IPV6_ALLOW", dns_rules, false)?;
 
         Ok(EgressEnforcerHandle { bpf, cgroup_path })
     }
@@ -117,7 +121,13 @@ fn create_cgroup(job_id: &str) -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn load_rules(bpf: &mut Ebpf, v4_map: &str, v6_map: &str, rules: &[EgressRuleEntry]) -> Result<()> {
+fn load_rules(
+    bpf: &mut Ebpf,
+    v4_map: &str,
+    v6_map: &str,
+    rules: &[EgressRuleEntry],
+    include_loopback: bool,
+) -> Result<()> {
     let mut v4_entries: Vec<(u32, u32)> = Vec::new();
     let mut v6_entries: Vec<(u32, [u8; 16])> = Vec::new();
 
@@ -152,6 +162,12 @@ fn load_rules(bpf: &mut Ebpf, v4_map: &str, v6_map: &str, rules: &[EgressRuleEnt
             }
             other => anyhow::bail!("Unsupported rule type: {}", other),
         }
+    }
+
+    if include_loopback {
+        // Always allow local loopback so sandboxed web apps remain reachable on localhost.
+        v4_entries.push((8, u32::from_be_bytes([127, 0, 0, 0])));
+        v6_entries.push((128, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]));
     }
 
     {

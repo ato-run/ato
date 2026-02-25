@@ -35,13 +35,15 @@ impl NetworkSandbox for LinuxSandbox {
         })?;
         let cgroup_path = handle.cgroup_path.clone();
 
-        _cmd.pre_exec(move || {
-            std::fs::write(
-                cgroup_path.join("cgroup.procs"),
-                std::process::id().to_string(),
-            )?;
-            Ok(())
-        });
+        unsafe {
+            _cmd.pre_exec(move || {
+                std::fs::write(
+                    cgroup_path.join("cgroup.procs"),
+                    std::process::id().to_string(),
+                )?;
+                Ok(())
+            });
+        }
 
         Ok(())
     }
