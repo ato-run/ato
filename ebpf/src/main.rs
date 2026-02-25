@@ -52,6 +52,11 @@ fn try_nacelle_egress(ctx: SkBuffContext) -> Result<bool, i64> {
         if pkt_len < 20 {
             return Ok(true);
         }
+        // Always allow loopback traffic so sandboxed local web services remain reachable.
+        let dst_first_octet: u8 = ctx.load(16)?;
+        if dst_first_octet == 127 {
+            return Ok(true);
+        }
         let dst: u32 = u32::from_be(ctx.load(16)?);
 
         let key = LpmKey::new(32, Ipv4LpmKey { addr: dst });

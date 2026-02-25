@@ -38,8 +38,8 @@ fn build_ebpf_program() -> Result<(), Box<dyn std::error::Error>> {
         "nightly",
         "cargo",
         "build",
-        "--package",
-        "nacelle-ebpf",
+        "--manifest-path",
+        "ebpf/Cargo.toml",
         "-Z",
         "build-std=core",
         "--bins",
@@ -108,12 +108,35 @@ fn build_ebpf_program() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn write_placeholder_ebpf() -> Result<(), Box<dyn std::error::Error>> {
+    let out_dir = PathBuf::from(env::var("OUT_DIR")?);
+    let dst = out_dir.join("nacelle-ebpf");
+    if !dst.exists() {
+        fs::write(&dst, [])?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     aya_build::emit_bpf_target_arch_cfg();
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "linux" {
-        build_ebpf_program().expect("Failed to build eBPF program");
+        let target = env::var("TARGET").unwrap_or_default();
+        let host = env::var("HOST").unwrap_or_default();
+        if target == host {
+            if let Err(err) = build_ebpf_program() {
+                println!("cargo:warning=Failed to build eBPF program: {err}");
+                write_placeholder_ebpf()?;
+            }
+        } else {
+            println!(
+                "cargo:warning=Skipping eBPF build for cross-compilation (host={host}, target={target})"
+            );
+            write_placeholder_ebpf()?;
+        }
+    } else {
+        write_placeholder_ebpf()?;
     }
 
     Ok(())
