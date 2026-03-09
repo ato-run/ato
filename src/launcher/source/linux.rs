@@ -230,6 +230,31 @@ pub async fn launch_with_bubblewrap(
         }
     }
 
+    // Bubblewrap hides the host /tmp behind a tmpfs. Re-bind IPC socket parent
+    // directories so ato-cli provisioned sockets remain reachable inside the sandbox.
+    let mut ipc_bind_targets: Vec<PathBuf> = Vec::new();
+    for socket_path in &target.ipc_socket_paths {
+        let bind_target = if socket_path.exists() {
+            socket_path.clone()
+        } else if let Some(parent) = socket_path.parent() {
+            parent.to_path_buf()
+        } else {
+            continue;
+        };
+
+        if !bind_target.exists() || ipc_bind_targets.contains(&bind_target) {
+            continue;
+        }
+
+        let bind_target_str = bind_target.to_string_lossy().to_string();
+        debug!(
+            "Binding IPC path into bubblewrap sandbox: {}",
+            bind_target_str
+        );
+        cmd.args(["--bind", &bind_target_str, &bind_target_str]);
+        ipc_bind_targets.push(bind_target);
+    }
+
     // Hide sensitive paths that would be reachable via any parent bind-mount
     let all_parents: Vec<&str> = extra_bound_parents.iter().map(|s| s.as_str()).collect();
     add_sensitive_path_hiding(&mut cmd, &all_parents);

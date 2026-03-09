@@ -1,0 +1,235 @@
+name: Build and Publish nacelle
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+      - "v*.*.*-*"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_macos:
+    name: Build macOS binaries
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Build macOS release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="v$(sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -n1)"
+          if [[ -z "$version" ]]; then
+            echo "Failed to resolve version from Cargo.toml" >&2
+            exit 1
+          fi
+
+          out_dir="/tmp/nacelle-release/${version}"
+          mkdir -p "$out_dir"
+
+          cargo build --release --bin nacelle --target x86_64-apple-darwin
+          cargo build --release --bin nacelle --target aarch64-apple-darwin
+
+          cp target/x86_64-apple-darwin/release/nacelle "$out_dir/nacelle-${version}-darwin-x64"
+          cp target/aarch64-apple-darwin/release/nacelle "$out_dir/nacelle-${version}-darwin-arm64"
+          chmod +x "$out_dir"/nacelle-${version}-darwin-*
+
+            python3 - <<'PY'
+            from pathlib import Path
+            import hashlib
+            out_dir = Path('/tmp/nacelle-release').glob('v*/')
+            out_dir = sorted(out_dir)[-1]
+            for path in sorted(out_dir.iterdir()):
+              if path.is_file() and not path.name.endswith('.sha256'):
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                (path.parent / f"{path.name}.sha256").write_text(f"{digest}  {path.name}\n")
+            PY
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nacelle-release-macos
+          path: /tmp/nacelle-release
+          if-no-files-found: error
+
+  build_linux:
+    name: Build Linux binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+
+      - name: Set up Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        shell: bash
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Build Linux release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="v$(sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -n1)"
+          if [[ -z "$version" ]]; then
+            echo "Failed to resolve version from Cargo.toml" >&2
+            exit 1
+          fi
+
+          out_dir="/tmp/nacelle-release/${version}"
+          mkdir -p "$out_dir"
+
+          cargo zigbuild --release --bin nacelle --target x86_64-unknown-linux-musl
+          cargo zigbuild --release --bin nacelle --target aarch64-unknown-linux-musl
+
+          cp target/x86_64-unknown-linux-musl/release/nacelle "$out_dir/nacelle-${version}-linux-x64"
+          cp target/aarch64-unknown-linux-musl/release/nacelle "$out_dir/nacelle-${version}-linux-arm64"
+          chmod +x "$out_dir"/nacelle-${version}-linux-*
+
+            python3 - <<'PY'
+            from pathlib import Path
+            import hashlib
+            out_dir = Path('/tmp/nacelle-release').glob('v*/')
+            out_dir = sorted(out_dir)[-1]
+            for path in sorted(out_dir.iterdir()):
+              if path.is_file() and not path.name.endswith('.sha256'):
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                (path.parent / f"{path.name}.sha256").write_text(f"{digest}  {path.name}\n")
+            PY
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nacelle-release-linux
+          path: /tmp/nacelle-release
+          if-no-files-found: error
+
+  upload_r2:
+    name: Upload nacelle to R2
+    needs:
+      - build_macos
+      - build_linux
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      DEFAULT_BUCKET_STAGING: ${{ secrets.R2_BUCKET_STAGING }}
+      DEFAULT_BUCKET_PRODUCTION: ${{ secrets.R2_BUCKET_PRODUCTION }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nacelle-release-*
+          path: /tmp/nacelle-artifacts
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Wrangler CLI
+        run: npm install -g wrangler@4
+
+      - name: Prepare upload bundle
+        id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${CLOUDFLARE_API_TOKEN:-}" || -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
+            echo "Missing required secrets: CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID" >&2
+            exit 1
+          fi
+
+          cargo_version="$(sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -n1)"
+          if [[ -z "$cargo_version" ]]; then
+            echo "Failed to read version from Cargo.toml" >&2
+            exit 1
+          fi
+
+          release_version="${GITHUB_REF#refs/tags/}"
+          if [[ -z "$release_version" ]]; then
+            echo "Failed to derive release version from tag" >&2
+            exit 1
+          fi
+
+          update_latest="0"
+          if [[ "$release_version" == "v${cargo_version}" ]]; then
+            update_latest="1"
+          fi
+
+          source_dir="/tmp/nacelle-release/${release_version}"
+          mkdir -p "$source_dir"
+
+          mapfile -t binaries < <(find /tmp/nacelle-artifacts -type f -name "nacelle-${release_version}-*" ! -name '*.sha256' | sort)
+          mapfile -t checksum_sidecars < <(find /tmp/nacelle-artifacts -type f -name "nacelle-${release_version}-*.sha256" | sort)
+
+          if [[ "${#binaries[@]}" -eq 0 ]]; then
+            echo "No nacelle binaries found in downloaded artifacts" >&2
+            exit 1
+          fi
+          if [[ "${#checksum_sidecars[@]}" -eq 0 ]]; then
+            echo "No nacelle checksum sidecars found in downloaded artifacts" >&2
+            exit 1
+          fi
+
+          cp "${binaries[@]}" "$source_dir/"
+          cp "${checksum_sidecars[@]}" "$source_dir/"
+
+          : > "$source_dir/SHA256SUMS"
+          for checksum_file in "$source_dir"/*.sha256; do
+            cat "$checksum_file" >> "$source_dir/SHA256SUMS"
+          done
+
+          if [[ "$update_latest" == "1" ]]; then
+            printf '%s\n' "$release_version" > "$source_dir/latest.txt"
+          fi
+
+          echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
+          echo "cargo_version=$cargo_version" >> "$GITHUB_OUTPUT"
+          echo "deploy_env=staging" >> "$GITHUB_OUTPUT"
+          echo "update_latest=$update_latest" >> "$GITHUB_OUTPUT"
+          echo "source_dir=$source_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Upload nacelle to R2 (staging)
+        shell: bash
+        env:
+          VERSION: ${{ steps.prepare.outputs.release_version }}
+          DEPLOY_ENV: ${{ steps.prepare.outputs.deploy_env }}
+          UPDATE_LATEST: ${{ steps.prepare.outputs.update_latest }}
+          SOURCE_DIR: ${{ steps.prepare.outputs.source_dir }}
+          WRANGLER_CONFIG: ""
+        run: bash ./scripts/upload_release_to_r2.sh
+
+      - name: Upload nacelle to R2 (production)
+        shell: bash
+        env:
+          VERSION: ${{ steps.prepare.outputs.release_version }}
+          DEPLOY_ENV: production
+          UPDATE_LATEST: ${{ steps.prepare.outputs.update_latest }}
+          SOURCE_DIR: ${{ steps.prepare.outputs.source_dir }}
+          WRANGLER_CONFIG: ""
+        run: bash ./scripts/upload_release_to_r2.sh

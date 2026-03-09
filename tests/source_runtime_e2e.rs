@@ -3,8 +3,8 @@
 /// Tests for Source Runtime with multiple language targets:
 /// - Python (python3)
 /// - Node.js (node)
-/// - Ruby (ruby)
 /// - Deno (deno)
+/// - Bun (bun)
 use std::process::Command;
 
 #[cfg(test)]
@@ -284,6 +284,73 @@ console.log("TEST_VAR=" + (Deno.env.get("TEST_VAR") || "not_set"));
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("TEST_VAR=test_value_abc"));
+
+        std::fs::remove_file(script_path).ok();
+    }
+}
+
+#[cfg(test)]
+mod bun_tests {
+    use super::*;
+
+    #[test]
+    #[ignore] // Run with: cargo test --test source_runtime_e2e -- --ignored bun
+    fn test_bun_hello_world() {
+        let bun_check = Command::new("bun").arg("--version").output();
+
+        if bun_check.is_err() {
+            eprintln!("Bun not found, skipping test");
+            return;
+        }
+
+        let test_script = r#"
+console.log("Hello from Bun Source Runtime!");
+console.log("Bun version:", Bun.version);
+"#;
+
+        let temp_dir = std::env::temp_dir();
+        let script_path = temp_dir.join("test_bun.js");
+        std::fs::write(&script_path, test_script).expect("Failed to write test script");
+
+        let output = Command::new("bun")
+            .arg(&script_path)
+            .output()
+            .expect("Failed to execute Bun script");
+
+        assert!(output.status.success(), "Bun script failed");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Hello from Bun Source Runtime!"));
+
+        std::fs::remove_file(script_path).ok();
+    }
+
+    #[test]
+    #[ignore]
+    fn test_bun_with_env() {
+        let bun_check = Command::new("bun").arg("--version").output();
+
+        if bun_check.is_err() {
+            eprintln!("Bun not found, skipping test");
+            return;
+        }
+
+        let test_script = r#"
+console.log("TEST_VAR=" + (process.env.TEST_VAR || "not_set"));
+"#;
+
+        let temp_dir = std::env::temp_dir();
+        let script_path = temp_dir.join("test_bun_env.js");
+        std::fs::write(&script_path, test_script).expect("Failed to write test script");
+
+        let output = Command::new("bun")
+            .arg(&script_path)
+            .env("TEST_VAR", "test_value_bun")
+            .output()
+            .expect("Failed to execute Bun script");
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("TEST_VAR=test_value_bun"));
 
         std::fs::remove_file(script_path).ok();
     }

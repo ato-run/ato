@@ -45,6 +45,9 @@ enum InternalCommands {
     Features,
     /// Execute a workload from JSON spec (internal use)
     Exec,
+    /// Legacy placeholder: build/pack is owned by ato-cli, not nacelle
+    #[command(hide = true)]
+    Pack,
 }
 
 pub async fn execute() -> anyhow::Result<()> {
@@ -59,6 +62,7 @@ pub async fn execute() -> anyhow::Result<()> {
             let cmd = match command {
                 InternalCommands::Features => commands::internal::InternalCommand::Features,
                 InternalCommands::Exec => commands::internal::InternalCommand::Exec,
+                InternalCommands::Pack => commands::internal::InternalCommand::Pack,
             };
 
             commands::internal::execute(commands::internal::InternalArgs {
