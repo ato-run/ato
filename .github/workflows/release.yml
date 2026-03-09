@@ -143,6 +143,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.89.0
           targets: x86_64-pc-windows-msvc
 
       - name: Build Windows release binaries
