@@ -37,6 +37,12 @@ pub use validator::{validate_binary, validate_cmd};
 /// Async child process handle for supervisor mode
 pub type AsyncChild = tokio::process::Child;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeSandboxCapabilityReport {
+    pub backends: Vec<String>,
+    pub ipc_sandbox: bool,
+}
+
 /// Source runtime execution mode
 #[derive(Debug, Clone)]
 pub enum SourceRuntimeMode {
@@ -94,6 +100,40 @@ pub struct SourceRuntime {
 }
 
 impl SourceRuntime {
+    pub fn supported_languages() -> Vec<String> {
+        canonical_supported_languages()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn native_sandbox_capability_report() -> NativeSandboxCapabilityReport {
+        let bubblewrap_available = linux::verify_bubblewrap_available().is_ok();
+        linux_capability_report(
+            bubblewrap_available,
+            crate::system::sandbox::linux::is_landlock_supported(),
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn native_sandbox_capability_report() -> NativeSandboxCapabilityReport {
+        macos_capability_report(
+            macos::is_alcoholless_available(),
+            macos::is_seatbelt_available(),
+        )
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn native_sandbox_capability_report() -> NativeSandboxCapabilityReport {
+        windows_capability_report(
+            windows::is_windows_sandbox_available(),
+            windows::is_sandboxie_available(),
+        )
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    pub fn native_sandbox_capability_report() -> NativeSandboxCapabilityReport {
+        NativeSandboxCapabilityReport::default()
+    }
+
     /// Create a new SourceRuntime with the given configuration
     pub fn new(config: SourceRuntimeConfig) -> Self {
         // Try to initialize RuntimeFetcher for JIT provisioning
@@ -133,6 +173,11 @@ impl SourceRuntime {
     /// Take an async child for waiting (removes from registry)
     pub async fn take_async_child(&self, workload_id: &str) -> Option<AsyncChild> {
         let mut children = self.async_children.lock().await;
+        children.remove(workload_id)
+    }
+
+    pub fn take_child(&self, workload_id: &str) -> Option<Child> {
+        let mut children = self.active_children.lock().unwrap();
         children.remove(workload_id)
     }
 
@@ -356,20 +401,17 @@ impl SourceRuntime {
     /// Check if native sandbox is available on this platform
     #[cfg(target_os = "linux")]
     fn is_native_sandbox_available() -> bool {
-        // Check for bubblewrap
-        which::which("bwrap").is_ok()
+        !Self::native_sandbox_capability_report().backends.is_empty()
     }
 
     #[cfg(target_os = "macos")]
     fn is_native_sandbox_available() -> bool {
-        // Alcoholless preferred, sandbox-exec always available as fallback
-        macos::is_native_available()
+        !Self::native_sandbox_capability_report().backends.is_empty()
     }
 
     #[cfg(target_os = "windows")]
     fn is_native_sandbox_available() -> bool {
-        // Windows Sandbox (Pro/Enterprise) or Sandboxie Plus
-        windows::is_native_available()
+        !Self::native_sandbox_capability_report().backends.is_empty()
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -425,6 +467,80 @@ impl SourceRuntime {
     }
 
     // OCI fallback removed; only native sandbox is supported.
+}
+
+fn canonical_supported_languages() -> Vec<String> {
+    vec![
+        "bun".to_string(),
+        "deno".to_string(),
+        "node".to_string(),
+        "python".to_string(),
+    ]
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn linux_capability_report(
+    bubblewrap_available: bool,
+    landlock_supported: bool,
+) -> NativeSandboxCapabilityReport {
+    if !bubblewrap_available {
+        return NativeSandboxCapabilityReport::default();
+    }
+
+    let mut backends = vec!["linux-bwrap".to_string()];
+    if landlock_supported {
+        backends.push("linux-landlock".to_string());
+    }
+
+    NativeSandboxCapabilityReport {
+        backends,
+        ipc_sandbox: true,
+    }
+}
+
+fn macos_capability_report(
+    alcoholless_available: bool,
+    seatbelt_available: bool,
+) -> NativeSandboxCapabilityReport {
+    if !alcoholless_available && !seatbelt_available {
+        return NativeSandboxCapabilityReport::default();
+    }
+
+    let mut backends = Vec::new();
+    if seatbelt_available {
+        backends.push("macos-seatbelt".to_string());
+    }
+    if alcoholless_available {
+        backends.push("macos-alcoholless".to_string());
+    }
+
+    NativeSandboxCapabilityReport {
+        backends,
+        ipc_sandbox: seatbelt_available,
+    }
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_capability_report(
+    windows_sandbox_available: bool,
+    sandboxie_available: bool,
+) -> NativeSandboxCapabilityReport {
+    if !windows_sandbox_available && !sandboxie_available {
+        return NativeSandboxCapabilityReport::default();
+    }
+
+    let mut backends = Vec::new();
+    if windows_sandbox_available {
+        backends.push("windows-sandbox".to_string());
+    }
+    if sandboxie_available {
+        backends.push("windows-sandboxie".to_string());
+    }
+
+    NativeSandboxCapabilityReport {
+        backends,
+        ipc_sandbox: false,
+    }
 }
 
 #[async_trait]
@@ -520,6 +636,7 @@ impl Runtime for SourceRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn test_default_config() {
@@ -538,5 +655,91 @@ mod tests {
 
         let path = runtime.workload_log_path("test-123");
         assert_eq!(path, PathBuf::from("/var/log/nacelle/test-123.log"));
+    }
+
+    #[test]
+    fn supported_languages_match_current_contract() {
+        let languages = SourceRuntime::supported_languages()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            languages,
+            BTreeSet::from([
+                "bun".to_string(),
+                "deno".to_string(),
+                "node".to_string(),
+                "python".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn linux_capability_report_fails_closed_without_bwrap() {
+        assert_eq!(
+            linux_capability_report(false, true),
+            NativeSandboxCapabilityReport::default()
+        );
+    }
+
+    #[test]
+    fn linux_capability_report_includes_landlock_only_when_supported() {
+        assert_eq!(
+            linux_capability_report(true, false),
+            NativeSandboxCapabilityReport {
+                backends: vec!["linux-bwrap".to_string()],
+                ipc_sandbox: true,
+            }
+        );
+        assert_eq!(
+            linux_capability_report(true, true),
+            NativeSandboxCapabilityReport {
+                backends: vec!["linux-bwrap".to_string(), "linux-landlock".to_string()],
+                ipc_sandbox: true,
+            }
+        );
+    }
+
+    #[test]
+    fn macos_capability_report_requires_real_backend() {
+        assert_eq!(
+            macos_capability_report(false, false),
+            NativeSandboxCapabilityReport::default()
+        );
+        assert_eq!(
+            macos_capability_report(true, false),
+            NativeSandboxCapabilityReport {
+                backends: vec!["macos-alcoholless".to_string()],
+                ipc_sandbox: false,
+            }
+        );
+        assert_eq!(
+            macos_capability_report(false, true),
+            NativeSandboxCapabilityReport {
+                backends: vec!["macos-seatbelt".to_string()],
+                ipc_sandbox: true,
+            }
+        );
+    }
+
+    #[test]
+    fn windows_capability_report_requires_real_backend() {
+        assert_eq!(
+            windows_capability_report(false, false),
+            NativeSandboxCapabilityReport::default()
+        );
+        assert_eq!(
+            windows_capability_report(true, false),
+            NativeSandboxCapabilityReport {
+                backends: vec!["windows-sandbox".to_string()],
+                ipc_sandbox: false,
+            }
+        );
+        assert_eq!(
+            windows_capability_report(false, true),
+            NativeSandboxCapabilityReport {
+                backends: vec!["windows-sandboxie".to_string()],
+                ipc_sandbox: false,
+            }
+        );
     }
 }

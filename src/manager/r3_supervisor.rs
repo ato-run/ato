@@ -4,6 +4,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use crate::config::{RuntimeConfig, ServiceConfig};
+use crate::internal_api::NacelleEvent;
 use crate::lockfile;
 use crate::system::NetworkSandbox;
 
@@ -12,6 +13,23 @@ pub async fn run_services_from_config(
     bundle_root: &Path,
     sandbox: Option<&dyn NetworkSandbox>,
     strict_sandbox_required: bool,
+) -> Result<(), String> {
+    run_services_from_config_with_events(
+        config,
+        bundle_root,
+        sandbox,
+        strict_sandbox_required,
+        None,
+    )
+    .await
+}
+
+pub async fn run_services_from_config_with_events(
+    config: &RuntimeConfig,
+    bundle_root: &Path,
+    sandbox: Option<&dyn NetworkSandbox>,
+    strict_sandbox_required: bool,
+    event_tx: Option<tokio::sync::mpsc::UnboundedSender<NacelleEvent>>,
 ) -> Result<(), String> {
     if strict_sandbox_required && sandbox.is_none() {
         let mut msg = "Strict sandbox enforcement is enabled but sandbox backend is not available"
@@ -56,16 +74,24 @@ pub async fn run_services_from_config(
         cmd.stdout(Stdio::inherit());
         cmd.stderr(Stdio::inherit());
 
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("Failed to spawn service '{}': {}", name, e))?;
+
+        if let Some(health_check) = &svc.health_check {
+            wait_for_service_ready(&mut child, name, health_check, event_tx.as_ref()).await?;
+        }
+
         children.insert(name.clone(), child);
     }
 
-    supervise_children(children).await
+    supervise_children(children, event_tx.as_ref()).await
 }
 
-async fn supervise_children(mut children: HashMap<String, Child>) -> Result<(), String> {
+async fn supervise_children(
+    mut children: HashMap<String, Child>,
+    event_tx: Option<&tokio::sync::mpsc::UnboundedSender<NacelleEvent>>,
+) -> Result<(), String> {
     loop {
         let mut exited: Option<(String, std::process::ExitStatus)> = None;
         let mut wait_error: Option<(String, String)> = None;
@@ -91,6 +117,13 @@ async fn supervise_children(mut children: HashMap<String, Child>) -> Result<(), 
 
         if let Some((name, status)) = exited {
             let is_main = name == "main";
+            emit_event(
+                event_tx,
+                NacelleEvent::ServiceExited {
+                    service: name.clone(),
+                    exit_code: status.code(),
+                },
+            );
             terminate_all(&mut children, &name);
 
             if is_main {
@@ -105,6 +138,145 @@ async fn supervise_children(mut children: HashMap<String, Child>) -> Result<(), 
 
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+async fn wait_for_service_ready(
+    child: &mut Child,
+    service: &str,
+    health_check: &crate::config::HealthCheck,
+    event_tx: Option<&tokio::sync::mpsc::UnboundedSender<NacelleEvent>>,
+) -> Result<(), String> {
+    use tokio::time::{sleep, Instant};
+
+    let timeout = Duration::from_secs(u64::from(health_check.timeout_secs.unwrap_or(30)));
+    let interval = Duration::from_secs(u64::from(health_check.interval_secs.unwrap_or(1).max(1)));
+    let deadline = Instant::now() + timeout;
+    let port: u16 = health_check.port.trim().parse().map_err(|_| {
+        format!(
+            "Invalid health_check.port for '{service}': {}",
+            health_check.port
+        )
+    })?;
+
+    loop {
+        if Instant::now() > deadline {
+            return Err(format!("Health check timed out for '{service}'"));
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                emit_event(
+                    event_tx,
+                    NacelleEvent::ServiceExited {
+                        service: service.to_string(),
+                        exit_code: status.code(),
+                    },
+                );
+                return Err(format!(
+                    "Service '{service}' exited before readiness (code: {:?})",
+                    status.code()
+                ));
+            }
+            Ok(None) => {}
+            Err(err) => {
+                return Err(format!("Service '{service}' wait failed: {err}"));
+            }
+        }
+
+        if health_check_ready(health_check, port).await {
+            let (endpoint, port) = readiness_endpoint(health_check, port);
+            emit_event(
+                event_tx,
+                NacelleEvent::IpcReady {
+                    service: service.to_string(),
+                    endpoint,
+                    port,
+                },
+            );
+            return Ok(());
+        }
+
+        sleep(interval).await;
+    }
+}
+
+async fn health_check_ready(health_check: &crate::config::HealthCheck, port: u16) -> bool {
+    if let Some(http_get) = &health_check.http_get {
+        return readiness_http_ok(http_get, port).await;
+    }
+
+    let host = health_check
+        .tcp_connect
+        .as_deref()
+        .unwrap_or("127.0.0.1")
+        .trim();
+    readiness_tcp_ok(host, port).await
+}
+
+fn readiness_endpoint(
+    health_check: &crate::config::HealthCheck,
+    port: u16,
+) -> (String, Option<u16>) {
+    let host = health_check
+        .tcp_connect
+        .as_deref()
+        .unwrap_or("127.0.0.1")
+        .trim();
+    if host.contains(':') {
+        (format!("tcp://{}", host), Some(port))
+    } else {
+        (format!("tcp://{}:{}", host, port), Some(port))
+    }
+}
+
+fn emit_event(
+    event_tx: Option<&tokio::sync::mpsc::UnboundedSender<NacelleEvent>>,
+    event: NacelleEvent,
+) {
+    if let Some(tx) = event_tx {
+        let _ = tx.send(event);
+    }
+}
+
+async fn readiness_tcp_ok(host: &str, port: u16) -> bool {
+    use tokio::net::TcpStream;
+    use tokio::time::timeout;
+
+    let addr = if host.contains(':') {
+        host.to_string()
+    } else {
+        format!("{host}:{port}")
+    };
+
+    timeout(Duration::from_secs(1), TcpStream::connect(addr))
+        .await
+        .ok()
+        .and_then(|result| result.ok())
+        .is_some()
+}
+
+async fn readiness_http_ok(http_get: &str, port: u16) -> bool {
+    use tokio::time::timeout;
+
+    let url = if http_get.starts_with("http://") || http_get.starts_with("https://") {
+        http_get.to_string()
+    } else if http_get.starts_with('/') {
+        format!("http://127.0.0.1:{port}{http_get}")
+    } else {
+        format!("http://127.0.0.1:{port}/{http_get}")
+    };
+
+    let client = reqwest::Client::new();
+    let fut = async {
+        let resp = client.get(url).send().await.ok()?;
+        Some(resp.status().is_success())
+    };
+
+    timeout(Duration::from_secs(2), fut)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false)
 }
 
 fn terminate_all(children: &mut HashMap<String, Child>, exclude: &str) {

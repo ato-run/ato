@@ -165,18 +165,30 @@ pub async fn launch_native_macos(
         return launch_direct(runtime, request, target).await;
     }
 
-    // Try Alcoholless first (preferred)
-    if is_alcoholless_available() {
+    let requires_ipc_passthrough = !target.ipc_socket_paths.is_empty();
+
+    // IPC socket allow-lists are currently implemented only in the Seatbelt path.
+    if !requires_ipc_passthrough && is_alcoholless_available() {
         info!("Using Alcoholless sandbox for macOS");
         return launch_with_alcoholless(runtime, request, target).await;
     }
 
-    // Fallback to sandbox-exec
-    warn!(
-        "Alcoholless not found. Install via: {}. Falling back to sandbox-exec.",
-        ALCOHOLLESS_INSTALL_URL
-    );
-    launch_with_sandbox_exec(runtime, request, target).await
+    if is_seatbelt_available() {
+        if requires_ipc_passthrough {
+            info!("Using sandbox-exec for macOS IPC socket passthrough");
+        } else {
+            warn!(
+                "Alcoholless not found. Install via: {}. Falling back to sandbox-exec.",
+                ALCOHOLLESS_INSTALL_URL
+            );
+        }
+        return launch_with_sandbox_exec(runtime, request, target).await;
+    }
+
+    Err(RuntimeError::SandboxSetupFailed(
+        "No macOS sandbox backend available. Install Alcoholless or restore sandbox-exec."
+            .to_string(),
+    ))
 }
 
 /// Check if Alcoholless (alcless) is installed
@@ -184,12 +196,16 @@ pub fn is_alcoholless_available() -> bool {
     which::which("alcless").is_ok() || which::which("alclessctl").is_ok()
 }
 
+/// Check if sandbox-exec (Seatbelt launcher) is available.
+pub fn is_seatbelt_available() -> bool {
+    which::which("sandbox-exec").is_ok()
+}
+
 /// Check if native sandbox is available on macOS
 /// Returns true if either Alcoholless or sandbox-exec is available
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn is_native_available() -> bool {
-    // sandbox-exec is always available on macOS (though deprecated)
-    // Alcoholless is preferred but optional
-    true
+    is_alcoholless_available() || is_seatbelt_available()
 }
 
 /// Launch using Alcoholless (alcless) sandbox
@@ -956,6 +972,34 @@ mod tests {
         // No deny network, no egress comment
         assert!(!profile.contains("(deny network*)"));
         assert!(!profile.contains("egress_allow"));
+    }
+
+    #[test]
+    fn test_seatbelt_profile_includes_ipc_socket_parent_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let socket_path = temp_dir.path().join("capsule-ipc").join("service.sock");
+
+        let target = SourceTarget {
+            language: "python".to_string(),
+            version: Some("3.11".to_string()),
+            entrypoint: "main.py".to_string(),
+            dependencies: None,
+            args: vec![],
+            source_dir: PathBuf::from("/Users/test/app"),
+            cmd: None,
+            dev_mode: false,
+            isolation: None,
+            ipc_socket_paths: vec![socket_path.clone()],
+        };
+        let toolchain = PathBuf::from("/usr/bin/python3");
+
+        let profile = generate_seatbelt_profile(&target, &toolchain);
+        let parent = socket_path.parent().unwrap().to_string_lossy().to_string();
+
+        assert!(
+            profile.contains(&parent),
+            "profile should allow IPC parent directory: {profile}"
+        );
     }
 
     #[test]
