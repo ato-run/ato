@@ -16,6 +16,16 @@ jobs:
     name: Build macOS binaries
     runs-on: macos-14
     steps:
+      - name: Check upload secrets
+        id: secrets_check
+        shell: bash
+        run: |
+          if [[ -n "${CLOUDFLARE_API_TOKEN:-}" && -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -136,33 +146,42 @@ jobs:
       DEFAULT_BUCKET_STAGING: ${{ secrets.R2_BUCKET_STAGING }}
       DEFAULT_BUCKET_PRODUCTION: ${{ secrets.R2_BUCKET_PRODUCTION }}
     steps:
+      - name: Check upload secrets
+        id: secrets_check
+        shell: bash
+        run: |
+          if [[ -n "${CLOUDFLARE_API_TOKEN:-}" && -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Download built artifacts
+        if: ${{ steps.secrets_check.outputs.available == 'true' }}
         uses: actions/download-artifact@v4
         with:
           pattern: nacelle-release-*
           path: /tmp/nacelle-artifacts
 
       - name: Set up Node.js
+        if: ${{ steps.secrets_check.outputs.available == 'true' }}
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
       - name: Install Wrangler CLI
+        if: ${{ steps.secrets_check.outputs.available == 'true' }}
         run: npm install -g wrangler@4
 
       - name: Prepare upload bundle
         id: prepare
+        if: ${{ steps.secrets_check.outputs.available == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
-
-          if [[ -z "${CLOUDFLARE_API_TOKEN:-}" || -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
-            echo "Missing required secrets: CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID" >&2
-            exit 1
-          fi
 
           cargo_version="$(sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -n1)"
           if [[ -z "$cargo_version" ]]; then
@@ -215,6 +234,7 @@ jobs:
           echo "source_dir=$source_dir" >> "$GITHUB_OUTPUT"
 
       - name: Upload nacelle to R2 (staging)
+        if: ${{ steps.secrets_check.outputs.available == 'true' }}
         shell: bash
         env:
           VERSION: ${{ steps.prepare.outputs.release_version }}
@@ -225,6 +245,7 @@ jobs:
         run: bash ./scripts/upload_release_to_r2.sh
 
       - name: Upload nacelle to R2 (production)
+        if: ${{ steps.secrets_check.outputs.available == 'true' }}
         shell: bash
         env:
           VERSION: ${{ steps.prepare.outputs.release_version }}
@@ -233,3 +254,7 @@ jobs:
           SOURCE_DIR: ${{ steps.prepare.outputs.source_dir }}
           WRANGLER_CONFIG: ""
         run: bash ./scripts/upload_release_to_r2.sh
+
+      - name: Skip upload when secrets are unavailable
+        if: ${{ steps.secrets_check.outputs.available != 'true' }}
+        run: echo "Skipping R2 upload because CLOUDFLARE_API_TOKEN/CLOUDFLARE_ACCOUNT_ID are not configured."
