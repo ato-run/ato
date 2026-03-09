@@ -45,7 +45,7 @@ nacelle internal --input - pack
   "spec_version": "1.0",
   "engine": {
     "name": "nacelle",
-    "engine_version": "0.2.7",
+    "engine_version": "0.2.8",
     "platform": "darwin-aarch64",
     "commit": null
   },

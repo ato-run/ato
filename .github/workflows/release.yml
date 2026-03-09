@@ -171,7 +171,13 @@ jobs:
 
           Get-ChildItem -Path $outDir -File | Where-Object { $_.Extension -ne '.sha256' } | ForEach-Object {
             $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
-            Set-Content -Path (Join-Path $_.DirectoryName ($_.Name + '.sha256')) -Value "$hash  $($_.Name)"
+            $checksumPath = Join-Path $_.DirectoryName ($_.Name + '.sha256')
+            $checksumBody = "$hash  $($_.Name)`n"
+            [System.IO.File]::WriteAllText(
+              $checksumPath,
+              $checksumBody,
+              [System.Text.UTF8Encoding]::new($false)
+            )
           }
 
       - name: Upload Windows artifacts
@@ -271,6 +277,13 @@ jobs:
           for checksum_file in "$source_dir"/*.sha256; do
             cat "$checksum_file" >> "$source_dir/SHA256SUMS"
           done
+          python3 - "$source_dir/SHA256SUMS" <<'PY'
+          from pathlib import Path
+          import sys
+
+          checksums = Path(sys.argv[1])
+          checksums.write_text(checksums.read_text().replace("\r\n", "\n").replace("\r", "\n"))
+          PY
 
           if [[ "$update_latest" == "1" ]]; then
             printf '%s\n' "$release_version" > "$source_dir/latest.txt"
