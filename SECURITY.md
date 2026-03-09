@@ -39,7 +39,7 @@ The Nacelle project takes security seriously. If you discover a security vulnera
 1. **Assessment:** Security team evaluates the report
 2. **Reproduction:** Confirm the vulnerability in current and recent versions
 3. **Fix:** Develop and test the patch
-4. **Release:** Push patch to `main` and release new version (e.g., `v0.2.5`)
+4. **Release:** Push patch to `main` and release new version (e.g., `v0.2.6`)
 5. **Disclosure:** Public advisory with CVE (if applicable)
 
 ### Supported Versions
