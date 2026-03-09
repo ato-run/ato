@@ -161,6 +161,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
           cargo build --release --bin nacelle --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
 
           $binaryPath = 'target/x86_64-pc-windows-msvc/release/nacelle.exe'
           $destPath = Join-Path $outDir "nacelle-$resolvedVersion-windows-x64.exe"
