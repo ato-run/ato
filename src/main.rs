@@ -33,15 +33,22 @@ fn is_self_extracting_bundle() -> anyhow::Result<bool> {
 async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     println!("🚀 Starting nacelle bundle...");
 
-    let temp_dir = std::env::temp_dir().join(format!("nacelle-{}", std::process::id()));
-    std::fs::create_dir_all(&temp_dir)?;
+    let keep_extracted = std::env::var_os("NACELLE_BUNDLE_KEEP_EXTRACTED").is_some();
+    let extraction_dir = nacelle::bundle::prepare_extraction_dir(keep_extracted)?;
+    let temp_dir_path = extraction_dir.path().to_path_buf();
 
-    println!("📦 Extracting to {:?}...", temp_dir);
+    println!("📦 Extracting to {:?}...", temp_dir_path);
+    if extraction_dir.preserved() {
+        eprintln!(
+            "Preserving extracted bundle contents at {}",
+            temp_dir_path.display()
+        );
+    }
 
     let exe_path = std::env::current_exe()?;
-    nacelle::bundle::extract_bundle_to_dir(&exe_path, &temp_dir)?;
+    nacelle::bundle::extract_bundle_to_dir(&exe_path, &temp_dir_path)?;
 
-    let config_path = temp_dir.join("config.json");
+    let config_path = temp_dir_path.join("config.json");
     if !config_path.exists() {
         anyhow::bail!("No config.json found in bundle (R3 requires config.json)");
     }
@@ -49,7 +56,7 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     let mut config = nacelle::config::load_config(&config_path)?;
 
     if let Some(main_svc) = config.services.get_mut("main") {
-        if main_svc.cwd == Some("source".to_string()) && !temp_dir.join("source").is_dir() {
+        if main_svc.cwd == Some("source".to_string()) && !temp_dir_path.join("source").is_dir() {
             main_svc.cwd = Some(".".to_string());
         }
     }
@@ -137,7 +144,7 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     };
     nacelle::manager::r3_supervisor::run_services_from_config(
         &config,
-        &temp_dir,
+        &temp_dir_path,
         sandbox_ref,
         strict_enforcement,
     )

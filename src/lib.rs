@@ -32,6 +32,7 @@ pub mod common;
 pub mod config; // R3 config.json loader
 #[cfg(feature = "sync-runtime")]
 pub mod guest;
+pub mod internal_api;
 pub mod launcher;
 pub mod license; // License verification (PoL)
 pub mod lockfile;

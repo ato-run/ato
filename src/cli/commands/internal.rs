@@ -2,10 +2,14 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing::info;
 
-use nacelle::launcher::source::{SourceRuntime, SourceRuntimeConfig};
+use nacelle::internal_api::{validate_spec_version, NacelleEvent, CURRENT_SPEC_VERSION};
+use nacelle::launcher::source::{
+    NativeSandboxCapabilityReport, SourceRuntime, SourceRuntimeConfig,
+};
 use nacelle::launcher::{IsolationPolicy, LaunchRequest, Runtime, SourceTarget};
 
 /// Minimal manifest structure for parsing capsule.toml
@@ -21,6 +25,9 @@ struct CapsuleManifest {
     /// Isolation/Sandbox configuration
     #[serde(default)]
     isolation: IsolationConfig,
+    /// Optional readiness probe for NDJSON event streaming.
+    #[serde(default)]
+    readiness_probe: Option<ReadinessProbeConfig>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -81,6 +88,27 @@ fn default_network_enabled() -> bool {
     true
 }
 
+#[derive(Debug, Deserialize, Clone)]
+struct ReadinessProbeConfig {
+    port: String,
+    #[serde(default)]
+    http_get: Option<String>,
+    #[serde(default)]
+    tcp_connect: Option<String>,
+    #[serde(default = "default_readiness_timeout_ms")]
+    timeout_ms: u64,
+    #[serde(default = "default_readiness_interval_ms")]
+    interval_ms: u64,
+}
+
+fn default_readiness_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_readiness_interval_ms() -> u64 {
+    200
+}
+
 /// Language configuration for JIT provisioning
 #[derive(Debug, Deserialize)]
 struct LanguageConfig {
@@ -138,6 +166,7 @@ pub struct InternalArgs {
 pub enum InternalCommand {
     Features,
     Exec,
+    Pack,
 }
 
 #[derive(Debug, Serialize)]
@@ -171,42 +200,6 @@ struct Response<T> {
 /// ```json
 /// {"event":"ipc_ready","service":"llm-service","endpoint":"unix:///tmp/capsule-ipc/llm.sock","port":54321}
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
-#[allow(dead_code)]
-pub enum NacelleEvent {
-    /// A service's readiness probe succeeded and its IPC endpoint is available.
-    IpcReady {
-        /// Service name as declared in the manifest
-        service: String,
-        /// IPC endpoint URI (e.g., "unix:///tmp/capsule-ipc/svc.sock" or "tcp://127.0.0.1:54321")
-        endpoint: String,
-        /// Port number (if TCP-based)
-        #[serde(skip_serializing_if = "Option::is_none")]
-        port: Option<u16>,
-    },
-    /// A service has exited (fail-fast notification)
-    ServiceExited {
-        service: String,
-        exit_code: Option<i32>,
-    },
-}
-
-impl NacelleEvent {
-    /// Write the event as a single JSON line to stdout.
-    ///
-    /// Each event is a separate line so ato-cli can read them
-    /// incrementally (newline-delimited JSON).
-    #[allow(dead_code)]
-    pub fn emit(&self) {
-        if let Ok(json) = serde_json::to_string(self) {
-            println!("{}", json);
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-        }
-    }
-}
-
 #[derive(Debug, Serialize)]
 struct FeaturesData {
     engine: EngineInfo,
@@ -235,29 +228,61 @@ struct Capabilities {
     ipc_sandbox: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct FeatureCapabilityReport {
+    languages: Vec<String>,
+    sandbox: Vec<String>,
+    ipc_sandbox: bool,
+}
+
+#[derive(Debug)]
+enum ManagedChild {
+    Async(tokio::process::Child),
+    Sync(std::process::Child),
+}
+
+#[derive(Debug)]
+enum ReadinessOutcome {
+    Ready,
+    Exited(std::process::ExitStatus),
+}
+
 pub async fn execute(args: InternalArgs) -> Result<()> {
     // Internal interface must keep stdout machine-clean (JSON only).
     // Mark internal mode so shared helpers can route progress/logs to stderr.
     std::env::set_var("NACELLE_INTERNAL", "1");
 
-    match args.command {
-        InternalCommand::Features => handle_features(args.input).await,
-        InternalCommand::Exec => handle_exec(args.input).await,
+    let raw = read_input(&args.input)?;
+    let spec_version =
+        parse_spec_version_from_raw(&raw).unwrap_or_else(|| CURRENT_SPEC_VERSION.to_string());
+
+    let result = match args.command {
+        InternalCommand::Features => handle_features(&raw).await,
+        InternalCommand::Exec => handle_exec(&raw).await,
+        InternalCommand::Pack => handle_pack(&raw).await,
+    };
+
+    if let Err(err) = result {
+        write_error(
+            spec_version,
+            classify_error_code(&err),
+            err.to_string(),
+            None,
+        );
+        return Err(err);
     }
+
+    Ok(())
 }
 
-async fn handle_features(input: String) -> Result<()> {
-    let spec_version = parse_spec_version(&input).unwrap_or_else(|| "0.1.0".to_string());
+async fn handle_features(raw: &str) -> Result<()> {
+    let spec_version =
+        parse_spec_version_from_raw(raw).unwrap_or_else(|| CURRENT_SPEC_VERSION.to_string());
+    validate_spec_version(&spec_version).map_err(anyhow::Error::msg)?;
 
     let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     let commit = std::env::var("GIT_COMMIT").ok();
-
-    #[cfg(target_os = "macos")]
-    let sandbox = vec!["macos-seatbelt".to_string()];
-    #[cfg(target_os = "linux")]
-    let sandbox = vec!["linux-landlock".to_string()];
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let sandbox: Vec<String> = Vec::new();
+    let report = current_feature_capability_report();
 
     let data = FeaturesData {
         engine: EngineInfo {
@@ -266,22 +291,47 @@ async fn handle_features(input: String) -> Result<()> {
             platform,
             commit,
         },
-        capabilities: Capabilities {
-            workloads: vec!["source".to_string(), "bundle".to_string()],
-            languages: vec!["python".to_string()],
-            sandbox,
-            socket_activation: true,
-            jit_provisioning: true,
-            ipc_sandbox: true,
-        },
+        capabilities: capabilities_from_report(report),
     };
 
     write_ok(spec_version, data);
     Ok(())
 }
 
-fn parse_spec_version(input: &str) -> Option<String> {
-    let raw = read_input(input).ok()?;
+async fn handle_pack(raw: &str) -> Result<()> {
+    let spec_version =
+        parse_spec_version_from_raw(raw).unwrap_or_else(|| CURRENT_SPEC_VERSION.to_string());
+    validate_spec_version(&spec_version).map_err(anyhow::Error::msg)?;
+    anyhow::bail!("internal pack is not supported by nacelle. Packaging/build is owned by ato-cli");
+}
+
+fn current_feature_capability_report() -> FeatureCapabilityReport {
+    let NativeSandboxCapabilityReport {
+        backends,
+        ipc_sandbox,
+    } = SourceRuntime::native_sandbox_capability_report();
+
+    FeatureCapabilityReport {
+        languages: SourceRuntime::supported_languages(),
+        sandbox: backends,
+        ipc_sandbox,
+    }
+}
+
+fn capabilities_from_report(report: FeatureCapabilityReport) -> Capabilities {
+    let ipc_sandbox = !report.sandbox.is_empty() && report.ipc_sandbox;
+
+    Capabilities {
+        workloads: vec!["source".to_string(), "bundle".to_string()],
+        languages: report.languages,
+        sandbox: report.sandbox,
+        socket_activation: true,
+        jit_provisioning: true,
+        ipc_sandbox,
+    }
+}
+
+fn parse_spec_version_from_raw(raw: &str) -> Option<String> {
     let env: Envelope = serde_json::from_str(&raw).ok()?;
     Some(env.spec_version)
 }
@@ -313,6 +363,223 @@ fn write_ok<T: Serialize>(spec_version: String, data: T) {
         data: Some(data),
     };
     println!("{}", serde_json::to_string(&resp).unwrap());
+}
+
+fn write_error(
+    spec_version: String,
+    code: &str,
+    message: String,
+    details: Option<serde_json::Value>,
+) {
+    let resp: Response<serde_json::Value> = Response {
+        ok: false,
+        spec_version,
+        error: Some(ErrorBody {
+            code: code.to_string(),
+            message,
+            details,
+        }),
+        data: None,
+    };
+    println!("{}", serde_json::to_string(&resp).unwrap());
+}
+
+fn classify_error_code(err: &anyhow::Error) -> &'static str {
+    let text = err.to_string();
+    if text.contains("Unsupported spec_version") || text.contains("internal pack is not supported")
+    {
+        "UNSUPPORTED"
+    } else if text.contains("Failed to parse")
+        || text.contains("manifest path is required")
+        || text.contains("manifest not found")
+        || text.contains("Invalid readiness probe port")
+    {
+        "INVALID_INPUT"
+    } else if text.contains("Policy") || text.contains("sandbox") {
+        "POLICY_VIOLATION"
+    } else {
+        "INTERNAL"
+    }
+}
+
+impl ManagedChild {
+    fn take_stdout(&mut self) -> Option<tokio::process::ChildStdout> {
+        match self {
+            ManagedChild::Async(child) => child.stdout.take(),
+            ManagedChild::Sync(_) => None,
+        }
+    }
+
+    fn take_stderr(&mut self) -> Option<tokio::process::ChildStderr> {
+        match self {
+            ManagedChild::Async(child) => child.stderr.take(),
+            ManagedChild::Sync(_) => None,
+        }
+    }
+
+    async fn poll_exit(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match self {
+            ManagedChild::Async(child) => child.try_wait(),
+            ManagedChild::Sync(child) => child.try_wait(),
+        }
+    }
+
+    async fn kill(&mut self) -> std::io::Result<()> {
+        match self {
+            ManagedChild::Async(child) => child.kill().await,
+            ManagedChild::Sync(child) => child.kill(),
+        }
+    }
+}
+
+fn start_log_forwarding(child: &mut ManagedChild) {
+    if let Some(stdout) = child.take_stdout() {
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                eprintln!("[stdout] {}", line);
+            }
+        });
+    }
+
+    if let Some(stderr) = child.take_stderr() {
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                eprintln!("[stderr] {}", line);
+            }
+        });
+    }
+}
+
+fn emit_service_exited(service: &str, status: &std::process::ExitStatus) {
+    NacelleEvent::ServiceExited {
+        service: service.to_string(),
+        exit_code: status.code(),
+    }
+    .emit();
+}
+
+fn readiness_endpoint(
+    probe: &ReadinessProbeConfig,
+    ipc_socket_paths: &[PathBuf],
+) -> (String, Option<u16>) {
+    if let Some(socket_path) = ipc_socket_paths.first() {
+        return (format!("unix://{}", socket_path.display()), None);
+    }
+
+    let port = probe.port.trim().parse::<u16>().ok();
+    let host = probe.tcp_connect.as_deref().unwrap_or("127.0.0.1").trim();
+
+    if host.contains(':') {
+        return (format!("tcp://{}", host), port);
+    }
+
+    match port {
+        Some(port) => (format!("tcp://{}:{}", host, port), Some(port)),
+        None => (format!("tcp://{}", host), None),
+    }
+}
+
+async fn wait_for_readiness_or_exit(
+    child: &mut ManagedChild,
+    probe: &ReadinessProbeConfig,
+    ipc_socket_paths: &[PathBuf],
+) -> Result<ReadinessOutcome> {
+    use tokio::time::Instant;
+
+    let deadline = Instant::now() + Duration::from_millis(probe.timeout_ms);
+    let interval = Duration::from_millis(probe.interval_ms);
+
+    loop {
+        if let Some(status) = child.poll_exit().await? {
+            return Ok(ReadinessOutcome::Exited(status));
+        }
+
+        if readiness_probe_ok(probe, ipc_socket_paths).await? {
+            return Ok(ReadinessOutcome::Ready);
+        }
+
+        if Instant::now() >= deadline {
+            let _ = child.kill().await;
+            anyhow::bail!("Readiness probe timed out");
+        }
+
+        tokio::time::sleep(interval).await;
+    }
+}
+
+async fn wait_for_child_exit(child: &mut ManagedChild) -> Result<std::process::ExitStatus> {
+    loop {
+        if let Some(status) = child.poll_exit().await? {
+            return Ok(status);
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn readiness_probe_ok(
+    probe: &ReadinessProbeConfig,
+    ipc_socket_paths: &[PathBuf],
+) -> Result<bool> {
+    if !ipc_socket_paths.is_empty() {
+        return Ok(ipc_socket_paths.iter().any(|path| path.exists()));
+    }
+
+    let port: u16 = probe
+        .port
+        .trim()
+        .parse()
+        .with_context(|| format!("Invalid readiness probe port: {}", probe.port))?;
+
+    if let Some(http_get) = &probe.http_get {
+        return Ok(readiness_http_ok(http_get, port).await);
+    }
+
+    let host = probe.tcp_connect.as_deref().unwrap_or("127.0.0.1").trim();
+    Ok(readiness_tcp_ok(host, port).await)
+}
+
+async fn readiness_tcp_ok(host: &str, port: u16) -> bool {
+    use tokio::net::TcpStream;
+    use tokio::time::timeout;
+
+    let addr = if host.contains(':') {
+        host.to_string()
+    } else {
+        format!("{host}:{port}")
+    };
+
+    timeout(Duration::from_secs(1), TcpStream::connect(addr))
+        .await
+        .ok()
+        .and_then(|result| result.ok())
+        .is_some()
+}
+
+async fn readiness_http_ok(http_get: &str, port: u16) -> bool {
+    use tokio::time::timeout;
+
+    let url = if http_get.starts_with("http://") || http_get.starts_with("https://") {
+        http_get.to_string()
+    } else if http_get.starts_with('/') {
+        format!("http://127.0.0.1:{port}{http_get}")
+    } else {
+        format!("http://127.0.0.1:{port}/{http_get}")
+    };
+
+    let client = reqwest::Client::new();
+    let fut = async {
+        let resp = client.get(url).send().await.ok()?;
+        Some(resp.status().is_success())
+    };
+
+    timeout(Duration::from_secs(2), fut)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false)
 }
 
 /// Result of command resolution
@@ -555,10 +822,10 @@ fn convert_isolation_config(
 }
 
 /// Handle exec command - launch a workload from manifest
-async fn handle_exec(input: String) -> Result<()> {
-    let raw = read_input(&input)?;
+async fn handle_exec(raw: &str) -> Result<()> {
     let envelope: ExecEnvelope =
         serde_json::from_str(&raw).context("Failed to parse exec request JSON")?;
+    validate_spec_version(&envelope.spec_version).map_err(anyhow::Error::msg)?;
 
     info!("Received exec request: {:?}", envelope.workload);
 
@@ -706,84 +973,48 @@ async fn handle_exec(input: String) -> Result<()> {
     use std::io::Write;
     let _ = std::io::stdout().flush();
 
-    // SUPERVISOR MODE: Wait for child process with proper log forwarding
-    // This keeps nacelle alive so:
-    // 1. stderr pipe stays open for log forwarding to Ato Desktop
-    // 2. Process group (PGID) is maintained for killpg()
-    // 3. Ato Desktop can detect termination via pipe closure
     if let Some(child_pid) = pid {
         eprintln!(
             "[nacelle] Supervisor mode: waiting for child PID {} to terminate...",
             child_pid
         );
 
-        // Try to get the async child handle (for dev mode)
-        if let Some(mut child) = runtime.take_async_child(&workload_id).await {
-            // Take stdout and stderr for forwarding
-            let child_stdout = child.stdout.take();
-            let child_stderr = child.stderr.take();
-
-            // Spawn log forwarding tasks
-            // Forward stdout to nacelle's stderr (so Ato Desktop sees it)
-            if let Some(stdout) = child_stdout {
-                tokio::spawn(async move {
-                    let mut reader = BufReader::new(stdout).lines();
-                    while let Ok(Some(line)) = reader.next_line().await {
-                        eprintln!("[stdout] {}", line);
-                    }
-                });
-            }
-
-            // Forward stderr to nacelle's stderr
-            if let Some(stderr) = child_stderr {
-                tokio::spawn(async move {
-                    let mut reader = BufReader::new(stderr).lines();
-                    while let Ok(Some(line)) = reader.next_line().await {
-                        eprintln!("[stderr] {}", line);
-                    }
-                });
-            }
-
-            // Wait for the child process asynchronously (non-blocking!)
-            let exit_code = match child.wait().await {
-                Ok(status) => {
-                    let code = status.code().unwrap_or(-1);
-                    eprintln!(
-                        "[nacelle] Child process {} exited with code {}",
-                        child_pid, code
-                    );
-                    code
-                }
-                Err(e) => {
-                    eprintln!("[nacelle] Error waiting for child: {}", e);
-                    1
-                }
-            };
-
-            // Give log forwarding tasks a moment to flush
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-            // Exit with the child's exit code
-            std::process::exit(exit_code);
+        let mut child = if let Some(child) = runtime.take_async_child(&workload_id).await {
+            ManagedChild::Async(child)
+        } else if let Some(child) = runtime.take_child(&workload_id) {
+            ManagedChild::Sync(child)
         } else {
-            // Fallback for sync children (sandbox modes): poll using kill(pid, 0)
-            eprintln!(
-                "[nacelle] Using poll-based wait for PID {} (sync mode)",
-                child_pid
-            );
-            loop {
-                let status = unsafe { libc::kill(child_pid as i32, 0) };
-                if status != 0 {
-                    // Process has exited
-                    eprintln!(
-                        "[nacelle] Child process {} terminated (detected via poll)",
-                        child_pid
-                    );
-                    break;
+            anyhow::bail!("Internal exec lost child handle for PID {}", child_pid);
+        };
+
+        start_log_forwarding(&mut child);
+
+        if let Some(probe) = manifest.readiness_probe.as_ref() {
+            match wait_for_readiness_or_exit(&mut child, probe, &source_target.ipc_socket_paths)
+                .await?
+            {
+                ReadinessOutcome::Ready => {
+                    let (endpoint, port) =
+                        readiness_endpoint(probe, &source_target.ipc_socket_paths);
+                    NacelleEvent::IpcReady {
+                        service: manifest.name.clone(),
+                        endpoint,
+                        port,
+                    }
+                    .emit();
                 }
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                ReadinessOutcome::Exited(status) => {
+                    emit_service_exited(&manifest.name, &status);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    std::process::exit(status.code().unwrap_or(1));
+                }
             }
         }
+
+        let status = wait_for_child_exit(&mut child).await?;
+        emit_service_exited(&manifest.name, &status);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        std::process::exit(status.code().unwrap_or(1));
     }
 
     Ok(())
@@ -876,17 +1107,58 @@ mod tests {
 
     #[test]
     fn test_capabilities_includes_ipc_sandbox() {
-        let caps = Capabilities {
-            workloads: vec!["source".to_string()],
-            languages: vec!["python".to_string()],
+        let caps = capabilities_from_report(FeatureCapabilityReport {
+            languages: SourceRuntime::supported_languages(),
             sandbox: vec!["macos-seatbelt".to_string()],
-            socket_activation: true,
-            jit_provisioning: true,
             ipc_sandbox: true,
-        };
+        });
 
         let json = serde_json::to_string(&caps).unwrap();
         assert!(json.contains("\"ipc_sandbox\":true"));
+    }
+
+    #[test]
+    fn test_capabilities_fail_closed_when_backend_unavailable() {
+        let caps = capabilities_from_report(FeatureCapabilityReport {
+            languages: SourceRuntime::supported_languages(),
+            sandbox: Vec::new(),
+            ipc_sandbox: true,
+        });
+
+        assert!(caps.sandbox.is_empty());
+        assert!(!caps.ipc_sandbox);
+    }
+
+    #[test]
+    fn test_readiness_probe_deserialization_defaults() {
+        let manifest: CapsuleManifest = toml::from_str(
+            r#"
+name = "probe-app"
+version = "0.1.0"
+
+[execution]
+entrypoint = "python3 server.py"
+
+[readiness_probe]
+port = "43123"
+http_get = "/health"
+"#,
+        )
+        .unwrap();
+
+        let probe = manifest.readiness_probe.unwrap();
+        assert_eq!(probe.port, "43123");
+        assert_eq!(probe.http_get.as_deref(), Some("/health"));
+        assert_eq!(probe.timeout_ms, 30_000);
+        assert_eq!(probe.interval_ms, 200);
+    }
+
+    #[test]
+    fn test_classify_internal_pack_as_unsupported() {
+        let err = anyhow::anyhow!(
+            "internal pack is not supported by nacelle. Packaging/build is owned by ato-cli"
+        );
+        assert_eq!(classify_error_code(&err), "UNSUPPORTED");
     }
 
     #[test]
