@@ -9,15 +9,23 @@
 //! - SD_LISTEN_FDS_START = 3 (first passed FD after stdin/stdout/stderr)
 
 use std::net::{SocketAddr, TcpListener};
-use std::os::fd::{AsRawFd, RawFd};
 use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tracing::{debug, info};
+use tracing::info;
+
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, RawFd};
+
+#[cfg(unix)]
+use tracing::debug;
 
 #[cfg(not(unix))]
 use tracing::warn;
+
+#[cfg(not(unix))]
+type RawFd = i32;
 
 /// Systemd Socket Activation FD start constant
 /// FDs 0, 1, 2 are stdin, stdout, stderr - socket activation starts at 3
@@ -80,18 +88,32 @@ impl SocketManager {
         // Set SO_REUSEADDR to allow quick rebind after restart
         // Note: This is handled automatically by std::net::TcpListener on most platforms
 
+        #[cfg(unix)]
         info!(
             "Socket Activation: Successfully bound to {}, fd={}",
             addr,
             listener.as_raw_fd()
         );
 
+        #[cfg(not(unix))]
+        info!(
+            "Socket Activation: Successfully bound to {} (socket activation stub on this platform)",
+            addr
+        );
+
         Ok(Self { listener, config })
     }
 
     /// Get the raw file descriptor of the listening socket
+    #[cfg(unix)]
     pub fn raw_fd(&self) -> RawFd {
         self.listener.as_raw_fd()
+    }
+
+    /// Non-Unix platforms do not support systemd-style FD passing.
+    #[cfg(not(unix))]
+    pub fn raw_fd(&self) -> RawFd {
+        -1
     }
 
     /// Get the bound port
@@ -188,7 +210,7 @@ impl SocketManager {
 
     /// Prepare command for socket activation (non-Unix stub)
     #[cfg(not(unix))]
-    pub fn prepare_command(&self, cmd: &mut Command) -> Result<()> {
+    pub fn prepare_command(&self, _cmd: &mut Command) -> Result<()> {
         warn!("Socket Activation: Not supported on this platform, child will bind its own socket");
         Ok(())
     }
@@ -219,7 +241,10 @@ mod tests {
         assert!(manager.is_ok());
 
         let manager = manager.unwrap();
+        #[cfg(unix)]
         assert!(manager.raw_fd() >= 0);
+        #[cfg(not(unix))]
+        assert_eq!(manager.raw_fd(), -1);
     }
 
     #[test]

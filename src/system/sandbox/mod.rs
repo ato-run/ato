@@ -67,7 +67,7 @@ pub fn sensitive_paths() -> Vec<PathBuf> {
         return Vec::new();
     };
 
-    let mut paths = vec![
+    let paths = vec![
         // Cryptographic keys and credentials
         home.join(".ssh"),
         home.join(".gnupg"),
@@ -89,15 +89,20 @@ pub fn sensitive_paths() -> Vec<PathBuf> {
     // macOS-specific sensitive directories
     #[cfg(target_os = "macos")]
     {
+        let mut paths = paths;
         paths.extend([
             home.join("Library/Keychains"),
             home.join("Library/Cookies"),
             home.join("Library/Application Support/Google/Chrome"),
             home.join("Library/Application Support/Firefox"),
         ]);
+        paths
     }
 
-    paths
+    #[cfg(not(target_os = "macos"))]
+    {
+        paths
+    }
 }
 
 /// Check whether `candidate` is a sub-path of (or equal to) any sensitive path.
