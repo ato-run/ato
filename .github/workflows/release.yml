@@ -45,16 +45,16 @@ jobs:
           cp target/aarch64-apple-darwin/release/nacelle "$out_dir/nacelle-${version}-darwin-arm64"
           chmod +x "$out_dir"/nacelle-${version}-darwin-*
 
-            python3 - <<'PY'
-            from pathlib import Path
-            import hashlib
-            out_dir = Path('/tmp/nacelle-release').glob('v*/')
-            out_dir = sorted(out_dir)[-1]
-            for path in sorted(out_dir.iterdir()):
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          out_dir = Path('/tmp/nacelle-release').glob('v*/')
+          out_dir = sorted(out_dir)[-1]
+          for path in sorted(out_dir.iterdir()):
               if path.is_file() and not path.name.endswith('.sha256'):
-                digest = hashlib.sha256(path.read_bytes()).hexdigest()
-                (path.parent / f"{path.name}.sha256").write_text(f"{digest}  {path.name}\n")
-            PY
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  (path.parent / f"{path.name}.sha256").write_text(f"{digest}  {path.name}\n")
+          PY
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
@@ -105,16 +105,16 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/nacelle "$out_dir/nacelle-${version}-linux-arm64"
           chmod +x "$out_dir"/nacelle-${version}-linux-*
 
-            python3 - <<'PY'
-            from pathlib import Path
-            import hashlib
-            out_dir = Path('/tmp/nacelle-release').glob('v*/')
-            out_dir = sorted(out_dir)[-1]
-            for path in sorted(out_dir.iterdir()):
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          out_dir = Path('/tmp/nacelle-release').glob('v*/')
+          out_dir = sorted(out_dir)[-1]
+          for path in sorted(out_dir.iterdir()):
               if path.is_file() and not path.name.endswith('.sha256'):
-                digest = hashlib.sha256(path.read_bytes()).hexdigest()
-                (path.parent / f"{path.name}.sha256").write_text(f"{digest}  {path.name}\n")
-            PY
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  (path.parent / f"{path.name}.sha256").write_text(f"{digest}  {path.name}\n")
+          PY
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
