@@ -275,7 +275,16 @@ enum Commands {
     )]
     Install {
         /// Capsule scoped ID (publisher/slug)
-        slug: String,
+        #[arg(required_unless_present = "from_gh_repo")]
+        slug: Option<String>,
+
+        /// Build and install directly from a public GitHub repository
+        #[arg(
+            long = "from-gh-repo",
+            value_name = "REPOSITORY",
+            conflicts_with = "slug"
+        )]
+        from_gh_repo: Option<String>,
 
         /// Registry URL (default: registry.capsule.app)
         #[arg(long)]
@@ -1890,6 +1899,7 @@ fn run() -> Result<()> {
 
         Commands::Install {
             slug,
+            from_gh_repo,
             registry,
             version,
             default,
@@ -1906,8 +1916,84 @@ fn run() -> Result<()> {
                     "--skip-verify is no longer supported. Signature/hash verification is always required."
                 );
             }
+            let projection_preference = if project {
+                install::ProjectionPreference::Force
+            } else if no_project {
+                install::ProjectionPreference::Skip
+            } else {
+                install::ProjectionPreference::Prompt
+            };
+            let can_prompt = !json
+                && can_prompt_interactively(
+                    std::io::stdin().is_terminal(),
+                    std::io::stderr().is_terminal(),
+                );
             let rt = tokio::runtime::Runtime::new()?;
+
+            if let Some(repository) = from_gh_repo {
+                if registry.is_some() {
+                    anyhow::bail!("--registry cannot be used with --from-gh-repo");
+                }
+                if version.is_some() {
+                    anyhow::bail!("--version cannot be used with --from-gh-repo");
+                }
+                let checkout = rt.block_on(install::download_github_repository(&repository))?;
+                if !json {
+                    eprintln!(
+                        "📦 Building {} from GitHub source in {}",
+                        checkout.repository,
+                        checkout.checkout_dir.display()
+                    );
+                }
+                let reporter = std::sync::Arc::new(reporters::CliReporter::new(json));
+                let build_result = commands::build::execute_pack_command(
+                    checkout.checkout_dir.clone(),
+                    false,
+                    None,
+                    false,
+                    false,
+                    false,
+                    false,
+                    EnforcementMode::Strict.as_str().to_string(),
+                    reporter,
+                    false,
+                    json,
+                    None,
+                )?;
+                let artifact = build_result.artifact.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "GitHub repository did not produce an installable .capsule artifact"
+                    )
+                })?;
+                let result = rt.block_on(install::install_built_github_artifact(
+                    &artifact,
+                    &checkout.publisher,
+                    &checkout.repository,
+                    install::InstallExecutionOptions {
+                        output_dir: output,
+                        yes,
+                        projection_preference,
+                        json_output: json,
+                        can_prompt_interactively: can_prompt,
+                    },
+                ))?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("\n✅ Installation complete!");
+                    println!("   Capsule: {}", result.slug);
+                    println!("   Version: {}", result.version);
+                    println!("   Path:    {}", result.path.display());
+                    println!("   Hash:    {}", result.content_hash);
+                }
+                return Ok(());
+            }
+
             rt.block_on(async {
+
+                let slug = slug.ok_or_else(|| {
+                    anyhow::anyhow!("capsule slug is required when not using --from-gh-repo")
+                })?;
                 if install::is_slug_only_ref(&slug) {
                     let suggestions = install::suggest_scoped_capsules(
                         &slug,
@@ -1945,20 +2031,11 @@ fn run() -> Result<()> {
                     output,
                     default,
                     yes,
-                    if project {
-                        install::ProjectionPreference::Force
-                    } else if no_project {
-                        install::ProjectionPreference::Skip
-                    } else {
-                        install::ProjectionPreference::Prompt
-                    },
+                    projection_preference,
                     allow_unverified,
                     false,
                     json,
-                    !json && can_prompt_interactively(
-                        std::io::stdin().is_terminal(),
-                        std::io::stderr().is_terminal(),
-                    ),
+                    can_prompt,
                 )
                 .await?;
 
