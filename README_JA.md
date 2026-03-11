@@ -14,6 +14,7 @@ ato ps
 ato close --id <capsule-id> | --name <name> [--all] [--force]
 ato logs --id <capsule-id> [--follow]
 ato install <publisher/slug> [--registry <url>]
+ato install --from-gh-repo <owner/repo>
 ato build [dir] [--strict-v3] [--force-large-payload]
 ato publish [--registry <url>] [--artifact <file.capsule>] [--scoped-id <publisher/slug>] [--allow-existing] [--prepare] [--build] [--deploy] [--legacy-full-publish] [--fix] [--no-tui] [--force-large-payload]
 ato publish --dry-run

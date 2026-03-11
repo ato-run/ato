@@ -1,6 +1,10 @@
 #![allow(deprecated)]
 
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::path::Path;
+use std::thread;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -20,6 +24,103 @@ fn run_init_in(dir: &std::path::Path) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap()
+}
+
+struct MockGitHubArchiveServer {
+    base_url: String,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for MockGitHubArchiveServer {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.join().expect("mock GitHub archive server thread");
+        }
+    }
+}
+
+fn build_github_tarball(root: &str, files: &[(&str, &str)]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let encoder = flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::default());
+    let mut builder = tar::Builder::new(encoder);
+    for (path, contents) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(
+                &mut header,
+                format!("{root}/{path}"),
+                std::io::Cursor::new(contents.as_bytes()),
+            )
+            .expect("append tar entry");
+    }
+    builder
+        .into_inner()
+        .expect("finish tar builder")
+        .finish()
+        .expect("finish gzip encoder");
+    bytes
+}
+
+fn spawn_github_archive_server(
+    expected_path: &'static str,
+    archive: Vec<u8>,
+) -> MockGitHubArchiveServer {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local server");
+    let addr = listener.local_addr().expect("listener addr");
+
+    // Single-connection mock server: sufficient for the current install flow, which fetches one
+    // tarball over one HTTP connection per test invocation.
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept request");
+        let mut request = [0u8; 4096];
+        let size = stream.read(&mut request).expect("read request");
+        let request_text = String::from_utf8_lossy(&request[..size]);
+        let (status_line, response_body, content_type) =
+            if request_text.starts_with(&format!("GET {expected_path} ")) {
+                ("HTTP/1.1 200 OK", archive, "application/gzip")
+            } else {
+                (
+                    "HTTP/1.1 404 Not Found",
+                    b"{\"error\":\"not found\"}".to_vec(),
+                    "application/json",
+                )
+            };
+        let response = format!(
+            "{status_line}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            response_body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .and_then(|_| stream.write_all(&response_body))
+            .expect("write response");
+    });
+
+    MockGitHubArchiveServer {
+        base_url: format!("http://{}", addr),
+        handle: Some(handle),
+    }
+}
+
+fn extract_manifest_from_archive(path: &Path) -> String {
+    let bytes = fs::read(path).unwrap();
+    let mut archive = tar::Archive::new(std::io::Cursor::new(bytes));
+    let entries = archive.entries().unwrap();
+    for entry in entries {
+        let mut entry = entry.unwrap();
+        let entry_path = entry.path().unwrap().to_string_lossy().into_owned();
+        if entry_path == "capsule.toml" {
+            let mut manifest = String::new();
+            entry.read_to_string(&mut manifest).unwrap();
+            return manifest;
+        }
+    }
+    panic!(
+        "capsule.toml not found in installed archive: {}",
+        path.display()
+    );
 }
 
 #[test]
@@ -121,6 +222,113 @@ fn test_search_help_uses_store_api_default() {
         .stdout(predicate::str::contains(
             "Registry URL (default: https://api.ato.run)",
         ));
+}
+
+#[test]
+fn test_install_help_shows_from_gh_repo() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["install", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--from-gh-repo <REPOSITORY>"));
+}
+
+#[test]
+fn test_install_rejects_slug_with_from_gh_repo() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args([
+        "install",
+        "koh0920/sample-capsule",
+        "--from-gh-repo",
+        "github.com/Koh0920/ato-cli",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("--from-gh-repo"));
+}
+
+#[test]
+fn test_install_rejects_registry_with_from_gh_repo() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args([
+        "install",
+        "--from-gh-repo",
+        "github.com/Koh0920/ato-cli",
+        "--registry",
+        "http://127.0.0.1:8080",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains(
+        "--registry cannot be used with --from-gh-repo",
+    ));
+}
+
+#[test]
+fn test_install_rejects_version_with_from_gh_repo() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args([
+        "install",
+        "--from-gh-repo",
+        "github.com/Koh0920/ato-cli",
+        "--version",
+        "1.2.3",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains(
+        "--version cannot be used with --from-gh-repo",
+    ));
+}
+
+#[test]
+fn test_install_from_gh_repo_without_manifest_uses_zero_config_build_fallback() {
+    let tmp = tempdir().unwrap();
+    let output_dir = tmp.path().join("installed");
+    let runtime_root = tmp.path().join("runtime");
+    let archive = build_github_tarball(
+        "Koh0920-demo-repo-a1b2c3",
+        &[("index.js", "console.log('hello from zero config');\n")],
+    );
+    let server = spawn_github_archive_server("/repos/Koh0920/demo-repo/tarball", archive);
+
+    let assert = Command::cargo_bin("ato")
+        .unwrap()
+        .current_dir(tmp.path())
+        .env("ATO_GITHUB_API_BASE_URL", &server.base_url)
+        .env("ATO_RUNTIME_ROOT", &runtime_root)
+        .args([
+            "install",
+            "--from-gh-repo",
+            "https://github.com/Koh0920/demo-repo",
+            "--output",
+        ])
+        .arg(&output_dir)
+        .args(["--yes", "--no-project"])
+        .assert();
+
+    assert.success();
+
+    let installed = output_dir
+        .join("koh0920")
+        .join("demo-repo")
+        .join("0.1.0")
+        .join("demo-repo-0.1.0.capsule");
+    assert!(
+        installed.exists(),
+        "installed artifact missing: {}",
+        installed.display()
+    );
+
+    let manifest = extract_manifest_from_archive(&installed);
+    assert!(
+        manifest.contains("name = \"demo-repo\""),
+        "manifest={manifest}"
+    );
+    assert!(
+        manifest.contains("entrypoint = \"index.js\""),
+        "manifest={manifest}"
+    );
 }
 
 #[test]
