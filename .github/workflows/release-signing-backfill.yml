@@ -1,0 +1,78 @@
+name: Release Signing Backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to backfill signing assets for
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  sign-and-sbom-backfill:
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Download release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts generated
+          gh release download "$RELEASE_TAG" --dir artifacts --pattern '*'
+
+      - name: Remove existing generated metadata
+        shell: bash
+        run: |
+          rm -f artifacts/*.sha256 artifacts/*.sigstore.json artifacts/*.sbom.spdx.json
+
+      - id: syft
+        name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0.23.1
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4.1.0
+
+      - name: Generate SBOMs and keyless bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t release_assets < <(find artifacts -maxdepth 1 -type f | sort)
+          if [[ "${#release_assets[@]}" -eq 0 ]]; then
+            echo "::error::No release assets found to sign"
+            exit 1
+          fi
+
+          syft_cmd='${{ steps.syft.outputs.cmd }}'
+
+          for asset in "${release_assets[@]}"; do
+            asset_name="$(basename "$asset")"
+
+            case "$asset_name" in
+              *.tar.xz|*.tar.gz|*.zip)
+                "$syft_cmd" "file:$asset" -o "spdx-json=generated/${asset_name}.sbom.spdx.json"
+                cosign sign-blob --yes \
+                  --bundle "generated/${asset_name}.sigstore.json" \
+                  "$asset"
+                ;;
+            esac
+          done
+
+          shopt -s nullglob
+          for sbom in generated/*.sbom.spdx.json; do
+            sbom_name="$(basename "$sbom")"
+            cosign sign-blob --yes \
+              --bundle "generated/${sbom_name}.sigstore.json" \
+              "$sbom"
+          done
+          shopt -u nullglob
+
+      - name: Upload backfilled signing assets
+        shell: bash
+        run: gh release upload "$RELEASE_TAG" generated/* --clobber
