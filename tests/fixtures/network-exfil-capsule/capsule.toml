@@ -1,0 +1,14 @@
+schema_version = "0.2"
+name = "network-exfil-capsule"
+version = "0.1.0"
+type = "app"
+default_target = "cli"
+
+[network]
+egress_allow = ["api.github.com"]
+
+[targets.cli]
+runtime = "source"
+driver = "deno"
+runtime_version = "1.46.3"
+entrypoint = "main.ts"

@@ -1,0 +1,15 @@
+version = "1"
+
+[meta]
+created_at = "2026-03-03T07:20:13.289516+00:00"
+manifest_hash = "sha256:02f1d78938d17d042178f38348b6c3e5fb635d6d23bf2ac29886b5d13ae833ff"
+
+[runtimes.deno]
+provider = "official"
+version = "1.46.3"
+
+[runtimes.deno.targets.aarch64-apple-darwin]
+url = "https://github.com/denoland/deno/releases/download/v1.46.3/deno-aarch64-apple-darwin.zip"
+sha256 = "e74f8ddd6d8205654905a4e42b5a605ab110722a7898aef68bc35d6e704c2946"
+
+[targets]

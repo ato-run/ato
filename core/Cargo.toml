@@ -1,0 +1,64 @@
+[package]
+name = "capsule-core"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+name = "capsule_core"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+prost = "0.13"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+anyhow = "1.0"
+bollard = "0.15"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_jcs = "0.1"
+blake3 = "1.5"
+fastcdc = "3.2"
+futures-util = "0.3"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = true }
+rand = "0.8"
+ed25519-dalek = { version = "2.0", features = ["rand_core"] }
+thiserror = "2.0"
+dirs = "5.0"
+toml = "0.8"
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+tar = "0.4"
+http = "0.2"
+hyper-util = { version = "0.1", features = ["tokio"] }
+tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
+tower = "0.4"
+flate2 = "1.0"
+zip = "2.1"
+sha2 = "0.10"
+regex = "1"
+walkdir = "2"
+url = "2.5"
+fs2 = "0.4"
+ignore = "0.4"
+globset = "0.4"
+jsonschema = "0.17"
+shell-words = "1.1"
+futures = "0.3"
+tokio-util = "0.7"
+tracing = "0.1"
+which = "6.0"
+ctrlc = "3.4"
+zstd = { version = "0.13", features = ["zstdmt"] }
+tempfile = "3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+dhat = "0.3"
+axum = { version = "0.7", features = ["multipart"] }
+
+[features]
+default = []
+provisioning-tests = []

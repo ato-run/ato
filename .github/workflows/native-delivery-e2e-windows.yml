@@ -1,0 +1,35 @@
+name: Native Delivery E2E (Windows Only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: native-delivery-e2e-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native_delivery_e2e_windows:
+    name: Native delivery E2E (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Windows native delivery E2E
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p ato-cli --test native_delivery_e2e e2e_native_delivery_windows_build_publish_install_run -- --test-threads=1 --nocapture

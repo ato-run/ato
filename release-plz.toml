@@ -1,0 +1,36 @@
+[workspace]
+allow_dirty = false
+changelog_update = true
+dependencies_update = true
+pr_branch_prefix = "release-plz-"
+pr_labels = ["release"]
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to `ato-cli` will be documented in this file.
+"""
+body = """
+## [{{ version }}] - {{ timestamp | date(format=\"%Y-%m-%d\") }}
+
+### What Changed
+
+{% for group, commits in commits | group_by(attribute=\"group\") %}
+#### {{ group }}
+{% for commit in commits %}
+- {{ commit.message | upper_first }}{% if commit.remote.pr_number %} (#{{ commit.remote.pr_number }}){% endif %}
+{% endfor %}
+{% endfor %}
+"""
+trim = true
+commit_parsers = [
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^security", group = "Security" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^refactor", group = "Refactoring" },
+  { message = "^ci", group = "CI" },
+  { message = "^test", group = "Tests" },
+  { message = ".*", group = "Other Changes" },
+]

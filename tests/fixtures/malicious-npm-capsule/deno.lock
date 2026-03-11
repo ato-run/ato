@@ -1,0 +1,9 @@
+{
+  "version": "4",
+  "specifiers": {},
+  "jsr": {},
+  "npm": {},
+  "workspace": {
+    "dependencies": []
+  }
+}

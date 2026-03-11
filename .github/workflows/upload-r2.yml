@@ -1,0 +1,69 @@
+name: Upload Release Assets to R2
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to upload (for example: v0.4.12)"
+        required: true
+        type: string
+
+jobs:
+  upload-r2:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ASSET_PREFIX: ato-cli
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Setup Node.js for Wrangler
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Wrangler
+        run: npm install --global wrangler@4
+
+      - name: Download release assets
+        id: download
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          if [[ "$TAG" =~ ^v(.+)$ ]]; then
+            VERSION="${BASH_REMATCH[1]}"
+          else
+            echo "::error::Invalid tag format: $TAG"
+            exit 1
+          fi
+
+          SOURCE_DIR="${GITHUB_WORKSPACE}/.tmp/ato-release/${VERSION}"
+          mkdir -p "$SOURCE_DIR"
+
+          gh release download "$TAG" --dir "$SOURCE_DIR" --clobber
+
+          (
+            cd "$SOURCE_DIR"
+            shasum -a 256 "$ASSET_PREFIX"-*.tar.xz "$ASSET_PREFIX"-*.tar.gz "$ASSET_PREFIX"-*.zip 2>/dev/null || true
+          ) > "$SOURCE_DIR/SHA256SUMS" || true
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "source_dir=$SOURCE_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to R2
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DEFAULT_BUCKET_STAGING: ${{ secrets.R2_BUCKET_STAGING }}
+          DEFAULT_BUCKET_PRODUCTION: ${{ secrets.R2_BUCKET_PRODUCTION }}
+        run: |
+          VERSION="${{ steps.download.outputs.version }}" \
+          SOURCE_DIR="${{ steps.download.outputs.source_dir }}" \
+          ASSET_PREFIX="$ASSET_PREFIX" \
+          DEPLOY_ENV=production \
+          ./scripts/upload_release_to_r2.sh
