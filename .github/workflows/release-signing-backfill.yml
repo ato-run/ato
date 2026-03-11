@@ -18,13 +18,14 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RELEASE_TAG: ${{ inputs.tag }}
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Download release assets
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p artifacts generated
-          gh release download "$RELEASE_TAG" --dir artifacts --pattern '*'
+          gh release download "$RELEASE_TAG" --repo "$GH_REPO" --dir artifacts --pattern '*'
 
       - name: Remove existing generated metadata
         shell: bash
@@ -75,4 +76,4 @@ jobs:
 
       - name: Upload backfilled signing assets
         shell: bash
-        run: gh release upload "$RELEASE_TAG" generated/* --clobber
+        run: gh release upload "$RELEASE_TAG" --repo "$GH_REPO" generated/* --clobber
