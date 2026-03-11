@@ -343,6 +343,7 @@ jobs:
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ needs.plan.outputs.tag }}
     steps:
       - name: Fetch artifacts
@@ -397,7 +398,7 @@ jobs:
           shopt -u nullglob
       - name: Upload SBOMs and signatures
         shell: bash
-        run: gh release upload "$RELEASE_TAG" generated/* --clobber
+        run: gh release upload "$RELEASE_TAG" --repo "$GH_REPO" generated/* --clobber
 
   provenance:
     needs:
