@@ -1,0 +1,12 @@
+schema_version = "0.2"
+name = "sample-native-capsule"
+version = "0.1.1"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source"
+driver = "native"
+entrypoint = "cargo"
+cmd = ["build", "--manifest-path", "src-tauri/Cargo.toml", "--release"]
+working_dir = "."

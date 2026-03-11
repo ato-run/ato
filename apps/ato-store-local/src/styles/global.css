@@ -1,0 +1,186 @@
+@import url("https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300;1,400;1,500&family=DM+Sans:wght@300;400;500;600&display=swap");
+
+:root {
+  --bg: #f7f7f8;
+  --surface: #ffffff;
+  --border: #e4e4e7;
+  --border-md: #d1d1d6;
+  --text-1: #18181b;
+  --text-2: #52525b;
+  --text-3: #a1a1aa;
+  --accent: #2563eb;
+  --accent-lt: #eff6ff;
+  --accent-md: #bfdbfe;
+  --green: #16a34a;
+  --green-lt: #f0fdf4;
+  --red: #dc2626;
+  --red-lt: #fef2f2;
+  --yellow: #d97706;
+  --yellow-lt: #fffbeb;
+  --sidebar-bg: #18181b;
+  --sidebar-bd: #27272a;
+  --sidebar-tx: #a1a1aa;
+  --sidebar-ax: #ffffff;
+  --term-bg: #18181b;
+  --term-bd: #27272a;
+  --white: #ffffff;
+  --green-border: #bbf7d0;
+  --red-border: #fecaca;
+  --overlay: rgba(0, 0, 0, 0.3);
+  --shadow-sm: rgba(24, 24, 27, 0.08);
+  --log-info: #60a5fa;
+  --log-warn: #fbbf24;
+  --log-error: #f87171;
+  --log-default: #d4d4d8;
+  --log-muted: #3f3f46;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--text-1);
+  font-family: "DM Sans", sans-serif;
+  font-size: 12px;
+  overflow: hidden;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+pre,
+code,
+.mono {
+  font-family: "DM Mono", monospace;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-md);
+}
+
+.app-shell {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.main-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.content-pane {
+  flex: 1;
+  min-height: 0;
+  padding: 14px;
+  overflow: auto;
+}
+
+.mobile-nav-bar {
+  display: none;
+}
+
+@keyframes pulse-dot {
+  0% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+}
+
+@keyframes toast-in {
+  0% {
+    transform: translateY(8px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@media (max-width: 768px) {
+  body {
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+
+  #root {
+    height: auto;
+    min-height: 100dvh;
+  }
+
+  .app-shell {
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+
+  .main-pane {
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+
+  .mobile-nav-bar {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+
+  .mobile-menu-btn {
+    background: var(--surface);
+  }
+
+  .content-pane {
+    padding: 10px;
+    overflow: visible;
+  }
+}

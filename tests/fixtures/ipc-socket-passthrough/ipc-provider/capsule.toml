@@ -1,0 +1,18 @@
+schema_version = "0.2"
+name = "ipc-provider"
+version = "0.1.0"
+type = "app"
+default_target = "svc"
+
+[targets.svc]
+runtime = "source"
+driver = "native"
+entrypoint = "echo provider"
+
+[ipc.exports]
+name = "echo-service"
+protocol = "jsonrpc-2.0"
+transport = "unix-socket"
+
+[[ipc.exports.methods]]
+name = "ping"

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "manifest_hash": "sha256:939f9c1ef9887f3493c0b3d8b6d284312e18c03c4aa3f9581c21dbc3ef5d2799",
+  "files": [
+    {
+      "path": "capsule.toml",
+      "size": 194,
+      "modified_ns": 1772077935652671041,
+      "inode": 254715144
+    }
+  ]
+}

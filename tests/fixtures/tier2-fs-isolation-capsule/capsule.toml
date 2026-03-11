@@ -1,0 +1,13 @@
+schema_version = "0.2"
+name = "tier2-fs-isolation-capsule"
+version = "0.1.0"
+type = "app"
+default_target = "cli"
+
+[sandbox.filesystem]
+read_write = ["./output"]
+
+[targets.cli]
+runtime = "source"
+driver = "native"
+entrypoint = "main.py"
