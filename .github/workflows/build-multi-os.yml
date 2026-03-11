@@ -1,0 +1,497 @@
+name: Build (Multi OS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Optional release version to validate against Cargo.toml.
+        required: false
+        type: string
+      native_only:
+        description: Run only the Windows native delivery E2E job.
+        required: false
+        type: boolean
+        default: false
+  pull_request:
+  push:
+    branches:
+      - dev
+      - main
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: build-multi-os-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  clippy:
+    name: Clippy
+    if: ${{ !((github.event_name == 'workflow_dispatch' && inputs.native_only) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[native-only]'))) }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Validate Cargo.lock is up to date
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! cargo metadata --locked --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo.lock is out of date for the current Cargo.toml." >&2
+            echo "Run 'cargo generate-lockfile' (or 'cargo check') locally and commit Cargo.lock." >&2
+            exit 1
+          fi
+
+      - name: Run clippy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  build:
+    name: Build ${{ matrix.artifact_name }}
+    if: ${{ !((github.event_name == 'workflow_dispatch' && inputs.native_only) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[native-only]'))) }}
+    needs: clippy
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact_name: linux-x86_64
+            os: ubuntu-latest
+            binary_name: ato
+            build_target: x86_64-unknown-linux-gnu
+            rustflags: ""
+          - artifact_name: linux-aarch64
+            os: ubuntu-latest
+            binary_name: ato
+            build_target: aarch64-unknown-linux-gnu
+            rustflags: ""
+          - artifact_name: macos-host
+            os: macos-latest
+            binary_name: ato
+            build_target: ""
+            rustflags: ""
+          - artifact_name: windows-x86_64
+            os: windows-latest
+            binary_name: ato.exe
+            build_target: x86_64-pc-windows-msvc
+            rustflags: -C target-feature=+crt-static
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify version source of truth
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cargo_version="$(sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -n1)"
+          if [[ -z "$cargo_version" ]]; then
+            echo "Failed to read version from Cargo.toml" >&2
+            exit 1
+          fi
+
+          if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
+            tag_version="${GITHUB_REF#refs/tags/v}"
+            if [[ "$tag_version" != "$cargo_version" ]]; then
+              echo "Tag version ($tag_version) does not match Cargo.toml version ($cargo_version)" >&2
+              exit 1
+            fi
+          fi
+
+          version_input="${{ github.event.inputs.version }}"
+          if [[ -n "$version_input" ]]; then
+            version_input="${version_input#v}"
+            if [[ ! "$version_input" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+              echo "Invalid workflow input version: $version_input" >&2
+              exit 1
+            fi
+            if [[ "$version_input" != "$cargo_version" ]]; then
+              echo "workflow_dispatch version ($version_input) must match Cargo.toml version ($cargo_version)" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Validate Cargo.lock is up to date
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! cargo metadata --locked --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo.lock is out of date for the current Cargo.toml." >&2
+            echo "Run 'cargo generate-lockfile' (or 'cargo check') locally and commit Cargo.lock." >&2
+            exit 1
+          fi
+
+      - name: Install aarch64 Linux cross toolchain
+        if: ${{ matrix.build_target == 'aarch64-unknown-linux-gnu' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+
+      - name: Add Rust target
+        if: ${{ matrix.build_target != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target add "${{ matrix.build_target }}"
+
+      - name: Build release binary
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ matrix.build_target }}" ]]; then
+            cargo build --release --locked --target "${{ matrix.build_target }}" --bin ato
+          else
+            cargo build --release --locked --bin ato
+          fi
+
+      - name: Package target archive and checksum
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${{ matrix.build_target }}" ]]; then
+            resolved_target="${{ matrix.build_target }}"
+          else
+            resolved_target="$(rustc -vV | sed -n 's/^host: //p')"
+          fi
+          if [[ -z "$resolved_target" ]]; then
+            echo "failed to detect target triple" >&2
+            exit 1
+          fi
+
+          mkdir -p dist/payload
+          binary_path="target/release/${{ matrix.binary_name }}"
+          if [[ -n "${{ matrix.build_target }}" ]]; then
+            binary_path="target/${{ matrix.build_target }}/release/${{ matrix.binary_name }}"
+          fi
+          cp "$binary_path" "dist/payload/${{ matrix.binary_name }}"
+
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            archive_name="ato-cli-${resolved_target}.zip"
+            powershell.exe -NoProfile -Command "Push-Location 'dist/payload'; Compress-Archive -Path '${{ matrix.binary_name }}' -DestinationPath '../${archive_name}' -Force; Pop-Location"
+          else
+            archive_name="ato-cli-${resolved_target}.tar.xz"
+            tar -C dist/payload -cJf "dist/${archive_name}" "${{ matrix.binary_name }}"
+          fi
+
+          archive_path="dist/${archive_name}"
+          if [[ ! -f "$archive_path" ]]; then
+            echo "archive not found for checksum generation: $archive_path" >&2
+            exit 1
+          fi
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            checksum="$(sha256sum "$archive_path" | awk '{print $1}')"
+          elif command -v shasum >/dev/null 2>&1; then
+            checksum="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
+          else
+            echo "No SHA-256 tool found (need sha256sum or shasum)" >&2
+            exit 1
+          fi
+          printf '%s  %s\n' "$checksum" "$archive_name" > dist/SHA256SUMS
+
+          echo "$resolved_target" > "dist/target-triple.txt"
+          echo "target_triple=$resolved_target" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.artifact_name }}
+          path: |
+            dist/ato-cli-*.tar.xz
+            dist/ato-cli-*.zip
+            dist/SHA256SUMS
+            dist/target-triple.txt
+          if-no-files-found: error
+
+  smoke:
+    name: Smoke ${{ matrix.artifact_name }}
+    if: ${{ !((github.event_name == 'workflow_dispatch' && inputs.native_only) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[native-only]'))) }}
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact_name: linux-x86_64
+            os: ubuntu-latest
+            binary_name: ato
+            qemu_arm: false
+          - artifact_name: linux-aarch64
+            os: ubuntu-latest
+            binary_name: ato
+            qemu_arm: true
+          - artifact_name: macos-host
+            os: macos-latest
+            binary_name: ato
+            qemu_arm: false
+          - artifact_name: windows-x86_64
+            os: windows-latest
+            binary_name: ato.exe
+            qemu_arm: false
+
+    steps:
+      - name: Download packaged artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-${{ matrix.artifact_name }}
+          path: ato-smoke
+
+      - name: Prepare extracted binary
+        id: prep
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ato-bin
+          archive="$(find ato-smoke -maxdepth 1 -type f \( -name 'ato-cli-*.tar.xz' -o -name 'ato-cli-*.zip' \) | head -n1)"
+          if [[ -z "$archive" ]]; then
+            echo "No archive found in ato-smoke" >&2
+            exit 1
+          fi
+
+          if [[ "$archive" == *.zip ]]; then
+            archive_win="$(cygpath -w "$archive")"
+            dest_win="$(cygpath -w "$PWD/ato-bin")"
+            powershell.exe -NoProfile -Command "Expand-Archive -Path '$archive_win' -DestinationPath '$dest_win' -Force"
+          else
+            tar -C ato-bin -xJf "$archive"
+          fi
+
+          binary_path="$PWD/ato-bin/${{ matrix.binary_name }}"
+          if [[ ! -f "$binary_path" ]]; then
+            echo "Extracted binary not found: $binary_path" >&2
+            exit 1
+          fi
+          chmod +x "$binary_path" || true
+          echo "binary=$binary_path" >> "$GITHUB_OUTPUT"
+
+      - name: Install ARM runtime tools
+        if: ${{ matrix.qemu_arm }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static libc6-arm64-cross libgcc-s1-arm64-cross libstdc++6-arm64-cross
+
+      - name: Smoke (aarch64 via QEMU)
+        if: ${{ matrix.qemu_arm }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="${{ steps.prep.outputs.binary }}"
+          qemu-aarch64-static -L /usr/aarch64-linux-gnu "$BIN" --version
+          qemu-aarch64-static -L /usr/aarch64-linux-gnu "$BIN" --help >/dev/null
+
+      - name: Smoke (native commands)
+        if: ${{ !matrix.qemu_arm }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="${{ steps.prep.outputs.binary }}"
+          "$BIN" --version
+          "$BIN" --help >/dev/null
+          "$BIN" run --help >/dev/null
+
+      - name: Verify strict-v3 fail-fast behavior
+        if: ${{ matrix.artifact_name == 'linux-x86_64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="${{ steps.prep.outputs.binary }}"
+
+          tmp_dir="$(mktemp -d)"
+          mkdir -p "${tmp_dir}/source"
+          cat >"${tmp_dir}/capsule.toml" <<'EOF'
+          schema_version = "0.2"
+          name = "strict-v3-ci-check"
+          version = "0.1.0"
+          type = "app"
+          default_target = "cli"
+
+          [targets.cli]
+          runtime = "source"
+          driver = "native"
+          entrypoint = "source/main.py"
+          EOF
+          cat >"${tmp_dir}/source/main.py" <<'EOF'
+          print("strict v3 check")
+          EOF
+
+          set +e
+          "$BIN" build "${tmp_dir}" --strict-v3 >"${tmp_dir}/stdout.log" 2>"${tmp_dir}/stderr.log"
+          status=$?
+          set -e
+          if [[ $status -eq 0 ]]; then
+            echo "strict-v3 check unexpectedly succeeded" >&2
+            cat "${tmp_dir}/stdout.log" >&2 || true
+            cat "${tmp_dir}/stderr.log" >&2 || true
+            exit 1
+          fi
+          if ! grep -qiE "strict-v3|Strict v3 fallback is not allowed|strict-manifest|source_digest is missing|E102" "${tmp_dir}/stderr.log"; then
+            echo "strict-v3 failure message not found in stderr" >&2
+            cat "${tmp_dir}/stderr.log" >&2 || true
+            exit 1
+          fi
+
+      - name: Verify keyring fail-closed/auth bypass behavior
+        if: ${{ matrix.artifact_name == 'linux-x86_64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="${{ steps.prep.outputs.binary }}"
+          tmp_home="$(mktemp -d)"
+
+          set +e
+          env -u ATO_TOKEN HOME="$tmp_home" "$BIN" source rebuild --source-id src_123 --ref main --registry http://127.0.0.1:9 >"$tmp_home/no_token.stdout" 2>"$tmp_home/no_token.stderr"
+          status_no_token=$?
+          set -e
+          if [[ $status_no_token -eq 0 ]]; then
+            echo "Expected authentication failure without ATO_TOKEN" >&2
+            exit 1
+          fi
+          if ! grep -qiE "Source operation requires authentication|Not authenticated" "$tmp_home/no_token.stderr"; then
+            echo "Missing fail-closed auth error without ATO_TOKEN" >&2
+            cat "$tmp_home/no_token.stderr" >&2 || true
+            exit 1
+          fi
+
+          set +e
+          HOME="$tmp_home" ATO_TOKEN=dummy "$BIN" source rebuild --source-id src_123 --ref main --registry http://127.0.0.1:9 >"$tmp_home/with_token.stdout" 2>"$tmp_home/with_token.stderr"
+          status_with_token=$?
+          set -e
+          if [[ $status_with_token -eq 0 ]]; then
+            echo "Expected preflight/network failure with dummy ATO_TOKEN" >&2
+            exit 1
+          fi
+          if grep -qiE "Source operation requires authentication|Not authenticated" "$tmp_home/with_token.stderr"; then
+            echo "ATO_TOKEN path unexpectedly failed due to authentication" >&2
+            cat "$tmp_home/with_token.stderr" >&2 || true
+            exit 1
+          fi
+          if ! grep -qiE "Failed to preflight source operation|Source preflight failed|Connection refused|error sending request" "$tmp_home/with_token.stderr"; then
+            echo "Expected preflight/network error not found for dummy ATO_TOKEN path" >&2
+            cat "$tmp_home/with_token.stderr" >&2 || true
+            exit 1
+          fi
+
+      - name: Verify Linux dynamic dependencies
+        if: ${{ matrix.artifact_name == 'linux-x86_64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="${{ steps.prep.outputs.binary }}"
+          ldd "$BIN" | tee /tmp/ato-ldd.txt
+          if grep -q "not found" /tmp/ato-ldd.txt; then
+            echo "Detected unresolved dynamic dependency" >&2
+            exit 1
+          fi
+
+      - name: Verify macOS dynamic dependencies
+        if: ${{ matrix.artifact_name == 'macos-host' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="${{ steps.prep.outputs.binary }}"
+          otool -L "$BIN" >/tmp/ato-otool.txt
+
+  native_delivery_e2e_windows:
+    name: Native delivery E2E (Windows)
+    if: ${{ !((github.event_name == 'workflow_dispatch' && inputs.native_only) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[native-only]'))) }}
+    needs: clippy
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Windows native delivery E2E
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p ato-cli --test native_delivery_e2e e2e_native_delivery_windows_build_publish_install_run -- --test-threads=1 --nocapture
+
+  native_delivery_e2e_windows_fast:
+    name: Native delivery E2E (Windows Fast)
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.native_only) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[native-only]')) }}
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Windows native delivery E2E
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p ato-cli --test native_delivery_e2e e2e_native_delivery_windows_build_publish_install_run -- --test-threads=1 --nocapture
+
+  tar_pack_benchmark:
+    name: Tar pack benchmark
+    if: ${{ !((github.event_name == 'workflow_dispatch' && inputs.native_only) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[native-only]'))) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Benchmark (10k files)
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILES=10000 scripts/ci/tar_pack_benchmark.sh
+
+      - name: Benchmark (100k files)
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILES=100000 scripts/ci/tar_pack_benchmark.sh
+
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tar-pack-benchmark
+          path: /tmp/tar-pack-benchmark
+          if-no-files-found: error

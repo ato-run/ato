@@ -1,0 +1,14 @@
+schema_version = "0.2"
+name = "ipc-socket-passthrough"
+version = "0.1.0"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "native"
+entrypoint = "./run.sh"
+
+[ipc.imports.echo]
+from = "./ipc-provider"
+activation = "eager"

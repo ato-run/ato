@@ -1,0 +1,12 @@
+[advisories]
+ignore = [
+    # The current runtime stack is still pinned to wasmtime 16 on non-Windows targets.
+    # Keep these acknowledgements narrow so the workflow stays green until the
+    # dependency refresh lands.
+    "RUSTSEC-2024-0438",
+    "RUSTSEC-2024-0445",
+    "RUSTSEC-2025-0046",
+    "RUSTSEC-2025-0118",
+    "RUSTSEC-2026-0020",
+    "RUSTSEC-2026-0021",
+]

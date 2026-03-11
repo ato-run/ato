@@ -1,0 +1,4562 @@
+use anyhow::{Context, Result};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use colored::Colorize;
+use serde::Serialize;
+use serde_json::json;
+use std::cmp::Ordering;
+use std::io::{self, IsTerminal, Write};
+use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
+use tracing::debug;
+
+use capsule_core::CapsuleReporter;
+
+fn print_animated_logo() {
+    let logo = r#"
+    ___    __       
+   /   |  / /_____  
+  / /| | / __/ __ \ 
+ / ___ |/ /_/ /_/ / 
+/_/  |_|\__/\____/  
+"#;
+
+    for line in logo.lines() {
+        println!("{}", line.cyan().bold());
+        io::stdout().flush().unwrap();
+        thread::sleep(Duration::from_millis(30));
+    }
+    println!();
+}
+
+const DEFAULT_RUN_REGISTRY_URL: &str = "https://api.ato.run";
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum EnforcementMode {
+    Strict,
+    BestEffort,
+}
+
+impl EnforcementMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            EnforcementMode::Strict => "strict",
+            EnforcementMode::BestEffort => "best_effort",
+        }
+    }
+}
+
+struct SidecarCleanup {
+    sidecar: Option<common::sidecar::SidecarHandle>,
+    reporter: std::sync::Arc<reporters::CliReporter>,
+}
+
+impl SidecarCleanup {
+    fn new(
+        sidecar: Option<common::sidecar::SidecarHandle>,
+        reporter: std::sync::Arc<reporters::CliReporter>,
+    ) -> Self {
+        Self { sidecar, reporter }
+    }
+
+    fn stop_now(&mut self) {
+        if let Some(sidecar) = self.sidecar.take() {
+            if let Err(err) = sidecar.stop() {
+                let _ = futures::executor::block_on(
+                    self.reporter
+                        .warn(format!("⚠️  Failed to stop sidecar: {}", err)),
+                );
+            }
+        }
+    }
+}
+
+impl Drop for SidecarCleanup {
+    fn drop(&mut self) {
+        self.stop_now();
+    }
+}
+
+mod ato_error_jsonl;
+mod auth;
+mod binding;
+mod commands;
+mod common;
+mod consent_store;
+mod diagnostics;
+mod engine_manager;
+mod env;
+mod error_codes;
+mod executors;
+mod gen_ci;
+mod guest_protocol;
+mod ingress_proxy;
+mod init;
+mod install;
+mod ipc;
+mod keygen;
+mod native_delivery;
+mod new;
+mod payload_guard;
+mod process_manager;
+mod profile;
+mod publish_artifact;
+mod publish_ci;
+mod publish_dry_run;
+mod publish_official;
+mod publish_preflight;
+mod publish_prepare;
+mod publish_private;
+mod registry;
+mod registry_delete;
+mod registry_http;
+mod registry_serve;
+mod registry_store;
+mod registry_yank;
+mod reporters;
+mod runtime_manager;
+mod runtime_overrides;
+mod runtime_tree;
+mod scaffold;
+mod search;
+mod sign;
+mod skill;
+mod skill_resolver;
+mod source;
+mod state;
+mod tui;
+mod verify;
+
+fn cli_styles() -> clap::builder::Styles {
+    use clap::builder::styling::{AnsiColor, Effects};
+    clap::builder::Styles::styled()
+        .header(AnsiColor::Cyan.on_default() | Effects::BOLD)
+        .usage(AnsiColor::Green.on_default() | Effects::BOLD)
+        .literal(AnsiColor::Blue.on_default() | Effects::BOLD)
+        .placeholder(AnsiColor::Yellow.on_default())
+}
+
+#[derive(Parser)]
+#[command(name = "ato")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
+#[command(styles = cli_styles())]
+#[command(help_template = "\
+{about-with-newline}
+Usage: {usage}
+
+Primary Commands:
+  run      Execute a capsule or SKILL.md in a strict Zero-Trust sandbox
+  build    Pack a project into an immutable .capsule archive
+  publish  Publish capsule artifacts to a registry
+  install  Install a verified package from the registry
+  search   Search the registry for agent skills and packages
+  init     Analyze the current project and print an agent-ready capsule.toml prompt
+
+Management:
+  ps       List running capsules
+  stop     Stop a running capsule
+  logs     Show logs of a running capsule
+    state    Inspect or register persistent state bindings
+    binding  Inspect or register host-side service bindings
+
+Auth:
+  login    Login to Ato registry
+  logout   Logout
+  whoami   Show current authentication status
+
+Advanced Commands:
+  inspect  Inspect capsule metadata and runtime requirements
+  fetch    Fetch an artifact into local cache for debugging or manual workflows
+  finalize Perform local derivation for a fetched native artifact
+  project  Add a finalized app to launcher surfaces
+  unproject Remove a launcher projection
+  key      Manage signing keys
+  config   Manage configuration (registry, engine, source)
+  gen-ci   Generate GitHub Actions workflow for OIDC CI publish
+  registry Manage registry commands (resolve/list/cache/serve)
+
+Options:
+{options}
+
+Use 'ato help <command>' for more information.
+")]
+struct Cli {
+    /// Path to nacelle engine binary (overrides NACELLE_PATH)
+    #[arg(long)]
+    nacelle: Option<PathBuf>,
+
+    /// Emit machine-readable JSON output
+    #[arg(long)]
+    json: bool,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    #[command(
+        next_help_heading = "Primary Commands",
+        about = "Run a capsule app or local project"
+    )]
+    Run {
+        /// Local path (./, ../, ~/, /...) or store scoped ID (publisher/slug). Default: current directory
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Resolve SKILL.md by skill name from standard locations and run it safely
+        #[arg(long = "skill", conflicts_with = "from_skill")]
+        skill: Option<String>,
+
+        /// Run from SKILL.md by translating frontmatter into a fail-closed capsule execution plan
+        #[arg(long = "from-skill", conflicts_with = "skill")]
+        from_skill: Option<PathBuf>,
+
+        /// Target label to execute (e.g. static, cli, widget)
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+
+        /// Run in development mode (foreground) with hot-reloading on file changes
+        #[arg(long)]
+        watch: bool,
+
+        /// Run in background mode (detached)
+        #[arg(long)]
+        background: bool,
+
+        /// Path to nacelle engine binary (overrides NACELLE_PATH)
+        #[arg(long)]
+        nacelle: Option<PathBuf>,
+
+        /// Registry URL for auto-install when app-id is not installed (default: https://api.ato.run)
+        #[arg(long)]
+        registry: Option<String>,
+
+        /// Explicitly bind a manifest [state.<name>] entry using STATE=/absolute/path or STATE=state-...
+        #[arg(long = "state", value_name = "STATE=/ABS/PATH|STATE=state-...")]
+        state: Vec<String>,
+
+        /// Network enforcement mode
+        #[arg(long, value_enum, default_value_t = EnforcementMode::Strict)]
+        enforcement: EnforcementMode,
+
+        /// Explicitly allow Tier2 (python/native) execution via native OS sandbox
+        #[arg(long = "sandbox", default_value_t = false)]
+        sandbox_mode: bool,
+
+        /// Legacy alias for `--sandbox`
+        #[arg(long = "unsafe", hide = true, default_value_t = false)]
+        unsafe_mode_legacy: bool,
+
+        /// Legacy alias for `--sandbox`
+        #[arg(long = "unsafe-bypass-sandbox", hide = true, default_value_t = false)]
+        unsafe_bypass_sandbox_legacy: bool,
+
+        /// Dangerously bypass all Ato runtime permission/sandbox barriers (host-native execution)
+        #[arg(
+            short = 'U',
+            long = "dangerously-skip-permissions",
+            default_value_t = false
+        )]
+        dangerously_skip_permissions: bool,
+
+        /// Skip prompt and auto-install when app-id is not installed
+        #[arg(short = 'y', long = "yes", default_value_t = false)]
+        yes: bool,
+
+        /// Allow installing/running unverified signatures in non-production environments
+        #[arg(long, default_value_t = false)]
+        allow_unverified: bool,
+    },
+
+    #[command(
+        next_help_heading = "Primary Commands",
+        about = "Install a package from the store"
+    )]
+    Install {
+        /// Capsule scoped ID (publisher/slug)
+        slug: String,
+
+        /// Registry URL (default: registry.capsule.app)
+        #[arg(long)]
+        registry: Option<String>,
+
+        /// Specific version to install
+        #[arg(long)]
+        version: Option<String>,
+
+        /// Set as default handler for supported content types
+        #[arg(long, default_value_t = false)]
+        default: bool,
+
+        /// Skip prompts and approve local finalize / projection
+        #[arg(short = 'y', long = "yes", default_value_t = false)]
+        yes: bool,
+
+        /// Deprecated legacy flag (always rejected)
+        #[arg(long = "skip-verify", hide = true, default_value_t = false)]
+        skip_verify_legacy: bool,
+
+        /// Allow installing unverified signatures in non-production environments
+        #[arg(long, default_value_t = false)]
+        allow_unverified: bool,
+
+        /// Output directory (default: ~/.ato/store/)
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Create a launcher projection after install
+        #[arg(long, default_value_t = false, conflicts_with = "no_project")]
+        project: bool,
+
+        /// Do not prompt for or create a launcher projection
+        #[arg(long, default_value_t = false, conflicts_with = "project")]
+        no_project: bool,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    #[command(
+        next_help_heading = "Primary Commands",
+        about = "Analyze the current project and print an agent-ready capsule.toml prompt"
+    )]
+    Init,
+
+    #[command(
+        next_help_heading = "Primary Commands",
+        about = "Build project into a capsule archive"
+    )]
+    Build {
+        /// Directory containing capsule.toml (default: ".")
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+
+        /// Initialize capsule.toml interactively if not found
+        #[arg(long)]
+        init: bool,
+
+        /// Path to signing key (optional)
+        #[arg(long)]
+        key: Option<PathBuf>,
+
+        /// Network enforcement mode
+        #[arg(long, value_enum, default_value_t = EnforcementMode::Strict)]
+        enforcement: EnforcementMode,
+
+        /// Create self-extracting executable installer (includes nacelle runtime)
+        #[arg(long)]
+        standalone: bool,
+
+        /// Allow building payloads larger than 200MB
+        #[arg(long, default_value_t = false)]
+        force_large_payload: bool,
+
+        /// Keep failed build artifacts when smoke test fails
+        #[arg(long, default_value_t = false)]
+        keep_failed_artifacts: bool,
+
+        /// Print per-phase build timings
+        #[arg(long, default_value_t = false)]
+        timings: bool,
+
+        /// Disallow fallback when source_digest/CAS(v3 path) is unavailable
+        #[arg(long, default_value_t = false)]
+        strict_v3: bool,
+    },
+
+    #[command(
+        next_help_heading = "Advanced Commands",
+        about = "Validate capsule build/run inputs without executing"
+    )]
+    Validate {
+        /// Directory containing capsule.toml or the manifest file itself (default: ".")
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    #[command(
+        next_help_heading = "Advanced Commands",
+        about = "Update ato CLI to the latest version"
+    )]
+    Update,
+
+    #[command(
+        next_help_heading = "Advanced Commands",
+        about = "Inspect capsule metadata and runtime requirements"
+    )]
+    Inspect {
+        #[command(subcommand)]
+        command: InspectCommands,
+    },
+
+    #[command(
+        next_help_heading = "Primary Commands",
+        about = "Search the store for packages"
+    )]
+    Search {
+        /// Search query (e.g., "note", "ai chat")
+        query: Option<String>,
+
+        /// Filter by category
+        #[arg(long)]
+        category: Option<String>,
+
+        /// Filter by tag (repeatable, comma-separated supported)
+        #[arg(long = "tag", value_delimiter = ',')]
+        tags: Vec<String>,
+
+        /// Maximum number of results (default: 20, max: 50)
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Pagination cursor for next page
+        #[arg(long)]
+        cursor: Option<String>,
+
+        /// Registry URL (default: https://api.ato.run)
+        #[arg(long)]
+        registry: Option<String>,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+
+        /// Disable interactive TUI even when running in TTY
+        #[arg(long, default_value_t = false)]
+        no_tui: bool,
+
+        /// Show selected capsule's capsule.toml in the TUI right panel
+        #[arg(long, default_value_t = false)]
+        show_manifest: bool,
+    },
+
+    #[command(
+        next_help_heading = "Advanced Commands",
+        about = "Fetch an artifact into local cache for debugging or manual workflows"
+    )]
+    Fetch {
+        /// Capsule ref (`publisher/slug[@version]` or `localhost:8080/slug:version`)
+        capsule_ref: String,
+
+        /// Registry URL override (or embed registry in `capsule_ref`)
+        #[arg(long)]
+        registry: Option<String>,
+
+        /// Specific version to fetch (or use publisher/slug@version)
+        #[arg(long)]
+        version: Option<String>,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    #[command(
+        next_help_heading = "Advanced Commands",
+        about = "Perform local derivation for a fetched native artifact. Most users should use `ato install`."
+    )]
+    Finalize {
+        /// Path to fetched artifact directory created by `ato fetch`
+        fetched_artifact_dir: PathBuf,
+
+        /// Allow external finalize execution (`codesign`) for this PoC
+        #[arg(long, default_value_t = false)]
+        allow_external_finalize: bool,
+
+        /// Output directory for derived artifacts
+        #[arg(long)]
+        output_dir: PathBuf,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    #[command(
+        next_help_heading = "Advanced Commands",
+        about = "Add a finalized app to launcher surfaces (experimental)"
+    )]
+    Project {
+        /// Path to a finalized local derived artifact directory created by `ato finalize`
+        derived_app_path: Option<PathBuf>,
+
+        /// Override launcher surface directory (default: host-specific launcher dir)
+        #[arg(long)]
+        launcher_dir: Option<PathBuf>,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+
+        #[command(subcommand)]
+        command: Option<ProjectCommands>,
+    },
+
+    #[command(
+        next_help_heading = "Advanced Commands",
+        about = "Remove an experimental launcher projection without mutating the finalized artifact"
+    )]
+    Unproject {
+        /// Projection ID, projected symlink path, or finalized derived .app path
+        projection_ref: String,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    #[command(next_help_heading = "Management", about = "List running capsules")]
+    Ps {
+        /// Show all capsules including stopped ones
+        #[arg(long, default_value_t = false)]
+        all: bool,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    #[command(next_help_heading = "Management", about = "Stop a running capsule")]
+    Stop {
+        /// Capsule ID (from ps output)
+        #[arg(long)]
+        id: Option<String>,
+
+        /// Capsule name (partial match)
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Stop all capsules matching the name
+        #[arg(long, default_value_t = false)]
+        all: bool,
+
+        /// Force kill (SIGKILL) instead of graceful shutdown (SIGTERM)
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+
+    #[command(
+        next_help_heading = "Management",
+        about = "Show logs of a running capsule"
+    )]
+    Logs {
+        /// Capsule ID (from ps output)
+        #[arg(long)]
+        id: Option<String>,
+
+        /// Capsule name (partial match)
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Follow log output in real-time
+        #[arg(long, default_value_t = false)]
+        follow: bool,
+
+        /// Show last N lines
+        #[arg(long)]
+        tail: Option<usize>,
+    },
+
+    #[command(
+        next_help_heading = "Management",
+        about = "Inspect or register persistent state bindings"
+    )]
+    State {
+        #[command(subcommand)]
+        command: StateCommands,
+    },
+
+    #[command(
+        next_help_heading = "Management",
+        about = "Inspect or register host-side service bindings"
+    )]
+    Binding {
+        #[command(subcommand)]
+        command: BindingCommands,
+    },
+
+    #[command(next_help_heading = "Auth", about = "Login to Ato registry")]
+    Login {
+        /// GitHub Personal Access Token (legacy fallback, scope: read:user)
+        #[arg(long)]
+        token: Option<String>,
+
+        /// Do not open browser automatically; print activation URL for another device/session
+        #[arg(long, default_value_t = false)]
+        headless: bool,
+    },
+
+    #[command(next_help_heading = "Auth", about = "Logout")]
+    Logout,
+
+    #[command(
+        next_help_heading = "Auth",
+        about = "Show current authentication status"
+    )]
+    Whoami,
+
+    #[command(next_help_heading = "Advanced Commands", about = "Manage signing keys")]
+    Key {
+        #[command(subcommand)]
+        command: KeyCommands,
+    },
+
+    #[command(
+        next_help_heading = "Advanced Commands",
+        about = "Manage configuration (registry, engine)"
+    )]
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
+
+    #[command(
+        next_help_heading = "Advanced Commands",
+        about = "Publish capsule (Dock/private registry: direct upload, official registry: CI-first)"
+    )]
+    Publish {
+        /// Registry URL override (default: https://api.ato.run)
+        #[arg(long)]
+        registry: Option<String>,
+
+        /// Use prebuilt .capsule artifact (skip repackaging for private registry publish)
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["ci", "dry_run"])]
+        artifact: Option<PathBuf>,
+
+        /// Explicit scoped ID for artifact publish (publisher/slug)
+        #[arg(
+            long,
+            value_name = "PUBLISHER/SLUG",
+            conflicts_with_all = ["ci", "dry_run"],
+            requires = "artifact"
+        )]
+        scoped_id: Option<String>,
+
+        /// Allow idempotent success when same version already exists with identical sha256
+        #[arg(long, default_value_t = false, conflicts_with_all = ["ci", "dry_run"])]
+        allow_existing: bool,
+
+        /// Run prepare phase
+        #[arg(long, default_value_t = false, conflicts_with_all = ["ci", "dry_run"])]
+        prepare: bool,
+
+        /// Run build phase
+        #[arg(long, default_value_t = false, conflicts_with_all = ["ci", "dry_run"])]
+        build: bool,
+
+        /// Run deploy phase
+        #[arg(long, default_value_t = false, conflicts_with_all = ["ci", "dry_run"])]
+        deploy: bool,
+
+        /// Use legacy default phases (prepare/build/deploy) for official registry publish
+        #[arg(long, default_value_t = false, conflicts_with_all = ["ci", "dry_run"])]
+        legacy_full_publish: bool,
+
+        /// Allow publishing payloads larger than 200MB
+        #[arg(long, default_value_t = false)]
+        force_large_payload: bool,
+
+        /// Auto-fix official CI workflow once, then rerun diagnostics exactly once
+        #[arg(long, default_value_t = false, conflicts_with_all = ["ci", "dry_run"])]
+        fix: bool,
+
+        /// Publish from GitHub Actions with OIDC token (CI-only mode)
+        #[arg(long, conflicts_with = "dry_run")]
+        ci: bool,
+
+        /// Validate local capsule build inputs without publishing
+        #[arg(long, conflicts_with = "ci")]
+        dry_run: bool,
+
+        /// Disable interactive TUI and show CI guidance instead
+        #[arg(long, conflicts_with_all = ["ci", "dry_run", "json"])]
+        no_tui: bool,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    #[command(
+        next_help_heading = "Advanced Commands",
+        about = "Generate fixed GitHub Actions workflow for OIDC CI publish"
+    )]
+    GenCi,
+
+    #[command(hide = true)]
+    Engine {
+        #[command(subcommand)]
+        command: EngineCommands,
+    },
+
+    #[command(
+        next_help_heading = "Advanced Commands",
+        about = "Manage registry commands (resolve/list/cache/serve)"
+    )]
+    Registry {
+        #[command(subcommand)]
+        command: RegistryCommands,
+    },
+
+    #[command(hide = true)]
+    Setup {
+        /// Engine name to install (default: nacelle)
+        #[arg(long, default_value = "nacelle")]
+        engine: String,
+
+        /// Engine version (default: latest)
+        #[arg(long)]
+        version: Option<String>,
+
+        /// Skip SHA256 verification
+        #[arg(long, default_value_t = false)]
+        skip_verify: bool,
+    },
+
+    #[command(hide = true)]
+    Open {
+        /// Path to a .capsule archive or directory containing capsule.toml
+        #[arg()]
+        path: PathBuf,
+
+        /// Target label to execute (e.g. static, cli, widget)
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+
+        /// Run in development mode (foreground) with hot-reloading on file changes
+        #[arg(long)]
+        watch: bool,
+
+        /// Run in background mode (detached)
+        #[arg(long)]
+        background: bool,
+
+        /// Path to nacelle engine binary (overrides NACELLE_PATH)
+        #[arg(long)]
+        nacelle: Option<PathBuf>,
+
+        /// Registry URL for auto-install when app-id is not installed (default: https://api.ato.run)
+        #[arg(long)]
+        registry: Option<String>,
+
+        /// Explicitly bind a manifest [state.<name>] entry using STATE=/absolute/path or STATE=state-...
+        #[arg(long = "state", value_name = "STATE=/ABS/PATH|STATE=state-...")]
+        state: Vec<String>,
+
+        /// Network enforcement mode
+        #[arg(long, value_enum, default_value_t = EnforcementMode::Strict)]
+        enforcement: EnforcementMode,
+
+        /// Explicitly allow Tier2 (python/native) execution via native OS sandbox
+        #[arg(long = "sandbox", default_value_t = false)]
+        sandbox_mode: bool,
+
+        /// Legacy alias for `--sandbox`
+        #[arg(long = "unsafe", hide = true, default_value_t = false)]
+        unsafe_mode_legacy: bool,
+
+        /// Legacy alias for `--sandbox`
+        #[arg(long = "unsafe-bypass-sandbox", hide = true, default_value_t = false)]
+        unsafe_bypass_sandbox_legacy: bool,
+
+        /// Dangerously bypass all Ato runtime permission/sandbox barriers (host-native execution)
+        #[arg(
+            short = 'U',
+            long = "dangerously-skip-permissions",
+            default_value_t = false
+        )]
+        dangerously_skip_permissions: bool,
+
+        /// Skip prompt and auto-install when app-id is not installed
+        #[arg(short = 'y', long = "yes", default_value_t = false)]
+        yes: bool,
+    },
+
+    #[command(hide = true)]
+    New {
+        /// Project name
+        name: String,
+
+        /// Template type: python, node, hono, rust, go, shell
+        #[arg(long, default_value = "python")]
+        template: String,
+    },
+
+    #[command(hide = true)]
+    Keygen {
+        /// Output base path (default: ./private.key and ./public.key)
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Overwrite existing keys
+        #[arg(long, default_value_t = false)]
+        force: bool,
+
+        /// Output keys in StoredKey JSON format
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    #[command(hide = true)]
+    Pack {
+        /// Directory containing capsule.toml (default: ".")
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+
+        /// Initialize capsule.toml interactively if not found
+        #[arg(long)]
+        init: bool,
+
+        /// Path to signing key (optional)
+        #[arg(long)]
+        key: Option<PathBuf>,
+
+        /// Network enforcement mode
+        #[arg(long, value_enum, default_value_t = EnforcementMode::Strict)]
+        enforcement: EnforcementMode,
+
+        /// Create self-extracting executable installer (includes nacelle runtime)
+        #[arg(long)]
+        standalone: bool,
+
+        /// Allow building payloads larger than 200MB
+        #[arg(long, hide = true, default_value_t = false)]
+        force_large_payload: bool,
+
+        /// Keep failed build artifacts when smoke test fails
+        #[arg(long, hide = true, default_value_t = false)]
+        keep_failed_artifacts: bool,
+
+        /// Print per-phase build timings
+        #[arg(long, hide = true, default_value_t = false)]
+        timings: bool,
+
+        /// Disallow fallback when source_digest/CAS(v3 path) is unavailable
+        #[arg(long, hide = true, default_value_t = false)]
+        strict_v3: bool,
+    },
+
+    #[command(hide = true)]
+    Scaffold {
+        #[command(subcommand)]
+        command: ScaffoldCommands,
+    },
+
+    #[command(hide = true)]
+    Sign {
+        /// File to sign
+        target: PathBuf,
+
+        /// Path to the secret key
+        #[arg(long)]
+        key: PathBuf,
+
+        /// Output signature path (default: <target>.sig)
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+
+    #[command(hide = true)]
+    Verify {
+        /// File to verify (the artifact, not the .sig file)
+        target: PathBuf,
+
+        /// Path to the signature file (default: <target>.sig)
+        #[arg(long)]
+        sig: Option<PathBuf>,
+
+        /// Expected signer DID or developer key (optional, for additional check)
+        #[arg(long)]
+        signer: Option<String>,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    #[command(hide = true)]
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommands,
+    },
+
+    #[command(hide = true)]
+    Package {
+        #[command(subcommand)]
+        command: PackageCommands,
+    },
+
+    #[command(hide = true)]
+    Source {
+        #[command(subcommand)]
+        command: SourceCommands,
+    },
+
+    #[command(hide = true)]
+    Close {
+        /// Capsule ID (from ps output)
+        #[arg(long)]
+        id: Option<String>,
+
+        /// Capsule name (partial match)
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Stop all capsules matching the name
+        #[arg(long, default_value_t = false)]
+        all: bool,
+
+        /// Force kill (SIGKILL) instead of graceful shutdown (SIGTERM)
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+
+    #[command(hide = true)]
+    Guest {
+        /// Path to a .sync archive
+        #[arg()]
+        sync_path: PathBuf,
+    },
+
+    #[command(hide = true)]
+    Ipc {
+        #[command(subcommand)]
+        command: IpcCommands,
+    },
+
+    #[command(hide = true)]
+    Auth,
+}
+
+#[derive(Subcommand)]
+enum InspectCommands {
+    #[command(about = "Inspect runtime requirements from capsule.toml")]
+    Requirements {
+        /// Local path or scoped store ID (publisher/slug)
+        target: String,
+
+        /// Registry URL override for remote inspection
+        #[arg(long)]
+        registry: Option<String>,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProjectCommands {
+    #[command(
+        about = "List experimental projection state and detect broken projections read-only"
+    )]
+    Ls {
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum KeyCommands {
+    /// Generate a new signing keypair
+    Gen {
+        /// Output base path (default: ./private.key and ./public.key)
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Overwrite existing keys
+        #[arg(long, default_value_t = false)]
+        force: bool,
+
+        /// Output keys in StoredKey JSON format
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// Sign an existing artifact
+    Sign {
+        /// File to sign
+        target: PathBuf,
+
+        /// Path to the secret key
+        #[arg(long)]
+        key: PathBuf,
+
+        /// Output signature path (default: <target>.sig)
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+
+    /// Verify a signed artifact
+    Verify {
+        /// File to verify (the artifact, not the .sig file)
+        target: PathBuf,
+
+        /// Path to the signature file (default: <target>.sig)
+        #[arg(long)]
+        sig: Option<PathBuf>,
+
+        /// Expected signer DID or developer key (optional, for additional check)
+        #[arg(long)]
+        signer: Option<String>,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Engine configuration
+    Engine {
+        #[command(subcommand)]
+        command: ConfigEngineCommands,
+    },
+
+    /// Registry configuration
+    Registry {
+        #[command(subcommand)]
+        command: ConfigRegistryCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigEngineCommands {
+    /// Show engine capabilities (JSON)
+    Features,
+
+    /// Register a nacelle engine binary (writes ~/.ato/config.toml)
+    Register {
+        /// Registration name (e.g. "default" or "my-custom-nacelle")
+        #[arg(long)]
+        name: String,
+
+        /// Path to nacelle engine binary (if omitted, uses NACELLE_PATH)
+        #[arg(long)]
+        path: Option<PathBuf>,
+
+        /// Set this registration as the default engine
+        #[arg(long, default_value_t = false)]
+        default: bool,
+    },
+
+    /// Download and install an engine
+    Install {
+        /// Engine name to install (default: nacelle)
+        #[arg(long, default_value = "nacelle")]
+        engine: String,
+
+        /// Engine version (default: latest)
+        #[arg(long)]
+        version: Option<String>,
+
+        /// Skip SHA256 verification
+        #[arg(long, default_value_t = false)]
+        skip_verify: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigRegistryCommands {
+    /// Resolve registry for a domain
+    Resolve {
+        /// Domain to resolve (e.g., example.com)
+        domain: String,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List configured registries
+    List {
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Clear registry cache
+    ClearCache,
+}
+
+#[derive(Subcommand)]
+enum IpcCommands {
+    /// Show status of running IPC services
+    Status {
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Start an IPC service from a capsule directory
+    Start {
+        /// Path to capsule directory or capsule.toml
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Stop a running IPC service
+    Stop {
+        /// Service name to stop
+        #[arg(long)]
+        name: String,
+
+        /// Force kill (SIGKILL) instead of graceful shutdown (SIGTERM)
+        #[arg(long, default_value_t = false)]
+        force: bool,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Validate and send a JSON-RPC invoke request
+    Invoke {
+        /// Path to capsule directory or capsule.toml
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Override exported service name
+        #[arg(long)]
+        service: Option<String>,
+
+        /// Method name to invoke
+        #[arg(long)]
+        method: String,
+
+        /// JSON arguments payload
+        #[arg(long)]
+        args: String,
+
+        /// JSON-RPC request id
+        #[arg(long, default_value = "invoke-1")]
+        id: String,
+
+        /// Maximum serialized message size in bytes
+        #[arg(long)]
+        max_message_size: Option<usize>,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScaffoldCommands {
+    /// Generate a Dockerfile + .dockerignore for running a self-extracting bundle
+    Docker {
+        /// Path to capsule.toml
+        #[arg(long, default_value = "capsule.toml")]
+        manifest: PathBuf,
+
+        /// Output Dockerfile path (default: <manifest dir>/Dockerfile)
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Output directory (default: manifest directory). Ignored if --output is set.
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+
+        /// Overwrite existing files
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProfileCommands {
+    /// Create a new profile.sync
+    Create {
+        /// Display name
+        #[arg(long)]
+        name: String,
+
+        /// Short bio
+        #[arg(long)]
+        bio: Option<String>,
+
+        /// Path to avatar image (png/jpg)
+        #[arg(long)]
+        avatar: Option<PathBuf>,
+
+        /// Path to signing key (JSON format)
+        #[arg(long)]
+        key: PathBuf,
+
+        /// Output path (default: ./profile.sync)
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Website URL
+        #[arg(long)]
+        website: Option<String>,
+
+        /// GitHub username
+        #[arg(long)]
+        github: Option<String>,
+
+        /// Twitter/X handle
+        #[arg(long)]
+        twitter: Option<String>,
+    },
+
+    /// Show profile info from a profile.sync file
+    Show {
+        /// Path to profile.sync
+        #[arg()]
+        path: PathBuf,
+
+        /// Emit JSON output
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum EngineCommands {
+    /// Show engine capabilities (JSON)
+    Features,
+
+    /// Register a nacelle engine binary (writes ~/.ato/config.toml)
+    Register {
+        /// Registration name (e.g. "default" or "my-custom-nacelle")
+        #[arg(long)]
+        name: String,
+
+        /// Path to nacelle engine binary (if omitted, uses NACELLE_PATH)
+        #[arg(long)]
+        path: Option<PathBuf>,
+
+        /// Set this registration as the default engine
+        #[arg(long, default_value_t = false)]
+        default: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RegistryCommands {
+    /// Resolve registry for a domain
+    Resolve {
+        /// Domain to resolve (e.g., example.com)
+        domain: String,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List configured registries
+    List {
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Clear registry cache
+    ClearCache,
+
+    /// Start local HTTP registry server for offline development
+    Serve {
+        /// Listen port
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
+
+        /// Data directory for local registry state
+        #[arg(long, default_value = "~/.ato/local-registry")]
+        data_dir: String,
+
+        /// Listen host (non-loopback requires --auth-token)
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Bearer token required for write API (recommended when exposing non-loopback host)
+        #[arg(long)]
+        auth_token: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum StateCommands {
+    /// List registered persistent states
+    #[command(visible_alias = "ls")]
+    List {
+        /// Filter by owner scope
+        #[arg(long)]
+        owner_scope: Option<String>,
+
+        /// Filter by manifest state name
+        #[arg(long)]
+        state_name: Option<String>,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Inspect one persistent state by state-id or ato-state:// URI
+    Inspect {
+        /// State reference (`state-...` or `ato-state://state-...`)
+        state_ref: String,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Register a persistent state from a manifest contract
+    Register {
+        /// Path to capsule directory or capsule.toml
+        #[arg(long, default_value = ".")]
+        manifest: PathBuf,
+
+        /// State name from [state.<name>]
+        #[arg(long = "name")]
+        state_name: String,
+
+        /// Absolute host directory to bind to this state contract
+        #[arg(long = "path", value_name = "/ABS/PATH")]
+        path: PathBuf,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum BindingCommands {
+    /// List registered host-side service bindings
+    #[command(visible_alias = "ls")]
+    List {
+        /// Filter by owner scope
+        #[arg(long)]
+        owner_scope: Option<String>,
+
+        /// Filter by service name
+        #[arg(long)]
+        service_name: Option<String>,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Inspect one host-side service binding by binding-id
+    Inspect {
+        /// Binding reference (`binding-...`)
+        binding_ref: String,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Resolve a host-side service binding by owner scope, service, and kind
+    Resolve {
+        /// Binding owner scope
+        #[arg(long)]
+        owner_scope: String,
+
+        /// Service name from [services.<name>]
+        #[arg(long)]
+        service_name: String,
+
+        /// Binding kind to resolve
+        #[arg(long, default_value = "ingress")]
+        binding_kind: String,
+
+        /// Optional caller service for allow_from-restricted bindings
+        #[arg(long)]
+        caller_service: Option<String>,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Explicitly bootstrap TLS assets and optional trust installation for an ingress binding
+    BootstrapTls {
+        /// Binding reference (`binding-...`)
+        #[arg(long = "binding")]
+        binding_ref: String,
+
+        /// Attempt to install the generated certificate into the local user trust store
+        #[arg(long, default_value_t = false)]
+        install_system_trust: bool,
+
+        /// Skip the interactive consent prompt after reviewing the trust action
+        #[arg(short = 'y', long = "yes", default_value_t = false)]
+        yes: bool,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Run a host-side ingress reverse proxy for a registered binding
+    ServeIngress {
+        /// Binding reference (`binding-...`)
+        #[arg(long = "binding")]
+        binding_ref: String,
+
+        /// Path to capsule directory or capsule.toml used to derive the upstream port
+        #[arg(long, default_value = ".")]
+        manifest: PathBuf,
+
+        /// Optional upstream URL override
+        #[arg(long)]
+        upstream_url: Option<String>,
+    },
+
+    /// Register a host-side ingress binding from a manifest service
+    RegisterIngress {
+        /// Path to capsule directory or capsule.toml
+        #[arg(long, default_value = ".")]
+        manifest: PathBuf,
+
+        /// Service name from [services.<name>]
+        #[arg(long)]
+        service_name: String,
+
+        /// Host-side ingress URL (http:// or https://)
+        #[arg(long)]
+        url: String,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Register a local cross-capsule service binding for a separately launched service
+    RegisterService {
+        /// Path to capsule directory or capsule.toml
+        #[arg(long, default_value = ".")]
+        manifest: PathBuf,
+
+        /// Service name from [services.<name>]
+        #[arg(long)]
+        service_name: String,
+
+        /// Loopback URL for the running local service (http://localhost:PORT or http://127.0.0.1:PORT)
+        #[arg(long)]
+        url: Option<String>,
+
+        /// Running local process id to derive manifest and target metadata from
+        #[arg(long)]
+        process_id: Option<String>,
+
+        /// Override the loopback port when registering from a running process
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Auto-register all eligible local service bindings from a running process
+    SyncProcess {
+        /// Running local process id
+        #[arg(long)]
+        process_id: String,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SourceCommands {
+    /// Show sync run status for a source
+    SyncStatus {
+        /// Source ID
+        #[arg(long = "source-id")]
+        source_id: String,
+
+        /// Sync run ID
+        #[arg(long = "sync-run-id")]
+        sync_run_id: String,
+
+        /// Registry URL
+        #[arg(long)]
+        registry: Option<String>,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Trigger rebuild/re-sign flow for a source
+    Rebuild {
+        /// Source ID
+        #[arg(long = "source-id")]
+        source_id: String,
+
+        /// Optional ref (branch/tag/SHA)
+        #[arg(long = "ref", alias = "reference")]
+        reference: Option<String>,
+
+        /// Wait and fetch status after trigger
+        #[arg(long, default_value_t = false)]
+        wait: bool,
+
+        /// Registry URL
+        #[arg(long)]
+        registry: Option<String>,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum PackageCommands {
+    /// Search published packages in the store
+    Search {
+        /// Search query (e.g., "note", "ai chat")
+        query: Option<String>,
+
+        /// Filter by category
+        #[arg(long)]
+        category: Option<String>,
+
+        /// Filter by tag (repeatable, comma-separated supported)
+        #[arg(long = "tag", value_delimiter = ',')]
+        tags: Vec<String>,
+
+        /// Maximum number of results (default: 20, max: 50)
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Pagination cursor for next page
+        #[arg(long)]
+        cursor: Option<String>,
+
+        /// Registry URL (default: https://api.ato.run)
+        #[arg(long)]
+        registry: Option<String>,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+
+        /// Disable interactive TUI even when running in TTY
+        #[arg(long, default_value_t = false)]
+        no_tui: bool,
+
+        /// Show selected capsule's capsule.toml in the TUI right panel
+        #[arg(long, default_value_t = false)]
+        show_manifest: bool,
+    },
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let json_mode = args.iter().any(|arg| arg == "--json");
+    let command_context = diagnostics::detect_command_context(&args);
+
+    if let Err(err) = run() {
+        if json_mode && commands::inspect::try_emit_json_error(&err) {
+            std::process::exit(error_codes::EXIT_USER_ERROR);
+        }
+
+        if ato_error_jsonl::try_emit_from_anyhow(&err, json_mode) {
+            std::process::exit(error_codes::EXIT_USER_ERROR);
+        }
+
+        let diagnostic = diagnostics::from_anyhow(&err, command_context);
+        let exit_code = diagnostics::map_exit_code(&diagnostic, &err);
+
+        if json_mode {
+            if let Ok(payload) = serde_json::to_string(&diagnostic.to_json_envelope()) {
+                println!("{}", payload);
+            } else {
+                println!(
+                    r#"{{"schema_version":"1","type":"error","code":"E999","message":"failed to serialize error payload","causes":[]}}"#
+                );
+            }
+        } else {
+            eprintln!("{:?}", miette::Report::new(diagnostic));
+        }
+
+        std::process::exit(exit_code);
+    }
+}
+
+fn run() -> Result<()> {
+    let is_no_args = std::env::args_os().count() == 1;
+
+    if is_no_args {
+        print_animated_logo();
+        let mut cmd = Cli::command();
+        cmd.print_help().context("failed to print CLI help")?;
+        println!();
+        return Ok(());
+    }
+
+    let cli = Cli::parse();
+    let reporter = std::sync::Arc::new(reporters::CliReporter::new(cli.json));
+
+    match cli.command {
+        Commands::Run {
+            path,
+            skill,
+            from_skill,
+            target,
+            watch,
+            background,
+            nacelle,
+            registry,
+            state,
+            enforcement,
+            sandbox_mode,
+            unsafe_mode_legacy,
+            unsafe_bypass_sandbox_legacy,
+            dangerously_skip_permissions,
+            yes,
+            allow_unverified,
+        } => execute_run_like_command(
+            path,
+            target,
+            watch,
+            background,
+            nacelle,
+            registry,
+            state,
+            enforcement,
+            sandbox_mode,
+            unsafe_mode_legacy,
+            unsafe_bypass_sandbox_legacy,
+            dangerously_skip_permissions,
+            yes,
+            allow_unverified,
+            skill,
+            from_skill,
+            None,
+            reporter.clone(),
+        ),
+
+        Commands::Engine { command } => {
+            execute_engine_command(command, cli.nacelle, reporter.clone())
+        }
+
+        Commands::Registry { command } => execute_registry_command(command),
+
+        Commands::Setup {
+            engine,
+            version,
+            skip_verify,
+        } => execute_setup_command(engine, version, skip_verify, reporter.clone()),
+
+        Commands::Open {
+            path,
+            target,
+            watch,
+            background,
+            nacelle,
+            registry,
+            state,
+            enforcement,
+            sandbox_mode,
+            unsafe_mode_legacy,
+            unsafe_bypass_sandbox_legacy,
+            dangerously_skip_permissions,
+            yes,
+        } => execute_run_like_command(
+            path,
+            target,
+            watch,
+            background,
+            nacelle,
+            registry,
+            state,
+            enforcement,
+            sandbox_mode,
+            unsafe_mode_legacy,
+            unsafe_bypass_sandbox_legacy,
+            dangerously_skip_permissions,
+            yes,
+            false,
+            None,
+            None,
+            Some("⚠️  'ato open' is deprecated. Use 'ato run' instead."),
+            reporter.clone(),
+        ),
+
+        Commands::Init => init::execute_prompt(init::PromptArgs { path: None }, reporter.clone()),
+
+        Commands::New { name, template } => new::execute(
+            new::NewArgs {
+                name,
+                template: Some(template),
+            },
+            reporter.clone(),
+        ),
+
+        Commands::Build {
+            dir,
+            init,
+            key,
+            standalone,
+            force_large_payload,
+            enforcement,
+            keep_failed_artifacts,
+            timings,
+            strict_v3,
+        } => {
+            let result = commands::build::execute_pack_command(
+                dir,
+                init,
+                key,
+                standalone,
+                force_large_payload,
+                keep_failed_artifacts,
+                strict_v3,
+                enforcement.as_str().to_string(),
+                reporter.clone(),
+                timings,
+                cli.json,
+                cli.nacelle,
+            )?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            Ok(())
+        }
+
+        Commands::Validate { path, json } => {
+            commands::validate::execute(path, cli.json || json)?;
+            Ok(())
+        }
+
+        Commands::Update => {
+            commands::update::update()?;
+            Ok(())
+        }
+
+        Commands::Inspect { command } => match command {
+            InspectCommands::Requirements {
+                target,
+                registry,
+                json,
+            } => {
+                let rt = tokio::runtime::Runtime::new()?;
+                rt.block_on(async {
+                    commands::inspect::execute_requirements(target, registry, cli.json || json)
+                        .await
+                        .map(|_| ())
+                        .map_err(anyhow::Error::from)
+                })
+            }
+        },
+
+        Commands::Keygen { out, force, json } => {
+            keygen::execute(keygen::KeygenArgs { out, force, json }, reporter.clone())
+        }
+
+        Commands::Key { command } => match command {
+            KeyCommands::Gen { out, force, json } => {
+                keygen::execute(keygen::KeygenArgs { out, force, json }, reporter.clone())
+            }
+            KeyCommands::Sign { target, key, out } => {
+                sign::execute(sign::SignArgs { target, key, out }, reporter.clone())
+            }
+            KeyCommands::Verify {
+                target,
+                sig,
+                signer,
+                json,
+            } => verify::execute(
+                verify::VerifyArgs {
+                    target,
+                    sig,
+                    signer,
+                    json,
+                },
+                reporter.clone(),
+            ),
+        },
+
+        Commands::Pack {
+            dir,
+            init,
+            key,
+            standalone,
+            force_large_payload,
+            enforcement,
+            keep_failed_artifacts,
+            timings,
+            strict_v3,
+        } => {
+            eprintln!("⚠️  'ato pack' is deprecated. Use 'ato build' instead.");
+            let result = commands::build::execute_pack_command(
+                dir,
+                init,
+                key,
+                standalone,
+                force_large_payload,
+                keep_failed_artifacts,
+                strict_v3,
+                enforcement.as_str().to_string(),
+                reporter.clone(),
+                timings,
+                cli.json,
+                cli.nacelle,
+            )?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            Ok(())
+        }
+
+        Commands::Scaffold {
+            command:
+                ScaffoldCommands::Docker {
+                    manifest,
+                    output,
+                    output_dir,
+                    force,
+                },
+        } => scaffold::execute_docker(
+            scaffold::ScaffoldDockerArgs {
+                manifest_path: manifest,
+                output_dir,
+                output,
+                force,
+            },
+            reporter.clone(),
+        ),
+
+        Commands::Sign { target, key, out } => {
+            sign::execute(sign::SignArgs { target, key, out }, reporter.clone())
+        }
+
+        Commands::Verify {
+            target,
+            sig,
+            signer,
+            json,
+        } => verify::execute(
+            verify::VerifyArgs {
+                target,
+                sig,
+                signer,
+                json,
+            },
+            reporter.clone(),
+        ),
+
+        Commands::Profile { command } => match command {
+            ProfileCommands::Create {
+                name,
+                bio,
+                avatar,
+                key,
+                output,
+                website,
+                github,
+                twitter,
+            } => profile::execute_create(
+                profile::CreateArgs {
+                    name,
+                    bio,
+                    avatar,
+                    key,
+                    output,
+                    website,
+                    github,
+                    twitter,
+                },
+                reporter.clone(),
+            ),
+            ProfileCommands::Show { path, json } => {
+                profile::execute_show(profile::ShowArgs { path, json }, reporter.clone())
+            }
+        },
+
+        Commands::Install {
+            slug,
+            registry,
+            version,
+            default,
+            yes,
+            skip_verify_legacy,
+            allow_unverified,
+            output,
+            project,
+            no_project,
+            json,
+        } => {
+            if skip_verify_legacy {
+                anyhow::bail!(
+                    "--skip-verify is no longer supported. Signature/hash verification is always required."
+                );
+            }
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async {
+                if install::is_slug_only_ref(&slug) {
+                    let suggestions = install::suggest_scoped_capsules(
+                        &slug,
+                        registry.as_deref(),
+                        5,
+                    )
+                    .await?;
+                    if suggestions.is_empty() {
+                        anyhow::bail!(
+                            "scoped_id_required: '{}' is ambiguous. Use publisher/slug (for example: koh0920/{})",
+                            slug,
+                            slug
+                        );
+                    }
+                    let mut message = format!(
+                        "scoped_id_required: '{}' requires publisher scope.\n\nDid you mean one of these?",
+                        slug
+                    );
+                    for suggestion in suggestions {
+                        message.push_str(&format!(
+                            "\n  - {}  ({} downloads)",
+                            suggestion.scoped_id, suggestion.downloads
+                        ));
+                    }
+                    message.push_str("\n\nRun `ato search ");
+                    message.push_str(&slug);
+                    message.push_str("` to see more options.");
+                    anyhow::bail!(message);
+                }
+
+                let result = install::install_app(
+                    &slug,
+                    registry.as_deref(),
+                    version.as_deref(),
+                    output,
+                    default,
+                    yes,
+                    if project {
+                        install::ProjectionPreference::Force
+                    } else if no_project {
+                        install::ProjectionPreference::Skip
+                    } else {
+                        install::ProjectionPreference::Prompt
+                    },
+                    allow_unverified,
+                    false,
+                    json,
+                    !json && can_prompt_interactively(
+                        std::io::stdin().is_terminal(),
+                        std::io::stderr().is_terminal(),
+                    ),
+                )
+                .await?;
+
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("\n✅ Installation complete!");
+                    println!("   Capsule: {}", result.slug);
+                    println!("   Version: {}", result.version);
+                    println!("   Path:    {}", result.path.display());
+                    println!("   Hash:    {}", result.content_hash);
+                    if let Some(launchable) = &result.launchable {
+                        match launchable {
+                            install::LaunchableTarget::CapsuleArchive { path } => {
+                                println!("   Launch:  ato run {}", path.display());
+                            }
+                            install::LaunchableTarget::DerivedApp { path } => {
+                                println!("   App:     {}", path.display());
+                            }
+                        }
+                    }
+                    if let Some(projection) = &result.projection {
+                        if projection.performed {
+                            if let Some(projected_path) = &projection.projected_path {
+                                println!("   Launcher: {}", projected_path.display());
+                            }
+                        } else if no_project {
+                            println!("   Launcher: skipped");
+                        }
+                    }
+                }
+                Ok(())
+            })
+        }
+
+        Commands::Search {
+            query,
+            category,
+            tags,
+            limit,
+            cursor,
+            registry,
+            json,
+            no_tui,
+            show_manifest,
+        } => execute_search_command(
+            query,
+            category,
+            tags,
+            limit,
+            cursor,
+            registry,
+            json,
+            no_tui,
+            show_manifest,
+        ),
+
+        Commands::Fetch {
+            capsule_ref,
+            registry,
+            version,
+            json,
+        } => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async {
+                if install::is_slug_only_ref(&capsule_ref) {
+                    let suggestions =
+                        install::suggest_scoped_capsules(&capsule_ref, registry.as_deref(), 5)
+                            .await?;
+                    if suggestions.is_empty() {
+                        anyhow::bail!(
+                            "scoped_id_required: '{}' is ambiguous. Use publisher/slug (for example: koh0920/{})",
+                            capsule_ref,
+                            capsule_ref
+                        );
+                    }
+                    let mut message = format!(
+                        "scoped_id_required: '{}' requires publisher scope.\n\nDid you mean one of these?",
+                        capsule_ref
+                    );
+                    for suggestion in suggestions {
+                        message.push_str(&format!(
+                            "\n  - {}  ({} downloads)",
+                            suggestion.scoped_id, suggestion.downloads
+                        ));
+                    }
+                    anyhow::bail!(message);
+                }
+
+                let result = native_delivery::execute_fetch(
+                    &capsule_ref,
+                    registry.as_deref(),
+                    version.as_deref(),
+                )
+                .await?;
+                if cli.json || json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("✅ Fetched to: {}", result.cache_dir.display());
+                    println!("   Scoped ID: {}", result.scoped_id);
+                    println!("   Version:   {}", result.version);
+                    println!("   Digest:    {}", result.parent_digest);
+                }
+                Ok(())
+            })
+        }
+
+        Commands::Finalize {
+            fetched_artifact_dir,
+            allow_external_finalize,
+            output_dir,
+            json,
+        } => {
+            let result = native_delivery::execute_finalize(
+                &fetched_artifact_dir,
+                &output_dir,
+                allow_external_finalize,
+            )?;
+            if cli.json || json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("✅ Finalized to: {}", result.output_dir.display());
+                println!("   App:      {}", result.derived_app_path.display());
+                println!("   Parent:   {}", result.parent_digest);
+                println!("   Derived:  {}", result.derived_digest);
+            }
+            Ok(())
+        }
+
+        Commands::Project {
+            derived_app_path,
+            launcher_dir,
+            json,
+            command,
+        } => match command {
+            Some(ProjectCommands::Ls {
+                json: subcommand_json,
+            }) => {
+                let result = native_delivery::execute_project_ls()?;
+                if cli.json || json || subcommand_json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else if result.projections.is_empty() {
+                    println!("No experimental projections found.");
+                } else {
+                    for projection in result.projections {
+                        let marker = if projection.state == "ok" {
+                            "✅"
+                        } else {
+                            "⚠️"
+                        };
+                        println!(
+                            "{} [{}] {} -> {}",
+                            marker,
+                            projection.state,
+                            projection.projected_path.display(),
+                            projection.derived_app_path.display()
+                        );
+                        println!("   ID:       {}", projection.projection_id);
+                        if !projection.problems.is_empty() {
+                            println!("   Problems: {}", projection.problems.join(", "));
+                        }
+                    }
+                }
+                Ok(())
+            }
+            None => {
+                let derived_app_path = derived_app_path.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "ato project requires <DERIVED_APP_PATH> or use `ato project ls` for read-only status"
+                    )
+                })?;
+                let result =
+                    native_delivery::execute_project(&derived_app_path, launcher_dir.as_deref())?;
+                if cli.json || json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("✅ Projected to: {}", result.projected_path.display());
+                    println!("   ID:       {}", result.projection_id);
+                    println!("   Target:   {}", result.derived_app_path.display());
+                    println!("   State:    {}", result.state);
+                    println!("   Metadata: {}", result.metadata_path.display());
+                }
+                Ok(())
+            }
+        },
+
+        Commands::Unproject {
+            projection_ref,
+            json,
+        } => {
+            let result = native_delivery::execute_unproject(&projection_ref)?;
+            if cli.json || json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("✅ Unprojected: {}", result.projected_path.display());
+                println!("   ID:      {}", result.projection_id);
+                println!("   State:   {}", result.state_before);
+                println!(
+                    "   Removed: metadata={}, symlink={}",
+                    result.removed_metadata, result.removed_projected_path
+                );
+            }
+            Ok(())
+        }
+
+        Commands::Config { command } => match command {
+            ConfigCommands::Engine { command } => match command {
+                ConfigEngineCommands::Features => {
+                    execute_engine_command(EngineCommands::Features, cli.nacelle, reporter.clone())
+                }
+                ConfigEngineCommands::Register {
+                    name,
+                    path,
+                    default,
+                } => execute_engine_command(
+                    EngineCommands::Register {
+                        name,
+                        path,
+                        default,
+                    },
+                    cli.nacelle,
+                    reporter.clone(),
+                ),
+                ConfigEngineCommands::Install {
+                    engine,
+                    version,
+                    skip_verify,
+                } => execute_setup_command(engine, version, skip_verify, reporter.clone()),
+            },
+            ConfigCommands::Registry { command } => {
+                let mapped = match command {
+                    ConfigRegistryCommands::Resolve { domain, json } => {
+                        RegistryCommands::Resolve { domain, json }
+                    }
+                    ConfigRegistryCommands::List { json } => RegistryCommands::List { json },
+                    ConfigRegistryCommands::ClearCache => RegistryCommands::ClearCache,
+                };
+                execute_registry_command(mapped)
+            }
+        },
+
+        Commands::Publish {
+            registry,
+            artifact,
+            scoped_id,
+            allow_existing,
+            prepare,
+            build,
+            deploy,
+            legacy_full_publish,
+            force_large_payload,
+            fix,
+            ci,
+            dry_run,
+            no_tui,
+            json,
+        } => {
+            if ci {
+                execute_publish_ci_command(json, force_large_payload, reporter.clone())
+            } else if dry_run {
+                execute_publish_dry_run_command(json, reporter.clone())
+            } else {
+                execute_publish_command(
+                    PublishCommandArgs {
+                        registry,
+                        artifact,
+                        scoped_id,
+                        allow_existing,
+                        prepare,
+                        build,
+                        deploy,
+                        legacy_full_publish,
+                        force_large_payload,
+                        fix,
+                        no_tui,
+                        json,
+                    },
+                    reporter.clone(),
+                )
+            }
+        }
+
+        Commands::GenCi => gen_ci::execute(reporter.clone()),
+
+        Commands::Package {
+            command:
+                PackageCommands::Search {
+                    query,
+                    category,
+                    tags,
+                    limit,
+                    cursor,
+                    registry,
+                    json,
+                    no_tui,
+                    show_manifest,
+                },
+        } => execute_search_command(
+            query,
+            category,
+            tags,
+            limit,
+            cursor,
+            registry,
+            json,
+            no_tui,
+            show_manifest,
+        ),
+
+        Commands::Source { command } => match command {
+            SourceCommands::SyncStatus {
+                source_id,
+                sync_run_id,
+                registry,
+                json,
+            } => execute_source_sync_status_command(source_id, sync_run_id, registry, json),
+            SourceCommands::Rebuild {
+                source_id,
+                reference,
+                wait,
+                registry,
+                json,
+            } => execute_source_rebuild_command(source_id, reference, wait, registry, json),
+        },
+
+        Commands::Ps { all, json } => {
+            commands::ps::execute(commands::ps::PsArgs { all, json }, reporter.clone())
+        }
+
+        Commands::Stop {
+            id,
+            name,
+            all,
+            force,
+        } => commands::close::execute(
+            commands::close::CloseArgs {
+                id,
+                name,
+                all,
+                force,
+            },
+            reporter.clone(),
+        ),
+
+        Commands::Close {
+            id,
+            name,
+            all,
+            force,
+        } => commands::close::execute(
+            commands::close::CloseArgs {
+                id,
+                name,
+                all,
+                force,
+            },
+            reporter.clone(),
+        ),
+
+        Commands::Logs {
+            id,
+            name,
+            follow,
+            tail,
+        } => commands::logs::execute(
+            commands::logs::LogsArgs {
+                id,
+                name,
+                follow,
+                tail,
+            },
+            reporter.clone(),
+        ),
+
+        Commands::State { command } => execute_state_command(command),
+
+        Commands::Binding { command } => execute_binding_command(command),
+
+        Commands::Guest { sync_path } => {
+            commands::guest::execute(commands::guest::GuestArgs { sync_path })
+        }
+
+        Commands::Ipc {
+            command: IpcCommands::Status { json },
+        } => commands::ipc::run_ipc_status(json),
+
+        Commands::Ipc {
+            command: IpcCommands::Start { path, json },
+        } => commands::ipc::run_ipc_start(path, json),
+
+        Commands::Ipc {
+            command: IpcCommands::Stop { name, force, json },
+        } => commands::ipc::run_ipc_stop(name, force, json),
+
+        Commands::Ipc {
+            command:
+                IpcCommands::Invoke {
+                    path,
+                    service,
+                    method,
+                    args,
+                    id,
+                    max_message_size,
+                    json,
+                },
+        } => commands::ipc::run_ipc_invoke(path, service, method, args, id, max_message_size, json),
+
+        Commands::Login { token, headless } => {
+            let rt = tokio::runtime::Runtime::new()?;
+            match token {
+                Some(token) => rt.block_on(auth::login_with_token(token)),
+                None => rt.block_on(auth::login_with_store_device_flow(headless)),
+            }
+        }
+
+        Commands::Logout => auth::logout(),
+
+        Commands::Whoami => auth::status(),
+
+        Commands::Auth => auth::status(),
+    }
+}
+
+fn execute_engine_command(
+    command: EngineCommands,
+    nacelle_override: Option<PathBuf>,
+    reporter: std::sync::Arc<reporters::CliReporter>,
+) -> Result<()> {
+    match command {
+        EngineCommands::Features => {
+            let nacelle =
+                capsule_core::engine::discover_nacelle(capsule_core::engine::EngineRequest {
+                    explicit_path: nacelle_override,
+                    manifest_path: None,
+                })?;
+            let payload = json!({ "spec_version": "0.1.0" });
+            let resp = capsule_core::engine::run_internal(&nacelle, "features", &payload)?;
+            let body = serde_json::to_string_pretty(&resp)?;
+            futures::executor::block_on(reporter.notify(body))?;
+            Ok(())
+        }
+        EngineCommands::Register {
+            name,
+            path,
+            default,
+        } => {
+            let resolved_path = if let Some(p) = path {
+                p
+            } else if let Ok(env_path) = std::env::var("NACELLE_PATH") {
+                PathBuf::from(env_path)
+            } else {
+                anyhow::bail!("Missing --path and NACELLE_PATH is not set");
+            };
+
+            let validated =
+                capsule_core::engine::discover_nacelle(capsule_core::engine::EngineRequest {
+                    explicit_path: Some(resolved_path),
+                    manifest_path: None,
+                })?;
+
+            let mut cfg = capsule_core::config::load_config()?;
+            cfg.engines.insert(
+                name.clone(),
+                capsule_core::config::EngineRegistration {
+                    path: validated.display().to_string(),
+                },
+            );
+            if default {
+                cfg.default_engine = Some(name.clone());
+            }
+            capsule_core::config::save_config(&cfg)?;
+
+            futures::executor::block_on(reporter.notify(format!(
+                "✅ Registered engine '{}' -> {}",
+                name,
+                validated.display()
+            )))?;
+            if default {
+                futures::executor::block_on(
+                    reporter.notify("✅ Set as default engine".to_string()),
+                )?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn execute_registry_command(command: RegistryCommands) -> Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        match command {
+            RegistryCommands::Resolve { domain, json } => {
+                let resolver = registry::RegistryResolver::default();
+                match resolver.resolve(&domain).await {
+                    Ok(info) => {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&info)?);
+                        } else {
+                            println!("📡 Registry for {}:", domain);
+                            println!("   URL:    {}", info.url);
+                            if let Some(name) = &info.name {
+                                println!("   Name:   {}", name);
+                            }
+                            if let Some(key) = &info.public_key {
+                                println!("   Key:    {}", key);
+                            }
+                            println!("   Source: {:?}", info.source);
+                        }
+                    }
+                    Err(e) => {
+                        if json {
+                            println!(r#"{{"error": "{}"}}"#, e);
+                        } else {
+                            eprintln!("❌ Failed to resolve registry: {}", e);
+                        }
+                    }
+                }
+                Ok(())
+            }
+            RegistryCommands::List { json } => {
+                let resolver = registry::RegistryResolver::default();
+                let info = resolver.resolve_for_app("default").await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&[&info])?);
+                } else {
+                    println!("📋 Configured registries:");
+                    println!(
+                        "   • {} ({})",
+                        info.url,
+                        format!("{:?}", info.source).to_lowercase()
+                    );
+                }
+                Ok(())
+            }
+            RegistryCommands::ClearCache => {
+                let cache = registry::RegistryCache::new();
+                cache.clear()?;
+                println!("✅ Registry cache cleared");
+                Ok(())
+            }
+            RegistryCommands::Serve {
+                port,
+                data_dir,
+                host,
+                auth_token,
+            } => {
+                if host != "127.0.0.1"
+                    && auth_token
+                        .as_deref()
+                        .map(str::trim)
+                        .unwrap_or("")
+                        .is_empty()
+                {
+                    anyhow::bail!("--auth-token is required when --host is not 127.0.0.1");
+                }
+                registry_serve::serve(registry_serve::RegistryServerConfig {
+                    host,
+                    port,
+                    data_dir,
+                    auth_token,
+                })
+                .await
+            }
+        }
+    })
+}
+
+fn execute_state_command(command: StateCommands) -> Result<()> {
+    match command {
+        StateCommands::List {
+            owner_scope,
+            state_name,
+            json,
+        } => state::list_states(owner_scope.as_deref(), state_name.as_deref(), json),
+        StateCommands::Inspect { state_ref, json } => state::inspect_state(&state_ref, json),
+        StateCommands::Register {
+            manifest,
+            state_name,
+            path,
+            json,
+        } => state::register_state_from_manifest(
+            &manifest,
+            &state_name,
+            path.to_string_lossy().as_ref(),
+            json,
+        ),
+    }
+}
+
+fn execute_binding_command(command: BindingCommands) -> Result<()> {
+    match command {
+        BindingCommands::List {
+            owner_scope,
+            service_name,
+            json,
+        } => binding::list_bindings(owner_scope.as_deref(), service_name.as_deref(), json),
+        BindingCommands::Inspect { binding_ref, json } => {
+            binding::inspect_binding(&binding_ref, json)
+        }
+        BindingCommands::Resolve {
+            owner_scope,
+            service_name,
+            binding_kind,
+            caller_service,
+            json,
+        } => binding::resolve_binding(
+            &owner_scope,
+            &service_name,
+            &binding_kind,
+            caller_service.as_deref(),
+            json,
+        ),
+        BindingCommands::BootstrapTls {
+            binding_ref,
+            install_system_trust,
+            yes,
+            json,
+        } => binding::bootstrap_ingress_tls(&binding_ref, install_system_trust, yes, json),
+        BindingCommands::ServeIngress {
+            binding_ref,
+            manifest,
+            upstream_url,
+        } => binding::serve_ingress_binding(&binding_ref, &manifest, upstream_url.as_deref()),
+        BindingCommands::RegisterIngress {
+            manifest,
+            service_name,
+            url,
+            json,
+        } => binding::register_ingress_binding_from_manifest(&manifest, &service_name, &url, json),
+        BindingCommands::RegisterService {
+            manifest,
+            service_name,
+            url,
+            process_id,
+            port,
+            json,
+        } => match (url.as_deref(), process_id.as_deref()) {
+            (Some(url), _) => {
+                binding::register_service_binding_from_manifest(&manifest, &service_name, url, json)
+            }
+            (None, Some(process_id)) => binding::register_service_binding_from_process(
+                process_id,
+                &service_name,
+                port,
+                json,
+            ),
+            (None, None) => anyhow::bail!("register-service requires either --url or --process-id"),
+        },
+        BindingCommands::SyncProcess { process_id, json } => {
+            binding::sync_service_bindings_from_process(&process_id, json)
+        }
+    }
+}
+
+fn execute_publish_ci_command(
+    json_output: bool,
+    force_large_payload: bool,
+    reporter: std::sync::Arc<reporters::CliReporter>,
+) -> Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let result = publish_ci::execute(
+            publish_ci::PublishCiArgs {
+                json_output,
+                force_large_payload,
+            },
+            reporter.clone(),
+        )
+        .await?;
+
+        if json_output {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            println!("✅ Successfully published to Ato Store!");
+            println!();
+            println!(
+                "📦 Capsule:   {} v{}",
+                result.capsule_scoped_id, result.version
+            );
+            if let Some(sha256) = &result.artifact_sha256 {
+                println!("🛡️  Integrity: sha256:{}", sha256);
+            } else if let Some(blake3) = &result.artifact_blake3 {
+                println!("🛡️  Integrity: {}", blake3);
+            }
+            println!();
+            println!("🌐 Store URL:      {}", result.urls.store);
+            if let Some(playground) = &result.urls.playground {
+                println!("🎮 Playground URL: {}", playground);
+            }
+            println!();
+            println!("👉 Next step: ato run {}", result.capsule_scoped_id);
+            println!();
+            println!("   Event ID:   {}", result.publish_event_id);
+            println!("   Release ID: {}", result.release_id);
+            println!("   Artifact:   {}", result.artifact_id);
+            println!("   Status:     {}", result.verification_status);
+        }
+        futures::executor::block_on(
+            reporter
+                .notify("CI publish completed using GitHub OIDC workflow identity.".to_string()),
+        )?;
+        Ok(())
+    })
+}
+
+fn execute_publish_dry_run_command(
+    json_output: bool,
+    reporter: std::sync::Arc<reporters::CliReporter>,
+) -> Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let result =
+            publish_dry_run::execute(publish_dry_run::PublishDryRunArgs { json_output }).await?;
+
+        if json_output {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            println!("✅ Dry-run successful! Your capsule is ready to be published via CI.");
+            println!("   Capsule: {}", result.capsule_name);
+            println!("   Version: {}", result.version);
+            println!("   Artifact: {}", result.artifact_path.display());
+            println!("   Size: {} bytes", result.artifact_size_bytes);
+        }
+        futures::executor::block_on(
+            reporter.notify("Local publish dry-run completed (no upload performed).".to_string()),
+        )?;
+        Ok(())
+    })
+}
+
+#[allow(dead_code)]
+fn execute_publish_guidance_command(json_output: bool, registry_url: &str) -> Result<()> {
+    if json_output {
+        let payload = serde_json::json!({
+            "ok": false,
+            "code": "CI_ONLY_PUBLISH",
+            "message": "Official registry publishing is CI-first. Use `ato publish --ci` in GitHub Actions, or `ato publish --dry-run` locally."
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "❌ Direct local publishing is disabled for official registry ({}).",
+            registry_url
+        );
+        println!();
+        println!("Ato uses a strict CI-first publishing model via GitHub Actions (OIDC).");
+        println!("This guarantees published capsules match committed source.");
+        println!();
+        println!("👉 Next steps:");
+        println!("  1. Run `ato gen-ci` to generate `.github/workflows/ato-publish.yml`.");
+        println!("  2. Commit and tag your release (e.g. `git tag v0.1.0`).");
+        println!("  3. Push the tag to GitHub (`git push origin v0.1.0`).");
+        println!("  4. GitHub Actions runs `ato publish --ci` automatically.");
+        println!();
+        println!("💡 Tip: Run `ato publish --dry-run` to validate locally before pushing.");
+        println!("💡 Private registry directly publish: `ato publish --registry <url>`");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct PublishCommandArgs {
+    registry: Option<String>,
+    artifact: Option<PathBuf>,
+    scoped_id: Option<String>,
+    allow_existing: bool,
+    prepare: bool,
+    build: bool,
+    deploy: bool,
+    legacy_full_publish: bool,
+    force_large_payload: bool,
+    fix: bool,
+    no_tui: bool,
+    json: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PublishPhaseSelection {
+    prepare: bool,
+    build: bool,
+    deploy: bool,
+    explicit_filter: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PublishPhaseResult {
+    name: &'static str,
+    selected: bool,
+    ok: bool,
+    status: &'static str,
+    elapsed_ms: u64,
+    actionable_fix: Option<String>,
+    message: String,
+    result_kind: Option<String>,
+    skipped_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct OfficialDeployOutcome {
+    route: publish_official::PublishRoutePlan,
+    fix_result: publish_official::WorkflowFixResult,
+    diagnosis: publish_official::OfficialPublishDiagnosis,
+}
+
+fn execute_publish_command(
+    args: PublishCommandArgs,
+    reporter: std::sync::Arc<reporters::CliReporter>,
+) -> Result<()> {
+    let resolved_registry = resolve_publish_registry_url(args.registry.clone())?;
+    let is_official = is_official_publish_registry(&resolved_registry);
+    let selection = select_publish_phases(
+        args.prepare,
+        args.build,
+        args.deploy,
+        is_official,
+        args.legacy_full_publish,
+    );
+    validate_publish_phase_options(&args, selection, is_official)?;
+    maybe_warn_legacy_full_publish(&args, selection, is_official);
+    let _ = args.no_tui;
+
+    let mut phases = vec![
+        new_phase_result("prepare", selection.prepare),
+        new_phase_result("build", selection.build),
+        new_phase_result("deploy", selection.deploy),
+    ];
+
+    let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
+    let mut built_artifact_path: Option<PathBuf> = None;
+    let mut private_result: Option<publish_private::PublishPrivateResult> = None;
+    let mut official_result: Option<OfficialDeployOutcome> = None;
+
+    let private_preview = if selection.deploy && !is_official {
+        Some(publish_private::summarize(
+            &publish_private::PublishPrivateArgs {
+                registry_url: resolved_registry.clone(),
+                artifact_path: args.artifact.clone(),
+                force_large_payload: args.force_large_payload,
+                scoped_id: args.scoped_id.clone(),
+                allow_existing: args.allow_existing,
+            },
+        )?)
+    } else {
+        None
+    };
+
+    if selection.prepare {
+        print_phase_line(args.json, "prepare", "RUN", "prepare command detection");
+        let started = std::time::Instant::now();
+        let prepare_spec = publish_prepare::detect_prepare_command(&cwd)?;
+        match prepare_spec {
+            Some(spec) => {
+                let message = format!("running {}", spec.source.as_label());
+                publish_prepare::run_prepare_command(&spec, &cwd, args.json)
+                    .context("Failed to run publish prepare command")?;
+                phase_mark_ok(
+                    &mut phases[0],
+                    started.elapsed().as_millis() as u64,
+                    message.clone(),
+                    None,
+                );
+                print_phase_line(args.json, "prepare", "OK", &message);
+            }
+            None => {
+                let skipped_reason = "no prepare command configured".to_string();
+                if selection.explicit_filter {
+                    let fix = "capsule.toml に [build.lifecycle].prepare を設定するか package.json scripts[\"capsule:prepare\"] を追加して再実行してください。".to_string();
+                    phase_mark_failed(
+                        &mut phases[0],
+                        started.elapsed().as_millis() as u64,
+                        "--prepare was selected but no prepare command was found".to_string(),
+                        Some(fix.clone()),
+                    );
+                    print_phase_line(args.json, "prepare", "FAIL", "prepare command not found");
+                    if !args.json {
+                        println!("👉 次に打つコマンド: {}", fix);
+                    }
+                    anyhow::bail!(
+                        "--prepare was selected but no prepare command was found. Set `build.lifecycle.prepare` in capsule.toml or add package.json scripts[\"capsule:prepare\"]."
+                    );
+                }
+                phase_mark_skipped(
+                    &mut phases[0],
+                    started.elapsed().as_millis() as u64,
+                    skipped_reason.clone(),
+                    skipped_reason.clone(),
+                );
+                print_phase_line(args.json, "prepare", "SKIP", &skipped_reason);
+            }
+        }
+    } else {
+        phase_mark_skipped(
+            &mut phases[0],
+            0,
+            "prepare phase not selected".to_string(),
+            "not selected".to_string(),
+        );
+        print_phase_line(args.json, "prepare", "SKIP", "not selected");
+    }
+
+    if selection.build {
+        print_phase_line(args.json, "build", "RUN", "artifact build");
+        let started = std::time::Instant::now();
+        if args.artifact.is_some() {
+            let skipped_reason = "--artifact provided".to_string();
+            phase_mark_skipped(
+                &mut phases[1],
+                started.elapsed().as_millis() as u64,
+                "build is skipped when --artifact is provided".to_string(),
+                skipped_reason.clone(),
+            );
+            print_phase_line(args.json, "build", "SKIP", &skipped_reason);
+        } else {
+            let artifact_path = build_capsule_artifact_for_publish(&cwd)?;
+            let elapsed = started.elapsed().as_millis() as u64;
+            let message = format!("artifact built: {}", artifact_path.display());
+            phase_mark_ok(&mut phases[1], elapsed, message.clone(), None);
+            built_artifact_path = Some(artifact_path);
+            print_phase_line(args.json, "build", "OK", &message);
+        }
+    } else {
+        phase_mark_skipped(
+            &mut phases[1],
+            0,
+            "build phase not selected".to_string(),
+            "not selected".to_string(),
+        );
+        print_phase_line(args.json, "build", "SKIP", "not selected");
+    }
+
+    if selection.deploy {
+        print_phase_line(args.json, "deploy", "RUN", "deploy execution");
+        let started = std::time::Instant::now();
+        if is_official {
+            let outcome = run_official_deploy(resolved_registry.clone(), args.fix)?;
+
+            if !args.json {
+                println!(
+                    "🔎 official publish route registry={} route={:?}",
+                    outcome.route.registry_url, outcome.route.route
+                );
+                for stage in &outcome.diagnosis.stages {
+                    let icon = if stage.ok { "✅" } else { "❌" };
+                    println!("{} {:<14} {}", icon, stage.key, stage.message);
+                }
+                if outcome.fix_result.attempted {
+                    if outcome.fix_result.applied {
+                        let label = if outcome.fix_result.created {
+                            "created"
+                        } else {
+                            "updated"
+                        };
+                        println!("🛠️  workflow {} via --fix", label);
+                    } else {
+                        println!("🛠️  --fix requested, but workflow was already up-to-date");
+                    }
+                }
+            }
+
+            if !outcome.diagnosis.can_handoff {
+                let actions = publish_official::collect_issue_actions(&outcome.diagnosis.issues);
+                let fix_line = actions.first().cloned().unwrap_or_else(|| {
+                    "ato publish --deploy --registry https://api.ato.run".to_string()
+                });
+                phase_mark_failed(
+                    &mut phases[2],
+                    started.elapsed().as_millis() as u64,
+                    "official publish diagnostics failed".to_string(),
+                    Some(fix_line.clone()),
+                );
+                print_phase_line(args.json, "deploy", "FAIL", "official diagnostics failed");
+                if !args.json {
+                    println!("👉 次に打つコマンド: {}", fix_line);
+                    if !actions.is_empty() {
+                        println!();
+                        println!("詳細:");
+                        for issue in &outcome.diagnosis.issues {
+                            println!(" - [{}] {}", issue.stage, issue.message);
+                        }
+                    }
+                    anyhow::bail!("official publish diagnostics failed");
+                }
+                official_result = Some(outcome);
+            } else {
+                let success_message = "official CI handoff is ready".to_string();
+                phase_mark_ok(
+                    &mut phases[2],
+                    started.elapsed().as_millis() as u64,
+                    success_message.clone(),
+                    Some("handoff".to_string()),
+                );
+                print_phase_line(args.json, "deploy", "OK", &success_message);
+                official_result = Some(outcome);
+            }
+        } else {
+            let source_is_artifact = args.artifact.is_some();
+            let deploy_artifact = if let Some(path) = args.artifact.clone() {
+                path
+            } else if let Some(path) = built_artifact_path.clone() {
+                path
+            } else {
+                let fix_line =
+                    "ato publish --deploy --artifact <file.capsule> --registry <url> もしくは ato publish --build --deploy --registry <url>"
+                        .to_string();
+                phase_mark_failed(
+                    &mut phases[2],
+                    started.elapsed().as_millis() as u64,
+                    "deploy phase requires artifact input".to_string(),
+                    Some(fix_line.clone()),
+                );
+                print_phase_line(args.json, "deploy", "FAIL", "artifact input is missing");
+                if !args.json {
+                    println!("👉 次に打つコマンド: {}", fix_line);
+                }
+                anyhow::bail!(
+                    "--deploy requires artifact input for private registry. Use --artifact or include --build."
+                );
+            };
+
+            let preview = private_preview
+                .as_ref()
+                .context("missing private publish preview")?;
+            if !args.json {
+                println!(
+                    "{}",
+                    publish_private_start_summary_line(
+                        &resolved_registry,
+                        preview.source,
+                        &preview.scoped_id,
+                        &preview.version,
+                        preview.allow_existing,
+                    )
+                );
+            }
+
+            let status = publish_private_status_message(source_is_artifact);
+            futures::executor::block_on(reporter.progress_start(status.to_string(), None))?;
+            let scoped_override = if source_is_artifact {
+                args.scoped_id.clone()
+            } else {
+                Some(preview.scoped_id.clone())
+            };
+            let upload_result = publish_private::execute(publish_private::PublishPrivateArgs {
+                registry_url: resolved_registry.clone(),
+                artifact_path: Some(deploy_artifact),
+                force_large_payload: args.force_large_payload,
+                scoped_id: scoped_override,
+                allow_existing: args.allow_existing,
+            });
+            futures::executor::block_on(reporter.progress_finish(None))?;
+            let result = upload_result?;
+
+            let success_message = format!("uploaded {}", result.file_name);
+            phase_mark_ok(
+                &mut phases[2],
+                started.elapsed().as_millis() as u64,
+                success_message.clone(),
+                Some("upload".to_string()),
+            );
+            print_phase_line(args.json, "deploy", "OK", &success_message);
+            private_result = Some(result);
+        }
+    } else {
+        phase_mark_skipped(
+            &mut phases[2],
+            0,
+            "deploy phase not selected".to_string(),
+            "not selected".to_string(),
+        );
+        print_phase_line(args.json, "deploy", "SKIP", "not selected");
+    }
+
+    if args.json {
+        emit_publish_json_output(
+            &resolved_registry,
+            is_official,
+            &phases,
+            private_result.as_ref(),
+            official_result.as_ref(),
+        )?;
+    } else if let Some(result) = private_result {
+        println!("✅ Successfully published to private registry!");
+        println!();
+        println!("📦 Capsule:   {} v{}", result.scoped_id, result.version);
+        println!("🛡️  Integrity: {}, {}", result.sha256, result.blake3);
+        println!();
+        println!("🌐 Artifact URL: {}", result.artifact_url);
+        println!();
+        if result.already_existed {
+            println!("ℹ️  Existing release reused (same sha256, no new upload).");
+            println!();
+        }
+        println!(
+            "👉 Next step: ato install {} --registry {}",
+            result.scoped_id, result.registry_url
+        );
+    } else if let Some(outcome) = official_result {
+        println!();
+        println!("✅ CI handoff ready. 次の順で実行してください:");
+        for command in &outcome.diagnosis.next_commands {
+            println!("  {}", command);
+        }
+        if let Some(repo) = &outcome.diagnosis.repository {
+            println!(
+                "  https://github.com/{}/actions/workflows/ato-publish.yml",
+                repo
+            );
+        }
+    } else {
+        println!("✅ Selected publish phases completed.");
+    }
+
+    if !args.json {
+        if selection.deploy && phases[2].ok {
+            let notice = if is_official {
+                "Official publish handoff prepared (CI-first: local upload is not executed)."
+            } else {
+                "Private registry publish completed."
+            };
+            futures::executor::block_on(reporter.notify(notice.to_string()))?;
+        } else {
+            futures::executor::block_on(
+                reporter.notify("Selected publish phases completed.".to_string()),
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn run_official_deploy(registry_url: String, fix: bool) -> Result<OfficialDeployOutcome> {
+    let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
+    let route = publish_official::build_route_plan(&registry_url);
+
+    let mut fix_result = publish_official::WorkflowFixResult::default();
+    let mut diagnosis = publish_official::diagnose_official(&cwd, &registry_url);
+    if fix && diagnosis.needs_workflow_fix {
+        fix_result = publish_official::apply_workflow_fix_once(&cwd)?;
+        diagnosis = publish_official::diagnose_official(&cwd, &registry_url);
+    }
+
+    Ok(OfficialDeployOutcome {
+        route,
+        fix_result,
+        diagnosis,
+    })
+}
+
+fn publish_private_status_message(has_artifact: bool) -> &'static str {
+    if has_artifact {
+        "📤 Publishing provided artifact to private registry..."
+    } else {
+        "📦 Building capsule artifact for private registry publish..."
+    }
+}
+
+fn publish_private_start_summary_line(
+    registry_url: &str,
+    source: &str,
+    scoped_id: &str,
+    version: &str,
+    allow_existing: bool,
+) -> String {
+    format!(
+        "🔎 private publish target registry={} source={} scoped_id={} version={} allow_existing={}",
+        registry_url, source, scoped_id, version, allow_existing
+    )
+}
+
+fn select_publish_phases(
+    prepare: bool,
+    build: bool,
+    deploy: bool,
+    is_official: bool,
+    legacy_full_publish: bool,
+) -> PublishPhaseSelection {
+    let explicit_filter = prepare || build || deploy;
+    if explicit_filter {
+        PublishPhaseSelection {
+            prepare,
+            build,
+            deploy,
+            explicit_filter,
+        }
+    } else if is_official && !legacy_full_publish {
+        PublishPhaseSelection {
+            prepare: false,
+            build: false,
+            deploy: true,
+            explicit_filter: false,
+        }
+    } else {
+        PublishPhaseSelection {
+            prepare: true,
+            build: true,
+            deploy: true,
+            explicit_filter: false,
+        }
+    }
+}
+
+fn maybe_warn_legacy_full_publish(
+    args: &PublishCommandArgs,
+    selection: PublishPhaseSelection,
+    is_official: bool,
+) {
+    if args.legacy_full_publish && is_official && !selection.explicit_filter {
+        eprintln!(
+            "⚠️  --legacy-full-publish is deprecated and will be removed in a future release. Use explicit --prepare/--build/--deploy flags instead."
+        );
+    }
+}
+
+fn validate_publish_phase_options(
+    args: &PublishCommandArgs,
+    selection: PublishPhaseSelection,
+    is_official: bool,
+) -> Result<()> {
+    if args.fix && !(is_official && selection.deploy) {
+        anyhow::bail!("--fix is only available when deploying to official registry");
+    }
+
+    if args.legacy_full_publish && !is_official {
+        anyhow::bail!("--legacy-full-publish is only available for official registry publish");
+    }
+
+    if args.legacy_full_publish && selection.explicit_filter {
+        anyhow::bail!("--legacy-full-publish cannot be combined with --prepare/--build/--deploy");
+    }
+
+    if args.allow_existing && (is_official || !selection.deploy) {
+        anyhow::bail!("--allow-existing is only available for private registry deploy phase");
+    }
+
+    if !is_official && selection.deploy && !selection.build && args.artifact.is_none() {
+        anyhow::bail!(
+            "--deploy requires --artifact for private registry publish (or include --build)"
+        );
+    }
+
+    Ok(())
+}
+
+fn build_capsule_artifact_for_publish(cwd: &std::path::Path) -> Result<PathBuf> {
+    let manifest_path = cwd.join("capsule.toml");
+    let manifest_raw = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
+    let manifest = capsule_core::types::CapsuleManifest::from_toml(&manifest_raw)
+        .map_err(|err| anyhow::anyhow!("Failed to parse capsule.toml: {}", err))?;
+    crate::publish_ci::build_capsule_artifact(&manifest_path, &manifest.name, &manifest.version)
+        .with_context(|| "Failed to build artifact for publish")
+}
+
+fn emit_publish_json_output(
+    registry_url: &str,
+    is_official: bool,
+    phases: &[PublishPhaseResult],
+    private_result: Option<&publish_private::PublishPrivateResult>,
+    official_result: Option<&OfficialDeployOutcome>,
+) -> Result<()> {
+    if let Some(outcome) = official_result {
+        let payload = serde_json::json!({
+            "ok": outcome.diagnosis.can_handoff,
+            "code": if outcome.diagnosis.can_handoff { "CI_HANDOFF_READY" } else { "CI_ONLY_PUBLISH" },
+            "message": if outcome.diagnosis.can_handoff {
+                "Official registry publishing is CI-first. Handoff is ready."
+            } else {
+                "Official registry publishing is CI-first. Run the suggested local fixes, then push tag to trigger CI."
+            },
+            "route": outcome.route.route,
+            "registry": outcome.route.registry_url,
+            "fix": outcome.fix_result,
+            "diagnosis": outcome.diagnosis,
+            "phases": phases,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    if let Some(result) = private_result {
+        let mut payload = serde_json::to_value(result)?;
+        if let serde_json::Value::Object(map) = &mut payload {
+            map.insert("phases".to_string(), serde_json::to_value(phases)?);
+        }
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    let payload = serde_json::json!({
+        "ok": true,
+        "code": "PUBLISH_PHASES_COMPLETED",
+        "message": "Selected publish phases completed.",
+        "registry": registry_url,
+        "route": if is_official { "official" } else { "private" },
+        "phases": phases,
+    });
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+fn new_phase_result(name: &'static str, selected: bool) -> PublishPhaseResult {
+    PublishPhaseResult {
+        name,
+        selected,
+        ok: !selected,
+        status: "skipped",
+        elapsed_ms: 0,
+        actionable_fix: None,
+        message: if selected {
+            "pending".to_string()
+        } else {
+            "not selected".to_string()
+        },
+        result_kind: None,
+        skipped_reason: if selected {
+            None
+        } else {
+            Some("not selected".to_string())
+        },
+    }
+}
+
+fn phase_mark_ok(
+    phase: &mut PublishPhaseResult,
+    elapsed_ms: u64,
+    message: String,
+    result_kind: Option<String>,
+) {
+    phase.ok = true;
+    phase.status = "ok";
+    phase.elapsed_ms = elapsed_ms;
+    phase.actionable_fix = None;
+    phase.message = message;
+    phase.result_kind = result_kind;
+    phase.skipped_reason = None;
+}
+
+fn phase_mark_skipped(
+    phase: &mut PublishPhaseResult,
+    elapsed_ms: u64,
+    message: String,
+    skipped_reason: String,
+) {
+    phase.ok = true;
+    phase.status = "skipped";
+    phase.elapsed_ms = elapsed_ms;
+    phase.actionable_fix = None;
+    phase.message = message;
+    phase.result_kind = None;
+    phase.skipped_reason = Some(skipped_reason);
+}
+
+fn phase_mark_failed(
+    phase: &mut PublishPhaseResult,
+    elapsed_ms: u64,
+    message: String,
+    actionable_fix: Option<String>,
+) {
+    phase.ok = false;
+    phase.status = "failed";
+    phase.elapsed_ms = elapsed_ms;
+    phase.actionable_fix = actionable_fix;
+    phase.message = message;
+    phase.result_kind = None;
+    phase.skipped_reason = None;
+}
+
+fn print_phase_line(json_output: bool, phase: &str, state: &str, detail: &str) {
+    if json_output {
+        return;
+    }
+    println!("PHASE {:<7} {:<4} {}", phase, state, detail);
+}
+
+fn resolve_publish_registry_url(cli_registry: Option<String>) -> Result<String> {
+    if let Some(url) = cli_registry {
+        return normalize_registry_url(&url);
+    }
+
+    let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
+    let manifest_path = cwd.join("capsule.toml");
+    if manifest_path.exists() {
+        let raw = std::fs::read_to_string(&manifest_path)
+            .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
+        let parsed: toml::Value = toml::from_str(&raw)
+            .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
+        if let Some(url) = parsed
+            .get("store")
+            .and_then(|v| v.get("registry"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            return normalize_registry_url(url);
+        }
+    }
+
+    Ok(DEFAULT_RUN_REGISTRY_URL.to_string())
+}
+
+fn normalize_registry_url(raw: &str) -> Result<String> {
+    crate::registry_http::normalize_registry_url(raw, "registry")
+}
+
+fn is_official_publish_registry(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("api.ato.run") || host.eq_ignore_ascii_case("staging.api.ato.run")
+}
+
+fn execute_setup_command(
+    engine: String,
+    version: Option<String>,
+    skip_verify: bool,
+    reporter: std::sync::Arc<reporters::CliReporter>,
+) -> Result<()> {
+    let capsule_reporter: &dyn capsule_core::CapsuleReporter = reporter.as_ref();
+    let install = engine_manager::install_engine_release(
+        &engine,
+        version.as_deref(),
+        skip_verify,
+        capsule_reporter,
+    )?;
+
+    futures::executor::block_on(reporter.notify(format!(
+        "✅ Engine {} {} installed at {}",
+        engine,
+        install.version,
+        install.path.display()
+    )))?;
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_run_like_command(
+    path: PathBuf,
+    target: Option<String>,
+    watch: bool,
+    background: bool,
+    nacelle: Option<PathBuf>,
+    registry: Option<String>,
+    state: Vec<String>,
+    enforcement: EnforcementMode,
+    sandbox_mode: bool,
+    unsafe_mode_legacy: bool,
+    unsafe_bypass_sandbox_legacy: bool,
+    dangerously_skip_permissions: bool,
+    yes: bool,
+    allow_unverified: bool,
+    skill: Option<String>,
+    from_skill: Option<PathBuf>,
+    deprecation_warning: Option<&str>,
+    reporter: std::sync::Arc<reporters::CliReporter>,
+) -> Result<()> {
+    if let Some(warning) = deprecation_warning {
+        eprintln!("{warning}");
+    }
+
+    let rt = tokio::runtime::Runtime::new()?;
+
+    let resolved_skill_path = match (skill, from_skill) {
+        (Some(skill_name), None) => Some(skill_resolver::resolve_skill_path(&skill_name)?),
+        (None, Some(path)) => Some(path),
+        (None, None) => None,
+        (Some(_), Some(_)) => {
+            anyhow::bail!("--skill and --from-skill are mutually exclusive");
+        }
+    };
+
+    if let Some(skill_path) = resolved_skill_path {
+        if watch {
+            anyhow::bail!("--skill/--from-skill does not support --watch in MVP mode");
+        }
+        if background {
+            anyhow::bail!("--skill/--from-skill does not support --background in MVP mode");
+        }
+
+        let generated = skill::materialize_skill_capsule(&skill_path)?;
+        debug!(
+            manifest_path = %generated.manifest_path().display(),
+            "Translated SKILL.md to capsule"
+        );
+
+        let sandbox_requested = sandbox_mode || unsafe_mode_legacy || unsafe_bypass_sandbox_legacy;
+        let effective_enforcement = enforce_sandbox_mode_flags(
+            enforcement,
+            sandbox_requested,
+            dangerously_skip_permissions,
+            reporter.clone(),
+        )?;
+        return execute_open_command(
+            generated.manifest_path().to_path_buf(),
+            target,
+            watch,
+            background,
+            nacelle,
+            effective_enforcement,
+            sandbox_requested,
+            dangerously_skip_permissions,
+            yes,
+            state,
+            reporter,
+        );
+    }
+
+    let path = rt.block_on(resolve_run_target_or_install(
+        path,
+        yes,
+        allow_unverified,
+        registry.as_deref(),
+        reporter.clone(),
+    ))?;
+
+    let sandbox_requested = sandbox_mode || unsafe_mode_legacy || unsafe_bypass_sandbox_legacy;
+    let effective_enforcement = enforce_sandbox_mode_flags(
+        enforcement,
+        sandbox_requested,
+        dangerously_skip_permissions,
+        reporter.clone(),
+    )?;
+    execute_open_command(
+        path,
+        target,
+        watch,
+        background,
+        nacelle,
+        effective_enforcement,
+        sandbox_requested,
+        dangerously_skip_permissions,
+        yes,
+        state,
+        reporter,
+    )
+}
+
+async fn resolve_run_target_or_install(
+    path: PathBuf,
+    yes: bool,
+    allow_unverified: bool,
+    registry: Option<&str>,
+    reporter: std::sync::Arc<reporters::CliReporter>,
+) -> Result<PathBuf> {
+    let raw = path.to_string_lossy().to_string();
+    if is_explicit_local_path_input(&raw) {
+        return Ok(expand_explicit_local_path(&raw));
+    }
+
+    let scoped_ref = match install::parse_capsule_ref(&raw) {
+        Ok(value) => value,
+        Err(error) => {
+            if install::is_slug_only_ref(&raw) {
+                let effective_registry = registry.unwrap_or(DEFAULT_RUN_REGISTRY_URL);
+                let suggestions =
+                    install::suggest_scoped_capsules(&raw, Some(effective_registry), 5).await?;
+                if suggestions.is_empty() {
+                    anyhow::bail!(
+                        "scoped_id_required: '{}' is not valid for `ato run`. Use publisher/slug (for example: koh0920/{}).",
+                        raw,
+                        raw.trim()
+                    );
+                }
+
+                let mut message = format!(
+                    "scoped_id_required: '{}' is ambiguous. Specify publisher/slug.\n\nDid you mean one of these?",
+                    raw
+                );
+                for suggestion in suggestions {
+                    message.push_str(&format!(
+                        "\n  - {}  ({} downloads)",
+                        suggestion.scoped_id, suggestion.downloads
+                    ));
+                }
+                message.push_str("\n\nRun `ato search ");
+                message.push_str(raw.trim());
+                message.push_str("` to see more options.");
+                anyhow::bail!(message);
+            }
+            return Err(error).context(
+                "Invalid run target. Use ./, ../, ~/, / for local paths, or publisher/slug for store capsules.",
+            );
+        }
+    };
+
+    let installed_capsule = resolve_installed_capsule_archive(&scoped_ref, registry, None).await?;
+    let mut registry_detail = None;
+    let mut registry_installable_version = None;
+
+    if let Some(explicit_registry) = registry {
+        match install::fetch_capsule_detail(&scoped_ref.scoped_id, Some(explicit_registry)).await {
+            Ok(detail) => {
+                registry_installable_version = detail
+                    .latest_version
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+
+                if let Some(version) = registry_installable_version.as_deref() {
+                    if let Some(installed_capsule) =
+                        resolve_installed_capsule_archive(&scoped_ref, registry, Some(version))
+                            .await?
+                    {
+                        debug!(
+                            capsule = %installed_capsule.display(),
+                            version = version,
+                            "Using installed capsule matching registry current version"
+                        );
+                        return Ok(installed_capsule);
+                    }
+                }
+
+                registry_detail = Some(detail);
+            }
+            Err(error) => {
+                if let Some(installed_capsule) = installed_capsule {
+                    debug!(
+                        capsule = %installed_capsule.display(),
+                        error = %error,
+                        "Falling back to installed capsule after registry detail lookup failed"
+                    );
+                    return Ok(installed_capsule);
+                }
+                return Err(error);
+            }
+        }
+    } else if let Some(installed_capsule) = installed_capsule {
+        debug!(
+            capsule = %installed_capsule.display(),
+            "Using installed capsule"
+        );
+        return Ok(installed_capsule);
+    }
+
+    let json_mode = matches!(reporter.as_ref(), reporters::CliReporter::Json(_));
+    if json_mode && !yes {
+        anyhow::bail!(
+            "Non-interactive JSON mode requires -y/--yes when auto-installing missing capsules"
+        );
+    }
+
+    if !yes
+        && !can_prompt_interactively(
+            std::io::stdin().is_terminal(),
+            std::io::stdout().is_terminal(),
+        )
+    {
+        anyhow::bail!(
+            "Interactive install confirmation requires a TTY. Re-run with -y/--yes in CI or non-interactive environments."
+        );
+    }
+
+    let effective_registry = registry.unwrap_or(DEFAULT_RUN_REGISTRY_URL);
+    let detail = if let Some(detail) = registry_detail {
+        detail
+    } else {
+        install::fetch_capsule_detail(&scoped_ref.scoped_id, Some(effective_registry)).await?
+    };
+    let installable_version = if let Some(version) = registry_installable_version {
+        version
+    } else {
+        detail
+            .latest_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Cannot auto-install '{}': no installable version is published.",
+                    detail.scoped_id
+                )
+            })?
+            .to_string()
+    };
+
+    if !yes {
+        let approved = prompt_install_confirmation(&detail, &installable_version)?;
+        if !approved {
+            anyhow::bail!("Installation cancelled by user");
+        }
+    } else {
+        debug!(
+            scoped_id = %detail.scoped_id,
+            "Capsule not installed; continuing with -y auto-install"
+        );
+    }
+
+    let install_result = install::install_app(
+        &scoped_ref.scoped_id,
+        Some(effective_registry),
+        Some(installable_version.as_str()),
+        None,
+        false,
+        yes,
+        install::ProjectionPreference::Skip,
+        allow_unverified,
+        false,
+        json_mode,
+        !json_mode
+            && can_prompt_interactively(
+                std::io::stdin().is_terminal(),
+                std::io::stderr().is_terminal(),
+            ),
+    )
+    .await?;
+    Ok(install_result.path)
+}
+
+fn is_explicit_local_path_input(raw: &str) -> bool {
+    if raw.is_empty() {
+        return false;
+    }
+    if raw == "." || raw == ".." {
+        return true;
+    }
+    if raw.starts_with("./")
+        || raw.starts_with("../")
+        || raw.starts_with(".\\")
+        || raw.starts_with("..\\")
+        || raw.starts_with("~/")
+        || raw.starts_with("~\\")
+        || raw.starts_with('/')
+        || raw.starts_with('\\')
+    {
+        return true;
+    }
+    raw.len() >= 3
+        && raw.as_bytes()[1] == b':'
+        && (raw.as_bytes()[2] == b'/' || raw.as_bytes()[2] == b'\\')
+        && raw.as_bytes()[0].is_ascii_alphabetic()
+}
+
+fn expand_explicit_local_path(raw: &str) -> PathBuf {
+    if raw == "~" {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(raw));
+    }
+    if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(raw)
+}
+
+async fn resolve_installed_capsule_archive(
+    scoped_ref: &install::ScopedCapsuleRef,
+    registry: Option<&str>,
+    preferred_version: Option<&str>,
+) -> Result<Option<PathBuf>> {
+    let store_root = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ato")
+        .join("store");
+    if let Some(path) = resolve_installed_capsule_archive_in_store(
+        &store_root.join(&scoped_ref.publisher),
+        &scoped_ref.slug,
+        preferred_version,
+    )? {
+        return Ok(Some(path));
+    }
+
+    let legacy_slug_dir = store_root.join(&scoped_ref.slug);
+    if !legacy_slug_dir.exists() || !legacy_slug_dir.is_dir() {
+        return Ok(None);
+    }
+
+    let scoped_slug_dir = store_root
+        .join(&scoped_ref.publisher)
+        .join(&scoped_ref.slug);
+    if scoped_slug_dir.exists() {
+        return resolve_installed_capsule_archive_in_store(
+            &store_root.join(&scoped_ref.publisher),
+            &scoped_ref.slug,
+            preferred_version,
+        );
+    }
+
+    let effective_registry = registry.unwrap_or(DEFAULT_RUN_REGISTRY_URL);
+    let suggestions =
+        install::suggest_scoped_capsules(&scoped_ref.slug, Some(effective_registry), 10).await?;
+    let scoped_matches: Vec<_> = suggestions
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .scoped_id
+                .ends_with(&format!("/{}", scoped_ref.slug))
+        })
+        .collect();
+    let unique_match =
+        scoped_matches.len() == 1 && scoped_matches[0].scoped_id == scoped_ref.scoped_id;
+
+    if !unique_match {
+        anyhow::bail!(
+            "Legacy installation found at {} but publisher could not be determined safely. Please reinstall using: ato install {}",
+            legacy_slug_dir.display(),
+            scoped_ref.scoped_id
+        );
+    }
+
+    if let Some(parent) = scoped_slug_dir.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create scoped store directory: {}",
+                parent.display()
+            )
+        })?;
+    }
+    std::fs::rename(&legacy_slug_dir, &scoped_slug_dir).with_context(|| {
+        format!(
+            "Failed to migrate legacy store path {} -> {}",
+            legacy_slug_dir.display(),
+            scoped_slug_dir.display()
+        )
+    })?;
+
+    resolve_installed_capsule_archive_in_store(
+        &store_root.join(&scoped_ref.publisher),
+        &scoped_ref.slug,
+        preferred_version,
+    )
+}
+
+fn resolve_installed_capsule_archive_in_store(
+    store_root: &std::path::Path,
+    slug: &str,
+    preferred_version: Option<&str>,
+) -> Result<Option<PathBuf>> {
+    let slug_dir = store_root.join(slug);
+    if !slug_dir.exists() || !slug_dir.is_dir() {
+        return Ok(None);
+    }
+
+    if let Some(version) = preferred_version
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let version_dir = slug_dir.join(version);
+        if !version_dir.exists() || !version_dir.is_dir() {
+            return Ok(None);
+        }
+        return select_capsule_file_in_version(&version_dir);
+    }
+
+    let mut version_dirs: Vec<(ParsedSemver, PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(&slug_dir)
+        .with_context(|| format!("Failed to read store directory: {}", slug_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(version_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if let Some(parsed) = ParsedSemver::parse(version_name) {
+            version_dirs.push((parsed, path));
+        }
+    }
+
+    version_dirs.sort_by(|(a, _), (b, _)| compare_semver(a, b).reverse());
+
+    for (_, version_dir) in version_dirs {
+        if let Some(capsule_path) = select_capsule_file_in_version(&version_dir)? {
+            return Ok(Some(capsule_path));
+        }
+    }
+
+    Ok(None)
+}
+
+fn select_capsule_file_in_version(version_dir: &std::path::Path) -> Result<Option<PathBuf>> {
+    let mut capsules = Vec::new();
+    for entry in std::fs::read_dir(version_dir).with_context(|| {
+        format!(
+            "Failed to read version directory: {}",
+            version_dir.display()
+        )
+    })? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .extension()
+                .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("capsule"))
+        {
+            capsules.push(path);
+        }
+    }
+
+    capsules.sort();
+    Ok(capsules.into_iter().next())
+}
+
+fn prompt_install_confirmation(
+    detail: &install::CapsuleDetailSummary,
+    resolved_version: &str,
+) -> Result<bool> {
+    println!();
+    println!("[!] Capsule '{}' is not installed.", detail.scoped_id);
+    println!();
+    let name = if detail.name.trim().is_empty() {
+        detail.slug.as_str()
+    } else {
+        detail.name.trim()
+    };
+    println!("📦 {} (v{})", name, resolved_version);
+    if !detail.description.trim().is_empty() {
+        println!("{}", detail.description.trim());
+    }
+
+    print_permission_summary(detail.permissions.as_ref());
+    println!();
+
+    loop {
+        print!("? Do you want to install and run this capsule? (Y/n): ");
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("Failed to read user input")?;
+
+        match input.trim().to_ascii_lowercase().as_str() {
+            "" | "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => {
+                println!("Please answer 'y' or 'n'.");
+            }
+        }
+    }
+}
+
+fn print_permission_summary(permissions: Option<&install::CapsulePermissions>) {
+    println!("This capsule requests the following permissions:");
+    let Some(permissions) = permissions else {
+        println!("  - No permissions metadata declared");
+        return;
+    };
+
+    let mut printed_any = false;
+
+    if let Some(network) = permissions.network.as_ref() {
+        let endpoints = network.merged_endpoints();
+        if !endpoints.is_empty() {
+            printed_any = true;
+            println!("  🌐 Network:");
+            for endpoint in endpoints {
+                println!("    - {}", endpoint);
+            }
+        }
+    }
+
+    if let Some(isolation) = permissions.isolation.as_ref() {
+        if !isolation.allow_env.is_empty() {
+            printed_any = true;
+            println!("  🔑 Isolation env allowlist:");
+            for env in &isolation.allow_env {
+                println!("    - {}", env);
+            }
+        }
+    }
+
+    if let Some(filesystem) = permissions.filesystem.as_ref() {
+        if !filesystem.read_only.is_empty() {
+            printed_any = true;
+            println!("  📁 Filesystem read-only:");
+            for path in &filesystem.read_only {
+                println!("    - {}", path);
+            }
+        }
+        if !filesystem.read_write.is_empty() {
+            printed_any = true;
+            println!("  ✍️  Filesystem read-write:");
+            for path in &filesystem.read_write {
+                println!("    - {}", path);
+            }
+        }
+    }
+
+    if !printed_any {
+        println!("  - No permissions metadata declared");
+    }
+}
+
+fn can_prompt_interactively(stdin_is_tty: bool, stdout_is_tty: bool) -> bool {
+    tui::can_launch_tui(stdin_is_tty, stdout_is_tty)
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct ParsedSemver {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    pre_release: Option<String>,
+}
+
+impl ParsedSemver {
+    fn parse(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let without_build = trimmed.split('+').next()?;
+        let (core, pre_release) = if let Some((core, pre)) = without_build.split_once('-') {
+            (core, Some(pre.to_string()))
+        } else {
+            (without_build, None)
+        };
+
+        let mut parts = core.split('.');
+        let major = parts.next()?.parse::<u64>().ok()?;
+        let minor = parts.next()?.parse::<u64>().ok()?;
+        let patch = parts.next()?.parse::<u64>().ok()?;
+        if parts.next().is_some() {
+            return None;
+        }
+
+        Some(Self {
+            major,
+            minor,
+            patch,
+            pre_release,
+        })
+    }
+}
+
+fn compare_semver(a: &ParsedSemver, b: &ParsedSemver) -> Ordering {
+    a.major
+        .cmp(&b.major)
+        .then_with(|| a.minor.cmp(&b.minor))
+        .then_with(|| a.patch.cmp(&b.patch))
+        .then_with(|| match (&a.pre_release, &b.pre_release) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(_), None) => Ordering::Less,
+            (Some(a_pre), Some(b_pre)) => a_pre.cmp(b_pre),
+        })
+}
+
+fn enforce_sandbox_mode_flags(
+    enforcement: EnforcementMode,
+    sandbox_requested: bool,
+    dangerously_skip_permissions: bool,
+    reporter: std::sync::Arc<reporters::CliReporter>,
+) -> Result<EnforcementMode> {
+    const ENV_ALLOW_UNSAFE: &str = "CAPSULE_ALLOW_UNSAFE";
+
+    if matches!(enforcement, EnforcementMode::BestEffort) {
+        anyhow::bail!("--enforcement best-effort is no longer supported; use --enforcement strict");
+    }
+
+    if matches!(enforcement, EnforcementMode::Strict) && sandbox_requested {
+        futures::executor::block_on(
+            reporter.warn(
+                "⚠️  Sandbox mode enabled: Tier2 targets will run under strict native sandboxing"
+                    .to_string(),
+            ),
+        )?;
+    }
+
+    if dangerously_skip_permissions {
+        if std::env::var(ENV_ALLOW_UNSAFE).ok().as_deref() != Some("1") {
+            anyhow::bail!(
+                "--dangerously-skip-permissions requires {}=1",
+                ENV_ALLOW_UNSAFE
+            );
+        }
+        futures::executor::block_on(
+            reporter.warn(
+                "⚠️  Dangerous mode enabled: bypassing all Ato runtime permission and sandbox barriers"
+                    .to_string(),
+            ),
+        )?;
+    }
+
+    Ok(enforcement)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_open_command(
+    path: PathBuf,
+    target: Option<String>,
+    watch: bool,
+    background: bool,
+    nacelle: Option<PathBuf>,
+    enforcement: EnforcementMode,
+    sandbox_mode: bool,
+    dangerously_skip_permissions: bool,
+    assume_yes: bool,
+    state: Vec<String>,
+    reporter: std::sync::Arc<reporters::CliReporter>,
+) -> Result<()> {
+    let target_path = if path.is_file() || path.extension().is_some_and(|ext| ext == "capsule") {
+        path.clone()
+    } else {
+        path.join("capsule.toml")
+    };
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(commands::open::execute(commands::open::OpenArgs {
+        target: target_path,
+        target_label: target,
+        watch,
+        background,
+        nacelle,
+        enforcement: enforcement.as_str().to_string(),
+        sandbox_mode,
+        dangerously_skip_permissions,
+        assume_yes,
+        state_bindings: state,
+        reporter,
+    }))
+}
+
+fn execute_source_sync_status_command(
+    source_id: String,
+    sync_run_id: String,
+    registry: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let result =
+            source::fetch_sync_run_status(&source_id, &sync_run_id, registry.as_deref(), json)
+                .await?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Ok(())
+    })
+}
+
+fn execute_source_rebuild_command(
+    source_id: String,
+    reference: Option<String>,
+    wait: bool,
+    registry: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let result = source::rebuild_source(
+            &source_id,
+            reference.as_deref(),
+            wait,
+            registry.as_deref(),
+            json,
+        )
+        .await?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Ok(())
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_search_command(
+    query: Option<String>,
+    category: Option<String>,
+    tags: Vec<String>,
+    limit: Option<usize>,
+    cursor: Option<String>,
+    registry: Option<String>,
+    json: bool,
+    no_tui: bool,
+    show_manifest: bool,
+) -> Result<()> {
+    if should_use_search_tui(
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+        json,
+        no_tui,
+    ) {
+        let selected = tui::run_search_tui(tui::SearchTuiArgs {
+            query: query.clone(),
+            category: category.clone(),
+            tags: tags.clone(),
+            limit,
+            cursor: cursor.clone(),
+            registry: registry.clone(),
+            show_manifest,
+        })?;
+        if let Some(scoped_id) = selected {
+            println!("{}", scoped_id);
+        }
+        return Ok(());
+    }
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let result = search::search_capsules(
+            query.as_deref(),
+            category.as_deref(),
+            Some(tags.as_slice()),
+            limit,
+            cursor.as_deref(),
+            registry.as_deref(),
+            json,
+        )
+        .await?;
+
+        if json {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Ok(())
+    })
+}
+
+fn should_use_search_tui(
+    stdin_is_tty: bool,
+    stdout_is_tty: bool,
+    json: bool,
+    no_tui: bool,
+) -> bool {
+    tui::can_launch_tui(stdin_is_tty, stdout_is_tty) && !json && !no_tui
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn explicit_local_path_rules() {
+        assert!(is_explicit_local_path_input("./foo"));
+        assert!(is_explicit_local_path_input("../foo"));
+        assert!(is_explicit_local_path_input("~/foo"));
+        assert!(is_explicit_local_path_input("/tmp/foo"));
+        assert!(is_explicit_local_path_input("."));
+        assert!(is_explicit_local_path_input(".."));
+        assert!(!is_explicit_local_path_input("foo"));
+        assert!(!is_explicit_local_path_input("foo/bar"));
+    }
+
+    #[test]
+    fn semver_prefers_highest_stable_release() {
+        let stable = ParsedSemver::parse("1.2.0").unwrap();
+        let prerelease = ParsedSemver::parse("1.2.0-rc1").unwrap();
+        let older = ParsedSemver::parse("1.1.9").unwrap();
+
+        assert_eq!(compare_semver(&stable, &prerelease), Ordering::Greater);
+        assert_eq!(compare_semver(&stable, &older), Ordering::Greater);
+        assert_eq!(compare_semver(&prerelease, &older), Ordering::Greater);
+    }
+
+    #[test]
+    fn bare_relative_scoped_like_input_is_not_local() {
+        let tmp = tempfile::tempdir().unwrap();
+        let scoped_like = tmp.path().join("my-org").join("my-tool");
+        std::fs::create_dir_all(&scoped_like).unwrap();
+        assert!(!is_explicit_local_path_input("my-org/my-tool"));
+    }
+
+    #[test]
+    fn select_capsule_file_is_deterministic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let version_dir = tmp.path().join("1.0.0");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        std::fs::write(version_dir.join("zeta.capsule"), b"z").unwrap();
+        std::fs::write(version_dir.join("alpha.capsule"), b"a").unwrap();
+
+        let selected = select_capsule_file_in_version(&version_dir)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            selected.file_name().and_then(|name| name.to_str()),
+            Some("alpha.capsule")
+        );
+    }
+
+    #[test]
+    fn resolve_installed_capsule_uses_highest_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let slug = "demo-app";
+        let slug_dir = tmp.path().join(slug);
+        std::fs::create_dir_all(slug_dir.join("0.9.0")).unwrap();
+        std::fs::create_dir_all(slug_dir.join("1.2.0-rc1")).unwrap();
+        std::fs::create_dir_all(slug_dir.join("1.2.0")).unwrap();
+
+        std::fs::write(slug_dir.join("0.9.0/old.capsule"), b"old").unwrap();
+        std::fs::write(slug_dir.join("1.2.0-rc1/preview.capsule"), b"preview").unwrap();
+        std::fs::write(slug_dir.join("1.2.0/new.capsule"), b"new").unwrap();
+
+        let resolved = resolve_installed_capsule_archive_in_store(tmp.path(), slug, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            resolved.file_name().and_then(|name| name.to_str()),
+            Some("new.capsule")
+        );
+    }
+
+    #[test]
+    fn resolve_installed_capsule_can_target_exact_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let slug = "demo-app";
+        let slug_dir = tmp.path().join(slug);
+        std::fs::create_dir_all(slug_dir.join("1.0.0")).unwrap();
+        std::fs::create_dir_all(slug_dir.join("2.0.0")).unwrap();
+
+        std::fs::write(slug_dir.join("1.0.0/rolled-back.capsule"), b"old").unwrap();
+        std::fs::write(slug_dir.join("2.0.0/current.capsule"), b"new").unwrap();
+
+        let resolved = resolve_installed_capsule_archive_in_store(tmp.path(), slug, Some("1.0.0"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            resolved.file_name().and_then(|name| name.to_str()),
+            Some("rolled-back.capsule")
+        );
+    }
+
+    #[test]
+    fn tty_prompt_gate_requires_both_streams() {
+        assert!(can_prompt_interactively(true, true));
+        assert!(!can_prompt_interactively(true, false));
+        assert!(!can_prompt_interactively(false, true));
+        assert!(!can_prompt_interactively(false, false));
+    }
+
+    #[test]
+    fn search_tui_gate_requires_tty_and_flags_allowing_tui() {
+        assert!(should_use_search_tui(true, true, false, false));
+        assert!(!should_use_search_tui(false, true, false, false));
+        assert!(!should_use_search_tui(true, false, false, false));
+        assert!(!should_use_search_tui(true, true, true, false));
+        assert!(!should_use_search_tui(true, true, false, true));
+    }
+
+    #[test]
+    fn run_command_parses_explicit_state_bindings() {
+        let cli = Cli::try_parse_from([
+            "ato",
+            "run",
+            ".",
+            "--state",
+            "data=/var/lib/ato/persistent/demo",
+            "--state",
+            "cache=/var/lib/ato/persistent/cache",
+        ])
+        .expect("parse");
+
+        match cli.command {
+            Commands::Run { state, .. } => assert_eq!(
+                state,
+                vec![
+                    "data=/var/lib/ato/persistent/demo".to_string(),
+                    "cache=/var/lib/ato/persistent/cache".to_string()
+                ]
+            ),
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn state_command_parses_register_and_inspect_forms() {
+        let register = Cli::try_parse_from([
+            "ato",
+            "state",
+            "register",
+            "--manifest",
+            ".",
+            "--name",
+            "data",
+            "--path",
+            "/var/lib/ato/persistent/demo",
+        ])
+        .expect("parse register");
+
+        match register.command {
+            Commands::State {
+                command:
+                    StateCommands::Register {
+                        manifest,
+                        state_name,
+                        path,
+                        json,
+                    },
+            } => {
+                assert_eq!(manifest, PathBuf::from("."));
+                assert_eq!(state_name, "data");
+                assert_eq!(path, PathBuf::from("/var/lib/ato/persistent/demo"));
+                assert!(!json);
+            }
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+
+        let inspect =
+            Cli::try_parse_from(["ato", "state", "inspect", "state-demo"]).expect("parse inspect");
+        match inspect.command {
+            Commands::State {
+                command: StateCommands::Inspect { state_ref, json },
+            } => {
+                assert_eq!(state_ref, "state-demo");
+                assert!(!json);
+            }
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn parse_sha256_for_artifact_supports_sha256sums_format() {
+        let body = "\
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  nacelle-v1.2.3-darwin-arm64
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  nacelle-v1.2.3-linux-x64
+";
+        let parsed =
+            crate::engine_manager::parse_sha256_for_artifact(body, "nacelle-v1.2.3-linux-x64");
+        assert_eq!(
+            parsed.as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+    }
+
+    #[test]
+    fn parse_sha256_for_artifact_supports_bsd_style_format() {
+        let body = "SHA256 (nacelle-v1.2.3-darwin-arm64) = CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+        let parsed =
+            crate::engine_manager::parse_sha256_for_artifact(body, "nacelle-v1.2.3-darwin-arm64");
+        assert_eq!(
+            parsed.as_deref(),
+            Some("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        );
+    }
+
+    #[test]
+    fn extract_first_sha256_hex_reads_single_file_checksum() {
+        let body = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd  nacelle-v1.2.3-darwin-arm64";
+        let parsed = crate::engine_manager::extract_first_sha256_hex(body);
+        assert_eq!(
+            parsed.as_deref(),
+            Some("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
+        );
+    }
+
+    #[test]
+    fn dangerous_skip_permissions_requires_explicit_opt_in_env() {
+        let _guard = env_lock().lock().expect("env lock");
+        std::env::remove_var("CAPSULE_ALLOW_UNSAFE");
+
+        let reporter = std::sync::Arc::new(reporters::CliReporter::new(true));
+        let err = enforce_sandbox_mode_flags(EnforcementMode::Strict, false, true, reporter)
+            .expect_err("must fail closed without env opt-in");
+        assert!(err
+            .to_string()
+            .contains("--dangerously-skip-permissions requires CAPSULE_ALLOW_UNSAFE=1"));
+    }
+
+    #[test]
+    fn dangerous_skip_permissions_allows_with_explicit_opt_in_env() {
+        let _guard = env_lock().lock().expect("env lock");
+        std::env::set_var("CAPSULE_ALLOW_UNSAFE", "1");
+
+        let reporter = std::sync::Arc::new(reporters::CliReporter::new(true));
+        let result = enforce_sandbox_mode_flags(EnforcementMode::Strict, false, true, reporter);
+        assert!(result.is_ok());
+
+        std::env::remove_var("CAPSULE_ALLOW_UNSAFE");
+    }
+
+    #[test]
+    fn publish_private_status_message_for_build_path() {
+        assert_eq!(
+            publish_private_status_message(false),
+            "📦 Building capsule artifact for private registry publish..."
+        );
+    }
+
+    #[test]
+    fn publish_private_status_message_for_upload_path() {
+        assert_eq!(
+            publish_private_status_message(true),
+            "📤 Publishing provided artifact to private registry..."
+        );
+    }
+
+    #[test]
+    fn publish_private_start_summary_line_build_path() {
+        let line = publish_private_start_summary_line(
+            "http://127.0.0.1:8787",
+            "build",
+            "local/demo-app",
+            "1.2.3",
+            false,
+        );
+        assert!(line.contains("registry=http://127.0.0.1:8787"));
+        assert!(line.contains("source=build"));
+        assert!(line.contains("scoped_id=local/demo-app"));
+        assert!(line.contains("version=1.2.3"));
+        assert!(line.contains("allow_existing=false"));
+    }
+
+    #[test]
+    fn publish_private_start_summary_line_artifact_path() {
+        let line = publish_private_start_summary_line(
+            "http://127.0.0.1:8787",
+            "artifact",
+            "team-x/demo-app",
+            "1.2.3",
+            true,
+        );
+        assert!(line.contains("source=artifact"));
+        assert!(line.contains("allow_existing=true"));
+    }
+
+    fn test_publish_args() -> PublishCommandArgs {
+        PublishCommandArgs {
+            registry: Some("http://127.0.0.1:8787".to_string()),
+            artifact: None,
+            scoped_id: None,
+            allow_existing: false,
+            prepare: false,
+            build: false,
+            deploy: false,
+            legacy_full_publish: false,
+            force_large_payload: false,
+            fix: false,
+            no_tui: false,
+            json: true,
+        }
+    }
+
+    #[test]
+    fn publish_phase_selection_defaults_to_all_for_private() {
+        let selected = select_publish_phases(false, false, false, false, false);
+        assert!(selected.prepare);
+        assert!(selected.build);
+        assert!(selected.deploy);
+        assert!(!selected.explicit_filter);
+    }
+
+    #[test]
+    fn publish_phase_selection_respects_filter_flags() {
+        let selected = select_publish_phases(true, false, true, true, false);
+        assert!(selected.prepare);
+        assert!(!selected.build);
+        assert!(selected.deploy);
+        assert!(selected.explicit_filter);
+    }
+
+    #[test]
+    fn publish_phase_selection_defaults_to_deploy_for_official() {
+        let selected = select_publish_phases(false, false, false, true, false);
+        assert!(!selected.prepare);
+        assert!(!selected.build);
+        assert!(selected.deploy);
+        assert!(!selected.explicit_filter);
+    }
+
+    #[test]
+    fn publish_phase_selection_legacy_full_publish_keeps_all_for_official() {
+        let selected = select_publish_phases(false, false, false, true, true);
+        assert!(selected.prepare);
+        assert!(selected.build);
+        assert!(selected.deploy);
+        assert!(!selected.explicit_filter);
+    }
+
+    #[test]
+    fn publish_validate_rejects_allow_existing_without_deploy() {
+        let mut args = test_publish_args();
+        args.allow_existing = true;
+        let selected = select_publish_phases(false, true, false, false, false);
+        let err =
+            validate_publish_phase_options(&args, selected, false).expect_err("must fail closed");
+        assert!(err.to_string().contains("--allow-existing"));
+    }
+
+    #[test]
+    fn publish_validate_rejects_fix_for_private_registry() {
+        let mut args = test_publish_args();
+        args.fix = true;
+        let selected = select_publish_phases(false, false, true, false, false);
+        let err =
+            validate_publish_phase_options(&args, selected, false).expect_err("must fail closed");
+        assert!(err.to_string().contains("--fix"));
+    }
+
+    #[test]
+    fn publish_validate_requires_artifact_or_build_for_private_deploy_only() {
+        let args = test_publish_args();
+        let selected = select_publish_phases(false, false, true, false, false);
+        let err =
+            validate_publish_phase_options(&args, selected, false).expect_err("must fail closed");
+        assert!(err.to_string().contains("--deploy requires --artifact"));
+    }
+}

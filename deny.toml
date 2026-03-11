@@ -1,0 +1,51 @@
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+unmaintained = "workspace"
+ignore = [
+    { id = "RUSTSEC-2024-0438", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
+    { id = "RUSTSEC-2024-0445", reason = "cap-primitives is pulled in by the same pinned wasmtime 16 stack and is being handled in that upgrade." },
+    { id = "RUSTSEC-2025-0046", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
+    { id = "RUSTSEC-2025-0118", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
+    { id = "RUSTSEC-2026-0020", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
+    { id = "RUSTSEC-2026-0021", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "LGPL-2.1-or-later",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "OpenSSL",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[bans]
+# This workspace intentionally resolves multiple target-specific support crates
+# in the shared lockfile; keep duplicate-version noise out of the security gate
+# while still denying wildcard requirements.
+multiple-versions = "allow"
+allow-wildcard-paths = true
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

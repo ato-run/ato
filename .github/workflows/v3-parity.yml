@@ -1,0 +1,62 @@
+name: V3 Parity Matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      native_only:
+        description: Skip V3 parity when running Windows native delivery E2E only.
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches:
+      - dev
+      - main
+  pull_request:
+    branches:
+      - dev
+      - main
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  SOURCE_DATE_EPOCH: "1704067200"
+
+concurrency:
+  group: v3-parity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  parity:
+    name: Dual Build + Compatibility
+    if: ${{ !((github.event_name == 'workflow_dispatch' && inputs.native_only) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[native-only]'))) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Validate Cargo.lock is up to date
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --format-version 1 >/dev/null
+
+      - name: Build ato binary (debug)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p ato-cli --locked
+
+      - name: Run v3 parity checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/ci/v3_parity_check.sh

@@ -1,0 +1,31 @@
+{
+  "metadata": {
+    "generated_by": "ato-cli v0.1.0",
+    "name": "native-python-no-uv-lock-capsule",
+    "source_manifest": "sha256:939f9c1ef9887f3493c0b3d8b6d284312e18c03c4aa3f9581c21dbc3ef5d2799",
+    "version": "0.1.0"
+  },
+  "sandbox": {
+    "enabled": true,
+    "network": {
+      "enabled": true,
+      "enforcement": "strict"
+    }
+  },
+  "services": {
+    "main": {
+      "args": [
+        "run",
+        "--offline",
+        "python3",
+        "main.py"
+      ],
+      "cwd": "source",
+      "env": {
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "executable": "uv"
+    }
+  },
+  "version": "1.0.0"
+}
