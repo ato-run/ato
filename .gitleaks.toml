@@ -1,0 +1,38 @@
+title = "ato-cli gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Documentation placeholder tokens"
+paths = [
+  '''^README\.md$''',
+  '''^README_JA\.md$''',
+]
+regexes = [
+  '''ATO_TOKEN=pwd''',
+  '''--auth-token pwd''',
+  '''<capsule-id>''',
+  '''<publisher>/<slug>''',
+  '''\./<name>\.capsule''',
+]
+
+[[allowlists]]
+description = "Generated source file"
+paths = [
+  '''^src/capsule_capnp\.rs$''',
+]
+
+[[allowlists]]
+description = "Test fixture placeholders in auth/profile/identity tests"
+paths = [
+  '''^src/auth\.rs$''',
+  '''^core/src/types/profile\.rs$''',
+  '''^core/src/types/identity\.rs$''',
+]
+regexes = [
+  '''ghp_test123''',
+  '''ghp_legacy123''',
+  '''did:key:z6MkLegacy''',
+  '''did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK''',
+]

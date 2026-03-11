@@ -1,0 +1,25 @@
+{
+  "version": "1.0.0",
+  "services": {
+    "main": {
+      "executable": "bun",
+      "args": [
+        "main.ts"
+      ],
+      "cwd": "source"
+    }
+  },
+  "sandbox": {
+    "enabled": true,
+    "network": {
+      "enabled": true,
+      "enforcement": "strict"
+    }
+  },
+  "metadata": {
+    "name": "env-dump-capsule",
+    "version": "0.1.0",
+    "generated_by": "ato-cli v0.1.0",
+    "source_manifest": "sha256:02f1d78938d17d042178f38348b6c3e5fb635d6d23bf2ac29886b5d13ae833ff"
+  }
+}

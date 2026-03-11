@@ -1,0 +1,25 @@
+schema_version = "1.0"
+name = "ipc-test-service"
+version = "0.1.0"
+type = "app"
+
+[metadata]
+description = "Test IPC service for E2E tests"
+
+[execution]
+runtime = "source"
+entrypoint = "echo hello"
+
+[ipc.exports]
+name = "test-svc"
+protocol = "jsonrpc-2.0"
+transport = "unix-socket"
+
+[ipc.exports.sharing]
+mode = "singleton"
+idle_timeout = 10
+max_clients = 5
+
+[[ipc.exports.methods]]
+name = "ping"
+description = "Ping method"

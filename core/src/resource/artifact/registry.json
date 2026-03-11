@@ -1,0 +1,26 @@
+{
+  "version": "1.0.0",
+  "runtimes": {
+    "llama-server": {
+      "latest": "b4238",
+      "versions": {
+        "b4238": {
+          "platforms": {
+            "mac-arm64": {
+              "url": "https://github.com/ggerganov/llama.cpp/releases/download/b4238/llama-b4238-bin-macos-arm64.zip",
+              "sha256": "SKIP_VERIFY",
+              "size_bytes": 15728640,
+              "binary_path": "build/bin/llama-server"
+            },
+            "mac-x64": {
+              "url": "https://github.com/ggerganov/llama.cpp/releases/download/b4238/llama-b4238-bin-macos-x64.zip",
+              "sha256": "SKIP_VERIFY",
+              "size_bytes": 15728640,
+              "binary_path": "build/bin/llama-server"
+            }
+          }
+        }
+      }
+    }
+  }
+}

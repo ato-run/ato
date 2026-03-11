@@ -1,0 +1,27 @@
+# IPC error test: circular dependency (IPC-003)
+schema_version = "1.0"
+name = "ipc-circular-a"
+version = "0.1.0"
+type = "app"
+
+[execution]
+runtime = "source"
+entrypoint = "echo hello"
+
+[ipc.exports]
+name = "circular-a"
+protocol = "jsonrpc-2.0"
+transport = "unix-socket"
+
+[[ipc.exports.methods]]
+name = "do_a"
+
+[ipc.imports]
+
+[ipc.imports.circular-b]
+from = "ipc-circular-b"
+activation = "eager"
+required = true
+
+[[ipc.imports.circular-b.capabilities]]
+method = "do_b"
