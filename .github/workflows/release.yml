@@ -383,8 +383,7 @@ jobs:
             esac
 
             cosign sign-blob --yes \
-              --output-signature "generated/${asset_name}.sig" \
-              --output-certificate "generated/${asset_name}.pem" \
+              --bundle "generated/${asset_name}.sigstore.json" \
               "$asset"
           done
 
@@ -392,8 +391,7 @@ jobs:
           for sbom in generated/*.sbom.spdx.json; do
             sbom_name="$(basename "$sbom")"
             cosign sign-blob --yes \
-              --output-signature "generated/${sbom_name}.sig" \
-              --output-certificate "generated/${sbom_name}.pem" \
+              --bundle "generated/${sbom_name}.sigstore.json" \
               "$sbom"
           done
           shopt -u nullglob
