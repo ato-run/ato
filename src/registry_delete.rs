@@ -102,8 +102,5 @@ fn parse_error_message(status: StatusCode, body: &str) -> String {
 }
 
 fn read_ato_token() -> Option<String> {
-    std::env::var("ATO_TOKEN")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    crate::auth::current_session_token()
 }
