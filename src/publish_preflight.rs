@@ -173,11 +173,18 @@ pub fn normalize_repository_value(value: &str) -> Result<String> {
         return Ok(format!("{}/{}", owner, repo));
     }
 
+    let raw = raw.trim_end_matches('/');
+    let raw = raw
+        .strip_prefix("github.com/")
+        .or_else(|| raw.strip_prefix("www.github.com/"))
+        .unwrap_or(raw);
     let mut it = raw.split('/');
     let owner = it.next().unwrap_or("").trim();
     let repo = it.next().unwrap_or("").trim_end_matches(".git").trim();
     if owner.is_empty() || repo.is_empty() || it.next().is_some() {
-        anyhow::bail!("repository must be 'owner/repo' or GitHub URL");
+        anyhow::bail!(
+            "repository must be 'owner/repo', 'github.com/owner/repo', 'www.github.com/owner/repo', or a GitHub URL like 'https://github.com/owner/repo'"
+        );
     }
     Ok(format!("{}/{}", owner, repo))
 }
