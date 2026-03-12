@@ -42,6 +42,39 @@ pub fn execute_pack_command(
     cli_json: bool,
     nacelle_override: Option<PathBuf>,
 ) -> Result<BuildResult> {
+    execute_pack_command_with_injected_manifest(
+        dir,
+        init_if_missing,
+        key,
+        standalone,
+        force_large_payload,
+        keep_failed_artifacts,
+        strict_manifest,
+        enforcement,
+        reporter,
+        timings,
+        cli_json,
+        nacelle_override,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_pack_command_with_injected_manifest(
+    dir: PathBuf,
+    init_if_missing: bool,
+    key: Option<PathBuf>,
+    standalone: bool,
+    force_large_payload: bool,
+    keep_failed_artifacts: bool,
+    strict_manifest: bool,
+    enforcement: String,
+    reporter: std::sync::Arc<reporters::CliReporter>,
+    timings: bool,
+    cli_json: bool,
+    nacelle_override: Option<PathBuf>,
+    injected_manifest: Option<&str>,
+) -> Result<BuildResult> {
     let total_started = Instant::now();
     let mut timing_entries = Vec::new();
     let dir = dir
@@ -69,6 +102,14 @@ pub fn execute_pack_command(
                 },
                 reporter.clone(),
             )?;
+        } else if let Some(manifest_text) = injected_manifest {
+            futures::executor::block_on(reporter.warn(
+                "No `capsule.toml` found. Using draft returned by ato store for this GitHub repository.".to_string(),
+            ))?;
+            std::fs::write(&manifest, manifest_text).with_context(|| {
+                format!("Failed to write temporary manifest: {}", manifest.display())
+            })?;
+            temporary_manifest = Some(TemporaryManifestGuard::new(manifest.clone()));
         } else {
             futures::executor::block_on(reporter.warn(
                 "No `capsule.toml` found. Using defaults. Run `ato init` to generate an agent prompt, or `ato build --init` to create `capsule.toml` interactively.".to_string(),
