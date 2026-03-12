@@ -119,7 +119,12 @@ fn resolve_publish_input(args: &PublishPrivateArgs) -> Result<ResolvedPublishInp
     if let Some(artifact_path) = &args.artifact_path {
         let info = crate::publish_artifact::inspect_artifact_manifest(artifact_path)?;
         let slug = manifest_slug(&info.name)?;
-        let scoped_id = resolve_scoped_id_for_artifact(args.scoped_id.as_deref(), &info, &slug)?;
+        let scoped_id = resolve_scoped_id_for_artifact(
+            &args.registry_url,
+            args.scoped_id.as_deref(),
+            &info,
+            &slug,
+        )?;
         return Ok(ResolvedPublishInput::Artifact {
             artifact_path: artifact_path.clone(),
             version: info.version,
@@ -135,7 +140,7 @@ fn resolve_publish_input(args: &PublishPrivateArgs) -> Result<ResolvedPublishInp
         .map_err(|err| anyhow::anyhow!("Failed to parse capsule.toml: {}", err))?;
 
     let slug = manifest_slug(&manifest.name)?;
-    let publisher = resolve_private_publisher(&manifest_raw);
+    let publisher = resolve_private_publisher(&args.registry_url, &manifest_raw);
     let scoped_id = format!("{}/{}", publisher, slug);
 
     Ok(ResolvedPublishInput::Build {
@@ -147,10 +152,32 @@ fn resolve_publish_input(args: &PublishPrivateArgs) -> Result<ResolvedPublishInp
 }
 
 fn resolve_scoped_id_for_artifact(
+    registry_url: &str,
     override_scoped_id: Option<&str>,
     info: &ArtifactManifestInfo,
     slug: &str,
 ) -> Result<String> {
+    if let Some(dock_handle) = dock_handle_from_registry_url(registry_url) {
+        if let Some(explicit) = override_scoped_id {
+            let scoped = crate::install::parse_capsule_ref(explicit)?;
+            if scoped.slug != slug {
+                anyhow::bail!(
+                    "--scoped-id slug '{}' must match artifact manifest.name '{}'",
+                    scoped.slug,
+                    slug
+                );
+            }
+            if scoped.publisher != dock_handle {
+                anyhow::bail!(
+                    "--scoped-id publisher '{}' must match dock handle '{}'",
+                    scoped.publisher,
+                    dock_handle
+                );
+            }
+        }
+        return Ok(format!("{}/{}", dock_handle, slug));
+    }
+
     if let Some(explicit) = override_scoped_id {
         let scoped = crate::install::parse_capsule_ref(explicit)?;
         if scoped.slug != slug {
@@ -172,7 +199,11 @@ fn resolve_scoped_id_for_artifact(
     Ok(format!("{}/{}", publisher, slug))
 }
 
-fn resolve_private_publisher(manifest_raw: &str) -> String {
+fn resolve_private_publisher(registry_url: &str, manifest_raw: &str) -> String {
+    if let Some(dock_handle) = dock_handle_from_registry_url(registry_url) {
+        return dock_handle;
+    }
+
     if let Some(repo_owner) = manifest_repository_owner(manifest_raw) {
         return repo_owner;
     }
@@ -189,6 +220,24 @@ fn resolve_private_publisher(manifest_raw: &str) -> String {
     }
 
     "local".to_string()
+}
+
+fn dock_handle_from_registry_url(registry_url: &str) -> Option<String> {
+    let normalized =
+        crate::registry_http::normalize_registry_url(registry_url, "--registry").ok()?;
+    let parsed = reqwest::Url::parse(&normalized).ok()?;
+    let mut segments = parsed
+        .path_segments()?
+        .filter(|segment| !segment.is_empty());
+    if segments.next()? != "d" {
+        return None;
+    }
+    let handle = segments.next()?.trim();
+    if handle.is_empty() {
+        None
+    } else {
+        Some(handle.to_string())
+    }
 }
 
 fn manifest_repository_owner(manifest_raw: &str) -> Option<String> {
@@ -327,5 +376,78 @@ entrypoint = "main.ts"
         .expect("summarize");
 
         assert_eq!(summary.scoped_id, "team-x/demo-app");
+    }
+
+    #[test]
+    fn summarize_artifact_mode_uses_dock_handle_from_registry_url() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let artifact_path = tmp.path().join("demo.capsule");
+        write_test_artifact(
+            &artifact_path,
+            "demo-app",
+            "1.2.3",
+            Some("https://github.com/another-owner/demo-app"),
+        );
+
+        let summary = summarize(&PublishPrivateArgs {
+            registry_url: "https://ato.run/d/koh0920".to_string(),
+            artifact_path: Some(artifact_path),
+            force_large_payload: false,
+            scoped_id: None,
+            allow_existing: false,
+        })
+        .expect("summarize");
+
+        assert_eq!(summary.scoped_id, "koh0920/demo-app");
+    }
+
+    #[test]
+    fn summarize_artifact_mode_rejects_scoped_id_publisher_mismatch_for_dock() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let artifact_path = tmp.path().join("demo.capsule");
+        write_test_artifact(&artifact_path, "demo-app", "1.2.3", None);
+
+        let err = summarize(&PublishPrivateArgs {
+            registry_url: "https://ato.run/d/koh0920".to_string(),
+            artifact_path: Some(artifact_path),
+            force_large_payload: false,
+            scoped_id: Some("other-team/demo-app".to_string()),
+            allow_existing: false,
+        })
+        .expect_err("must reject mismatched dock publisher");
+
+        assert!(err.to_string().contains("must match dock handle 'koh0920'"));
+    }
+
+    #[test]
+    fn resolve_private_publisher_uses_dock_handle_before_repository_owner() {
+        let manifest_raw = r#"
+schema_version = "0.2"
+name = "demo-app"
+version = "1.2.3"
+type = "app"
+default_target = "cli"
+
+[metadata]
+repository = "https://github.com/another-owner/demo-app"
+
+[targets.cli]
+runtime = "source"
+driver = "deno"
+"#;
+
+        assert_eq!(
+            resolve_private_publisher("https://ato.run/d/koh0920", manifest_raw),
+            "koh0920"
+        );
+    }
+
+    #[test]
+    fn dock_handle_from_registry_url_extracts_handle() {
+        assert_eq!(
+            dock_handle_from_registry_url("https://ato.run/d/koh0920"),
+            Some("koh0920".to_string())
+        );
+        assert_eq!(dock_handle_from_registry_url("https://api.ato.run"), None);
     }
 }

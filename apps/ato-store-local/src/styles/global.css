@@ -8,14 +8,14 @@
   --text-1: #0a0a0a;
   --text-2: #525252;
   --text-3: #a3a3a3;
-  --accent: #0066ff;
-  --accent-lt: #e6f0ff;
-  --accent-md: #bfdbfe;
-  --green: #22c55e;
+  --accent: #0a0a0a;
+  --accent-lt: #f4f4f5;
+  --accent-md: #d4d4d4;
+  --green: #16a34a;
   --green-lt: #f0fdf4;
   --red: #ef4444;
   --red-lt: #fef2f2;
-  --yellow: #f59e0b;
+  --yellow: #d97706;
   --yellow-lt: #fffbeb;
   --sidebar-bg: #ffffff;
   --sidebar-bd: #e5e5e5;
@@ -102,8 +102,11 @@ code,
 
 .app-shell {
   display: flex;
+  flex-direction: column;
   height: 100vh;
   overflow: hidden;
+  /* offset for fixed LocalNav (h-16 = 64px) */
+  padding-top: 64px;
 }
 
 .main-pane {
@@ -112,7 +115,6 @@ code,
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  height: 100vh;
   overflow: hidden;
 }
 
@@ -168,22 +170,8 @@ code,
 
   .main-pane {
     height: auto;
-    min-height: 100dvh;
+    min-height: 0;
     overflow: visible;
-  }
-
-  .mobile-nav-bar {
-    display: flex;
-    align-items: center;
-    min-height: 44px;
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
-    flex-shrink: 0;
-  }
-
-  .mobile-menu-btn {
-    background: var(--surface);
   }
 
   .content-pane {
