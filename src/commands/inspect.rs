@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Error as AnyhowError;
 use capsule_core::manifest;
@@ -245,8 +245,9 @@ async fn resolve_target(
     input: &str,
     registry: Option<&str>,
 ) -> Result<ResolvedInspection, InspectRequirementsError> {
-    let expanded_path = expand_local_path(input);
-    let should_treat_as_local = expanded_path.exists() || is_explicit_local_path_input(input);
+    let expanded_path = crate::local_input::expand_local_path(input);
+    let should_treat_as_local =
+        crate::local_input::should_treat_input_as_local(input, &expanded_path);
     if should_treat_as_local {
         return resolve_local_target(input, &expanded_path);
     }
@@ -645,42 +646,4 @@ fn print_category<'a>(label: &str, values: impl Iterator<Item = &'a String>) {
     } else {
         println!("  {label}: {}", values.join(", "));
     }
-}
-
-fn expand_local_path(raw: &str) -> PathBuf {
-    if raw == "~" {
-        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(raw));
-    }
-    if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
-    }
-    PathBuf::from(raw)
-}
-
-fn is_explicit_local_path_input(raw: &str) -> bool {
-    if raw.is_empty() {
-        return false;
-    }
-    if raw == "." || raw == ".." {
-        return true;
-    }
-    if raw.starts_with("./")
-        || raw.starts_with("../")
-        || raw.starts_with(".\\")
-        || raw.starts_with("..\\")
-        || raw.starts_with("~/")
-        || raw.starts_with("~\\")
-        || raw.starts_with('/')
-        || raw.starts_with('\\')
-    {
-        return true;
-    }
-
-    // Check for Windows absolute path: "C:\path" or "C:/path".
-    raw.len() >= 3
-        && raw.as_bytes()[1] == b':'
-        && (raw.as_bytes()[2] == b'/' || raw.as_bytes()[2] == b'\\')
-        && raw.as_bytes()[0].is_ascii_alphabetic()
 }
