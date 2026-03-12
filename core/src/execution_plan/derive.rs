@@ -65,6 +65,7 @@ pub fn compile_execution_plan(
         runtime,
         named_target.driver.as_deref(),
         named_target.language.as_deref(),
+        &named_target.cmd,
     )?;
     let tier = derive_tier(runtime, driver)?;
 
@@ -84,6 +85,13 @@ pub fn compile_execution_plan(
         })?;
         allow_hosts.push(format!("127.0.0.1:{port}"));
         allow_hosts.push(format!("localhost:{port}"));
+        allow_hosts.push(format!("0.0.0.0:{port}"));
+    } else if matches!((runtime, driver), (ExecutionRuntime::Source, ExecutionDriver::Deno)) {
+        if let Some(port) = decision.plan.execution_port() {
+            allow_hosts.push(format!("127.0.0.1:{port}"));
+            allow_hosts.push(format!("localhost:{port}"));
+            allow_hosts.push(format!("0.0.0.0:{port}"));
+        }
     }
     allow_hosts = normalize_unordered_set(&allow_hosts);
 
@@ -187,6 +195,7 @@ fn resolve_driver(
     runtime: ExecutionRuntime,
     explicit_driver: Option<&str>,
     language: Option<&str>,
+    cmd: &[String],
 ) -> Result<ExecutionDriver, AtoExecutionError> {
     let parsed = explicit_driver.map(|value| {
         ExecutionDriver::from_manifest(value).ok_or_else(|| {
@@ -212,6 +221,17 @@ fn resolve_driver(
         ExecutionRuntime::Web => ExecutionDriver::Static,
         ExecutionRuntime::Wasm => ExecutionDriver::Wasmtime,
         ExecutionRuntime::Source => {
+            if let Some(program) = cmd.first() {
+                match program.trim().to_ascii_lowercase().as_str() {
+                    "deno" => return Ok(parsed.unwrap_or(ExecutionDriver::Deno)),
+                    "node" | "nodejs" => return Ok(parsed.unwrap_or(ExecutionDriver::Node)),
+                    "python" | "python3" | "py" => {
+                        return Ok(parsed.unwrap_or(ExecutionDriver::Python));
+                    }
+                    _ => {}
+                }
+            }
+
             match language
                 .unwrap_or_default()
                 .trim()
@@ -347,33 +367,46 @@ mod tests {
 
     #[test]
     fn driver_resolution_infers_from_language() {
-        let driver = resolve_driver(ExecutionRuntime::Source, None, Some("deno")).expect("driver");
+        let driver = resolve_driver(ExecutionRuntime::Source, None, Some("deno"), &[])
+            .expect("driver");
         assert!(matches!(driver, ExecutionDriver::Deno));
     }
 
     #[test]
     fn driver_resolution_infers_node_from_language() {
-        let driver =
-            resolve_driver(ExecutionRuntime::Source, None, Some("typescript")).expect("driver");
+        let driver = resolve_driver(ExecutionRuntime::Source, None, Some("typescript"), &[])
+            .expect("driver");
         assert!(matches!(driver, ExecutionDriver::Node));
     }
 
     #[test]
     fn driver_resolution_infers_python_from_language() {
-        let driver =
-            resolve_driver(ExecutionRuntime::Source, None, Some("python")).expect("driver");
+        let driver = resolve_driver(ExecutionRuntime::Source, None, Some("python"), &[])
+            .expect("driver");
         assert!(matches!(driver, ExecutionDriver::Python));
     }
 
     #[test]
+    fn driver_resolution_infers_deno_from_cmd_program() {
+        let driver = resolve_driver(
+            ExecutionRuntime::Source,
+            None,
+            None,
+            &["deno".to_string(), "run".to_string(), "main.ts".to_string()],
+        )
+        .expect("driver");
+        assert!(matches!(driver, ExecutionDriver::Deno));
+    }
+
+    #[test]
     fn driver_resolution_rejects_mismatch() {
-        let err = resolve_driver(ExecutionRuntime::Web, Some("native"), None).unwrap_err();
+        let err = resolve_driver(ExecutionRuntime::Web, Some("native"), None, &[]).unwrap_err();
         assert_eq!(err.code, "ATO_ERR_POLICY_VIOLATION");
     }
 
     #[test]
     fn driver_resolution_requires_explicit_driver_for_web() {
-        let err = resolve_driver(ExecutionRuntime::Web, None, None).unwrap_err();
+        let err = resolve_driver(ExecutionRuntime::Web, None, None, &[]).unwrap_err();
         assert_eq!(err.code, "ATO_ERR_POLICY_VIOLATION");
         assert!(err.message.contains("requires explicit driver"));
     }
