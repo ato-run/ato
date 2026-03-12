@@ -2395,10 +2395,7 @@ fn has_ato_token() -> bool {
 }
 
 fn current_ato_token() -> Option<String> {
-    std::env::var("ATO_TOKEN")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    crate::auth::current_session_token()
 }
 
 fn verify_epoch_signature(epoch: &ManifestEpochResolveResponse) -> Result<()> {
