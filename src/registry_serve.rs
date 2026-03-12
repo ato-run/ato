@@ -4618,7 +4618,7 @@ mod tests {
     #[test]
     fn format_bind_error_preserves_generic_io_message() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9090);
-        let err = std::io::Error::new(ErrorKind::Other, "boom");
+        let err = std::io::Error::other("boom");
         let message = format_bind_error(addr, &err);
         assert!(message.contains("Failed to bind 127.0.0.1:9090: boom"));
         assert!(!message.contains("Another process is already listening"));
