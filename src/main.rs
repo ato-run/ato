@@ -1937,16 +1937,52 @@ fn run() -> Result<()> {
                 if version.is_some() {
                     anyhow::bail!("--version cannot be used with --from-gh-repo");
                 }
-                let checkout = rt.block_on(install::download_github_repository(&repository))?;
+                let install_draft = match rt
+                    .block_on(install::fetch_github_install_draft(&repository))
+                {
+                    Ok(draft) => Some(draft),
+                    Err(error) => {
+                        if !json {
+                            eprintln!(
+                                "⚠️  Failed to fetch ato store install draft: {error}. Falling back to local zero-config inference."
+                            );
+                        }
+                        None
+                    }
+                };
+                let checkout = rt.block_on(install::download_github_repository_at_ref(
+                    &repository,
+                    install_draft
+                        .as_ref()
+                        .map(|draft| draft.resolved_ref.sha.as_str()),
+                ))?;
                 if !json {
                     eprintln!(
                         "📦 Building {} from GitHub source in {}",
                         checkout.repository,
                         checkout.checkout_dir.display()
                     );
+                    if let Some(draft) = install_draft.as_ref() {
+                        eprintln!(
+                            "   Revision: {} ({})",
+                            draft.resolved_ref.sha, draft.resolved_ref.ref_name
+                        );
+                        if draft.manifest_source == "inferred" {
+                            eprintln!(
+                                "   Using store-generated capsule draft for {}",
+                                draft.repo_ref
+                            );
+                            if let Some(hint) = draft.capsule_hint.as_ref() {
+                                eprintln!("   Confidence: {}", hint.confidence);
+                                for warning in &hint.warnings {
+                                    eprintln!("   Warning: {warning}");
+                                }
+                            }
+                        }
+                    }
                 }
                 let reporter = std::sync::Arc::new(reporters::CliReporter::new(json));
-                let build_result = commands::build::execute_pack_command(
+                let build_result = commands::build::execute_pack_command_with_injected_manifest(
                     checkout.checkout_dir.clone(),
                     false,
                     None,
@@ -1959,6 +1995,9 @@ fn run() -> Result<()> {
                     false,
                     json,
                     None,
+                    install_draft
+                        .as_ref()
+                        .and_then(|draft| draft.preview_toml.as_deref()),
                 )?;
                 let artifact = build_result.artifact.ok_or_else(|| {
                     anyhow::anyhow!(

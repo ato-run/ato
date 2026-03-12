@@ -29,6 +29,8 @@ use crate::registry::RegistryResolver;
 use crate::runtime_tree;
 
 const DEFAULT_STORE_DIR: &str = ".ato/store";
+const DEFAULT_STORE_API_URL: &str = "https://api.ato.run";
+const ENV_STORE_API_URL: &str = "ATO_STORE_API_URL";
 const SEGMENT_MAX_LEN: usize = 63;
 const LEASE_REFRESH_INTERVAL_SECS: u64 = 300;
 const NEGOTIATE_DEFAULT_MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -87,6 +89,56 @@ pub struct GitHubCheckout {
     pub publisher: String,
     pub checkout_dir: PathBuf,
     _temp_dir: tempfile::TempDir,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct GitHubInstallDraftResponse {
+    pub repo: GitHubInstallDraftRepo,
+    #[serde(rename = "capsuleToml")]
+    pub capsule_toml: GitHubInstallDraftCapsuleToml,
+    #[serde(rename = "repoRef")]
+    pub repo_ref: String,
+    #[serde(rename = "proposedInstallCommand")]
+    pub proposed_install_command: String,
+    #[serde(rename = "resolvedRef")]
+    pub resolved_ref: GitHubInstallDraftResolvedRef,
+    #[serde(rename = "manifestSource")]
+    pub manifest_source: String,
+    #[serde(rename = "previewToml")]
+    pub preview_toml: Option<String>,
+    #[serde(rename = "capsuleHint")]
+    pub capsule_hint: Option<GitHubInstallDraftHint>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct GitHubInstallDraftRepo {
+    pub owner: String,
+    pub repo: String,
+    #[serde(rename = "fullName")]
+    pub full_name: String,
+    #[serde(rename = "defaultBranch")]
+    pub default_branch: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct GitHubInstallDraftCapsuleToml {
+    pub exists: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GitHubInstallDraftResolvedRef {
+    #[serde(rename = "ref")]
+    pub ref_name: String,
+    pub sha: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GitHubInstallDraftHint {
+    pub confidence: String,
+    pub warnings: Vec<String>,
 }
 
 pub struct InstallExecutionOptions {
@@ -456,14 +508,58 @@ pub fn normalize_github_repository(repository: &str) -> Result<String> {
     crate::publish_preflight::normalize_repository_value(repository)
 }
 
-pub async fn download_github_repository(repository: &str) -> Result<GitHubCheckout> {
+pub async fn fetch_github_install_draft(repository: &str) -> Result<GitHubInstallDraftResponse> {
+    let normalized = normalize_github_repository(repository)?;
+    let (owner, repo) = normalized
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("repository must include owner/repo"))?;
+    let client = reqwest::Client::new();
+    let endpoint = format!(
+        "{}/v1/github/repos/{}/{}/install-draft",
+        resolve_store_api_base_url(),
+        urlencoding::encode(owner),
+        urlencoding::encode(repo)
+    );
+    let response = client
+        .get(&endpoint)
+        .header(reqwest::header::USER_AGENT, "ato-cli")
+        .send()
+        .await
+        .with_context(|| format!("Failed to fetch GitHub install draft: {normalized}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        bail!(
+            "Failed to fetch GitHub install draft (status={}): {}",
+            status,
+            body
+        );
+    }
+
+    response
+        .json::<GitHubInstallDraftResponse>()
+        .await
+        .with_context(|| format!("Failed to parse GitHub install draft: {normalized}"))
+}
+
+pub async fn download_github_repository_at_ref(
+    repository: &str,
+    resolved_ref: Option<&str>,
+) -> Result<GitHubCheckout> {
     let normalized = normalize_github_repository(repository)?;
     let (owner, repo) = normalized
         .split_once('/')
         .ok_or_else(|| anyhow::anyhow!("repository must include owner/repo"))?;
     let publisher = normalize_install_segment(owner)?;
     let client = reqwest::Client::new();
-    let archive_url = format!("{}/repos/{owner}/{repo}/tarball", github_api_base_url());
+    let archive_url = match resolved_ref.filter(|value| !value.trim().is_empty()) {
+        Some(reference) => format!(
+            "{}/repos/{owner}/{repo}/tarball/{}",
+            github_api_base_url(),
+            urlencoding::encode(reference)
+        ),
+        None => format!("{}/repos/{owner}/{repo}/tarball", github_api_base_url()),
+    };
     let response = client
         .get(&archive_url)
         .header(reqwest::header::USER_AGENT, "ato-cli")
@@ -498,6 +594,14 @@ pub async fn download_github_repository(repository: &str) -> Result<GitHubChecko
         checkout_dir,
         _temp_dir: temp_dir,
     })
+}
+
+fn resolve_store_api_base_url() -> String {
+    std::env::var(ENV_STORE_API_URL)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_STORE_API_URL.to_string())
 }
 
 pub async fn install_built_github_artifact(
@@ -1047,6 +1151,17 @@ fn unpack_github_tarball(bytes: &[u8], destination: &Path) -> Result<PathBuf> {
         .context("Failed to read GitHub repository archive")?
     {
         let mut entry = entry.context("Invalid GitHub repository archive entry")?;
+        if !matches!(
+            entry.header().entry_type(),
+            tar::EntryType::Regular
+                | tar::EntryType::Directory
+                | tar::EntryType::Symlink
+                | tar::EntryType::Link
+        ) {
+            // Ignore tar metadata entries like PAX/GNU headers so valid GitHub
+            // archives with a single repository root are not rejected.
+            continue;
+        }
         let path = entry
             .path()
             .context("Failed to read GitHub archive entry path")?;
@@ -3431,9 +3546,17 @@ entrypoint = "main.py"
     }
 
     #[test]
-    fn test_normalize_github_repository_accepts_url_and_owner_repo() {
+    fn test_normalize_github_repository_accepts_url_host_path_and_owner_repo() {
         assert_eq!(
             normalize_github_repository("https://github.com/Koh0920/ato-cli.git").unwrap(),
+            "Koh0920/ato-cli"
+        );
+        assert_eq!(
+            normalize_github_repository("github.com/Koh0920/ato-cli.git").unwrap(),
+            "Koh0920/ato-cli"
+        );
+        assert_eq!(
+            normalize_github_repository("www.github.com/Koh0920/ato-cli").unwrap(),
             "Koh0920/ato-cli"
         );
         assert_eq!(
@@ -3517,6 +3640,47 @@ entrypoint = "main.py"
         let err =
             unpack_github_tarball(&archive_bytes, temp.path()).expect_err("must reject archive");
         assert!(err.to_string().contains("multiple top-level directories"));
+    }
+
+    #[test]
+    fn test_unpack_github_tarball_ignores_global_pax_headers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut archive_bytes = Vec::new();
+        {
+            let encoder =
+                flate2::write::GzEncoder::new(&mut archive_bytes, flate2::Compression::default());
+            let mut builder = tar::Builder::new(encoder);
+
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::XGlobalHeader);
+            header.set_size(0);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "pax_global_header", std::io::Cursor::new([]))
+                .expect("append pax global header");
+
+            let mut header = tar::Header::new_gnu();
+            header.set_size(1);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "repo/index.js", std::io::Cursor::new(b"a"))
+                .expect("append repo file");
+
+            builder
+                .into_inner()
+                .expect("finish tar")
+                .finish()
+                .expect("finish gzip");
+        }
+
+        let root = unpack_github_tarball(&archive_bytes, temp.path()).expect("must unpack archive");
+        assert_eq!(root, temp.path().join("repo"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("index.js")).expect("read unpacked file"),
+            "a"
+        );
     }
 
     #[test]
