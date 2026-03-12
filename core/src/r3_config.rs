@@ -273,8 +273,13 @@ fn build_config_json(
     } else {
         let entrypoint = read_entrypoint(manifest)?;
         let command = read_command(manifest);
-        let (executable, args, env, signals) =
-            resolve_command(&entrypoint, command.as_deref(), manifest, standalone);
+        let cmd_overrides_entrypoint = target_cmd_overrides_entrypoint(manifest);
+        let (executable, args, env, signals) = if cmd_overrides_entrypoint {
+            let command_entrypoint = command.as_deref().unwrap_or(&entrypoint);
+            resolve_command(command_entrypoint, None, manifest, standalone)
+        } else {
+            resolve_command(&entrypoint, command.as_deref(), manifest, standalone)
+        };
         let main_spec = ServiceSpec {
             executable,
             args,
@@ -460,7 +465,7 @@ fn resolve_target_command(
 
     let mut env = runtime.env.clone();
 
-    let (executable, mut args) = if let Some(lang) = language.as_deref() {
+    let (executable, args) = if let Some(lang) = language.as_deref() {
         match lang {
             "python" => {
                 let mut args = tokens.get(1..).unwrap_or(&[]).to_vec();
@@ -527,9 +532,13 @@ fn resolve_target_command(
         )
     };
 
-    if !runtime.cmd.is_empty() {
-        args.extend(runtime.cmd.clone());
-    }
+    let (executable, mut args) = if let Some((cmd_executable, cmd_args)) =
+        resolve_explicit_cmd_override(&runtime.cmd, standalone, &mut env)
+    {
+        (cmd_executable, cmd_args)
+    } else {
+        (executable, args)
+    };
 
     if !args.is_empty() {
         args = args
@@ -601,6 +610,14 @@ fn read_command(manifest: &toml::Value) -> Option<String> {
         }
     }
     None
+}
+
+fn target_cmd_overrides_entrypoint(manifest: &toml::Value) -> bool {
+    selected_target_table(manifest)
+        .and_then(|target| target.get("cmd"))
+        .and_then(|value| value.as_array())
+        .map(|cmd| !cmd.is_empty())
+        .unwrap_or(false)
 }
 
 fn read_entrypoint(manifest: &toml::Value) -> Result<String> {
@@ -1049,6 +1066,62 @@ fn detect_language_from_entrypoint(entrypoint: &str) -> Option<String> {
         return Some("bun".to_string());
     }
     None
+}
+
+fn resolve_explicit_cmd_override(
+    runtime_cmd: &[String],
+    standalone: bool,
+    env: &mut HashMap<String, String>,
+) -> Option<(String, Vec<String>)> {
+    let program = runtime_cmd.first()?.trim().to_string();
+    if program.is_empty() {
+        return None;
+    }
+
+    let args = runtime_cmd.get(1..).unwrap_or(&[]).to_vec();
+
+    let resolved = match detect_language_from_program(&program).as_deref() {
+        Some("python") => {
+            env.insert("PYTHONDONTWRITEBYTECODE".to_string(), "1".to_string());
+            if standalone {
+                env.insert("PYTHONHOME".to_string(), "runtime/python".to_string());
+                env.insert("PYTHONPATH".to_string(), "source".to_string());
+                ("runtime/python/bin/python3".to_string(), args)
+            } else {
+                let mut uv_args = vec![
+                    "run".to_string(),
+                    "--offline".to_string(),
+                    "python3".to_string(),
+                ];
+                uv_args.extend(args);
+                ("uv".to_string(), uv_args)
+            }
+        }
+        Some("node") => {
+            if standalone {
+                ("runtime/node/bin/node".to_string(), args)
+            } else {
+                ("node".to_string(), args)
+            }
+        }
+        Some("deno") => {
+            if standalone {
+                ("runtime/deno/bin/deno".to_string(), args)
+            } else {
+                ("deno".to_string(), args)
+            }
+        }
+        Some("bun") => {
+            if standalone {
+                ("runtime/bun/bin/bun".to_string(), args)
+            } else {
+                ("bun".to_string(), args)
+            }
+        }
+        _ => (normalize_program(&program, standalone), args),
+    };
+
+    Some(resolved)
 }
 
 fn normalize_language(lang: &str) -> String {
@@ -1604,6 +1677,37 @@ env = { PYTHONPATH = "src" }
         let config: ConfigJson = serde_json::from_str(&config_raw).unwrap();
 
         assert_eq!(config.services["main"].executable, "my-app");
+    }
+
+    #[test]
+    fn test_explicit_cmd_overrides_bun_inference_for_typescript_entrypoint() {
+        let tmp = tempdir().unwrap();
+        let manifest_path = tmp.path().join("capsule.toml");
+
+        let manifest = r#"
+    schema_version = "0.2"
+    name = "fresh-demo"
+    version = "0.1.0"
+    type = "app"
+    default_target = "app"
+
+    [targets.app]
+    runtime = "source"
+    entrypoint = "main.ts"
+    cmd = ["deno", "run", "-A", "--no-lock", "--unstable-kv", "main.ts"]
+    "#;
+
+        std::fs::write(&manifest_path, manifest).unwrap();
+
+        let config_path = generate_and_write_config(&manifest_path, None, false).unwrap();
+        let config_raw = std::fs::read_to_string(config_path).unwrap();
+        let config: ConfigJson = serde_json::from_str(&config_raw).unwrap();
+
+        assert_eq!(config.services["main"].executable, "deno");
+        assert_eq!(
+            config.services["main"].args,
+            vec!["run", "-A", "--no-lock", "--unstable-kv", "main.ts"]
+        );
     }
 
     #[test]
