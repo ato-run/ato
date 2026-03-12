@@ -388,6 +388,11 @@ fn read_env_non_empty(key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+pub fn current_session_token() -> Option<String> {
+    let auth = AuthManager::new().ok()?;
+    auth.resolve_session_token().ok().flatten()
+}
+
 fn trim_trailing_slash(value: &str) -> String {
     value.trim_end_matches('/').to_string()
 }

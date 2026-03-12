@@ -575,10 +575,7 @@ fn normalize_segment(input: &str) -> String {
 }
 
 fn read_ato_token() -> Option<String> {
-    std::env::var("ATO_TOKEN")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+    crate::auth::current_session_token()
 }
 
 fn compute_blake3(data: &[u8]) -> String {
