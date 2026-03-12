@@ -1,6 +1,17 @@
 # Changelog
 
 All notable changes to `ato-cli` will be documented in this file.
+## [0.4.21] - 2026-03-13
+
+### What Changed
+
+
+#### Bug Fixes
+
+- Improve registry serve bind errors
+
+- Satisfy clippy io-other-error lint
+
 ## [0.4.20] - 2026-03-12
 
 ### What Changed
@@ -459,4 +470,3 @@ All notable changes to `ato-cli` will be documented in this file.
 - Extend e2e coverage for new IPC and auth flows
 
 - Add E2E test for validation pipeline
-
