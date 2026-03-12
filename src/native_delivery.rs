@@ -1014,7 +1014,7 @@ pub fn execute_project(
     launcher_dir: Option<&Path>,
 ) -> Result<ProjectResult> {
     if !host_supports_projection() {
-    bail!("ato project currently supports macOS, Linux, and Windows hosts only");
+        bail!("ato project currently supports macOS, Linux, and Windows hosts only");
     }
 
     let launcher_dir = resolve_launcher_dir(launcher_dir)?;
@@ -1024,7 +1024,7 @@ pub fn execute_project(
 
 pub fn execute_project_ls() -> Result<ProjectionListResult> {
     if !host_supports_projection() {
-    bail!("ato project ls currently supports macOS, Linux, and Windows hosts only");
+        bail!("ato project ls currently supports macOS, Linux, and Windows hosts only");
     }
 
     list_projections(&projections_root()?)
@@ -1032,7 +1032,7 @@ pub fn execute_project_ls() -> Result<ProjectionListResult> {
 
 pub fn execute_unproject(reference: &str) -> Result<UnprojectResult> {
     if !host_supports_projection() {
-    bail!("ato unproject currently supports macOS, Linux, and Windows hosts only");
+        bail!("ato unproject currently supports macOS, Linux, and Windows hosts only");
     }
 
     unproject_with_metadata_root(reference, &projections_root()?)
@@ -1296,15 +1296,14 @@ fn project_with_roots_and_command_dir(
     let result = (|| -> Result<ProjectResult> {
         let projected_path = match source.projection_kind {
             ProjectionKind::Symlink => {
-                let created =
-                    create_projection_symlink(&source.derived_app_path, &projected_path)
-                        .with_context(|| {
-                            format!(
-                                "Failed to create projection {} -> {}",
-                                projected_path.display(),
-                                source.derived_app_path.display()
-                            )
-                        })?;
+                let created = create_projection_symlink(&source.derived_app_path, &projected_path)
+                    .with_context(|| {
+                        format!(
+                            "Failed to create projection {} -> {}",
+                            projected_path.display(),
+                            source.derived_app_path.display()
+                        )
+                    })?;
                 created_projected_path = Some(created.clone());
                 created
             }
@@ -2830,8 +2829,8 @@ fn copy_recursively(source: &Path, destination: &Path) -> Result<()> {
 }
 
 fn ensure_tree_writable(path: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("Failed to stat {}", path.display()))?;
+    let metadata =
+        fs::symlink_metadata(path).with_context(|| format!("Failed to stat {}", path.display()))?;
     let file_type = metadata.file_type();
 
     if !file_type.is_symlink() {
@@ -3814,17 +3813,11 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
 "#
     }
 
-    fn sample_file_delivery_toml() -> &'static str {
-        r#"schema_version = "0.1"
-[artifact]
-framework = "tauri"
-stage = "unsigned"
-target = "windows/x86_64"
-input = "dist/MyApp.exe"
-[finalize]
-tool = "signtool"
-args = ["sign", "/fd", "SHA256", "dist/MyApp.exe"]
-"#
+    fn sample_file_delivery_toml() -> String {
+        format!(
+            "schema_version = \"0.1\"\n[artifact]\nframework = \"tauri\"\nstage = \"unsigned\"\ntarget = \"{}\"\ninput = \"dist/MyApp.exe\"\n[finalize]\ntool = \"signtool\"\nargs = [\"sign\", \"/fd\", \"SHA256\", \"dist/MyApp.exe\"]\n",
+            default_delivery_target_for_input("dist/MyApp.exe")
+        )
     }
 
     fn sample_windows_pe_bytes(is_dll: bool) -> Vec<u8> {
@@ -5087,13 +5080,20 @@ input = "dist/time-management-desktop.app"
     #[test]
     fn test_build_rejects_non_executable_without_mutation() -> Result<()> {
         let tmp = tempdir()?;
-        let plan = sample_native_build_plan(tmp.path(), 0o644)?;
+        let plan = sample_native_build_plan(tmp.path(), 0o755)?;
+        #[cfg(unix)]
+        {
+            let binary_path = plan.source_app_path.join("Contents/MacOS/MyApp");
+            let mut permissions = fs::metadata(&binary_path)?.permissions();
+            permissions.set_mode(0o644);
+            fs::set_permissions(&binary_path, permissions)?;
+        }
         let source_digest_before = compute_tree_digest(&plan.source_app_path)?;
         let artifact_path = tmp.path().join("out/my-app-0.1.0.capsule");
 
         let result = build_native_artifact_with_strip(&plan, Some(&artifact_path), |_app| Ok(()));
 
-        if cfg!(target_os = "macos") {
+        if cfg!(unix) {
             let err = result.expect_err("build must fail closed when executable bit is missing");
             assert!(err.to_string().contains("Executable bit is missing"));
             assert!(!artifact_path.exists());
@@ -5151,7 +5151,7 @@ input = "dist/time-management-desktop.app"
 
         let result =
             finalize_with_runner(&fetched_dir, &output_root, |_derived_dir, _config| Ok(()));
-        if cfg!(target_os = "macos") {
+        if cfg!(unix) {
             let err = result.expect_err("finalize must fail closed when executable bit is missing");
             assert!(err.to_string().contains("Executable bit is missing"));
         } else {
