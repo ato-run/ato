@@ -1,3 +1,462 @@
 # Changelog
 
 All notable changes to `ato-cli` will be documented in this file.
+## [0.4.20] - 2026-03-12
+
+### What Changed
+
+
+#### Bug Fixes
+
+- Share local input resolution across commands
+
+- Add repository field to package metadata in Cargo.toml
+
+- Satisfy clippy for finalize permissions
+
+- [native-only] clear readonly finalize output
+
+- Sign rebased windows artifact
+
+- Hardcode windows finalize target path
+
+- Select windows build result json
+
+- Update README to include DeepWiki badge
+
+- Parse windows build json output
+
+- Stabilize windows native fixture build
+
+- Add Windows tauri test icon
+
+- Increase Windows stack for local registry server
+
+- Flatten registry route construction
+
+- Disable registry ui for windows e2e server
+
+- Harden windows registry e2e readiness checks
+
+- Update artifact naming to include 'ato-cli' prefix and change archive formats
+
+- Refactor update function for improved error handling and output
+
+- Preserve strict-v3 failure path
+
+- Address prompt review feedback
+
+- Correct argument passing in infer_source_driver function
+
+- Improve error handling for UI dependency installation and streamline code
+
+- Remove unused serde_jcs dependency from Cargo.toml
+
+- Replace zip command with PowerShell Compress-Archive for Windows builds
+
+- Update node-modules-dir argument to remove auto option and enhance local registry tests
+
+- Align rebuild CLI contract and wait behavior
+
+- Update errno function to use std::io::Error for better error handling
+
+
+#### CI
+
+- [native-only] add fast native delivery path
+
+- Add native delivery windows workflow
+
+- Tighten release workflow permissions
+
+- Add release readiness workflows
+
+
+#### Documentation
+
+- Add windows native delivery e2e postmortem
+
+- Remove note about OpenSSF Best Practices badge from README
+
+- Add README status badges
+
+- Clarify release tagging flow
+
+- Update CLI docs and add artifact publish scripts
+
+- Add Apache-2.0 LICENSE and trademark guidelines
+
+
+#### Features
+
+- Refactor token handling to use current_session_token for consistency
+
+- Refactor app structure and enhance UI components
+
+- Update release workflows to enhance token handling and remove R2 upload process
+
+- Enhance Deno command handling and environment setup
+
+- Add cargo audit configuration and update dependencies
+
+- Implement fallback update mechanism and enhance installer URL resolution
+
+- Detect and validate windows native executables
+
+- Add update command to ato CLI for version management
+
+- Expand init framework prompt detection
+
+- Generate agent-ready prompts from ato init
+
+- Introduce experimental native delivery support
+
+- Enhance process cleanup by integrating service binding cleanup functionality
+
+- Refactor service binding synchronization and add cleanup functionality
+
+- Add sync functionality for local service bindings from a running process
+
+- Enhance service binding registration with process ID and port options
+
+- Add support for registering local service bindings and enhance service binding handling
+
+- Add ingress TLS bootstrap and serving commands
+
+- Add service binding resolution with allowed callers enforcement
+
+- Implement host-side service binding management and API
+
+- Implement persistent state management and API
+
+- Add inspect requirements json output
+
+- Update dependencies and enhance install command with artifact persistence
+
+- Improve keyring error handling and add wait_for_single_process function in tests
+
+- Enhance native delivery with local derivation and projection support
+
+- Add platform-specific symlink creation for native delivery
+
+- Add experimental project and unproject commands for symlink management
+
+- Update README for new commands and options in ato-cli
+
+- Enhance ConfirmActionModal with extra content support
+
+- Update error messages to include --strict-v3 for clarity in diagnostics
+
+- Consolidate JSON-RPC imports for improved clarity
+
+- Refactor IPC invoke handling for improved readability and maintainability
+
+- Refactor IPC invoke handling for improved platform compatibility and streamline code
+
+- Enhance Windows support for npm handling and improve UI build process
+
+- Add Windows-specific guest command handling and update dependencies
+
+- Enhance build process and clean up code across multiple modules
+
+- Refactor and clean up code across multiple modules
+
+- Migrate web deno orchestration to services supervisor mode
+
+- Add dynamic app capsule recipe and update symlink handling in packaging
+
+- Remove obsolete allowlist for known false positives in historical test commits
+
+- Update workflows to trigger on push events for dev and main branches, remove pull request triggers
+
+- Add Cloudflare secrets check for R2 upload and ensure proper permissions in secret scan workflow
+
+- Enhance R2 upload workflow with additional checks and fallback bucket options
+
+- Add Japanese README.md for localization support
+
+- Add CODEOWNERS file to define repository ownership
+
+- Add support for zip archives and update scripts for multi-OS builds
+
+- Update version to 0.4.0 and add subtle dependency; enhance process identity checks and token validation
+
+- Add execution_required_envs method and preflight check for required environment variables
+
+- Bump version to 0.3.8 and enhance Deno artifact handling
+
+- Add static file server implementation in Deno
+
+- Bump version to 0.3.4 and add private key file; enhance CI publish error handling
+
+- Bump version to 0.3.2 in Cargo.toml and Cargo.lock
+
+- Add retry logic for upload failures and update default values for PUT_RETRIES and PUT_RETRY_SLEEP
+
+- Add cargo_version output and enhance R2 upload steps for semver aliases
+
+- Add validation step for Cargo.lock in CI workflow
+
+- Enhance CI workflow validation and OIDC token handling
+
+- Add dry run functionality for capsule publishing
+
+- Add cache control options for R2 object uploads
+
+- Enhance multi-OS build workflow with configurable build targets and rustflags
+
+- Add support for Windows target with rustflags configuration
+
+- Enhance R2 upload workflow with configurable inputs and improve wrangler config handling
+
+- Implement Windows process termination and enhance process management
+
+- Add conditional compilation for Unix-specific imports in runtime and IPC modules
+
+- Add config schema for Nacelle runtime configuration
+
+- Implement multi-OS build workflow and enhance guest protocol handling
+
+- Finalize local registry, runtime guard, and silent runner UX
+
+- Improve run auto-install flow and registry handling
+
+- Implement manifest validation for build process and add smoke testing functionality
+
+- Add miette diagnostics with JSON error envelope
+
+- Add auth/search/source/install and IPC command surface
+
+- Expand runtime and capsule type foundations
+
+- Implement process management functionality
+
+- Update README and add tests for Python, Node, Deno, Bun, and custom app config generation
+
+- Enhance error handling in main function with specific CapsuleError messages
+
+- Add session file pattern to .gitignore
+
+- Add Cap'n Proto conversion for CapsuleManifestV1
+
+- Add R3 configuration generation and enforcement
+
+- Phase 2 - Add validation pipeline (L1/L2/L4)
+
+- Add scaffold command for generating Dockerfiles and .dockerignore
+
+- Add Rust/Go binary distribution flow
+
+
+#### Other Changes
+
+- Refactor path handling and validation in manifest and execution plan
+
+- Update border-radius and font-family across stylesheets for consistency
+
+- Restore 0.4.19 release metadata
+
+- Revert "chore: update dependencies and remove unused packages"
+
+- Update dependencies and remove unused packages
+
+- Fix native delivery smoke fixtures
+
+- Support store-backed GitHub install drafts
+
+- Polish GitHub repo install error messaging
+
+- Fix GitHub repo install normalization and tarball unpacking
+
+- Bump version to 0.4.18 ([#145](https://github.com/Koh0920/ato-cli/pull/145))
+
+- Fix release SBOM upload repo context ([#144](https://github.com/Koh0920/ato-cli/pull/144))
+
+- Bump version to 0.4.17 ([#143](https://github.com/Koh0920/ato-cli/pull/143))
+
+- Merge dev into main for 0.4.17 ([#142](https://github.com/Koh0920/ato-cli/pull/142))
+
+- Fix repo context in release signing backfill ([#141](https://github.com/Koh0920/ato-cli/pull/141))
+
+- Add release signing backfill workflow
+
+- Fix cosign bundle output in release workflow ([#139](https://github.com/Koh0920/ato-cli/pull/139))
+
+- Merge origin/main into dev
+
+- Bump version to 0.4.16
+
+- Add Windows native-delivery E2E coverage with committed Tauri fixture ([#126](https://github.com/Koh0920/ato-cli/pull/126))
+
+- Linux向けProjection処理を追加し、`.desktop` と `~/.local/bin` 連携を実装 ([#125](https://github.com/Koh0920/ato-cli/pull/125))
+
+- Relax native delivery config validation for Linux targets and non-signing finalize tools ([#124](https://github.com/Koh0920/ato-cli/pull/124))
+
+- Merge pull request #116 from Koh0920/copilot/stabilize-native-delivery-metadata
+
+- Merge pull request #123 from Koh0920/copilot/implement-linux-artifact-detection
+
+- Merge pull request #122 from Koh0920/copilot/implement-windows-projection
+
+- Bump version to 0.4.14 in Cargo.toml and Cargo.lock
+
+- Bump version to 0.4.13 in Cargo.toml and Cargo.lock
+
+- Fix description formatting and update tag input reference in upload workflow
+
+- Add ASSET_PREFIX variable for consistent asset naming in R2 uploads
+
+- Fix R2 upload workflow
+
+- Retag latest release as 0.4.12
+
+- Fix Windows UI bootstrap checksum
+
+- Prepare 0.4.13 release
+
+- Prepare 0.4.12 dist release
+
+- Clarify native delivery fail-closed follow-ups
+
+- Fix native finalize path rebasing for 0.4.11
+
+- Release v0.4.10 ([#85](https://github.com/Koh0920/ato-cli/pull/85))
+
+- Refresh Cargo.lock for 0.4.9
+
+- Bump version to 0.4.9
+
+- Bump version to 0.4.8
+
+- Address inspect requirements review feedback
+
+- Merge pull request #65 from Koh0920/copilot/add-storage-mount-schema
+
+- Fix clippy sort_by_key warning
+
+- Add native delivery fetch/finalize PoC
+
+- Implement target-based configuration generation and refactor engine installation logic
+
+- Refactor code for improved readability and maintainability
+
+- Keep nacelle release flow in nacelle repo
+
+- Add nacelle R2 mirror release flow
+
+- Improve build lockfile performance and timings
+
+- Fix local registry UI env aggregation and release 0.4.6
+
+- Skip unsupported universal lock targets
+
+- Skip unsupported Deno platforms in universal locks
+
+- Regenerate stale universal lockfiles
+
+- Release 0.4.2
+
+- Bump CLI version to 0.4.1
+
+- Expand web runtime lockfile platforms
+
+- Merge origin/main into dev
+
+- Feat/multi cas ([#43](https://github.com/Koh0920/ato-cli/pull/43))
+
+- Feat/multi cas ([#42](https://github.com/Koh0920/ato-cli/pull/42))
+
+- Add transient step progress for pack/publish to avoid “silent wait” UX ([#39](https://github.com/Koh0920/ato-cli/pull/39))
+
+- Refactor trademark guidelines, remove obsolete scripts, and clean up skills
+
+- Mask staging domains and bucket defaults for public repo
+
+- Sanitize absolute paths in skill verify prompts
+
+- Remove sensitive and unnecessary files before public release
+
+- Remove sensitive/temp files and harden gitignore
+
+- Update .github/workflows/build-multi-os.yml
+
+- Update readme
+
+- Update to 0.3.9
+
+- Update to 0.3.8
+
+- Bump version to 0.3.6 and update publish command for keyless OIDC CI
+
+- 0.3.5
+
+- Refactor publish command tests to align with new CLI structure
+
+- Remove branch and path ignore settings from build workflow
+
+- Update Cargo.lock
+
+- Update  version
+
+- Refactor CI workflows and clean up dependencies
+
+- Refactor consent handling and enhance permission management
+
+- Reliability update v0.2.1 final polish
+
+- Update tracked files
+
+- Add untracked files
+
+- Refactor error handling to use CapsuleError across various modules
+
+- Implement CLI reporters for metrics reporting: StdoutReporter and JsonReporter
+
+- Bump version to 0.2.0 in Cargo files
+
+- Unify new/init using recipe engine
+
+- Fix Bun flag placement in node template
+
+- Standardize Bun dev/release workflow
+
+- エンジンの登録機能を追加し、設定ファイルの読み書きを実装。依存関係に `toml` を追加し、エンジンの発見ロジックを改善。
+
+- Initial commit
+
+
+#### Refactoring
+
+- Refactor native delivery platform abstractions
+
+- Streamline framework detection logic and improve readability
+
+- Simplify variable initialization in persistent state test
+
+- Clean up error handling and improve script documentation
+
+
+#### Tests
+
+- [native-only] fix windows authenticode verification
+
+- Cover windows pe validation branches
+
+- Test native delivery follow-up constraints
+
+- Test native delivery platform refactor
+
+- Tighten expanded init prompt coverage
+
+- Add test for persistent state columns creation in fresh database
+
+- Validate native delivery build path
+
+- Cover native delivery build integration
+
+- Accept authenticated preflight failure for source rebuild alias
+
+- Extend e2e coverage for new IPC and auth flows
+
+- Add E2E test for validation pipeline
+
