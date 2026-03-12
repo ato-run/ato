@@ -64,6 +64,46 @@ fn build_github_tarball(root: &str, files: &[(&str, &str)]) -> Vec<u8> {
     bytes
 }
 
+fn build_github_tarball_with_global_pax_header(root: &str, files: &[(&str, &str)]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let encoder = flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::default());
+    let mut builder = tar::Builder::new(encoder);
+
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::XGlobalHeader);
+    header.set_size(0);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder
+        .append_data(
+            &mut header,
+            "pax_global_header",
+            std::io::Cursor::new(Vec::<u8>::new()),
+        )
+        .expect("append pax global header");
+
+    for (path, contents) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(
+                &mut header,
+                format!("{root}/{path}"),
+                std::io::Cursor::new(contents.as_bytes()),
+            )
+            .expect("append tar entry");
+    }
+
+    builder
+        .into_inner()
+        .expect("finish tar builder")
+        .finish()
+        .expect("finish gzip encoder");
+    bytes
+}
+
 fn spawn_github_archive_server(
     expected_path: &'static str,
     archive: Vec<u8>,
@@ -328,6 +368,46 @@ fn test_install_from_gh_repo_without_manifest_uses_zero_config_build_fallback() 
     assert!(
         manifest.contains("entrypoint = \"index.js\""),
         "manifest={manifest}"
+    );
+}
+
+#[test]
+fn test_install_from_gh_repo_accepts_host_path_and_metadata_archive() {
+    let tmp = tempdir().unwrap();
+    let output_dir = tmp.path().join("installed");
+    let runtime_root = tmp.path().join("runtime");
+    let archive = build_github_tarball_with_global_pax_header(
+        "Koh0920-demo-repo-a1b2c3",
+        &[("index.js", "console.log('hello from host path');\n")],
+    );
+    let server = spawn_github_archive_server("/repos/Koh0920/demo-repo/tarball", archive);
+
+    let assert = Command::cargo_bin("ato")
+        .unwrap()
+        .current_dir(tmp.path())
+        .env("ATO_GITHUB_API_BASE_URL", &server.base_url)
+        .env("ATO_RUNTIME_ROOT", &runtime_root)
+        .args([
+            "install",
+            "--from-gh-repo",
+            "github.com/Koh0920/demo-repo",
+            "--output",
+        ])
+        .arg(&output_dir)
+        .args(["--yes", "--no-project"])
+        .assert();
+
+    assert.success();
+
+    let installed = output_dir
+        .join("koh0920")
+        .join("demo-repo")
+        .join("0.1.0")
+        .join("demo-repo-0.1.0.capsule");
+    assert!(
+        installed.exists(),
+        "installed artifact missing: {}",
+        installed.display()
     );
 }
 
