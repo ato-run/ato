@@ -1054,6 +1054,8 @@ fn unpack_github_tarball(bytes: &[u8], destination: &Path) -> Result<PathBuf> {
                 | tar::EntryType::Symlink
                 | tar::EntryType::Link
         ) {
+            // Ignore tar metadata entries like PAX/GNU headers so valid GitHub
+            // archives with a single repository root are not rejected.
             continue;
         }
         let path = entry
