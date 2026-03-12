@@ -200,8 +200,8 @@ impl Default for RegistryResolver {
             dns: DnsResolver::default(),
             well_known: WellKnownResolver::default(),
             fallbacks: vec![RegistryInfo {
-                url: "https://registry.capsule.app".to_string(),
-                name: Some("Capsule Public Registry".to_string()),
+                url: "https://api.ato.run".to_string(),
+                name: Some("Ato Public Registry".to_string()),
                 public_key: None,
                 source: DiscoverySource::Config,
             }],
@@ -394,7 +394,7 @@ mod tests {
     fn test_registry_resolver_default() {
         let resolver = RegistryResolver::default();
         assert!(!resolver.fallbacks.is_empty());
-        assert!(resolver.fallbacks[0].url.contains("capsule.app"));
+        assert_eq!(resolver.fallbacks[0].url, "https://api.ato.run");
     }
 
     #[test]
