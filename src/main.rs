@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde_json::json;
 use std::cmp::Ordering;
 use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 use tracing::debug;
@@ -627,10 +627,10 @@ enum Commands {
 
     #[command(
         next_help_heading = "Advanced Commands",
-        about = "Publish capsule (Dock/private registry: direct upload, official registry: CI-first)"
+        about = "Publish capsule (default: My Dock direct upload, official registry: CI-first)"
     )]
     Publish {
-        /// Registry URL override (default: https://api.ato.run)
+        /// Registry URL override (default: My Dock when logged in; official Store remains CI-first)
         #[arg(long)]
         registry: Option<String>,
 
@@ -3110,7 +3110,7 @@ fn execute_publish_command(
                 );
             }
 
-            let status = publish_private_status_message(source_is_artifact);
+            let status = publish_private_status_message(&resolved_registry, source_is_artifact);
             futures::executor::block_on(reporter.progress_start(status.to_string(), None))?;
             let scoped_override = if source_is_artifact {
                 args.scoped_id.clone()
@@ -3155,12 +3155,20 @@ fn execute_publish_command(
             private_result.as_ref(),
             official_result.as_ref(),
         )?;
-    } else if let Some(result) = private_result {
-        println!("✅ Successfully published to private registry!");
+    } else if let Some(result) = private_result.as_ref() {
+        let dock_publish = is_dock_publish_registry(&result.registry_url);
+        if dock_publish {
+            println!("✅ Successfully published to Personal Dock!");
+        } else {
+            println!("✅ Successfully published to private registry!");
+        }
         println!();
         println!("📦 Capsule:   {} v{}", result.scoped_id, result.version);
         println!("🛡️  Integrity: {}, {}", result.sha256, result.blake3);
         println!();
+        if dock_publish {
+            println!("🧭 Dock URL:   {}", result.registry_url);
+        }
         println!("🌐 Artifact URL: {}", result.artifact_url);
         println!();
         if result.already_existed {
@@ -3191,6 +3199,11 @@ fn execute_publish_command(
         if selection.deploy && phases[2].ok {
             let notice = if is_official {
                 "Official publish handoff prepared (CI-first: local upload is not executed)."
+            } else if private_result
+                .as_ref()
+                .is_some_and(|result| is_dock_publish_registry(&result.registry_url))
+            {
+                "Personal Dock publish completed."
             } else {
                 "Private registry publish completed."
             };
@@ -3223,8 +3236,14 @@ fn run_official_deploy(registry_url: String, fix: bool) -> Result<OfficialDeploy
     })
 }
 
-fn publish_private_status_message(has_artifact: bool) -> &'static str {
-    if has_artifact {
+fn publish_private_status_message(registry_url: &str, has_artifact: bool) -> &'static str {
+    if is_dock_publish_registry(registry_url) {
+        if has_artifact {
+            "📤 Publishing provided artifact to Personal Dock..."
+        } else {
+            "📦 Building capsule artifact for Personal Dock publish..."
+        }
+    } else if has_artifact {
         "📤 Publishing provided artifact to private registry..."
     } else {
         "📦 Building capsule artifact for private registry publish..."
@@ -3239,8 +3258,17 @@ fn publish_private_start_summary_line(
     allow_existing: bool,
 ) -> String {
     format!(
-        "🔎 private publish target registry={} source={} scoped_id={} version={} allow_existing={}",
-        registry_url, source, scoped_id, version, allow_existing
+        "🔎 {} publish target registry={} source={} scoped_id={} version={} allow_existing={}",
+        if is_dock_publish_registry(registry_url) {
+            "dock"
+        } else {
+            "private"
+        },
+        registry_url,
+        source,
+        scoped_id,
+        version,
+        allow_existing
     )
 }
 
@@ -3450,29 +3478,57 @@ fn print_phase_line(json_output: bool, phase: &str, state: &str, detail: &str) {
 }
 
 fn resolve_publish_registry_url(cli_registry: Option<String>) -> Result<String> {
+    let manifest_registry = discover_manifest_publish_registry()?;
+    let dock_registry = crate::auth::current_dock_registry_url()?;
+
+    resolve_publish_registry_url_from_sources(
+        cli_registry.as_deref(),
+        manifest_registry.as_deref(),
+        dock_registry.as_deref(),
+    )
+}
+
+fn discover_manifest_publish_registry() -> Result<Option<String>> {
+    let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
+    let manifest_path = cwd.join("capsule.toml");
+    if !manifest_path.exists() {
+        return Ok(None);
+    }
+
+    let raw = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
+    let parsed: toml::Value = toml::from_str(&raw)
+        .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
+
+    Ok(parsed
+        .get("store")
+        .and_then(|v| v.get("registry"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned))
+}
+
+fn resolve_publish_registry_url_from_sources(
+    cli_registry: Option<&str>,
+    manifest_registry: Option<&str>,
+    dock_registry: Option<&str>,
+) -> Result<String> {
     if let Some(url) = cli_registry {
         return normalize_registry_url(&url);
     }
 
-    let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
-    let manifest_path = cwd.join("capsule.toml");
-    if manifest_path.exists() {
-        let raw = std::fs::read_to_string(&manifest_path)
-            .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
-        let parsed: toml::Value = toml::from_str(&raw)
-            .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
-        if let Some(url) = parsed
-            .get("store")
-            .and_then(|v| v.get("registry"))
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
-            return normalize_registry_url(url);
-        }
+    if let Some(url) = manifest_registry {
+        return normalize_registry_url(url);
     }
 
-    Ok(DEFAULT_RUN_REGISTRY_URL.to_string())
+    if let Some(url) = dock_registry {
+        return normalize_registry_url(url);
+    }
+
+    anyhow::bail!(
+        "No default publish target found. Run `ato login` to publish to your Personal Dock, or pass `--registry https://api.ato.run` / `--ci` for the official Store."
+    );
 }
 
 fn normalize_registry_url(raw: &str) -> Result<String> {
@@ -3487,6 +3543,25 @@ fn is_official_publish_registry(url: &str) -> bool {
         return false;
     };
     host.eq_ignore_ascii_case("api.ato.run") || host.eq_ignore_ascii_case("staging.api.ato.run")
+}
+
+fn is_dock_publish_registry(url: &str) -> bool {
+    dock_handle_from_publish_registry(url).is_some()
+}
+
+fn dock_handle_from_publish_registry(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let mut segments = parsed.path_segments()?;
+    while let Some(segment) = segments.next() {
+        if segment == "d" {
+            return segments
+                .next()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+        }
+    }
+    None
 }
 
 fn execute_setup_command(
@@ -3623,8 +3698,9 @@ async fn resolve_run_target_or_install(
     reporter: std::sync::Arc<reporters::CliReporter>,
 ) -> Result<PathBuf> {
     let raw = path.to_string_lossy().to_string();
-    if is_explicit_local_path_input(&raw) {
-        return Ok(expand_explicit_local_path(&raw));
+    let expanded_local = expand_explicit_local_path(&raw);
+    if should_treat_run_input_as_local(&raw, &expanded_local) {
+        return Ok(expanded_local);
     }
 
     let scoped_ref = match install::parse_capsule_ref(&raw) {
@@ -3658,7 +3734,7 @@ async fn resolve_run_target_or_install(
                 anyhow::bail!(message);
             }
             return Err(error).context(
-                "Invalid run target. Use ./, ../, ~/, / for local paths, or publisher/slug for store capsules.",
+                "Invalid run target. Use a local path or existing .capsule file, or publisher/slug for store capsules.",
             );
         }
     };
@@ -3809,6 +3885,17 @@ fn is_explicit_local_path_input(raw: &str) -> bool {
         && raw.as_bytes()[1] == b':'
         && (raw.as_bytes()[2] == b'/' || raw.as_bytes()[2] == b'\\')
         && raw.as_bytes()[0].is_ascii_alphabetic()
+}
+
+fn looks_like_local_capsule_artifact(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    !trimmed.is_empty() && trimmed.ends_with(".capsule")
+}
+
+fn should_treat_run_input_as_local(raw: &str, expanded_path: &Path) -> bool {
+    expanded_path.exists()
+        || is_explicit_local_path_input(raw)
+        || looks_like_local_capsule_artifact(raw)
 }
 
 fn expand_explicit_local_path(raw: &str) -> PathBuf {
@@ -4343,6 +4430,24 @@ mod tests {
     }
 
     #[test]
+    fn looks_like_local_capsule_artifact_accepts_bare_capsule_filename() {
+        assert!(looks_like_local_capsule_artifact("demo.capsule"));
+        assert!(!looks_like_local_capsule_artifact("demo"));
+        assert!(!looks_like_local_capsule_artifact("koh0920/demo"));
+    }
+
+    #[test]
+    fn should_treat_existing_local_run_input_as_local() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifact = tmp.path().join("demo.capsule");
+        std::fs::write(&artifact, b"capsule").unwrap();
+        assert!(should_treat_run_input_as_local(
+            "demo.capsule",
+            Path::new(&artifact)
+        ));
+    }
+
+    #[test]
     fn select_capsule_file_is_deterministic() {
         let tmp = tempfile::tempdir().unwrap();
         let version_dir = tmp.path().join("1.0.0");
@@ -4552,7 +4657,7 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  nacelle-v1.2.3
     #[test]
     fn publish_private_status_message_for_build_path() {
         assert_eq!(
-            publish_private_status_message(false),
+            publish_private_status_message("http://127.0.0.1:8787", false),
             "📦 Building capsule artifact for private registry publish..."
         );
     }
@@ -4560,8 +4665,24 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  nacelle-v1.2.3
     #[test]
     fn publish_private_status_message_for_upload_path() {
         assert_eq!(
-            publish_private_status_message(true),
+            publish_private_status_message("http://127.0.0.1:8787", true),
             "📤 Publishing provided artifact to private registry..."
+        );
+    }
+
+    #[test]
+    fn publish_private_status_message_for_dock_build_path() {
+        assert_eq!(
+            publish_private_status_message("https://ato.run/d/koh0920", false),
+            "📦 Building capsule artifact for Personal Dock publish..."
+        );
+    }
+
+    #[test]
+    fn publish_private_status_message_for_dock_upload_path() {
+        assert_eq!(
+            publish_private_status_message("https://ato.run/d/koh0920", true),
+            "📤 Publishing provided artifact to Personal Dock..."
         );
     }
 
@@ -4592,6 +4713,18 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  nacelle-v1.2.3
         );
         assert!(line.contains("source=artifact"));
         assert!(line.contains("allow_existing=true"));
+    }
+
+    #[test]
+    fn publish_private_start_summary_line_marks_dock_target() {
+        let line = publish_private_start_summary_line(
+            "https://ato.run/d/koh0920",
+            "artifact",
+            "koh0920/demo-app",
+            "1.2.3",
+            false,
+        );
+        assert!(line.contains("🔎 dock publish target"));
     }
 
     fn test_publish_args() -> PublishCommandArgs {
@@ -4645,6 +4778,60 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  nacelle-v1.2.3
         assert!(selected.build);
         assert!(selected.deploy);
         assert!(!selected.explicit_filter);
+    }
+
+    #[test]
+    fn resolve_publish_registry_prefers_cli_registry_over_other_sources() {
+        let resolved = resolve_publish_registry_url_from_sources(
+            Some("https://api.ato.run"),
+            Some("https://ato.run/d/from-manifest"),
+            Some("https://ato.run/d/from-login"),
+        )
+        .expect("resolve");
+
+        assert_eq!(resolved, "https://api.ato.run");
+    }
+
+    #[test]
+    fn resolve_publish_registry_uses_manifest_before_dock_default() {
+        let resolved = resolve_publish_registry_url_from_sources(
+            None,
+            Some("https://ato.run/d/from-manifest"),
+            Some("https://ato.run/d/from-login"),
+        )
+        .expect("resolve");
+
+        assert_eq!(resolved, "https://ato.run/d/from-manifest");
+    }
+
+    #[test]
+    fn resolve_publish_registry_uses_logged_in_dock_when_no_explicit_target_exists() {
+        let resolved = resolve_publish_registry_url_from_sources(
+            None,
+            None,
+            Some("https://ato.run/d/koh0920"),
+        )
+        .expect("resolve");
+
+        assert_eq!(resolved, "https://ato.run/d/koh0920");
+    }
+
+    #[test]
+    fn resolve_publish_registry_errors_without_login_or_registry_override() {
+        let err = resolve_publish_registry_url_from_sources(None, None, None)
+            .expect_err("must fail without any publish target");
+
+        assert!(err.to_string().contains("Run `ato login`"));
+        assert!(err.to_string().contains("--registry https://api.ato.run"));
+    }
+
+    #[test]
+    fn is_dock_publish_registry_detects_dock_path_prefix() {
+        assert!(is_dock_publish_registry("https://ato.run/d/koh0920"));
+        assert!(is_dock_publish_registry(
+            "https://ato.run/publish/d/koh0920"
+        ));
+        assert!(!is_dock_publish_registry("https://api.ato.run"));
     }
 
     #[test]

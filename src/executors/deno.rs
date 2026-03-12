@@ -415,7 +415,10 @@ fn ensure_deno_runtime_env_paths(runtime_dir: &Path) -> Result<DenoRuntimeEnvPat
 
     for dir in [&home, &xdg_cache_home, &deno_dir, &macos_cache_root] {
         std::fs::create_dir_all(dir).with_context(|| {
-            format!("Failed to create Deno runtime cache directory: {}", dir.display())
+            format!(
+                "Failed to create Deno runtime cache directory: {}",
+                dir.display()
+            )
         })?;
     }
 
@@ -588,9 +591,7 @@ fn disable_runtime_lockfile(runtime_dir: &Path) -> Result<()> {
 }
 
 fn manifest_cmd_contains(plan: &ManifestData, flag: &str) -> bool {
-    selected_target_cmd(plan)
-        .iter()
-        .any(|entry| entry == flag)
+    selected_target_cmd(plan).iter().any(|entry| entry == flag)
 }
 
 fn selected_target_cmd(plan: &ManifestData) -> Vec<String> {
@@ -842,12 +843,19 @@ mod tests {
         let paths = ensure_deno_runtime_env_paths(&runtime_dir).expect("build runtime env paths");
 
         assert_eq!(paths.home, runtime_dir.join(".ato-home"));
-        assert_eq!(paths.xdg_cache_home, runtime_dir.join(".ato-home").join(".cache"));
+        assert_eq!(
+            paths.xdg_cache_home,
+            runtime_dir.join(".ato-home").join(".cache")
+        );
         assert_eq!(paths.deno_dir, runtime_dir.join(".ato-home").join(".deno"));
         assert!(paths.home.exists());
         assert!(paths.xdg_cache_home.exists());
         assert!(paths.deno_dir.exists());
-        assert!(runtime_dir.join(".ato-home").join("Library").join("Caches").exists());
+        assert!(runtime_dir
+            .join(".ato-home")
+            .join("Library")
+            .join("Caches")
+            .exists());
     }
 
     #[test]
