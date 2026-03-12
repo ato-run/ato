@@ -5,9 +5,9 @@
   gap: 6px;
   padding: 6px 14px;
   min-height: 30px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   border: 1px solid transparent;
-  font-family: "DM Sans", sans-serif;
+  font-family: "DM Sans", -apple-system, BlinkMacSystemFont, sans-serif;
   font-size: 12px;
   font-weight: 500;
   line-height: 1;
@@ -23,6 +23,7 @@
 .btn-primary {
   background: var(--accent);
   color: var(--white);
+  border-color: var(--accent);
 }
 
 .btn-ghost {
@@ -59,7 +60,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text-2);
@@ -77,7 +78,7 @@
 }
 
 .badge {
-  border-radius: 4px;
+  border-radius: 6px;
   border: 1px solid var(--border);
   padding: 3px 8px;
   font-size: 11px;
@@ -170,7 +171,7 @@
 
 .input {
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--text-1);
   min-height: 30px;
@@ -180,7 +181,7 @@
 
 .card {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   background: var(--surface);
 }
 
@@ -205,9 +206,9 @@
 .confirm-card {
   width: min(460px, calc(100vw - 32px));
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: var(--surface);
-  box-shadow: 0 10px 30px var(--shadow-sm);
+  box-shadow: var(--shadow-card);
   padding: 16px;
 }
 
@@ -226,7 +227,7 @@
 
 .confirm-body {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   padding: 10px;
   display: grid;
@@ -283,7 +284,7 @@
 
 .permission-mode-card {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: var(--surface);
   padding: 10px;
   display: grid;
@@ -375,10 +376,10 @@
   z-index: 40;
   width: min(560px, calc(100vw - 20px));
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--text-1);
   color: var(--white);
-  box-shadow: 0 10px 24px var(--shadow-sm);
+  box-shadow: var(--shadow-card);
   padding: 10px;
   display: grid;
   gap: 8px;

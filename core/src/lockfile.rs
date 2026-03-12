@@ -731,7 +731,7 @@ async fn generate_lockfile(
             .await?;
             runtimes.node = Some(runtime);
             if runtimes.deno.is_none() {
-                let deno_version = read_language_version(manifest_raw, "deno", "1.46.3");
+                let deno_version = read_language_version(manifest_raw, "deno", "2.6.8");
                 let step_started = Instant::now();
                 let deno_runtime =
                     resolve_deno_runtime(&deno_version, &runtime_platforms, reporter.clone())
@@ -775,7 +775,7 @@ async fn generate_lockfile(
             let version = required_runtime_version
                 .clone()
                 .or_else(|| read_runtime_version(manifest_raw))
-                .unwrap_or_else(|| read_language_version(manifest_raw, "deno", "1.46.3"));
+                .unwrap_or_else(|| read_language_version(manifest_raw, "deno", "2.6.8"));
             let step_started = Instant::now();
             let runtime =
                 resolve_deno_runtime(&version, &runtime_platforms, reporter.clone()).await?;
@@ -832,7 +832,8 @@ async fn generate_lockfile(
             // プロジェクト依存の deno.lock 生成は不要（かつ monorepo で誤検出しやすい）。
             let is_web_static = selected_target_runtime(manifest_raw).as_deref() == Some("web")
                 && selected_target_driver(manifest_raw).as_deref() == Some("static");
-            if !is_web_static {
+            let skip_deno_lock_generation = selected_target_cmd_contains(manifest_raw, "--no-lock");
+            if !is_web_static && !skip_deno_lock_generation {
                 let step_started = Instant::now();
                 let _ = generate_deno_lock(manifest_dir, manifest_raw, &version, reporter.clone())
                     .await?;
@@ -898,7 +899,7 @@ async fn generate_lockfile(
         if matches!(driver.as_deref(), Some("deno")) && runtimes.deno.is_none() {
             let version = runtime_version
                 .clone()
-                .unwrap_or_else(|| "1.46.3".to_string());
+                .unwrap_or_else(|| "2.6.8".to_string());
             runtimes.deno =
                 Some(resolve_deno_runtime(&version, &runtime_platforms, reporter.clone()).await?);
         }
@@ -909,7 +910,7 @@ async fn generate_lockfile(
         {
             let version = runtime_version
                 .clone()
-                .unwrap_or_else(|| "1.46.3".to_string());
+                .unwrap_or_else(|| "2.6.8".to_string());
             runtimes.deno =
                 Some(resolve_deno_runtime(&version, &runtime_platforms, reporter.clone()).await?);
         }
@@ -1133,7 +1134,7 @@ async fn generate_deno_lock(
         "cache",
         entrypoint.as_str(),
         "--lock=deno.lock",
-        "--lock-write",
+        "--frozen=false",
     ])
     .current_dir(manifest_dir);
 
@@ -2249,11 +2250,7 @@ fn read_dependencies_path(
 }
 
 fn detect_language(manifest: &toml::Value) -> Option<String> {
-    if let Some(driver) = selected_target_table(manifest)
-        .and_then(|t| t.get("driver"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_ascii_lowercase())
-    {
+    if let Some(driver) = selected_target_driver(manifest) {
         if matches!(driver.as_str(), "python" | "node" | "deno") {
             return Some(driver);
         }
@@ -2426,6 +2423,32 @@ fn selected_target_driver(manifest: &toml::Value) -> Option<String> {
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty())
+        .or_else(|| selected_target_cmd_driver(manifest))
+}
+
+fn selected_target_cmd_contains(manifest: &toml::Value, flag: &str) -> bool {
+    selected_target_table(manifest)
+        .and_then(|t| t.get("cmd"))
+        .and_then(|v| v.as_array())
+        .map(|cmd| cmd.iter().any(|entry| entry.as_str() == Some(flag)))
+        .unwrap_or(false)
+}
+
+fn selected_target_cmd_driver(manifest: &toml::Value) -> Option<String> {
+    let program = selected_target_table(manifest)
+        .and_then(|t| t.get("cmd"))
+        .and_then(|v| v.as_array())
+        .and_then(|cmd| cmd.first())
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())?;
+
+    match program.as_str() {
+        "deno" => Some("deno".to_string()),
+        "node" | "nodejs" => Some("node".to_string()),
+        "python" | "python3" | "py" => Some("python".to_string()),
+        _ => None,
+    }
 }
 
 fn required_runtime_version(manifest: &toml::Value) -> Result<Option<String>> {

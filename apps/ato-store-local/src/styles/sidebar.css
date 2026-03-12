@@ -39,15 +39,16 @@
 }
 
 .sidebar-close-btn {
-  border-color: var(--sidebar-bd);
-  background: var(--term-bd);
-  color: var(--sidebar-ax);
+  border-color: var(--border);
+  background: var(--bg);
+  color: var(--text-2);
 }
 
 .sidebar-logo {
   color: var(--sidebar-ax);
-  font-family: "DM Mono", monospace;
+  font-family: "JetBrains Mono", monospace;
   font-size: 14px;
+  font-weight: 600;
   margin-bottom: 4px;
 }
 
@@ -88,9 +89,9 @@
 }
 
 .sidebar-item.active {
-  border-color: var(--sidebar-bd);
-  background: var(--term-bd);
-  color: var(--sidebar-ax);
+  border-color: var(--accent-md);
+  background: var(--accent-lt);
+  color: var(--accent);
 }
 
 .sidebar-item.disabled {
@@ -102,7 +103,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  font-family: "DM Mono", monospace;
+  font-family: "JetBrains Mono", monospace;
   font-size: 11px;
   padding: 4px 0;
 }
