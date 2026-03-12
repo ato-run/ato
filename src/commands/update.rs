@@ -6,7 +6,7 @@ use serde::Deserialize;
 use std::fs;
 use std::process::Command;
 
-const DEFAULT_INSTALLER_URL: &str = "https://store.ato.run/install.sh";
+const DEFAULT_INSTALLER_URL: &str = "https://ato.run/install.sh";
 const INSTALLER_URL_ENV: &str = "ATO_INSTALLER_URL";
 const UPDATE_RELEASE_API_URL_ENV: &str = "ATO_UPDATE_RELEASE_API_URL";
 

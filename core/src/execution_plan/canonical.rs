@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 
@@ -74,16 +74,51 @@ pub fn canonicalize_policy_paths(
 }
 
 pub fn canonicalize_path(project_root: &Path, raw_path: &str) -> Result<String, AtoExecutionError> {
+    let root_input = if project_root.is_absolute() {
+        project_root.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|err| {
+                AtoExecutionError::policy_violation(format!(
+                    "failed to resolve current directory for '{}': {}",
+                    project_root.display(),
+                    err
+                ))
+            })?
+            .join(project_root)
+    };
+    let root = canonicalize_existing_or_ancestor(&root_input).map_err(|err| {
+        AtoExecutionError::policy_violation(format!(
+            "failed to canonicalize project root '{}': {}",
+            project_root.display(),
+            err
+        ))
+    })?;
+
+    if raw_path == "~" || raw_path.starts_with("~/") || raw_path.starts_with("~\\") {
+        return Err(AtoExecutionError::policy_violation(format!(
+            "path canonicalization denied for '{}': home-directory aliases are not allowed",
+            raw_path
+        )));
+    }
+
     let path = PathBuf::from(raw_path);
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(AtoExecutionError::policy_violation(format!(
+            "path canonicalization denied for '{}': parent traversal (..) is not allowed",
+            raw_path
+        )));
+    }
+
     let absolute = if path.is_absolute() {
         path
     } else {
-        project_root.join(path)
+        root.join(path)
     };
 
-    let root = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf());
     validate_path(
         &absolute.to_string_lossy(),
         &[root.to_string_lossy().to_string()],
@@ -133,6 +168,12 @@ mod tests {
         RuntimeFilesystemPolicy, RuntimeNetworkPolicy, RuntimePolicy, RuntimeSecretsPolicy,
         SecretDelivery,
     };
+    use std::sync::{Mutex, OnceLock};
+
+    fn cwd_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn sample_runtime(args: Vec<&str>, allow_hosts: Vec<&str>, read_only: Vec<&str>) -> Runtime {
         Runtime {
@@ -217,5 +258,37 @@ mod tests {
         let hash_a = compute_provisioning_policy_hash(&provisioning).unwrap();
         let hash_b = compute_provisioning_policy_hash(&provisioning).unwrap();
         assert_eq!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn canonicalize_path_allows_relative_input_with_relative_project_root() {
+        let _guard = cwd_lock().lock().unwrap();
+        let previous_cwd = std::env::current_dir().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        std::fs::create_dir_all(root.join("dist")).unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        let resolved = canonicalize_path(Path::new("workspace"), "dist").unwrap();
+        let expected = root.canonicalize().unwrap().join("dist");
+        assert_eq!(resolved, expected.to_string_lossy());
+
+        std::env::set_current_dir(previous_cwd).unwrap();
+    }
+
+    #[test]
+    fn canonicalize_path_rejects_parent_traversal_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        let err = canonicalize_path(temp.path(), "../dist").unwrap_err();
+        assert!(err.message.contains("parent traversal (..) is not allowed"));
+    }
+
+    #[test]
+    fn canonicalize_path_rejects_home_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        let err = canonicalize_path(temp.path(), "~/dist").unwrap_err();
+        assert!(err
+            .message
+            .contains("home-directory aliases are not allowed"));
     }
 }
