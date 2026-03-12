@@ -1,38 +1,43 @@
-@import url("https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300;1,400;1,500&family=DM+Sans:wght@300;400;500;600&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500&display=swap");
 
 :root {
-  --bg: #f7f7f8;
+  --bg: #fafafa;
   --surface: #ffffff;
-  --border: #e4e4e7;
-  --border-md: #d1d1d6;
-  --text-1: #18181b;
-  --text-2: #52525b;
-  --text-3: #a1a1aa;
-  --accent: #2563eb;
-  --accent-lt: #eff6ff;
+  --border: #e5e5e5;
+  --border-md: #d4d4d4;
+  --text-1: #0a0a0a;
+  --text-2: #525252;
+  --text-3: #a3a3a3;
+  --accent: #0066ff;
+  --accent-lt: #e6f0ff;
   --accent-md: #bfdbfe;
-  --green: #16a34a;
+  --green: #22c55e;
   --green-lt: #f0fdf4;
-  --red: #dc2626;
+  --red: #ef4444;
   --red-lt: #fef2f2;
-  --yellow: #d97706;
+  --yellow: #f59e0b;
   --yellow-lt: #fffbeb;
-  --sidebar-bg: #18181b;
-  --sidebar-bd: #27272a;
-  --sidebar-tx: #a1a1aa;
-  --sidebar-ax: #ffffff;
-  --term-bg: #18181b;
-  --term-bd: #27272a;
+  --sidebar-bg: #ffffff;
+  --sidebar-bd: #e5e5e5;
+  --sidebar-tx: #525252;
+  --sidebar-ax: #0a0a0a;
+  --term-bg: #0a0a0a;
+  --term-bd: #1c1c1c;
   --white: #ffffff;
   --green-border: #bbf7d0;
   --red-border: #fecaca;
-  --overlay: rgba(0, 0, 0, 0.3);
-  --shadow-sm: rgba(24, 24, 27, 0.08);
+  --overlay: rgba(0, 0, 0, 0.4);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.06);
   --log-info: #60a5fa;
   --log-warn: #fbbf24;
   --log-error: #f87171;
   --log-default: #d4d4d8;
-  --log-muted: #3f3f46;
+  --log-muted: #52525b;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
 }
 
 * {
@@ -52,9 +57,11 @@ body {
   min-height: 100%;
   background: var(--bg);
   color: var(--text-1);
-  font-family: "DM Sans", sans-serif;
+  font-family: "DM Sans", -apple-system, BlinkMacSystemFont, sans-serif;
   font-size: 12px;
   overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 a {
@@ -72,7 +79,7 @@ select {
 pre,
 code,
 .mono {
-  font-family: "DM Mono", monospace;
+  font-family: "JetBrains Mono", monospace;
 }
 
 ::-webkit-scrollbar {
