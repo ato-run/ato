@@ -287,7 +287,7 @@ enum Commands {
         )]
         from_gh_repo: Option<String>,
 
-        /// Registry URL (default: registry.capsule.app)
+        /// Registry URL (default: api.ato.run)
         #[arg(long)]
         registry: Option<String>,
 
