@@ -984,6 +984,21 @@ entrypoint = "main.ts"
     }
 
     #[test]
+    fn build_upload_endpoint_preserves_dock_path_prefix() {
+        let endpoint = build_upload_endpoint(
+            "https://ato.run/d/koh0920",
+            "koh0920",
+            "demo-app",
+            "1.0.0",
+            "demo-app-1.0.0.capsule",
+            false,
+        );
+
+        assert!(endpoint
+            .starts_with("https://ato.run/d/koh0920/v1/local/capsules/koh0920/demo-app/1.0.0"));
+    }
+
+    #[test]
     fn classify_upload_failure_detects_version_exists_from_status_and_message() {
         let err = classify_upload_failure(
             StatusCode::CONFLICT,

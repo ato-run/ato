@@ -86,7 +86,10 @@ pub fn compile_execution_plan(
         allow_hosts.push(format!("127.0.0.1:{port}"));
         allow_hosts.push(format!("localhost:{port}"));
         allow_hosts.push(format!("0.0.0.0:{port}"));
-    } else if matches!((runtime, driver), (ExecutionRuntime::Source, ExecutionDriver::Deno)) {
+    } else if matches!(
+        (runtime, driver),
+        (ExecutionRuntime::Source, ExecutionDriver::Deno)
+    ) {
         if let Some(port) = decision.plan.execution_port() {
             allow_hosts.push(format!("127.0.0.1:{port}"));
             allow_hosts.push(format!("localhost:{port}"));
@@ -367,8 +370,8 @@ mod tests {
 
     #[test]
     fn driver_resolution_infers_from_language() {
-        let driver = resolve_driver(ExecutionRuntime::Source, None, Some("deno"), &[])
-            .expect("driver");
+        let driver =
+            resolve_driver(ExecutionRuntime::Source, None, Some("deno"), &[]).expect("driver");
         assert!(matches!(driver, ExecutionDriver::Deno));
     }
 
@@ -381,8 +384,8 @@ mod tests {
 
     #[test]
     fn driver_resolution_infers_python_from_language() {
-        let driver = resolve_driver(ExecutionRuntime::Source, None, Some("python"), &[])
-            .expect("driver");
+        let driver =
+            resolve_driver(ExecutionRuntime::Source, None, Some("python"), &[]).expect("driver");
         assert!(matches!(driver, ExecutionDriver::Python));
     }
 

@@ -560,7 +560,7 @@ fn is_safe_relative_path(path: &str) -> bool {
             component,
             Component::ParentDir | Component::RootDir | Component::Prefix(_)
         )
-    })
+    }) && !path.starts_with('~')
 }
 
 fn validate_pack_config(manifest_path: &Path, raw: &toml::Value) -> Result<(), CapsuleError> {
@@ -686,6 +686,31 @@ port = 8080
 
         std::fs::create_dir_all(dir.path().join("dist")).unwrap();
         assert!(validate_manifest_for_build(&manifest_path, "static").is_ok());
+    }
+
+    #[test]
+    fn web_static_rejects_home_alias_entrypoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("capsule.toml");
+        std::fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.2"
+name = "web-static"
+version = "0.1.0"
+default_target = "static"
+
+[targets.static]
+runtime = "web"
+driver = "static"
+entrypoint = "~/dist"
+port = 8080
+"#,
+        )
+        .unwrap();
+
+        let err = validate_manifest_for_build(&manifest_path, "static").unwrap_err();
+        assert!(err.to_string().contains("must be a safe relative path"));
     }
 
     #[test]
