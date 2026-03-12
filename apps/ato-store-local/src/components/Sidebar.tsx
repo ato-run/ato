@@ -38,7 +38,7 @@ export function Sidebar({
               </button>
             ) : null}
           </div>
-          <div className="sidebar-subtitle">local registry</div>
+          <div className="sidebar-subtitle">local dock</div>
         </div>
 
         <div className="sidebar-group">

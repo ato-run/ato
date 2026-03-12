@@ -1,12 +1,16 @@
+/* Desktop: sidebar is replaced by AppHeader — hidden by default */
 .sidebar {
+  display: none;
+}
+
+/* Mobile-only slide-in drawer */
+.sidebar.mobile {
+  display: none; /* shown only when open, via media query below */
   width: 220px;
   background: var(--sidebar-bg);
   border-right: 1px solid var(--sidebar-bd);
   color: var(--sidebar-tx);
-  display: flex;
   flex-direction: column;
-  height: 100vh;
-  min-height: 100vh;
   flex-shrink: 0;
   overflow: hidden;
 }
@@ -117,10 +121,12 @@
 
 @media (max-width: 768px) {
   .sidebar.mobile {
+    display: flex;
     position: fixed;
     left: 0;
     top: 0;
     z-index: 16;
+    height: 100dvh;
     transform: translateX(-100%);
     transition: transform 180ms ease;
     width: min(220px, 86vw);
