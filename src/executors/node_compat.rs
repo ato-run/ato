@@ -322,6 +322,7 @@ fn append_allow_env_permission(
 
     let mut keys = BTreeSet::new();
     keys.extend(runtime_overrides::merged_env(plan.execution_env()).into_keys());
+    keys.extend(manifest_allow_env_keys(plan));
     keys.extend(launch_ctx.env_permission_keys());
     if keys.is_empty() {
         return;
@@ -331,6 +332,22 @@ fn append_allow_env_permission(
         "--allow-env={}",
         keys.into_iter().collect::<Vec<_>>().join(",")
     ));
+}
+
+fn manifest_allow_env_keys(plan: &ManifestData) -> Vec<String> {
+    plan.manifest
+        .get("isolation")
+        .and_then(|value| value.get("allow_env"))
+        .and_then(|value| value.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.as_str())
+                .map(|entry| entry.trim().to_string())
+                .filter(|entry| !entry.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

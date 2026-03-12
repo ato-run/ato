@@ -31,6 +31,12 @@ enum DependencyLock {
     PackageJson(PathBuf),
 }
 
+struct DenoRuntimeEnvPaths {
+    home: PathBuf,
+    xdg_cache_home: PathBuf,
+    deno_dir: PathBuf,
+}
+
 struct PreparedCommand {
     cmd: Command,
     #[cfg(unix)]
@@ -58,21 +64,29 @@ pub fn execute(
         })?;
 
     let runtime_dir = resolve_deno_runtime_dir(&plan.manifest_dir, &entrypoint);
-    let lock = resolve_dependency_lock(&plan.manifest_dir, &runtime_dir);
-    let Some(lock) = lock else {
+    let skip_lock = manifest_cmd_contains(plan, "--no-lock");
+    if skip_lock {
+        disable_runtime_lockfile(runtime_dir.as_path())?;
+    }
+    let lock = if skip_lock {
+        None
+    } else {
+        resolve_dependency_lock(&plan.manifest_dir, &runtime_dir)
+    };
+    if !skip_lock && lock.is_none() {
         return Err(AtoExecutionError::lock_incomplete(
             "deno.lock or package-lock.json is required for source/deno execution",
             Some("deno.lock"),
         )
         .into());
-    };
+    }
 
     run_provisioning(
         &deno_bin,
         plan,
         &runtime_dir,
         &entrypoint,
-        &lock,
+        lock.as_ref(),
         launch_ctx,
     )?;
     let prepared = build_runtime_command(
@@ -81,7 +95,7 @@ pub fn execute(
         execution_plan,
         &runtime_dir,
         &entrypoint,
-        &lock,
+        lock.as_ref(),
         launch_ctx,
         dangerously_skip_permissions,
     )?;
@@ -116,21 +130,29 @@ pub fn spawn(
             AtoExecutionError::policy_violation("source/deno target requires entrypoint")
         })?;
     let runtime_dir = resolve_deno_runtime_dir(&plan.manifest_dir, &entrypoint);
-    let lock = resolve_dependency_lock(&plan.manifest_dir, &runtime_dir);
-    let Some(lock) = lock else {
+    let skip_lock = manifest_cmd_contains(plan, "--no-lock");
+    if skip_lock {
+        disable_runtime_lockfile(runtime_dir.as_path())?;
+    }
+    let lock = if skip_lock {
+        None
+    } else {
+        resolve_dependency_lock(&plan.manifest_dir, &runtime_dir)
+    };
+    if !skip_lock && lock.is_none() {
         return Err(AtoExecutionError::lock_incomplete(
             "deno.lock or package-lock.json is required for source/deno execution",
             Some("deno.lock"),
         )
         .into());
-    };
+    }
 
     run_provisioning(
         &deno_bin,
         plan,
         &runtime_dir,
         &entrypoint,
-        &lock,
+        lock.as_ref(),
         launch_ctx,
     )?;
 
@@ -140,7 +162,7 @@ pub fn spawn(
         execution_plan,
         &runtime_dir,
         &entrypoint,
-        &lock,
+        lock.as_ref(),
         launch_ctx,
         dangerously_skip_permissions,
     )?;
@@ -157,26 +179,34 @@ pub fn spawn(
 
 fn run_provisioning(
     deno_bin: &Path,
-    _plan: &ManifestData,
+    plan: &ManifestData,
     runtime_dir: &Path,
     entrypoint: &str,
-    lock: &DependencyLock,
+    lock: Option<&DependencyLock>,
     launch_ctx: &RuntimeLaunchContext,
 ) -> Result<()> {
     let mut cmd = Command::new(deno_bin);
+    let runtime_env_paths = ensure_deno_runtime_env_paths(runtime_dir)?;
     cmd.current_dir(runtime_dir).arg("cache");
+    let (explicit_deno_flags, _) = selected_deno_cmd_parts(plan, entrypoint);
+    if explicit_deno_flags.iter().any(|arg| arg == "--no-lock") {
+        cmd.arg("--no-lock");
+    }
     match lock {
-        DependencyLock::Deno(lock_path) => {
+        Some(DependencyLock::Deno(lock_path)) => {
             cmd.arg("--lock").arg(lock_path).arg("--frozen");
         }
-        DependencyLock::PackageJson(_) => {
+        Some(DependencyLock::PackageJson(_)) => {
             cmd.arg("--node-modules-dir");
         }
+        None => {}
     }
     cmd.arg(entrypoint)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+
+    apply_deno_runtime_env(&mut cmd, &runtime_env_paths);
 
     launch_ctx.apply_allowlisted_env(&mut cmd)?;
     if let Some(proxy_env) = proxy::proxy_env_from_env(&[])? {
@@ -188,13 +218,17 @@ fn run_provisioning(
         Ok(())
     } else {
         let message = match lock {
-            DependencyLock::Deno(_) => format!(
+            Some(DependencyLock::Deno(_)) => format!(
                 "deno cache --lock --frozen failed with exit code {}",
                 status.code().unwrap_or(1)
             ),
-            DependencyLock::PackageJson(lock_path) => format!(
+            Some(DependencyLock::PackageJson(lock_path)) => format!(
                 "deno cache with package-lock.json fallback failed ({}): exit code {}",
                 lock_path.display(),
+                status.code().unwrap_or(1)
+            ),
+            None => format!(
+                "deno cache failed with exit code {}",
                 status.code().unwrap_or(1)
             ),
         };
@@ -209,30 +243,40 @@ fn build_runtime_command(
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     entrypoint: &str,
-    lock: &DependencyLock,
+    lock: Option<&DependencyLock>,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
 ) -> Result<PreparedCommand> {
     let mut cmd = Command::new(deno_bin);
+    let runtime_env_paths = ensure_deno_runtime_env_paths(runtime_dir)?;
     let execution_env = runtime_overrides::merged_env(plan.execution_env());
+    let (explicit_deno_flags, explicit_script_args) = selected_deno_cmd_parts(plan, entrypoint);
     cmd.current_dir(runtime_dir).arg("run").arg("--no-prompt");
+    for arg in &explicit_deno_flags {
+        if arg == "-A" || arg == "--allow-all" || arg == "run" {
+            continue;
+        }
+        cmd.arg(arg);
+    }
     if !dangerously_skip_permissions {
         cmd.arg("--cached-only");
     }
 
     match lock {
-        DependencyLock::Deno(lock_path) => {
+        Some(DependencyLock::Deno(lock_path)) => {
             cmd.arg("--lock").arg(lock_path).arg("--frozen");
         }
-        DependencyLock::PackageJson(_) => {
+        Some(DependencyLock::PackageJson(_)) => {
             cmd.arg("--node-modules-dir");
         }
+        None => {}
     }
 
     if dangerously_skip_permissions {
         cmd.arg("-A");
     } else {
         let is_web_runtime = execution_plan.target.runtime == ExecutionRuntime::Web;
+        let is_fresh_runtime = runtime_dir.join("fresh.gen.ts").exists();
 
         if is_web_runtime {
             // web/deno orchestration spawns subprocesses and probes loopback ports dynamically.
@@ -254,13 +298,28 @@ fn build_runtime_command(
 
             let mut allow_read = execution_plan.runtime.policy.filesystem.read_only.clone();
             allow_read.extend(execution_plan.runtime.policy.filesystem.read_write.clone());
+            let runtime_dir_str = runtime_dir.to_string_lossy().to_string();
+            let runtime_home_str = runtime_env_paths.home.to_string_lossy().to_string();
+            if !allow_read.iter().any(|path| path == &runtime_dir_str) {
+                allow_read.push(runtime_dir_str);
+            }
+            if !allow_read.iter().any(|path| path == &runtime_home_str) {
+                allow_read.push(runtime_home_str.clone());
+            }
             if !allow_read.is_empty() {
                 cmd.arg(format!("--allow-read={}", allow_read.join(",")));
             }
 
-            let allow_write = execution_plan.runtime.policy.filesystem.read_write.clone();
+            let mut allow_write = execution_plan.runtime.policy.filesystem.read_write.clone();
+            if !allow_write.iter().any(|path| path == &runtime_home_str) {
+                allow_write.push(runtime_home_str);
+            }
             if !allow_write.is_empty() {
                 cmd.arg(format!("--allow-write={}", allow_write.join(",")));
+            }
+
+            if is_fresh_runtime {
+                cmd.arg("--allow-run");
             }
         }
     }
@@ -268,6 +327,7 @@ fn build_runtime_command(
     for (key, value) in execution_env {
         cmd.env(key, value);
     }
+    apply_deno_runtime_env(&mut cmd, &runtime_env_paths);
     cmd.env("ATO_RUNTIME_DENO_BIN", deno_bin);
     if execution_plan.target.runtime == ExecutionRuntime::Web {
         let web_host = launch_ctx
@@ -327,7 +387,15 @@ fn build_runtime_command(
     }
 
     cmd.arg(entrypoint);
-    let args = plan.targets_oci_cmd();
+    let args = if selected_target_cmd(plan)
+        .first()
+        .map(|arg| arg == "deno")
+        .unwrap_or(false)
+    {
+        explicit_script_args
+    } else {
+        plan.targets_oci_cmd()
+    };
     if !args.is_empty() {
         cmd.args(args);
     }
@@ -337,6 +405,31 @@ fn build_runtime_command(
         #[cfg(unix)]
         _secret_fd_guard: secret_fd_guard,
     })
+}
+
+fn ensure_deno_runtime_env_paths(runtime_dir: &Path) -> Result<DenoRuntimeEnvPaths> {
+    let home = runtime_dir.join(".ato-home");
+    let xdg_cache_home = home.join(".cache");
+    let deno_dir = home.join(".deno");
+    let macos_cache_root = home.join("Library").join("Caches");
+
+    for dir in [&home, &xdg_cache_home, &deno_dir, &macos_cache_root] {
+        std::fs::create_dir_all(dir).with_context(|| {
+            format!("Failed to create Deno runtime cache directory: {}", dir.display())
+        })?;
+    }
+
+    Ok(DenoRuntimeEnvPaths {
+        home,
+        xdg_cache_home,
+        deno_dir,
+    })
+}
+
+fn apply_deno_runtime_env(cmd: &mut Command, env_paths: &DenoRuntimeEnvPaths) {
+    cmd.env("HOME", &env_paths.home);
+    cmd.env("XDG_CACHE_HOME", &env_paths.xdg_cache_home);
+    cmd.env("DENO_DIR", &env_paths.deno_dir);
 }
 
 fn has_runtime_tool(plan: &ManifestData, keys: &[&str]) -> bool {
@@ -422,6 +515,7 @@ fn append_allow_env_permission(
 
     let mut keys = BTreeSet::new();
     keys.extend(runtime_overrides::merged_env(plan.execution_env()).into_keys());
+    keys.extend(manifest_allow_env_keys(plan));
     keys.extend(launch_ctx.env_permission_keys());
     if keys.is_empty() {
         return;
@@ -431,6 +525,22 @@ fn append_allow_env_permission(
         "--allow-env={}",
         keys.into_iter().collect::<Vec<_>>().join(",")
     ));
+}
+
+fn manifest_allow_env_keys(plan: &ManifestData) -> Vec<String> {
+    plan.manifest
+        .get("isolation")
+        .and_then(|value| value.get("allow_env"))
+        .and_then(|value| value.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.as_str())
+                .map(|entry| entry.trim().to_string())
+                .filter(|entry| !entry.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 fn resolve_deno_runtime_dir(manifest_dir: &Path, entrypoint: &str) -> PathBuf {
@@ -457,6 +567,75 @@ fn resolve_package_lock_path(manifest_dir: &Path, runtime_dir: &Path) -> Option<
         manifest_dir.join("source").join("package-lock.json"),
     ];
     candidates.into_iter().find(|path| path.exists())
+}
+
+fn disable_runtime_lockfile(runtime_dir: &Path) -> Result<()> {
+    let lock_path = runtime_dir.join("deno.lock");
+    let disabled_path = runtime_dir.join(".ato-deno.lock.disabled");
+
+    if !lock_path.exists() || disabled_path.exists() {
+        return Ok(());
+    }
+
+    std::fs::rename(&lock_path, &disabled_path).with_context(|| {
+        format!(
+            "Failed to disable runtime deno.lock for --no-lock execution: {}",
+            lock_path.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+fn manifest_cmd_contains(plan: &ManifestData, flag: &str) -> bool {
+    selected_target_cmd(plan)
+        .iter()
+        .any(|entry| entry == flag)
+}
+
+fn selected_target_cmd(plan: &ManifestData) -> Vec<String> {
+    plan.manifest
+        .get("targets")
+        .and_then(|targets| targets.get(&plan.selected_target))
+        .and_then(|target| target.get("cmd"))
+        .and_then(|cmd| cmd.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.as_str().map(|value| value.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn selected_deno_cmd_parts(plan: &ManifestData, entrypoint: &str) -> (Vec<String>, Vec<String>) {
+    let cmd = selected_target_cmd(plan);
+    if cmd.first().map(|arg| arg != "deno").unwrap_or(true) {
+        return (Vec::new(), Vec::new());
+    }
+
+    let mut iter = cmd.into_iter().skip(1).peekable();
+    if matches!(iter.peek().map(String::as_str), Some("run")) {
+        let _ = iter.next();
+    }
+
+    let mut flags = Vec::new();
+    let mut script_args = Vec::new();
+    let mut reached_entrypoint = false;
+
+    for arg in iter {
+        if !reached_entrypoint {
+            if arg == entrypoint {
+                reached_entrypoint = true;
+                continue;
+            }
+            flags.push(arg);
+        } else {
+            script_args.push(arg);
+        }
+    }
+
+    (flags, script_args)
 }
 
 fn resolve_dependency_lock(manifest_dir: &Path, runtime_dir: &Path) -> Option<DependencyLock> {
@@ -606,7 +785,10 @@ fn verify_execution_plan_hashes(execution_plan: &ExecutionPlan) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_deno_lock_path, resolve_deno_runtime_dir, resolve_package_lock_path};
+    use super::{
+        disable_runtime_lockfile, ensure_deno_runtime_env_paths, resolve_deno_lock_path,
+        resolve_deno_runtime_dir, resolve_package_lock_path,
+    };
 
     #[test]
     fn deno_runtime_dir_uses_source_when_entrypoint_exists_only_there() {
@@ -649,5 +831,36 @@ mod tests {
             lock_path,
             tmp.path().join("source").join("package-lock.json")
         );
+    }
+
+    #[test]
+    fn deno_runtime_env_paths_stay_within_runtime_dir() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let runtime_dir = tmp.path().join("source");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+
+        let paths = ensure_deno_runtime_env_paths(&runtime_dir).expect("build runtime env paths");
+
+        assert_eq!(paths.home, runtime_dir.join(".ato-home"));
+        assert_eq!(paths.xdg_cache_home, runtime_dir.join(".ato-home").join(".cache"));
+        assert_eq!(paths.deno_dir, runtime_dir.join(".ato-home").join(".deno"));
+        assert!(paths.home.exists());
+        assert!(paths.xdg_cache_home.exists());
+        assert!(paths.deno_dir.exists());
+        assert!(runtime_dir.join(".ato-home").join("Library").join("Caches").exists());
+    }
+
+    #[test]
+    fn disable_runtime_lockfile_renames_deno_lock() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let runtime_dir = tmp.path().join("source");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+        let lock_path = runtime_dir.join("deno.lock");
+        std::fs::write(&lock_path, "{}").expect("write deno.lock");
+
+        disable_runtime_lockfile(&runtime_dir).expect("disable deno.lock");
+
+        assert!(!lock_path.exists());
+        assert!(runtime_dir.join(".ato-deno.lock.disabled").exists());
     }
 }
