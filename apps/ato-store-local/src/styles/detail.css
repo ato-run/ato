@@ -1,6 +1,6 @@
 .detail-page {
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--surface);
   height: 100%;
   min-height: 0;
@@ -20,7 +20,7 @@
 .detail-icon {
   width: 40px;
   height: 40px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border);
   background: var(--bg);
   display: inline-flex;
@@ -33,7 +33,7 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
 }
 
 .detail-title-row {
@@ -43,7 +43,7 @@
 }
 
 .detail-title {
-  font-family: "DM Mono", monospace;
+  font-family: "JetBrains Mono", monospace;
   font-size: 15px;
   color: var(--text-1);
 }
@@ -162,7 +162,7 @@
 }
 
 .terminal-bar-title {
-  font-family: "DM Mono", monospace;
+  font-family: "JetBrains Mono", monospace;
   font-size: 11px;
   color: var(--log-muted);
 }
@@ -176,7 +176,7 @@
   flex: 1;
   overflow-y: auto;
   padding: 14px;
-  font-family: "DM Mono", monospace;
+  font-family: "JetBrains Mono", monospace;
   font-size: 12px;
 }
 
@@ -232,7 +232,7 @@
   max-width: 980px;
   margin: 0 auto;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--surface);
   padding: 24px;
 }
@@ -250,7 +250,7 @@
 
 .release-summary-tile {
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: var(--bg);
   padding: 14px;
   display: grid;
@@ -258,14 +258,14 @@
 }
 
 .release-summary-tile strong {
-  font-family: "DM Mono", monospace;
+  font-family: "JetBrains Mono", monospace;
   font-size: 14px;
   color: var(--text-1);
 }
 
 .release-empty {
-  border: 1px dashed var(--border-md);
-  border-radius: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   background: var(--bg);
   padding: 24px;
   color: var(--text-3);
@@ -274,7 +274,7 @@
 
 .release-table-wrap {
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   overflow: auto;
 }
 
@@ -296,7 +296,7 @@
 }
 
 .release-table th {
-  font-family: "DM Mono", monospace;
+  font-family: "JetBrains Mono", monospace;
   font-size: 11px;
   color: var(--text-3);
   text-transform: uppercase;
@@ -350,7 +350,7 @@
   background: var(--term-bg);
   padding: 12px;
   color: var(--log-info);
-  font-family: "DM Mono", monospace;
+  font-family: "JetBrains Mono", monospace;
   font-size: 12px;
   max-height: 240px;
   overflow-y: auto;
@@ -376,7 +376,7 @@
 
 .config-section {
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: var(--surface);
   overflow: hidden;
 }
@@ -428,7 +428,7 @@
 .toml-body {
   background: var(--term-bg);
   padding: 14px;
-  font-family: "DM Mono", monospace;
+  font-family: "JetBrains Mono", monospace;
   font-size: 12px;
   line-height: 1.7;
   max-height: 440px;
@@ -520,19 +520,19 @@
 }
 
 .env-key {
-  font-family: "DM Mono", monospace;
+  font-family: "JetBrains Mono", monospace;
   font-size: 11px;
   color: var(--text-3);
 }
 
 .env-key-input {
-  font-family: "DM Mono", monospace;
+  font-family: "JetBrains Mono", monospace;
   font-size: 11px;
   color: var(--text-2);
 }
 
 .env-input {
-  font-family: "DM Mono", monospace;
+  font-family: "JetBrains Mono", monospace;
   font-size: 12px;
 }
 
