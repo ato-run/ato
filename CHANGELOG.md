@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to `ato-cli` will be documented in this file.
+
+## [0.4.22] - 2026-03-13
+
+### What Changed
+
+#### Bug Fixes
+- Use `https://api.ato.run` as the default registry fallback
 ## [0.4.21] - 2026-03-13
 
 ### What Changed
