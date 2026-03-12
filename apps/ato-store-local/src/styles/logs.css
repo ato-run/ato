@@ -1,6 +1,6 @@
 .logs-card {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   background: var(--surface);
   height: 100%;
   min-height: 0;
@@ -19,7 +19,7 @@
 }
 
 .logs-title {
-  font-family: "DM Mono", monospace;
+  font-family: "JetBrains Mono", monospace;
   font-size: 11px;
   color: var(--text-2);
 }
@@ -35,7 +35,7 @@
   border-bottom: 1px solid var(--term-bd);
   overflow: auto;
   padding: 10px;
-  font-family: "DM Mono", monospace;
+  font-family: "JetBrains Mono", monospace;
   font-size: 11px;
 }
 
