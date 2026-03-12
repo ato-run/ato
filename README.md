@@ -139,12 +139,15 @@ cargo build -p ato-cli
 ./target/debug/ato close --id <capsule-id>
 ```
 
-## Publish Model (Official / Local)
+## Publish Model (Official / Dock / Custom)
 
 - Official registries (`https://api.ato.run`, `https://staging.api.ato.run`):
   `ato publish` is CI-first (OIDC). Direct local uploads are not allowed.
   Default phase selection is `deploy` only (handoff/diagnostics). If you need local build checks, explicitly add `--build` (or `--prepare --build`) before `--deploy`.
-- Local/private registries (any other `--registry`):
+- Personal Dock (default when logged in and no registry is specified):
+  `ato publish` resolves the target from `ato login` and uploads directly to `https://store.ato.run/d/<handle>`.
+  `--artifact` is recommended to avoid re-packing, and `--scoped-id` is auto-filled as `<handle>/<slug>`.
+- Custom/private registries (any other `--registry`):
   `ato publish --registry ...` performs direct uploads. `--artifact` is recommended to avoid re-packing.
   `--artifact` supports standalone artifact flow (no local `capsule.toml` required).
   `--allow-existing` is available only on deploy phase (`--deploy`) for private/local registries.
@@ -169,21 +172,28 @@ Official registry helpers:
 
 The Dock-first path uses existing commands (no new subcommands):
 
-1. Open `/publish` in Store Web and create/connect your Dock.
+1. Run `ato login` once and create/connect your Dock from Store Web `/publish`.
 2. Build artifact locally: `ato build .`
-3. Publish to your Dock endpoint:
-   `ATO_TOKEN=... ato publish --registry <dock-endpoint> --artifact ./<name>.capsule`
+3. Publish to your Dock:
+   `ato publish --artifact ./<name>.capsule`
 4. Share your public Dock page: `/d/<handle>`
-5. When ready, submit from Dock Control Tower (`Submit to Official Marketplace`).
+5. When ready for the official Store, use `ato publish --registry https://api.ato.run` or `ato publish --ci`.
+6. Final review/submission continues from Dock Control Tower (`Submit to Official Marketplace`).
 
 ```bash
-# pre-build + direct publish to a private registry (recommended)
+# login once, then publish to your Personal Dock (recommended default)
+ato login
+ato build .
+ato publish --artifact ./<name>.capsule
+
+# pre-build + direct publish to a custom/private registry
 ato build .
 ATO_TOKEN=pwd ato publish --registry http://127.0.0.1:18787 --artifact ./<name>.capsule
 
 # phase-filtered execution examples
 ato publish --prepare
 ato publish --build
+ato publish --artifact ./<name>.capsule          # default target: My Dock
 ATO_TOKEN=pwd ato publish --deploy --artifact ./<name>.capsule --registry http://127.0.0.1:18787
 ato publish --registry https://api.ato.run           # default: deploy only
 ato publish --registry https://api.ato.run --build   # explicit local build + official handoff

@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const DEFAULT_STORE_API_URL: &str = "https://api.ato.run";
-const DEFAULT_STORE_SITE_URL: &str = "https://store.ato.run";
+const DEFAULT_STORE_SITE_URL: &str = "https://ato.run";
 const ENV_STORE_API_URL: &str = "ATO_STORE_API_URL";
 const ENV_STORE_SITE_URL: &str = "ATO_STORE_SITE_URL";
 const ENV_ATO_TOKEN: &str = "ATO_TOKEN";
@@ -200,11 +200,9 @@ impl AuthManager {
         tokio::task::spawn_blocking(move || {
             let entry = Entry::new(&service, &account)
                 .with_context(|| "Failed to initialize OS keyring entry")?;
-            entry.set_password(&token).map_err(|err| {
-                anyhow::anyhow!(
-                    "Failed to save token in OS keyring ({err}). Security requirements prohibit plaintext fallback. Use ATO_TOKEN for this environment."
-                )
-            })
+            entry
+                .set_password(&token)
+                .map_err(|err| anyhow::anyhow!(format_keyring_error_message("save", &err)))
         })
         .await
         .map_err(|err| anyhow::anyhow!("Keyring worker failed: {err}"))?
@@ -216,11 +214,9 @@ impl AuthManager {
         tokio::task::spawn_blocking(move || {
             let entry = Entry::new(&service, &account)
                 .with_context(|| "Failed to initialize OS keyring entry")?;
-            entry.set_password(&token).map_err(|err| {
-                anyhow::anyhow!(
-                    "Failed to save token in OS keyring ({err}). Security requirements prohibit plaintext fallback. Use ATO_TOKEN for this environment."
-                )
-            })
+            entry
+                .set_password(&token)
+                .map_err(|err| anyhow::anyhow!(format_keyring_error_message("save", &err)))
         })
         .await
         .map_err(|err| anyhow::anyhow!("Keyring worker failed: {err}"))?
@@ -259,10 +255,7 @@ impl AuthManager {
     }
 
     fn keyring_error(&self, err: KeyringError, action: &str) -> anyhow::Error {
-        anyhow::anyhow!(
-            "Failed to {} token in OS keyring ({err}). Security requirements prohibit plaintext fallback. Use ATO_TOKEN for this environment.",
-            action
-        )
+        anyhow::anyhow!(format_keyring_error_message(action, &err))
     }
 
     fn is_nonfatal_keyring_error(&self, err: &KeyringError) -> bool {
@@ -388,6 +381,23 @@ fn read_env_non_empty(key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+pub fn current_session_token() -> Option<String> {
+    let auth = AuthManager::new().ok()?;
+    auth.resolve_session_token().ok().flatten()
+}
+
+pub fn current_publisher_handle() -> Result<Option<String>> {
+    let manager = AuthManager::new()?;
+    Ok(
+        hydrate_publisher_identity_with(&manager, fetch_publisher_me_blocking)?
+            .and_then(|creds| cached_publisher_handle(&creds)),
+    )
+}
+
+pub fn current_dock_registry_url() -> Result<Option<String>> {
+    Ok(current_publisher_handle()?.map(|handle| dock_registry_url_for_handle(&handle)))
+}
+
 fn trim_trailing_slash(value: &str) -> String {
     value.trim_end_matches('/').to_string()
 }
@@ -424,6 +434,39 @@ fn store_site_base_url() -> String {
         &read_env_non_empty(ENV_STORE_SITE_URL)
             .unwrap_or_else(|| DEFAULT_STORE_SITE_URL.to_string()),
     )
+}
+
+fn is_local_store_api_base_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+fn keyring_user_interaction_not_allowed_message(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("user interaction is not allowed")
+}
+
+fn format_keyring_error_message(action: &str, err: &KeyringError) -> String {
+    let err_text = err.to_string();
+    let mut message = format!(
+        "Failed to {} token in OS keyring ({}). Security requirements prohibit plaintext fallback.",
+        action, err_text
+    );
+
+    if keyring_user_interaction_not_allowed_message(&err_text) {
+        message.push_str(
+            " macOS denied Keychain access. This usually means the login keychain is locked or this shell cannot show Keychain prompts (for example: ssh, tmux, sudo, launchd, or a backgrounded GUI session). Unlock the login keychain or allow your terminal app in Keychain Access, then retry.",
+        );
+    }
+
+    message.push_str(" Use ATO_TOKEN for this environment.");
+    message
 }
 
 fn try_open_browser(url: &str) -> Result<()> {
@@ -496,6 +539,92 @@ fn store_session_cookie_header(session_token: &str) -> String {
     format!(
         "better-auth.session_token={}; __Secure-better-auth.session_token={}",
         session_token, session_token
+    )
+}
+
+fn cached_publisher_handle(creds: &Credentials) -> Option<String> {
+    creds.publisher_handle.as_ref().and_then(|handle| {
+        let trimmed = handle.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn merge_publisher_identity(creds: &mut Credentials, me: &PublisherMeResponse) {
+    if !me.id.trim().is_empty() {
+        creds.publisher_id = Some(me.id.clone());
+    }
+    if !me.handle.trim().is_empty() {
+        creds.publisher_handle = Some(me.handle.clone());
+    }
+    if !me.author_did.trim().is_empty() {
+        creds.publisher_did = Some(me.author_did.clone());
+    }
+}
+
+fn hydrate_publisher_identity_with<F>(
+    manager: &AuthManager,
+    fetcher: F,
+) -> Result<Option<Credentials>>
+where
+    F: FnOnce(&str) -> Result<Option<PublisherMeResponse>>,
+{
+    let mut creds = manager.load()?.unwrap_or_default();
+    if cached_publisher_handle(&creds).is_some() {
+        return Ok(Some(creds));
+    }
+
+    let Some(session_token) = manager.resolve_session_token()? else {
+        return Ok(None);
+    };
+
+    let Some(me) = fetcher(&session_token)? else {
+        return Ok(None);
+    };
+
+    merge_publisher_identity(&mut creds, &me);
+    manager.save(&creds)?;
+    Ok(Some(creds))
+}
+
+fn fetch_publisher_me_blocking(session_token: &str) -> Result<Option<PublisherMeResponse>> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .context("Failed to create HTTP client")?;
+
+    let response = client
+        .get(format!("{}/v1/publishers/me", store_api_base_url()))
+        .header("Accept", "application/json")
+        .header("Cookie", store_session_cookie_header(session_token))
+        .send()
+        .context("Failed to fetch publisher profile")?;
+
+    if response.status() == StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if response.status() == StatusCode::UNAUTHORIZED || response.status() == StatusCode::FORBIDDEN {
+        anyhow::bail!("Store session is not authorized for publisher lookup");
+    }
+    if !response.status().is_success() {
+        anyhow::bail!("Publisher lookup failed (HTTP {})", response.status());
+    }
+
+    let body = response
+        .json::<PublisherMeResponse>()
+        .context("Failed to parse publisher profile response")?;
+
+    Ok(Some(body))
+}
+
+fn dock_registry_url_for_handle(handle: &str) -> String {
+    format!(
+        "{}/d/{}",
+        store_site_base_url(),
+        urlencoding::encode(handle.trim())
     )
 }
 
@@ -1080,7 +1209,13 @@ pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
     if !start_response.status().is_success() {
         let status = start_response.status();
         let body = start_response.text().await.unwrap_or_default();
-        anyhow::bail!("Bridge auth init failed ({}): {}", status, body);
+        let mut message = format!("Bridge auth init failed ({}): {}", status, body);
+        if status.is_server_error() && is_local_store_api_base_url(&api_base) {
+            message.push_str(
+                "\nLocal ato-store may be missing DB migrations. Run `pnpm -C apps/ato-store db:migrate` and restart `pnpm -C apps/ato-store dev`.",
+            );
+        }
+        anyhow::bail!(message);
     }
 
     let start: BridgeInitResponse = start_response
@@ -1234,10 +1369,7 @@ pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
                 creds.publisher_handle = exchange.handle.clone();
                 manager.save(&creds)?;
 
-                let session_token_for_setup = creds
-                    .session_token
-                    .clone()
-                    .context("Missing session token after login")?;
+                let session_token_for_setup = session_token.clone();
                 println!("🧪 Running publisher onboarding...");
                 let onboarding = run_publisher_onboarding_flow(
                     &session_token_for_setup,
@@ -1351,7 +1483,38 @@ pub fn status() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let previous = std::env::var(key).ok();
+            match value {
+                Some(next) => std::env::set_var(key, next),
+                None => std::env::remove_var(key),
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn test_credentials_roundtrip() {
@@ -1420,6 +1583,8 @@ mod tests {
 
     #[test]
     fn test_require_fails_when_not_authenticated() {
+        let _guard = env_lock().lock().unwrap();
+        let _token_guard = EnvVarGuard::set(ENV_ATO_TOKEN, None);
         let temp_dir = TempDir::new().unwrap();
         let creds_path = temp_dir.path().join("nonexistent.json");
 
@@ -1435,6 +1600,8 @@ mod tests {
 
     #[test]
     fn test_require_fails_when_no_tokens() {
+        let _guard = env_lock().lock().unwrap();
+        let _token_guard = EnvVarGuard::set(ENV_ATO_TOKEN, None);
         let temp_dir = TempDir::new().unwrap();
         let creds_path = temp_dir.path().join("credentials.json");
 
@@ -1479,5 +1646,107 @@ mod tests {
 
         manager.delete().unwrap();
         assert!(!creds_path.exists());
+    }
+
+    #[test]
+    fn hydrate_publisher_identity_uses_cached_handle_without_fetch() {
+        let temp_dir = TempDir::new().unwrap();
+        let creds_path = temp_dir.path().join("credentials.json");
+        let manager = AuthManager::with_path(creds_path);
+        manager
+            .save(&Credentials {
+                github_token: None,
+                session_token: None,
+                publisher_did: Some("did:key:z6MkCached".to_string()),
+                publisher_id: Some("publisher-cached".to_string()),
+                publisher_handle: Some("cached-handle".to_string()),
+                github_app_installation_id: None,
+                github_app_account_login: None,
+                github_username: None,
+            })
+            .unwrap();
+
+        let hydrated = hydrate_publisher_identity_with(&manager, |_| {
+            anyhow::bail!("fetcher should not be called when handle is cached")
+        })
+        .unwrap()
+        .expect("cached credentials");
+
+        assert_eq!(hydrated.publisher_handle.as_deref(), Some("cached-handle"));
+        assert_eq!(hydrated.publisher_id.as_deref(), Some("publisher-cached"));
+    }
+
+    #[test]
+    fn hydrate_publisher_identity_fetches_and_persists_missing_handle() {
+        let _guard = env_lock().lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let creds_path = temp_dir.path().join("credentials.json");
+        let manager = AuthManager::with_path(creds_path);
+        manager
+            .save(&Credentials {
+                github_token: None,
+                session_token: None,
+                publisher_did: None,
+                publisher_id: None,
+                publisher_handle: None,
+                github_app_installation_id: None,
+                github_app_account_login: None,
+                github_username: Some("dock-user".to_string()),
+            })
+            .unwrap();
+        let _token_guard = EnvVarGuard::set(ENV_ATO_TOKEN, Some("session-token-123"));
+
+        let hydrated = hydrate_publisher_identity_with(&manager, |token| {
+            assert_eq!(token, "session-token-123");
+            Ok(Some(PublisherMeResponse {
+                id: "publisher-123".to_string(),
+                handle: "dock-user".to_string(),
+                author_did: "did:key:z6MkDockUser".to_string(),
+            }))
+        })
+        .unwrap()
+        .expect("hydrated credentials");
+
+        assert_eq!(hydrated.publisher_handle.as_deref(), Some("dock-user"));
+        assert_eq!(hydrated.publisher_id.as_deref(), Some("publisher-123"));
+        assert_eq!(
+            hydrated.publisher_did.as_deref(),
+            Some("did:key:z6MkDockUser")
+        );
+
+        let persisted = manager.load().unwrap().unwrap();
+        assert_eq!(persisted.publisher_handle.as_deref(), Some("dock-user"));
+        assert_eq!(persisted.publisher_id.as_deref(), Some("publisher-123"));
+        assert_eq!(
+            persisted.publisher_did.as_deref(),
+            Some("did:key:z6MkDockUser")
+        );
+    }
+
+    #[test]
+    fn dock_registry_url_for_handle_uses_store_site_base() {
+        let _guard = env_lock().lock().unwrap();
+        let _site_guard = EnvVarGuard::set(ENV_STORE_SITE_URL, Some("https://staging.ato.run/"));
+        assert_eq!(
+            dock_registry_url_for_handle("koh0920"),
+            "https://staging.ato.run/d/koh0920"
+        );
+    }
+
+    #[test]
+    fn is_local_store_api_base_url_detects_loopback_hosts() {
+        assert!(is_local_store_api_base_url("http://localhost:8787"));
+        assert!(is_local_store_api_base_url("http://127.0.0.1:8787"));
+        assert!(!is_local_store_api_base_url("https://api.ato.run"));
+    }
+
+    #[test]
+    fn keyring_user_interaction_not_allowed_message_detects_macos_error() {
+        assert!(keyring_user_interaction_not_allowed_message(
+            "Platform secure storage failure: User interaction is not allowed."
+        ));
+        assert!(!keyring_user_interaction_not_allowed_message(
+            "Platform secure storage failure: Item not found."
+        ));
     }
 }

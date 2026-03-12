@@ -27,6 +27,7 @@ interface CatalogPageProps {
   onInspect: (capsule: Capsule) => void;
   onDelete: (capsule: Capsule) => void;
   publishCommand: string;
+  writeAuthRequired: boolean;
   onCopyCommand: () => void;
 }
 
@@ -46,6 +47,7 @@ export function CatalogPage({
   onInspect,
   onDelete,
   publishCommand,
+  writeAuthRequired,
   onCopyCommand,
 }: CatalogPageProps): JSX.Element {
   return (
@@ -60,8 +62,11 @@ export function CatalogPage({
 
       {capsules.length === 0 ? (
         <div className="empty-state" role="status">
-          <h3>No capsules in this registry.</h3>
+          <h3>No capsules in this Dock.</h3>
           <p>To publish your first capsule, run:</p>
+          {writeAuthRequired ? (
+            <p>If this Dock requires write auth, run <code>ato login</code> first. The publish command below will reuse your saved CLI session.</p>
+          ) : null}
           <pre>{publishCommand}</pre>
           <button className="btn btn-ghost" type="button" onClick={onCopyCommand}>
             <Copy size={14} strokeWidth={1.5} /> Copy command
