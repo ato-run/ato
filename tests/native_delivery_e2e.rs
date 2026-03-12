@@ -593,12 +593,7 @@ fn verify_authenticode_signature(path: &Path) -> Result<()> {
     );
     let output = run_command(
         "powershell.exe",
-        &[
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &command,
-        ],
+        &["-NoProfile", "-NonInteractive", "-Command", &command],
         path.parent().unwrap_or_else(|| Path::new(".")),
     )?;
     let output = require_success(output, "Get-AuthenticodeSignature")?;

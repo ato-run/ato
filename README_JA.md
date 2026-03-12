@@ -128,12 +128,15 @@ cargo build -p ato-cli
 ./target/debug/ato close --id <capsule-id>
 ```
 
-## 公開モデル（公式 / ローカル）
+## 公開モデル（公式 / Dock / カスタム）
 
 - 公式レジストリ（`https://api.ato.run`, `https://staging.api.ato.run`）:
   `ato publish` は CI-first（OIDC）で公開します。ローカルからの直接アップロードは行いません。
   既定フェーズは `deploy` のみ（handoff/diagnostics）です。ローカルで build 検証が必要な場合は `--build`（必要なら `--prepare --build`）を明示してください。
-- ローカル/私設レジストリ（上記以外の `--registry`）:
+- Personal Dock（`ato login` 済みで `--registry` 未指定時の既定先）:
+  `ato publish` はログイン済みユーザーの `https://store.ato.run/d/<handle>` を自動解決して直接アップロードします。
+  `--artifact` 指定を推奨します（再パッキング回避）。`--scoped-id` 未指定時は `<handle>/<slug>` が自動採用されます。
+- カスタム/私設レジストリ（上記以外の `--registry`）:
   `ato publish --registry ...` で直接アップロードします。`--artifact` 指定を推奨します（再パッキング回避）。
   `--artifact` はローカル `capsule.toml` がなくても単体で publish できます。
   `--allow-existing` は private/local の deploy フェーズ（`--deploy`）でのみ利用できます。
@@ -158,21 +161,28 @@ cargo build -p ato-cli
 
 Dock-first では既存コマンドだけで運用します（新サブコマンドなし）。
 
-1. Store Web の `/publish` で Dock を作成/接続
+1. `ato login` を一度実行し、Store Web の `/publish` で Dock を作成/接続
 2. ローカルで artifact 作成: `ato build .`
-3. Dock endpoint へ publish:
-   `ATO_TOKEN=... ato publish --registry <dock-endpoint> --artifact ./<name>.capsule`
+3. Personal Dock へ publish:
+   `ato publish --artifact ./<name>.capsule`
 4. 公開 Dock ページ `/d/<handle>` を共有
-5. 準備できたら Dock Control Tower から `Submit to Official Marketplace` を実行
+5. 公式 Store に出す段階になったら `ato publish --registry https://api.ato.run` または `ato publish --ci` を使う
+6. 最終的な審査・提出は Dock Control Tower の `Submit to Official Marketplace` から進める
 
 ```bash
-# 事前ビルド + private registry へ直接 publish（推奨）
+# 一度 login したら Personal Dock へそのまま publish（既定）
+ato login
+ato build .
+ato publish --artifact ./<name>.capsule
+
+# 事前ビルド + custom/private registry へ直接 publish
 ato build .
 ATO_TOKEN=pwd ato publish --registry http://127.0.0.1:18787 --artifact ./<name>.capsule
 
 # フェーズ指定の実行例
 ato publish --prepare
 ato publish --build
+ato publish --artifact ./<name>.capsule          # 既定ターゲット: My Dock
 ATO_TOKEN=pwd ato publish --deploy --artifact ./<name>.capsule --registry http://127.0.0.1:18787
 ato publish --registry https://api.ato.run           # 既定: deployのみ
 ato publish --registry https://api.ato.run --build   # 明示的にローカルbuild + official handoff

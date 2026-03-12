@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Menu } from "lucide-react";
 import { ConfirmActionModal } from "./components/ConfirmActionModal";
 import {
   getPermissionModeMessage,
   PermissionModeSelector,
 } from "./components/PermissionModeSelector";
 import { Sidebar } from "./components/Sidebar";
+import { LocalNav } from "./components/LocalNav";
 import { ProcessDrawer } from "./components/ProcessDrawer";
 import { Toast, type ToastState } from "./components/Toast";
 import { CatalogPage } from "./pages/CatalogPage";
@@ -917,6 +917,7 @@ export default function App(): JSX.Element {
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [isSubmittingConfirm, setIsSubmittingConfirm] = useState(false);
   const [writeAuthRequired, setWriteAuthRequired] = useState(false);
+  const [localPublisherHandle, setLocalPublisherHandle] = useState<string | null>(null);
   const [registryAuthToken, setRegistryAuthToken] = useState<string>(() => {
     const params = new URLSearchParams(window.location.search);
     const fromQuery = params.get("authToken") ?? params.get("token");
@@ -1048,6 +1049,15 @@ export default function App(): JSX.Element {
   useEffect(() => {
     void loadCatalogCapsules();
   }, [loadCatalogCapsules]);
+
+  useEffect(() => {
+    fetch("/v1/local/info")
+      .then((r) => r.json())
+      .then((data: { publisher_handle?: string | null }) => {
+        setLocalPublisherHandle(data.publisher_handle ?? null);
+      })
+      .catch(() => {/* ignore */});
+  }, []);
 
   const loadProcesses = useCallback(async (): Promise<void> => {
     try {
@@ -2208,6 +2218,7 @@ export default function App(): JSX.Element {
           navigate(`/capsule/${encodeURIComponent(capsule.id)}`)
         }
         publishCommand={`ato publish --registry ${window.location.origin} --artifact ./dist/my-app.capsule`}
+        writeAuthRequired={writeAuthRequired}
         onCopyCommand={() => {
           navigator.clipboard
             .writeText(
@@ -2296,7 +2307,7 @@ export default function App(): JSX.Element {
                 ]
               : [
                   `Capsule: ${confirmState.capsule.scopedId}`,
-                  "Action: Delete from local registry",
+                  "Action: Delete from local dock",
                   "Scope: All published versions",
                 ];
 
@@ -2343,6 +2354,13 @@ export default function App(): JSX.Element {
   return (
     <>
       <div className="app-shell">
+        <LocalNav
+          processes={processes}
+          isMobile={isMobileViewport}
+          onOpenMobileSidebar={() => setMobileSidebarOpen(true)}
+          onOpenProcesses={() => setDrawerOpen(true)}
+          publisherHandle={localPublisherHandle ?? undefined}
+        />
         <Sidebar
           processes={processes}
           isMobile={isMobileViewport}
@@ -2351,18 +2369,6 @@ export default function App(): JSX.Element {
           onOpenProcesses={() => setDrawerOpen(true)}
         />
         <main className="main-pane">
-          {isMobileViewport ? (
-            <div className="mobile-nav-bar">
-              <button
-                className="icon-btn mobile-menu-btn"
-                type="button"
-                aria-label="Open navigation menu"
-                onClick={() => setMobileSidebarOpen(true)}
-              >
-                <Menu size={15} strokeWidth={1.5} />
-              </button>
-            </div>
-          ) : null}
           <div className="content-pane">{content}</div>
         </main>
 

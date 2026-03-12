@@ -17,6 +17,8 @@ concurrency:
 jobs:
   release-plz:
     runs-on: ubuntu-latest
+    env:
+      RELEASE_PLZ_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,9 +29,20 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+      - name: Resolve release-plz token
+        id: release_plz_token
+        shell: bash
+        run: |
+          if [[ -n "${RELEASE_PLZ_TOKEN}" ]]; then
+            echo "token=${RELEASE_PLZ_TOKEN}" >> "$GITHUB_OUTPUT"
+            echo "Using RELEASE_PLZ_TOKEN for release PR operations"
+          else
+            echo "token=${{ secrets.GITHUB_TOKEN }}" >> "$GITHUB_OUTPUT"
+            echo "Using default GITHUB_TOKEN for release PR operations"
+          fi
       - name: Create or update release PR
         uses: release-plz/action@v0.5.128
         with:
           command: release-pr
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.release_plz_token.outputs.token }}
