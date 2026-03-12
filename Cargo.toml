@@ -11,6 +11,7 @@ version = "0.4.19"
 edition = "2021"
 description = "ato CLI (meta-runtime)"
 license = "Apache-2.0"
+repository = "https://github.com/Koh0920/ato-cli"
 build = "build.rs"
 
 [[bin]]
