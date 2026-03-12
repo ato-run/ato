@@ -1047,6 +1047,15 @@ fn unpack_github_tarball(bytes: &[u8], destination: &Path) -> Result<PathBuf> {
         .context("Failed to read GitHub repository archive")?
     {
         let mut entry = entry.context("Invalid GitHub repository archive entry")?;
+        if !matches!(
+            entry.header().entry_type(),
+            tar::EntryType::Regular
+                | tar::EntryType::Directory
+                | tar::EntryType::Symlink
+                | tar::EntryType::Link
+        ) {
+            continue;
+        }
         let path = entry
             .path()
             .context("Failed to read GitHub archive entry path")?;
@@ -3431,9 +3440,17 @@ entrypoint = "main.py"
     }
 
     #[test]
-    fn test_normalize_github_repository_accepts_url_and_owner_repo() {
+    fn test_normalize_github_repository_accepts_url_host_path_and_owner_repo() {
         assert_eq!(
             normalize_github_repository("https://github.com/Koh0920/ato-cli.git").unwrap(),
+            "Koh0920/ato-cli"
+        );
+        assert_eq!(
+            normalize_github_repository("github.com/Koh0920/ato-cli.git").unwrap(),
+            "Koh0920/ato-cli"
+        );
+        assert_eq!(
+            normalize_github_repository("www.github.com/Koh0920/ato-cli").unwrap(),
             "Koh0920/ato-cli"
         );
         assert_eq!(
@@ -3517,6 +3534,47 @@ entrypoint = "main.py"
         let err =
             unpack_github_tarball(&archive_bytes, temp.path()).expect_err("must reject archive");
         assert!(err.to_string().contains("multiple top-level directories"));
+    }
+
+    #[test]
+    fn test_unpack_github_tarball_ignores_global_pax_headers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut archive_bytes = Vec::new();
+        {
+            let encoder =
+                flate2::write::GzEncoder::new(&mut archive_bytes, flate2::Compression::default());
+            let mut builder = tar::Builder::new(encoder);
+
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::XGlobalHeader);
+            header.set_size(0);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "pax_global_header", std::io::Cursor::new([]))
+                .expect("append pax global header");
+
+            let mut header = tar::Header::new_gnu();
+            header.set_size(1);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "repo/index.js", std::io::Cursor::new(b"a"))
+                .expect("append repo file");
+
+            builder
+                .into_inner()
+                .expect("finish tar")
+                .finish()
+                .expect("finish gzip");
+        }
+
+        let root = unpack_github_tarball(&archive_bytes, temp.path()).expect("must unpack archive");
+        assert_eq!(root, temp.path().join("repo"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("index.js")).expect("read unpacked file"),
+            "a"
+        );
     }
 
     #[test]
