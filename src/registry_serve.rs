@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::io::{BufRead, BufReader, Cursor, Read};
 use std::net::{SocketAddr, TcpListener};
 #[cfg(unix)]
@@ -623,6 +624,12 @@ pub async fn serve(config: RegistryServerConfig) -> Result<()> {
 
     app = app.layer(DefaultBodyLimit::max(512 * 1024 * 1024));
 
+    let addr: SocketAddr = format!("{}:{}", host, config.port)
+        .parse()
+        .context("Invalid listen address")?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|err| anyhow::anyhow!(format_bind_error(addr, &err)))?;
     let access_base_url = format!("http://{}:{}", access_host, config.port);
     println!("🚀 Local registry serving at {}", listen_url);
     println!("🔌 API: {}/v1/...", access_base_url);
@@ -632,17 +639,28 @@ pub async fn serve(config: RegistryServerConfig) -> Result<()> {
     if ui_enabled && LocalRegistryUiAssets::get("index.html").is_none() {
         println!("⚠️  Web UI assets are missing. Rebuild with `cargo build` after installing npm deps in apps/ato-store-local.");
     }
-    let addr: SocketAddr = format!("{}:{}", host, config.port)
-        .parse()
-        .context("Invalid listen address")?;
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("Failed to bind {}", addr))?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("Local registry server failed")?;
     Ok(())
+}
+
+fn format_bind_error(addr: SocketAddr, err: &std::io::Error) -> String {
+    let mut message = format!("Failed to bind {}: {}", addr, err);
+    match err.kind() {
+        ErrorKind::AddrInUse => {
+            message.push_str(". Another process is already listening on that port. Try a different `--port` or inspect listeners with `lsof -nP -iTCP:<port> -sTCP:LISTEN`.");
+        }
+        ErrorKind::AddrNotAvailable => {
+            message.push_str(". The requested host is not available on this machine.");
+        }
+        ErrorKind::PermissionDenied => {
+            message.push_str(". Permission was denied while opening the socket.");
+        }
+        _ => {}
+    }
+    message
 }
 
 async fn shutdown_signal() {
@@ -4578,11 +4596,32 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use std::io::{Cursor, Write};
+    use std::net::{IpAddr, Ipv4Addr};
     use std::sync::{Mutex as StdMutex, OnceLock};
 
     fn env_lock() -> &'static StdMutex<()> {
         static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| StdMutex::new(()))
+    }
+
+    #[test]
+    fn format_bind_error_mentions_port_conflict_guidance() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9090);
+        let err = std::io::Error::new(ErrorKind::AddrInUse, "Address already in use");
+        let message = format_bind_error(addr, &err);
+        assert!(message.contains("Failed to bind 127.0.0.1:9090"));
+        assert!(message.contains("Address already in use"));
+        assert!(message.contains("Another process is already listening"));
+        assert!(message.contains("lsof -nP -iTCP:<port> -sTCP:LISTEN"));
+    }
+
+    #[test]
+    fn format_bind_error_preserves_generic_io_message() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9090);
+        let err = std::io::Error::new(ErrorKind::Other, "boom");
+        let message = format_bind_error(addr, &err);
+        assert!(message.contains("Failed to bind 127.0.0.1:9090: boom"));
+        assert!(!message.contains("Another process is already listening"));
     }
 
     struct HomeGuard {
