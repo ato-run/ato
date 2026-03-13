@@ -2,6 +2,13 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
+## [0.4.23] - 2026-03-13
+
+### What Changed
+
+#### Bug Fixes
+- Include the current Ato session token when reading capsule metadata and manifests
+
 ## [0.4.22] - 2026-03-13
 
 ### What Changed
