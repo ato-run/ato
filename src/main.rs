@@ -201,7 +201,7 @@ enum Commands {
         about = "Run a capsule app or local project"
     )]
     Run {
-        /// Local path (./, ../, ~/, /...) or store scoped ID (publisher/slug). Default: current directory
+        /// Local path (./, ../, ~/, /...), store scoped ID (publisher/slug), or GitHub repo (github.com/owner/repo). Default: current directory
         #[arg(default_value = ".")]
         path: PathBuf,
 
@@ -1938,84 +1938,13 @@ fn run() -> Result<()> {
                 if version.is_some() {
                     anyhow::bail!("--version cannot be used with --from-gh-repo");
                 }
-                let install_draft = match rt
-                    .block_on(install::fetch_github_install_draft(&repository))
-                {
-                    Ok(draft) => Some(draft),
-                    Err(error) => {
-                        if !json {
-                            eprintln!(
-                                "⚠️  Failed to fetch ato store install draft: {error}. Falling back to local zero-config inference."
-                            );
-                        }
-                        None
-                    }
-                };
-                let checkout = rt.block_on(install::download_github_repository_at_ref(
+                let result = rt.block_on(install_github_repository(
                     &repository,
-                    install_draft
-                        .as_ref()
-                        .map(|draft| draft.resolved_ref.sha.as_str()),
-                ))?;
-                if !json {
-                    eprintln!(
-                        "📦 Building {} from GitHub source in {}",
-                        checkout.repository,
-                        checkout.checkout_dir.display()
-                    );
-                    if let Some(draft) = install_draft.as_ref() {
-                        eprintln!(
-                            "   Revision: {} ({})",
-                            draft.resolved_ref.sha, draft.resolved_ref.ref_name
-                        );
-                        if draft.manifest_source == "inferred" {
-                            eprintln!(
-                                "   Using store-generated capsule draft for {}",
-                                draft.repo_ref
-                            );
-                            if let Some(hint) = draft.capsule_hint.as_ref() {
-                                eprintln!("   Confidence: {}", hint.confidence);
-                                for warning in &hint.warnings {
-                                    eprintln!("   Warning: {warning}");
-                                }
-                            }
-                        }
-                    }
-                }
-                let reporter = std::sync::Arc::new(reporters::CliReporter::new(json));
-                let build_result = commands::build::execute_pack_command_with_injected_manifest(
-                    checkout.checkout_dir.clone(),
-                    false,
-                    None,
-                    false,
-                    false,
-                    false,
-                    false,
-                    EnforcementMode::Strict.as_str().to_string(),
-                    reporter,
-                    false,
+                    output,
+                    yes,
+                    projection_preference,
                     json,
-                    None,
-                    install_draft
-                        .as_ref()
-                        .and_then(|draft| draft.preview_toml.as_deref()),
-                )?;
-                let artifact = build_result.artifact.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "GitHub repository did not produce an installable .capsule artifact"
-                    )
-                })?;
-                let result = rt.block_on(install::install_built_github_artifact(
-                    &artifact,
-                    &checkout.publisher,
-                    &checkout.repository,
-                    install::InstallExecutionOptions {
-                        output_dir: output,
-                        yes,
-                        projection_preference,
-                        json_output: json,
-                        can_prompt_interactively: can_prompt,
-                    },
+                    can_prompt,
                 ))?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -3704,6 +3633,53 @@ async fn resolve_run_target_or_install(
         return Ok(expanded_local);
     }
 
+    if let Some(repository) = install::parse_github_run_ref(&raw)? {
+        let json_mode = matches!(reporter.as_ref(), reporters::CliReporter::Json(_));
+        if json_mode && !yes {
+            anyhow::bail!(
+                "Non-interactive JSON mode requires -y/--yes when auto-installing missing capsules"
+            );
+        }
+
+        if !yes
+            && !can_prompt_interactively(
+                std::io::stdin().is_terminal(),
+                std::io::stdout().is_terminal(),
+            )
+        {
+            anyhow::bail!(
+                "Interactive install confirmation requires a TTY. Re-run with -y/--yes in CI or non-interactive environments."
+            );
+        }
+
+        if !yes {
+            let approved = prompt_github_run_confirmation(&repository)?;
+            if !approved {
+                anyhow::bail!("Installation cancelled by user");
+            }
+        } else {
+            debug!(
+                repository = %repository,
+                "GitHub repository not installed locally; continuing with -y auto-install"
+            );
+        }
+
+        let install_result = install_github_repository(
+            &repository,
+            None,
+            yes,
+            install::ProjectionPreference::Skip,
+            json_mode,
+            !json_mode
+                && can_prompt_interactively(
+                    std::io::stdin().is_terminal(),
+                    std::io::stderr().is_terminal(),
+                ),
+        )
+        .await?;
+        return Ok(install_result.path);
+    }
+
     let scoped_ref = match install::parse_capsule_ref(&raw) {
         Ok(value) => value,
         Err(error) => {
@@ -3942,6 +3918,110 @@ async fn resolve_installed_capsule_archive(
     )
 }
 
+async fn install_github_repository(
+    repository: &str,
+    output_dir: Option<PathBuf>,
+    yes: bool,
+    projection_preference: install::ProjectionPreference,
+    json: bool,
+    can_prompt: bool,
+) -> Result<install::InstallResult> {
+    let install_draft = match install::fetch_github_install_draft(repository).await {
+        Ok(draft) => Some(draft),
+        Err(error) => {
+            if !json {
+                eprintln!(
+                    "⚠️  Failed to fetch ato store install draft: {error}. Falling back to local zero-config inference."
+                );
+            }
+            None
+        }
+    };
+    let injected_manifest = install_draft
+        .as_ref()
+        .and_then(|draft| draft.preview_toml.clone());
+    let checkout = install::download_github_repository_at_ref(
+        repository,
+        install_draft
+            .as_ref()
+            .map(|draft| draft.resolved_ref.sha.as_str()),
+    )
+    .await?;
+    if !json {
+        eprintln!(
+            "📦 Building {} from GitHub source in {}",
+            checkout.repository,
+            checkout.checkout_dir.display()
+        );
+        if let Some(draft) = install_draft.as_ref() {
+            eprintln!(
+                "   Revision: {} ({})",
+                draft.resolved_ref.sha, draft.resolved_ref.ref_name
+            );
+            if draft.manifest_source == "inferred" {
+                eprintln!(
+                    "   Using store-generated capsule draft for {}",
+                    draft.repo_ref
+                );
+                if let Some(hint) = draft.capsule_hint.as_ref() {
+                    eprintln!("   Confidence: {}", hint.confidence);
+                    for warning in &hint.warnings {
+                        eprintln!("   Warning: {warning}");
+                    }
+                }
+            }
+        }
+    }
+    let build_result = run_blocking_github_install_step({
+        let checkout_dir = checkout.checkout_dir.clone();
+        move || {
+            let reporter = std::sync::Arc::new(reporters::CliReporter::new(json));
+            commands::build::execute_pack_command_with_injected_manifest(
+                checkout_dir,
+                false,
+                None,
+                false,
+                false,
+                false,
+                false,
+                EnforcementMode::Strict.as_str().to_string(),
+                reporter,
+                false,
+                json,
+                None,
+                injected_manifest.as_deref(),
+            )
+        }
+    })
+    .await?;
+    let artifact = build_result.artifact.ok_or_else(|| {
+        anyhow::anyhow!("GitHub repository did not produce an installable .capsule artifact")
+    })?;
+    install::install_built_github_artifact(
+        &artifact,
+        &checkout.publisher,
+        &checkout.repository,
+        install::InstallExecutionOptions {
+            output_dir,
+            yes,
+            projection_preference,
+            json_output: json,
+            can_prompt_interactively: can_prompt,
+        },
+    )
+    .await
+}
+
+async fn run_blocking_github_install_step<T, F>(operation: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .context("GitHub repository build task failed")?
+}
+
 fn resolve_installed_capsule_archive_in_store(
     store_root: &std::path::Path,
     slug: &str,
@@ -4036,6 +4116,35 @@ fn prompt_install_confirmation(
 
     loop {
         print!("? Do you want to install and run this capsule? (Y/n): ");
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("Failed to read user input")?;
+
+        match input.trim().to_ascii_lowercase().as_str() {
+            "" | "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => {
+                println!("Please answer 'y' or 'n'.");
+            }
+        }
+    }
+}
+
+fn prompt_github_run_confirmation(repository: &str) -> Result<bool> {
+    println!();
+    println!(
+        "[!] GitHub repository 'github.com/{}' is not installed.",
+        repository
+    );
+    println!();
+    println!("ato will download, build, install, and run this repository.");
+    println!();
+
+    loop {
+        print!("? Do you want to install and run this repository? (Y/n): ");
         io::stdout().flush()?;
 
         let mut input = String::new();
@@ -4428,6 +4537,62 @@ mod tests {
         assert!(!can_prompt_interactively(true, false));
         assert!(!can_prompt_interactively(false, true));
         assert!(!can_prompt_interactively(false, false));
+    }
+
+    #[test]
+    fn resolve_run_target_rejects_noncanonical_github_url_input() {
+        let reporter = std::sync::Arc::new(reporters::CliReporter::new(false));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let error = runtime
+            .block_on(resolve_run_target_or_install(
+                PathBuf::from("https://github.com/Koh0920/demo-repo"),
+                true,
+                false,
+                None,
+                reporter,
+            ))
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("ato run github.com/Koh0920/demo-repo"),
+            "error={error:#}"
+        );
+    }
+
+    #[test]
+    fn resolve_run_target_requires_yes_or_tty_for_github_repo_install() {
+        let reporter = std::sync::Arc::new(reporters::CliReporter::new(false));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let error = runtime
+            .block_on(resolve_run_target_or_install(
+                PathBuf::from("github.com/Koh0920/demo-repo"),
+                false,
+                false,
+                None,
+                reporter,
+            ))
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Interactive install confirmation requires a TTY"),
+            "error={error:#}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_install_build_step_runs_outside_async_runtime_worker() {
+        let value = run_blocking_github_install_step(|| {
+            let runtime = tokio::runtime::Runtime::new()?;
+            Ok::<u8, anyhow::Error>(runtime.block_on(async { 7 }))
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(value, 7);
     }
 
     #[test]
