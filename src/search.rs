@@ -186,8 +186,7 @@ pub async fn search_capsules(
         url.push_str(&params.join("&"));
     }
 
-    let response: RawCapsulesResponse = client
-        .get(&url)
+    let response: RawCapsulesResponse = with_ato_token(client.get(&url))
         .send()
         .await
         .with_context(|| format!("Failed to search capsules: {}", registry))?
@@ -269,8 +268,7 @@ pub async fn fetch_capsule_manifest(scoped_id: &str, registry_url: Option<&str>)
         urlencoding::encode(&slug)
     );
 
-    let detail: RawCapsuleDetailForManifest = client
-        .get(&url)
+    let detail: RawCapsuleDetailForManifest = with_ato_token(client.get(&url))
         .send()
         .await
         .with_context(|| format!("Failed to fetch capsule detail: {}", scoped_id))?
@@ -400,7 +398,7 @@ async fn fetch_manifest_from_distribution_artifact(
         urlencoding::encode(publisher),
         urlencoding::encode(slug)
     );
-    let distribution_response = match client.get(&distribution_url).send().await {
+    let distribution_response = match with_ato_token(client.get(&distribution_url)).send().await {
         Ok(response) => response,
         Err(_) => return Ok(None),
     };
@@ -484,6 +482,14 @@ fn json_to_toml_value(value: &serde_json::Value) -> Option<toml::Value> {
             }
             Some(toml::Value::Table(table))
         }
+    }
+}
+
+fn with_ato_token(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    if let Some(token) = crate::auth::current_session_token() {
+        request.header("authorization", format!("Bearer {}", token))
+    } else {
+        request
     }
 }
 
