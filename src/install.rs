@@ -688,8 +688,7 @@ pub async fn install_app(
         urlencoding::encode(&scoped_ref.publisher),
         urlencoding::encode(&scoped_ref.slug)
     );
-    let capsule: CapsuleDetail = client
-        .get(&capsule_url)
+    let capsule: CapsuleDetail = with_ato_token(client.get(&capsule_url))
         .send()
         .await
         .with_context(|| format!("Failed to connect to registry: {}", registry))?
@@ -1497,8 +1496,7 @@ pub async fn fetch_capsule_detail(
         urlencoding::encode(&scoped_ref.publisher),
         urlencoding::encode(&scoped_ref.slug)
     );
-    let capsule: CapsuleDetail = client
-        .get(&capsule_url)
+    let capsule: CapsuleDetail = with_ato_token(client.get(&capsule_url))
         .send()
         .await
         .with_context(|| format!("Failed to connect to registry: {}", registry))?
@@ -1536,8 +1534,7 @@ pub async fn fetch_capsule_manifest_toml(
         urlencoding::encode(&scoped_ref.publisher),
         urlencoding::encode(&scoped_ref.slug)
     );
-    let response = client
-        .get(&capsule_url)
+    let response = with_ato_token(client.get(&capsule_url))
         .send()
         .await
         .with_context(|| format!("Failed to connect to registry: {}", registry))?;
