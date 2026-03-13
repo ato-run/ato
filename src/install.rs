@@ -508,6 +508,35 @@ pub fn normalize_github_repository(repository: &str) -> Result<String> {
     crate::publish_preflight::normalize_repository_value(repository)
 }
 
+pub fn parse_github_run_ref(input: &str) -> Result<Option<String>> {
+    let raw = input.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+
+    if raw.starts_with("github.com/") {
+        return normalize_github_repository(raw).map(Some);
+    }
+
+    let is_noncanonical_github_ref = raw.starts_with("www.github.com/")
+        || raw.starts_with("http://github.com/")
+        || raw.starts_with("https://github.com/")
+        || raw.starts_with("http://www.github.com/")
+        || raw.starts_with("https://www.github.com/");
+
+    if !is_noncanonical_github_ref {
+        return Ok(None);
+    }
+
+    let normalized = normalize_github_repository(raw).with_context(|| {
+        "GitHub repository inputs for `ato run` must use `github.com/owner/repo`"
+    })?;
+    bail!(
+        "GitHub repository inputs for `ato run` must use `github.com/owner/repo`. Re-run with: ato run github.com/{}",
+        normalized
+    );
+}
+
 pub async fn fetch_github_install_draft(repository: &str) -> Result<GitHubInstallDraftResponse> {
     let normalized = normalize_github_repository(repository)?;
     let (owner, repo) = normalized

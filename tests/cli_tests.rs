@@ -1261,10 +1261,33 @@ fn test_run_help_shows_yes_flag() {
     cmd.args(["run", "--help"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("github.com/owner/repo"))
         .stdout(predicate::str::contains("--skill <SKILL>"))
         .stdout(predicate::str::contains("--yes"))
         .stdout(predicate::str::contains("--registry"))
         .stdout(predicate::str::contains("default: https://api.ato.run"));
+}
+
+#[test]
+fn test_run_rejects_noncanonical_github_url_input() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["run", "https://github.com/Koh0920/demo-repo", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "ato run github.com/Koh0920/demo-repo",
+        ));
+}
+
+#[test]
+fn test_run_requires_yes_or_tty_for_github_repo_install() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["run", "github.com/Koh0920/demo-repo"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Interactive install confirmation requires a TTY",
+        ));
 }
 
 #[test]
