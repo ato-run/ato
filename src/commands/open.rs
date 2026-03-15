@@ -29,7 +29,12 @@ use crate::state::{
 };
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::execution_plan::guard::ExecutorKind;
-use capsule_core::types::{CapsuleManifest, StateDurability};
+use capsule_core::lockfile::{
+    lockfile_output_path, manifest_external_capsule_dependencies, parse_lockfile_text,
+    resolve_existing_lockfile_path, verify_lockfile_external_dependencies, CAPSULE_LOCK_FILE_NAME,
+    LEGACY_CAPSULE_LOCK_FILE_NAME,
+};
+use capsule_core::types::{CapsuleManifest, CapsuleType, StateDurability};
 use capsule_core::{router, CapsuleReporter};
 
 mod watch;
@@ -48,6 +53,7 @@ pub struct OpenArgs {
     pub dangerously_skip_permissions: bool,
     pub assume_yes: bool,
     pub state_bindings: Vec<String>,
+    pub inject_bindings: Vec<String>,
     pub reporter: Arc<CliReporter>,
 }
 
@@ -94,6 +100,7 @@ async fn execute_capsule_file(args: &OpenArgs, capsule_path: &PathBuf) -> Result
             dangerously_skip_permissions: args.dangerously_skip_permissions,
             assume_yes: args.assume_yes,
             state_bindings: args.state_bindings.clone(),
+            inject_bindings: args.inject_bindings.clone(),
             reporter: args.reporter.clone(),
         };
         return execute_normal_mode(open_args).await;
@@ -191,6 +198,7 @@ async fn execute_capsule_file(args: &OpenArgs, capsule_path: &PathBuf) -> Result
         dangerously_skip_permissions: args.dangerously_skip_permissions,
         assume_yes: args.assume_yes,
         state_bindings: args.state_bindings.clone(),
+        inject_bindings: args.inject_bindings.clone(),
         reporter: args.reporter.clone(),
     };
 
@@ -238,7 +246,10 @@ async fn copy_source_files(
             continue;
         }
 
-        if file_name == "capsule.toml" || file_name == "capsule.lock" || file_name == "config.json"
+        if file_name == "capsule.toml"
+            || file_name == CAPSULE_LOCK_FILE_NAME
+            || file_name == LEGACY_CAPSULE_LOCK_FILE_NAME
+            || file_name == "config.json"
         {
             continue;
         }
@@ -295,7 +306,8 @@ fn check_has_source_files(dir: &Path) -> bool {
         let path = entry.path();
 
         if file_name == "capsule.toml"
-            || file_name == "capsule.lock"
+            || file_name == CAPSULE_LOCK_FILE_NAME
+            || file_name == LEGACY_CAPSULE_LOCK_FILE_NAME
             || file_name == "config.json"
             || file_name == "signature.json"
         {
@@ -385,6 +397,9 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
     };
 
     let manifest = CapsuleManifest::load_from_file(&manifest_path)?;
+    if manifest.schema_version.trim() == "0.3" && manifest.capsule_type == CapsuleType::Library {
+        anyhow::bail!("schema_version=0.3 type=library package cannot be started with `ato run`");
+    }
     let state_source_overrides = resolve_state_source_overrides(&manifest, &args.state_bindings)?;
     let decision = capsule_core::router::route_manifest_with_state_overrides(
         &manifest_path,
@@ -392,7 +407,61 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
         args.target_label.as_deref(),
         state_source_overrides,
     )?;
-    let launch_ctx = target_runner::resolve_launch_context(&decision.plan, &args.reporter).await?;
+    if decision
+        .plan
+        .execution_package_type()
+        .is_some_and(|value| value.eq_ignore_ascii_case("library"))
+    {
+        anyhow::bail!(
+            "schema_version=0.3 type=library package '{}' cannot be started with `ato run`",
+            decision.plan.selected_target_label()
+        );
+    }
+    let external_dependencies = manifest_external_capsule_dependencies(&decision.plan.manifest)?;
+    let mut external_capsules = None;
+    if !external_dependencies.is_empty() {
+        if args.background {
+            anyhow::bail!("external capsule dependencies do not support --background yet");
+        }
+        let lockfile_path = manifest_path
+            .parent()
+            .and_then(resolve_existing_lockfile_path)
+            .ok_or_else(|| {
+                AtoExecutionError::lock_incomplete(
+                    "external capsule dependencies require capsule.lock.json",
+                    Some(CAPSULE_LOCK_FILE_NAME),
+                )
+            })?;
+        let raw = std::fs::read_to_string(&lockfile_path)
+            .with_context(|| format!("Failed to read {}", lockfile_path.display()))?;
+        let lockfile = parse_lockfile_text(&raw, &lockfile_path)?;
+        verify_lockfile_external_dependencies(&decision.plan.manifest, &lockfile)?;
+        external_capsules = Some(
+            crate::external_capsule::start_external_capsules(
+                &decision.plan,
+                &lockfile,
+                &args.inject_bindings,
+                args.reporter.clone(),
+                &crate::external_capsule::ExternalCapsuleOptions {
+                    enforcement: args.enforcement.clone(),
+                    sandbox_mode: args.sandbox_mode,
+                    dangerously_skip_permissions: args.dangerously_skip_permissions,
+                    assume_yes: args.assume_yes,
+                },
+            )
+            .await?,
+        );
+    }
+    let injected_data =
+        crate::data_injection::resolve_and_record(&decision.plan, &args.inject_bindings).await?;
+    let mut merged_injected_env = injected_data.env;
+    if let Some(external_capsules) = external_capsules.as_ref() {
+        merged_injected_env.extend(external_capsules.caller_env().clone());
+    }
+    let launch_ctx = target_runner::resolve_launch_context(&decision.plan, &args.reporter)
+        .await?
+        .with_injected_env(merged_injected_env)
+        .with_injected_mounts(injected_data.mounts);
 
     if decision.plan.is_orchestration_mode() {
         if args.background {
@@ -413,6 +482,9 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
         )
         .await?;
         if exit != 0 {
+            if let Some(external_capsules) = external_capsules.as_mut() {
+                external_capsules.shutdown_now();
+            }
             std::process::exit(exit);
         }
         return Ok(());
@@ -428,6 +500,9 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
             crate::executors::oci::execute(&decision.plan, args.reporter.clone(), &launch_ctx)
                 .await?;
         if exit != 0 {
+            if let Some(external_capsules) = external_capsules.as_mut() {
+                external_capsules.shutdown_now();
+            }
             std::process::exit(exit);
         }
         return Ok(());
@@ -448,6 +523,8 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
     let tier = prepared.tier;
     let guard_result = prepared.guard_result;
     let launch_ctx = prepared.launch_ctx;
+
+    run_v03_lifecycle_steps(&decision.plan, &args.reporter, &launch_ctx).await?;
 
     debug!(
         runtime = execution_plan.target.runtime.as_str(),
@@ -491,6 +568,60 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
 
     if execution_plan.target.runtime == capsule_core::execution_plan::model::ExecutionRuntime::Web {
         notify_web_endpoint(&decision.plan, &args.reporter).await?;
+    }
+
+    if decision.plan.execution_run_command().is_some() {
+        let mut process = crate::executors::shell::execute(&decision.plan, mode, &launch_ctx)?;
+        if args.background {
+            let pid = process.child.id();
+            let id = format!("capsule-{}", pid);
+            let now = SystemTime::now();
+
+            let info = crate::process_manager::ProcessInfo {
+                id: id.clone(),
+                name: decision
+                    .plan
+                    .manifest_path
+                    .file_stem()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                pid: pid as i32,
+                workload_pid: None,
+                status: crate::process_manager::ProcessStatus::Ready,
+                runtime: "shell".to_string(),
+                start_time: now,
+                manifest_path: Some(decision.plan.manifest_path.clone()),
+                scoped_id: run_scoped_id.clone(),
+                target_label: Some(decision.plan.selected_target_label().to_string()),
+                requested_port: None,
+                log_path: None,
+                ready_at: Some(now),
+                last_event: Some("spawned".to_string()),
+                last_error: None,
+                exit_code: None,
+            };
+
+            let pm = crate::process_manager::ProcessManager::new()?;
+            pm.write_pid(&info)?;
+            args.reporter
+                .notify(format!("🚀 Capsule started in background (ID: {})", id))
+                .await?;
+            drop(process.child);
+            sidecar_cleanup.stop_now();
+            return Ok(());
+        }
+
+        let exit_code = crate::executors::source::wait_for_exit(&mut process.child).await?;
+        cleanup_process_artifacts(&process.cleanup_paths);
+        sidecar_cleanup.stop_now();
+        if exit_code != 0 {
+            if let Some(external_capsules) = external_capsules.as_mut() {
+                external_capsules.shutdown_now();
+            }
+            std::process::exit(exit_code);
+        }
+        return Ok(());
     }
 
     match guard_result.executor_kind {
@@ -631,6 +762,9 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
             sidecar_cleanup.stop_now();
 
             if exit_code != 0 {
+                if let Some(external_capsules) = external_capsules.as_mut() {
+                    external_capsules.shutdown_now();
+                }
                 std::process::exit(exit_code);
             }
         }
@@ -642,6 +776,9 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
             )?;
             sidecar_cleanup.stop_now();
             if exit != 0 {
+                if let Some(external_capsules) = external_capsules.as_mut() {
+                    external_capsules.shutdown_now();
+                }
                 std::process::exit(exit);
             }
         }
@@ -700,6 +837,9 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
             )?;
             sidecar_cleanup.stop_now();
             if exit != 0 {
+                if let Some(external_capsules) = external_capsules.as_mut() {
+                    external_capsules.shutdown_now();
+                }
                 std::process::exit(exit);
             }
         }
@@ -712,6 +852,9 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
             )?;
             sidecar_cleanup.stop_now();
             if exit != 0 {
+                if let Some(external_capsules) = external_capsules.as_mut() {
+                    external_capsules.shutdown_now();
+                }
                 std::process::exit(exit);
             }
         }
@@ -1236,6 +1379,155 @@ fn preflight_required_environment_variables(
     )
 }
 
+async fn run_v03_lifecycle_steps(
+    plan: &capsule_core::router::ManifestData,
+    reporter: &Arc<CliReporter>,
+    launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
+) -> Result<()> {
+    let schema_version = plan
+        .manifest
+        .get("schema_version")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if schema_version != "0.3" {
+        return Ok(());
+    }
+
+    let mut provisioned_roots = std::collections::HashSet::new();
+    for target_label in plan.selected_target_package_order()? {
+        let target_plan = plan.with_selected_target(target_label.clone());
+        let working_dir = target_plan.execution_working_directory();
+
+        if provisioned_roots.insert(working_dir.clone()) {
+            if let Some(command) = plan_v03_provision_command(&target_plan)? {
+                reporter
+                    .notify(format!("⚙️  Provision [{}]: {}", target_label, command))
+                    .await?;
+                run_lifecycle_shell_command(&target_plan, launch_ctx, &command, "provision")?;
+            }
+        }
+
+        if let Some(command) = target_plan
+            .build_lifecycle_build()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            reporter
+                .notify(format!("🏗️  Build [{}]: {}", target_label, command))
+                .await?;
+            run_lifecycle_shell_command(&target_plan, launch_ctx, &command, "build")?;
+        }
+    }
+
+    Ok(())
+}
+
+fn plan_v03_provision_command(plan: &capsule_core::router::ManifestData) -> Result<Option<String>> {
+    let runtime = plan.execution_runtime().unwrap_or_default();
+    let driver = plan.execution_driver().unwrap_or_default();
+    let runtime = runtime.trim().to_ascii_lowercase();
+    let driver = driver.trim().to_ascii_lowercase();
+    let manifest_dir = plan.execution_working_directory();
+
+    if runtime == "web" && driver == "static" {
+        return Ok(None);
+    }
+
+    if matches!(driver.as_str(), "node") {
+        let package_lock = manifest_dir.join("package-lock.json");
+        let pnpm_lock = manifest_dir.join("pnpm-lock.yaml");
+        let bun_lock = manifest_dir.join("bun.lock");
+        let bun_lockb = manifest_dir.join("bun.lockb");
+        let mut matches = Vec::new();
+        if package_lock.exists() {
+            matches.push("npm ci");
+        }
+        if pnpm_lock.exists() {
+            matches.push("pnpm install --frozen-lockfile");
+        }
+        if bun_lock.exists() || bun_lockb.exists() {
+            matches.push("bun install --frozen-lockfile");
+        }
+        return match matches.as_slice() {
+            [] => Err(AtoExecutionError::lock_incomplete(
+                "source/node target requires one of package-lock.json, pnpm-lock.yaml, bun.lock, or bun.lockb",
+                Some("package-lock.json"),
+            )
+            .into()),
+            [command] => Ok(Some((*command).to_string())),
+            _ => Err(AtoExecutionError::lock_incomplete(
+                "multiple node lockfiles detected; keep only one of package-lock.json, pnpm-lock.yaml, bun.lock, or bun.lockb",
+                Some("package-lock.json"),
+            )
+            .into()),
+        };
+    }
+
+    if matches!(driver.as_str(), "python") {
+        return if manifest_dir.join("uv.lock").exists() {
+            Ok(Some("uv sync --frozen".to_string()))
+        } else {
+            Err(AtoExecutionError::lock_incomplete(
+                "source/python target requires uv.lock for fail-closed provisioning",
+                Some("uv.lock"),
+            )
+            .into())
+        };
+    }
+
+    if matches!(driver.as_str(), "native") && manifest_dir.join("Cargo.lock").exists() {
+        return Ok(Some("cargo fetch --locked".to_string()));
+    }
+
+    Ok(None)
+}
+
+fn run_lifecycle_shell_command(
+    plan: &capsule_core::router::ManifestData,
+    launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
+    command: &str,
+    phase: &str,
+) -> Result<()> {
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", command]);
+        cmd
+    };
+
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-lc", command]);
+        cmd
+    };
+
+    cmd.current_dir(plan.execution_working_directory())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+
+    for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
+        cmd.env(key, value);
+    }
+    launch_ctx.apply_allowlisted_env(&mut cmd)?;
+
+    let status = cmd
+        .status()
+        .with_context(|| format!("Failed to execute {} command", phase))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "{} command failed with exit code {}: {}",
+            phase,
+            status.code().unwrap_or(1),
+            command
+        ))
+    }
+}
+
 fn preflight_macos_compat(plan: &capsule_core::router::ManifestData) -> Result<()> {
     let required_raw = match detect_required_macos_from_entrypoint(plan)? {
         Some(value) => value,
@@ -1318,8 +1610,8 @@ fn preflight_python_uv_binary_for_source_driver(
         .map(|_| ())
         .map_err(|_| {
             AtoExecutionError::lock_incomplete(
-                "source/python target requires hermetic uv from capsule.lock (tools.uv)",
-                Some("capsule.lock"),
+                "source/python target requires hermetic uv from capsule.lock.json (tools.uv)",
+                Some(CAPSULE_LOCK_FILE_NAME),
             )
             .into()
         })
@@ -1345,12 +1637,14 @@ fn preflight_glibc_compat(plan: &capsule_core::router::ManifestData) -> Result<(
     let required_from_elf = detect_required_glibc_from_entrypoint(plan)?;
 
     let lock_path = match plan.manifest_path.parent() {
-        Some(parent) => parent.join("capsule.lock"),
+        Some(parent) => {
+            resolve_existing_lockfile_path(parent).unwrap_or_else(|| lockfile_output_path(parent))
+        }
         None => {
             if required_from_elf.is_none() {
                 return Ok(());
             }
-            PathBuf::from("capsule.lock")
+            PathBuf::from(CAPSULE_LOCK_FILE_NAME)
         }
     };
 
@@ -1414,8 +1708,8 @@ fn detect_required_glibc_from_lock(lock_path: &Path) -> Result<Option<String>> {
 
     let raw = fs::read_to_string(lock_path)
         .with_context(|| format!("Failed to read {}", lock_path.display()))?;
-    let lockfile: capsule_core::lockfile::CapsuleLock =
-        toml::from_str(&raw).with_context(|| format!("Failed to parse {}", lock_path.display()))?;
+    let lockfile = parse_lockfile_text(&raw, lock_path)
+        .with_context(|| format!("Failed to parse {}", lock_path.display()))?;
 
     Ok(lockfile
         .targets
@@ -1716,8 +2010,9 @@ fn resolve_python_dependency_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
 mod tests {
     use super::{
         foreground_native_event_messages, initial_foreground_native_messages,
-        preflight_required_environment_variables, resolve_python_dependency_lock_path,
-        resolve_state_source_overrides, ForegroundEventMessage,
+        plan_v03_provision_command, preflight_required_environment_variables,
+        resolve_python_dependency_lock_path, resolve_state_source_overrides,
+        ForegroundEventMessage,
     };
     use crate::executors::source::NacelleExecEvent;
     use capsule_core::router::{ExecutionProfile, ManifestData};
@@ -1763,6 +2058,79 @@ mod tests {
 
         let found = resolve_python_dependency_lock_path(tmp.path()).expect("must resolve uv.lock");
         assert_eq!(found, tmp.path().join("source").join("uv.lock"));
+    }
+
+    #[test]
+    fn v03_node_provision_prefers_single_detected_lockfile() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
+            .expect("write pnpm lock");
+
+        let plan = manifest_with_schema_and_target(
+            "0.3",
+            tmp.path().to_path_buf(),
+            vec![
+                ("runtime", toml::Value::String("source".to_string())),
+                ("driver", toml::Value::String("node".to_string())),
+                (
+                    "run_command",
+                    toml::Value::String("pnpm start -- --port $PORT".to_string()),
+                ),
+            ],
+        );
+
+        let command = plan_v03_provision_command(&plan).expect("plan provision");
+        assert_eq!(command.as_deref(), Some("pnpm install --frozen-lockfile"));
+    }
+
+    #[test]
+    fn v03_node_provision_rejects_ambiguous_lockfiles() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("package-lock.json"), "{}").expect("write package lock");
+        std::fs::write(tmp.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
+            .expect("write pnpm lock");
+
+        let plan = manifest_with_schema_and_target(
+            "0.3",
+            tmp.path().to_path_buf(),
+            vec![
+                ("runtime", toml::Value::String("source".to_string())),
+                ("driver", toml::Value::String("node".to_string())),
+                (
+                    "run_command",
+                    toml::Value::String("npm start -- --port $PORT".to_string()),
+                ),
+            ],
+        );
+
+        let err = plan_v03_provision_command(&plan).expect_err("must reject ambiguity");
+        assert!(err.to_string().contains("multiple node lockfiles detected"));
+    }
+
+    #[test]
+    fn v03_node_provision_uses_target_working_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let app_dir = tmp.path().join("apps").join("web");
+        std::fs::create_dir_all(&app_dir).expect("create app dir");
+        std::fs::write(app_dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
+            .expect("write pnpm lock");
+
+        let plan = manifest_with_schema_and_target(
+            "0.3",
+            tmp.path().to_path_buf(),
+            vec![
+                ("runtime", toml::Value::String("source".to_string())),
+                ("driver", toml::Value::String("node".to_string())),
+                ("working_dir", toml::Value::String("apps/web".to_string())),
+                (
+                    "run_command",
+                    toml::Value::String("pnpm start -- --port $PORT".to_string()),
+                ),
+            ],
+        );
+
+        let command = plan_v03_provision_command(&plan).expect("plan provision");
+        assert_eq!(command.as_deref(), Some("pnpm install --frozen-lockfile"));
     }
 
     #[test]
@@ -2032,7 +2400,35 @@ target = "/var/lib/app"
     }
 
     fn manifest_with_required_env(keys: Vec<&str>) -> ManifestData {
+        manifest_with_schema_and_target(
+            "0.2",
+            PathBuf::from("/tmp"),
+            vec![
+                ("runtime", toml::Value::String("source".to_string())),
+                ("driver", toml::Value::String("native".to_string())),
+                ("entrypoint", toml::Value::String("main.py".to_string())),
+                (
+                    "required_env",
+                    toml::Value::Array(
+                        keys.into_iter()
+                            .map(|k| toml::Value::String(k.to_string()))
+                            .collect(),
+                    ),
+                ),
+            ],
+        )
+    }
+
+    fn manifest_with_schema_and_target(
+        schema_version: &str,
+        manifest_dir: PathBuf,
+        entries: Vec<(&str, toml::Value)>,
+    ) -> ManifestData {
         let mut manifest = toml::map::Map::new();
+        manifest.insert(
+            "schema_version".to_string(),
+            toml::Value::String(schema_version.to_string()),
+        );
         manifest.insert("name".to_string(), toml::Value::String("demo".to_string()));
         manifest.insert(
             "default_target".to_string(),
@@ -2040,26 +2436,9 @@ target = "/var/lib/app"
         );
 
         let mut target = toml::map::Map::new();
-        target.insert(
-            "runtime".to_string(),
-            toml::Value::String("source".to_string()),
-        );
-        target.insert(
-            "driver".to_string(),
-            toml::Value::String("native".to_string()),
-        );
-        target.insert(
-            "entrypoint".to_string(),
-            toml::Value::String("main.py".to_string()),
-        );
-        target.insert(
-            "required_env".to_string(),
-            toml::Value::Array(
-                keys.into_iter()
-                    .map(|k| toml::Value::String(k.to_string()))
-                    .collect(),
-            ),
-        );
+        for (key, value) in entries {
+            target.insert(key.to_string(), value);
+        }
 
         let mut targets = toml::map::Map::new();
         targets.insert("default".to_string(), toml::Value::Table(target));
@@ -2067,8 +2446,8 @@ target = "/var/lib/app"
 
         ManifestData {
             manifest: toml::Value::Table(manifest),
-            manifest_path: PathBuf::from("/tmp/capsule.toml"),
-            manifest_dir: PathBuf::from("/tmp"),
+            manifest_path: manifest_dir.join("capsule.toml"),
+            manifest_dir,
             profile: ExecutionProfile::Dev,
             selected_target: "default".to_string(),
             state_source_overrides: std::collections::HashMap::new(),

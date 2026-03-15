@@ -541,7 +541,7 @@ pub async fn execute_fetch(
     let client = reqwest::Client::new();
 
     let detail_url = format!(
-        "{}/v1/manifest/capsules/by/{}/{}",
+        "{}/v1/capsules/by/{}/{}",
         registry.trim_end_matches('/'),
         urlencoding::encode(&scoped_ref.publisher),
         urlencoding::encode(&scoped_ref.slug)
@@ -581,7 +581,7 @@ pub async fn execute_fetch(
         .with_context(|| format!("Version {} not found", target_version))?;
 
     let download_url = format!(
-        "{}/v1/manifest/capsules/by/{}/{}/download?version={}",
+        "{}/v1/capsules/by/{}/{}/download?version={}",
         registry.trim_end_matches('/'),
         urlencoding::encode(&scoped_ref.publisher),
         urlencoding::encode(&scoped_ref.slug),
