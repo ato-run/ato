@@ -10,6 +10,7 @@ use tracing::debug;
 use crate::init;
 use crate::native_delivery;
 use crate::reporters;
+use crate::runtime_overrides;
 
 #[derive(Debug, Serialize)]
 pub struct BuildResult {
@@ -25,6 +26,12 @@ pub struct BuildResult {
     pub target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub derived_from: Option<PathBuf>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Smoke test failed: {report}")]
+pub struct InferredManifestSmokeFailure {
+    pub report: capsule_core::smoke::SmokeFailureReport,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -157,6 +164,7 @@ pub fn execute_pack_command_with_injected_manifest(
     for diagnostic in ipc_diagnostics {
         futures::executor::block_on(reporter.warn(diagnostic.to_string()))?;
     }
+    run_v03_build_lifecycle_steps(&decision.plan, &reporter)?;
     record_timing(
         &mut timing_entries,
         "build.validation",
@@ -278,12 +286,15 @@ pub fn execute_pack_command_with_injected_manifest(
                     Err(err) => {
                         futures::executor::block_on(reporter.progress_finish(None))?;
                         record_timing(&mut timing_entries, "build.smoke", smoke_started.elapsed());
-                        handle_failed_artifact(
+                        cleanup_failed_artifact(
                             &artifact_path,
                             keep_failed_artifacts,
                             reporter.clone(),
-                            format!("Smoke test failed: {err}"),
                         )?;
+                        if injected_manifest.is_some() {
+                            return Err(InferredManifestSmokeFailure { report: err }.into());
+                        }
+                        anyhow::bail!("Smoke test failed: {err}");
                     }
                 }
             }
@@ -592,18 +603,17 @@ fn toml_escape(input: &str) -> String {
         .replace('\t', "\\t")
 }
 
-fn handle_failed_artifact(
+fn cleanup_failed_artifact(
     artifact_path: &PathBuf,
     keep_failed_artifacts: bool,
     reporter: std::sync::Arc<reporters::CliReporter>,
-    message: String,
 ) -> Result<()> {
     if keep_failed_artifacts {
         futures::executor::block_on(reporter.warn(format!(
             "⚠️  Build failed but artifact kept for debugging: {}",
             artifact_path.display()
         )))?;
-        anyhow::bail!("{message}");
+        return Ok(());
     }
 
     if artifact_path.exists() {
@@ -615,7 +625,158 @@ fn handle_failed_artifact(
         }
     }
 
-    anyhow::bail!("{message}");
+    Ok(())
+}
+
+fn run_v03_build_lifecycle_steps(
+    plan: &capsule_core::router::ManifestData,
+    reporter: &std::sync::Arc<reporters::CliReporter>,
+) -> Result<()> {
+    let schema_version = plan
+        .manifest
+        .get("schema_version")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if schema_version != "0.3" {
+        return Ok(());
+    }
+
+    let mut provisioned_roots = std::collections::HashSet::new();
+    for target_label in plan.selected_target_package_order()? {
+        let target_plan = plan.with_selected_target(target_label.clone());
+        let working_dir = target_plan.execution_working_directory();
+
+        if provisioned_roots.insert(working_dir.clone()) {
+            if let Some(command) = plan_v03_build_provision_command(&target_plan)? {
+                futures::executor::block_on(
+                    reporter.notify(format!("⚙️  Provision [{}]: {}", target_label, command)),
+                )?;
+                run_build_lifecycle_shell_command(&target_plan, &command, "provision")?;
+            }
+        }
+
+        if let Some(command) = target_plan
+            .build_lifecycle_build()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            futures::executor::block_on(
+                reporter.notify(format!("🏗️  Build [{}]: {}", target_label, command)),
+            )?;
+            run_build_lifecycle_shell_command(&target_plan, &command, "build")?;
+        }
+    }
+
+    Ok(())
+}
+
+fn plan_v03_build_provision_command(
+    plan: &capsule_core::router::ManifestData,
+) -> Result<Option<String>> {
+    let runtime = plan.execution_runtime().unwrap_or_default();
+    let driver = plan.execution_driver().unwrap_or_default();
+    let runtime = runtime.trim().to_ascii_lowercase();
+    let driver = driver.trim().to_ascii_lowercase();
+    let manifest_dir = plan.execution_working_directory();
+
+    if runtime == "web" && driver == "static" {
+        return Ok(None);
+    }
+
+    if matches!(driver.as_str(), "node") {
+        let package_lock = manifest_dir.join("package-lock.json");
+        let pnpm_lock = manifest_dir.join("pnpm-lock.yaml");
+        let bun_lock = manifest_dir.join("bun.lock");
+        let bun_lockb = manifest_dir.join("bun.lockb");
+        let mut matches = Vec::new();
+        if package_lock.exists() {
+            matches.push("npm ci");
+        }
+        if pnpm_lock.exists() {
+            matches.push("pnpm install --frozen-lockfile");
+        }
+        if bun_lock.exists() || bun_lockb.exists() {
+            matches.push("bun install --frozen-lockfile");
+        }
+        return match matches.as_slice() {
+            [] => Err(AtoExecutionError::lock_incomplete(
+                "source/node target requires one of package-lock.json, pnpm-lock.yaml, bun.lock, or bun.lockb",
+                Some("package-lock.json"),
+            )
+            .into()),
+            [command] => Ok(Some((*command).to_string())),
+            _ => Err(AtoExecutionError::lock_incomplete(
+                "multiple node lockfiles detected; keep only one of package-lock.json, pnpm-lock.yaml, bun.lock, or bun.lockb",
+                Some("package-lock.json"),
+            )
+            .into()),
+        };
+    }
+
+    if matches!(driver.as_str(), "python") {
+        return if manifest_dir.join("uv.lock").exists() {
+            Ok(Some("uv sync --frozen".to_string()))
+        } else {
+            Err(AtoExecutionError::lock_incomplete(
+                "source/python target requires uv.lock for fail-closed provisioning",
+                Some("uv.lock"),
+            )
+            .into())
+        };
+    }
+
+    if matches!(driver.as_str(), "native") && manifest_dir.join("Cargo.lock").exists() {
+        return Ok(Some("cargo fetch --locked".to_string()));
+    }
+
+    Ok(None)
+}
+
+fn run_build_lifecycle_shell_command(
+    plan: &capsule_core::router::ManifestData,
+    command: &str,
+    phase: &str,
+) -> Result<()> {
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", command]);
+        cmd
+    };
+
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-lc", command]);
+        cmd
+    };
+
+    cmd.current_dir(plan.execution_working_directory())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+
+    for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
+        cmd.env(key, value);
+    }
+    if let Some(port) = runtime_overrides::override_port(plan.execution_port()) {
+        cmd.env("PORT", port.to_string());
+    }
+
+    let status = cmd
+        .status()
+        .with_context(|| format!("Failed to execute {} command", phase))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "{} command failed with exit code {}: {}",
+            phase,
+            status.code().unwrap_or(1),
+            command
+        ))
+    }
 }
 
 fn sign_if_requested(
@@ -634,4 +795,72 @@ fn sign_if_requested(
         return Ok(Some(sig_path));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_v03_build_provision_command;
+    use capsule_core::router::{ExecutionProfile, ManifestData};
+    use std::path::PathBuf;
+
+    #[test]
+    fn v03_build_provision_uses_target_working_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let app_dir = tmp.path().join("apps").join("web");
+        std::fs::create_dir_all(&app_dir).expect("create app dir");
+        std::fs::write(app_dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
+            .expect("write pnpm lock");
+
+        let plan = manifest_with_schema_and_target(
+            "0.3",
+            tmp.path().to_path_buf(),
+            vec![
+                ("runtime", toml::Value::String("source".to_string())),
+                ("driver", toml::Value::String("node".to_string())),
+                ("working_dir", toml::Value::String("apps/web".to_string())),
+                (
+                    "run_command",
+                    toml::Value::String("pnpm start -- --port $PORT".to_string()),
+                ),
+            ],
+        );
+
+        let command = plan_v03_build_provision_command(&plan).expect("plan provision");
+        assert_eq!(command.as_deref(), Some("pnpm install --frozen-lockfile"));
+    }
+
+    fn manifest_with_schema_and_target(
+        schema_version: &str,
+        manifest_dir: PathBuf,
+        entries: Vec<(&str, toml::Value)>,
+    ) -> ManifestData {
+        let mut manifest = toml::map::Map::new();
+        manifest.insert(
+            "schema_version".to_string(),
+            toml::Value::String(schema_version.to_string()),
+        );
+        manifest.insert("name".to_string(), toml::Value::String("demo".to_string()));
+        manifest.insert(
+            "default_target".to_string(),
+            toml::Value::String("default".to_string()),
+        );
+
+        let mut target = toml::map::Map::new();
+        for (key, value) in entries {
+            target.insert(key.to_string(), value);
+        }
+
+        let mut targets = toml::map::Map::new();
+        targets.insert("default".to_string(), toml::Value::Table(target));
+        manifest.insert("targets".to_string(), toml::Value::Table(targets));
+
+        ManifestData {
+            manifest: toml::Value::Table(manifest),
+            manifest_path: manifest_dir.join("capsule.toml"),
+            manifest_dir,
+            profile: ExecutionProfile::Dev,
+            selected_target: "default".to_string(),
+            state_source_overrides: std::collections::HashMap::new(),
+        }
+    }
 }

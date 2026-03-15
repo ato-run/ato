@@ -238,12 +238,9 @@ fn parse_bool_env(key: &str, raw: &str) -> Result<bool> {
 }
 
 fn validate_entrypoint(manifest_path: &Path, manifest_dir: &Path) -> Result<()> {
-    use std::fs;
-
-    let manifest_content = fs::read_to_string(manifest_path)?;
-    let manifest: toml::Value = manifest_content
-        .parse()
-        .map_err(|e| CapsuleError::Pack(format!("Failed to parse capsule.toml: {}", e)))?;
+    let manifest = manifest::load_manifest(manifest_path)
+        .map_err(|err| CapsuleError::Pack(err.to_string()))?
+        .raw;
 
     let default_target = manifest
         .get("default_target")
@@ -266,16 +263,24 @@ fn validate_entrypoint(manifest_path: &Path, manifest_dir: &Path) -> Result<()> 
 
     if !clean_entrypoint.contains('/') && !clean_entrypoint.contains('\\') {
         if clean_entrypoint.contains(' ') || clean_entrypoint.contains('\t') {
-            return Err(CapsuleError::Pack(format!(
-                "Entrypoint '{}' contains whitespace. Use entrypoint for the command and command for arguments.",
-                entrypoint
-            )));
+            return Ok(());
         }
         return Ok(());
     }
 
-    let entrypoint_path = manifest_dir.join(clean_entrypoint);
-    let source_entrypoint_path = manifest_dir.join("source").join(clean_entrypoint);
+    let target_manifest_dir = manifest
+        .get("targets")
+        .and_then(|t| t.as_table())
+        .and_then(|t| t.get(default_target))
+        .and_then(|target| target.get("working_dir"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| manifest_dir.join(value))
+        .unwrap_or_else(|| manifest_dir.to_path_buf());
+
+    let entrypoint_path = target_manifest_dir.join(clean_entrypoint);
+    let source_entrypoint_path = target_manifest_dir.join("source").join(clean_entrypoint);
 
     if !entrypoint_path.exists() && !source_entrypoint_path.exists() {
         return Err(CapsuleError::Pack(format!(

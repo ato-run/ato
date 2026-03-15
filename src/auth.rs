@@ -1,7 +1,7 @@
 //! Authentication module for Ato Store
 //!
 //! Manages authentication credentials for the ato CLI.
-//! Stores credentials in `~/.ato/credentials.json`.
+//! Stores canonical credentials in `$XDG_CONFIG_HOME/ato/credentials.toml`.
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -14,14 +14,20 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+#[cfg(test)]
+use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 
 const DEFAULT_STORE_API_URL: &str = "https://api.ato.run";
 const DEFAULT_STORE_SITE_URL: &str = "https://ato.run";
 const ENV_STORE_API_URL: &str = "ATO_STORE_API_URL";
 const ENV_STORE_SITE_URL: &str = "ATO_STORE_SITE_URL";
 const ENV_ATO_TOKEN: &str = "ATO_TOKEN";
+const ENV_XDG_CONFIG_HOME: &str = "XDG_CONFIG_HOME";
 const KEYRING_SERVICE_NAME: &str = "run.ato.cli";
 const KEYRING_SESSION_ACCOUNT: &str = "current_session";
 const KEYRING_GITHUB_ACCOUNT: &str = "github_token";
@@ -29,6 +35,13 @@ const GITHUB_APP_INSTALL_TIMEOUT_SECS: u64 = 5 * 60;
 const GITHUB_APP_INSTALL_POLL_SECS: u64 = 3;
 const GITHUB_APP_INSTALL_NOTICE_INTERVAL_SECS: u64 = 12;
 const GITHUB_APP_INSTALL_TROUBLESHOOT_AFTER_SECS: u64 = 45;
+const LEGACY_CREDENTIALS_DIR: &str = ".ato";
+const LEGACY_CREDENTIALS_FILE: &str = "credentials.json";
+const CANONICAL_CREDENTIALS_DIR: &str = "ato";
+const CANONICAL_CREDENTIALS_FILE: &str = "credentials.toml";
+
+#[cfg(test)]
+static TEST_KEYRING: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
 
 /// User credentials stored locally
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -69,6 +82,7 @@ pub struct Credentials {
 /// Manages authentication credentials
 pub struct AuthManager {
     credentials_path: PathBuf,
+    legacy_credentials_path: PathBuf,
     keyring_service: String,
     keyring_session_account: String,
     keyring_github_account: String,
@@ -78,18 +92,19 @@ impl AuthManager {
     /// Create a new AuthManager with default credentials path
     pub fn new() -> Result<Self> {
         let home = dirs::home_dir().context("Cannot determine home directory")?;
-        let credentials_path = home.join(".ato").join("credentials.json");
+        let credentials_path = canonical_credentials_path(&home);
+        let legacy_credentials_path = legacy_credentials_path(&home);
         Ok(Self {
             credentials_path,
+            legacy_credentials_path,
             keyring_service: KEYRING_SERVICE_NAME.to_string(),
             keyring_session_account: KEYRING_SESSION_ACCOUNT.to_string(),
             keyring_github_account: KEYRING_GITHUB_ACCOUNT.to_string(),
         })
     }
 
-    /// Create AuthManager with custom credentials path (for testing)
     #[cfg(test)]
-    pub fn with_path(credentials_path: PathBuf) -> Self {
+    pub fn with_paths(credentials_path: PathBuf, legacy_credentials_path: PathBuf) -> Self {
         let suffix =
             hex::encode(blake3::hash(credentials_path.to_string_lossy().as_bytes()).as_bytes())
                 .chars()
@@ -97,69 +112,36 @@ impl AuthManager {
                 .collect::<String>();
         Self {
             credentials_path,
+            legacy_credentials_path,
             keyring_service: format!("{}.test", KEYRING_SERVICE_NAME),
             keyring_session_account: format!("{}-{}", KEYRING_SESSION_ACCOUNT, suffix),
             keyring_github_account: format!("{}-{}", KEYRING_GITHUB_ACCOUNT, suffix),
         }
     }
 
-    /// Load credentials from disk
+    /// Load sanitized credentials metadata from canonical TOML or legacy JSON.
     pub fn load(&self) -> Result<Option<Credentials>> {
-        if !self.credentials_path.exists() {
-            return Ok(None);
-        }
-
-        let contents = fs::read_to_string(&self.credentials_path).with_context(|| {
-            format!(
-                "Failed to read credentials from {:?}",
-                self.credentials_path
-            )
-        })?;
-
-        let creds: Credentials = serde_json::from_str(&contents).with_context(|| {
-            format!(
-                "Failed to parse credentials from {:?}",
-                self.credentials_path
-            )
-        })?;
-
-        let mut sanitized = creds;
-        sanitized.session_token = None;
-        sanitized.github_token = None;
-
-        Ok(Some(sanitized))
+        Ok(self.load_any_credentials()?.map(sanitize_credentials))
     }
 
-    /// Save credentials to disk
+    /// Save sanitized metadata into canonical TOML without clobbering stored tokens.
     pub fn save(&self, creds: &Credentials) -> Result<()> {
-        if let Some(parent) = self.credentials_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory {:?}", parent))?;
-        }
-
-        let mut persistable = creds.clone();
-        persistable.session_token = None;
-        persistable.github_token = None;
-        let json = serde_json::to_string_pretty(&persistable)
-            .context("Failed to serialize credentials")?;
-
-        fs::write(&self.credentials_path, json).with_context(|| {
-            format!("Failed to write credentials to {:?}", self.credentials_path)
-        })?;
-
-        Ok(())
+        let mut persistable = self.load_canonical_credentials()?.unwrap_or_default();
+        merge_metadata(&mut persistable, creds);
+        self.write_canonical_credentials(&persistable)
     }
 
     /// Load credentials or return an error if not authenticated
     pub fn require(&self) -> Result<Credentials> {
         let mut creds = self.load()?.unwrap_or_default();
         creds.session_token = self.resolve_session_token()?;
-        creds.github_token = self.load_keyring_token(&self.keyring_github_account)?;
+        creds.github_token = self.resolve_github_token()?;
 
         if creds.session_token.is_none() && creds.github_token.is_none() {
             anyhow::bail!(
-                "Not authenticated. Run:\n  ato login\n\nNo usable token found in {:?}",
-                self.credentials_path
+                "Not authenticated. Run:\n  ato login\n\nNo usable token found in ATO_TOKEN, OS keyring, {:?}, or {:?}",
+                self.credentials_path,
+                self.legacy_credentials_path
             );
         }
 
@@ -187,19 +169,60 @@ impl AuthManager {
         &self.credentials_path
     }
 
+    pub fn legacy_credentials_path(&self) -> &PathBuf {
+        &self.legacy_credentials_path
+    }
+
     fn resolve_session_token(&self) -> Result<Option<String>> {
         if let Some(token) = read_env_non_empty(ENV_ATO_TOKEN) {
             return Ok(Some(token));
         }
-        self.load_keyring_token(&self.keyring_session_account)
+        if let Some(token) = self.load_keyring_token(&self.keyring_session_account)? {
+            return Ok(Some(token));
+        }
+        if let Some(creds) = self.load_canonical_credentials()? {
+            if let Some(token) = creds.session_token.filter(|value| !value.trim().is_empty()) {
+                return Ok(Some(token));
+            }
+        }
+        if let Some(creds) = self.load_legacy_credentials()? {
+            if let Some(token) = creds.session_token.filter(|value| !value.trim().is_empty()) {
+                return Ok(Some(token));
+            }
+        }
+        Ok(None)
+    }
+
+    fn resolve_github_token(&self) -> Result<Option<String>> {
+        if let Some(token) = self.load_keyring_token(&self.keyring_github_account)? {
+            return Ok(Some(token));
+        }
+        if let Some(creds) = self.load_canonical_credentials()? {
+            if let Some(token) = creds.github_token.filter(|value| !value.trim().is_empty()) {
+                return Ok(Some(token));
+            }
+        }
+        if let Some(creds) = self.load_legacy_credentials()? {
+            if let Some(token) = creds.github_token.filter(|value| !value.trim().is_empty()) {
+                return Ok(Some(token));
+            }
+        }
+        Ok(None)
     }
 
     async fn save_session_token_async(&self, token: String) -> Result<()> {
+        #[cfg(test)]
+        if self.is_test_keyring() {
+            self.test_keyring_set(&self.keyring_session_account, &token);
+            return Ok(());
+        }
+
         let service = self.keyring_service.clone();
         let account = self.keyring_session_account.clone();
+        let token = token.clone();
         tokio::task::spawn_blocking(move || {
             let entry = Entry::new(&service, &account)
-                .with_context(|| "Failed to initialize OS keyring entry")?;
+                .map_err(|err| anyhow::anyhow!(format_keyring_error_message("save", &err)))?;
             entry
                 .set_password(&token)
                 .map_err(|err| anyhow::anyhow!(format_keyring_error_message("save", &err)))
@@ -209,11 +232,18 @@ impl AuthManager {
     }
 
     async fn save_github_token_async(&self, token: String) -> Result<()> {
+        #[cfg(test)]
+        if self.is_test_keyring() {
+            self.test_keyring_set(&self.keyring_github_account, &token);
+            return Ok(());
+        }
+
         let service = self.keyring_service.clone();
         let account = self.keyring_github_account.clone();
+        let token = token.clone();
         tokio::task::spawn_blocking(move || {
             let entry = Entry::new(&service, &account)
-                .with_context(|| "Failed to initialize OS keyring entry")?;
+                .map_err(|err| anyhow::anyhow!(format_keyring_error_message("save", &err)))?;
             entry
                 .set_password(&token)
                 .map_err(|err| anyhow::anyhow!(format_keyring_error_message("save", &err)))
@@ -228,6 +258,10 @@ impl AuthManager {
     }
 
     fn load_keyring_token(&self, account: &str) -> Result<Option<String>> {
+        #[cfg(test)]
+        if self.is_test_keyring() {
+            return Ok(self.test_keyring_get(account));
+        }
         let entry = match self.keyring_entry(account) {
             Ok(entry) => entry,
             Err(err) if self.is_nonfatal_keyring_access_error(err.as_ref()) => return Ok(None),
@@ -242,6 +276,11 @@ impl AuthManager {
     }
 
     fn delete_keyring_token(&self, account: &str) -> Result<()> {
+        #[cfg(test)]
+        if self.is_test_keyring() {
+            self.test_keyring_delete(account);
+            return Ok(());
+        }
         let entry = match self.keyring_entry(account) {
             Ok(entry) => entry,
             Err(err) if self.is_nonfatal_keyring_access_error(err.as_ref()) => return Ok(()),
@@ -258,6 +297,90 @@ impl AuthManager {
         anyhow::anyhow!(format_keyring_error_message(action, &err))
     }
 
+    fn write_canonical_credentials(&self, creds: &Credentials) -> Result<()> {
+        let contents = toml::to_string_pretty(creds).context("Failed to serialize credentials")?;
+        write_secure_credentials_file(&self.credentials_path, &contents)
+    }
+
+    fn load_canonical_credentials(&self) -> Result<Option<Credentials>> {
+        read_toml_credentials_file(&self.credentials_path)
+    }
+
+    fn load_legacy_credentials(&self) -> Result<Option<Credentials>> {
+        read_legacy_json_credentials_file(&self.legacy_credentials_path)
+    }
+
+    fn load_any_credentials(&self) -> Result<Option<Credentials>> {
+        if let Some(creds) = self.load_canonical_credentials()? {
+            return Ok(Some(creds));
+        }
+        self.load_legacy_credentials()
+    }
+
+    fn has_persisted_local_state(&self) -> Result<bool> {
+        if self.credentials_path.exists() || self.legacy_credentials_path.exists() {
+            return Ok(true);
+        }
+        Ok(self
+            .load_keyring_token(&self.keyring_session_account)?
+            .is_some()
+            || self
+                .load_keyring_token(&self.keyring_github_account)?
+                .is_some())
+    }
+
+    async fn persist_session_token(
+        &self,
+        token: String,
+        headless: bool,
+    ) -> Result<TokenStorageLocation> {
+        if headless {
+            let mut creds = self.load_canonical_credentials()?.unwrap_or_default();
+            creds.session_token = Some(token);
+            self.write_canonical_credentials(&creds)?;
+            return Ok(TokenStorageLocation::CanonicalFile);
+        }
+
+        self.save_session_token_async(token).await?;
+        Ok(TokenStorageLocation::OsKeyring)
+    }
+
+    #[cfg(test)]
+    fn is_test_keyring(&self) -> bool {
+        self.keyring_service.ends_with(".test")
+    }
+
+    #[cfg(test)]
+    fn test_keyring_get(&self, account: &str) -> Option<String> {
+        TEST_KEYRING
+            .get_or_init(Default::default)
+            .lock()
+            .expect("test keyring lock")
+            .get(&(self.keyring_service.clone(), account.to_string()))
+            .cloned()
+    }
+
+    #[cfg(test)]
+    fn test_keyring_set(&self, account: &str, value: &str) {
+        TEST_KEYRING
+            .get_or_init(Default::default)
+            .lock()
+            .expect("test keyring lock")
+            .insert(
+                (self.keyring_service.clone(), account.to_string()),
+                value.to_string(),
+            );
+    }
+
+    #[cfg(test)]
+    fn test_keyring_delete(&self, account: &str) {
+        TEST_KEYRING
+            .get_or_init(Default::default)
+            .lock()
+            .expect("test keyring lock")
+            .remove(&(self.keyring_service.clone(), account.to_string()));
+    }
+
     fn is_nonfatal_keyring_error(&self, err: &KeyringError) -> bool {
         matches!(
             err,
@@ -270,6 +393,116 @@ impl AuthManager {
             .map(|inner| self.is_nonfatal_keyring_error(inner))
             .unwrap_or(false)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenStorageLocation {
+    OsKeyring,
+    CanonicalFile,
+}
+
+fn canonical_credentials_path(home: &Path) -> PathBuf {
+    if let Some(config_home) = read_env_non_empty(ENV_XDG_CONFIG_HOME) {
+        return PathBuf::from(config_home)
+            .join(CANONICAL_CREDENTIALS_DIR)
+            .join(CANONICAL_CREDENTIALS_FILE);
+    }
+    home.join(".config")
+        .join(CANONICAL_CREDENTIALS_DIR)
+        .join(CANONICAL_CREDENTIALS_FILE)
+}
+
+fn legacy_credentials_path(home: &Path) -> PathBuf {
+    home.join(LEGACY_CREDENTIALS_DIR)
+        .join(LEGACY_CREDENTIALS_FILE)
+}
+
+fn sanitize_credentials(mut creds: Credentials) -> Credentials {
+    creds.session_token = None;
+    creds.github_token = None;
+    creds
+}
+
+fn merge_metadata(target: &mut Credentials, incoming: &Credentials) {
+    target.publisher_did = incoming.publisher_did.clone();
+    target.publisher_id = incoming.publisher_id.clone();
+    target.publisher_handle = incoming.publisher_handle.clone();
+    target.github_app_installation_id = incoming.github_app_installation_id;
+    target.github_app_account_login = incoming.github_app_account_login.clone();
+    target.github_username = incoming.github_username.clone();
+}
+
+fn read_toml_credentials_file(path: &Path) -> Result<Option<Credentials>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read credentials from {:?}", path))?;
+    let creds: Credentials = toml::from_str(&contents)
+        .with_context(|| format!("Failed to parse credentials from {:?}", path))?;
+    Ok(Some(creds))
+}
+
+fn read_legacy_json_credentials_file(path: &Path) -> Result<Option<Credentials>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read legacy credentials from {:?}", path))?;
+    let creds: Credentials = serde_json::from_str(&contents)
+        .with_context(|| format!("Failed to parse legacy credentials from {:?}", path))?;
+    Ok(Some(creds))
+}
+
+#[allow(clippy::needless_return)]
+fn write_secure_credentials_file(path: &Path, contents: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("Credentials path must have a parent directory")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("Failed to create credentials directory {:?}", parent))?;
+    set_dir_permissions_if_supported(parent)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("Failed to open credentials file {:?}", path))?;
+        file.write_all(contents.as_bytes())
+            .with_context(|| format!("Failed to write credentials to {:?}", path))?;
+        file.flush()
+            .with_context(|| format!("Failed to flush credentials to {:?}", path))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("Failed to secure credentials file {:?}", path))?;
+        return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        fs::write(path, contents)
+            .with_context(|| format!("Failed to write credentials to {:?}", path))?;
+        Ok(())
+    }
+}
+
+fn set_dir_permissions_if_supported(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("Failed to secure credentials directory {:?}", path))?;
+    }
+
+    Ok(())
 }
 
 /// GitHub user information
@@ -386,6 +619,16 @@ pub fn current_session_token() -> Option<String> {
     auth.resolve_session_token().ok().flatten()
 }
 
+pub fn require_session_token() -> Result<String> {
+    let auth = AuthManager::new()?;
+    let Some(token) = auth.resolve_session_token()? else {
+        anyhow::bail!(
+            "Authentication required. Run `ato login` again, or set `ATO_TOKEN` for this shell."
+        );
+    };
+    Ok(token)
+}
+
 pub fn current_publisher_handle() -> Result<Option<String>> {
     let manager = AuthManager::new()?;
     Ok(
@@ -394,8 +637,8 @@ pub fn current_publisher_handle() -> Result<Option<String>> {
     )
 }
 
-pub fn current_dock_registry_url() -> Result<Option<String>> {
-    Ok(current_publisher_handle()?.map(|handle| dock_registry_url_for_handle(&handle)))
+pub fn default_store_registry_url() -> String {
+    store_api_base_url()
 }
 
 fn trim_trailing_slash(value: &str) -> String {
@@ -454,10 +697,7 @@ fn keyring_user_interaction_not_allowed_message(message: &str) -> bool {
 
 fn format_keyring_error_message(action: &str, err: &KeyringError) -> String {
     let err_text = err.to_string();
-    let mut message = format!(
-        "Failed to {} token in OS keyring ({}). Security requirements prohibit plaintext fallback.",
-        action, err_text
-    );
+    let mut message = format!("Failed to {} token in OS keyring ({}).", action, err_text);
 
     if keyring_user_interaction_not_allowed_message(&err_text) {
         message.push_str(
@@ -465,7 +705,7 @@ fn format_keyring_error_message(action: &str, err: &KeyringError) -> String {
         );
     }
 
-    message.push_str(" Use ATO_TOKEN for this environment.");
+    message.push_str(" Use ATO_TOKEN or `ato login --headless` for this environment.");
     message
 }
 
@@ -618,14 +858,6 @@ fn fetch_publisher_me_blocking(session_token: &str) -> Result<Option<PublisherMe
         .context("Failed to parse publisher profile response")?;
 
     Ok(Some(body))
-}
-
-fn dock_registry_url_for_handle(handle: &str) -> String {
-    format!(
-        "{}/d/{}",
-        store_site_base_url(),
-        urlencoding::encode(handle.trim())
-    )
 }
 
 fn parse_store_error_text(body: &str) -> String {
@@ -1182,12 +1414,16 @@ pub async fn login_with_token(token: String) -> Result<()> {
     manager.save(&creds)?;
 
     println!("✅ Authenticated as @{}", username);
-    println!("   Credentials saved to: {:?}", manager.credentials_path());
+    println!("   GitHub token storage: OS keyring");
+    if manager.credentials_path().exists() {
+        println!("   Metadata file: {:?}", manager.credentials_path());
+    }
 
     Ok(())
 }
 
 /// Login with Store Device Flow
+#[allow(clippy::needless_return)]
 pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
     let api_base = store_api_base_url();
     let site_base = store_site_base_url();
@@ -1362,12 +1598,17 @@ pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
                 let session_token = exchange.access_token;
 
                 let manager = AuthManager::new()?;
-                manager
-                    .save_session_token_async(session_token.clone())
+                let storage = manager
+                    .persist_session_token(session_token.clone(), headless)
                     .await?;
                 let mut creds = manager.load()?.unwrap_or_default();
                 creds.publisher_handle = exchange.handle.clone();
-                manager.save(&creds)?;
+                if headless {
+                    let mut persisted = manager.load_canonical_credentials()?.unwrap_or_default();
+                    persisted.session_token = Some(session_token.clone());
+                    merge_metadata(&mut persisted, &creds);
+                    manager.write_canonical_credentials(&persisted)?;
+                }
 
                 let session_token_for_setup = session_token.clone();
                 println!("🧪 Running publisher onboarding...");
@@ -1383,7 +1624,12 @@ pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
                     creds.github_app_installation_id = Some(installation.installation_id);
                     creds.github_app_account_login = Some(installation.account_login);
                 }
-                manager.save(&creds)?;
+                if headless {
+                    let mut persisted = manager.load_canonical_credentials()?.unwrap_or_default();
+                    persisted.session_token = Some(session_token.clone());
+                    merge_metadata(&mut persisted, &creds);
+                    manager.write_canonical_credentials(&persisted)?;
+                }
 
                 println!("✅ Login completed successfully");
                 if let Some(handle) = creds.publisher_handle.as_deref() {
@@ -1392,7 +1638,20 @@ pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
                 if let Some(id) = creds.github_app_installation_id {
                     println!("   GitHub App Installation: {}", id);
                 }
-                println!("   Credentials saved to: {:?}", manager.credentials_path());
+                match storage {
+                    TokenStorageLocation::OsKeyring => {
+                        println!("   Store session saved to: OS keyring");
+                    }
+                    TokenStorageLocation::CanonicalFile => {
+                        println!(
+                            "   Store session saved to: {:?}",
+                            manager.credentials_path()
+                        );
+                    }
+                }
+                if headless {
+                    println!("   Metadata file: {:?}", manager.credentials_path());
+                }
                 return Ok(());
             }
             other => {
@@ -1403,10 +1662,11 @@ pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
 }
 
 /// Logout (delete stored credentials)
+#[allow(clippy::needless_return)]
 pub fn logout() -> Result<()> {
     let manager = AuthManager::new()?;
 
-    if !manager.credentials_path().exists() {
+    if !manager.has_persisted_local_state()? {
         println!("ℹ️  Not currently logged in");
         return Ok(());
     }
@@ -1414,9 +1674,15 @@ pub fn logout() -> Result<()> {
     manager.delete()?;
     println!("✅ Logged out successfully");
     println!(
-        "   Deleted credentials from: {:?}",
+        "   Removed session tokens from: OS keyring and {:?}",
         manager.credentials_path()
     );
+    if manager.legacy_credentials_path().exists() {
+        println!(
+            "   Legacy metadata file was left untouched: {:?}",
+            manager.legacy_credentials_path()
+        );
+    }
 
     Ok(())
 }
@@ -1466,14 +1732,27 @@ pub fn status() -> Result<()> {
             if let Some(login) = &creds.github_app_account_login {
                 println!("   GitHub App Account: {}", login);
             }
-            println!("   Credentials: {:?}", manager.credentials_path());
+            if manager
+                .load_keyring_token(&manager.keyring_session_account)?
+                .is_some()
+            {
+                println!("   Session storage: OS keyring");
+            }
+            if manager.credentials_path().exists() {
+                println!("   Credential file: {:?}", manager.credentials_path());
+            } else if manager.legacy_credentials_path().exists() {
+                println!(
+                    "   Legacy credential file: {:?}",
+                    manager.legacy_credentials_path()
+                );
+            }
         }
         Err(_) => {
             println!("❌ Not authenticated");
             println!("   Run: ato login");
             println!();
-            println!("   Legacy fallback:");
-            println!("   Set ATO_TOKEN for headless environments");
+            println!("   Headless/CI/agent fallback:");
+            println!("   Set ATO_TOKEN or run `ato login --headless`");
         }
     }
 
@@ -1483,7 +1762,6 @@ pub fn status() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
 
     fn env_lock() -> &'static Mutex<()> {
@@ -1516,12 +1794,28 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_credentials_roundtrip() {
-        let temp_dir = TempDir::new().unwrap();
-        let creds_path = temp_dir.path().join("credentials.json");
+    fn test_manager(temp_dir: &TempDir) -> (AuthManager, PathBuf, PathBuf) {
+        let canonical = temp_dir
+            .path()
+            .join("config")
+            .join("ato")
+            .join("credentials.toml");
+        let legacy = temp_dir
+            .path()
+            .join("home")
+            .join(".ato")
+            .join("credentials.json");
+        (
+            AuthManager::with_paths(canonical.clone(), legacy.clone()),
+            canonical,
+            legacy,
+        )
+    }
 
-        let manager = AuthManager::with_path(creds_path.clone());
+    #[test]
+    fn test_credentials_roundtrip_uses_canonical_toml() {
+        let temp_dir = TempDir::new().unwrap();
+        let (manager, creds_path, _) = test_manager(&temp_dir);
 
         let original = Credentials {
             github_token: Some("ghp_test123".to_string()),
@@ -1535,6 +1829,9 @@ mod tests {
         };
 
         manager.save(&original).unwrap();
+        let raw = fs::read_to_string(&creds_path).unwrap();
+        assert!(raw.contains("publisher_did = \"did:key:z6Mk...\""));
+        assert!(!raw.contains("sess_test_123"));
         let loaded = manager.load().unwrap().unwrap();
 
         assert_eq!(loaded.github_token, None);
@@ -1556,19 +1853,20 @@ mod tests {
     #[test]
     fn test_legacy_credentials_json_compatibility() {
         let temp_dir = TempDir::new().unwrap();
-        let creds_path = temp_dir.path().join("credentials.json");
+        let (manager, _, legacy_path) = test_manager(&temp_dir);
 
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
         fs::write(
-            &creds_path,
+            &legacy_path,
             r#"{
   "github_token": "ghp_legacy123",
+  "session_token": "legacy-session-token",
   "publisher_did": "did:key:z6MkLegacy",
   "github_username": "legacy-user"
 }"#,
         )
         .unwrap();
 
-        let manager = AuthManager::with_path(creds_path);
         let loaded = manager.load().unwrap().unwrap();
 
         assert_eq!(loaded.github_token, None);
@@ -1579,6 +1877,10 @@ mod tests {
         assert_eq!(loaded.github_app_installation_id, None);
         assert_eq!(loaded.github_app_account_login, None);
         assert_eq!(loaded.github_username.as_deref(), Some("legacy-user"));
+        assert_eq!(
+            manager.resolve_session_token().unwrap().as_deref(),
+            Some("legacy-session-token")
+        );
     }
 
     #[test]
@@ -1586,9 +1888,7 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         let _token_guard = EnvVarGuard::set(ENV_ATO_TOKEN, None);
         let temp_dir = TempDir::new().unwrap();
-        let creds_path = temp_dir.path().join("nonexistent.json");
-
-        let manager = AuthManager::with_path(creds_path);
+        let (manager, _, _) = test_manager(&temp_dir);
         let result = manager.require();
 
         assert!(result.is_err());
@@ -1603,9 +1903,7 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         let _token_guard = EnvVarGuard::set(ENV_ATO_TOKEN, None);
         let temp_dir = TempDir::new().unwrap();
-        let creds_path = temp_dir.path().join("credentials.json");
-
-        let manager = AuthManager::with_path(creds_path);
+        let (manager, _, _) = test_manager(&temp_dir);
         manager
             .save(&Credentials {
                 github_token: None,
@@ -1624,11 +1922,9 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_credentials() {
+    fn test_delete_credentials_keeps_legacy_file() {
         let temp_dir = TempDir::new().unwrap();
-        let creds_path = temp_dir.path().join("credentials.json");
-
-        let manager = AuthManager::with_path(creds_path.clone());
+        let (manager, creds_path, legacy_path) = test_manager(&temp_dir);
 
         let creds = Credentials {
             github_token: Some("ghp_test123".to_string()),
@@ -1641,18 +1937,28 @@ mod tests {
             github_username: Some("testuser".to_string()),
         };
 
-        manager.save(&creds).unwrap();
+        manager.write_canonical_credentials(&creds).unwrap();
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        fs::write(&legacy_path, r#"{"publisher_handle":"legacy-user"}"#).unwrap();
+        manager.test_keyring_set(&manager.keyring_session_account, "keyring-token");
         assert!(creds_path.exists());
+        assert!(legacy_path.exists());
 
         manager.delete().unwrap();
         assert!(!creds_path.exists());
+        assert!(legacy_path.exists());
+        assert_eq!(
+            manager
+                .load_keyring_token(&manager.keyring_session_account)
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
     fn hydrate_publisher_identity_uses_cached_handle_without_fetch() {
         let temp_dir = TempDir::new().unwrap();
-        let creds_path = temp_dir.path().join("credentials.json");
-        let manager = AuthManager::with_path(creds_path);
+        let (manager, _, _) = test_manager(&temp_dir);
         manager
             .save(&Credentials {
                 github_token: None,
@@ -1680,8 +1986,7 @@ mod tests {
     fn hydrate_publisher_identity_fetches_and_persists_missing_handle() {
         let _guard = env_lock().lock().unwrap();
         let temp_dir = TempDir::new().unwrap();
-        let creds_path = temp_dir.path().join("credentials.json");
-        let manager = AuthManager::with_path(creds_path);
+        let (manager, _, _) = test_manager(&temp_dir);
         manager
             .save(&Credentials {
                 github_token: None,
@@ -1724,12 +2029,22 @@ mod tests {
     }
 
     #[test]
-    fn dock_registry_url_for_handle_uses_store_site_base() {
+    fn current_session_token_reads_env_override() {
         let _guard = env_lock().lock().unwrap();
-        let _site_guard = EnvVarGuard::set(ENV_STORE_SITE_URL, Some("https://staging.ato.run/"));
+        let _token_guard = EnvVarGuard::set(ENV_ATO_TOKEN, Some("session-token-123"));
         assert_eq!(
-            dock_registry_url_for_handle("koh0920"),
-            "https://staging.ato.run/d/koh0920"
+            current_session_token().as_deref(),
+            Some("session-token-123")
+        );
+    }
+
+    #[test]
+    fn require_session_token_reads_env_override() {
+        let _guard = env_lock().lock().unwrap();
+        let _token_guard = EnvVarGuard::set(ENV_ATO_TOKEN, Some("session-token-123"));
+        assert_eq!(
+            require_session_token().expect("session token"),
+            "session-token-123"
         );
     }
 
@@ -1748,5 +2063,145 @@ mod tests {
         assert!(!keyring_user_interaction_not_allowed_message(
             "Platform secure storage failure: Item not found."
         ));
+    }
+
+    #[test]
+    fn save_preserves_existing_canonical_tokens() {
+        let temp_dir = TempDir::new().unwrap();
+        let (manager, _, _) = test_manager(&temp_dir);
+        manager
+            .write_canonical_credentials(&Credentials {
+                session_token: Some("file-session".to_string()),
+                github_token: Some("file-github".to_string()),
+                publisher_handle: Some("before".to_string()),
+                ..Credentials::default()
+            })
+            .unwrap();
+
+        manager
+            .save(&Credentials {
+                publisher_handle: Some("after".to_string()),
+                ..Credentials::default()
+            })
+            .unwrap();
+
+        let persisted = manager.load_canonical_credentials().unwrap().unwrap();
+        assert_eq!(persisted.session_token.as_deref(), Some("file-session"));
+        assert_eq!(persisted.github_token.as_deref(), Some("file-github"));
+        assert_eq!(persisted.publisher_handle.as_deref(), Some("after"));
+    }
+
+    #[test]
+    fn save_does_not_migrate_legacy_tokens_into_canonical_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let (manager, canonical_path, legacy_path) = test_manager(&temp_dir);
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        fs::write(
+            &legacy_path,
+            r#"{"session_token":"legacy-session","publisher_handle":"legacy-user"}"#,
+        )
+        .unwrap();
+
+        manager
+            .save(&Credentials {
+                publisher_handle: Some("new-user".to_string()),
+                ..Credentials::default()
+            })
+            .unwrap();
+
+        assert!(canonical_path.exists());
+        let persisted = manager.load_canonical_credentials().unwrap().unwrap();
+        assert_eq!(persisted.session_token, None);
+        assert_eq!(persisted.publisher_handle.as_deref(), Some("new-user"));
+    }
+
+    #[test]
+    fn canonical_file_wins_over_legacy_for_session_resolution() {
+        let _guard = env_lock().lock().unwrap();
+        let _token_guard = EnvVarGuard::set(ENV_ATO_TOKEN, None);
+        let temp_dir = TempDir::new().unwrap();
+        let (manager, _, legacy_path) = test_manager(&temp_dir);
+
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        fs::write(&legacy_path, r#"{"session_token":"legacy-token"}"#).unwrap();
+        assert_eq!(
+            manager.resolve_session_token().unwrap().as_deref(),
+            Some("legacy-token")
+        );
+
+        manager
+            .write_canonical_credentials(&Credentials {
+                session_token: Some("canonical-token".to_string()),
+                ..Credentials::default()
+            })
+            .unwrap();
+        assert_eq!(
+            manager.resolve_session_token().unwrap().as_deref(),
+            Some("canonical-token")
+        );
+    }
+
+    #[test]
+    fn require_uses_canonical_file_token_when_keyring_is_unavailable() {
+        let _guard = env_lock().lock().unwrap();
+        let _token_guard = EnvVarGuard::set(ENV_ATO_TOKEN, None);
+        let temp_dir = TempDir::new().unwrap();
+        let (manager, _, _) = test_manager(&temp_dir);
+        manager
+            .write_canonical_credentials(&Credentials {
+                session_token: Some("file-session".to_string()),
+                publisher_handle: Some("dock-user".to_string()),
+                ..Credentials::default()
+            })
+            .unwrap();
+
+        let creds = manager.require().unwrap();
+        assert_eq!(creds.session_token.as_deref(), Some("file-session"));
+        assert_eq!(creds.publisher_handle.as_deref(), Some("dock-user"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn persist_session_token_headless_uses_canonical_file_with_0600() {
+        let temp_dir = TempDir::new().unwrap();
+        let (manager, canonical_path, _) = test_manager(&temp_dir);
+
+        let storage = manager
+            .persist_session_token("headless-token".to_string(), true)
+            .await
+            .unwrap();
+
+        assert_eq!(storage, TokenStorageLocation::CanonicalFile);
+        assert!(canonical_path.exists());
+        let persisted = manager.load_canonical_credentials().unwrap().unwrap();
+        assert_eq!(persisted.session_token.as_deref(), Some("headless-token"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = fs::metadata(&canonical_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn persist_session_token_interactive_uses_keyring_without_creating_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let (manager, canonical_path, _) = test_manager(&temp_dir);
+
+        let storage = manager
+            .persist_session_token("interactive-token".to_string(), false)
+            .await
+            .unwrap();
+
+        assert_eq!(storage, TokenStorageLocation::OsKeyring);
+        assert!(!canonical_path.exists());
+        assert_eq!(
+            manager
+                .load_keyring_token(&manager.keyring_session_account)
+                .unwrap()
+                .as_deref(),
+            Some("interactive-token")
+        );
     }
 }

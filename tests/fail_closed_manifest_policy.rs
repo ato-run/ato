@@ -137,7 +137,7 @@ fn redirect_escape_to_disallowed_host_blocked() {
 }
 
 #[test]
-#[ignore = "network policy fixture needs a runtime-complete capsule.lock to reach execution"]
+#[ignore = "network policy fixture needs a runtime-complete capsule.lock.json to reach execution"]
 fn network_exfiltration_blocked() {
     let output = run_with_seeded_consent("network-exfil-capsule", &[], &[]);
 
@@ -151,7 +151,7 @@ fn network_exfiltration_blocked() {
 }
 
 #[test]
-#[ignore = "policy re-consent fixture needs a runtime-complete capsule.lock after manifest mutation"]
+#[ignore = "policy re-consent fixture needs a runtime-complete capsule.lock.json after manifest mutation"]
 fn reconsent_required_on_policy_change() {
     let (_workspace, fixture) = prepare_fixture_workspace("malicious-npm-capsule");
     let home = prepare_consent_home(&fixture);

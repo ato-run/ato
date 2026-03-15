@@ -6,6 +6,7 @@ use chrono::Utc;
 use serde::Serialize;
 
 use crate::error::{CapsuleError, Result};
+use crate::lockfile::CAPSULE_LOCK_FILE_NAME;
 use crate::manifest;
 use crate::packers::payload;
 use crate::reporter::CapsuleReporter;
@@ -286,11 +287,16 @@ pub fn write_lockfile(
 
     warn_on_allowlist(&lockfile, &allowlist, reporter.clone())?;
 
-    let lock_path = manifest_dir.join("capsule.lock");
-    let content = toml::to_string_pretty(&lockfile)
-        .map_err(|e| CapsuleError::Pack(format!("Failed to serialize capsule.lock: {}", e)))?;
-    std::fs::write(&lock_path, content)
-        .map_err(|e| CapsuleError::Pack(format!("Failed to write capsule.lock: {}", e)))?;
+    let lock_path = manifest_dir.join(CAPSULE_LOCK_FILE_NAME);
+    let content = serde_json::to_vec_pretty(&lockfile).map_err(|e| {
+        CapsuleError::Pack(format!(
+            "Failed to serialize {}: {}",
+            CAPSULE_LOCK_FILE_NAME, e
+        ))
+    })?;
+    std::fs::write(&lock_path, content).map_err(|e| {
+        CapsuleError::Pack(format!("Failed to write {}: {}", CAPSULE_LOCK_FILE_NAME, e))
+    })?;
 
     Ok(lock_path)
 }
@@ -411,9 +417,10 @@ fn warn_on_allowlist(
     let urls = collect_urls(lockfile);
     for url in urls {
         if !is_allowed(&url, allowlist) {
-            futures::executor::block_on(
-                reporter.warn(format!("⚠️  Allowlist mismatch in capsule.lock: {}", url)),
-            )?;
+            futures::executor::block_on(reporter.warn(format!(
+                "⚠️  Allowlist mismatch in {}: {}",
+                CAPSULE_LOCK_FILE_NAME, url
+            )))?;
         }
     }
     Ok(())

@@ -192,7 +192,7 @@ pub fn from_anyhow(err: &AnyhowError, command_context: CommandContext) -> CliDia
         return CliDiagnostic::new(
             CliDiagnosticCode::E201,
             message,
-            Some("`ato login` を実行するか `ATO_TOKEN=<token>` を設定して再試行してください。"),
+            Some("`ato login`、`ato login --headless`、または `ATO_TOKEN=<token>` を使って再試行してください。"),
             None,
             None,
             causes,
@@ -260,6 +260,17 @@ pub fn from_anyhow(err: &AnyhowError, command_context: CommandContext) -> CliDia
             Some("entrypoint のパスがプロジェクトルートか source/ 配下に存在するか確認してください。"),
             None,
             Some("targets.<label>.entrypoint"),
+            causes,
+        );
+    }
+
+    if is_manual_intervention_issue(&message) {
+        return CliDiagnostic::new(
+            CliDiagnosticCode::E102,
+            message,
+            Some("生成された capsule.toml と必要な環境変数・外部依存を確認し、準備後に再実行してください。"),
+            None,
+            None,
             causes,
         );
     }
@@ -482,6 +493,12 @@ fn is_publish_version_exists_conflict(message: &str) -> bool {
             || lower.contains("sha256 mismatch"))
 }
 
+fn is_manual_intervention_issue(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("manual intervention required")
+}
+
 fn detect_field(message: &str) -> Option<&'static str> {
     if message.contains("default_target") {
         Some("default_target")
@@ -567,6 +584,15 @@ mod tests {
             anyhow!("Artifact upload failed (409 Conflict): same version is already published");
         let diagnostic = from_anyhow(&err, CommandContext::Publish);
         assert_eq!(diagnostic.code, CliDiagnosticCode::E202);
+    }
+
+    #[test]
+    fn maps_manual_intervention_messages_to_e102() {
+        let err = anyhow!(
+            "manual intervention required: DATABASE_URL is required\nGenerated capsule.toml: /repo/.tmp/capsule.toml"
+        );
+        let diagnostic = from_anyhow(&err, CommandContext::Run);
+        assert_eq!(diagnostic.code, CliDiagnosticCode::E102);
     }
 
     #[test]
