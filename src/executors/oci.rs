@@ -76,7 +76,15 @@ pub async fn execute_with_client<C: OciRuntimeClient>(
             env,
             working_dir: plan.targets_oci_working_dir(),
             labels,
-            mounts: Vec::new(),
+            mounts: launch_ctx
+                .injected_mounts()
+                .iter()
+                .map(|mount| capsule_core::runtime::oci::OciMountSpec {
+                    source: mount.source.to_string_lossy().to_string(),
+                    target: mount.target.clone(),
+                    readonly: mount.readonly,
+                })
+                .collect(),
             ports,
             network: None,
             aliases: Vec::new(),

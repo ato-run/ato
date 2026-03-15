@@ -38,7 +38,7 @@ fn consent_store_permissions_are_hardened() {
 }
 
 #[test]
-#[ignore = "fixture needs a runtime-complete capsule.lock to execute the Deno runtime path"]
+#[ignore = "fixture needs a runtime-complete capsule.lock.json to execute the Deno runtime path"]
 fn npm_lifecycle_isolation() {
     let pwn_target = PathBuf::from("/tmp/ato_pwned_test_6");
     let _ = fs::remove_file(&pwn_target);
@@ -57,7 +57,7 @@ fn npm_lifecycle_isolation() {
 }
 
 #[test]
-#[ignore = "fixture needs a runtime-complete capsule.lock to execute the secret-fd path"]
+#[ignore = "fixture needs a runtime-complete capsule.lock.json to execute the secret-fd path"]
 fn secret_fd_injection_no_env_leak() {
     let output = run_with_seeded_consent(
         "env-dump-capsule",

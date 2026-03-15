@@ -53,24 +53,31 @@ pub fn write_capsule_lock(workspace_root: &Path, fixture_name: &str) {
     let hash = capsule_core::packers::payload::compute_manifest_hash_without_signatures(&manifest)
         .expect("failed to compute manifest hash");
 
-    let mut lock_content = format!(
-        "version = \"1\"\n\n[meta]\ncreated_at = \"2026-02-23T00:00:00Z\"\nmanifest_hash = \"{}\"\n\n[targets]\n",
-        hash
-    );
+    let mut lock_content = serde_json::json!({
+        "version": "1",
+        "meta": {
+            "created_at": "2026-02-23T00:00:00Z",
+            "manifest_hash": hash,
+        },
+        "targets": {},
+    });
 
     if fixture_name == "future-glibc-capsule" {
-        lock_content.push_str(
-            "\n[targets.\"x86_64-unknown-linux-gnu\".constraints]\nglibc = \"glibc-999.0\"\n",
-        );
+        lock_content["targets"]["x86_64-unknown-linux-gnu"] = serde_json::json!({
+            "constraints": { "glibc": "glibc-999.0" }
+        });
     }
     if fixture_name == "glibc-mismatch-capsule" {
-        lock_content.push_str(
-            "\n[targets.\"x86_64-unknown-linux-gnu\".constraints]\nglibc = \"glibc-2.17\"\n",
-        );
+        lock_content["targets"]["x86_64-unknown-linux-gnu"] = serde_json::json!({
+            "constraints": { "glibc": "glibc-2.17" }
+        });
     }
 
-    fs::write(workspace_root.join("capsule.lock"), lock_content)
-        .expect("failed to write capsule.lock");
+    fs::write(
+        workspace_root.join("capsule.lock.json"),
+        serde_json::to_vec_pretty(&lock_content).expect("serialize capsule.lock.json"),
+    )
+    .expect("failed to write capsule.lock.json");
 }
 
 pub fn prepare_fixture_workspace(fixture_name: &str) -> (TempDir, PathBuf) {
@@ -78,15 +85,15 @@ pub fn prepare_fixture_workspace(fixture_name: &str) -> (TempDir, PathBuf) {
     let temp = TempDir::new().expect("failed to create fixture workspace");
     let workspace_root = temp.path().join(fixture_name);
     copy_dir_recursive(&source, &workspace_root);
-    let lock_path = workspace_root.join("capsule.lock");
+    let lock_path = workspace_root.join("capsule.lock.json");
     if lock_path.exists() {
         let manifest_text = fs::read_to_string(workspace_root.join("capsule.toml"))
             .expect("failed to read manifest");
         let manifest = capsule_core::types::CapsuleManifest::from_toml(&manifest_text)
             .expect("failed to parse manifest");
         let rendered = capsule_core::lockfile::render_lockfile_for_manifest(&lock_path, &manifest)
-            .expect("failed to re-render existing capsule.lock");
-        fs::write(&lock_path, rendered).expect("failed to update existing capsule.lock");
+            .expect("failed to re-render existing capsule.lock.json");
+        fs::write(&lock_path, rendered).expect("failed to update existing capsule.lock.json");
     } else {
         write_capsule_lock(&workspace_root, fixture_name);
     }
@@ -291,13 +298,13 @@ pub fn resolve_test_nacelle_path() -> PathBuf {
 }
 
 pub fn tamper_lock_manifest_hash(workspace_root: &Path) {
-    let lock_path = workspace_root.join("capsule.lock");
-    let raw = fs::read_to_string(&lock_path).expect("failed to read capsule.lock");
+    let lock_path = workspace_root.join("capsule.lock.json");
+    let raw = fs::read_to_string(&lock_path).expect("failed to read capsule.lock.json");
     let tampered = raw.replace(
-        "manifest_hash = \"blake3:",
-        "manifest_hash = \"blake3:deadbeef",
+        "\"manifest_hash\": \"blake3:",
+        "\"manifest_hash\": \"blake3:deadbeef",
     );
-    fs::write(&lock_path, tampered).expect("failed to tamper capsule.lock");
+    fs::write(&lock_path, tampered).expect("failed to tamper capsule.lock.json");
 }
 
 pub fn add_egress_allow_host(workspace_root: &Path, host: &str) {

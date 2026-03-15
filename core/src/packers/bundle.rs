@@ -7,6 +7,7 @@ use tar::{Builder, EntryType, Header};
 
 use super::runtime_fetcher::RuntimeFetcher;
 use crate::error::{CapsuleError, Result};
+use crate::lockfile::{resolve_existing_lockfile_path, CAPSULE_LOCK_FILE_NAME};
 use crate::packers::pack_filter::load_pack_filter_from_path;
 
 /// Magic bytes to identify self-extracting v2 bundles.
@@ -502,9 +503,8 @@ fn create_bundle_archive(
             append_file(&mut builder, config_path, "config.json")?;
         }
 
-        let capsule_lock = source_dir.join("capsule.lock");
-        if capsule_lock.exists() {
-            append_file(&mut builder, &capsule_lock, "capsule.lock")?;
+        if let Some(capsule_lock) = resolve_existing_lockfile_path(source_dir) {
+            append_file(&mut builder, &capsule_lock, CAPSULE_LOCK_FILE_NAME)?;
         }
 
         let uv_lock = source_dir.join("uv.lock");

@@ -19,21 +19,7 @@ pub fn load_manifest(path: &Path) -> Result<LoadedManifest> {
         )
     })?;
 
-    let raw: toml::Value = toml::from_str(&raw_text).map_err(|e| {
-        CapsuleError::Manifest(
-            path.to_path_buf(),
-            format!("Failed to parse manifest TOML: {}", e),
-        )
-    })?;
-
-    if raw.get("execution").is_some() {
-        return Err(CapsuleError::Manifest(
-            path.to_path_buf(),
-            "legacy [execution] section is not supported in schema_version=0.2".to_string(),
-        ));
-    }
-
-    let mut model = CapsuleManifest::from_toml(&raw_text).map_err(|e| {
+    let mut model = CapsuleManifest::from_toml_with_path(&raw_text, path).map_err(|e| {
         CapsuleError::Manifest(
             path.to_path_buf(),
             format!("Failed to parse manifest into schema: {}", e),
@@ -62,6 +48,19 @@ pub fn load_manifest(path: &Path) -> Result<LoadedManifest> {
     if model.schema_version.trim().is_empty() {
         model.schema_version = "0.2".to_string();
     }
+
+    let normalized_text = model.to_toml().map_err(|e| {
+        CapsuleError::Manifest(
+            path.to_path_buf(),
+            format!("Failed to serialize normalized manifest: {}", e),
+        )
+    })?;
+    let raw: toml::Value = toml::from_str(&normalized_text).map_err(|e| {
+        CapsuleError::Manifest(
+            path.to_path_buf(),
+            format!("Failed to parse normalized manifest TOML: {}", e),
+        )
+    })?;
 
     let dir = path
         .parent()

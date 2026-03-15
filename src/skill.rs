@@ -378,13 +378,19 @@ fn write_capsule_lock(root: &Path, manifest_path: &Path) -> Result<()> {
     let hash = capsule_core::packers::payload::compute_manifest_hash_without_signatures(&manifest)
         .context("failed to compute generated manifest hash")?;
 
-    let lock = format!(
-        "version = \"1\"\n\n[meta]\ncreated_at = \"2026-02-24T00:00:00Z\"\nmanifest_hash = \"{}\"\n\n[targets]\n",
-        hash
-    );
+    let lock = serde_json::json!({
+        "version": "1",
+        "meta": {
+            "created_at": "2026-02-24T00:00:00Z",
+            "manifest_hash": hash,
+        },
+        "targets": {}
+    });
 
-    let lock_path = root.join("capsule.lock");
-    fs::write(&lock_path, lock).with_context(|| {
+    let lock_path = root.join("capsule.lock.json");
+    let rendered =
+        serde_json::to_vec_pretty(&lock).context("failed to render generated lockfile")?;
+    fs::write(&lock_path, rendered).with_context(|| {
         format!(
             "failed to write generated lockfile: {}",
             lock_path.display()
