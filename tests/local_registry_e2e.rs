@@ -693,7 +693,7 @@ default_target = "default"
 include = [
   "ato-entry.ts",
   "capsule.toml",
-  "capsule.lock",
+    "capsule.lock.json",
   "deno.lock",
   "package.json"
 ]
@@ -722,8 +722,8 @@ repository = "Koh0920/file2api"
         "console.log('file2api package-json prepare');\n",
     )?;
     std::fs::write(
-        project_dir.join("capsule.lock"),
-        "version = \"1\"\n\n[meta]\ncreated_at = \"2026-01-01T00:00:00Z\"\nmanifest_hash = \"sha256:dummy\"\n",
+        project_dir.join("capsule.lock.json"),
+        "{\n  \"version\": \"1\",\n  \"meta\": {\n    \"created_at\": \"2026-01-01T00:00:00Z\",\n    \"manifest_hash\": \"sha256:dummy\"\n  },\n  \"targets\": {}\n}\n",
     )?;
     std::fs::write(
         project_dir.join("deno.lock"),

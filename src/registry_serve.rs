@@ -497,12 +497,21 @@ pub async fn serve(config: RegistryServerConfig) -> Result<()> {
         "/v1/manifest/capsules/by/:publisher/:slug",
         get(handle_get_capsule),
     );
+    app = app.route("/v1/capsules/by/:publisher/:slug", get(handle_get_capsule));
     app = app.route(
         "/v1/manifest/capsules/by/:publisher/:slug/distributions",
         get(handle_distributions),
     );
     app = app.route(
+        "/v1/capsules/by/:publisher/:slug/distributions",
+        get(handle_distributions),
+    );
+    app = app.route(
         "/v1/manifest/capsules/by/:publisher/:slug/download",
+        get(handle_download),
+    );
+    app = app.route(
+        "/v1/capsules/by/:publisher/:slug/download",
         get(handle_download),
     );
     app = app.route("/v1/manifest/negotiate", post(handle_manifest_negotiate));
@@ -4080,7 +4089,7 @@ fn extract_capsule_lock_from_capsule(bytes: &[u8]) -> Option<String> {
     for entry in entries {
         let mut entry = entry.ok()?;
         let entry_path = entry.path().ok()?.to_string_lossy().to_string();
-        if entry_path == "capsule.lock" {
+        if entry_path == "capsule.lock.json" || entry_path == "capsule.lock" {
             let mut lock = String::new();
             entry.read_to_string(&mut lock).ok()?;
             return Some(lock);
