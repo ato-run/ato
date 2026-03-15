@@ -83,13 +83,16 @@ mod binding;
 mod commands;
 mod common;
 mod consent_store;
+mod data_injection;
 mod diagnostics;
 mod engine_manager;
 mod env;
 mod error_codes;
 mod executors;
+mod external_capsule;
 mod gen_ci;
 mod guest_protocol;
+mod inference_feedback;
 mod ingress_proxy;
 mod init;
 mod install;
@@ -236,6 +239,10 @@ enum Commands {
         /// Explicitly bind a manifest [state.<name>] entry using STATE=/absolute/path or STATE=state-...
         #[arg(long = "state", value_name = "STATE=/ABS/PATH|STATE=state-...")]
         state: Vec<String>,
+
+        /// Inject external data binding using KEY=VALUE for targets that declare [external_injection]
+        #[arg(long = "inject", value_name = "KEY=VALUE")]
+        inject: Vec<String>,
 
         /// Network enforcement mode
         #[arg(long, value_enum, default_value_t = EnforcementMode::Strict)]
@@ -758,6 +765,10 @@ enum Commands {
         /// Explicitly bind a manifest [state.<name>] entry using STATE=/absolute/path or STATE=state-...
         #[arg(long = "state", value_name = "STATE=/ABS/PATH|STATE=state-...")]
         state: Vec<String>,
+
+        /// Inject external data binding using KEY=VALUE for targets that declare [external_injection]
+        #[arg(long = "inject", value_name = "KEY=VALUE")]
+        inject: Vec<String>,
 
         /// Network enforcement mode
         #[arg(long, value_enum, default_value_t = EnforcementMode::Strict)]
@@ -1632,6 +1643,7 @@ fn run() -> Result<()> {
             nacelle,
             registry,
             state,
+            inject,
             enforcement,
             sandbox_mode,
             unsafe_mode_legacy,
@@ -1647,6 +1659,7 @@ fn run() -> Result<()> {
             nacelle,
             registry,
             state,
+            inject,
             enforcement,
             sandbox_mode,
             unsafe_mode_legacy,
@@ -1680,6 +1693,7 @@ fn run() -> Result<()> {
             nacelle,
             registry,
             state,
+            inject,
             enforcement,
             sandbox_mode,
             unsafe_mode_legacy,
@@ -1694,6 +1708,7 @@ fn run() -> Result<()> {
             nacelle,
             registry,
             state,
+            inject,
             enforcement,
             sandbox_mode,
             unsafe_mode_legacy,
@@ -2873,6 +2888,38 @@ struct PublishPhaseResult {
     skipped_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishTargetMode {
+    PersonalDockDirect,
+    OfficialCi,
+    CustomDirect,
+}
+
+impl PublishTargetMode {
+    fn is_official(self) -> bool {
+        matches!(self, Self::OfficialCi)
+    }
+
+    fn is_personal_dock(self) -> bool {
+        matches!(self, Self::PersonalDockDirect)
+    }
+
+    fn route_label(self) -> &'static str {
+        match self {
+            Self::PersonalDockDirect => "personal_dock_direct",
+            Self::OfficialCi => "official",
+            Self::CustomDirect => "private",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedPublishTarget {
+    registry_url: String,
+    mode: PublishTargetMode,
+    publisher_handle: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct OfficialDeployOutcome {
     route: publish_official::PublishRoutePlan,
@@ -2884,8 +2931,8 @@ fn execute_publish_command(
     args: PublishCommandArgs,
     reporter: std::sync::Arc<reporters::CliReporter>,
 ) -> Result<()> {
-    let resolved_registry = resolve_publish_registry_url(args.registry.clone())?;
-    let is_official = is_official_publish_registry(&resolved_registry);
+    let resolved_target = resolve_publish_target(args.registry.clone())?;
+    let is_official = resolved_target.mode.is_official();
     let selection = select_publish_phases(
         args.prepare,
         args.build,
@@ -2893,6 +2940,9 @@ fn execute_publish_command(
         is_official,
         args.legacy_full_publish,
     );
+    if resolved_target.mode.is_personal_dock() && selection.deploy {
+        let _ = crate::auth::require_session_token()?;
+    }
     validate_publish_phase_options(&args, selection, is_official)?;
     maybe_warn_legacy_full_publish(&args, selection, is_official);
     let _ = args.no_tui;
@@ -2911,7 +2961,8 @@ fn execute_publish_command(
     let private_preview = if selection.deploy && !is_official {
         Some(publish_private::summarize(
             &publish_private::PublishPrivateArgs {
-                registry_url: resolved_registry.clone(),
+                registry_url: resolved_target.registry_url.clone(),
+                publisher_hint: resolved_target.publisher_handle.clone(),
                 artifact_path: args.artifact.clone(),
                 force_large_payload: args.force_large_payload,
                 scoped_id: args.scoped_id.clone(),
@@ -3010,7 +3061,7 @@ fn execute_publish_command(
         print_phase_line(args.json, "deploy", "RUN", "deploy execution");
         let started = std::time::Instant::now();
         if is_official {
-            let outcome = run_official_deploy(resolved_registry.clone(), args.fix)?;
+            let outcome = run_official_deploy(resolved_target.registry_url.clone(), args.fix)?;
 
             if !args.json {
                 println!(
@@ -3102,7 +3153,8 @@ fn execute_publish_command(
                 println!(
                     "{}",
                     publish_private_start_summary_line(
-                        &resolved_registry,
+                        resolved_target.mode,
+                        &resolved_target.registry_url,
                         preview.source,
                         &preview.scoped_id,
                         &preview.version,
@@ -3111,7 +3163,7 @@ fn execute_publish_command(
                 );
             }
 
-            let status = publish_private_status_message(&resolved_registry, source_is_artifact);
+            let status = publish_private_status_message(resolved_target.mode, source_is_artifact);
             futures::executor::block_on(reporter.progress_start(status.to_string(), None))?;
             let scoped_override = if source_is_artifact {
                 args.scoped_id.clone()
@@ -3119,7 +3171,8 @@ fn execute_publish_command(
                 Some(preview.scoped_id.clone())
             };
             let upload_result = publish_private::execute(publish_private::PublishPrivateArgs {
-                registry_url: resolved_registry.clone(),
+                registry_url: resolved_target.registry_url.clone(),
+                publisher_hint: resolved_target.publisher_handle.clone(),
                 artifact_path: Some(deploy_artifact),
                 force_large_payload: args.force_large_payload,
                 scoped_id: scoped_override,
@@ -3150,15 +3203,13 @@ fn execute_publish_command(
 
     if args.json {
         emit_publish_json_output(
-            &resolved_registry,
-            is_official,
+            &resolved_target,
             &phases,
             private_result.as_ref(),
             official_result.as_ref(),
         )?;
     } else if let Some(result) = private_result.as_ref() {
-        let dock_publish = is_dock_publish_registry(&result.registry_url);
-        if dock_publish {
+        if resolved_target.mode.is_personal_dock() {
             println!("✅ Successfully published to Personal Dock!");
         } else {
             println!("✅ Successfully published to private registry!");
@@ -3167,19 +3218,21 @@ fn execute_publish_command(
         println!("📦 Capsule:   {} v{}", result.scoped_id, result.version);
         println!("🛡️  Integrity: {}, {}", result.sha256, result.blake3);
         println!();
-        if dock_publish {
-            println!("🧭 Dock URL:   {}", result.registry_url);
-        }
+        println!("🌐 Registry: {}", result.registry_url);
         println!("🌐 Artifact URL: {}", result.artifact_url);
         println!();
         if result.already_existed {
             println!("ℹ️  Existing release reused (same sha256, no new upload).");
             println!();
         }
-        println!(
-            "👉 Next step: ato install {} --registry {}",
-            result.scoped_id, result.registry_url
-        );
+        if resolved_target.mode.is_personal_dock() {
+            println!("👉 Next step: ato install {}", result.scoped_id);
+        } else {
+            println!(
+                "👉 Next step: ato install {} --registry {}",
+                result.scoped_id, result.registry_url
+            );
+        }
     } else if let Some(outcome) = official_result {
         println!();
         println!("✅ CI handoff ready. 次の順で実行してください:");
@@ -3200,10 +3253,7 @@ fn execute_publish_command(
         if selection.deploy && phases[2].ok {
             let notice = if is_official {
                 "Official publish handoff prepared (CI-first: local upload is not executed)."
-            } else if private_result
-                .as_ref()
-                .is_some_and(|result| is_dock_publish_registry(&result.registry_url))
-            {
+            } else if resolved_target.mode.is_personal_dock() {
                 "Personal Dock publish completed."
             } else {
                 "Private registry publish completed."
@@ -3237,8 +3287,11 @@ fn run_official_deploy(registry_url: String, fix: bool) -> Result<OfficialDeploy
     })
 }
 
-fn publish_private_status_message(registry_url: &str, has_artifact: bool) -> &'static str {
-    if is_dock_publish_registry(registry_url) {
+fn publish_private_status_message(
+    target_mode: PublishTargetMode,
+    has_artifact: bool,
+) -> &'static str {
+    if target_mode.is_personal_dock() {
         if has_artifact {
             "📤 Publishing provided artifact to Personal Dock..."
         } else {
@@ -3252,6 +3305,7 @@ fn publish_private_status_message(registry_url: &str, has_artifact: bool) -> &'s
 }
 
 fn publish_private_start_summary_line(
+    target_mode: PublishTargetMode,
     registry_url: &str,
     source: &str,
     scoped_id: &str,
@@ -3260,7 +3314,7 @@ fn publish_private_start_summary_line(
 ) -> String {
     format!(
         "🔎 {} publish target registry={} source={} scoped_id={} version={} allow_existing={}",
-        if is_dock_publish_registry(registry_url) {
+        if target_mode.is_personal_dock() {
             "dock"
         } else {
             "private"
@@ -3358,8 +3412,7 @@ fn build_capsule_artifact_for_publish(cwd: &std::path::Path) -> Result<PathBuf> 
 }
 
 fn emit_publish_json_output(
-    registry_url: &str,
-    is_official: bool,
+    resolved_target: &ResolvedPublishTarget,
     phases: &[PublishPhaseResult],
     private_result: Option<&publish_private::PublishPrivateResult>,
     official_result: Option<&OfficialDeployOutcome>,
@@ -3396,8 +3449,8 @@ fn emit_publish_json_output(
         "ok": true,
         "code": "PUBLISH_PHASES_COMPLETED",
         "message": "Selected publish phases completed.",
-        "registry": registry_url,
-        "route": if is_official { "official" } else { "private" },
+        "registry": resolved_target.registry_url,
+        "route": resolved_target.mode.route_label(),
         "phases": phases,
     });
     println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -3478,14 +3531,14 @@ fn print_phase_line(json_output: bool, phase: &str, state: &str, detail: &str) {
     println!("PHASE {:<7} {:<4} {}", phase, state, detail);
 }
 
-fn resolve_publish_registry_url(cli_registry: Option<String>) -> Result<String> {
+fn resolve_publish_target(cli_registry: Option<String>) -> Result<ResolvedPublishTarget> {
     let manifest_registry = discover_manifest_publish_registry()?;
-    let dock_registry = crate::auth::current_dock_registry_url()?;
+    let publisher_handle = crate::auth::current_publisher_handle()?;
 
-    resolve_publish_registry_url_from_sources(
+    resolve_publish_target_from_sources(
         cli_registry.as_deref(),
         manifest_registry.as_deref(),
-        dock_registry.as_deref(),
+        publisher_handle.as_deref(),
     )
 }
 
@@ -3510,26 +3563,50 @@ fn discover_manifest_publish_registry() -> Result<Option<String>> {
         .map(ToOwned::to_owned))
 }
 
-fn resolve_publish_registry_url_from_sources(
+fn resolve_publish_target_from_sources(
     cli_registry: Option<&str>,
     manifest_registry: Option<&str>,
-    dock_registry: Option<&str>,
-) -> Result<String> {
+    publisher_handle: Option<&str>,
+) -> Result<ResolvedPublishTarget> {
     if let Some(url) = cli_registry {
-        return normalize_registry_url(url);
+        return resolve_explicit_publish_target(url);
     }
 
     if let Some(url) = manifest_registry {
-        return normalize_registry_url(url);
+        return resolve_explicit_publish_target(url);
     }
 
-    if let Some(url) = dock_registry {
-        return normalize_registry_url(url);
+    if let Some(handle) = publisher_handle {
+        return Ok(ResolvedPublishTarget {
+            registry_url: crate::auth::default_store_registry_url(),
+            mode: PublishTargetMode::PersonalDockDirect,
+            publisher_handle: Some(handle.to_string()),
+        });
     }
 
     anyhow::bail!(
         "No default publish target found. Run `ato login` to publish to your Personal Dock, or pass `--registry https://api.ato.run` / `--ci` for the official Store."
     );
+}
+
+fn resolve_explicit_publish_target(raw: &str) -> Result<ResolvedPublishTarget> {
+    let normalized = normalize_registry_url(raw)?;
+    if is_legacy_dock_publish_registry(&normalized) {
+        anyhow::bail!(
+            "Registry URL `{}` is no longer supported. Personal Dock publish now uses `https://api.ato.run`; `/d/<handle>` is a UI page, not a registry.",
+            normalized
+        );
+    }
+
+    Ok(ResolvedPublishTarget {
+        registry_url: normalized.clone(),
+        mode: if is_official_publish_registry(&normalized) {
+            PublishTargetMode::OfficialCi
+        } else {
+            PublishTargetMode::CustomDirect
+        },
+        publisher_handle: None,
+    })
 }
 
 fn normalize_registry_url(raw: &str) -> Result<String> {
@@ -3546,23 +3623,23 @@ fn is_official_publish_registry(url: &str) -> bool {
     host.eq_ignore_ascii_case("api.ato.run") || host.eq_ignore_ascii_case("staging.api.ato.run")
 }
 
-fn is_dock_publish_registry(url: &str) -> bool {
-    dock_handle_from_publish_registry(url).is_some()
-}
-
-fn dock_handle_from_publish_registry(url: &str) -> Option<String> {
-    let parsed = reqwest::Url::parse(url).ok()?;
-    let mut segments = parsed.path_segments()?;
+fn is_legacy_dock_publish_registry(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(mut segments) = parsed.path_segments() else {
+        return false;
+    };
     while let Some(segment) = segments.next() {
         if segment == "d" {
             return segments
                 .next()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned);
+                .is_some();
         }
     }
-    None
+    false
 }
 
 fn execute_setup_command(
@@ -3598,6 +3675,7 @@ fn execute_run_like_command(
     nacelle: Option<PathBuf>,
     registry: Option<String>,
     state: Vec<String>,
+    inject: Vec<String>,
     enforcement: EnforcementMode,
     sandbox_mode: bool,
     unsafe_mode_legacy: bool,
@@ -3657,6 +3735,7 @@ fn execute_run_like_command(
             dangerously_skip_permissions,
             yes,
             state,
+            inject,
             reporter,
         );
     }
@@ -3687,6 +3766,7 @@ fn execute_run_like_command(
         dangerously_skip_permissions,
         yes,
         state,
+        inject,
         reporter,
     )
 }
@@ -3940,6 +4020,483 @@ async fn resolve_installed_capsule_archive(
         &scoped_ref.slug,
         preferred_version,
     )
+}
+
+async fn install_github_repository(
+    repository: &str,
+    output_dir: Option<PathBuf>,
+    yes: bool,
+    projection_preference: install::ProjectionPreference,
+    json: bool,
+    can_prompt: bool,
+) -> Result<install::InstallResult> {
+    const MAX_GITHUB_DRAFT_RETRIES: u8 = 3;
+
+    let install_draft = match install::fetch_github_install_draft(repository).await {
+        Ok(draft) => Some(draft),
+        Err(error) => {
+            if !json {
+                eprintln!(
+                    "⚠️  Failed to fetch ato store install draft: {error}. Falling back to local zero-config inference."
+                );
+            }
+            None
+        }
+    };
+    let checkout = install::download_github_repository_at_ref(
+        repository,
+        install_draft
+            .as_ref()
+            .map(|draft| draft.resolved_ref.sha.as_str()),
+    )
+    .await?;
+    let install_draft = install_draft
+        .as_ref()
+        .map(|draft| draft.normalize_preview_toml_for_checkout(&checkout.checkout_dir))
+        .transpose()?;
+    let injected_manifest = install_draft
+        .as_ref()
+        .and_then(|draft| draft.preview_toml.clone());
+    let inference_attempt = if let Some(draft) = install_draft.as_ref() {
+        inference_feedback::submit_attempt(repository, draft)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    if !json {
+        eprintln!(
+            "📦 Building {} from GitHub source in {}",
+            checkout.repository,
+            checkout.checkout_dir.display()
+        );
+        if let Some(draft) = install_draft.as_ref() {
+            eprintln!(
+                "   Revision: {} ({})",
+                draft.resolved_ref.sha, draft.resolved_ref.ref_name
+            );
+            if draft.manifest_source == "inferred" {
+                eprintln!(
+                    "   Using store-generated capsule draft for {}",
+                    draft.repo_ref
+                );
+                if let Some(hint) = draft.capsule_hint.as_ref() {
+                    eprintln!("   Confidence: {}", hint.confidence);
+                    for warning in &hint.warnings {
+                        eprintln!("   Warning: {warning}");
+                    }
+                }
+            }
+        }
+    }
+    let mut latest_install_draft = install_draft.clone();
+    let build_result = match build_github_repository_checkout(
+        checkout.checkout_dir.clone(),
+        json,
+        injected_manifest.clone(),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let mut last_error = error;
+            let smoke_report = last_error
+                .downcast_ref::<commands::build::InferredManifestSmokeFailure>()
+                .map(|failure| failure.report.clone());
+
+            if let (Some(attempt), Some(report)) =
+                (inference_attempt.as_ref(), smoke_report.as_ref())
+            {
+                let _ = inference_feedback::submit_smoke_failed(attempt, report).await;
+            }
+
+            if let (Some(draft), Some(report)) = (install_draft.as_ref(), smoke_report.as_ref()) {
+                if !json {
+                    eprintln!("Failed to run with inferred capsule.toml.");
+                    eprintln!("Reason: {}", report.message);
+                }
+                if draft_requires_manual_review(draft) {
+                    return Err(build_github_manual_intervention_error(
+                        &checkout.checkout_dir,
+                        repository,
+                        draft,
+                        inference_attempt.as_ref(),
+                        &report.message,
+                    )?);
+                }
+
+                let mut recovered_build = None;
+                let mut current_draft = draft.clone();
+                let mut current_report = report.clone();
+                for retry_ordinal in 1..=MAX_GITHUB_DRAFT_RETRIES {
+                    let previous_toml = current_draft.preview_toml.clone().unwrap_or_default();
+                    if previous_toml.trim().is_empty() {
+                        break;
+                    }
+
+                    let next_draft = match inference_feedback::request_retry_install_draft(
+                        repository,
+                        &current_draft,
+                        inference_attempt.as_ref(),
+                        &current_report,
+                        retry_ordinal,
+                    )
+                    .await
+                    {
+                        Ok(value) => value,
+                        Err(retry_error) => {
+                            if !json {
+                                eprintln!(
+                                    "⚠️  Failed to request retry draft ({retry_ordinal}/{MAX_GITHUB_DRAFT_RETRIES}): {retry_error}"
+                                );
+                            }
+                            break;
+                        }
+                    };
+                    let next_draft =
+                        next_draft.normalize_preview_toml_for_checkout(&checkout.checkout_dir)?;
+                    let next_toml = next_draft.preview_toml.clone().unwrap_or_default();
+                    let draft_changed = next_toml.trim() != previous_toml.trim();
+                    latest_install_draft = Some(next_draft.clone());
+                    current_draft = next_draft;
+
+                    if !draft_changed {
+                        if !json {
+                            eprintln!(
+                                "ℹ️  Retry draft {retry_ordinal}/{MAX_GITHUB_DRAFT_RETRIES} did not change the generated capsule.toml."
+                            );
+                        }
+                        break;
+                    }
+                    if !current_draft.retryable {
+                        if !json {
+                            eprintln!(
+                                "ℹ️  Retry draft {retry_ordinal}/{MAX_GITHUB_DRAFT_RETRIES} requested manual review instead of another automatic retry."
+                            );
+                        }
+                        break;
+                    }
+
+                    if !json {
+                        eprintln!(
+                            "🔁 Retrying build with failure-aware draft ({retry_ordinal}/{MAX_GITHUB_DRAFT_RETRIES})..."
+                        );
+                        if let Some(hint) = current_draft.capsule_hint.as_ref() {
+                            eprintln!("   Confidence: {}", hint.confidence);
+                            if let Some(launchability) = hint.launchability.as_deref() {
+                                eprintln!("   Launchability: {}", launchability);
+                            }
+                            for warning in &hint.warnings {
+                                eprintln!("   Warning: {warning}");
+                            }
+                        }
+                    }
+
+                    match build_github_repository_checkout(
+                        checkout.checkout_dir.clone(),
+                        json,
+                        current_draft.preview_toml.clone(),
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            recovered_build = Some(result);
+                            break;
+                        }
+                        Err(retry_error) => {
+                            let retry_smoke_report = retry_error
+                                .downcast_ref::<commands::build::InferredManifestSmokeFailure>()
+                                .map(|failure| failure.report.clone());
+                            last_error = retry_error;
+                            let Some(retry_report) = retry_smoke_report else {
+                                break;
+                            };
+                            current_report = retry_report.clone();
+                            if let Some(attempt) = inference_attempt.as_ref() {
+                                let _ =
+                                    inference_feedback::submit_smoke_failed(attempt, &retry_report)
+                                        .await;
+                            }
+                        }
+                    }
+                }
+
+                if let Some(result) = recovered_build {
+                    result
+                } else if draft_requires_manual_review(
+                    latest_install_draft.as_ref().unwrap_or(draft),
+                ) {
+                    return Err(build_github_manual_intervention_error(
+                        &checkout.checkout_dir,
+                        repository,
+                        latest_install_draft.as_ref().unwrap_or(draft),
+                        inference_attempt.as_ref(),
+                        &current_report.message,
+                    )?);
+                } else if can_prompt {
+                    let draft_for_manual_fix = latest_install_draft.as_ref().unwrap_or(draft);
+                    if let Some(recovered) = retry_github_build_after_manual_fix(
+                        &checkout.checkout_dir,
+                        repository,
+                        draft_for_manual_fix,
+                        inference_attempt.as_ref(),
+                        json,
+                    )
+                    .await?
+                    {
+                        recovered
+                    } else {
+                        return Err(last_error);
+                    }
+                } else {
+                    return Err(last_error);
+                }
+            } else {
+                return Err(last_error);
+            }
+        }
+    };
+    let artifact = build_result.artifact.ok_or_else(|| {
+        anyhow::anyhow!("GitHub repository did not produce an installable .capsule artifact")
+    })?;
+    install::install_built_github_artifact(
+        &artifact,
+        &checkout.publisher,
+        &checkout.repository,
+        install::InstallExecutionOptions {
+            output_dir,
+            yes,
+            projection_preference,
+            json_output: json,
+            can_prompt_interactively: can_prompt,
+        },
+    )
+    .await
+}
+
+async fn run_blocking_github_install_step<T, F>(operation: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .context("GitHub repository build task failed")?
+}
+
+async fn build_github_repository_checkout(
+    checkout_dir: PathBuf,
+    json: bool,
+    injected_manifest: Option<String>,
+) -> Result<commands::build::BuildResult> {
+    run_blocking_github_install_step(move || {
+        let reporter = std::sync::Arc::new(reporters::CliReporter::new(json));
+        commands::build::execute_pack_command_with_injected_manifest(
+            checkout_dir,
+            false,
+            None,
+            false,
+            false,
+            false,
+            false,
+            EnforcementMode::Strict.as_str().to_string(),
+            reporter,
+            false,
+            json,
+            None,
+            injected_manifest.as_deref(),
+        )
+    })
+    .await
+}
+
+async fn retry_github_build_after_manual_fix(
+    checkout_dir: &std::path::Path,
+    repository: &str,
+    install_draft: &install::GitHubInstallDraftResponse,
+    inference_attempt: Option<&inference_feedback::InferenceAttemptHandle>,
+    json: bool,
+) -> Result<Option<commands::build::BuildResult>> {
+    let should_edit =
+        inference_feedback::prompt_yes_no("Edit generated capsule.toml and retry? [Y/n]: ", true)?;
+    if !should_edit {
+        return Ok(None);
+    }
+
+    let attempt_label = inference_attempt
+        .map(|attempt| attempt.attempt_id.as_str())
+        .unwrap_or("manual");
+    let manifest_path = inference_feedback::build_manual_manifest_path(checkout_dir, attempt_label);
+    let inferred_manifest = install_draft
+        .preview_toml
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("store draft previewToml missing for manual fix"))?;
+    inference_feedback::write_manual_manifest(&manifest_path, inferred_manifest)?;
+
+    eprintln!("Open editor for {}", manifest_path.display());
+    if !inference_feedback::has_configured_editor() {
+        return Err(anyhow::anyhow!(build_github_manual_intervention_message(
+            repository,
+            install_draft,
+            &manifest_path,
+            "VISUAL or EDITOR is not set for manual fix mode",
+        )));
+    }
+    inference_feedback::open_editor(&manifest_path)?;
+    let edited_manifest = inference_feedback::read_manual_manifest(&manifest_path)?;
+    if edited_manifest.trim().is_empty() {
+        anyhow::bail!("edited capsule.toml is empty");
+    }
+
+    let retry_result = build_github_repository_checkout(
+        checkout_dir.to_path_buf(),
+        json,
+        Some(edited_manifest.clone()),
+    )
+    .await?;
+
+    eprintln!(
+        "{}",
+        inference_feedback::summarize_manifest_diff(inferred_manifest, &edited_manifest)
+    );
+    if let Some(attempt) = inference_attempt {
+        let should_share = inference_feedback::prompt_yes_no(
+            "The generated capsule.toml was fixed and smoke test passed. Share this corrected configuration to improve ato for public GitHub repositories? [Y/n]: ",
+            true,
+        )?;
+        if should_share {
+            let _ = inference_feedback::submit_verified_fix(attempt, &edited_manifest).await;
+        }
+    }
+
+    Ok(Some(retry_result))
+}
+
+fn draft_requires_manual_review(draft: &install::GitHubInstallDraftResponse) -> bool {
+    if draft
+        .capsule_hint
+        .as_ref()
+        .and_then(|hint| hint.launchability.as_deref())
+        == Some("manual_review")
+    {
+        return true;
+    }
+    if draft.retryable {
+        return false;
+    }
+
+    let has_required_env = draft
+        .preview_toml
+        .as_deref()
+        .map(required_env_from_preview_toml)
+        .map(|values| !values.is_empty())
+        .unwrap_or(false);
+    let has_manual_review_warning = draft
+        .capsule_hint
+        .as_ref()
+        .map(|hint| {
+            hint.warnings.iter().any(|warning| {
+                let lowered = warning.to_ascii_lowercase();
+                lowered.contains("manual")
+                    || lowered.contains("database")
+                    || lowered.contains("redis")
+                    || lowered.contains(".env")
+                    || lowered.contains("credential")
+                    || lowered.contains("secret")
+                    || lowered.contains("token")
+                    || warning.contains("環境変数")
+                    || warning.contains("手動")
+                    || warning.contains("外部")
+            })
+        })
+        .unwrap_or(false);
+
+    has_required_env || has_manual_review_warning
+}
+
+fn build_github_manual_intervention_error(
+    checkout_dir: &std::path::Path,
+    repository: &str,
+    install_draft: &install::GitHubInstallDraftResponse,
+    inference_attempt: Option<&inference_feedback::InferenceAttemptHandle>,
+    failure_reason: &str,
+) -> Result<anyhow::Error> {
+    let attempt_label = inference_attempt
+        .map(|attempt| attempt.attempt_id.as_str())
+        .unwrap_or("manual");
+    let manifest_path = inference_feedback::build_manual_manifest_path(checkout_dir, attempt_label);
+    if let Some(preview_toml) = install_draft.preview_toml.as_deref() {
+        inference_feedback::write_manual_manifest(&manifest_path, preview_toml)?;
+    }
+    Ok(anyhow::anyhow!(build_github_manual_intervention_message(
+        repository,
+        install_draft,
+        &manifest_path,
+        failure_reason,
+    )))
+}
+
+fn build_github_manual_intervention_message(
+    repository: &str,
+    install_draft: &install::GitHubInstallDraftResponse,
+    manifest_path: &std::path::Path,
+    failure_reason: &str,
+) -> String {
+    let mut next_steps = Vec::new();
+    let required_env = install_draft
+        .preview_toml
+        .as_deref()
+        .map(required_env_from_preview_toml)
+        .unwrap_or_default();
+    if !required_env.is_empty() {
+        next_steps.push(format!(
+            "Set the required environment variables before rerunning: {}.",
+            required_env.join(", ")
+        ));
+    }
+    if let Some(hint) = install_draft.capsule_hint.as_ref() {
+        for warning in hint.warnings.iter().take(2) {
+            next_steps.push(warning.clone());
+        }
+    }
+    next_steps.push(format!(
+        "Review {} and adjust the generated command or target settings as needed.",
+        manifest_path.display()
+    ));
+    if !inference_feedback::has_configured_editor() {
+        next_steps.push(
+            "Set VISUAL or EDITOR if you want ato to open the file automatically.".to_string(),
+        );
+    }
+    next_steps.push(format!(
+        "Rerun `ato run {repository}` after the prerequisites are ready."
+    ));
+    inference_feedback::build_manual_intervention_message(
+        manifest_path,
+        failure_reason,
+        &next_steps,
+    )
+}
+
+fn required_env_from_preview_toml(manifest_text: &str) -> Vec<String> {
+    let Ok(parsed) = toml::from_str::<toml::Value>(manifest_text) else {
+        return Vec::new();
+    };
+    parsed
+        .get("env")
+        .and_then(|env| env.get("required"))
+        .and_then(toml::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn resolve_installed_capsule_archive_in_store(
@@ -4212,6 +4769,7 @@ fn execute_open_command(
     dangerously_skip_permissions: bool,
     assume_yes: bool,
     state: Vec<String>,
+    inject: Vec<String>,
     reporter: std::sync::Arc<reporters::CliReporter>,
 ) -> Result<()> {
     let target_path = if path.is_file() || path.extension().is_some_and(|ext| ext == "capsule") {
@@ -4234,6 +4792,7 @@ fn execute_open_command(
         dangerously_skip_permissions,
         assume_yes,
         state_bindings: state,
+        inject_bindings: inject,
         reporter,
     }))
 }
@@ -4573,7 +5132,7 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  nacelle-v1.2.3
     #[test]
     fn publish_private_status_message_for_build_path() {
         assert_eq!(
-            publish_private_status_message("http://127.0.0.1:8787", false),
+            publish_private_status_message(PublishTargetMode::CustomDirect, false),
             "📦 Building capsule artifact for private registry publish..."
         );
     }
@@ -4581,23 +5140,23 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  nacelle-v1.2.3
     #[test]
     fn publish_private_status_message_for_upload_path() {
         assert_eq!(
-            publish_private_status_message("http://127.0.0.1:8787", true),
+            publish_private_status_message(PublishTargetMode::CustomDirect, true),
             "📤 Publishing provided artifact to private registry..."
         );
     }
 
     #[test]
-    fn publish_private_status_message_for_dock_build_path() {
+    fn publish_private_status_message_for_personal_dock_build_path() {
         assert_eq!(
-            publish_private_status_message("https://ato.run/d/koh0920", false),
+            publish_private_status_message(PublishTargetMode::PersonalDockDirect, false),
             "📦 Building capsule artifact for Personal Dock publish..."
         );
     }
 
     #[test]
-    fn publish_private_status_message_for_dock_upload_path() {
+    fn publish_private_status_message_for_personal_dock_upload_path() {
         assert_eq!(
-            publish_private_status_message("https://ato.run/d/koh0920", true),
+            publish_private_status_message(PublishTargetMode::PersonalDockDirect, true),
             "📤 Publishing provided artifact to Personal Dock..."
         );
     }
@@ -4605,6 +5164,7 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  nacelle-v1.2.3
     #[test]
     fn publish_private_start_summary_line_build_path() {
         let line = publish_private_start_summary_line(
+            PublishTargetMode::CustomDirect,
             "http://127.0.0.1:8787",
             "build",
             "local/demo-app",
@@ -4621,6 +5181,7 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  nacelle-v1.2.3
     #[test]
     fn publish_private_start_summary_line_artifact_path() {
         let line = publish_private_start_summary_line(
+            PublishTargetMode::CustomDirect,
             "http://127.0.0.1:8787",
             "artifact",
             "team-x/demo-app",
@@ -4632,9 +5193,10 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  nacelle-v1.2.3
     }
 
     #[test]
-    fn publish_private_start_summary_line_marks_dock_target() {
+    fn publish_private_start_summary_line_marks_personal_dock_target() {
         let line = publish_private_start_summary_line(
-            "https://ato.run/d/koh0920",
+            PublishTargetMode::PersonalDockDirect,
+            "https://api.ato.run",
             "artifact",
             "koh0920/demo-app",
             "1.2.3",
@@ -4697,44 +5259,44 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  nacelle-v1.2.3
     }
 
     #[test]
-    fn resolve_publish_registry_prefers_cli_registry_over_other_sources() {
-        let resolved = resolve_publish_registry_url_from_sources(
+    fn resolve_publish_target_prefers_cli_registry_over_other_sources() {
+        let resolved = resolve_publish_target_from_sources(
             Some("https://api.ato.run"),
-            Some("https://ato.run/d/from-manifest"),
-            Some("https://ato.run/d/from-login"),
+            Some("http://127.0.0.1:8787"),
+            Some("koh0920"),
         )
         .expect("resolve");
 
-        assert_eq!(resolved, "https://api.ato.run");
+        assert_eq!(resolved.registry_url, "https://api.ato.run");
+        assert_eq!(resolved.mode, PublishTargetMode::OfficialCi);
     }
 
     #[test]
-    fn resolve_publish_registry_uses_manifest_before_dock_default() {
-        let resolved = resolve_publish_registry_url_from_sources(
+    fn resolve_publish_target_uses_manifest_before_logged_in_default() {
+        let resolved = resolve_publish_target_from_sources(
             None,
-            Some("https://ato.run/d/from-manifest"),
-            Some("https://ato.run/d/from-login"),
+            Some("http://127.0.0.1:8787"),
+            Some("koh0920"),
         )
         .expect("resolve");
 
-        assert_eq!(resolved, "https://ato.run/d/from-manifest");
+        assert_eq!(resolved.registry_url, "http://127.0.0.1:8787");
+        assert_eq!(resolved.mode, PublishTargetMode::CustomDirect);
     }
 
     #[test]
-    fn resolve_publish_registry_uses_logged_in_dock_when_no_explicit_target_exists() {
-        let resolved = resolve_publish_registry_url_from_sources(
-            None,
-            None,
-            Some("https://ato.run/d/koh0920"),
-        )
-        .expect("resolve");
+    fn resolve_publish_target_uses_logged_in_default_when_no_explicit_target_exists() {
+        let resolved =
+            resolve_publish_target_from_sources(None, None, Some("koh0920")).expect("resolve");
 
-        assert_eq!(resolved, "https://ato.run/d/koh0920");
+        assert_eq!(resolved.registry_url, "https://api.ato.run");
+        assert_eq!(resolved.mode, PublishTargetMode::PersonalDockDirect);
+        assert_eq!(resolved.publisher_handle.as_deref(), Some("koh0920"));
     }
 
     #[test]
-    fn resolve_publish_registry_errors_without_login_or_registry_override() {
-        let err = resolve_publish_registry_url_from_sources(None, None, None)
+    fn resolve_publish_target_errors_without_login_or_registry_override() {
+        let err = resolve_publish_target_from_sources(None, None, None)
             .expect_err("must fail without any publish target");
 
         assert!(err.to_string().contains("Run `ato login`"));
@@ -4742,12 +5304,24 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  nacelle-v1.2.3
     }
 
     #[test]
-    fn is_dock_publish_registry_detects_dock_path_prefix() {
-        assert!(is_dock_publish_registry("https://ato.run/d/koh0920"));
-        assert!(is_dock_publish_registry(
+    fn resolve_publish_target_rejects_legacy_dock_registry_urls() {
+        let err = resolve_publish_target_from_sources(
+            Some("https://ato.run/d/koh0920"),
+            None,
+            Some("koh0920"),
+        )
+        .expect_err("must reject legacy dock url");
+        assert!(err.to_string().contains("https://api.ato.run"));
+        assert!(err.to_string().contains("/d/<handle>"));
+    }
+
+    #[test]
+    fn is_legacy_dock_publish_registry_detects_dock_path_prefix() {
+        assert!(is_legacy_dock_publish_registry("https://ato.run/d/koh0920"));
+        assert!(is_legacy_dock_publish_registry(
             "https://ato.run/publish/d/koh0920"
         ));
-        assert!(!is_dock_publish_registry("https://api.ato.run"));
+        assert!(!is_legacy_dock_publish_registry("https://api.ato.run"));
     }
 
     #[test]
@@ -4777,5 +5351,64 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  nacelle-v1.2.3
         let err =
             validate_publish_phase_options(&args, selected, false).expect_err("must fail closed");
         assert!(err.to_string().contains("--deploy requires --artifact"));
+    }
+
+    #[test]
+    fn github_manual_intervention_extracts_required_env() {
+        let required = required_env_from_preview_toml(
+            r#"
+[env]
+required = ["DATABASE_URL", "REDIS_URL"]
+"#,
+        );
+
+        assert_eq!(required, vec!["DATABASE_URL", "REDIS_URL"]);
+    }
+
+    #[test]
+    fn github_manual_intervention_message_mentions_manifest_and_repo() {
+        let draft = install::GitHubInstallDraftResponse {
+            repo: install::GitHubInstallDraftRepo {
+                owner: "octocat".to_string(),
+                repo: "hello-world".to_string(),
+                full_name: "octocat/hello-world".to_string(),
+                default_branch: "main".to_string(),
+            },
+            capsule_toml: install::GitHubInstallDraftCapsuleToml { exists: false },
+            repo_ref: "octocat/hello-world".to_string(),
+            proposed_run_command: None,
+            proposed_install_command: "ato run github.com/octocat/hello-world".to_string(),
+            resolved_ref: install::GitHubInstallDraftResolvedRef {
+                ref_name: "main".to_string(),
+                sha: "deadbeef".to_string(),
+            },
+            manifest_source: "inferred".to_string(),
+            preview_toml: Some(
+                r#"
+[env]
+required = ["DATABASE_URL"]
+"#
+                .to_string(),
+            ),
+            capsule_hint: Some(install::GitHubInstallDraftHint {
+                confidence: "medium".to_string(),
+                warnings: vec!["外部DBの準備が必要です。".to_string()],
+                launchability: Some("manual_review".to_string()),
+            }),
+            inference_mode: Some("rules".to_string()),
+            retryable: false,
+        };
+
+        let message = build_github_manual_intervention_message(
+            "github.com/octocat/hello-world",
+            &draft,
+            std::path::Path::new("/repo/.tmp/ato-inference/attempt/capsule.toml"),
+            "Smoke failed",
+        );
+
+        assert!(message.contains("manual intervention required"));
+        assert!(message.contains("DATABASE_URL"));
+        assert!(message.contains("github.com/octocat/hello-world"));
+        assert!(message.contains("/repo/.tmp/ato-inference/attempt/capsule.toml"));
     }
 }

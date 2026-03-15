@@ -5,12 +5,15 @@ use crate::execution_plan::error::AtoExecutionError;
 use crate::execution_plan::model::{
     ExecutionDriver, ExecutionPlan, ExecutionRuntime, ExecutionTier,
 };
+use crate::lockfile::{
+    lockfile_output_path, resolve_existing_lockfile_path, CAPSULE_LOCK_FILE_NAME,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequiredLock {
     CapsuleLock,
     DenoLockOrPackageLock,
-    PackageLock,
+    NodeDependencyLock,
     UvLock,
 }
 
@@ -46,8 +49,8 @@ pub fn evaluate(
         && !resolve_capsule_lock_path(manifest_dir).exists()
     {
         return Err(AtoExecutionError::lock_incomplete(
-            "capsule.lock is required for Tier1 execution",
-            Some("capsule.lock"),
+            "capsule.lock.json is required for Tier1 execution",
+            Some(CAPSULE_LOCK_FILE_NAME),
         ));
     }
 
@@ -61,10 +64,10 @@ pub fn evaluate(
                 ));
             }
         }
-        Some(RequiredLock::PackageLock) => {
-            if resolve_package_lock_path(manifest_dir).is_none() {
+        Some(RequiredLock::NodeDependencyLock) => {
+            if resolve_node_dependency_lock_path(manifest_dir).is_none() {
                 return Err(AtoExecutionError::lock_incomplete(
-                    "package-lock.json is required for source/node Tier1 execution",
+                    "package-lock.json, pnpm-lock.yaml, bun.lock, or bun.lockb is required for source/node Tier1 execution",
                     Some("package-lock.json"),
                 ));
             }
@@ -141,7 +144,9 @@ fn resolve_required_lock(
             Ok(Some(RequiredLock::DenoLockOrPackageLock))
         }
         (ExecutionRuntime::Web, ExecutionDriver::Node)
-        | (ExecutionRuntime::Source, ExecutionDriver::Node) => Ok(Some(RequiredLock::PackageLock)),
+        | (ExecutionRuntime::Source, ExecutionDriver::Node) => {
+            Ok(Some(RequiredLock::NodeDependencyLock))
+        }
         (ExecutionRuntime::Web, ExecutionDriver::Python)
         | (ExecutionRuntime::Source, ExecutionDriver::Python) => Ok(Some(RequiredLock::UvLock)),
         (ExecutionRuntime::Wasm, ExecutionDriver::Wasmtime) => Ok(Some(RequiredLock::CapsuleLock)),
@@ -155,7 +160,8 @@ fn resolve_required_lock(
 }
 
 fn resolve_capsule_lock_path(manifest_dir: &Path) -> PathBuf {
-    manifest_dir.join("capsule.lock")
+    resolve_existing_lockfile_path(manifest_dir)
+        .unwrap_or_else(|| lockfile_output_path(manifest_dir))
 }
 
 fn requires_capsule_lock(runtime: ExecutionRuntime, driver: ExecutionDriver) -> bool {
@@ -181,8 +187,32 @@ fn resolve_package_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.exists())
 }
 
+fn resolve_pnpm_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
+    let candidates = [
+        manifest_dir.join("pnpm-lock.yaml"),
+        manifest_dir.join("source").join("pnpm-lock.yaml"),
+    ];
+    candidates.into_iter().find(|path| path.exists())
+}
+
+fn resolve_bun_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
+    let candidates = [
+        manifest_dir.join("bun.lock"),
+        manifest_dir.join("bun.lockb"),
+        manifest_dir.join("source").join("bun.lock"),
+        manifest_dir.join("source").join("bun.lockb"),
+    ];
+    candidates.into_iter().find(|path| path.exists())
+}
+
 fn resolve_deno_dependency_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
-    resolve_deno_lock_path(manifest_dir).or_else(|| resolve_package_lock_path(manifest_dir))
+    resolve_deno_lock_path(manifest_dir).or_else(|| resolve_node_dependency_lock_path(manifest_dir))
+}
+
+fn resolve_node_dependency_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
+    resolve_package_lock_path(manifest_dir)
+        .or_else(|| resolve_pnpm_lock_path(manifest_dir))
+        .or_else(|| resolve_bun_lock_path(manifest_dir))
 }
 
 fn resolve_uv_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
@@ -271,7 +301,7 @@ mod tests {
         let plan = sample_plan(ExecutionRuntime::Source, ExecutionDriver::Node);
         let result = evaluate(&plan, tmp.path(), "strict", false, false).expect("guard pass");
         assert!(!result.requires_sandbox_opt_in);
-        assert_eq!(result.required_lock, Some(RequiredLock::PackageLock));
+        assert_eq!(result.required_lock, Some(RequiredLock::NodeDependencyLock));
         assert_eq!(result.executor_kind, ExecutorKind::NodeCompat);
     }
 
@@ -311,7 +341,7 @@ mod tests {
 
         let plan = sample_plan(ExecutionRuntime::Source, ExecutionDriver::Node);
         let result = evaluate(&plan, tmp.path(), "strict", false, false).expect("guard pass");
-        assert_eq!(result.required_lock, Some(RequiredLock::PackageLock));
+        assert_eq!(result.required_lock, Some(RequiredLock::NodeDependencyLock));
     }
 
     #[test]

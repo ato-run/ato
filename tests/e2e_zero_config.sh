@@ -76,21 +76,31 @@ resolve_session_token() {
     return 0
   fi
 
-  local creds_file="${HOME}/.ato/credentials.json"
-  if [ ! -f "${creds_file}" ]; then
-    return 1
-  fi
-
   local token
   token="$(python3 - <<'PY'
 import json, os, pathlib
-p = pathlib.Path(os.path.expanduser('~/.ato/credentials.json'))
-try:
-    data = json.loads(p.read_text())
-except Exception:
-    print('')
-    raise SystemExit(0)
-print((data.get('session_token') or '').strip())
+
+config_home = os.environ.get("XDG_CONFIG_HOME")
+if config_home:
+    canonical = pathlib.Path(config_home) / "ato" / "credentials.toml"
+else:
+    canonical = pathlib.Path.home() / ".config" / "ato" / "credentials.toml"
+legacy = pathlib.Path.home() / ".ato" / "credentials.json"
+
+def read_token(path):
+    if not path.exists():
+        return ""
+    try:
+        if path.suffix == ".toml":
+            import tomllib
+            data = tomllib.loads(path.read_text())
+        else:
+            data = json.loads(path.read_text())
+    except Exception:
+        return ""
+    return (data.get("session_token") or "").strip()
+
+print(read_token(canonical) or read_token(legacy))
 PY
 )"
   if [ -n "${token}" ]; then

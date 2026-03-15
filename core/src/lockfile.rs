@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::fs;
 use std::future::Future;
@@ -13,19 +13,25 @@ use futures::future::try_join_all;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use url::form_urlencoded::byte_serialize;
 
 use crate::common::paths::{nacelle_home_dir, toolchain_cache_dir};
 use crate::error::{CapsuleError, Result};
 use crate::packers::payload;
 use crate::packers::runtime_fetcher::RuntimeFetcher;
 use crate::reporter::CapsuleReporter;
-use crate::types::CapsuleManifest;
+use crate::types::{CapsuleManifest, ExternalCapsuleDependency};
 
 const UV_VERSION: &str = "0.4.19";
 const PNPM_VERSION: &str = "9.9.0";
 const LOCKFILE_INPUT_SNAPSHOT_VERSION: u32 = 1;
 const LOCKFILE_INPUT_SNAPSHOT_NAME: &str = ".capsule.lock.inputs.json";
 const METADATA_CACHE_DIR_NAME: &str = "metadata-cache";
+const DEFAULT_STORE_API_URL: &str = "https://api.ato.run";
+const ENV_STORE_API_URL: &str = "ATO_STORE_API_URL";
+
+pub const CAPSULE_LOCK_FILE_NAME: &str = "capsule.lock.json";
+pub const LEGACY_CAPSULE_LOCK_FILE_NAME: &str = "capsule.lock";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapsuleLock {
@@ -33,6 +39,10 @@ pub struct CapsuleLock {
     pub meta: LockMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowlist: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capsule_dependencies: Vec<LockedCapsuleDependency>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub injected_data: HashMap<String, LockedInjectedData>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<ToolSection>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,6 +149,30 @@ pub struct ArtifactEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedCapsuleDependency {
+    pub name: String,
+    pub source: String,
+    pub source_type: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub injection_bindings: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedInjectedData {
+    pub source: String,
+    pub digest: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct LockfileInputSnapshot {
     version: u32,
     manifest_hash: String,
@@ -219,13 +253,17 @@ pub async fn generate_and_write_lockfile(
         timings,
     )
     .await?;
-    let output_path = manifest_dir.join("capsule.lock");
-    let content = toml::to_string_pretty(&lockfile)
-        .map_err(|e| CapsuleError::Pack(format!("Failed to serialize capsule.lock: {}", e)))?;
+    let output_path = manifest_dir.join(CAPSULE_LOCK_FILE_NAME);
+    let content = serde_json::to_vec_pretty(&lockfile).map_err(|e| {
+        CapsuleError::Pack(format!(
+            "Failed to serialize {}: {}",
+            CAPSULE_LOCK_FILE_NAME, e
+        ))
+    })?;
     write_atomic_bytes_with_os_lock(
         &output_path,
-        content.as_bytes(),
-        "capsule.lock",
+        &content,
+        CAPSULE_LOCK_FILE_NAME,
         capsule_error_pack,
     )?;
     Ok(output_path)
@@ -243,7 +281,7 @@ pub async fn ensure_lockfile(
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    let lock_path = manifest_dir.join("capsule.lock");
+    let lock_path = manifest_dir.join(CAPSULE_LOCK_FILE_NAME);
     let mut inputs = open_lockfile_inputs(manifest_path, &manifest_dir, manifest_raw)?;
     let manifest_hash = manifest_hash_from_open_inputs(&mut inputs, manifest_path)?;
 
@@ -293,9 +331,12 @@ pub fn render_lockfile_for_manifest(
 ) -> Result<Vec<u8>> {
     let mut lockfile = read_lockfile(lockfile_path)?;
     lockfile.meta.manifest_hash = semantic_manifest_hash(manifest)?;
-    toml::to_string_pretty(&lockfile)
-        .map(|toml| toml.into_bytes())
-        .map_err(|e| CapsuleError::Pack(format!("Failed to serialize capsule.lock: {}", e)))
+    serde_json::to_vec_pretty(&lockfile).map_err(|e| {
+        CapsuleError::Pack(format!(
+            "Failed to serialize {}: {}",
+            CAPSULE_LOCK_FILE_NAME, e
+        ))
+    })
 }
 
 fn verify_lockfile_manifest_with_open_manifest(
@@ -310,8 +351,13 @@ fn verify_lockfile_manifest_hash(lockfile_path: &Path, expected_hash: &str) -> R
     let lockfile = read_lockfile(lockfile_path)?;
     if lockfile.meta.manifest_hash != expected_hash {
         return Err(CapsuleError::Config(format!(
-            "capsule.lock manifest hash mismatch (expected {}, got {})",
-            expected_hash, lockfile.meta.manifest_hash
+            "{} manifest hash mismatch (expected {}, got {})",
+            lockfile_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(CAPSULE_LOCK_FILE_NAME),
+            expected_hash,
+            lockfile.meta.manifest_hash
         )));
     }
     Ok(())
@@ -319,9 +365,28 @@ fn verify_lockfile_manifest_hash(lockfile_path: &Path, expected_hash: &str) -> R
 
 fn read_lockfile(path: &Path) -> Result<CapsuleLock> {
     let raw = fs::read_to_string(path)
-        .map_err(|e| CapsuleError::Config(format!("Failed to read capsule.lock: {}", e)))?;
-    toml::from_str(&raw)
-        .map_err(|e| CapsuleError::Config(format!("Failed to parse capsule.lock: {}", e)))
+        .map_err(|e| CapsuleError::Config(format!("Failed to read {}: {}", path.display(), e)))?;
+    parse_lockfile_text(&raw, path)
+}
+
+pub fn lockfile_output_path(manifest_dir: &Path) -> PathBuf {
+    manifest_dir.join(CAPSULE_LOCK_FILE_NAME)
+}
+
+pub fn resolve_existing_lockfile_path(manifest_dir: &Path) -> Option<PathBuf> {
+    let primary = lockfile_output_path(manifest_dir);
+    if primary.exists() {
+        return Some(primary);
+    }
+
+    let legacy = manifest_dir.join(LEGACY_CAPSULE_LOCK_FILE_NAME);
+    legacy.exists().then_some(legacy)
+}
+
+pub fn parse_lockfile_text(raw: &str, path: &Path) -> Result<CapsuleLock> {
+    serde_json::from_str(raw)
+        .or_else(|_| toml::from_str(raw))
+        .map_err(|e| CapsuleError::Config(format!("Failed to parse {}: {}", path.display(), e)))
 }
 
 fn existing_lockfile_has_required_platform_coverage(
@@ -579,6 +644,215 @@ fn collect_lockfile_input_paths(
     paths
 }
 
+pub fn manifest_external_capsule_dependencies(
+    manifest_raw: &toml::Value,
+) -> Result<Vec<ExternalCapsuleDependency>> {
+    let Some(targets) = manifest_raw.get("targets").and_then(toml::Value::as_table) else {
+        return Ok(Vec::new());
+    };
+
+    let mut collected = Vec::new();
+    let mut seen = HashMap::<String, String>::new();
+    for (target_label, raw_target) in targets {
+        let Some(external_dependencies) = raw_target
+            .get("external_dependencies")
+            .and_then(toml::Value::as_array)
+        else {
+            continue;
+        };
+
+        for raw_dependency in external_dependencies {
+            let dependency: ExternalCapsuleDependency =
+                raw_dependency.clone().try_into().map_err(|err| {
+                    CapsuleError::Pack(format!(
+                        "Failed to parse targets.{}.external_dependencies entry: {}",
+                        target_label, err
+                    ))
+                })?;
+            if let Some(existing_source) = seen.get(&dependency.alias) {
+                if existing_source != &dependency.source {
+                    return Err(CapsuleError::Pack(format!(
+                        "External capsule dependency alias '{}' maps to multiple sources ('{}' and '{}')",
+                        dependency.alias, existing_source, dependency.source
+                    )));
+                }
+                continue;
+            }
+            seen.insert(dependency.alias.clone(), dependency.source.clone());
+            collected.push(dependency);
+        }
+    }
+
+    collected.sort_by(|a, b| a.alias.cmp(&b.alias));
+    Ok(collected)
+}
+
+#[derive(Debug, Clone)]
+struct StoreCapsuleSource {
+    scoped_id: String,
+    publisher: String,
+    slug: String,
+    version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LockfileStoreDistributionResponse {
+    version: String,
+    #[serde(default)]
+    artifact_url: Option<String>,
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default)]
+    blake3: Option<String>,
+}
+
+fn parse_store_capsule_source(source: &str) -> Result<StoreCapsuleSource> {
+    let raw = source.trim();
+    let raw = raw.strip_prefix("capsule://store/").ok_or_else(|| {
+        CapsuleError::Pack(format!("Unsupported capsule dependency source: {}", source))
+    })?;
+    let raw = raw.split_once('?').map(|(path, _)| path).unwrap_or(raw);
+    let (path_part, version) = raw
+        .rsplit_once('@')
+        .map(|(path, version)| (path, Some(version.trim().to_string())))
+        .unwrap_or((raw, None));
+    let mut segments = path_part
+        .split('/')
+        .filter(|segment| !segment.trim().is_empty());
+    let publisher = segments.next().ok_or_else(|| {
+        CapsuleError::Pack(format!("Invalid capsule dependency source: {}", source))
+    })?;
+    let slug = segments.next().ok_or_else(|| {
+        CapsuleError::Pack(format!("Invalid capsule dependency source: {}", source))
+    })?;
+    if segments.next().is_some() {
+        return Err(CapsuleError::Pack(format!(
+            "Invalid capsule dependency source: {}",
+            source
+        )));
+    }
+
+    Ok(StoreCapsuleSource {
+        scoped_id: format!("{}/{}", publisher, slug),
+        publisher: publisher.to_string(),
+        slug: slug.to_string(),
+        version,
+    })
+}
+
+fn resolve_store_api_base_url() -> String {
+    std::env::var(ENV_STORE_API_URL)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_STORE_API_URL.to_string())
+}
+
+async fn resolve_external_capsule_dependencies(
+    manifest_raw: &toml::Value,
+) -> Result<Vec<LockedCapsuleDependency>> {
+    let dependencies = manifest_external_capsule_dependencies(manifest_raw)?;
+    if dependencies.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let client = reqwest::Client::new();
+    let base_url = resolve_store_api_base_url();
+    let mut locked = Vec::new();
+    for dependency in dependencies {
+        if dependency.source_type != "store" {
+            return Err(CapsuleError::Pack(format!(
+                "capsule dependency '{}' uses source_type '{}' but only store dependencies are supported in lockfile generation",
+                dependency.alias, dependency.source_type
+            )));
+        }
+        let parsed = parse_store_capsule_source(&dependency.source)?;
+        let encoded_publisher: String = byte_serialize(parsed.publisher.as_bytes()).collect();
+        let encoded_slug: String = byte_serialize(parsed.slug.as_bytes()).collect();
+        let mut endpoint = format!(
+            "{}/v1/capsules/by/{}/{}/distributions",
+            base_url, encoded_publisher, encoded_slug
+        );
+        if let Some(version) = parsed.version.as_deref() {
+            endpoint.push_str("?version=");
+            let encoded_version: String = byte_serialize(version.as_bytes()).collect();
+            endpoint.push_str(&encoded_version);
+        }
+
+        let response = client.get(&endpoint).send().await.map_err(|err| {
+            CapsuleError::Pack(format!(
+                "Failed to resolve capsule dependency '{}' from store: {}",
+                dependency.alias, err
+            ))
+        })?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(CapsuleError::Pack(format!(
+                "Failed to resolve capsule dependency '{}' ({}) status={}: {}",
+                dependency.alias, parsed.scoped_id, status, body
+            )));
+        }
+        let resolved = response
+            .json::<LockfileStoreDistributionResponse>()
+            .await
+            .map_err(|err| {
+                CapsuleError::Pack(format!(
+                    "Failed to parse lockfile dependency resolution for '{}': {}",
+                    dependency.alias, err
+                ))
+            })?;
+        let digest = resolved.blake3.clone().or_else(|| resolved.sha256.clone());
+        locked.push(LockedCapsuleDependency {
+            name: dependency.alias,
+            source: dependency.source,
+            source_type: dependency.source_type,
+            injection_bindings: dependency.injection_bindings,
+            resolved_version: Some(resolved.version),
+            digest,
+            sha256: resolved.sha256,
+            artifact_url: resolved.artifact_url,
+        });
+    }
+
+    locked.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(locked)
+}
+
+pub fn verify_lockfile_external_dependencies(
+    manifest_raw: &toml::Value,
+    lockfile: &CapsuleLock,
+) -> Result<()> {
+    let expected = manifest_external_capsule_dependencies(manifest_raw)?;
+    if expected.is_empty() {
+        return Ok(());
+    }
+
+    for dependency in expected {
+        let Some(locked) = lockfile
+            .capsule_dependencies
+            .iter()
+            .find(|item| item.name == dependency.alias)
+        else {
+            return Err(CapsuleError::Config(format!(
+                "{} is missing capsule dependency '{}'",
+                CAPSULE_LOCK_FILE_NAME, dependency.alias
+            )));
+        };
+        if locked.source != dependency.source
+            || locked.source_type != dependency.source_type
+            || locked.injection_bindings != dependency.injection_bindings
+        {
+            return Err(CapsuleError::Config(format!(
+                "{} capsule dependency '{}' does not match manifest source '{}'",
+                CAPSULE_LOCK_FILE_NAME, dependency.alias, dependency.source
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn lockfile_input_state(
     manifest_dir: &Path,
     path: &Path,
@@ -627,6 +901,7 @@ async fn generate_lockfile(
     let runtime_platforms = lockfile_runtime_platforms(manifest_raw)?;
     let required_runtime_version = required_runtime_version(manifest_raw)?;
     let runtime_tools = read_runtime_tools(manifest_raw);
+    let capsule_dependencies = resolve_external_capsule_dependencies(manifest_raw).await?;
 
     let mut targets: HashMap<String, TargetEntry> = HashMap::new();
     let mut tools = ToolSection {
@@ -950,6 +1225,8 @@ async fn generate_lockfile(
             manifest_hash: semantic_manifest_hash_from_text(manifest_text)?,
         },
         allowlist,
+        capsule_dependencies,
+        injected_data: HashMap::new(),
         tools,
         runtimes: if runtimes.python.is_none() && runtimes.node.is_none() && runtimes.deno.is_none()
         {
@@ -998,48 +1275,19 @@ async fn generate_uv_lock(
         return Ok(None);
     };
 
-    let uv_path = ensure_uv(reporter.clone()).await?;
     reporter
-        .notify("⚙️  Generating uv.lock".to_string())
+        .notify("ℹ️  uv.lock is required but will not be generated automatically".to_string())
         .await?;
-
-    let status = if deps_path.file_name().is_some_and(|n| n == "pyproject.toml") {
-        run_command(
-            &uv_path,
-            &["lock"],
-            deps_path.parent().unwrap_or(manifest_dir),
-            Some(manifest),
-        )
-        .await?
-    } else if deps_path.extension().and_then(|e| e.to_str()) == Some("txt") {
-        let dep_string = deps_path.to_string_lossy().to_string();
-        run_command(
-            &uv_path,
-            &["pip", "compile", dep_string.as_str(), "-o", "uv.lock"],
-            manifest_dir,
-            Some(manifest),
-        )
-        .await?
-    } else {
-        run_command(&uv_path, &["lock"], manifest_dir, Some(manifest)).await?
-    };
-
-    if !status.success() {
-        return Err(CapsuleError::Pack("uv lock failed".to_string()));
-    }
-
-    let lock_path = manifest_dir.join("uv.lock");
-    if lock_path.exists() {
-        Ok(Some(lock_path))
-    } else {
-        Ok(None)
-    }
+    Err(CapsuleError::Pack(format!(
+        "uv.lock is missing for '{}'. Generate it with `uv lock` (or `uv pip compile requirements.txt -o uv.lock`) and rerun `ato generate-lockfile`.",
+        deps_path.display()
+    )))
 }
 
 async fn generate_pnpm_lock(
     manifest_dir: &Path,
     manifest: &toml::Value,
-    node_version: &str,
+    _node_version: &str,
     reporter: Arc<dyn CapsuleReporter + 'static>,
 ) -> Result<Option<PathBuf>> {
     // npm プロジェクト（package-lock.json）では pnpm lock 生成を強制しない。
@@ -1066,41 +1314,20 @@ async fn generate_pnpm_lock(
         return Ok(None);
     };
 
-    let node_path = ensure_node(node_version, reporter.clone()).await?;
-    let pnpm_cmd = ensure_pnpm(&node_path, reporter.clone()).await?;
-
     reporter
-        .notify("⚙️  Generating pnpm-lock.yaml".to_string())
+        .notify(
+            "ℹ️  pnpm-lock.yaml is required but will not be generated automatically".to_string(),
+        )
         .await?;
-
-    let mut cmd = std::process::Command::new(&pnpm_cmd.program);
-    cmd.args(&pnpm_cmd.args_prefix)
-        .args(["install", "--lockfile-only", "--ignore-scripts", "--silent"])
-        .current_dir(manifest_dir);
-    let status = run_command_inner_with_manifest_env(cmd, Some(manifest)).await?;
-    if !status.success() {
-        return Err(CapsuleError::Pack(
-            "pnpm lock generation failed".to_string(),
-        ));
-    }
-
-    let lock_path = manifest_dir.join("pnpm-lock.yaml");
-    if !lock_path.exists() {
-        return Ok(None);
-    }
-    let target_dir = manifest_dir.join("locks").join(platform_target_key()?);
-    std::fs::create_dir_all(&target_dir)
-        .map_err(|e| CapsuleError::Pack(format!("Failed to create locks directory: {}", e)))?;
-    let target_lock = target_dir.join("pnpm-lock.yaml");
-    std::fs::copy(&lock_path, &target_lock)
-        .map_err(|e| CapsuleError::Pack(format!("Failed to copy pnpm-lock.yaml: {}", e)))?;
-    Ok(Some(target_lock))
+    Err(CapsuleError::Pack(
+        "pnpm-lock.yaml is missing. Generate it with `pnpm install --lockfile-only` and rerun `ato generate-lockfile`.".to_string(),
+    ))
 }
 
 async fn generate_deno_lock(
     manifest_dir: &Path,
     manifest: &toml::Value,
-    deno_version: &str,
+    _deno_version: &str,
     reporter: Arc<dyn CapsuleReporter + 'static>,
 ) -> Result<Option<PathBuf>> {
     let entrypoint = read_target_entrypoint(manifest).or_else(|| {
@@ -1125,32 +1352,13 @@ async fn generate_deno_lock(
     }
 
     reporter
-        .notify("⚙️  Generating deno.lock".to_string())
+        .notify("ℹ️  deno.lock is required but will not be generated automatically".to_string())
         .await?;
-
-    let deno_path = ensure_deno(deno_version, reporter.clone()).await?;
-    let mut cmd = std::process::Command::new(&deno_path);
-    cmd.args([
-        "cache",
-        entrypoint.as_str(),
-        "--lock=deno.lock",
-        "--frozen=false",
-    ])
-    .current_dir(manifest_dir);
-
-    let status = run_command_inner_with_manifest_env(cmd, Some(manifest)).await?;
-    if !status.success() {
-        return Err(CapsuleError::Pack(
-            "deno lock generation failed".to_string(),
-        ));
-    }
-
-    let lock_path = manifest_dir.join("deno.lock");
-    if lock_path.exists() {
-        Ok(Some(lock_path))
-    } else {
-        Ok(None)
-    }
+    Err(CapsuleError::Pack(format!(
+        "deno.lock is missing for '{}'. Generate it with `deno cache --lock=deno.lock --frozen=false {}` and rerun `ato generate-lockfile`.",
+        manifest_dir.display(),
+        entrypoint
+    )))
 }
 
 async fn prepare_python_artifacts(
@@ -1319,14 +1527,6 @@ async fn ensure_node(
     }
     let fetcher = RuntimeFetcher::new_with_reporter(reporter)?;
     fetcher.ensure_node(version).await
-}
-
-async fn ensure_deno(
-    version: &str,
-    reporter: Arc<dyn CapsuleReporter + 'static>,
-) -> Result<PathBuf> {
-    let fetcher = RuntimeFetcher::new_with_reporter(reporter)?;
-    fetcher.ensure_deno(version).await
 }
 
 async fn ensure_pnpm(
@@ -1660,17 +1860,6 @@ fn find_binary_recursive(root: &Path, candidates: &[&str]) -> Option<PathBuf> {
         }
     }
     None
-}
-
-async fn run_command(
-    program: &Path,
-    args: &[&str],
-    cwd: &Path,
-    manifest: Option<&toml::Value>,
-) -> Result<std::process::ExitStatus> {
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(args).current_dir(cwd);
-    run_command_inner_with_manifest_env(cmd, manifest).await
 }
 
 #[cfg(test)]
@@ -2619,7 +2808,32 @@ fn reset_dir(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{routing::get, Json, Router};
+    use serde_json::json;
     use std::time::Duration;
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn serialize_lockfile_with_allowlist() {
@@ -2630,13 +2844,15 @@ mod tests {
                 manifest_hash: "sha256:deadbeef".to_string(),
             },
             allowlist: Some(vec!["nodejs.org".to_string()]),
+            capsule_dependencies: Vec::new(),
+            injected_data: HashMap::new(),
             tools: None,
             runtimes: None,
             targets: HashMap::new(),
         };
 
-        let toml = toml::to_string(&lockfile).unwrap();
-        let parsed: CapsuleLock = toml::from_str(&toml).unwrap();
+        let json = serde_json::to_string(&lockfile).unwrap();
+        let parsed: CapsuleLock = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.allowlist.unwrap()[0], "nodejs.org");
     }
 
@@ -2644,7 +2860,7 @@ mod tests {
     fn verify_lockfile_manifest_hash() {
         let temp = TempDir::new().unwrap();
         let manifest_path = temp.path().join("capsule.toml");
-        let lockfile_path = temp.path().join("capsule.lock");
+        let lockfile_path = temp.path().join(CAPSULE_LOCK_FILE_NAME);
         let manifest_text = r#"schema_version = "0.2"
 name = "demo"
 version = "1.0.0"
@@ -2660,15 +2876,111 @@ default_target = "cli"
                 manifest_hash: semantic_manifest_hash_from_text(manifest_text).unwrap(),
             },
             allowlist: None,
+            capsule_dependencies: Vec::new(),
+            injected_data: HashMap::new(),
             tools: None,
             runtimes: None,
             targets: HashMap::new(),
         };
 
-        let toml = toml::to_string(&lockfile).unwrap();
-        fs::write(&lockfile_path, toml).unwrap();
+        let json = serde_json::to_vec_pretty(&lockfile).unwrap();
+        fs::write(&lockfile_path, json).unwrap();
 
         verify_lockfile_manifest(&manifest_path, &lockfile_path).unwrap();
+    }
+
+    #[test]
+    fn verify_lockfile_external_dependencies_matches_manifest() {
+        let manifest: toml::Value = toml::from_str(
+            r#"
+default_target = "web"
+
+[targets.web]
+external_dependencies = [
+    { alias = "auth", source = "capsule://store/acme/auth-svc", source_type = "store", injection_bindings = { MODEL_DIR = "https://data.tld/weights.zip" } }
+]
+"#,
+        )
+        .unwrap();
+
+        let lockfile = CapsuleLock {
+            version: "1".to_string(),
+            meta: LockMeta {
+                created_at: "2026-01-20T00:00:00Z".to_string(),
+                manifest_hash: "sha256:deadbeef".to_string(),
+            },
+            allowlist: None,
+            capsule_dependencies: vec![LockedCapsuleDependency {
+                name: "auth".to_string(),
+                source: "capsule://store/acme/auth-svc".to_string(),
+                source_type: "store".to_string(),
+                injection_bindings: BTreeMap::from([(
+                    "MODEL_DIR".to_string(),
+                    "https://data.tld/weights.zip".to_string(),
+                )]),
+                resolved_version: Some("1.2.3".to_string()),
+                digest: Some("blake3:deadbeef".to_string()),
+                sha256: Some("sha256:beadfeed".to_string()),
+                artifact_url: Some("https://example.test/auth.capsule".to_string()),
+            }],
+            injected_data: HashMap::new(),
+            tools: None,
+            runtimes: None,
+            targets: HashMap::new(),
+        };
+
+        verify_lockfile_external_dependencies(&manifest, &lockfile).unwrap();
+    }
+
+    #[tokio::test]
+    async fn resolve_external_capsule_dependencies_reads_store_distribution() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let address = listener.local_addr().expect("local addr");
+        let app = Router::new().route(
+            "/v1/capsules/by/acme/auth-svc/distributions",
+            get(|| async {
+                Json(json!({
+                    "version": "1.2.3",
+                    "artifact_url": "https://registry.test/auth-svc-1.2.3.capsule",
+                    "sha256": "sha256:beadfeed",
+                    "blake3": "blake3:deadbeef"
+                }))
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve app");
+        });
+        let _guard = EnvGuard::set(ENV_STORE_API_URL, &format!("http://{}", address));
+
+        let manifest: toml::Value = toml::from_str(
+            r#"
+default_target = "web"
+
+[targets.web]
+external_dependencies = [
+    { alias = "auth", source = "capsule://store/acme/auth-svc", source_type = "store", injection_bindings = { MODEL_DIR = "https://data.tld/weights.zip" } }
+]
+"#,
+        )
+        .unwrap();
+
+        let resolved = resolve_external_capsule_dependencies(&manifest)
+            .await
+            .expect("resolve dependencies");
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "auth");
+        assert_eq!(
+            resolved[0]
+                .injection_bindings
+                .get("MODEL_DIR")
+                .map(String::as_str),
+            Some("https://data.tld/weights.zip")
+        );
+        assert_eq!(resolved[0].resolved_version.as_deref(), Some("1.2.3"));
+        assert_eq!(resolved[0].digest.as_deref(), Some("blake3:deadbeef"));
     }
 
     #[test]
@@ -2852,6 +3164,8 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
                 manifest_hash: "blake3:deadbeef".to_string(),
             },
             allowlist: None,
+            capsule_dependencies: Vec::new(),
+            injected_data: HashMap::new(),
             tools: Some(ToolSection {
                 uv: Some(ToolTargets {
                     targets: host_only_tool_targets,
@@ -2932,6 +3246,8 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
                 manifest_hash: "blake3:deadbeef".to_string(),
             },
             allowlist: None,
+            capsule_dependencies: Vec::new(),
+            injected_data: HashMap::new(),
             tools: Some(ToolSection {
                 uv: Some(ToolTargets {
                     targets: tool_targets,
@@ -3025,6 +3341,8 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
                 manifest_hash: "blake3:deadbeef".to_string(),
             },
             allowlist: None,
+            capsule_dependencies: Vec::new(),
+            injected_data: HashMap::new(),
             tools: Some(ToolSection {
                 uv: Some(ToolTargets {
                     targets: tool_targets,
@@ -3125,6 +3443,8 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
                 manifest_hash: "blake3:deadbeef".to_string(),
             },
             allowlist: None,
+            capsule_dependencies: Vec::new(),
+            injected_data: HashMap::new(),
             tools: Some(ToolSection {
                 uv: Some(ToolTargets {
                     targets: uv_targets,
@@ -3197,7 +3517,7 @@ env = { ATO_ORCH_REQUIRED_ENVS = "LEGACY_ONE, LEGACY_TWO,API_TOKEN" }
     #[test]
     fn atomic_write_replaces_file_without_temp_leaks() {
         let temp = TempDir::new().unwrap();
-        let target = temp.path().join("capsule.lock");
+        let target = temp.path().join(CAPSULE_LOCK_FILE_NAME);
 
         write_atomic_bytes_with_os_lock(&target, b"first", "test lockfile", capsule_error_pack)
             .unwrap();
@@ -3221,7 +3541,7 @@ env = { ATO_ORCH_REQUIRED_ENVS = "LEGACY_ONE, LEGACY_TWO,API_TOKEN" }
         let temp = TempDir::new().unwrap();
         let tmp_path = create_atomic_temp_file(
             temp.path(),
-            "capsule.lock",
+            CAPSULE_LOCK_FILE_NAME,
             "test temp file",
             &capsule_error_pack,
         )
