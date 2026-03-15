@@ -2,6 +2,16 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
+## [0.4.24] - 2026-03-15
+
+### What Changed
+
+#### Features
+- Add v0.3 runtime and capsule lock support
+
+#### Documentation
+- Update v0.3 and registry guidance
+
 ## [0.4.23] - 2026-03-13
 
 ### What Changed
