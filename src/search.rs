@@ -262,7 +262,7 @@ pub async fn fetch_capsule_manifest(scoped_id: &str, registry_url: Option<&str>)
 
     let client = reqwest::Client::new();
     let url = format!(
-        "{}/v1/manifest/capsules/by/{}/{}",
+        "{}/v1/capsules/by/{}/{}",
         registry,
         urlencoding::encode(&publisher),
         urlencoding::encode(&slug)
@@ -393,7 +393,7 @@ async fn fetch_manifest_from_distribution_artifact(
     slug: &str,
 ) -> Result<Option<String>> {
     let distribution_url = format!(
-        "{}/v1/manifest/capsules/by/{}/{}/distributions",
+        "{}/v1/capsules/by/{}/{}/distributions",
         registry,
         urlencoding::encode(publisher),
         urlencoding::encode(slug)
