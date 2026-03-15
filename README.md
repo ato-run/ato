@@ -17,13 +17,13 @@ It is designed around a Zero-Trust / fail-closed model: normal runs stay quiet, 
 ## Key Commands
 
 ```bash
-ato run [path|publisher/slug] [--registry <url>]
+ato run [path|publisher/slug|github.com/owner/repo] [--registry <url>]
 ato open [path] [--watch]                 # compatibility command (deprecated; prefer run)
 ato ps
 ato close --id <capsule-id> | --name <name> [--all] [--force]
 ato logs --id <capsule-id> [--follow]
 ato install <publisher/slug> [--registry <url>]
-ato install --from-gh-repo <owner/repo>
+ato install --from-gh-repo <github.com/owner/repo>
 ato build [dir] [--strict-v3] [--force-large-payload]
 ato publish [--registry <url>] [--artifact <file.capsule>] [--scoped-id <publisher/slug>] [--allow-existing] [--prepare] [--build] [--deploy] [--legacy-full-publish] [--fix] [--no-tui] [--force-large-payload]
 ato publish --dry-run
@@ -145,8 +145,9 @@ cargo build -p ato-cli
   `ato publish` is CI-first (OIDC). Direct local uploads are not allowed.
   Default phase selection is `deploy` only (handoff/diagnostics). If you need local build checks, explicitly add `--build` (or `--prepare --build`) before `--deploy`.
 - Personal Dock (default when logged in and no registry is specified):
-  `ato publish` resolves the target from `ato login` and uploads directly to `https://store.ato.run/d/<handle>`.
+  `ato publish` resolves the target from `ato login` and uploads directly to `https://api.ato.run/v1/local/capsules/...`.
   `--artifact` is recommended to avoid re-packing, and `--scoped-id` is auto-filled as `<handle>/<slug>`.
+  `/d/<handle>` is a public UI page only and is no longer a registry URL.
 - Custom/private registries (any other `--registry`):
   `ato publish --registry ...` performs direct uploads. `--artifact` is recommended to avoid re-packing.
   `--artifact` supports standalone artifact flow (no local `capsule.toml` required).
@@ -176,7 +177,7 @@ The Dock-first path uses existing commands (no new subcommands):
 2. Build artifact locally: `ato build .`
 3. Publish to your Dock:
    `ato publish --artifact ./<name>.capsule`
-4. Share your public Dock page: `/d/<handle>`
+4. Share your public Dock page: `/d/<handle>` (`api.ato.run` install/search とは別)
 5. When ready for the official Store, use `ato publish --registry https://api.ato.run` or `ato publish --ci`.
 6. Final review/submission continues from Dock Control Tower (`Submit to Official Marketplace`).
 
@@ -357,7 +358,7 @@ default_target = "default"
 [pack]
 include = [
   "capsule.toml",
-  "capsule.lock",
+  "capsule.lock.json",
   "apps/dashboard/.next/standalone/**",
   "apps/dashboard/.next/static/**",
   "apps/control-plane/src/**",
@@ -419,12 +420,12 @@ Notes:
 
 ## Runtime Isolation Policy (Tiers)
 
-- `web/static`: Tier1 (`driver = "static"` + `targets.<label>.port` required; no `capsule.lock` needed)
-- `web/deno`: Tier1 (`capsule.lock` + `deno.lock` or `package-lock.json`)
-- `web/node`: Tier1 (Deno compat execution; requires `capsule.lock` + `package-lock.json`)
+- `web/static`: Tier1 (`driver = "static"` + `targets.<label>.port` required; no `capsule.lock.json` needed)
+- `web/deno`: Tier1 (`capsule.lock.json` + `deno.lock` or `package-lock.json`)
+- `web/node`: Tier1 (Deno compat execution; requires `capsule.lock.json` + `package-lock.json`)
 - `web/python`: Tier2 (requires `uv.lock`; `--sandbox` recommended)
-- `source/deno`: Tier1 (`capsule.lock` + `deno.lock` or `package-lock.json`)
-- `source/node`: Tier1 (Deno compat execution; requires `capsule.lock` + `package-lock.json`)
+- `source/deno`: Tier1 (`capsule.lock.json` + `deno.lock` or `package-lock.json`)
+- `source/node`: Tier1 (Deno compat execution; requires `capsule.lock.json` + `package-lock.json`)
 - `source/python`: Tier2 (requires `uv.lock`; `--sandbox` recommended)
 - `source/native`: Tier2 (`--sandbox` recommended)
 
@@ -479,14 +480,23 @@ ato run --from-skill /path/to/SKILL.md
 ```bash
 ato search ai
 ato login
+ato login --headless
 ato whoami
 ```
 
 Default endpoints:
 
 - `ATO_STORE_API_URL` (default: `https://api.ato.run`)
-- `ATO_STORE_SITE_URL` (default: `https://store.ato.run`)
+- `ATO_STORE_SITE_URL` (default: `https://ato.run`)
 - `ATO_TOKEN`
+- canonical auth file: `${XDG_CONFIG_HOME:-~/.config}/ato/credentials.toml`
+
+Auth precedence:
+
+- `ATO_TOKEN`
+- OS keyring
+- `${XDG_CONFIG_HOME:-~/.config}/ato/credentials.toml`
+- legacy `~/.ato/credentials.json` (read-only fallback)
 
 ## Development Tests
 
