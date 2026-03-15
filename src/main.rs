@@ -1953,84 +1953,13 @@ fn run() -> Result<()> {
                 if version.is_some() {
                     anyhow::bail!("--version cannot be used with --from-gh-repo");
                 }
-                let install_draft = match rt
-                    .block_on(install::fetch_github_install_draft(&repository))
-                {
-                    Ok(draft) => Some(draft),
-                    Err(error) => {
-                        if !json {
-                            eprintln!(
-                                "⚠️  Failed to fetch ato store install draft: {error}. Falling back to local zero-config inference."
-                            );
-                        }
-                        None
-                    }
-                };
-                let checkout = rt.block_on(install::download_github_repository_at_ref(
+                let result = rt.block_on(install_github_repository(
                     &repository,
-                    install_draft
-                        .as_ref()
-                        .map(|draft| draft.resolved_ref.sha.as_str()),
-                ))?;
-                if !json {
-                    eprintln!(
-                        "📦 Building {} from GitHub source in {}",
-                        checkout.repository,
-                        checkout.checkout_dir.display()
-                    );
-                    if let Some(draft) = install_draft.as_ref() {
-                        eprintln!(
-                            "   Revision: {} ({})",
-                            draft.resolved_ref.sha, draft.resolved_ref.ref_name
-                        );
-                        if draft.manifest_source == "inferred" {
-                            eprintln!(
-                                "   Using store-generated capsule draft for {}",
-                                draft.repo_ref
-                            );
-                            if let Some(hint) = draft.capsule_hint.as_ref() {
-                                eprintln!("   Confidence: {}", hint.confidence);
-                                for warning in &hint.warnings {
-                                    eprintln!("   Warning: {warning}");
-                                }
-                            }
-                        }
-                    }
-                }
-                let reporter = std::sync::Arc::new(reporters::CliReporter::new(json));
-                let build_result = commands::build::execute_pack_command_with_injected_manifest(
-                    checkout.checkout_dir.clone(),
-                    false,
-                    None,
-                    false,
-                    false,
-                    false,
-                    false,
-                    EnforcementMode::Strict.as_str().to_string(),
-                    reporter,
-                    false,
+                    output,
+                    yes,
+                    projection_preference,
                     json,
-                    None,
-                    install_draft
-                        .as_ref()
-                        .and_then(|draft| draft.preview_toml.as_deref()),
-                )?;
-                let artifact = build_result.artifact.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "GitHub repository did not produce an installable .capsule artifact"
-                    )
-                })?;
-                let result = rt.block_on(install::install_built_github_artifact(
-                    &artifact,
-                    &checkout.publisher,
-                    &checkout.repository,
-                    install::InstallExecutionOptions {
-                        output_dir: output,
-                        yes,
-                        projection_preference,
-                        json_output: json,
-                        can_prompt_interactively: can_prompt,
-                    },
+                    can_prompt,
                 ))?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -3782,6 +3711,28 @@ async fn resolve_run_target_or_install(
     let expanded_local = local_input::expand_local_path(&raw);
     if local_input::should_treat_input_as_local(&raw, &expanded_local) {
         return Ok(expanded_local);
+    }
+
+    let json_mode = matches!(reporter.as_ref(), reporters::CliReporter::Json(_));
+    if let Some(repository) = install::parse_github_run_ref(&raw)? {
+        if registry.is_some() {
+            anyhow::bail!("--registry cannot be used with GitHub repository run targets");
+        }
+
+        let result = install_github_repository(
+            &repository,
+            None,
+            yes,
+            install::ProjectionPreference::Skip,
+            json_mode,
+            !json_mode
+                && can_prompt_interactively(
+                    std::io::stdin().is_terminal(),
+                    std::io::stderr().is_terminal(),
+                ),
+        )
+        .await?;
+        return Ok(result.path);
     }
 
     let scoped_ref = match install::parse_capsule_ref(&raw) {
