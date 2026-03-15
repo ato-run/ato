@@ -2,6 +2,10 @@
 
 use anyhow::{Context, Result};
 use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::lockfile::{
+    manifest_external_capsule_dependencies, parse_lockfile_text, resolve_existing_lockfile_path,
+    verify_lockfile_external_dependencies, CAPSULE_LOCK_FILE_NAME,
+};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -22,27 +26,55 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
         capsule_core::router::ExecutionProfile::Release,
         None,
     )?;
-    capsule_core::diagnostics::manifest::validate_manifest_for_build(
-        &manifest_path,
-        decision.plan.selected_target_label(),
-    )?;
+    let targets_to_validate = if decision
+        .plan
+        .manifest
+        .get("schema_version")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        == Some("0.3")
+    {
+        decision.plan.selected_target_package_order()?
+    } else {
+        vec![decision.plan.selected_target_label().to_string()]
+    };
+    for target_label in &targets_to_validate {
+        capsule_core::diagnostics::manifest::validate_manifest_for_build(
+            &manifest_path,
+            target_label,
+        )?;
+    }
 
     let lockfile_path = manifest_path
         .parent()
-        .map(|parent| parent.join("capsule.lock"))
-        .unwrap_or_else(|| PathBuf::from("capsule.lock"));
-    let lockfile_checked = if lockfile_path.exists() {
-        capsule_core::lockfile::verify_lockfile_manifest(&manifest_path, &lockfile_path).map_err(
+        .and_then(resolve_existing_lockfile_path);
+    let lockfile_checked = if let Some(lockfile_path) = lockfile_path.as_ref() {
+        capsule_core::lockfile::verify_lockfile_manifest(&manifest_path, lockfile_path).map_err(
             |err| {
                 if err.to_string().contains("manifest hash mismatch") {
-                    AtoExecutionError::lockfile_tampered(err.to_string(), Some("capsule.lock"))
+                    AtoExecutionError::lockfile_tampered(
+                        err.to_string(),
+                        Some(CAPSULE_LOCK_FILE_NAME),
+                    )
                 } else {
                     AtoExecutionError::policy_violation(err.to_string())
                 }
             },
         )?;
+        let raw = std::fs::read_to_string(lockfile_path)?;
+        let lockfile = parse_lockfile_text(&raw, lockfile_path)?;
+        verify_lockfile_external_dependencies(&decision.plan.manifest, &lockfile)?;
         true
     } else {
+        let external_dependencies =
+            manifest_external_capsule_dependencies(&decision.plan.manifest)?;
+        if !external_dependencies.is_empty() {
+            return Err(AtoExecutionError::lock_incomplete(
+                "external capsule dependencies require capsule.lock.json",
+                Some(CAPSULE_LOCK_FILE_NAME),
+            )
+            .into());
+        }
         false
     };
 
@@ -79,7 +111,7 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
         println!("  Runtime: {}", result.runtime);
         println!("  Target: {}", result.target_label);
         if result.lockfile_checked {
-            println!("  capsule.lock: verified");
+            println!("  {}: verified", CAPSULE_LOCK_FILE_NAME);
         }
         if result.warnings.is_empty() {
             println!("  IPC: no warnings");

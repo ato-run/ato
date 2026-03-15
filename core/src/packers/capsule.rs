@@ -12,6 +12,7 @@ use zstd::stream::write::Encoder as ZstdEncoder;
 
 use crate::capsule_v3::{CasStore, FastCdcWriter, FastCdcWriterConfig, V3_PAYLOAD_MANIFEST_PATH};
 use crate::error::{CapsuleError, Result as CapsuleResult};
+use crate::lockfile::{CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME};
 use crate::packers::pack_filter::PackFilter;
 use crate::packers::payload::{
     build_distribution_manifest, manifest_hash, normalize_relative_utf8_path,
@@ -26,7 +27,7 @@ const README_CANDIDATES: [&str; 4] = ["README.md", "README.mdx", "README.txt", "
 /// ```text
 /// my-app.capsule (PAX TAR)
 /// ├── capsule.toml
-/// ├── capsule.lock
+/// ├── capsule.lock.json
 /// ├── signature.json
 /// └── payload.tar.zst
 ///     ├── source/ (code)
@@ -49,6 +50,14 @@ struct PayloadFileEntry {
     disk_path: PathBuf,
     size: u64,
     mode: u32,
+}
+
+#[derive(Debug, Clone)]
+struct PayloadRoot {
+    disk_root: PathBuf,
+    archive_prefix: String,
+    filter_prefix: Option<PathBuf>,
+    warning: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -143,7 +152,7 @@ const PAYLOAD_CHANNEL_DEPTH: usize = 8;
 const DEFAULT_REPRO_MTIME: u64 = 0;
 
 pub async fn pack(
-    _plan: &crate::router::ManifestData,
+    plan: &crate::router::ManifestData,
     opts: CapsulePackOptions,
     reporter: Arc<dyn crate::reporter::CapsuleReporter + 'static>,
 ) -> CapsuleResult<PathBuf> {
@@ -167,31 +176,38 @@ pub async fn pack(
     }
     if !lockfile_path.exists() {
         return Err(CapsuleError::Pack(format!(
-            "capsule.lock is missing: {}",
+            "{} is missing: {}",
+            CAPSULE_LOCK_FILE_NAME,
             lockfile_path.display()
         )));
     }
 
     // Step 2: Resolve source payload input
-    let source_dir = opts.manifest_dir.join("source");
-    let (source_root, source_root_warning) = select_payload_source_root(&opts.manifest_dir);
-    if let Some(message) = source_root_warning {
-        reporter
-            .warn(message.to_string())
-            .await
-            .map_err(|err| CapsuleError::Pack(format!("Failed to emit pack warning: {err}")))?;
-    }
-    if source_root.as_path() == source_dir.as_path() {
-        debug!("Packaging source/ directory as source/");
-    } else {
-        debug!("Packaging project root as source/");
+    let payload_roots = select_payload_roots(plan, &opts.manifest_dir)?;
+    for root in &payload_roots {
+        if let Some(message) = root.warning {
+            reporter
+                .warn(message.to_string())
+                .await
+                .map_err(|err| CapsuleError::Pack(format!("Failed to emit pack warning: {err}")))?;
+        }
     }
 
     // Step 3: Create payload.tar.zst (single-pass stream)
     debug!("Phase 2: creating payload.tar.zst (streaming)");
 
-    let mut payload_entries =
-        collect_payload_entries(source_root.as_path(), "source", &pack_filter).await?;
+    let mut payload_entries = Vec::new();
+    for root in &payload_roots {
+        payload_entries.extend(
+            collect_payload_entries(
+                root.disk_root.as_path(),
+                &root.archive_prefix,
+                &pack_filter,
+                root.filter_prefix.as_deref(),
+            )
+            .await?,
+        );
+    }
     payload_entries.push(PayloadEntry::File(
         payload_file_entry(&config_path, "config.json".to_string()).await?,
     ));
@@ -272,12 +288,12 @@ pub async fn pack(
     )?;
     let packaged_lockfile_bytes =
         crate::lockfile::render_lockfile_for_manifest(&lockfile_path, &distribution_manifest)?;
-    let packaged_lockfile_path = temp_dir.path().join("capsule.lock");
+    let packaged_lockfile_path = temp_dir.path().join(CAPSULE_LOCK_FILE_NAME);
     fs::write(&packaged_lockfile_path, packaged_lockfile_bytes)?;
     append_regular_file_normalized(
         &mut outer_ar,
         &packaged_lockfile_path,
-        "capsule.lock",
+        CAPSULE_LOCK_FILE_NAME,
         reproducible_mtime_epoch(),
     )?;
 
@@ -359,6 +375,7 @@ async fn collect_payload_entries(
     src_root: &Path,
     prefix: &str,
     filter: &PackFilter,
+    filter_prefix: Option<&Path>,
 ) -> CapsuleResult<Vec<PayloadEntry>> {
     let mut entries = Vec::new();
     let mut stack = vec![src_root.to_path_buf()];
@@ -378,7 +395,10 @@ async fn collect_payload_entries(
                 Ok(rel) if !rel.as_os_str().is_empty() => rel,
                 _ => continue,
             };
-            if !filter.should_include_file(rel) || should_skip_reserved_file(rel) {
+            let filter_rel = filter_prefix
+                .map(|value| value.join(rel))
+                .unwrap_or_else(|| rel.to_path_buf());
+            if !filter.should_include_file(&filter_rel) || should_skip_reserved_file(&filter_rel) {
                 continue;
             }
 
@@ -614,8 +634,9 @@ fn should_skip_reserved_file(rel: &Path) -> bool {
     if matches!(
         file_name.as_str(),
         "capsule.toml"
+            | CAPSULE_LOCK_FILE_NAME
+            | LEGACY_CAPSULE_LOCK_FILE_NAME
             | "config.json"
-            | "capsule.lock"
             | "signature.json"
             | "sbom.spdx.json"
             | "payload.v3.manifest.json"
@@ -709,6 +730,79 @@ fn select_payload_source_root(manifest_dir: &Path) -> (PathBuf, Option<&'static 
     }
 
     (source_dir, None)
+}
+
+fn select_payload_roots(
+    plan: &crate::router::ManifestData,
+    manifest_dir: &Path,
+) -> CapsuleResult<Vec<PayloadRoot>> {
+    let schema_version = plan
+        .manifest
+        .get("schema_version")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if schema_version != "0.3" {
+        let (source_root, warning) = select_payload_source_root(manifest_dir);
+        return Ok(vec![PayloadRoot {
+            disk_root: source_root,
+            archive_prefix: "source".to_string(),
+            filter_prefix: None,
+            warning,
+        }]);
+    }
+
+    let mut roots = plan
+        .selected_target_package_order()
+        .map_err(|err| CapsuleError::Pack(err.to_string()))?
+        .into_iter()
+        .map(|target_label| -> CapsuleResult<PayloadRoot> {
+            let target_plan = plan.with_selected_target(target_label);
+            let working_dir = target_plan.execution_working_directory();
+            let relative = working_dir
+                .strip_prefix(manifest_dir)
+                .unwrap_or(working_dir.as_path())
+                .to_path_buf();
+            let (source_root, warning) = select_payload_source_root(&working_dir);
+            Ok(PayloadRoot {
+                disk_root: source_root,
+                archive_prefix: if relative.as_os_str().is_empty() {
+                    "source".to_string()
+                } else {
+                    format!(
+                        "source/{}",
+                        normalize_relative_utf8_path(&relative)
+                            .map_err(|err| CapsuleError::Pack(err.to_string()))?
+                    )
+                },
+                filter_prefix: Some(relative),
+                warning,
+            })
+        })
+        .collect::<CapsuleResult<Vec<_>>>()?;
+
+    roots.sort_by(|a, b| a.archive_prefix.cmp(&b.archive_prefix));
+    let mut deduped = Vec::new();
+    for root in roots {
+        let covered = deduped.iter().any(|existing: &PayloadRoot| {
+            root.disk_root == existing.disk_root
+                || root.disk_root.starts_with(&existing.disk_root)
+                || root.archive_prefix == existing.archive_prefix
+        });
+        if !covered {
+            deduped.push(root);
+        }
+    }
+    if deduped.is_empty() {
+        let (source_root, warning) = select_payload_source_root(manifest_dir);
+        deduped.push(PayloadRoot {
+            disk_root: source_root,
+            archive_prefix: "source".to_string(),
+            filter_prefix: None,
+            warning,
+        });
+    }
+    Ok(deduped)
 }
 
 fn has_next_standalone_node_modules(root: &Path) -> bool {
@@ -863,6 +957,65 @@ mod tests {
         let found = find_nearest_readme_candidate(&app_dir).expect("find readme");
         assert_eq!(found.0, tmp.path().join("README.md"));
         assert_eq!(found.1, "README.md");
+    }
+
+    #[test]
+    fn select_payload_roots_for_v03_workspace_uses_selected_package_closure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = tmp.path().join("capsule.toml");
+        std::fs::create_dir_all(tmp.path().join("apps/web")).expect("mkdir web");
+        std::fs::create_dir_all(tmp.path().join("packages/ui")).expect("mkdir ui");
+        std::fs::create_dir_all(tmp.path().join("apps/admin")).expect("mkdir admin");
+        std::fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.3"
+name = "workspace-app"
+default_target = "web"
+
+[packages.web]
+capsule_path = "./apps/web"
+
+[packages.ui]
+capsule_path = "./packages/ui"
+
+[packages.admin]
+capsule_path = "./apps/admin"
+"#,
+        )
+        .expect("write manifest");
+        std::fs::write(
+            tmp.path().join("apps/web/capsule.toml"),
+            "schema_version = \"0.3\"\nname = \"web\"\ntype = \"app\"\nruntime = \"source/node\"\nrun = \"node server.js\"\n[dependencies]\nui = \"workspace:ui\"\n",
+        )
+        .expect("write web manifest");
+        std::fs::write(
+            tmp.path().join("packages/ui/capsule.toml"),
+            "schema_version = \"0.3\"\nname = \"ui\"\ntype = \"library\"\nruntime = \"source/node\"\nbuild = \"node build.js\"\n",
+        )
+        .expect("write ui manifest");
+        std::fs::write(
+            tmp.path().join("apps/admin/capsule.toml"),
+            "schema_version = \"0.3\"\nname = \"admin\"\ntype = \"app\"\nruntime = \"source/node\"\nrun = \"node admin.js\"\n",
+        )
+        .expect("write admin manifest");
+
+        let decision =
+            crate::router::route_manifest(&manifest_path, ExecutionProfile::Release, None)
+                .expect("route manifest");
+        let roots = select_payload_roots(&decision.plan, tmp.path()).expect("select payload roots");
+        let prefixes = roots
+            .iter()
+            .map(|root| root.archive_prefix.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            prefixes,
+            vec![
+                "source/apps/web".to_string(),
+                "source/packages/ui".to_string()
+            ]
+        );
     }
 
     #[test]

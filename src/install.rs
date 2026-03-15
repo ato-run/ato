@@ -1,22 +1,22 @@
 //! Install command implementation
 //!
 //! Downloads and installs capsules from the Store.
-//! Primary path: `/v1/manifest/capsules/by/:publisher/:slug/distributions` (.capsule contract)
+//! Primary path: `/v1/capsules/by/:publisher/:slug/distributions` (.capsule contract)
 
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures::stream::{FuturesUnordered, StreamExt};
 use rand::RngCore;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::Write;
 use std::io::{self};
 use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Once, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 
@@ -35,6 +35,8 @@ const SEGMENT_MAX_LEN: usize = 63;
 const LEASE_REFRESH_INTERVAL_SECS: u64 = 300;
 const NEGOTIATE_DEFAULT_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const DELTA_RECONSTRUCT_ZSTD_LEVEL: i32 = 3;
+const DEFAULT_GITHUB_DRAFT_NODE_RUNTIME_VERSION: &str = "20.12.0";
+const DEFAULT_GITHUB_DRAFT_PYTHON_RUNTIME_VERSION: &str = "3.11.10";
 
 #[derive(Debug, Serialize)]
 pub struct InstallResult {
@@ -99,6 +101,8 @@ pub struct GitHubInstallDraftResponse {
     pub capsule_toml: GitHubInstallDraftCapsuleToml,
     #[serde(rename = "repoRef")]
     pub repo_ref: String,
+    #[serde(rename = "proposedRunCommand")]
+    pub proposed_run_command: Option<String>,
     #[serde(rename = "proposedInstallCommand")]
     pub proposed_install_command: String,
     #[serde(rename = "resolvedRef")]
@@ -109,6 +113,10 @@ pub struct GitHubInstallDraftResponse {
     pub preview_toml: Option<String>,
     #[serde(rename = "capsuleHint")]
     pub capsule_hint: Option<GitHubInstallDraftHint>,
+    #[serde(rename = "inferenceMode")]
+    pub inference_mode: Option<String>,
+    #[serde(default)]
+    pub retryable: bool,
 }
 
 #[allow(dead_code)]
@@ -139,6 +147,293 @@ pub struct GitHubInstallDraftResolvedRef {
 pub struct GitHubInstallDraftHint {
     pub confidence: String,
     pub warnings: Vec<String>,
+    #[serde(default)]
+    pub launchability: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubInstallDraftRetryRequest {
+    pub attempt_id: Option<String>,
+    pub resolved_ref_sha: String,
+    pub previous_toml: String,
+    pub smoke_error_class: String,
+    pub smoke_error_excerpt: String,
+    pub retry_ordinal: u8,
+}
+
+impl GitHubInstallDraftResponse {
+    pub fn normalize_preview_toml_for_checkout(&self, checkout_dir: &Path) -> Result<Self> {
+        let mut normalized = self.clone();
+        normalized.preview_toml = self
+            .preview_toml
+            .as_deref()
+            .map(|raw| normalize_github_install_preview_toml(checkout_dir, raw))
+            .transpose()?;
+        Ok(normalized)
+    }
+}
+
+fn normalize_github_install_preview_toml(
+    checkout_dir: &Path,
+    manifest_text: &str,
+) -> Result<String> {
+    let Ok(mut parsed) = toml::from_str::<toml::Value>(manifest_text) else {
+        return Ok(manifest_text.to_string());
+    };
+
+    if parsed
+        .get("schema_version")
+        .and_then(toml::Value::as_str)
+        .map(|value| value.trim() == "0.3")
+        .unwrap_or(false)
+        && parsed.get("targets").is_none()
+    {
+        let runtime = parsed
+            .get("runtime")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_ascii_lowercase());
+        let runtime_version_missing = parsed
+            .get("runtime_version")
+            .and_then(toml::Value::as_str)
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true);
+
+        if runtime_version_missing {
+            let driver = match runtime.as_deref() {
+                Some("source/node") | Some("web/node") => Some("node"),
+                Some("source/python") | Some("web/python") => Some("python"),
+                Some("source/deno") | Some("web/deno") => Some("deno"),
+                _ => None,
+            };
+
+            if let Some(driver) = driver {
+                if let Some(version) = infer_github_install_runtime_version(checkout_dir, driver) {
+                    parsed["runtime_version"] = toml::Value::String(version);
+                    return toml::to_string(&parsed)
+                        .context("Failed to serialize normalized GitHub install draft");
+                }
+            }
+        }
+
+        return Ok(manifest_text.to_string());
+    }
+
+    let Some(targets) = parsed
+        .get_mut("targets")
+        .and_then(toml::Value::as_table_mut)
+    else {
+        return Ok(manifest_text.to_string());
+    };
+
+    let mut changed = false;
+    for (_, target_value) in targets.iter_mut() {
+        let Some(target) = target_value.as_table_mut() else {
+            continue;
+        };
+        let runtime = target
+            .get("runtime")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        if runtime != "source" && runtime != "web" {
+            continue;
+        }
+
+        let current_driver: Option<String> = target
+            .get("driver")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_ascii_lowercase());
+
+        let Some(current_driver) = current_driver else {
+            continue;
+        };
+
+        let normalized_driver = normalize_github_install_driver(&current_driver);
+        if normalized_driver != current_driver {
+            target.insert(
+                "driver".to_string(),
+                toml::Value::String(normalized_driver.clone()),
+            );
+            changed = true;
+        }
+
+        if runtime == "source"
+            && matches!(normalized_driver.as_str(), "node" | "python" | "deno")
+            && target
+                .get("runtime_version")
+                .and_then(toml::Value::as_str)
+                .map(|value| value.trim().is_empty())
+                .unwrap_or(true)
+        {
+            if let Some(version) =
+                infer_github_install_runtime_version(checkout_dir, normalized_driver.as_str())
+            {
+                target.insert("runtime_version".to_string(), toml::Value::String(version));
+                changed = true;
+            }
+        }
+    }
+
+    if !changed {
+        return Ok(manifest_text.to_string());
+    }
+
+    toml::to_string(&parsed).context("Failed to serialize normalized GitHub install draft")
+}
+
+fn normalize_github_install_driver(driver: &str) -> String {
+    match driver.trim().to_ascii_lowercase().as_str() {
+        "pip" | "poetry" | "uv" => "python".to_string(),
+        "npm" | "pnpm" | "yarn" | "bun" | "nodejs" => "node".to_string(),
+        "cargo" | "go" => "native".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn infer_github_install_runtime_version(checkout_dir: &Path, driver: &str) -> Option<String> {
+    match driver {
+        "node" => Some(infer_node_runtime_version_for_github_install(checkout_dir)),
+        "python" => Some(infer_python_runtime_version_for_github_install(
+            checkout_dir,
+        )),
+        "deno" => None,
+        _ => None,
+    }
+}
+
+fn infer_node_runtime_version_for_github_install(checkout_dir: &Path) -> String {
+    let package_json_path = checkout_dir.join("package.json");
+    let raw = std::fs::read_to_string(&package_json_path).ok();
+    let engine = raw
+        .as_deref()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok())
+        .and_then(|json| {
+            json.get("engines")
+                .and_then(|engines| engines.get("node"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+
+    let Some(engine) = engine else {
+        return DEFAULT_GITHUB_DRAFT_NODE_RUNTIME_VERSION.to_string();
+    };
+
+    let major = first_numeric_version_component(&engine)
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0);
+    let Some(major) = major else {
+        return DEFAULT_GITHUB_DRAFT_NODE_RUNTIME_VERSION.to_string();
+    };
+
+    if major >= 22 {
+        format!("{major}.0.0")
+    } else if major >= 20 {
+        format!("{major}.12.0")
+    } else if major >= 18 {
+        format!("{major}.20.0")
+    } else {
+        format!("{major}.0.0")
+    }
+}
+
+fn infer_python_runtime_version_for_github_install(checkout_dir: &Path) -> String {
+    let pyproject = std::fs::read_to_string(checkout_dir.join("pyproject.toml")).ok();
+    if let Some(version) = pyproject
+        .as_deref()
+        .and_then(extract_pyproject_requires_python)
+        .as_deref()
+        .and_then(normalize_python_runtime_version_string)
+    {
+        return version;
+    }
+
+    let uv_lock = std::fs::read_to_string(checkout_dir.join("uv.lock")).ok();
+    if let Some(version) = uv_lock
+        .as_deref()
+        .and_then(extract_uv_lock_requires_python)
+        .as_deref()
+        .and_then(normalize_python_runtime_version_string)
+    {
+        return version;
+    }
+
+    for path in [
+        checkout_dir.join(".python-version"),
+        checkout_dir.join("runtime.txt"),
+    ] {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Some(version) = normalize_python_runtime_version_string(&raw) {
+            return version;
+        }
+    }
+
+    DEFAULT_GITHUB_DRAFT_PYTHON_RUNTIME_VERSION.to_string()
+}
+
+fn extract_pyproject_requires_python(raw: &str) -> Option<String> {
+    extract_toml_string_value(raw, "project", "requires-python")
+}
+
+fn extract_uv_lock_requires_python(raw: &str) -> Option<String> {
+    extract_toml_string_value(raw, "options", "requires-python")
+}
+
+fn extract_toml_string_value(raw: &str, section: &str, key: &str) -> Option<String> {
+    let escaped_section = regex::escape(section);
+    let escaped_key = regex::escape(key);
+    let section_re = Regex::new(&format!(
+        r"(?ms)^\[{escaped_section}\]\s*(.*?)(?=^\[[^\]]+\]\s*$|\z)"
+    ))
+    .ok()?;
+    let section_body = section_re
+        .captures(raw)
+        .and_then(|captures| captures.get(1))
+        .map(|value| value.as_str())
+        .unwrap_or(raw);
+    let key_re = Regex::new(&format!(r#"(?m)^{escaped_key}\s*=\s*["']([^"'\\n]+)["']"#)).ok()?;
+    key_re
+        .captures(section_body)
+        .and_then(|captures| captures.get(1))
+        .map(|value| value.as_str().trim().to_string())
+}
+
+fn first_numeric_version_component(raw: &str) -> Option<String> {
+    static VERSION_RE: OnceLock<Regex> = OnceLock::new();
+    VERSION_RE
+        .get_or_init(|| Regex::new(r"(\d+)").expect("version regex"))
+        .captures(raw)
+        .and_then(|captures| captures.get(1))
+        .map(|value| value.as_str().to_string())
+}
+
+fn normalize_runtime_version_string(raw: &str) -> Option<String> {
+    static VERSION_RE: OnceLock<Regex> = OnceLock::new();
+    let captures = VERSION_RE
+        .get_or_init(|| Regex::new(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?").expect("version regex"))
+        .captures(raw)?;
+
+    let major = captures.get(1)?.as_str();
+    let minor = captures.get(2).map(|value| value.as_str()).unwrap_or("0");
+    let patch = captures.get(3).map(|value| value.as_str()).unwrap_or("0");
+    Some(format!("{major}.{minor}.{patch}"))
+}
+
+fn normalize_python_runtime_version_string(raw: &str) -> Option<String> {
+    let normalized = normalize_runtime_version_string(raw)?;
+    let mut parts = normalized.split('.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    if major < 3 {
+        return None;
+    }
+    Some(normalized)
 }
 
 pub struct InstallExecutionOptions {
@@ -325,6 +620,7 @@ struct ManifestLeaseReleaseRequest {
 #[derive(Debug)]
 enum DeltaInstallResult {
     Artifact(Vec<u8>),
+    DownloadedArtifact { bytes: Vec<u8>, file_name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -571,6 +867,44 @@ pub async fn fetch_github_install_draft(repository: &str) -> Result<GitHubInstal
         .with_context(|| format!("Failed to parse GitHub install draft: {normalized}"))
 }
 
+pub async fn retry_github_install_draft(
+    repository: &str,
+    request: &GitHubInstallDraftRetryRequest,
+) -> Result<GitHubInstallDraftResponse> {
+    let normalized = normalize_github_repository(repository)?;
+    let (owner, repo) = normalized
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("repository must include owner/repo"))?;
+    let client = reqwest::Client::new();
+    let endpoint = format!(
+        "{}/v1/github/repos/{}/{}/install-draft/retry",
+        resolve_store_api_base_url(),
+        urlencoding::encode(owner),
+        urlencoding::encode(repo)
+    );
+    let response = client
+        .post(&endpoint)
+        .header(reqwest::header::USER_AGENT, "ato-cli")
+        .json(request)
+        .send()
+        .await
+        .with_context(|| format!("Failed to retry GitHub install draft: {normalized}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        bail!(
+            "Failed to retry GitHub install draft (status={}): {}",
+            status,
+            body
+        );
+    }
+
+    response
+        .json::<GitHubInstallDraftResponse>()
+        .await
+        .with_context(|| format!("Failed to parse retried GitHub install draft: {normalized}"))
+}
+
 pub async fn download_github_repository_at_ref(
     repository: &str,
     resolved_ref: Option<&str>,
@@ -625,7 +959,7 @@ pub async fn download_github_repository_at_ref(
     })
 }
 
-fn resolve_store_api_base_url() -> String {
+pub(crate) fn resolve_store_api_base_url() -> String {
     std::env::var(ENV_STORE_API_URL)
         .ok()
         .map(|value| value.trim().trim_end_matches('/').to_string())
@@ -712,7 +1046,7 @@ pub async fn install_app(
 
     let client = reqwest::Client::new();
     let capsule_url = format!(
-        "{}/v1/manifest/capsules/by/{}/{}",
+        "{}/v1/capsules/by/{}/{}",
         registry,
         urlencoding::encode(&scoped_ref.publisher),
         urlencoding::encode(&scoped_ref.slug)
@@ -792,6 +1126,14 @@ pub async fn install_app(
                 bytes,
                 format!("{}-{}.capsule", scoped_ref.slug, target_version),
             )
+        }
+        DeltaInstallResult::DownloadedArtifact { bytes, file_name } => {
+            if !json_output {
+                eprintln!(
+                    "ℹ️  Registry does not expose manifest delta APIs; falling back to direct artifact download"
+                );
+            }
+            (bytes, file_name)
         }
     };
 
@@ -1520,7 +1862,7 @@ pub async fn fetch_capsule_detail(
     let registry = resolve_registry_url(registry_url, false).await?;
     let client = reqwest::Client::new();
     let capsule_url = format!(
-        "{}/v1/manifest/capsules/by/{}/{}",
+        "{}/v1/capsules/by/{}/{}",
         registry,
         urlencoding::encode(&scoped_ref.publisher),
         urlencoding::encode(&scoped_ref.slug)
@@ -1558,7 +1900,7 @@ pub async fn fetch_capsule_manifest_toml(
     let registry = resolve_registry_url(registry_url, false).await?;
     let client = reqwest::Client::new();
     let capsule_url = format!(
-        "{}/v1/manifest/capsules/by/{}/{}",
+        "{}/v1/capsules/by/{}/{}",
         registry,
         urlencoding::encode(&scoped_ref.publisher),
         urlencoding::encode(&scoped_ref.slug)
@@ -1737,7 +2079,143 @@ async fn install_manifest_delta_path(
     if let Some(lease_id) = lease_id {
         let _ = release_lease_best_effort(client, registry, &lease_id).await;
     }
-    result
+    match result {
+        Ok(result) => Ok(result),
+        Err(err) if is_manifest_api_unsupported_error(&err) => {
+            download_capsule_artifact_via_distribution(
+                client,
+                registry,
+                scoped_ref,
+                requested_version,
+            )
+            .await
+        }
+        Err(err) => Err(err),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RegistryDistributionResponse {
+    version: String,
+    artifact_url: String,
+    #[serde(default)]
+    file_name: Option<String>,
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default)]
+    blake3: Option<String>,
+}
+
+fn is_manifest_api_unsupported_error(err: &anyhow::Error) -> bool {
+    let message = err.to_string().to_ascii_lowercase();
+    (message.contains("endpoint not found") || message.contains("status=404"))
+        && (message.contains("manifest") || message.contains("epoch pointer"))
+}
+
+async fn download_capsule_artifact_via_distribution(
+    client: &reqwest::Client,
+    registry: &str,
+    scoped_ref: &ScopedCapsuleRef,
+    requested_version: Option<&str>,
+) -> Result<DeltaInstallResult> {
+    let base = registry.trim_end_matches('/');
+    let mut distribution_url = format!(
+        "{}/v1/capsules/by/{}/{}/distributions",
+        base,
+        urlencoding::encode(&scoped_ref.publisher),
+        urlencoding::encode(&scoped_ref.slug)
+    );
+    if let Some(version) = requested_version
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        distribution_url.push_str(&format!("?version={}", urlencoding::encode(version)));
+    }
+
+    let has_token = has_ato_token();
+    let distribution_response = with_ato_token(client.get(&distribution_url))
+        .send()
+        .await
+        .with_context(|| "Failed to resolve distribution fallback for install")?;
+    if distribution_response.status() == reqwest::StatusCode::UNAUTHORIZED && !has_token {
+        bail!(
+            "{}: registry requires authentication for capsule download APIs. Run `ato login` or set `ATO_TOKEN=<token>`.",
+            crate::error_codes::ATO_ERR_AUTH_REQUIRED
+        );
+    }
+    let distribution = distribution_response
+        .error_for_status()
+        .with_context(|| {
+            format!(
+                "Failed to resolve direct download fallback for {}",
+                scoped_ref.scoped_id
+            )
+        })?
+        .json::<RegistryDistributionResponse>()
+        .await
+        .with_context(|| "Invalid distribution fallback response")?;
+
+    let artifact_request = artifact_request_builder(client, registry, &distribution.artifact_url);
+    let artifact_response = artifact_request
+        .send()
+        .await
+        .with_context(|| "Failed to download artifact for direct install fallback")?;
+    if artifact_response.status() == reqwest::StatusCode::UNAUTHORIZED && !has_token {
+        bail!(
+            "{}: registry requires authentication for capsule download APIs. Run `ato login` or set `ATO_TOKEN=<token>`.",
+            crate::error_codes::ATO_ERR_AUTH_REQUIRED
+        );
+    }
+    let artifact_status = artifact_response.status();
+    if !artifact_status.is_success() {
+        let body = artifact_response
+            .text()
+            .await
+            .unwrap_or_else(|_| String::new());
+        let body = body.trim();
+        if body.is_empty() {
+            bail!(
+                "Artifact download fallback failed (status={})",
+                artifact_status
+            );
+        }
+        bail!(
+            "Artifact download fallback failed (status={}): {}",
+            artifact_status,
+            body
+        );
+    }
+    let bytes = artifact_response
+        .bytes()
+        .await
+        .with_context(|| "Failed to read downloaded artifact body")?
+        .to_vec();
+
+    if let Some(expected_sha256) = distribution.sha256.as_deref() {
+        let computed_sha256 = compute_sha256(&bytes);
+        if !equals_hash(expected_sha256, &computed_sha256) {
+            bail!(
+                "{}: downloaded artifact sha256 mismatch during install fallback",
+                crate::error_codes::ATO_ERR_INTEGRITY_FAILURE
+            );
+        }
+    }
+    if let Some(expected_blake3) = distribution.blake3.as_deref() {
+        let computed_blake3 = compute_blake3(&bytes);
+        if !equals_hash(expected_blake3, &computed_blake3) {
+            bail!(
+                "{}: downloaded artifact blake3 mismatch during install fallback",
+                crate::error_codes::ATO_ERR_INTEGRITY_FAILURE
+            );
+        }
+    }
+
+    Ok(DeltaInstallResult::DownloadedArtifact {
+        bytes,
+        file_name: distribution
+            .file_name
+            .unwrap_or_else(|| format!("{}-{}.capsule", scoped_ref.slug, distribution.version)),
+    })
 }
 
 async fn install_manifest_delta_path_inner(
@@ -2112,7 +2590,7 @@ fn build_capsule_artifact(
         }
         if let Some(lockfile) = capsule_lock {
             if !lockfile.is_empty() {
-                append_capsule_entry(&mut builder, "capsule.lock", lockfile.as_bytes())?;
+                append_capsule_entry(&mut builder, "capsule.lock.json", lockfile.as_bytes())?;
             }
         }
         append_capsule_entry(&mut builder, "payload.tar.zst", payload_tar_zst)?;
@@ -2149,7 +2627,6 @@ fn compute_blake3(data: &[u8]) -> String {
     format!("blake3:{}", hex::encode(hash.as_bytes()))
 }
 
-#[cfg(test)]
 fn compute_sha256(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -2414,6 +2891,32 @@ fn with_ato_token(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     } else {
         request
     }
+}
+
+fn artifact_request_builder(
+    client: &reqwest::Client,
+    registry: &str,
+    artifact_url: &str,
+) -> reqwest::RequestBuilder {
+    let request = client.get(artifact_url);
+    if should_attach_ato_token_to_artifact_url(registry, artifact_url) {
+        with_ato_token(request)
+    } else {
+        request
+    }
+}
+
+fn should_attach_ato_token_to_artifact_url(registry: &str, artifact_url: &str) -> bool {
+    let Ok(registry_url) = reqwest::Url::parse(registry) else {
+        return false;
+    };
+    let Ok(artifact) = reqwest::Url::parse(artifact_url) else {
+        return false;
+    };
+    registry_url.scheme() == artifact.scheme()
+        && registry_url.host_str() == artifact.host_str()
+        && registry_url.port_or_known_default() == artifact.port_or_known_default()
+        && artifact.path().starts_with("/v1/capsules/")
 }
 
 fn has_ato_token() -> bool {
@@ -2884,6 +3387,87 @@ mod tests {
     }
 
     #[test]
+    fn normalize_github_install_preview_toml_maps_legacy_python_driver_and_runtime() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("pyproject.toml"),
+            r#"[project]
+version = "0.1.0"
+requires-python = ">=3.12"
+"#,
+        )
+        .expect("write pyproject");
+        let manifest = r#"
+schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "pip"
+entrypoint = "main.py"
+"#;
+
+        let normalized =
+            normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+        assert!(normalized.contains(r#"driver = "python""#));
+        assert!(normalized.contains(r#"runtime_version = "3.12.0""#));
+    }
+
+    #[test]
+    fn normalize_github_install_preview_toml_maps_native_tooling_drivers() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest = r#"
+schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "cargo"
+entrypoint = "src/main.rs"
+"#;
+
+        let normalized =
+            normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+        assert!(normalized.contains(r#"driver = "native""#));
+        assert!(!normalized.contains("runtime_version"));
+    }
+
+    #[test]
+    fn normalize_github_install_preview_toml_adds_runtime_version_to_v03_node_manifest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{
+  "engines": { "node": ">=20" }
+}"#,
+        )
+        .expect("write package.json");
+        let manifest = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node server.js"
+"#;
+
+        let normalized =
+            normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+        assert!(normalized.contains(r#"schema_version = "0.3""#));
+        assert!(normalized.contains(r#"runtime_version = "20.12.0""#));
+        assert!(normalized.contains(r#"runtime = "source/node""#));
+    }
+
+    #[test]
     fn native_install_documented_json_contract_fields_are_present() {
         let value = serde_json::to_value(InstallResult {
             capsule_id: "capsule-123".to_string(),
@@ -2951,6 +3535,8 @@ mod tests {
     enum MockScenario {
         FalsePositiveRecovery,
         FallbackNotImplemented,
+        ManifestApiNotFound,
+        ArtifactRejectsAuthorization,
         UnauthorizedManifest,
         LeaseReleaseOnFailure,
         YankedNegotiate,
@@ -3211,12 +3797,9 @@ entrypoint = "main.py"
             .route("/v1/manifest/chunks/:chunk_hash", get(mock_chunk))
             .route("/v1/manifest/leases/refresh", post(mock_lease_refresh))
             .route("/v1/manifest/leases/release", post(mock_lease_release))
+            .route("/v1/capsules/by/:publisher/:slug", get(mock_capsule_detail))
             .route(
-                "/v1/manifest/capsules/by/:publisher/:slug",
-                get(mock_capsule_detail),
-            )
-            .route(
-                "/v1/manifest/capsules/by/:publisher/:slug/distributions",
+                "/v1/capsules/by/:publisher/:slug/distributions",
                 get(mock_distribution),
             )
             .route("/mock/artifact.capsule", get(mock_artifact))
@@ -3262,6 +3845,19 @@ entrypoint = "main.py"
             || version != guard.fixture.version
         {
             return StatusCode::NOT_FOUND.into_response();
+        }
+        if matches!(
+            guard.scenario,
+            MockScenario::ManifestApiNotFound | MockScenario::ArtifactRejectsAuthorization
+        ) {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "not_found",
+                    "message": "Endpoint not found"
+                })),
+            )
+                .into_response();
         }
         Json(serde_json::json!({
             "scoped_id": guard.fixture.scoped_id,
@@ -3316,6 +3912,14 @@ entrypoint = "main.py"
         let call_index = guard.observations.negotiate_calls.len();
         match guard.scenario {
             MockScenario::FallbackNotImplemented => StatusCode::NOT_IMPLEMENTED.into_response(),
+            MockScenario::ManifestApiNotFound | MockScenario::ArtifactRejectsAuthorization => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "not_found",
+                    "message": "Endpoint not found"
+                })),
+            )
+                .into_response(),
             MockScenario::UnauthorizedManifest => StatusCode::UNAUTHORIZED.into_response(),
             MockScenario::YankedNegotiate => (
                 StatusCode::GONE,
@@ -3470,9 +4074,21 @@ entrypoint = "main.py"
         .into_response()
     }
 
-    async fn mock_artifact(State(state): State<SharedMockState>) -> Response {
+    async fn mock_artifact(State(state): State<SharedMockState>, headers: HeaderMap) -> Response {
         let mut guard = state.lock().await;
         guard.observations.artifact_calls += 1;
+        if guard.scenario == MockScenario::ArtifactRejectsAuthorization
+            && headers.contains_key(axum::http::header::AUTHORIZATION)
+        {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": "auth_header_not_allowed",
+                    "message": "Presigned artifact URLs must not receive Authorization headers."
+                })),
+            )
+                .into_response();
+        }
         (StatusCode::OK, guard.fixture.artifact_bytes.clone()).into_response()
     }
 
@@ -3586,6 +4202,27 @@ entrypoint = "main.py"
             normalize_github_repository("Koh0920/ato-cli").unwrap(),
             "Koh0920/ato-cli"
         );
+    }
+
+    #[test]
+    fn test_parse_github_run_ref_accepts_canonical_github_dot_com_input() {
+        assert_eq!(
+            parse_github_run_ref("github.com/Koh0920/ato-cli.git").unwrap(),
+            Some("Koh0920/ato-cli".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_github_run_ref_rejects_noncanonical_github_url_input() {
+        let error = parse_github_run_ref("https://github.com/Koh0920/ato-cli").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("ato run github.com/Koh0920/ato-cli"));
+    }
+
+    #[test]
+    fn test_parse_github_run_ref_ignores_store_scoped_id_shape() {
+        assert_eq!(parse_github_run_ref("koh0920/ato-cli").unwrap(), None);
     }
 
     #[test]
@@ -3932,10 +4569,12 @@ entrypoint = "main.py"
         for entry in archive.entries().expect("entries") {
             let mut entry = entry.expect("entry");
             let path = entry.path().expect("path").to_string_lossy().to_string();
-            if path == "capsule.lock" {
+            if path == "capsule.lock.json" {
                 has_capsule_lock = true;
                 let mut bytes = Vec::new();
-                entry.read_to_end(&mut bytes).expect("read capsule.lock");
+                entry
+                    .read_to_end(&mut bytes)
+                    .expect("read capsule.lock.json");
                 assert_eq!(bytes, capsule_lock.as_bytes());
             }
         }
@@ -4018,7 +4657,10 @@ entrypoint = "main.py"
             install_manifest_delta_path(&client, server.base_url(), &scoped_ref, None, None, None)
                 .await
                 .expect("delta install should succeed after retry");
-        let DeltaInstallResult::Artifact(artifact) = result;
+        let artifact = match result {
+            DeltaInstallResult::Artifact(artifact) => artifact,
+            other => panic!("expected reconstructed artifact result, got {:?}", other),
+        };
         let reconstructed_payload =
             extract_payload_tar_from_capsule(&artifact).expect("extract reconstructed payload");
         assert_eq!(reconstructed_payload, fixture.payload_tar);
@@ -4160,6 +4802,88 @@ entrypoint = "main.py"
         let observations = server.observations().await;
         assert_eq!(observations.distribution_calls, 0);
         assert_eq!(observations.artifact_calls, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_manifest_api_404_falls_back_to_distribution_download() {
+        let _env_lock = acquire_test_env_lock().await;
+        let cas_root = tempfile::tempdir().expect("cas root");
+        let _cas_guard = EnvVarGuard::set(
+            "ATO_CAS_ROOT",
+            Some(cas_root.path().to_string_lossy().as_ref()),
+        );
+        let _token_guard = EnvVarGuard::set("ATO_TOKEN", Some("test-token"));
+
+        let fixture = build_mock_fixture(TEST_SCOPED_ID, TEST_VERSION, vec![b"payload".to_vec()]);
+        let expected_artifact = fixture.artifact_bytes.clone();
+        let expected_file_name = format!("sample-{}.capsule", TEST_VERSION);
+        let server = spawn_mock_registry(MockScenario::ManifestApiNotFound, fixture).await;
+        let client = reqwest::Client::new();
+        let scoped_ref = test_scoped_ref();
+        let result = install_manifest_delta_path(
+            &client,
+            server.base_url(),
+            &scoped_ref,
+            Some(TEST_VERSION),
+            None,
+            None,
+        )
+        .await
+        .expect("404 manifest endpoint should fall back to direct distribution download");
+
+        match result {
+            DeltaInstallResult::DownloadedArtifact { bytes, file_name } => {
+                assert_eq!(bytes, expected_artifact);
+                assert_eq!(file_name, expected_file_name);
+            }
+            other => panic!("expected downloaded artifact fallback, got {:?}", other),
+        }
+
+        let observations = server.observations().await;
+        assert_eq!(observations.version_resolve_calls, 1);
+        assert_eq!(observations.manifest_calls, 0);
+        assert!(observations.negotiate_calls.is_empty());
+        assert_eq!(observations.distribution_calls, 1);
+        assert_eq!(observations.artifact_calls, 1);
+        assert!(observations.release_calls.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_distribution_artifact_fallback_does_not_send_auth_to_presigned_url() {
+        let _env_lock = acquire_test_env_lock().await;
+        let cas_root = tempfile::tempdir().expect("cas root");
+        let _cas_guard = EnvVarGuard::set(
+            "ATO_CAS_ROOT",
+            Some(cas_root.path().to_string_lossy().as_ref()),
+        );
+        let _token_guard = EnvVarGuard::set("ATO_TOKEN", Some("test-token"));
+
+        let fixture = build_mock_fixture(TEST_SCOPED_ID, TEST_VERSION, vec![b"payload".to_vec()]);
+        let expected_artifact = fixture.artifact_bytes.clone();
+        let server = spawn_mock_registry(MockScenario::ArtifactRejectsAuthorization, fixture).await;
+        let client = reqwest::Client::new();
+        let scoped_ref = test_scoped_ref();
+        let result = install_manifest_delta_path(
+            &client,
+            server.base_url(),
+            &scoped_ref,
+            Some(TEST_VERSION),
+            None,
+            None,
+        )
+        .await
+        .expect("artifact fallback should omit bearer auth for presigned URLs");
+
+        match result {
+            DeltaInstallResult::DownloadedArtifact { bytes, .. } => {
+                assert_eq!(bytes, expected_artifact);
+            }
+            other => panic!("expected downloaded artifact fallback, got {:?}", other),
+        }
+
+        let observations = server.observations().await;
+        assert_eq!(observations.distribution_calls, 1);
+        assert_eq!(observations.artifact_calls, 1);
     }
 
     #[tokio::test(flavor = "current_thread")]

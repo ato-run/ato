@@ -6,9 +6,9 @@ use tracing::debug;
 use crate::manifest;
 use crate::orchestration;
 use crate::types::{
-    CapsuleManifest, Mount, NamedTarget, OrchestrationPlan, ResolvedService,
-    ResolvedServiceNetwork, ResolvedServiceRuntime, ResolvedTargetRuntime, ServiceConnectionInfo,
-    ServiceSpec,
+    CapsuleManifest, ExternalInjectionSpec, Mount, NamedTarget, OrchestrationPlan, ReadinessProbe,
+    ResolvedService, ResolvedServiceNetwork, ResolvedServiceRuntime, ResolvedTargetRuntime,
+    ServiceConnectionInfo, ServiceSpec,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +104,12 @@ pub fn route_manifest_with_state_overrides(
 }
 
 impl ManifestData {
+    pub fn with_selected_target(&self, selected_target: impl Into<String>) -> Self {
+        let mut cloned = self.clone();
+        cloned.selected_target = selected_target.into();
+        cloned
+    }
+
     pub fn execution_entrypoint(&self) -> Option<String> {
         self.get_str(&["targets", &self.selected_target, "entrypoint"])
     }
@@ -114,6 +120,14 @@ impl ManifestData {
 
     pub fn execution_driver(&self) -> Option<String> {
         self.get_str(&["targets", &self.selected_target, "driver"])
+    }
+
+    pub fn execution_run_command(&self) -> Option<String> {
+        self.get_str(&["targets", &self.selected_target, "run_command"])
+    }
+
+    pub fn execution_package_type(&self) -> Option<String> {
+        self.get_str(&["targets", &self.selected_target, "package_type"])
     }
 
     pub fn execution_runtime_version(&self) -> Option<String> {
@@ -167,6 +181,75 @@ impl ManifestData {
         }
 
         ordered
+    }
+
+    pub fn execution_working_directory(&self) -> PathBuf {
+        self.execution_working_dir()
+            .map(|value| self.manifest_dir.join(value))
+            .unwrap_or_else(|| self.manifest_dir.clone())
+    }
+
+    pub fn target_package_dependencies(&self, target_label: &str) -> Vec<String> {
+        self.get_array(&["targets", target_label, "package_dependencies"])
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn selected_target_package_order(&self) -> Result<Vec<String>> {
+        let targets = self
+            .get_table(&["targets"])
+            .ok_or_else(|| anyhow!("Missing required [targets] table"))?;
+
+        let mut closure = HashSet::new();
+        let mut stack = vec![self.selected_target.clone()];
+        while let Some(target) = stack.pop() {
+            if !closure.insert(target.clone()) {
+                continue;
+            }
+            for dependency in self.target_package_dependencies(&target) {
+                if !targets.contains_key(&dependency) {
+                    return Err(anyhow!(
+                        "Target '{}' depends on unknown workspace package '{}'",
+                        target,
+                        dependency
+                    ));
+                }
+                stack.push(dependency);
+            }
+        }
+
+        let dependencies = closure
+            .iter()
+            .map(|target| (target.clone(), self.target_package_dependencies(target)))
+            .collect::<HashMap<_, _>>();
+        orchestration::startup_order_from_dependencies(&dependencies)
+    }
+
+    pub fn selected_target_external_injection(&self) -> HashMap<String, ExternalInjectionSpec> {
+        self.manifest
+            .get("targets")
+            .and_then(|targets| targets.get(&self.selected_target))
+            .cloned()
+            .and_then(|value| value.try_into::<NamedTarget>().ok())
+            .map(|target| target.external_injection)
+            .unwrap_or_default()
+    }
+
+    pub fn selected_target_readiness_probe(&self) -> Option<ReadinessProbe> {
+        self.manifest
+            .get("targets")
+            .and_then(|targets| targets.get(&self.selected_target))
+            .cloned()
+            .and_then(|value| value.try_into::<NamedTarget>().ok())
+            .and_then(|target| target.readiness_probe)
     }
 
     pub fn services(&self) -> HashMap<String, ServiceSpec> {
@@ -437,6 +520,11 @@ impl ManifestData {
 
     pub fn execution_working_dir(&self) -> Option<String> {
         self.target_working_dir(&self.selected_target)
+    }
+
+    pub fn build_lifecycle_build(&self) -> Option<String> {
+        self.get_str(&["targets", &self.selected_target, "build_command"])
+            .or_else(|| self.get_str(&["build", "lifecycle", "build"]))
     }
 
     pub fn execution_preference(&self) -> Option<Vec<RuntimeKind>> {
@@ -806,6 +894,53 @@ target = "db"
                 .target_for_service("main")
                 .expect("main target"),
             Some("web".to_string())
+        );
+    }
+
+    #[test]
+    fn v03_selected_target_package_order_respects_workspace_dependencies() {
+        let dir = write_manifest(
+            r#"
+schema_version = "0.3"
+name = "workspace-demo"
+
+[packages.web]
+type = "app"
+runtime = "source/node"
+run = "pnpm --filter web start"
+
+    [packages.web.dependencies]
+    api = "workspace:api"
+    ui = "workspace:ui"
+
+[packages.api]
+type = "app"
+runtime = "source/node"
+run = "pnpm --filter api start"
+
+    [packages.api.dependencies]
+    ui = "workspace:ui"
+
+[packages.ui]
+type = "library"
+runtime = "source/node"
+build = "pnpm --filter ui build"
+"#,
+        );
+
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            Some("web"),
+        )
+        .expect("route manifest");
+
+        assert_eq!(
+            decision
+                .plan
+                .selected_target_package_order()
+                .expect("package order"),
+            vec!["ui".to_string(), "api".to_string(), "web".to_string()]
         );
     }
 
