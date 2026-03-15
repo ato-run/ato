@@ -3,10 +3,14 @@
 //! Implements the "Everything is a Capsule" paradigm for Gumball v0.3.0.
 //! Supports both TOML (human-authored) and JSON (machine-generated) formats.
 
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
+use toml::value::Table;
+use url::form_urlencoded;
+use walkdir::WalkDir;
 
 use super::error::CapsuleError;
 use super::utils::parse_memory_string;
@@ -21,6 +25,8 @@ pub enum CapsuleType {
     Inference,
     /// Utility tool (RAG, code interpreter, etc.)
     Tool,
+    /// Reusable build-only package in schema v0.3.
+    Library,
     /// Application (agent, workflow, etc.)
     #[default]
     App,
@@ -537,7 +543,1570 @@ fn default_schema_version() -> String {
 }
 
 fn is_supported_schema_version(value: &str) -> bool {
-    matches!(value.trim(), "0.2" | "1")
+    matches!(value.trim(), "0.2" | "0.3" | "1")
+}
+
+fn is_v03_schema(raw: &toml::Value) -> bool {
+    raw.get("schema_version")
+        .and_then(toml::Value::as_str)
+        .map(|value| value.trim() == "0.3")
+        .unwrap_or(false)
+}
+
+fn normalize_v03_capsule_type(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn shallow_merge_v03_tables(defaults: &Table, package: &Table) -> Table {
+    let mut merged = defaults.clone();
+    for (key, value) in package {
+        match (merged.get_mut(key), value) {
+            (Some(toml::Value::Table(base)), toml::Value::Table(overlay)) => {
+                for (child_key, child_value) in overlay {
+                    base.insert(child_key.clone(), child_value.clone());
+                }
+            }
+            _ => {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    merged
+}
+
+fn normalize_v03_runtime_selector(value: &str) -> (String, Option<String>) {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "web/static" => ("web".to_string(), Some("static".to_string())),
+        "web/node" | "source/node" => ("source".to_string(), Some("node".to_string())),
+        "web/deno" | "source/deno" => ("source".to_string(), Some("deno".to_string())),
+        "web/python" | "source/python" => ("source".to_string(), Some("python".to_string())),
+        "source/native" => ("source".to_string(), Some("native".to_string())),
+        "source/go" => ("source".to_string(), Some("native".to_string())),
+        "source" | "web" | "oci" | "wasm" => (normalized, None),
+        other => {
+            if let Some((runtime, driver)) = other.split_once('/') {
+                let runtime = runtime.trim();
+                let driver = driver.trim();
+                let runtime = if runtime == "web" && driver != "static" {
+                    "source"
+                } else {
+                    runtime
+                };
+                let driver = (!driver.is_empty()).then(|| driver.to_string());
+                (runtime.to_string(), driver)
+            } else {
+                (other.to_string(), None)
+            }
+        }
+    }
+}
+
+fn tokenize_v03_run_command(value: &str) -> Vec<String> {
+    shell_words::split(value).unwrap_or_else(|_| vec![value.to_string()])
+}
+
+fn infer_v03_language_from_driver(driver: Option<&str>) -> Option<String> {
+    match driver.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(driver) if matches!(driver.as_str(), "node" | "python" | "deno" | "bun") => {
+            Some(driver)
+        }
+        _ => None,
+    }
+}
+
+fn split_v03_run_command(driver: Option<&str>, run_command: &str) -> (String, Option<Vec<String>>) {
+    let tokens = tokenize_v03_run_command(run_command);
+    if tokens.is_empty() {
+        return (run_command.to_string(), None);
+    }
+
+    let normalized_driver = driver.map(|value| value.trim().to_ascii_lowercase());
+    let first = tokens[0].trim().to_ascii_lowercase();
+
+    let runtime_exec = match normalized_driver.as_deref() {
+        Some("node") if matches!(first.as_str(), "node" | "nodejs") => Some("node"),
+        Some("python") if matches!(first.as_str(), "python" | "python3" | "py") => Some("python"),
+        Some("deno") if first == "deno" => Some("deno"),
+        Some("native") if matches!(first.as_str(), "cargo" | "go") => Some("native"),
+        _ => None,
+    };
+
+    if runtime_exec.is_none() {
+        return (run_command.to_string(), None);
+    }
+
+    let entrypoint_index = match runtime_exec {
+        Some("node") | Some("python") => tokens
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find_map(|(index, token)| (!token.starts_with('-')).then_some(index)),
+        Some("deno") => {
+            let mut index = 1;
+            while index < tokens.len() {
+                let token = tokens[index].as_str();
+                if token == "run" {
+                    index += 1;
+                    continue;
+                }
+                if token.starts_with('-') {
+                    index += 1;
+                    continue;
+                }
+                break;
+            }
+            (index < tokens.len()).then_some(index)
+        }
+        Some("native") => match first.as_str() {
+            "go" => tokens
+                .iter()
+                .enumerate()
+                .skip(1)
+                .find_map(|(index, token)| {
+                    (token == "run")
+                        .then_some(index + 1)
+                        .filter(|next_index| *next_index < tokens.len())
+                })
+                .or_else(|| (tokens.len() > 1).then_some(1)),
+            _ => None,
+        },
+        _ => None,
+    };
+
+    let Some(entrypoint_index) = entrypoint_index else {
+        return (run_command.to_string(), None);
+    };
+
+    let entrypoint = tokens[entrypoint_index].clone();
+    (entrypoint, Some(tokens))
+}
+
+fn apply_v03_readiness_probe(target_table: &mut Table, readiness_probe: toml::Value) {
+    match readiness_probe {
+        toml::Value::String(value) => {
+            let mut probe = Table::new();
+            probe.insert("http_get".to_string(), toml::Value::String(value.clone()));
+            probe.insert("port".to_string(), toml::Value::String("PORT".to_string()));
+            target_table.insert("readiness_probe".to_string(), toml::Value::Table(probe));
+            target_table.insert("health_check".to_string(), toml::Value::String(value));
+        }
+        toml::Value::Table(probe_table) => {
+            let mut normalized_probe = Table::new();
+            if let Some(http_get) = probe_table
+                .get("http_get")
+                .and_then(toml::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                normalized_probe.insert(
+                    "http_get".to_string(),
+                    toml::Value::String(http_get.to_string()),
+                );
+                target_table.insert(
+                    "health_check".to_string(),
+                    toml::Value::String(http_get.to_string()),
+                );
+            } else if probe_table
+                .get("type")
+                .and_then(toml::Value::as_str)
+                .map(|value| value.eq_ignore_ascii_case("http"))
+                .unwrap_or(false)
+            {
+                if let Some(target) = probe_table
+                    .get("target")
+                    .and_then(toml::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    normalized_probe.insert(
+                        "http_get".to_string(),
+                        toml::Value::String(target.to_string()),
+                    );
+                    target_table.insert(
+                        "health_check".to_string(),
+                        toml::Value::String(target.to_string()),
+                    );
+                }
+            }
+            if let Some(tcp_connect) = probe_table
+                .get("tcp_connect")
+                .and_then(toml::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                normalized_probe.insert(
+                    "tcp_connect".to_string(),
+                    toml::Value::String(tcp_connect.to_string()),
+                );
+            }
+            if let Some(port) = probe_table
+                .get("port")
+                .and_then(toml::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                normalized_probe.insert("port".to_string(), toml::Value::String(port.to_string()));
+            } else {
+                normalized_probe
+                    .insert("port".to_string(), toml::Value::String("PORT".to_string()));
+            }
+            if !normalized_probe.is_empty() {
+                target_table.insert(
+                    "readiness_probe".to_string(),
+                    toml::Value::Table(normalized_probe),
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalize_v03_target_table(table: &Table) -> Table {
+    let mut target_table = Table::new();
+
+    if let Some(package_type) = table.get("type").and_then(toml::Value::as_str) {
+        target_table.insert(
+            "package_type".to_string(),
+            toml::Value::String(normalize_v03_capsule_type(package_type)),
+        );
+    }
+
+    if let Some(runtime_selector) = table
+        .get("runtime")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let (runtime, driver) = normalize_v03_runtime_selector(runtime_selector);
+        target_table.insert("runtime".to_string(), toml::Value::String(runtime));
+        if let Some(driver) = driver {
+            target_table.insert("driver".to_string(), toml::Value::String(driver));
+        }
+    }
+
+    if let Some(run_command) = table
+        .get("run")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        target_table.insert(
+            "run_command".to_string(),
+            toml::Value::String(run_command.to_string()),
+        );
+        let normalized_driver = target_table
+            .get("driver")
+            .and_then(toml::Value::as_str)
+            .map(|value| value.to_string());
+        let (entrypoint, cmd) = split_v03_run_command(normalized_driver.as_deref(), run_command);
+        target_table.insert("entrypoint".to_string(), toml::Value::String(entrypoint));
+        if let Some(cmd) = cmd {
+            target_table.insert(
+                "cmd".to_string(),
+                toml::Value::Array(cmd.into_iter().map(toml::Value::String).collect()),
+            );
+        }
+        if let Some(language) = infer_v03_language_from_driver(normalized_driver.as_deref()) {
+            target_table
+                .entry("language".to_string())
+                .or_insert_with(|| toml::Value::String(language));
+        }
+    }
+
+    if let Some(build_command) = table
+        .get("build")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        target_table.insert(
+            "build_command".to_string(),
+            toml::Value::String(build_command.to_string()),
+        );
+    }
+
+    if let Some(port) = table.get("port").cloned() {
+        target_table.insert("port".to_string(), port);
+    }
+    if let Some(required_env) = table.get("required_env").cloned() {
+        target_table.insert("required_env".to_string(), required_env);
+    }
+    if let Some(runtime_version) = table.get("runtime_version").cloned() {
+        target_table.insert("runtime_version".to_string(), runtime_version);
+    }
+    if let Some(runtime_tools) = table.get("runtime_tools").cloned() {
+        target_table.insert("runtime_tools".to_string(), runtime_tools);
+    }
+    if let Some(readiness_probe) = table.get("readiness_probe").cloned() {
+        apply_v03_readiness_probe(&mut target_table, readiness_probe);
+    }
+
+    target_table
+}
+
+#[derive(Debug, Clone)]
+struct V03WorkspaceTarget {
+    label: String,
+    target_table: Table,
+}
+
+#[derive(Debug, Clone, Default)]
+struct V03WorkspaceContext {
+    package_dirs_by_label: HashMap<String, PathBuf>,
+    labels_by_relative_path: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalCapsuleDependency {
+    pub alias: String,
+    pub source: String,
+    pub source_type: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub injection_bindings: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalInjectionSpec {
+    #[serde(rename = "type")]
+    pub injection_type: String,
+    #[serde(default = "default_external_injection_required")]
+    pub required: bool,
+    #[serde(default)]
+    pub default: Option<String>,
+}
+
+fn default_external_injection_required() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Default)]
+struct V03NormalizedDependencies {
+    workspace_dependencies: Vec<String>,
+    external_dependencies: Vec<ExternalCapsuleDependency>,
+}
+
+fn normalize_workspace_relative_path(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn validate_workspace_relative_reference(
+    package_name: &str,
+    alias: &str,
+    raw: &str,
+) -> Result<String, CapsuleError> {
+    let path = Path::new(raw.trim());
+    if path.is_absolute() {
+        return Err(CapsuleError::ParseError(format!(
+            "schema_version=0.3 packages.{}.dependencies.{} must use a relative workspace path",
+            package_name, alias
+        )));
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(CapsuleError::ParseError(format!(
+            "schema_version=0.3 packages.{}.dependencies.{} must not escape the workspace root",
+            package_name, alias
+        )));
+    }
+
+    let normalized = normalize_workspace_relative_path(path);
+    if normalized.is_empty() {
+        return Err(CapsuleError::ParseError(format!(
+            "schema_version=0.3 packages.{}.dependencies.{} must reference a workspace package or path",
+            package_name, alias
+        )));
+    }
+    Ok(normalized)
+}
+
+fn workspace_members_globset(
+    manifest_path: &Path,
+    members: &[String],
+) -> Result<Option<GlobSet>, CapsuleError> {
+    if members.is_empty() {
+        return Ok(None);
+    }
+
+    let mut builder = GlobSetBuilder::new();
+    for pattern in members {
+        let glob = Glob::new(pattern).map_err(|err| {
+            CapsuleError::ParseError(format!(
+                "schema_version=0.3 workspace.members contains invalid glob '{}': {}",
+                pattern, err
+            ))
+        })?;
+        builder.add(glob);
+    }
+
+    builder.build().map(Some).map_err(|err| {
+        CapsuleError::ParseError(format!(
+            "schema_version=0.3 workspace.members could not build globset for '{}': {}",
+            manifest_path.display(),
+            err
+        ))
+    })
+}
+
+fn discover_v03_workspace_member_dirs(
+    manifest_path: &Path,
+    workspace_members: &[String],
+) -> Result<HashMap<String, PathBuf>, CapsuleError> {
+    let Some(globset) = workspace_members_globset(manifest_path, workspace_members)? else {
+        return Ok(HashMap::new());
+    };
+    let workspace_root = manifest_path.parent().ok_or_else(|| {
+        CapsuleError::ParseError(format!(
+            "manifest path '{}' has no parent directory",
+            manifest_path.display()
+        ))
+    })?;
+
+    let mut discovered = HashMap::new();
+    for entry in WalkDir::new(workspace_root)
+        .min_depth(1)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.file_type().is_dir())
+    {
+        let dir = entry.into_path();
+        if !dir.join("capsule.toml").exists() {
+            continue;
+        }
+
+        let relative = dir.strip_prefix(workspace_root).map_err(|_| {
+            CapsuleError::ParseError(format!(
+                "workspace member '{}' must stay inside '{}'",
+                dir.display(),
+                workspace_root.display()
+            ))
+        })?;
+        if !globset.is_match(relative) {
+            continue;
+        }
+
+        let label = dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                CapsuleError::ParseError(format!(
+                    "workspace member '{}' must have a terminal directory name",
+                    dir.display()
+                ))
+            })?
+            .to_string();
+        if let Some(existing) = discovered.insert(label.clone(), dir.clone()) {
+            return Err(CapsuleError::ParseError(format!(
+                "schema_version=0.3 workspace.members discovered duplicate package label '{}' at '{}' and '{}'",
+                label,
+                existing.display(),
+                dir.display()
+            )));
+        }
+    }
+
+    Ok(discovered)
+}
+
+fn augment_v03_packages_from_members(
+    manifest_path: &Path,
+    packages: &mut Table,
+    member_dirs: &HashMap<String, PathBuf>,
+) -> Result<(), CapsuleError> {
+    let workspace_root = manifest_path.parent().ok_or_else(|| {
+        CapsuleError::ParseError(format!(
+            "manifest path '{}' has no parent directory",
+            manifest_path.display()
+        ))
+    })?;
+
+    for (label, member_dir) in member_dirs {
+        if packages.contains_key(label) {
+            continue;
+        }
+        let member_manifest_path = member_dir.join("capsule.toml");
+        let claimed_by_explicit_package = packages.values().any(|raw_package| {
+            raw_package
+                .as_table()
+                .and_then(|package_table| package_table.get("capsule_path"))
+                .and_then(toml::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .and_then(|capsule_path| {
+                    manifest_path_for_capsule_path(manifest_path, capsule_path).ok()
+                })
+                .map(|path| path == member_manifest_path)
+                .unwrap_or(false)
+        });
+        if claimed_by_explicit_package {
+            continue;
+        }
+
+        let relative = member_dir.strip_prefix(workspace_root).map_err(|_| {
+            CapsuleError::ParseError(format!(
+                "workspace member '{}' must stay inside '{}'",
+                member_dir.display(),
+                workspace_root.display()
+            ))
+        })?;
+        let mut package_table = Table::new();
+        package_table.insert(
+            "capsule_path".to_string(),
+            toml::Value::String(normalize_workspace_relative_path(relative)),
+        );
+        packages.insert(label.clone(), toml::Value::Table(package_table));
+    }
+
+    Ok(())
+}
+
+fn build_v03_workspace_context(
+    manifest_path: &Path,
+    packages: &Table,
+    member_dirs: &HashMap<String, PathBuf>,
+) -> Result<V03WorkspaceContext, CapsuleError> {
+    let workspace_root = manifest_path.parent().ok_or_else(|| {
+        CapsuleError::ParseError(format!(
+            "manifest path '{}' has no parent directory",
+            manifest_path.display()
+        ))
+    })?;
+    let mut context = V03WorkspaceContext::default();
+
+    for (label, raw_package) in packages {
+        let package_table = raw_package.as_table().ok_or_else(|| {
+            CapsuleError::ParseError(format!(
+                "schema_version=0.3 packages.{} must be a TOML table",
+                label
+            ))
+        })?;
+
+        let package_dir = if let Some(capsule_path) = package_table
+            .get("capsule_path")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            manifest_path_for_capsule_path(manifest_path, capsule_path)?
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| workspace_root.to_path_buf())
+        } else if let Some(member_dir) = member_dirs.get(label) {
+            member_dir.clone()
+        } else {
+            workspace_root.to_path_buf()
+        };
+
+        let relative = package_dir.strip_prefix(workspace_root).map_err(|_| {
+            CapsuleError::ParseError(format!(
+                "workspace package '{}' resolved outside workspace root '{}'",
+                label,
+                workspace_root.display()
+            ))
+        })?;
+        let relative = normalize_workspace_relative_path(relative);
+
+        context
+            .package_dirs_by_label
+            .insert(label.clone(), package_dir.clone());
+        if !relative.is_empty() {
+            if let Some(existing) = context
+                .labels_by_relative_path
+                .insert(relative.clone(), label.clone())
+            {
+                if existing != *label {
+                    return Err(CapsuleError::ParseError(format!(
+                        "schema_version=0.3 workspace path '{}' maps to both '{}' and '{}'",
+                        relative, existing, label
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(context)
+}
+
+fn normalize_v03_workspace_dependency(
+    package_name: &str,
+    alias: &str,
+    raw_dependency: &toml::Value,
+    workspace_context: &V03WorkspaceContext,
+) -> Result<String, CapsuleError> {
+    let dependency = raw_dependency.as_str().map(str::trim).ok_or_else(|| {
+        CapsuleError::ParseError(format!(
+            "schema_version=0.3 packages.{}.dependencies.{} must be a string",
+            package_name, alias
+        ))
+    })?;
+
+    if dependency.is_empty() {
+        return Err(CapsuleError::ParseError(format!(
+            "schema_version=0.3 packages.{}.dependencies.{} must not be empty",
+            package_name, alias
+        )));
+    }
+
+    if let Some(target) = dependency.strip_prefix("workspace:") {
+        let target = target.trim();
+        if target.is_empty() {
+            return Err(CapsuleError::ParseError(format!(
+                "schema_version=0.3 packages.{}.dependencies.{} must reference a workspace package",
+                package_name, alias
+            )));
+        }
+        if workspace_context.package_dirs_by_label.contains_key(target) {
+            return Ok(target.to_string());
+        }
+
+        let normalized_path = validate_workspace_relative_reference(package_name, alias, target)?;
+        if let Some(label) = workspace_context
+            .labels_by_relative_path
+            .get(&normalized_path)
+        {
+            return Ok(label.clone());
+        }
+
+        return Err(CapsuleError::ParseError(format!(
+            "schema_version=0.3 packages.{}.dependencies.{} references unknown workspace package/path '{}'",
+            package_name, alias, target
+        )));
+    }
+
+    if dependency.starts_with("capsule://") {
+        return Err(CapsuleError::ParseError(format!(
+            "schema_version=0.3 packages.{}.dependencies.{} external capsule dependencies are not supported yet",
+            package_name, alias
+        )));
+    }
+
+    Err(CapsuleError::ParseError(format!(
+        "schema_version=0.3 packages.{}.dependencies.{} must use workspace: references",
+        package_name, alias
+    )))
+}
+
+fn infer_capsule_dependency_source_type(source: &str) -> Option<&'static str> {
+    let source = source.trim();
+    if source.starts_with("capsule://store/") {
+        Some("store")
+    } else if source.starts_with("capsule://github.com/") {
+        Some("github")
+    } else {
+        None
+    }
+}
+
+fn parse_capsule_dependency_source(
+    package_name: &str,
+    alias: &str,
+    raw_source: &str,
+) -> Result<(String, BTreeMap<String, String>), CapsuleError> {
+    let source = raw_source.trim();
+    let (base_source, query) = source.split_once('?').unwrap_or((source, ""));
+    let mut injection_bindings = BTreeMap::new();
+
+    if !query.is_empty() {
+        for (key, value) in form_urlencoded::parse(query.as_bytes()) {
+            let key = key.trim().to_string();
+            let value = value.trim().to_string();
+            if key.is_empty() || value.is_empty() {
+                return Err(CapsuleError::ParseError(format!(
+                    "schema_version=0.3 packages.{}.dependencies.{} contains an invalid capsule injection query in '{}'",
+                    package_name, alias, raw_source
+                )));
+            }
+            if injection_bindings.insert(key.clone(), value).is_some() {
+                return Err(CapsuleError::ParseError(format!(
+                    "schema_version=0.3 packages.{}.dependencies.{} repeats capsule injection key '{}'",
+                    package_name, alias, key
+                )));
+            }
+        }
+    }
+
+    Ok((base_source.to_string(), injection_bindings))
+}
+
+fn is_valid_external_injection_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+}
+
+fn normalize_external_injection_type(
+    package_name: &str,
+    key: &str,
+    raw_type: &str,
+) -> Result<String, CapsuleError> {
+    let normalized = raw_type.trim().to_ascii_lowercase();
+    if matches!(normalized.as_str(), "file" | "directory" | "string") {
+        Ok(normalized)
+    } else {
+        Err(CapsuleError::ParseError(format!(
+            "schema_version=0.3 packages.{}.external_injection.{} type '{}' is unsupported",
+            package_name, key, raw_type
+        )))
+    }
+}
+
+fn normalize_v03_external_injection_table(
+    package_name: &str,
+    table: &Table,
+) -> Result<Vec<(String, ExternalInjectionSpec)>, CapsuleError> {
+    let Some(raw_external_injection) = table.get("external_injection") else {
+        return Ok(Vec::new());
+    };
+
+    let external_injection_table = raw_external_injection.as_table().ok_or_else(|| {
+        CapsuleError::ParseError(format!(
+            "schema_version=0.3 packages.{}.external_injection must be a TOML table",
+            package_name
+        ))
+    })?;
+
+    let mut contracts = Vec::new();
+    for (key, raw_contract) in external_injection_table {
+        if !is_valid_external_injection_key(key) {
+            return Err(CapsuleError::ParseError(format!(
+                "schema_version=0.3 packages.{}.external_injection key '{}' must be an uppercase shell-safe identifier",
+                package_name, key
+            )));
+        }
+
+        let contract = if let Some(raw_type) = raw_contract.as_str() {
+            ExternalInjectionSpec {
+                injection_type: normalize_external_injection_type(package_name, key, raw_type)?,
+                required: true,
+                default: None,
+            }
+        } else {
+            let contract_table = raw_contract.as_table().ok_or_else(|| {
+                CapsuleError::ParseError(format!(
+                    "schema_version=0.3 packages.{}.external_injection.{} must be a string or table",
+                    package_name, key
+                ))
+            })?;
+            let injection_type = contract_table
+                .get("type")
+                .and_then(toml::Value::as_str)
+                .map(|value| normalize_external_injection_type(package_name, key, value))
+                .transpose()?
+                .ok_or_else(|| {
+                    CapsuleError::ParseError(format!(
+                        "schema_version=0.3 packages.{}.external_injection.{} must include type",
+                        package_name, key
+                    ))
+                })?;
+            let required = contract_table
+                .get("required")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(true);
+            let default = contract_table
+                .get("default")
+                .and_then(toml::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            ExternalInjectionSpec {
+                injection_type,
+                required,
+                default,
+            }
+        };
+
+        contracts.push((key.clone(), contract));
+    }
+
+    Ok(contracts)
+}
+
+fn normalize_v03_external_dependency(
+    package_name: &str,
+    alias: &str,
+    raw_dependency: &toml::Value,
+) -> Result<ExternalCapsuleDependency, CapsuleError> {
+    let (source, source_type, injection_bindings) = if let Some(source) = raw_dependency.as_str() {
+        let (source, injection_bindings) =
+            parse_capsule_dependency_source(package_name, alias, source)?;
+        let source_type = infer_capsule_dependency_source_type(&source).ok_or_else(|| {
+            CapsuleError::ParseError(format!(
+                "schema_version=0.3 packages.{}.dependencies.{} uses unsupported capsule source '{}'",
+                package_name, alias, source
+            ))
+        })?;
+        (source, source_type.to_string(), injection_bindings)
+    } else {
+        let table = raw_dependency.as_table().ok_or_else(|| {
+            CapsuleError::ParseError(format!(
+                "schema_version=0.3 packages.{}.dependencies.{} must be a string or table",
+                package_name, alias
+            ))
+        })?;
+        let raw_source = table
+            .get("source")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                CapsuleError::ParseError(format!(
+                    "schema_version=0.3 packages.{}.dependencies.{} table must include non-empty source",
+                    package_name, alias
+                ))
+            })?;
+        let (source, mut injection_bindings) =
+            parse_capsule_dependency_source(package_name, alias, raw_source)?;
+        let inferred_source_type = infer_capsule_dependency_source_type(&source).ok_or_else(|| {
+            CapsuleError::ParseError(format!(
+                "schema_version=0.3 packages.{}.dependencies.{} uses unsupported capsule source '{}'",
+                package_name, alias, source
+            ))
+        })?;
+        let source_type = table
+            .get("source_type")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(inferred_source_type)
+            .to_ascii_lowercase();
+        if source_type != inferred_source_type {
+            return Err(CapsuleError::ParseError(format!(
+                "schema_version=0.3 packages.{}.dependencies.{} source_type '{}' does not match source '{}'",
+                package_name, alias, source_type, source
+            )));
+        }
+
+        if let Some(raw_bindings) = table.get("injection_bindings") {
+            let binding_table = raw_bindings.as_table().ok_or_else(|| {
+                CapsuleError::ParseError(format!(
+                    "schema_version=0.3 packages.{}.dependencies.{}.injection_bindings must be a table",
+                    package_name, alias
+                ))
+            })?;
+            for (key, value) in binding_table {
+                let value = value.as_str().map(str::trim).filter(|value| !value.is_empty()).ok_or_else(|| {
+                    CapsuleError::ParseError(format!(
+                        "schema_version=0.3 packages.{}.dependencies.{}.injection_bindings.{} must be a non-empty string",
+                        package_name, alias, key
+                    ))
+                })?;
+                if injection_bindings
+                    .insert(key.clone(), value.to_string())
+                    .is_some()
+                {
+                    return Err(CapsuleError::ParseError(format!(
+                        "schema_version=0.3 packages.{}.dependencies.{} repeats capsule injection key '{}'",
+                        package_name, alias, key
+                    )));
+                }
+            }
+        }
+
+        (source, source_type, injection_bindings)
+    };
+
+    Ok(ExternalCapsuleDependency {
+        alias: alias.to_string(),
+        source,
+        source_type,
+        injection_bindings,
+    })
+}
+
+fn normalize_v03_package_dependencies(
+    package_name: &str,
+    table: &Table,
+    workspace_context: &V03WorkspaceContext,
+) -> Result<V03NormalizedDependencies, CapsuleError> {
+    let Some(raw_dependencies) = table.get("dependencies") else {
+        return Ok(V03NormalizedDependencies::default());
+    };
+
+    let dependencies_table = raw_dependencies.as_table().ok_or_else(|| {
+        CapsuleError::ParseError(format!(
+            "schema_version=0.3 packages.{}.dependencies must be a TOML table",
+            package_name
+        ))
+    })?;
+
+    let mut dependencies = V03NormalizedDependencies::default();
+    let mut seen_workspace = HashSet::new();
+    let mut seen_external = HashSet::new();
+    for (alias, raw_dependency) in dependencies_table {
+        let external_source = raw_dependency
+            .as_str()
+            .map(str::trim)
+            .filter(|value| value.starts_with("capsule://"))
+            .map(str::to_string)
+            .or_else(|| {
+                raw_dependency
+                    .as_table()
+                    .and_then(|table| table.get("source"))
+                    .and_then(toml::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| value.starts_with("capsule://"))
+                    .map(str::to_string)
+            });
+
+        if external_source.is_some() {
+            let dependency =
+                normalize_v03_external_dependency(package_name, alias, raw_dependency)?;
+            if seen_external.insert((dependency.alias.clone(), dependency.source.clone())) {
+                dependencies.external_dependencies.push(dependency);
+            }
+            continue;
+        }
+
+        let dependency = normalize_v03_workspace_dependency(
+            package_name,
+            alias,
+            raw_dependency,
+            workspace_context,
+        )?;
+        if seen_workspace.insert(dependency.clone()) {
+            dependencies.workspace_dependencies.push(dependency);
+        }
+    }
+    Ok(dependencies)
+}
+
+fn manifest_path_for_capsule_path(
+    base_manifest_path: &Path,
+    capsule_path: &str,
+) -> Result<PathBuf, CapsuleError> {
+    let base_dir = base_manifest_path.parent().ok_or_else(|| {
+        CapsuleError::ParseError(format!(
+            "manifest path '{}' has no parent directory",
+            base_manifest_path.display()
+        ))
+    })?;
+    let candidate = base_dir.join(capsule_path);
+    let manifest_path = if candidate.is_dir() {
+        candidate.join("capsule.toml")
+    } else {
+        candidate
+    };
+
+    if !manifest_path.exists() {
+        return Err(CapsuleError::ParseError(format!(
+            "schema_version=0.3 capsule_path '{}' does not exist",
+            manifest_path.display()
+        )));
+    }
+    Ok(manifest_path)
+}
+
+fn relative_package_working_dir(
+    root_manifest_path: &Path,
+    package_dir: &Path,
+) -> Result<Option<String>, CapsuleError> {
+    let root_dir = root_manifest_path.parent().ok_or_else(|| {
+        CapsuleError::ParseError(format!(
+            "manifest path '{}' has no parent directory",
+            root_manifest_path.display()
+        ))
+    })?;
+
+    if package_dir == root_dir {
+        return Ok(None);
+    }
+
+    let relative = package_dir.strip_prefix(root_dir).map_err(|_| {
+        CapsuleError::ParseError(format!(
+            "delegated package directory '{}' must stay inside workspace root '{}'",
+            package_dir.display(),
+            root_dir.display()
+        ))
+    })?;
+
+    Ok(Some(relative.to_string_lossy().replace('\\', "/")))
+}
+
+fn normalize_workspace_target_from_package(
+    root_manifest_path: Option<&Path>,
+    package_name: &str,
+    package_table: &Table,
+    package_dir: Option<&Path>,
+    workspace_context: &V03WorkspaceContext,
+) -> Result<V03WorkspaceTarget, CapsuleError> {
+    let mut target_table = normalize_v03_target_table(package_table);
+    let dependencies =
+        normalize_v03_package_dependencies(package_name, package_table, workspace_context)?;
+    let working_dir = match (root_manifest_path, package_dir) {
+        (Some(root_manifest_path), Some(package_dir)) => {
+            relative_package_working_dir(root_manifest_path, package_dir)?
+        }
+        _ => None,
+    };
+
+    if let Some(working_dir) = working_dir.as_ref() {
+        target_table.insert(
+            "working_dir".to_string(),
+            toml::Value::String(working_dir.clone()),
+        );
+    }
+    let external_injection = normalize_v03_external_injection_table(package_name, package_table)?;
+    if !external_injection.is_empty() {
+        let mut table = Table::new();
+        for (key, contract) in external_injection {
+            table.insert(key, toml::Value::try_from(contract).unwrap());
+        }
+        target_table.insert("external_injection".to_string(), toml::Value::Table(table));
+    }
+    if !dependencies.workspace_dependencies.is_empty() {
+        target_table.insert(
+            "package_dependencies".to_string(),
+            toml::Value::Array(
+                dependencies
+                    .workspace_dependencies
+                    .iter()
+                    .cloned()
+                    .map(toml::Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    if !dependencies.external_dependencies.is_empty() {
+        target_table.insert(
+            "external_dependencies".to_string(),
+            toml::Value::Array(
+                dependencies
+                    .external_dependencies
+                    .iter()
+                    .cloned()
+                    .map(|dependency| toml::Value::try_from(dependency).unwrap())
+                    .collect(),
+            ),
+        );
+    }
+
+    Ok(V03WorkspaceTarget {
+        label: package_name.to_string(),
+        target_table,
+    })
+}
+
+fn normalize_v03_single_manifest_target(
+    mut table: Table,
+    root_manifest_path: Option<&Path>,
+    package_manifest_path: Option<&Path>,
+    explicit_label: Option<&str>,
+    workspace_context: &V03WorkspaceContext,
+) -> Result<V03WorkspaceTarget, CapsuleError> {
+    let package_name = explicit_label.map(str::to_string).unwrap_or_else(|| {
+        table
+            .get("default_target")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("app")
+            .to_string()
+    });
+
+    if let Some(capsule_type) = table.get("type").and_then(toml::Value::as_str) {
+        table.insert(
+            "type".to_string(),
+            toml::Value::String(normalize_v03_capsule_type(capsule_type)),
+        );
+    }
+
+    normalize_workspace_target_from_package(
+        root_manifest_path,
+        &package_name,
+        &table,
+        package_manifest_path.and_then(Path::parent),
+        workspace_context,
+    )
+}
+
+fn normalize_legacy_manifest_as_workspace_target(
+    root_manifest_path: &Path,
+    manifest_path: &Path,
+    package_name: &str,
+) -> Result<V03WorkspaceTarget, CapsuleError> {
+    let manifest = CapsuleManifest::load_from_file(manifest_path)?;
+    let target = manifest.resolve_default_target()?;
+    let mut target_table = toml::Value::try_from(target.clone())
+        .map_err(|err| CapsuleError::SerializeError(err.to_string()))?
+        .as_table()
+        .cloned()
+        .ok_or_else(|| {
+            CapsuleError::ParseError(format!(
+                "legacy delegated manifest '{}' did not normalize to a target table",
+                manifest_path.display()
+            ))
+        })?;
+
+    let working_dir = relative_package_working_dir(
+        root_manifest_path,
+        manifest_path.parent().unwrap_or(Path::new(".")),
+    )?;
+    if let Some(working_dir) = working_dir.as_ref() {
+        target_table.insert(
+            "working_dir".to_string(),
+            toml::Value::String(working_dir.clone()),
+        );
+    }
+
+    Ok(V03WorkspaceTarget {
+        label: package_name.to_string(),
+        target_table,
+    })
+}
+
+fn normalize_v03_workspace_targets(
+    root_manifest_path: Option<&Path>,
+    current_manifest_path: Option<&Path>,
+    workspace_defaults: &Table,
+    packages: &Table,
+    workspace_context: &V03WorkspaceContext,
+    visiting: &mut HashSet<PathBuf>,
+) -> Result<Vec<V03WorkspaceTarget>, CapsuleError> {
+    let mut targets = Vec::new();
+
+    for (package_name, raw_package) in packages {
+        let package_table = raw_package.as_table().cloned().ok_or_else(|| {
+            CapsuleError::ParseError(format!(
+                "schema_version=0.3 packages.{} must be a TOML table",
+                package_name
+            ))
+        })?;
+
+        if let Some(capsule_path) = package_table
+            .get("capsule_path")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let current_manifest_path = current_manifest_path.ok_or_else(|| {
+                CapsuleError::ParseError(format!(
+                    "schema_version=0.3 packages.{} capsule_path requires loading from a file path",
+                    package_name
+                ))
+            })?;
+            let delegated_manifest_path =
+                manifest_path_for_capsule_path(current_manifest_path, capsule_path)?;
+            let delegated_canonical = delegated_manifest_path
+                .canonicalize()
+                .unwrap_or_else(|_| delegated_manifest_path.clone());
+            if !visiting.insert(delegated_canonical.clone()) {
+                return Err(CapsuleError::ParseError(format!(
+                    "circular capsule_path delegation detected at '{}'",
+                    delegated_canonical.display()
+                )));
+            }
+
+            let delegated_text = fs::read_to_string(&delegated_manifest_path).map_err(|err| {
+                CapsuleError::ParseError(format!(
+                    "failed to read delegated manifest '{}': {}",
+                    delegated_manifest_path.display(),
+                    err
+                ))
+            })?;
+            let delegated_raw: toml::Value = toml::from_str(&delegated_text).map_err(|err| {
+                CapsuleError::ParseError(format!(
+                    "failed to parse delegated manifest '{}': {}",
+                    delegated_manifest_path.display(),
+                    err
+                ))
+            })?;
+            let delegated_table = delegated_raw.as_table().cloned().ok_or_else(|| {
+                CapsuleError::ParseError(format!(
+                    "delegated manifest '{}' must be a TOML table",
+                    delegated_manifest_path.display()
+                ))
+            })?;
+
+            let delegated_targets = if is_v03_schema(&delegated_raw) {
+                if delegated_table.contains_key("packages") {
+                    let delegated_defaults = delegated_table
+                        .get("workspace")
+                        .and_then(|workspace| workspace.get("defaults"))
+                        .and_then(toml::Value::as_table)
+                        .cloned()
+                        .unwrap_or_default();
+                    let delegated_packages = delegated_table
+                        .get("packages")
+                        .and_then(toml::Value::as_table)
+                        .cloned()
+                        .ok_or_else(|| {
+                            CapsuleError::ParseError(format!(
+                                "schema_version=0.3 delegated manifest '{}' packages must be a TOML table",
+                                delegated_manifest_path.display()
+                            ))
+                        })?;
+                    normalize_v03_workspace_targets(
+                        root_manifest_path,
+                        Some(&delegated_manifest_path),
+                        &delegated_defaults,
+                        &delegated_packages,
+                        workspace_context,
+                        visiting,
+                    )?
+                } else {
+                    vec![normalize_v03_single_manifest_target(
+                        delegated_table,
+                        root_manifest_path,
+                        Some(&delegated_manifest_path),
+                        Some(package_name),
+                        workspace_context,
+                    )?]
+                }
+            } else {
+                vec![normalize_legacy_manifest_as_workspace_target(
+                    root_manifest_path.ok_or_else(|| {
+                        CapsuleError::ParseError(format!(
+                            "schema_version=0.3 packages.{} capsule_path requires a workspace root path",
+                            package_name
+                        ))
+                    })?,
+                    &delegated_manifest_path,
+                    package_name,
+                )?]
+            };
+            visiting.remove(&delegated_canonical);
+            targets.extend(delegated_targets);
+            continue;
+        }
+
+        let merged = shallow_merge_v03_tables(workspace_defaults, &package_table);
+        let package_dir = workspace_context
+            .package_dirs_by_label
+            .get(package_name)
+            .map(PathBuf::as_path);
+        targets.push(normalize_workspace_target_from_package(
+            root_manifest_path,
+            package_name,
+            &merged,
+            package_dir.or_else(|| current_manifest_path.and_then(Path::parent)),
+            workspace_context,
+        )?);
+    }
+
+    Ok(targets)
+}
+
+fn normalize_v03_workspace_manifest_with_path(
+    mut table: Table,
+    manifest_path: Option<&Path>,
+    visiting: &mut HashSet<PathBuf>,
+) -> Result<toml::Value, CapsuleError> {
+    let workspace_config = table
+        .get("workspace")
+        .and_then(toml::Value::as_table)
+        .cloned()
+        .unwrap_or_default();
+    let workspace_defaults = workspace_config
+        .get("defaults")
+        .and_then(toml::Value::as_table)
+        .cloned()
+        .unwrap_or_default();
+    let workspace_members = workspace_config
+        .get("members")
+        .and_then(toml::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut packages = table
+        .remove("packages")
+        .and_then(|value| value.as_table().cloned())
+        .ok_or_else(|| {
+            CapsuleError::ParseError("schema_version=0.3 packages must be a TOML table".to_string())
+        })?;
+    let member_dirs = manifest_path
+        .map(|path| discover_v03_workspace_member_dirs(path, &workspace_members))
+        .transpose()?
+        .unwrap_or_default();
+    if let Some(path) = manifest_path {
+        augment_v03_packages_from_members(path, &mut packages, &member_dirs)?;
+    }
+    let workspace_context = manifest_path
+        .map(|path| build_v03_workspace_context(path, &packages, &member_dirs))
+        .transpose()?
+        .unwrap_or_default();
+
+    let explicit_default_target = table
+        .get("default_target")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+
+    let mut targets_table = Table::new();
+    let mut first_runnable_target: Option<String> = None;
+    let targets = normalize_v03_workspace_targets(
+        manifest_path,
+        manifest_path,
+        &workspace_defaults,
+        &packages,
+        &workspace_context,
+        visiting,
+    )?;
+    for target in targets {
+        let target_table = target.target_table;
+        if first_runnable_target.is_none()
+            && target_table
+                .get("package_type")
+                .and_then(toml::Value::as_str)
+                .map(|value| !value.eq_ignore_ascii_case("library"))
+                .unwrap_or(true)
+        {
+            first_runnable_target = Some(target.label.clone());
+        }
+        if targets_table.contains_key(&target.label) {
+            return Err(CapsuleError::ParseError(format!(
+                "schema_version=0.3 duplicate package name '{}' after capsule_path expansion",
+                target.label
+            )));
+        }
+        targets_table.insert(target.label, toml::Value::Table(target_table));
+    }
+
+    if !table.contains_key("type") {
+        table.insert("type".to_string(), toml::Value::String("app".to_string()));
+    }
+    if !table.contains_key("version") {
+        table.insert(
+            "version".to_string(),
+            toml::Value::String("0.0.0".to_string()),
+        );
+    }
+    table.remove("workspace");
+    table.insert("targets".to_string(), toml::Value::Table(targets_table));
+    table.insert(
+        "default_target".to_string(),
+        toml::Value::String(
+            explicit_default_target
+                .or(first_runnable_target)
+                .unwrap_or_else(|| "app".to_string()),
+        ),
+    );
+
+    Ok(toml::Value::Table(table))
+}
+
+fn normalize_v03_manifest_value_with_path(
+    raw: toml::Value,
+    manifest_path: Option<&Path>,
+    visiting: &mut HashSet<PathBuf>,
+) -> Result<toml::Value, CapsuleError> {
+    if !is_v03_schema(&raw) {
+        return Ok(raw);
+    }
+
+    let mut table = raw.as_table().cloned().ok_or_else(|| {
+        CapsuleError::ParseError("schema_version=0.3 manifest must be a TOML table".to_string())
+    })?;
+
+    if table.contains_key("execution") {
+        return Err(CapsuleError::ParseError(
+            "legacy [execution] section is not supported in schema_version=0.3".to_string(),
+        ));
+    }
+
+    if table.contains_key("packages") {
+        return normalize_v03_workspace_manifest_with_path(table, manifest_path, visiting);
+    }
+
+    if let Some(capsule_type) = table.get("type").and_then(toml::Value::as_str) {
+        table.insert(
+            "type".to_string(),
+            toml::Value::String(normalize_v03_capsule_type(capsule_type)),
+        );
+    }
+
+    let runtime_selector = table
+        .get("runtime")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let run_command = table
+        .get("run")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let build_command = table
+        .get("build")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+
+    if runtime_selector.is_some()
+        || run_command.is_some()
+        || build_command.is_some()
+        || table.contains_key("required_env")
+        || table.contains_key("runtime_version")
+        || table.contains_key("runtime_tools")
+        || table.contains_key("port")
+        || table.contains_key("readiness_probe")
+    {
+        let default_target = table
+            .get("default_target")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("app")
+            .to_string();
+
+        let mut targets_table = table
+            .remove("targets")
+            .and_then(|value| value.as_table().cloned())
+            .unwrap_or_default();
+        let mut target_table = targets_table
+            .remove(&default_target)
+            .and_then(|value| value.as_table().cloned())
+            .unwrap_or_default();
+
+        if let Some(runtime_selector) = runtime_selector.as_deref() {
+            let (runtime, driver) = normalize_v03_runtime_selector(runtime_selector);
+            target_table.insert("runtime".to_string(), toml::Value::String(runtime));
+            if let Some(driver) = driver {
+                target_table.insert("driver".to_string(), toml::Value::String(driver));
+            }
+        }
+
+        if let Some(capsule_type) = table.get("type").and_then(toml::Value::as_str) {
+            target_table.insert(
+                "package_type".to_string(),
+                toml::Value::String(normalize_v03_capsule_type(capsule_type)),
+            );
+        }
+        if let Some(run_command) = run_command.as_ref() {
+            target_table.insert(
+                "run_command".to_string(),
+                toml::Value::String(run_command.clone()),
+            );
+            let normalized_driver = target_table
+                .get("driver")
+                .and_then(toml::Value::as_str)
+                .map(|value| value.to_string());
+            let (entrypoint, cmd) =
+                split_v03_run_command(normalized_driver.as_deref(), run_command);
+            target_table.insert("entrypoint".to_string(), toml::Value::String(entrypoint));
+            if let Some(cmd) = cmd {
+                target_table.insert(
+                    "cmd".to_string(),
+                    toml::Value::Array(cmd.into_iter().map(toml::Value::String).collect()),
+                );
+            }
+            if let Some(language) = infer_v03_language_from_driver(normalized_driver.as_deref()) {
+                target_table
+                    .entry("language".to_string())
+                    .or_insert_with(|| toml::Value::String(language));
+            }
+        }
+        if let Some(build_command) = build_command.as_ref() {
+            target_table.insert(
+                "build_command".to_string(),
+                toml::Value::String(build_command.clone()),
+            );
+        }
+
+        if let Some(port) = table.get("port").cloned() {
+            target_table.insert("port".to_string(), port);
+        }
+        if let Some(required_env) = table.get("required_env").cloned() {
+            target_table.insert("required_env".to_string(), required_env);
+        }
+        if let Some(runtime_version) = table.get("runtime_version").cloned() {
+            target_table.insert("runtime_version".to_string(), runtime_version);
+        }
+        if let Some(runtime_tools) = table.get("runtime_tools").cloned() {
+            target_table.insert("runtime_tools".to_string(), runtime_tools);
+        }
+        if let Some(readiness_probe) = table.get("readiness_probe").cloned() {
+            apply_v03_readiness_probe(&mut target_table, readiness_probe);
+        }
+        let external_injection = normalize_v03_external_injection_table(&default_target, &table)?;
+        if !external_injection.is_empty() {
+            let mut normalized_table = Table::new();
+            for (key, contract) in external_injection {
+                normalized_table.insert(key, toml::Value::try_from(contract).unwrap());
+            }
+            target_table.insert(
+                "external_injection".to_string(),
+                toml::Value::Table(normalized_table),
+            );
+        }
+        let dependencies = normalize_v03_package_dependencies(
+            &default_target,
+            &table,
+            &V03WorkspaceContext::default(),
+        )?;
+        if !dependencies.workspace_dependencies.is_empty() {
+            target_table.insert(
+                "package_dependencies".to_string(),
+                toml::Value::Array(
+                    dependencies
+                        .workspace_dependencies
+                        .into_iter()
+                        .map(toml::Value::String)
+                        .collect(),
+                ),
+            );
+        }
+        if !dependencies.external_dependencies.is_empty() {
+            target_table.insert(
+                "external_dependencies".to_string(),
+                toml::Value::Array(
+                    dependencies
+                        .external_dependencies
+                        .into_iter()
+                        .map(|dependency| toml::Value::try_from(dependency).unwrap())
+                        .collect(),
+                ),
+            );
+        }
+
+        targets_table.insert(default_target.clone(), toml::Value::Table(target_table));
+        table.insert(
+            "default_target".to_string(),
+            toml::Value::String(default_target),
+        );
+        table.insert("targets".to_string(), toml::Value::Table(targets_table));
+
+        table.remove("runtime");
+        table.remove("run");
+        table.remove("port");
+        table.remove("required_env");
+        table.remove("runtime_version");
+        table.remove("runtime_tools");
+        table.remove("readiness_probe");
+
+        if let Some(build_command) = build_command {
+            let mut lifecycle = Table::new();
+            lifecycle.insert("build".to_string(), toml::Value::String(build_command));
+            let mut build = Table::new();
+            build.insert("lifecycle".to_string(), toml::Value::Table(lifecycle));
+            table.insert("build".to_string(), toml::Value::Table(build));
+        }
+    }
+
+    Ok(toml::Value::Table(table))
 }
 
 /// Pre-warmed container pool configuration
@@ -987,6 +2556,34 @@ pub struct NamedTarget {
     /// Optional working directory.
     #[serde(default)]
     pub working_dir: Option<String>,
+
+    /// Package type preserved from schema v0.3 (`app` or `library`).
+    #[serde(default)]
+    pub package_type: Option<String>,
+
+    /// Package-specific build command preserved from schema v0.3.
+    #[serde(default)]
+    pub build_command: Option<String>,
+
+    /// Preserved shell-native run command for schema v0.3.
+    #[serde(default)]
+    pub run_command: Option<String>,
+
+    /// Optional readiness probe for top-level target execution.
+    #[serde(default)]
+    pub readiness_probe: Option<ReadinessProbe>,
+
+    /// v0.3 workspace-local package dependencies flattened to target labels.
+    #[serde(default)]
+    pub package_dependencies: Vec<String>,
+
+    /// v0.3 external capsule dependencies preserved for lockfile resolution.
+    #[serde(default)]
+    pub external_dependencies: Vec<ExternalCapsuleDependency>,
+
+    /// v0.3 external data injection contracts.
+    #[serde(default)]
+    pub external_injection: HashMap<String, ExternalInjectionSpec>,
 }
 
 /// WebAssembly Component Model target configuration
@@ -1118,8 +2715,10 @@ impl TargetsConfig {
 }
 
 impl CapsuleManifest {
-    /// Parse from TOML string
-    pub fn from_toml(content: &str) -> Result<Self, CapsuleError> {
+    fn from_toml_with_path_internal(
+        content: &str,
+        manifest_path: Option<&Path>,
+    ) -> Result<Self, CapsuleError> {
         let raw: toml::Value = toml::from_str(content)
             .map_err(|e| CapsuleError::ParseError(format!("TOML parse error: {}", e)))?;
 
@@ -1129,8 +2728,33 @@ impl CapsuleManifest {
             ));
         }
 
-        toml::from_str(content)
+        let mut visiting = HashSet::new();
+        if let Some(manifest_path) = manifest_path {
+            let canonical = manifest_path
+                .canonicalize()
+                .unwrap_or_else(|_| manifest_path.to_path_buf());
+            visiting.insert(canonical);
+        }
+
+        let normalized = normalize_v03_manifest_value_with_path(raw, manifest_path, &mut visiting)?;
+        let normalized_text = toml::to_string(&normalized)
+            .map_err(|e| CapsuleError::SerializeError(format!("TOML serialize error: {}", e)))?;
+
+        toml::from_str(&normalized_text)
             .map_err(|e| CapsuleError::ParseError(format!("TOML parse error: {}", e)))
+    }
+
+    /// Parse from TOML string
+    pub fn from_toml(content: &str) -> Result<Self, CapsuleError> {
+        Self::from_toml_with_path_internal(content, None)
+    }
+
+    /// Parse from TOML string with file path context for v0.3 delegation.
+    pub fn from_toml_with_path<P: AsRef<Path>>(
+        content: &str,
+        manifest_path: P,
+    ) -> Result<Self, CapsuleError> {
+        Self::from_toml_with_path_internal(content, Some(manifest_path.as_ref()))
     }
 
     /// Parse from JSON string
@@ -1228,11 +2852,11 @@ impl CapsuleManifest {
 
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         match ext {
-            "toml" => Self::from_toml(&content),
+            "toml" => Self::from_toml_with_path(&content, path),
             "json" => Self::from_json(&content),
             _ => {
                 // Try TOML first, then JSON
-                Self::from_toml(&content).or_else(|_| Self::from_json(&content))
+                Self::from_toml_with_path(&content, path).or_else(|_| Self::from_json(&content))
             }
         }
     }
@@ -1263,7 +2887,9 @@ impl CapsuleManifest {
             ));
         }
 
-        // Schema version must be "0.2"
+        let schema_is_v03 = self.schema_version.trim() == "0.3";
+
+        // Schema version must be supported.
         if !is_supported_schema_version(&self.schema_version) {
             errors.push(ValidationError::InvalidSchemaVersion(
                 self.schema_version.clone(),
@@ -1334,6 +2960,8 @@ impl CapsuleManifest {
             errors.push(ValidationError::MissingModelConfig);
         }
 
+        let is_v03_library = schema_is_v03 && self.capsule_type == CapsuleType::Library;
+
         // default_target must point to an existing named target.
         let named_targets = self
             .targets
@@ -1341,10 +2969,10 @@ impl CapsuleManifest {
             .map(|t| t.named_targets())
             .cloned()
             .unwrap_or_default();
-        if self.default_target.trim().is_empty() {
+        if !is_v03_library && self.default_target.trim().is_empty() {
             errors.push(ValidationError::MissingDefaultTarget);
         }
-        if named_targets.is_empty() {
+        if !is_v03_library && named_targets.is_empty() {
             errors.push(ValidationError::MissingTargets);
         } else if !self.default_target.trim().is_empty()
             && !named_targets.contains_key(self.default_target.trim())
@@ -1377,6 +3005,36 @@ impl CapsuleManifest {
         for (label, target) in &named_targets {
             let runtime = target.runtime.trim().to_ascii_lowercase();
             let entrypoint = target.entrypoint.trim();
+            let has_run_command = target
+                .run_command
+                .as_ref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false);
+            let target_is_library = schema_is_v03
+                && target
+                    .package_type
+                    .as_deref()
+                    .map(|value| value.eq_ignore_ascii_case("library"))
+                    .unwrap_or(is_v03_library);
+
+            if target_is_library {
+                if has_run_command
+                    || !entrypoint.is_empty()
+                    || target
+                        .image
+                        .as_deref()
+                        .map(|value| !value.trim().is_empty())
+                        .unwrap_or(false)
+                    || !target.cmd.is_empty()
+                {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "library target '{}' must not define a run command",
+                        label
+                    )));
+                }
+                continue;
+            }
+
             if label.trim().is_empty()
                 || runtime.is_empty()
                 || !matches!(runtime.as_str(), "source" | "wasm" | "oci" | "web")
@@ -1386,19 +3044,21 @@ impl CapsuleManifest {
             }
 
             if runtime == "source" {
-                if entrypoint.is_empty() {
+                if entrypoint.is_empty() && !has_run_command {
                     errors.push(ValidationError::InvalidTarget(label.clone()));
                     continue;
                 }
                 let effective_driver = infer_source_driver(target, entrypoint);
-                if matches!(
-                    effective_driver.as_deref(),
-                    Some("deno") | Some("node") | Some("python")
-                ) && target
-                    .runtime_version
-                    .as_ref()
-                    .map(|v| v.trim().is_empty())
-                    .unwrap_or(true)
+                if !schema_is_v03
+                    && matches!(
+                        effective_driver.as_deref(),
+                        Some("deno") | Some("node") | Some("python")
+                    )
+                    && target
+                        .runtime_version
+                        .as_ref()
+                        .map(|v| v.trim().is_empty())
+                        .unwrap_or(true)
                 {
                     errors.push(ValidationError::MissingRuntimeVersion(
                         label.clone(),
@@ -1472,14 +3132,15 @@ impl CapsuleManifest {
                         ));
                     }
                 } else {
-                    if entrypoint.is_empty() {
+                    if entrypoint.is_empty() && !has_run_command {
                         errors.push(ValidationError::InvalidTarget(label.clone()));
                         continue;
                     }
                     if matches!(
                         normalized_driver.as_deref(),
                         Some("node") | Some("deno") | Some("python")
-                    ) && entrypoint.split_whitespace().count() > 1
+                    ) && !has_run_command
+                        && entrypoint.split_whitespace().count() > 1
                     {
                         errors.push(ValidationError::InvalidWebTarget(
                             label.clone(),
@@ -1497,9 +3158,52 @@ impl CapsuleManifest {
                     errors.push(ValidationError::InvalidTarget(label.clone()));
                     continue;
                 }
-            } else if entrypoint.is_empty() {
+            } else if entrypoint.is_empty() && !has_run_command {
                 errors.push(ValidationError::InvalidTarget(label.clone()));
                 continue;
+            }
+
+            if let Some(probe) = target.readiness_probe.as_ref() {
+                if probe.port.trim().is_empty() {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{}': readiness_probe.port must be a non-empty placeholder name",
+                        label
+                    )));
+                }
+                let has_http_get = probe
+                    .http_get
+                    .as_ref()
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false);
+                let has_tcp_connect = probe
+                    .tcp_connect
+                    .as_ref()
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false);
+                if !has_http_get && !has_tcp_connect {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{}': readiness_probe must define http_get or tcp_connect",
+                        label
+                    )));
+                }
+            }
+
+            for (key, contract) in &target.external_injection {
+                if !is_valid_external_injection_key(key) {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{}': external_injection key '{}' must be an uppercase shell-safe identifier",
+                        label, key
+                    )));
+                }
+                if !matches!(
+                    contract.injection_type.as_str(),
+                    "file" | "directory" | "string"
+                ) {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{}': external_injection.{} type '{}' is unsupported",
+                        label, key, contract.injection_type
+                    )));
+                }
             }
 
             if let Some(driver) = target.driver.as_ref() {
@@ -1521,6 +3225,33 @@ impl CapsuleManifest {
                     ));
                     continue;
                 }
+            }
+        }
+
+        if schema_is_v03 {
+            let package_dependencies = named_targets
+                .iter()
+                .map(|(label, target)| (label.clone(), target.package_dependencies.clone()))
+                .collect::<HashMap<_, _>>();
+
+            for (label, dependencies) in &package_dependencies {
+                for dependency in dependencies {
+                    if dependency == label {
+                        errors.push(ValidationError::InvalidTarget(format!(
+                            "target '{}' must not depend on itself",
+                            label
+                        )));
+                    } else if !named_targets.contains_key(dependency) {
+                        errors.push(ValidationError::InvalidTarget(format!(
+                            "target '{}' depends on unknown workspace package '{}'",
+                            label, dependency
+                        )));
+                    }
+                }
+            }
+
+            if let Err(err) = startup_order_from_dependencies(&package_dependencies) {
+                errors.push(ValidationError::InvalidTarget(err.to_string()));
             }
         }
 
@@ -2170,7 +3901,7 @@ impl std::fmt::Display for ValidationError {
             ValidationError::InvalidSchemaVersion(v) => {
                 write!(
                     f,
-                    "Invalid schema_version '{}', expected '1' or legacy '0.2'",
+                    "Invalid schema_version '{}', expected '1' or legacy '0.2'/'0.3'",
                     v
                 )
             }
@@ -2439,6 +4170,600 @@ quantization = "4bit"
         assert!(errors
             .iter()
             .any(|e| matches!(e, ValidationError::InvalidSchemaVersion(_))));
+    }
+
+    #[test]
+    fn test_from_toml_accepts_v03_single_package_manifest() {
+        let toml = r#"
+schema_version = "0.3"
+name = "v03-demo"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+build = "npm run build"
+run = "npm start"
+port = 3000
+required_env = ["DATABASE_URL"]
+"#;
+
+        let manifest = CapsuleManifest::from_toml(toml).expect("parse v0.3 manifest");
+        assert_eq!(manifest.schema_version, "0.3");
+        assert_eq!(manifest.default_target, "app");
+
+        let target = manifest.resolve_default_target().expect("default target");
+        assert_eq!(target.runtime, "source");
+        assert_eq!(target.driver.as_deref(), Some("node"));
+        assert_eq!(target.entrypoint, "npm start");
+        assert_eq!(target.run_command.as_deref(), Some("npm start"));
+        assert_eq!(target.port, Some(3000));
+        assert_eq!(target.required_env, vec!["DATABASE_URL".to_string()]);
+        assert_eq!(
+            manifest
+                .build
+                .as_ref()
+                .and_then(|build| build.lifecycle.as_ref())
+                .and_then(|lifecycle| lifecycle.build.as_deref()),
+            Some("npm run build")
+        );
+    }
+
+    #[test]
+    fn test_from_toml_splits_v03_node_run_command_into_entrypoint_and_cmd() {
+        let toml = r#"
+schema_version = "0.3"
+name = "json-server"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node src/bin.ts fixtures/db.json"
+"#;
+
+        let manifest = CapsuleManifest::from_toml(toml).expect("parse v0.3 manifest");
+        let target = manifest.resolve_default_target().expect("default target");
+
+        assert_eq!(target.entrypoint, "src/bin.ts");
+        assert_eq!(target.driver.as_deref(), Some("node"));
+        assert_eq!(target.language.as_deref(), Some("node"));
+        assert_eq!(
+            target.run_command.as_deref(),
+            Some("node src/bin.ts fixtures/db.json")
+        );
+        assert_eq!(
+            target.cmd,
+            vec![
+                "node".to_string(),
+                "src/bin.ts".to_string(),
+                "fixtures/db.json".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_from_toml_preserves_v03_readiness_probe_table() {
+        let toml = r#"
+schema_version = "0.3"
+name = "probe-demo"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "npm start -- --port $PORT"
+port = 3000
+readiness_probe = { http_get = "/healthz", port = "PORT" }
+"#;
+
+        let manifest = CapsuleManifest::from_toml(toml).expect("parse v0.3 manifest");
+        let target = manifest.resolve_default_target().expect("default target");
+
+        assert_eq!(
+            target.run_command.as_deref(),
+            Some("npm start -- --port $PORT")
+        );
+        assert_eq!(
+            target
+                .readiness_probe
+                .as_ref()
+                .and_then(|probe| probe.http_get.as_deref()),
+            Some("/healthz")
+        );
+        assert_eq!(
+            target
+                .readiness_probe
+                .as_ref()
+                .map(|probe| probe.port.as_str()),
+            Some("PORT")
+        );
+    }
+
+    #[test]
+    fn test_validate_v03_library_without_run_is_ok() {
+        let toml = r#"
+schema_version = "0.3"
+name = "shared-ui"
+version = "0.1.0"
+type = "library"
+build = "npm run build"
+"#;
+
+        let manifest = CapsuleManifest::from_toml(toml).expect("parse v0.3 library");
+        assert_eq!(manifest.capsule_type, CapsuleType::Library);
+        assert!(manifest.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_v03_library_rejects_run_command() {
+        let toml = r#"
+schema_version = "0.3"
+name = "shared-ui"
+version = "0.1.0"
+type = "library"
+runtime = "source/node"
+run = "npm start"
+"#;
+
+        let manifest = CapsuleManifest::from_toml(toml).expect("parse v0.3 library");
+        let errors = manifest.validate().expect_err("library run must fail");
+        assert!(errors.iter().any(|error| {
+            matches!(error, ValidationError::InvalidTarget(message) if message.contains("must not define a run command"))
+        }));
+    }
+
+    #[test]
+    fn test_from_toml_accepts_v03_workspace_packages_as_named_targets() {
+        let toml = r#"
+schema_version = "0.3"
+name = "workspace-demo"
+
+[workspace]
+members = ["apps/*"]
+
+[workspace.defaults]
+runtime = "source/node"
+required_env = ["DATABASE_URL"]
+
+[packages.web]
+type = "app"
+build = "pnpm --filter web build"
+run = "pnpm --filter web start"
+port = 3000
+
+    [packages.web.dependencies]
+    ui = "workspace:ui"
+
+[packages.ui]
+type = "library"
+build = "pnpm --filter ui build"
+"#;
+
+        let manifest = CapsuleManifest::from_toml(toml).expect("parse v0.3 workspace");
+        assert_eq!(manifest.default_target, "web");
+        assert_eq!(manifest.version, "0.0.0");
+
+        let web = manifest
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.named_target("web"))
+            .expect("web target");
+        assert_eq!(web.package_type.as_deref(), Some("app"));
+        assert_eq!(
+            web.build_command.as_deref(),
+            Some("pnpm --filter web build")
+        );
+        assert_eq!(web.run_command.as_deref(), Some("pnpm --filter web start"));
+        assert_eq!(web.required_env, vec!["DATABASE_URL".to_string()]);
+        assert_eq!(web.package_dependencies, vec!["ui".to_string()]);
+
+        let ui = manifest
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.named_target("ui"))
+            .expect("ui target");
+        assert_eq!(ui.package_type.as_deref(), Some("library"));
+        assert_eq!(ui.build_command.as_deref(), Some("pnpm --filter ui build"));
+    }
+
+    #[test]
+    fn test_validate_v03_workspace_rejects_dependency_cycles() {
+        let toml = r#"
+schema_version = "0.3"
+name = "workspace-demo"
+
+[packages.web]
+type = "app"
+runtime = "source/node"
+run = "pnpm --filter web start"
+
+  [packages.web.dependencies]
+  ui = "workspace:ui"
+
+[packages.ui]
+type = "library"
+runtime = "source/node"
+build = "pnpm --filter ui build"
+
+  [packages.ui.dependencies]
+  web = "workspace:web"
+"#;
+
+        let manifest = CapsuleManifest::from_toml(toml).expect("parse v0.3 workspace");
+        let errors = manifest.validate().expect_err("cycle must fail");
+        assert!(errors.iter().any(|error| {
+            matches!(error, ValidationError::InvalidTarget(message) if message.contains("circular dependency detected"))
+        }));
+    }
+
+    #[test]
+    fn test_load_from_file_supports_v03_capsule_path_single_manifest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root_manifest = tmp.path().join("capsule.toml");
+        let package_dir = tmp.path().join("apps").join("api");
+        fs::create_dir_all(&package_dir).expect("create package dir");
+
+        fs::write(
+            &root_manifest,
+            r#"
+schema_version = "0.3"
+name = "workspace-demo"
+
+[packages.api]
+capsule_path = "./apps/api"
+"#,
+        )
+        .expect("write root manifest");
+
+        fs::write(
+            package_dir.join("capsule.toml"),
+            r#"
+schema_version = "0.3"
+name = "api"
+type = "app"
+runtime = "source/node"
+run = "pnpm start"
+"#,
+        )
+        .expect("write delegated manifest");
+
+        let manifest = CapsuleManifest::load_from_file(&root_manifest).expect("load manifest");
+        let api = manifest
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.named_target("api"))
+            .expect("api target");
+
+        assert_eq!(manifest.default_target, "api");
+        assert_eq!(api.run_command.as_deref(), Some("pnpm start"));
+        assert_eq!(api.working_dir.as_deref(), Some("apps/api"));
+    }
+
+    #[test]
+    fn test_load_from_file_supports_v03_capsule_path_workspace_manifest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root_manifest = tmp.path().join("capsule.toml");
+        let delegated_dir = tmp.path().join("packages").join("shared");
+        fs::create_dir_all(&delegated_dir).expect("create delegated dir");
+
+        fs::write(
+            &root_manifest,
+            r#"
+schema_version = "0.3"
+name = "workspace-demo"
+
+[packages.shared]
+capsule_path = "./packages/shared"
+"#,
+        )
+        .expect("write root manifest");
+
+        fs::write(
+            delegated_dir.join("capsule.toml"),
+            r#"
+schema_version = "0.3"
+name = "shared-workspace"
+
+[packages.ui]
+type = "library"
+runtime = "source/node"
+build = "pnpm --filter ui build"
+
+[packages.web]
+type = "app"
+runtime = "source/node"
+run = "pnpm --filter web start"
+
+  [packages.web.dependencies]
+  ui = "workspace:ui"
+"#,
+        )
+        .expect("write delegated workspace manifest");
+
+        let manifest = CapsuleManifest::load_from_file(&root_manifest).expect("load manifest");
+        let targets = manifest.targets.as_ref().expect("targets");
+        let ui = targets.named_target("ui").expect("ui target");
+        let web = targets.named_target("web").expect("web target");
+
+        assert_eq!(manifest.default_target, "web");
+        assert_eq!(ui.working_dir.as_deref(), Some("packages/shared"));
+        assert_eq!(web.working_dir.as_deref(), Some("packages/shared"));
+        assert_eq!(web.package_dependencies, vec!["ui".to_string()]);
+    }
+
+    #[test]
+    fn test_load_from_file_expands_workspace_members_and_resolves_workspace_path_dependencies() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root_manifest = tmp.path().join("capsule.toml");
+        let web_dir = tmp.path().join("apps").join("web");
+        let ui_dir = tmp.path().join("packages").join("ui");
+        let api_dir = tmp.path().join("apps").join("api_gateway");
+        fs::create_dir_all(&web_dir).expect("create web dir");
+        fs::create_dir_all(&ui_dir).expect("create ui dir");
+        fs::create_dir_all(&api_dir).expect("create api dir");
+
+        fs::write(web_dir.join("capsule.toml"), "name = 'web-marker'\n")
+            .expect("write web marker manifest");
+        fs::write(
+            ui_dir.join("capsule.toml"),
+            r#"
+schema_version = "0.3"
+name = "ui"
+type = "library"
+build = "pnpm --filter ui build"
+"#,
+        )
+        .expect("write ui manifest");
+        fs::write(
+            api_dir.join("capsule.toml"),
+            r#"
+schema_version = "0.3"
+name = "api-gateway"
+type = "app"
+runtime = "source/node"
+run = "pnpm --filter api start"
+"#,
+        )
+        .expect("write api manifest");
+        fs::write(
+            &root_manifest,
+            r#"
+schema_version = "0.3"
+name = "workspace-demo"
+
+[workspace]
+members = ["apps/*", "packages/*"]
+
+[workspace.defaults]
+runtime = "source/node"
+
+[packages.web]
+type = "app"
+run = "pnpm --filter web start"
+
+  [packages.web.dependencies]
+  ui = "workspace:packages/ui"
+
+[packages.api_gateway]
+capsule_path = "./apps/api_gateway"
+"#,
+        )
+        .expect("write root manifest");
+
+        let manifest = CapsuleManifest::load_from_file(&root_manifest).expect("load manifest");
+        let targets = manifest.targets.as_ref().expect("targets");
+        let web = targets.named_target("web").expect("web target");
+        let ui = targets.named_target("ui").expect("ui target");
+        let api = targets
+            .named_target("api_gateway")
+            .expect("api_gateway target");
+
+        assert_eq!(web.working_dir.as_deref(), Some("apps/web"));
+        assert_eq!(web.package_dependencies, vec!["ui".to_string()]);
+        assert_eq!(ui.working_dir.as_deref(), Some("packages/ui"));
+        assert_eq!(api.working_dir.as_deref(), Some("apps/api_gateway"));
+    }
+
+    #[test]
+    fn test_workspace_path_dependency_resolves_to_explicit_package_label() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root_manifest = tmp.path().join("capsule.toml");
+        let ui_dir = tmp.path().join("packages").join("ui");
+        fs::create_dir_all(&ui_dir).expect("create ui dir");
+        fs::write(
+            ui_dir.join("capsule.toml"),
+            r#"
+schema_version = "0.3"
+name = "ui"
+type = "library"
+build = "pnpm --filter ui build"
+"#,
+        )
+        .expect("write ui manifest");
+        fs::write(
+            &root_manifest,
+            r#"
+schema_version = "0.3"
+name = "workspace-demo"
+
+[workspace]
+members = ["packages/*"]
+
+[packages.web]
+type = "app"
+runtime = "source/node"
+run = "pnpm --filter web start"
+
+  [packages.web.dependencies]
+  ui = "workspace:packages/ui"
+
+[packages.shared-ui]
+capsule_path = "./packages/ui"
+"#,
+        )
+        .expect("write root manifest");
+
+        let manifest = CapsuleManifest::load_from_file(&root_manifest).expect("load manifest");
+        let web = manifest
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.named_target("web"))
+            .expect("web target");
+
+        assert_eq!(web.package_dependencies, vec!["shared-ui".to_string()]);
+    }
+
+    #[test]
+    fn test_load_from_file_preserves_external_capsule_dependencies() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = tmp.path().join("capsule.toml");
+        fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.3"
+name = "workspace-demo"
+
+[packages.web]
+type = "app"
+runtime = "source/node"
+run = "node server.js"
+
+  [packages.web.dependencies]
+  auth = "capsule://store/acme/auth-svc"
+"#,
+        )
+        .expect("write manifest");
+
+        let manifest = CapsuleManifest::load_from_file(&manifest_path).expect("load manifest");
+        let web = manifest
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.named_target("web"))
+            .expect("web target");
+
+        assert_eq!(web.external_dependencies.len(), 1);
+        assert_eq!(web.external_dependencies[0].alias, "auth");
+        assert_eq!(
+            web.external_dependencies[0].source,
+            "capsule://store/acme/auth-svc"
+        );
+        assert_eq!(web.external_dependencies[0].source_type, "store");
+    }
+
+    #[test]
+    fn test_load_from_file_preserves_external_capsule_dependency_query_bindings() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = tmp.path().join("capsule.toml");
+        fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.3"
+name = "workspace-demo"
+
+[packages.web]
+type = "app"
+runtime = "source/node"
+run = "npm start"
+
+  [packages.web.dependencies]
+  auth = "capsule://store/acme/auth-svc?MODEL_DIR=https%3A%2F%2Fdata.tld%2Fweights.zip&CONFIG_FILE=file%3A%2F%2F.%2Fconfig.json"
+"#,
+        )
+        .expect("write manifest");
+
+        let manifest = CapsuleManifest::load_from_file(&manifest_path).expect("load manifest");
+        let web = manifest
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.named_target("web"))
+            .expect("web target");
+
+        assert_eq!(web.external_dependencies.len(), 1);
+        assert_eq!(
+            web.external_dependencies[0].source,
+            "capsule://store/acme/auth-svc"
+        );
+        assert_eq!(
+            web.external_dependencies[0]
+                .injection_bindings
+                .get("MODEL_DIR")
+                .map(String::as_str),
+            Some("https://data.tld/weights.zip")
+        );
+        assert_eq!(
+            web.external_dependencies[0]
+                .injection_bindings
+                .get("CONFIG_FILE")
+                .map(String::as_str),
+            Some("file://./config.json")
+        );
+    }
+
+    #[test]
+    fn test_load_from_file_preserves_external_injection_contracts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = tmp.path().join("capsule.toml");
+        fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.3"
+name = "workspace-demo"
+
+[packages.worker]
+type = "app"
+runtime = "source/python"
+run = "python main.py --config $CONFIG_FILE"
+
+  [packages.worker.external_injection]
+  MODEL_DIR = "directory"
+  CONFIG_FILE = { type = "file", required = false, default = "https://example.test/config.json" }
+"#,
+        )
+        .expect("write manifest");
+
+        let manifest = CapsuleManifest::load_from_file(&manifest_path).expect("load manifest");
+        let worker = manifest
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.named_target("worker"))
+            .expect("worker target");
+
+        assert_eq!(
+            worker.external_injection["MODEL_DIR"].injection_type,
+            "directory"
+        );
+        assert!(worker.external_injection["MODEL_DIR"].required);
+        assert_eq!(
+            worker.external_injection["CONFIG_FILE"].injection_type,
+            "file"
+        );
+        assert!(!worker.external_injection["CONFIG_FILE"].required);
+        assert_eq!(
+            worker.external_injection["CONFIG_FILE"].default.as_deref(),
+            Some("https://example.test/config.json")
+        );
+    }
+
+    #[test]
+    fn test_load_from_file_rejects_invalid_external_injection_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = tmp.path().join("capsule.toml");
+        fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.3"
+name = "workspace-demo"
+
+[packages.worker]
+type = "app"
+runtime = "source/python"
+run = "python main.py"
+
+  [packages.worker.external_injection]
+  model_dir = "directory"
+"#,
+        )
+        .expect("write manifest");
+
+        let err = CapsuleManifest::load_from_file(&manifest_path).expect_err("must reject");
+        assert!(err
+            .to_string()
+            .contains("external_injection key 'model_dir'"));
     }
 
     #[test]
