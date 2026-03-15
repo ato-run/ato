@@ -3,12 +3,13 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use capsule_core::lockfile::{CapsuleLock, RuntimeArtifact, RuntimeEntry, ToolArtifact};
+use capsule_core::lockfile::{
+    parse_lockfile_text, resolve_existing_lockfile_path, CapsuleLock, RuntimeArtifact,
+    RuntimeEntry, ToolArtifact, CAPSULE_LOCK_FILE_NAME,
+};
 use capsule_core::router::ManifestData;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
-
-const LOCKFILE_NAME: &str = "capsule.lock";
 
 pub struct RuntimeManager {
     lockfile: CapsuleLock,
@@ -19,13 +20,14 @@ pub struct RuntimeManager {
 
 impl RuntimeManager {
     pub fn for_plan(plan: &ManifestData) -> Result<Self> {
-        let lockfile_path = plan.manifest_dir.join(LOCKFILE_NAME);
+        let lockfile_path = resolve_existing_lockfile_path(&plan.manifest_dir)
+            .unwrap_or_else(|| plan.manifest_dir.join(CAPSULE_LOCK_FILE_NAME));
         let lockfile_raw = match fs::read_to_string(&lockfile_path) {
             Ok(raw) => raw,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 bail!(
                     "Missing {} in capsule payload ({}). Rebuild and republish this capsule with the latest ato-cli.",
-                    LOCKFILE_NAME,
+                    CAPSULE_LOCK_FILE_NAME,
                     lockfile_path.display()
                 );
             }
@@ -34,7 +36,7 @@ impl RuntimeManager {
                     .with_context(|| format!("Failed to read {}", lockfile_path.display()));
             }
         };
-        let lockfile: CapsuleLock = toml::from_str(&lockfile_raw)
+        let lockfile: CapsuleLock = parse_lockfile_text(&lockfile_raw, &lockfile_path)
             .with_context(|| format!("Failed to parse {}", lockfile_path.display()))?;
         let (target_triple, platform_key) = current_platform_keys()?;
         let cache_root = runtime_cache_root()?;
@@ -52,7 +54,7 @@ impl RuntimeManager {
             .runtimes
             .as_ref()
             .and_then(|r| r.deno.as_ref())
-            .ok_or_else(|| anyhow::anyhow!("capsule.lock is missing runtimes.deno entry"))?;
+            .ok_or_else(|| anyhow::anyhow!("capsule.lock.json is missing runtimes.deno entry"))?;
         self.ensure_runtime_entry(
             "deno",
             runtime,
@@ -67,7 +69,7 @@ impl RuntimeManager {
             .runtimes
             .as_ref()
             .and_then(|r| r.node.as_ref())
-            .ok_or_else(|| anyhow::anyhow!("capsule.lock is missing runtimes.node entry"))?;
+            .ok_or_else(|| anyhow::anyhow!("capsule.lock.json is missing runtimes.node entry"))?;
         self.ensure_runtime_entry(
             "node",
             runtime,
@@ -83,7 +85,7 @@ impl RuntimeManager {
             .runtimes
             .as_ref()
             .and_then(|r| r.python.as_ref())
-            .ok_or_else(|| anyhow::anyhow!("capsule.lock is missing runtimes.python entry"))?;
+            .ok_or_else(|| anyhow::anyhow!("capsule.lock.json is missing runtimes.python entry"))?;
         self.ensure_runtime_entry(
             "python",
             runtime,
@@ -103,7 +105,7 @@ impl RuntimeManager {
                 select_tool_artifact(&uv.targets, &self.target_triple, &self.platform_key)
             })
             .ok_or_else(|| {
-                anyhow::anyhow!("capsule.lock is missing tools.uv entry for this platform")
+                anyhow::anyhow!("capsule.lock.json is missing tools.uv entry for this platform")
             })?;
         self.ensure_tool_artifact("uv", artifact, &["uv", "uv.exe"])
     }
@@ -118,7 +120,7 @@ impl RuntimeManager {
         if let Some(required) = required_version {
             if required != runtime.version {
                 bail!(
-                    "capsule.lock {} version mismatch (manifest={}, lock={})",
+                    "capsule.lock.json {} version mismatch (manifest={}, lock={})",
                     runtime_name,
                     required,
                     runtime.version
@@ -129,7 +131,7 @@ impl RuntimeManager {
             select_runtime_artifact(&runtime.targets, &self.target_triple, &self.platform_key)
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "capsule.lock is missing {} runtime artifact for this platform",
+                        "capsule.lock.json is missing {} runtime artifact for this platform",
                         runtime_name
                     )
                 })?;
@@ -142,14 +144,12 @@ impl RuntimeManager {
         artifact: &ToolArtifact,
         candidates: &[&str],
     ) -> Result<PathBuf> {
-        let version = artifact
-            .version
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("capsule.lock {} tool version is missing", tool_name))?;
-        let sha256 = artifact
-            .sha256
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("capsule.lock {} tool sha256 is missing", tool_name))?;
+        let version = artifact.version.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("capsule.lock.json {} tool version is missing", tool_name)
+        })?;
+        let sha256 = artifact.sha256.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("capsule.lock.json {} tool sha256 is missing", tool_name)
+        })?;
         self.install_archive(tool_name, version, &artifact.url, sha256, candidates)
     }
 

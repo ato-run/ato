@@ -9,6 +9,7 @@ use zstd::stream::write::Encoder as ZstdEncoder;
 
 use crate::error::{CapsuleError, Result};
 use crate::lockfile;
+use crate::lockfile::{CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME};
 use crate::manifest;
 use crate::packers::payload::{
     build_distribution_manifest, normalize_relative_utf8_path, reconstruct_from_chunks,
@@ -133,12 +134,12 @@ pub fn pack(
     )?;
     let packaged_lockfile_bytes =
         crate::lockfile::render_lockfile_for_manifest(&lockfile_path, &distribution_manifest)?;
-    let packaged_lockfile_path = temp_dir.path().join("capsule.lock");
+    let packaged_lockfile_path = temp_dir.path().join(CAPSULE_LOCK_FILE_NAME);
     fs::write(&packaged_lockfile_path, packaged_lockfile_bytes).map_err(CapsuleError::Io)?;
     append_regular_file_normalized(
         &mut outer,
         &packaged_lockfile_path,
-        "capsule.lock",
+        CAPSULE_LOCK_FILE_NAME,
         reproducible_mtime_epoch(),
     )?;
 
@@ -384,7 +385,8 @@ fn should_skip_entry(rel: &Path, is_dir: bool) -> bool {
     if matches!(
         file_name.as_str(),
         "capsule.toml"
-            | "capsule.lock"
+            | CAPSULE_LOCK_FILE_NAME
+            | LEGACY_CAPSULE_LOCK_FILE_NAME
             | "config.json"
             | "signature.json"
             | "sbom.spdx.json"
