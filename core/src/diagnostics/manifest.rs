@@ -7,13 +7,8 @@ pub fn validate_manifest_for_build(
     manifest_path: &Path,
     target_label: &str,
 ) -> Result<(), CapsuleError> {
-    let raw_text = std::fs::read_to_string(manifest_path).map_err(CapsuleError::Io)?;
-    let raw: toml::Value = toml::from_str(&raw_text)
-        .map_err(|e| manifest_err(manifest_path, format!("Failed to parse manifest TOML: {e}")))?;
-    let manifest_dir = manifest_path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let loaded = crate::manifest::load_manifest(manifest_path)?;
+    let raw = loaded.raw;
     validate_pack_config(manifest_path, &raw)?;
 
     let target = raw
@@ -22,6 +17,17 @@ pub fn validate_manifest_for_build(
         .and_then(|t| t.get(target_label))
         .and_then(|v| v.as_table())
         .ok_or_else(|| manifest_err(manifest_path, format!("targets.{target_label} is missing")))?;
+    let manifest_dir = manifest_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let target_manifest_dir = target
+        .get("working_dir")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| manifest_dir.join(value))
+        .unwrap_or_else(|| manifest_dir.clone());
 
     let runtime = target
         .get("runtime")
@@ -113,6 +119,14 @@ pub fn validate_manifest_for_build(
 
             validate_web_services_mode(manifest_path, target_label, &raw, &runtime_tools)?;
         } else {
+            let run_command = target
+                .get("run_command")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            if run_command.is_some() && matches!(driver.as_str(), "node" | "deno" | "python") {
+                return Ok(());
+            }
             let entrypoint = entrypoint.ok_or_else(|| {
                 manifest_err(
                     manifest_path,
@@ -138,8 +152,8 @@ pub fn validate_manifest_for_build(
                 ));
             }
 
-            let path_in_root = manifest_dir.join(clean_entrypoint);
-            let path_in_source = manifest_dir.join("source").join(clean_entrypoint);
+            let path_in_root = target_manifest_dir.join(clean_entrypoint);
+            let path_in_source = target_manifest_dir.join("source").join(clean_entrypoint);
             match driver.as_str() {
                 "static" => {
                     if !path_in_root.exists() || !path_in_root.is_dir() {
@@ -188,8 +202,8 @@ pub fn validate_manifest_for_build(
         })?;
         let clean_entrypoint = entrypoint.trim_start_matches("./");
         if clean_entrypoint.contains('/') || clean_entrypoint.contains('\\') {
-            let path_in_root = manifest_dir.join(clean_entrypoint);
-            let path_in_source = manifest_dir.join("source").join(clean_entrypoint);
+            let path_in_root = target_manifest_dir.join(clean_entrypoint);
+            let path_in_source = target_manifest_dir.join("source").join(clean_entrypoint);
             if !path_in_root.exists() && !path_in_source.exists() {
                 return Err(manifest_err(
                     manifest_path,

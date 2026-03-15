@@ -106,7 +106,7 @@ pub async fn execute_with_client<C: OciRuntimeClient>(
                 wait_until_ready(dependency, &mut running, &mut ready, client).await?;
             }
 
-            let env = build_service_env(plan, service, &running)?;
+            let env = build_service_env(plan, service, &running, launch_ctx)?;
             preflight_required_envs(service, &env)?;
             let running_service = start_service(
                 plan,
@@ -404,8 +404,12 @@ fn build_service_env(
     plan: &ManifestData,
     service: &ResolvedService,
     running: &HashMap<String, RunningService>,
+    launch_ctx: &RuntimeLaunchContext,
 ) -> Result<HashMap<String, String>> {
-    let mut env = runtime_overrides::merged_env(service.runtime.runtime().env.clone());
+    let mut env = launch_ctx.merged_env();
+    env.extend(runtime_overrides::merged_env(
+        service.runtime.runtime().env.clone(),
+    ));
 
     if let Some(port) = service.runtime.runtime().port {
         let port = if service.name == "main" {

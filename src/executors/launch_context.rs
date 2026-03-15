@@ -6,10 +6,18 @@ use anyhow::Result;
 
 use crate::ipc::inject::IpcContext;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InjectedMount {
+    pub source: PathBuf,
+    pub target: String,
+    pub readonly: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeLaunchContext {
     ipc: Option<IpcContext>,
     injected_env: HashMap<String, String>,
+    injected_mounts: Vec<InjectedMount>,
 }
 
 impl RuntimeLaunchContext {
@@ -22,6 +30,7 @@ impl RuntimeLaunchContext {
             Self {
                 ipc: Some(ipc),
                 injected_env: HashMap::new(),
+                injected_mounts: Vec::new(),
             }
         } else {
             Self::empty()
@@ -30,6 +39,11 @@ impl RuntimeLaunchContext {
 
     pub fn with_injected_env(mut self, env: HashMap<String, String>) -> Self {
         self.injected_env.extend(env);
+        self
+    }
+
+    pub fn with_injected_mounts(mut self, mounts: Vec<InjectedMount>) -> Self {
+        self.injected_mounts.extend(mounts);
         self
     }
 
@@ -47,6 +61,10 @@ impl RuntimeLaunchContext {
 
     pub fn injected_env(&self) -> &HashMap<String, String> {
         &self.injected_env
+    }
+
+    pub fn injected_mounts(&self) -> &[InjectedMount] {
+        &self.injected_mounts
     }
 
     pub fn merged_env(&self) -> HashMap<String, String> {
@@ -91,6 +109,7 @@ impl RuntimeLaunchContext {
 mod tests {
     use super::RuntimeLaunchContext;
     use crate::ipc::inject::IpcContext;
+    use std::path::PathBuf;
 
     #[test]
     fn empty_context_does_not_apply_env() {
@@ -139,5 +158,16 @@ mod tests {
 
         assert_eq!(value, "127.0.0.1");
         assert_eq!(ctx.env_permission_keys(), vec!["ATO_SERVICE_DB_HOST"]);
+    }
+
+    #[test]
+    fn injected_mounts_are_preserved() {
+        let mount = super::InjectedMount {
+            source: PathBuf::from("/tmp/model"),
+            target: "/var/run/ato/injected/MODEL_DIR".to_string(),
+            readonly: true,
+        };
+        let ctx = RuntimeLaunchContext::empty().with_injected_mounts(vec![mount.clone()]);
+        assert_eq!(ctx.injected_mounts(), &[mount]);
     }
 }
