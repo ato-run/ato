@@ -984,9 +984,9 @@ entrypoint = "main.ts"
     }
 
     #[test]
-    fn build_upload_endpoint_preserves_dock_path_prefix() {
+    fn build_upload_endpoint_uses_canonical_api_base() {
         let endpoint = build_upload_endpoint(
-            "https://ato.run/d/koh0920",
+            "https://api.ato.run",
             "koh0920",
             "demo-app",
             "1.0.0",
@@ -994,8 +994,9 @@ entrypoint = "main.ts"
             false,
         );
 
-        assert!(endpoint
-            .starts_with("https://ato.run/d/koh0920/v1/local/capsules/koh0920/demo-app/1.0.0"));
+        assert!(
+            endpoint.starts_with("https://api.ato.run/v1/local/capsules/koh0920/demo-app/1.0.0")
+        );
     }
 
     #[test]

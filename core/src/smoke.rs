@@ -1,14 +1,26 @@
 use std::collections::HashMap;
+use std::fmt;
+use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use crate::error::CapsuleError;
 
 const DEFAULT_STARTUP_TIMEOUT_MS: u64 = 2000;
 const PORT_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
 const PORT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+const STDERR_TAIL_MAX_BYTES: usize = 8192;
+const STDERR_CAPTURE_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(unix)]
+const PROCESS_TERMINATE_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmokeOptions {
@@ -23,6 +35,79 @@ pub struct SmokeSummary {
     pub checked_commands: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmokeFailureClass {
+    SpawnFailed,
+    ProcessExitedEarly,
+    StartupTimeout,
+    RequiredPortUnavailable,
+    RequiredPortUnreachable,
+    CheckCommandFailed,
+    ManifestInvalid,
+    ConfigInvalid,
+}
+
+impl SmokeFailureClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SpawnFailed => "spawn_failed",
+            Self::ProcessExitedEarly => "process_exited_early",
+            Self::StartupTimeout => "startup_timeout",
+            Self::RequiredPortUnavailable => "required_port_unavailable",
+            Self::RequiredPortUnreachable => "required_port_unreachable",
+            Self::CheckCommandFailed => "check_command_failed",
+            Self::ManifestInvalid => "manifest_invalid",
+            Self::ConfigInvalid => "config_invalid",
+        }
+    }
+}
+
+impl fmt::Display for SmokeFailureClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmokeFailureReport {
+    pub class: SmokeFailureClass,
+    pub message: String,
+    pub stderr_tail: String,
+    pub exit_status: Option<i32>,
+}
+
+impl SmokeFailureReport {
+    fn new(
+        class: SmokeFailureClass,
+        message: impl Into<String>,
+        stderr_tail: impl Into<String>,
+        exit_status: Option<i32>,
+    ) -> Self {
+        Self {
+            class,
+            message: message.into(),
+            stderr_tail: trim_utf8_by_bytes(&stderr_tail.into(), STDERR_TAIL_MAX_BYTES),
+            exit_status,
+        }
+    }
+}
+
+impl fmt::Display for SmokeFailureReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.stderr_tail.trim().is_empty() {
+            write!(f, "{} ({})", self.message, self.class)
+        } else {
+            write!(
+                f,
+                "{} ({})\nstderr tail:\n{}",
+                self.message, self.class, self.stderr_tail
+            )
+        }
+    }
+}
+
+impl std::error::Error for SmokeFailureReport {}
+
 #[derive(Debug, Clone)]
 struct MainService {
     executable: String,
@@ -33,39 +118,169 @@ struct MainService {
     health_port: Option<String>,
 }
 
+struct StderrTailCapture {
+    buffer: Arc<Mutex<Vec<u8>>>,
+    done_rx: Receiver<()>,
+    join_handle: Option<JoinHandle<()>>,
+}
+
+impl StderrTailCapture {
+    fn from_child(child: &mut Child) -> Option<Self> {
+        let reader = child.stderr.take()?;
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let buffer_ref = Arc::clone(&buffer);
+        let (done_tx, done_rx) = mpsc::channel();
+        let join_handle = std::thread::spawn(move || {
+            let mut reader = reader;
+            let mut chunk = [0_u8; 1024];
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(len) => {
+                        if let Ok(mut guard) = buffer_ref.lock() {
+                            guard.extend_from_slice(&chunk[..len]);
+                            if guard.len() > STDERR_TAIL_MAX_BYTES {
+                                let overflow = guard.len() - STDERR_TAIL_MAX_BYTES;
+                                guard.drain(..overflow);
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = done_tx.send(());
+        });
+        Some(Self {
+            buffer,
+            done_rx,
+            join_handle: Some(join_handle),
+        })
+    }
+
+    fn snapshot(&self) -> String {
+        let bytes = self
+            .buffer
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        String::from_utf8_lossy(&bytes).trim().to_string()
+    }
+
+    fn finish(&mut self) -> String {
+        let completed = self
+            .done_rx
+            .recv_timeout(STDERR_CAPTURE_WAIT_TIMEOUT)
+            .is_ok();
+        if completed {
+            if let Some(handle) = self.join_handle.take() {
+                let _ = handle.join();
+            }
+        } else {
+            let _ = self.join_handle.take();
+        }
+        self.snapshot()
+    }
+}
+
 pub fn run_capsule_smoke(
     capsule_path: &Path,
     target_label: &str,
-) -> Result<SmokeSummary, CapsuleError> {
-    let extract_dir = tempfile::tempdir().map_err(CapsuleError::Io)?;
-    extract_capsule(capsule_path, extract_dir.path())?;
+) -> std::result::Result<SmokeSummary, SmokeFailureReport> {
+    let extract_dir = tempfile::tempdir().map_err(|err| {
+        SmokeFailureReport::new(
+            SmokeFailureClass::ConfigInvalid,
+            format!("failed to create smoke tempdir: {err}"),
+            "",
+            None,
+        )
+    })?;
+    extract_capsule(capsule_path, extract_dir.path()).map_err(|err| {
+        SmokeFailureReport::new(SmokeFailureClass::ConfigInvalid, err.to_string(), "", None)
+    })?;
 
     let manifest_path = extract_dir.path().join("capsule.toml");
-    let manifest = std::fs::read_to_string(&manifest_path).map_err(CapsuleError::Io)?;
-    let manifest_raw: toml::Value = toml::from_str(&manifest)
-        .map_err(|e| CapsuleError::Pack(format!("manifest parse failed: {e}")))?;
+    let manifest = std::fs::read_to_string(&manifest_path).map_err(|err| {
+        SmokeFailureReport::new(
+            SmokeFailureClass::ManifestInvalid,
+            format!("failed to read extracted manifest: {err}"),
+            "",
+            None,
+        )
+    })?;
+    let manifest_raw: toml::Value = toml::from_str(&manifest).map_err(|err| {
+        SmokeFailureReport::new(
+            SmokeFailureClass::ManifestInvalid,
+            format!("manifest parse failed: {err}"),
+            "",
+            None,
+        )
+    })?;
 
-    let options = parse_smoke_options(&manifest_raw, target_label)?;
-    let service = load_main_service(extract_dir.path())?;
-    let required_port = resolve_required_port(&manifest_raw, target_label, &service)?;
-    ensure_required_port_is_free_before_start(required_port)?;
+    let options = parse_smoke_options(&manifest_raw, target_label).map_err(|err| {
+        SmokeFailureReport::new(
+            SmokeFailureClass::ManifestInvalid,
+            err.to_string(),
+            "",
+            None,
+        )
+    })?;
+    let service = load_main_service(extract_dir.path()).map_err(|err| {
+        SmokeFailureReport::new(SmokeFailureClass::ConfigInvalid, err.to_string(), "", None)
+    })?;
+    let required_port =
+        resolve_required_port(&manifest_raw, target_label, &service).map_err(|err| {
+            SmokeFailureReport::new(
+                SmokeFailureClass::ManifestInvalid,
+                err.to_string(),
+                "",
+                None,
+            )
+        })?;
+    ensure_required_port_is_free_before_start(required_port).map_err(|err| {
+        SmokeFailureReport::new(
+            SmokeFailureClass::RequiredPortUnavailable,
+            err.to_string(),
+            "",
+            None,
+        )
+    })?;
 
-    let mut child = spawn_main_service(extract_dir.path(), &service)?;
+    let mut child = spawn_main_service(extract_dir.path(), &service).map_err(|err| {
+        SmokeFailureReport::new(SmokeFailureClass::SpawnFailed, err.to_string(), "", None)
+    })?;
+    let mut stderr_capture = StderrTailCapture::from_child(&mut child);
     let startup_timeout = Duration::from_millis(options.startup_timeout_ms);
     let deadline = Instant::now() + startup_timeout;
 
     loop {
-        if let Some(status) = child.try_wait().map_err(CapsuleError::Io)? {
+        if let Some(status) = child.try_wait().map_err(|err| {
+            SmokeFailureReport::new(
+                SmokeFailureClass::ProcessExitedEarly,
+                format!("failed to poll smoke process: {err}"),
+                capture_current_stderr(&stderr_capture),
+                None,
+            )
+        })? {
             if status.success() && required_port.is_none() && options.check_commands.is_empty() {
+                if let Some(capture) = stderr_capture.as_mut() {
+                    let _ = capture.finish();
+                }
                 return Ok(SmokeSummary {
                     startup_timeout_ms: options.startup_timeout_ms,
                     required_port,
                     checked_commands: options.check_commands.len(),
                 });
             }
-            return Err(CapsuleError::Pack(format!(
-                "Smoke failed: process exited before startup timeout (status: {status})"
-            )));
+
+            let stderr_tail = finish_capture(&mut stderr_capture);
+            return Err(SmokeFailureReport::new(
+                SmokeFailureClass::ProcessExitedEarly,
+                format!("Smoke failed: process exited before startup timeout (status: {status})"),
+                stderr_tail,
+                status.code(),
+            ));
         }
 
         if Instant::now() >= deadline {
@@ -75,12 +290,50 @@ pub fn run_capsule_smoke(
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    if let Some(port) = required_port {
-        wait_for_required_port_with_retry(&mut child, port, PORT_RETRY_TIMEOUT)?;
+    if required_port.is_none() && options.check_commands.is_empty() {
+        kill_child(&mut child).map_err(|err| {
+            SmokeFailureReport::new(
+                SmokeFailureClass::StartupTimeout,
+                err.to_string(),
+                capture_current_stderr(&stderr_capture),
+                None,
+            )
+        })?;
+        let _ = finish_capture(&mut stderr_capture);
+        return Ok(SmokeSummary {
+            startup_timeout_ms: options.startup_timeout_ms,
+            required_port,
+            checked_commands: 0,
+        });
     }
 
-    run_check_commands(extract_dir.path(), &service, &options)?;
-    kill_child(&mut child)?;
+    if let Some(port) = required_port {
+        if let Err(mut report) =
+            wait_for_required_port_with_retry(&mut child, port, PORT_RETRY_TIMEOUT, &stderr_capture)
+        {
+            let _ = kill_child(&mut child);
+            report.stderr_tail =
+                combine_stderr(report.stderr_tail, finish_capture(&mut stderr_capture));
+            return Err(report);
+        }
+    }
+
+    if let Err(mut report) = run_check_commands(extract_dir.path(), &service, &options) {
+        let _ = kill_child(&mut child);
+        report.stderr_tail =
+            combine_stderr(finish_capture(&mut stderr_capture), report.stderr_tail);
+        return Err(report);
+    }
+
+    kill_child(&mut child).map_err(|err| {
+        SmokeFailureReport::new(
+            SmokeFailureClass::StartupTimeout,
+            err.to_string(),
+            capture_current_stderr(&stderr_capture),
+            None,
+        )
+    })?;
+    let _ = finish_capture(&mut stderr_capture);
 
     Ok(SmokeSummary {
         startup_timeout_ms: options.startup_timeout_ms,
@@ -279,7 +532,7 @@ fn resolve_required_port(
     Ok(None)
 }
 
-fn spawn_main_service(root: &Path, service: &MainService) -> Result<Child, CapsuleError> {
+fn spawn_main_service(root: &Path, service: &MainService) -> std::io::Result<Child> {
     let cwd_path = resolve_path(root, &service.cwd);
     let executable = resolve_path_with_cwd(root, &cwd_path, &service.executable);
     let mut cmd = Command::new(&executable);
@@ -292,7 +545,7 @@ fn spawn_main_service(root: &Path, service: &MainService) -> Result<Child, Capsu
     cmd.current_dir(&cwd_path);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
-    cmd.stderr(Stdio::null());
+    cmd.stderr(Stdio::piped());
 
     for (k, v) in &service.env {
         cmd.env(k, resolve_env_value(root, v));
@@ -301,11 +554,24 @@ fn spawn_main_service(root: &Path, service: &MainService) -> Result<Child, Capsu
         cmd.env(k, v.to_string());
     }
 
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
     cmd.spawn().map_err(|e| {
-        CapsuleError::Pack(format!(
-            "failed to start process '{}' for smoke: {e}",
-            executable.display()
-        ))
+        std::io::Error::new(
+            e.kind(),
+            format!(
+                "failed to start process '{}' for smoke: {e}",
+                executable.display()
+            ),
+        )
     })
 }
 
@@ -313,7 +579,7 @@ fn run_check_commands(
     root: &Path,
     service: &MainService,
     options: &SmokeOptions,
-) -> Result<(), CapsuleError> {
+) -> std::result::Result<(), SmokeFailureReport> {
     if options.check_commands.is_empty() {
         return Ok(());
     }
@@ -321,13 +587,19 @@ fn run_check_commands(
     let cwd_path = resolve_path(root, &service.cwd);
     for command in &options.check_commands {
         let parts = shell_words::split(command).map_err(|e| {
-            CapsuleError::Pack(format!(
-                "invalid smoke.check_commands entry '{command}': {e}"
-            ))
+            SmokeFailureReport::new(
+                SmokeFailureClass::CheckCommandFailed,
+                format!("invalid smoke.check_commands entry '{command}': {e}"),
+                "",
+                None,
+            )
         })?;
         if parts.is_empty() {
-            return Err(CapsuleError::Pack(
-                "smoke command must not be empty".to_string(),
+            return Err(SmokeFailureReport::new(
+                SmokeFailureClass::CheckCommandFailed,
+                "smoke command must not be empty",
+                "",
+                None,
             ));
         }
 
@@ -336,7 +608,7 @@ fn run_check_commands(
         cmd.current_dir(&cwd_path);
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::null());
+        cmd.stderr(Stdio::piped());
         for (k, v) in &service.env {
             cmd.env(k, resolve_env_value(root, v));
         }
@@ -344,13 +616,24 @@ fn run_check_commands(
             cmd.env(k, v.to_string());
         }
 
-        let status = cmd.status().map_err(|e| {
-            CapsuleError::Pack(format!("failed to execute smoke command '{command}': {e}"))
+        let output = cmd.output().map_err(|e| {
+            SmokeFailureReport::new(
+                SmokeFailureClass::CheckCommandFailed,
+                format!("failed to execute smoke command '{command}': {e}"),
+                "",
+                None,
+            )
         })?;
-        if !status.success() {
-            return Err(CapsuleError::Pack(format!(
-                "smoke command failed (status {status}): {command}"
-            )));
+        if !output.status.success() {
+            return Err(SmokeFailureReport::new(
+                SmokeFailureClass::CheckCommandFailed,
+                format!(
+                    "smoke command failed (status {}): {}",
+                    output.status, command
+                ),
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                output.status.code(),
+            ));
         }
     }
 
@@ -358,6 +641,31 @@ fn run_check_commands(
 }
 
 fn kill_child(child: &mut Child) -> Result<(), CapsuleError> {
+    #[cfg(unix)]
+    {
+        let pgid = child.id() as i32;
+        unsafe {
+            libc::killpg(pgid, libc::SIGTERM);
+        }
+        let terminate_deadline = Instant::now() + PROCESS_TERMINATE_TIMEOUT;
+        while Instant::now() < terminate_deadline {
+            if child.try_wait().map_err(CapsuleError::Io)?.is_some() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        unsafe {
+            libc::killpg(pgid, libc::SIGKILL);
+        }
+        let kill_deadline = Instant::now() + PROCESS_TERMINATE_TIMEOUT;
+        while Instant::now() < kill_deadline {
+            if child.try_wait().map_err(CapsuleError::Io)?.is_some() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     let _ = child.kill();
     let _ = child.wait();
     Ok(())
@@ -386,13 +694,26 @@ fn wait_for_required_port_with_retry(
     child: &mut Child,
     port: u16,
     timeout: Duration,
-) -> Result<(), CapsuleError> {
+    stderr_capture: &Option<StderrTailCapture>,
+) -> std::result::Result<(), SmokeFailureReport> {
     let start = Instant::now();
     loop {
-        if let Some(status) = child.try_wait().map_err(CapsuleError::Io)? {
-            return Err(CapsuleError::Pack(format!(
-                "Smoke failed: process exited while waiting for port {port} (status: {status})"
-            )));
+        if let Some(status) = child.try_wait().map_err(|err| {
+            SmokeFailureReport::new(
+                SmokeFailureClass::RequiredPortUnreachable,
+                format!("failed to poll smoke process while waiting for port {port}: {err}"),
+                capture_current_stderr(stderr_capture),
+                None,
+            )
+        })? {
+            return Err(SmokeFailureReport::new(
+                SmokeFailureClass::ProcessExitedEarly,
+                format!(
+                    "Smoke failed: process exited while waiting for port {port} (status: {status})"
+                ),
+                capture_current_stderr(stderr_capture),
+                status.code(),
+            ));
         }
 
         if can_connect_localhost(port) {
@@ -400,10 +721,15 @@ fn wait_for_required_port_with_retry(
         }
 
         if start.elapsed() > timeout {
-            return Err(CapsuleError::Pack(format!(
-                "Port {port} did not open within {} seconds. Check logs.",
-                timeout.as_secs()
-            )));
+            return Err(SmokeFailureReport::new(
+                SmokeFailureClass::RequiredPortUnreachable,
+                format!(
+                    "Port {port} did not open within {} seconds. Check logs.",
+                    timeout.as_secs()
+                ),
+                capture_current_stderr(stderr_capture),
+                None,
+            ));
         }
 
         std::thread::sleep(PORT_RETRY_INTERVAL);
@@ -462,6 +788,46 @@ fn resolve_env_value(root: &Path, raw: &str) -> String {
     trimmed.to_string()
 }
 
+fn trim_utf8_by_bytes(value: &str, max_bytes: usize) -> String {
+    let encoded = value.as_bytes();
+    if encoded.len() <= max_bytes {
+        return value.trim().to_string();
+    }
+
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].trim().to_string()
+}
+
+fn capture_current_stderr(stderr_capture: &Option<StderrTailCapture>) -> String {
+    stderr_capture
+        .as_ref()
+        .map(|capture| capture.snapshot())
+        .unwrap_or_default()
+}
+
+fn finish_capture(stderr_capture: &mut Option<StderrTailCapture>) -> String {
+    stderr_capture
+        .as_mut()
+        .map(|capture| capture.finish())
+        .unwrap_or_default()
+}
+
+fn combine_stderr(primary: String, secondary: String) -> String {
+    match (primary.trim(), secondary.trim()) {
+        ("", "") => String::new(),
+        ("", _) => trim_utf8_by_bytes(&secondary, STDERR_TAIL_MAX_BYTES),
+        (_, "") => trim_utf8_by_bytes(&primary, STDERR_TAIL_MAX_BYTES),
+        _ if primary == secondary => trim_utf8_by_bytes(&primary, STDERR_TAIL_MAX_BYTES),
+        _ => trim_utf8_by_bytes(
+            &format!("{}\n{}", primary.trim_end(), secondary.trim_start()),
+            STDERR_TAIL_MAX_BYTES,
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,5 +873,51 @@ startup_timeout_ms = 0
 
         let err = ensure_required_port_is_free_before_start(Some(port)).unwrap_err();
         assert!(err.to_string().contains("already in use"));
+    }
+
+    #[test]
+    fn trims_utf8_tail_without_splitting_codepoints() {
+        let repeated = "あ".repeat(5000);
+        let trimmed = trim_utf8_by_bytes(&repeated, 8192);
+        assert!(trimmed.len() < repeated.len());
+        assert!(trimmed.is_char_boundary(trimmed.len()));
+    }
+
+    #[test]
+    fn combines_unique_stderr_blocks() {
+        let combined = combine_stderr("main stderr".to_string(), "check stderr".to_string());
+        assert!(combined.contains("main stderr"));
+        assert!(combined.contains("check stderr"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_child_terminates_process_group_and_releases_stderr() {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("(sleep 30) >&2 & exec sleep 30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().expect("spawn smoke fixture");
+
+        let mut capture = StderrTailCapture::from_child(&mut child);
+        kill_child(&mut child).expect("kill child process group");
+
+        let started = Instant::now();
+        let _ = finish_capture(&mut capture);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "stderr capture should finish without hanging"
+        );
     }
 }
