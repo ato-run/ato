@@ -32,6 +32,7 @@ const SMART_DEFAULT_EXCLUDES: &[&str] = &[
     "**/*.sig",
     "capsule.toml",
     "config.json",
+    "capsule.lock.json",
     "capsule.lock",
     "signature.json",
     "payload.v3.manifest.json",
