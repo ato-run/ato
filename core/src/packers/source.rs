@@ -363,7 +363,8 @@ run = "deno task start"
         )
         .expect("write manifest");
 
-        validate_entrypoint(&manifest_path, temp.path()).expect("run-command manifest should validate");
+        validate_entrypoint(&manifest_path, temp.path())
+            .expect("run-command manifest should validate");
     }
 
     #[test]

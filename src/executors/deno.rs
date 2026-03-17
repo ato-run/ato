@@ -12,6 +12,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use serde_json::Value;
 
 use capsule_core::execution_plan::canonical::{
     compute_policy_segment_hash, compute_provisioning_policy_hash,
@@ -37,6 +38,13 @@ struct DenoRuntimeEnvPaths {
     deno_dir: PathBuf,
 }
 
+struct DenoLaunchSpec {
+    runtime_dir: PathBuf,
+    entrypoint: String,
+    explicit_deno_flags: Vec<String>,
+    explicit_script_args: Vec<String>,
+}
+
 struct PreparedCommand {
     cmd: Command,
     #[cfg(unix)]
@@ -55,23 +63,18 @@ pub fn execute(
     }
 
     let deno_bin = runtime_manager::ensure_deno_binary(plan)?;
-
-    let entrypoint = plan
-        .execution_entrypoint()
-        .filter(|v| !v.trim().is_empty())
-        .ok_or_else(|| {
-            AtoExecutionError::policy_violation("source/deno target requires entrypoint")
-        })?;
-
-    let runtime_dir = resolve_deno_runtime_dir(&plan.manifest_dir, &entrypoint);
-    let skip_lock = manifest_cmd_contains(plan, "--no-lock");
+    let launch_spec = resolve_deno_launch_spec(plan)?;
+    let skip_lock = launch_spec
+        .explicit_deno_flags
+        .iter()
+        .any(|arg| arg == "--no-lock");
     if skip_lock {
-        disable_runtime_lockfile(runtime_dir.as_path())?;
+        disable_runtime_lockfile(launch_spec.runtime_dir.as_path())?;
     }
     let lock = if skip_lock {
         None
     } else {
-        resolve_dependency_lock(&plan.manifest_dir, &runtime_dir)
+        resolve_dependency_lock(&plan.manifest_dir, &launch_spec.runtime_dir)
     };
     if !skip_lock && lock.is_none() {
         return Err(AtoExecutionError::lock_incomplete(
@@ -83,9 +86,9 @@ pub fn execute(
 
     run_provisioning(
         &deno_bin,
-        plan,
-        &runtime_dir,
-        &entrypoint,
+        &launch_spec.runtime_dir,
+        &launch_spec.entrypoint,
+        &launch_spec.explicit_deno_flags,
         lock.as_ref(),
         launch_ctx,
     )?;
@@ -93,8 +96,10 @@ pub fn execute(
         &deno_bin,
         plan,
         execution_plan,
-        &runtime_dir,
-        &entrypoint,
+        &launch_spec.runtime_dir,
+        &launch_spec.entrypoint,
+        &launch_spec.explicit_deno_flags,
+        &launch_spec.explicit_script_args,
         lock.as_ref(),
         launch_ctx,
         dangerously_skip_permissions,
@@ -123,21 +128,18 @@ pub fn spawn(
     }
 
     let deno_bin = runtime_manager::ensure_deno_binary(plan)?;
-    let entrypoint = plan
-        .execution_entrypoint()
-        .filter(|v| !v.trim().is_empty())
-        .ok_or_else(|| {
-            AtoExecutionError::policy_violation("source/deno target requires entrypoint")
-        })?;
-    let runtime_dir = resolve_deno_runtime_dir(&plan.manifest_dir, &entrypoint);
-    let skip_lock = manifest_cmd_contains(plan, "--no-lock");
+    let launch_spec = resolve_deno_launch_spec(plan)?;
+    let skip_lock = launch_spec
+        .explicit_deno_flags
+        .iter()
+        .any(|arg| arg == "--no-lock");
     if skip_lock {
-        disable_runtime_lockfile(runtime_dir.as_path())?;
+        disable_runtime_lockfile(launch_spec.runtime_dir.as_path())?;
     }
     let lock = if skip_lock {
         None
     } else {
-        resolve_dependency_lock(&plan.manifest_dir, &runtime_dir)
+        resolve_dependency_lock(&plan.manifest_dir, &launch_spec.runtime_dir)
     };
     if !skip_lock && lock.is_none() {
         return Err(AtoExecutionError::lock_incomplete(
@@ -149,9 +151,9 @@ pub fn spawn(
 
     run_provisioning(
         &deno_bin,
-        plan,
-        &runtime_dir,
-        &entrypoint,
+        &launch_spec.runtime_dir,
+        &launch_spec.entrypoint,
+        &launch_spec.explicit_deno_flags,
         lock.as_ref(),
         launch_ctx,
     )?;
@@ -160,8 +162,10 @@ pub fn spawn(
         &deno_bin,
         plan,
         execution_plan,
-        &runtime_dir,
-        &entrypoint,
+        &launch_spec.runtime_dir,
+        &launch_spec.entrypoint,
+        &launch_spec.explicit_deno_flags,
+        &launch_spec.explicit_script_args,
         lock.as_ref(),
         launch_ctx,
         dangerously_skip_permissions,
@@ -179,16 +183,15 @@ pub fn spawn(
 
 fn run_provisioning(
     deno_bin: &Path,
-    plan: &ManifestData,
     runtime_dir: &Path,
     entrypoint: &str,
+    explicit_deno_flags: &[String],
     lock: Option<&DependencyLock>,
     launch_ctx: &RuntimeLaunchContext,
 ) -> Result<()> {
     let mut cmd = Command::new(deno_bin);
     let runtime_env_paths = ensure_deno_runtime_env_paths(runtime_dir)?;
     cmd.current_dir(runtime_dir).arg("cache");
-    let (explicit_deno_flags, _) = selected_deno_cmd_parts(plan, entrypoint);
     if explicit_deno_flags.iter().any(|arg| arg == "--no-lock") {
         cmd.arg("--no-lock");
     }
@@ -243,6 +246,8 @@ fn build_runtime_command(
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     entrypoint: &str,
+    explicit_deno_flags: &[String],
+    explicit_script_args: &[String],
     lock: Option<&DependencyLock>,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -250,9 +255,8 @@ fn build_runtime_command(
     let mut cmd = Command::new(deno_bin);
     let runtime_env_paths = ensure_deno_runtime_env_paths(runtime_dir)?;
     let execution_env = runtime_overrides::merged_env(plan.execution_env());
-    let (explicit_deno_flags, explicit_script_args) = selected_deno_cmd_parts(plan, entrypoint);
     cmd.current_dir(runtime_dir).arg("run").arg("--no-prompt");
-    for arg in &explicit_deno_flags {
+    for arg in explicit_deno_flags {
         if arg == "-A" || arg == "--allow-all" || arg == "run" {
             continue;
         }
@@ -289,7 +293,9 @@ fn build_runtime_command(
                 .arg("--allow-sys")
                 .arg("--allow-ffi");
         } else {
-            if !execution_plan.runtime.policy.network.allow_hosts.is_empty() {
+            if !execution_plan.runtime.policy.network.allow_hosts.is_empty()
+                && !has_explicit_deno_permission(explicit_deno_flags, "--allow-net")
+            {
                 cmd.arg(format!(
                     "--allow-net={}",
                     execution_plan.runtime.policy.network.allow_hosts.join(",")
@@ -387,12 +393,13 @@ fn build_runtime_command(
     }
 
     cmd.arg(entrypoint);
-    let args = if selected_target_cmd(plan)
-        .first()
-        .map(|arg| arg == "deno")
-        .unwrap_or(false)
+    let args = if plan.execution_run_command().is_some()
+        || selected_target_cmd(plan)
+            .first()
+            .map(|arg| arg == "deno")
+            .unwrap_or(false)
     {
-        explicit_script_args
+        explicit_script_args.to_vec()
     } else {
         plan.targets_oci_cmd()
     };
@@ -405,6 +412,146 @@ fn build_runtime_command(
         #[cfg(unix)]
         _secret_fd_guard: secret_fd_guard,
     })
+}
+
+fn has_explicit_deno_permission(flags: &[String], permission: &str) -> bool {
+    flags.iter().any(|flag| {
+        flag == permission
+            || flag.starts_with(&format!("{permission}="))
+            || flag == "-A"
+            || flag == "--allow-all"
+    })
+}
+
+fn resolve_deno_launch_spec(plan: &ManifestData) -> Result<DenoLaunchSpec> {
+    if let Some(entrypoint) = plan.execution_entrypoint().filter(|v| !v.trim().is_empty()) {
+        let runtime_dir = resolve_deno_runtime_dir(&plan.manifest_dir, &entrypoint);
+        let (explicit_deno_flags, explicit_script_args) =
+            selected_deno_cmd_parts(plan, &entrypoint);
+        return Ok(DenoLaunchSpec {
+            runtime_dir,
+            entrypoint,
+            explicit_deno_flags,
+            explicit_script_args,
+        });
+    }
+
+    let run_command = plan
+        .execution_run_command()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            AtoExecutionError::policy_violation(
+                "source/deno target requires entrypoint or run_command",
+            )
+        })?;
+
+    resolve_deno_launch_spec_from_run_command(&plan.manifest_dir, &run_command)
+}
+
+fn resolve_deno_launch_spec_from_run_command(
+    manifest_dir: &Path,
+    run_command: &str,
+) -> Result<DenoLaunchSpec> {
+    let tokens = shell_words::split(run_command).unwrap_or_else(|_| vec![run_command.to_string()]);
+    let Some(first) = tokens.first() else {
+        return Err(anyhow::anyhow!("source/deno run_command is empty"));
+    };
+    if first != "deno" {
+        return Err(anyhow::anyhow!(
+            "source/deno run_command must start with 'deno', got '{}'",
+            first
+        ));
+    }
+
+    if tokens.get(1).map(String::as_str) == Some("task") {
+        let task_name = tokens.get(2).map(String::as_str).ok_or_else(|| {
+            anyhow::anyhow!("source/deno run_command 'deno task' requires a task name")
+        })?;
+        let task_command = read_deno_task_command(manifest_dir, task_name)?;
+        return resolve_deno_launch_spec_from_run_command(manifest_dir, &task_command);
+    }
+
+    parse_deno_run_tokens(manifest_dir, &tokens)
+}
+
+fn parse_deno_run_tokens(manifest_dir: &Path, tokens: &[String]) -> Result<DenoLaunchSpec> {
+    let mut iter = tokens.iter().skip(1).peekable();
+    if matches!(iter.peek().map(|value| value.as_str()), Some("run")) {
+        let _ = iter.next();
+    }
+
+    let mut explicit_deno_flags = Vec::new();
+    let mut entrypoint = None;
+    let mut explicit_script_args = Vec::new();
+
+    for arg in iter {
+        if entrypoint.is_none() {
+            if arg.starts_with('-') {
+                explicit_deno_flags.push(arg.to_string());
+                continue;
+            }
+            entrypoint = Some(arg.to_string());
+            continue;
+        }
+
+        explicit_script_args.push(arg.to_string());
+    }
+
+    let entrypoint = entrypoint.ok_or_else(|| {
+        anyhow::anyhow!("source/deno run_command must include a script entrypoint")
+    })?;
+    let runtime_dir = resolve_deno_runtime_dir(manifest_dir, &entrypoint);
+
+    Ok(DenoLaunchSpec {
+        runtime_dir,
+        entrypoint,
+        explicit_deno_flags,
+        explicit_script_args,
+    })
+}
+
+fn read_deno_task_command(manifest_dir: &Path, task_name: &str) -> Result<String> {
+    let deno_json_path = [
+        manifest_dir.join("deno.json"),
+        manifest_dir.join("source").join("deno.json"),
+    ]
+    .into_iter()
+    .find(|path| path.exists())
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "source/deno task '{}' requires deno.json in {} or {}/source",
+            task_name,
+            manifest_dir.display(),
+            manifest_dir.display()
+        )
+    })?;
+    let raw = std::fs::read_to_string(&deno_json_path).with_context(|| {
+        format!(
+            "Failed to read {} for source/deno task resolution",
+            deno_json_path.display()
+        )
+    })?;
+    let parsed: Value = serde_json::from_str(&raw).with_context(|| {
+        format!(
+            "Failed to parse {} for source/deno task resolution",
+            deno_json_path.display()
+        )
+    })?;
+    let command = parsed
+        .get("tasks")
+        .and_then(|tasks| tasks.get(task_name))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "source/deno task '{}' was not found in {}",
+                task_name,
+                deno_json_path.display()
+            )
+        })?;
+
+    Ok(command.to_string())
 }
 
 fn ensure_deno_runtime_env_paths(runtime_dir: &Path) -> Result<DenoRuntimeEnvPaths> {
@@ -588,10 +735,6 @@ fn disable_runtime_lockfile(runtime_dir: &Path) -> Result<()> {
     })?;
 
     Ok(())
-}
-
-fn manifest_cmd_contains(plan: &ManifestData, flag: &str) -> bool {
-    selected_target_cmd(plan).iter().any(|entry| entry == flag)
 }
 
 fn selected_target_cmd(plan: &ManifestData) -> Vec<String> {
@@ -787,7 +930,8 @@ fn verify_execution_plan_hashes(execution_plan: &ExecutionPlan) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        disable_runtime_lockfile, ensure_deno_runtime_env_paths, resolve_deno_lock_path,
+        disable_runtime_lockfile, ensure_deno_runtime_env_paths,
+        resolve_deno_launch_spec_from_run_command, resolve_deno_lock_path,
         resolve_deno_runtime_dir, resolve_package_lock_path,
     };
 
@@ -856,6 +1000,77 @@ mod tests {
             .join("Library")
             .join("Caches")
             .exists());
+    }
+
+    #[test]
+    fn run_command_spec_resolves_deno_task_entrypoint() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        std::fs::write(
+            tmp.path().join("deno.json"),
+            r#"{
+  "tasks": {
+    "start": "deno run --allow-net main.ts"
+  }
+}"#,
+        )
+        .expect("write deno.json");
+        std::fs::write(tmp.path().join("main.ts"), "console.log('ok');").expect("write main.ts");
+
+        let spec = resolve_deno_launch_spec_from_run_command(tmp.path(), "deno task start")
+            .expect("resolve deno task start");
+
+        assert_eq!(spec.runtime_dir, tmp.path());
+        assert_eq!(spec.entrypoint, "main.ts");
+        assert_eq!(spec.explicit_deno_flags, vec!["--allow-net".to_string()]);
+        assert!(spec.explicit_script_args.is_empty());
+    }
+
+    #[test]
+    fn run_command_spec_resolves_deno_task_from_source_dir_config() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        std::fs::create_dir_all(tmp.path().join("source")).expect("create source dir");
+        std::fs::write(
+            tmp.path().join("source").join("deno.json"),
+            r#"{
+  "tasks": {
+    "start": "deno run --allow-net main.ts"
+  }
+}"#,
+        )
+        .expect("write source deno.json");
+        std::fs::write(
+            tmp.path().join("source").join("main.ts"),
+            "console.log('ok');",
+        )
+        .expect("write source main.ts");
+
+        let spec = resolve_deno_launch_spec_from_run_command(tmp.path(), "deno task start")
+            .expect("resolve deno task start from source/");
+
+        assert_eq!(spec.runtime_dir, tmp.path().join("source"));
+        assert_eq!(spec.entrypoint, "main.ts");
+        assert_eq!(spec.explicit_deno_flags, vec!["--allow-net".to_string()]);
+        assert!(spec.explicit_script_args.is_empty());
+    }
+
+    #[test]
+    fn run_command_spec_resolves_direct_deno_run_entrypoint() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        std::fs::write(tmp.path().join("main.ts"), "console.log('ok');").expect("write main.ts");
+
+        let spec = resolve_deno_launch_spec_from_run_command(
+            tmp.path(),
+            "deno run --allow-net main.ts --port 8000",
+        )
+        .expect("resolve deno run command");
+
+        assert_eq!(spec.runtime_dir, tmp.path());
+        assert_eq!(spec.entrypoint, "main.ts");
+        assert_eq!(spec.explicit_deno_flags, vec!["--allow-net".to_string()]);
+        assert_eq!(
+            spec.explicit_script_args,
+            vec!["--port".to_string(), "8000".to_string()]
+        );
     }
 
     #[test]

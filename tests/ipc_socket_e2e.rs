@@ -5,11 +5,11 @@ use std::fs;
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::path::PathBuf;
-#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
+#[cfg(unix)]
+use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::Stdio;
 #[cfg(unix)]
@@ -57,8 +57,8 @@ fn maybe_resolve_test_nacelle_path() -> Option<PathBuf> {
         }
     }
 
-    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../nacelle/target/debug/nacelle");
+    let candidate =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../nacelle/target/debug/nacelle");
     candidate.exists().then_some(candidate)
 }
 

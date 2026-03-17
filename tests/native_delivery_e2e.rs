@@ -37,7 +37,11 @@ fn ato_bin() -> PathBuf {
     } else {
         debug_dir.join("ato")
     };
-    assert!(resolved.is_file(), "ato test binary not found at {}", resolved.display());
+    assert!(
+        resolved.is_file(),
+        "ato test binary not found at {}",
+        resolved.display()
+    );
     resolved
 }
 
@@ -265,8 +269,12 @@ fn run_command_with_timeout(mut command: Command, cwd: &Path, label: &str) -> Re
         .with_context(|| format!("failed to create temp stdout in {}", output_dir.display()))?;
     let stderr_file = NamedTempFile::new_in(&output_dir)
         .with_context(|| format!("failed to create temp stderr in {}", output_dir.display()))?;
-    let stdout_handle = stdout_file.reopen().context("failed to reopen stdout temp file")?;
-    let stderr_handle = stderr_file.reopen().context("failed to reopen stderr temp file")?;
+    let stdout_handle = stdout_file
+        .reopen()
+        .context("failed to reopen stdout temp file")?;
+    let stderr_handle = stderr_file
+        .reopen()
+        .context("failed to reopen stderr temp file")?;
 
     command
         .stdout(Stdio::from(stdout_handle))

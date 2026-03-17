@@ -4,8 +4,8 @@ use capsule_core::CapsuleReporter;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Read;
 use std::io::IsTerminal;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 use tracing::debug;
@@ -17,7 +17,14 @@ use crate::reporters;
 use crate::runtime_overrides;
 
 const BUILD_CACHE_LAYOUT_VERSION: &str = "chml-build-cache-v1";
-const BUILD_CACHE_IGNORED_DIRS: &[&str] = &[".git", ".tmp", "node_modules", ".venv", "target", "__pycache__"];
+const BUILD_CACHE_IGNORED_DIRS: &[&str] = &[
+    ".git",
+    ".tmp",
+    "node_modules",
+    ".venv",
+    "target",
+    "__pycache__",
+];
 
 #[derive(Debug, Serialize)]
 pub struct BuildResult {
@@ -163,11 +170,10 @@ pub fn execute_pack_command_with_injected_manifest(
         &manifest,
         decision.plan.selected_target_label(),
     )?;
-    let ipc_diagnostics = crate::ipc::validate::validate_manifest(
-        &raw_manifest,
-        &loaded_manifest.dir,
-    )
-    .map_err(|err| AtoExecutionError::policy_violation(format!("IPC validation failed: {err}")))?;
+    let ipc_diagnostics =
+        crate::ipc::validate::validate_manifest(&raw_manifest, &loaded_manifest.dir).map_err(
+            |err| AtoExecutionError::policy_violation(format!("IPC validation failed: {err}")),
+        )?;
     if crate::ipc::validate::has_errors(&ipc_diagnostics) {
         return Err(
             AtoExecutionError::policy_violation(crate::ipc::validate::format_diagnostics(
@@ -900,7 +906,9 @@ fn normalize_build_cache_outputs(raw_outputs: &[String]) -> Result<Vec<BuildCach
         normalized = normalized.trim_end_matches('/');
 
         if normalized.is_empty() {
-            anyhow::bail!("outputs entries must resolve to a relative path inside the package root");
+            anyhow::bail!(
+                "outputs entries must resolve to a relative path inside the package root"
+            );
         }
         if normalized.contains('*') || normalized.contains('?') || normalized.contains('[') {
             anyhow::bail!(
@@ -1040,7 +1048,9 @@ fn collect_build_cache_source_files(
 }
 
 fn path_is_within_cached_outputs(path: &Path, outputs: &[BuildCacheOutputSpec]) -> bool {
-    outputs.iter().any(|output| path.starts_with(&output.relative_path))
+    outputs
+        .iter()
+        .any(|output| path.starts_with(&output.relative_path))
 }
 
 fn update_hash_text(hasher: &mut Sha256, value: &str) {
@@ -1079,7 +1089,10 @@ fn remove_path_if_exists(path: &Path) -> Result<()> {
 fn copy_path_recursive(source: &Path, destination: &Path) -> Result<()> {
     if source.is_dir() {
         fs::create_dir_all(destination).with_context(|| {
-            format!("Failed to create build cache directory {}", destination.display())
+            format!(
+                "Failed to create build cache directory {}",
+                destination.display()
+            )
         })?;
         for entry in fs::read_dir(source)
             .with_context(|| format!("Failed to read directory {}", source.display()))?
@@ -1227,7 +1240,9 @@ mod tests {
                 ),
                 (
                     "build_env",
-                    toml::Value::Array(vec![toml::Value::String("NODE_ENV".to_string())]),
+                    toml::Value::Array(vec![toml::Value::String(
+                        "ATO_BUILD_CACHE_TEST_ENV".to_string(),
+                    )]),
                 ),
                 (
                     "run_command",
@@ -1237,7 +1252,7 @@ mod tests {
         );
         let reporter = std::sync::Arc::new(crate::reporters::CliReporter::new(true));
 
-        std::env::set_var("NODE_ENV", "test");
+        std::env::set_var("ATO_BUILD_CACHE_TEST_ENV", "test");
         run_v03_build_lifecycle_steps(&plan, &reporter).expect("first build");
         assert_eq!(
             std::fs::read_to_string(tmp.path().join(".tmp/build-count.txt")).expect("read count"),
@@ -1252,13 +1267,15 @@ mod tests {
         run_v03_build_lifecycle_steps(&plan, &reporter).expect("cache restore");
 
         assert_eq!(
-            std::fs::read_to_string(tmp.path().join(".tmp/build-count.txt")).expect("read count after restore"),
+            std::fs::read_to_string(tmp.path().join(".tmp/build-count.txt"))
+                .expect("read count after restore"),
             "x"
         );
         assert_eq!(
             std::fs::read_to_string(tmp.path().join("dist/out.txt")).expect("read restored output"),
             "cached"
         );
+        std::env::remove_var("ATO_BUILD_CACHE_TEST_ENV");
     }
 
     fn manifest_with_schema_and_target(
