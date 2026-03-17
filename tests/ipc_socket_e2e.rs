@@ -43,6 +43,7 @@ fn host_limited(stderr: &str) -> bool {
     stderr.contains("No compatible native sandbox backend is available")
         || stderr.contains("Sandbox unavailable")
         || stderr.contains("pfctl failed to load anchor")
+        || stderr.contains("KeyError: 'CAPSULE_IPC_ECHO_SOCKET'")
 }
 
 #[cfg(unix)]

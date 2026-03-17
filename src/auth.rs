@@ -1852,6 +1852,8 @@ mod tests {
 
     #[test]
     fn test_legacy_credentials_json_compatibility() {
+        let _guard = env_lock().lock().unwrap();
+        let _token_guard = EnvVarGuard::set(ENV_ATO_TOKEN, None);
         let temp_dir = TempDir::new().unwrap();
         let (manager, _, legacy_path) = test_manager(&temp_dir);
 

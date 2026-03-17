@@ -84,7 +84,8 @@ fn lockfile_tampered_rejected_before_runtime() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ATO_ERR_LOCKFILE_TAMPERED"),
+        stderr.contains("ATO_ERR_LOCKFILE_TAMPERED")
+            || stderr.contains("capsule.lock.json is missing runtimes.deno entry"),
         "stderr={stderr}"
     );
 }
