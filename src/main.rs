@@ -3847,22 +3847,12 @@ async fn resolve_run_target_or_install(
     }
 
     let json_mode = matches!(reporter.as_ref(), reporters::CliReporter::Json(_));
-    if json_mode && !yes {
-        anyhow::bail!(
-            "Non-interactive JSON mode requires -y/--yes when auto-installing missing capsules"
-        );
-    }
-
-    if !yes
-        && !can_prompt_interactively(
-            std::io::stdin().is_terminal(),
-            std::io::stdout().is_terminal(),
-        )
-    {
-        anyhow::bail!(
-            "Interactive install confirmation requires a TTY. Re-run with -y/--yes in CI or non-interactive environments."
-        );
-    }
+    ensure_run_auto_install_allowed(
+        yes,
+        json_mode,
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+    )?;
 
     let effective_registry = registry.unwrap_or(DEFAULT_RUN_REGISTRY_URL);
     let detail = if let Some(detail) = registry_detail {
@@ -4671,6 +4661,27 @@ fn can_prompt_interactively(stdin_is_tty: bool, stdout_is_tty: bool) -> bool {
     tui::can_launch_tui(stdin_is_tty, stdout_is_tty)
 }
 
+fn ensure_run_auto_install_allowed(
+    yes: bool,
+    json_mode: bool,
+    stdin_is_tty: bool,
+    stdout_is_tty: bool,
+) -> Result<()> {
+    if json_mode && !yes {
+        anyhow::bail!(
+            "Non-interactive JSON mode requires -y/--yes when auto-installing missing capsules"
+        );
+    }
+
+    if !yes && !can_prompt_interactively(stdin_is_tty, stdout_is_tty) {
+        anyhow::bail!(
+            "Interactive install confirmation requires a TTY. Re-run with -y/--yes in CI or non-interactive environments."
+        );
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct ParsedSemver {
     major: u64,
@@ -4995,6 +5006,24 @@ mod tests {
     }
 
     #[test]
+    fn run_auto_install_gate_requires_yes_or_tty() {
+        assert!(ensure_run_auto_install_allowed(false, false, true, true).is_ok());
+        assert!(ensure_run_auto_install_allowed(true, false, false, false).is_ok());
+
+        let err = ensure_run_auto_install_allowed(false, false, false, false)
+            .expect_err("non-interactive auto-install must fail without --yes");
+        assert!(err
+            .to_string()
+            .contains("Interactive install confirmation requires a TTY"));
+
+        let err = ensure_run_auto_install_allowed(false, true, true, true)
+            .expect_err("json mode must require --yes");
+        assert!(err
+            .to_string()
+            .contains("Non-interactive JSON mode requires -y/--yes"));
+    }
+
+    #[test]
     fn resolve_run_target_rejects_noncanonical_github_url_input() {
         let reporter = std::sync::Arc::new(reporters::CliReporter::new(false));
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -5018,18 +5047,8 @@ mod tests {
 
     #[test]
     fn resolve_run_target_requires_yes_or_tty_for_github_repo_install() {
-        let reporter = std::sync::Arc::new(reporters::CliReporter::new(false));
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let error = runtime
-            .block_on(resolve_run_target_or_install(
-                PathBuf::from("github.com/Koh0920/demo-repo"),
-                false,
-                false,
-                None,
-                reporter,
-            ))
-            .unwrap_err();
-
+        let error = ensure_run_auto_install_allowed(false, false, false, false)
+            .expect_err("non-interactive auto-install must fail without --yes");
         assert!(
             error
                 .to_string()
