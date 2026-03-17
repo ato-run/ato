@@ -271,14 +271,19 @@ fn build_config_json(
     if uses_target_based_services(&manifest_services) {
         services = build_target_based_services(manifest_path, standalone)?;
     } else {
-        let entrypoint = read_entrypoint(manifest)?;
-        let command = read_command(manifest);
-        let cmd_overrides_entrypoint = target_cmd_overrides_entrypoint(manifest);
-        let (executable, args, env, signals) = if cmd_overrides_entrypoint {
-            let command_entrypoint = command.as_deref().unwrap_or(&entrypoint);
-            resolve_command(command_entrypoint, None, manifest, standalone)
+        let (executable, args, env, signals) = if let Some(run_command) = read_run_command(manifest)
+        {
+            resolve_shell_command(&run_command, manifest)
         } else {
-            resolve_command(&entrypoint, command.as_deref(), manifest, standalone)
+            let entrypoint = read_entrypoint(manifest)?;
+            let command = read_command(manifest);
+            let cmd_overrides_entrypoint = target_cmd_overrides_entrypoint(manifest);
+            if cmd_overrides_entrypoint {
+                let command_entrypoint = command.as_deref().unwrap_or(&entrypoint);
+                resolve_command(command_entrypoint, None, manifest, standalone)
+            } else {
+                resolve_command(&entrypoint, command.as_deref(), manifest, standalone)
+            }
         };
         let main_spec = ServiceSpec {
             executable,
@@ -449,6 +454,23 @@ fn resolve_target_command(
     runtime: &ResolvedTargetRuntime,
     standalone: bool,
 ) -> (String, Vec<String>, Option<HashMap<String, String>>) {
+    if let Some(run_command) = runtime
+        .run_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return (
+            "sh".to_string(),
+            vec!["-c".to_string(), run_command.to_string()],
+            if runtime.env.is_empty() {
+                None
+            } else {
+                Some(runtime.env.clone())
+            },
+        );
+    }
+
     let entrypoint = runtime.entrypoint.as_str();
     let tokens = shell_words::split(entrypoint).unwrap_or_else(|_| vec![entrypoint.to_string()]);
     let program = tokens
@@ -612,6 +634,15 @@ fn read_command(manifest: &toml::Value) -> Option<String> {
     None
 }
 
+fn read_run_command(manifest: &toml::Value) -> Option<String> {
+    selected_target_table(manifest)
+        .and_then(|target| target.get("run_command"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn target_cmd_overrides_entrypoint(manifest: &toml::Value) -> bool {
     selected_target_table(manifest)
         .and_then(|target| target.get("cmd"))
@@ -629,6 +660,54 @@ fn read_entrypoint(manifest: &toml::Value) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("No entrypoint defined in capsule.toml"))?;
 
     Ok(entrypoint.to_string())
+}
+
+fn resolve_shell_command(command: &str, manifest: &toml::Value) -> CommandResolution {
+    let mut env = selected_target_table(manifest)
+        .and_then(|t| t.get("env"))
+        .and_then(|e| e.as_table())
+        .map(|tbl| {
+            tbl.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.to_string(), s.to_string())))
+                .collect::<HashMap<String, String>>()
+        })
+        .unwrap_or_default();
+
+    let execution_env = manifest
+        .get("execution")
+        .and_then(|e| e.get("env"))
+        .and_then(|e| e.as_table())
+        .map(|tbl| {
+            tbl.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.to_string(), s.to_string())))
+                .collect::<HashMap<String, String>>()
+        })
+        .unwrap_or_default();
+    env.extend(execution_env);
+
+    let signals = manifest
+        .get("execution")
+        .and_then(|e| e.get("signals"))
+        .and_then(|s| s.as_table())
+        .map(|tbl| SignalsConfig {
+            stop: tbl
+                .get("stop")
+                .and_then(|v| v.as_str())
+                .unwrap_or("SIGTERM")
+                .to_string(),
+            kill: tbl
+                .get("kill")
+                .and_then(|v| v.as_str())
+                .unwrap_or("SIGKILL")
+                .to_string(),
+        });
+
+    (
+        "sh".to_string(),
+        vec!["-c".to_string(), command.to_string()],
+        if env.is_empty() { None } else { Some(env) },
+        signals,
+    )
 }
 
 fn read_health_check(manifest: &toml::Value) -> Option<HealthCheck> {
@@ -1530,6 +1609,34 @@ env = { PYTHONPATH = "src" }
         assert_eq!(
             config.services["control_plane"].cwd,
             Some("source/apps/control-plane".to_string())
+        );
+    }
+
+    #[test]
+    fn test_v03_run_command_generates_shell_service() {
+        let tmp = tempdir().unwrap();
+        let manifest_path = tmp.path().join("capsule.toml");
+
+        let manifest = r#"
+schema_version = "0.3"
+name = "json-server"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "npx json-server --watch db.json --port $PORT"
+port = 3000
+"#;
+
+        std::fs::write(&manifest_path, manifest).unwrap();
+
+        let config = generate_config(&manifest_path, None, false).unwrap();
+        assert_eq!(config.services["main"].executable, "sh");
+        assert_eq!(
+            config.services["main"].args,
+            vec![
+                "-c".to_string(),
+                "npx json-server --watch db.json --port $PORT".to_string()
+            ]
         );
     }
 
