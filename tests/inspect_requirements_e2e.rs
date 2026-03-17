@@ -56,6 +56,43 @@ target = "/var/lib/app"
     )
 }
 
+fn chml_requirements_manifest(name: &str) -> String {
+    format!(
+        r#"
+name = "{name}"
+type = "app"
+runtime = "oci"
+image = "ghcr.io/example/{name}:latest"
+run = "docker run ghcr.io/example/{name}:latest"
+required_env = ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"]
+
+[external_injection]
+MODEL_DIR = "directory"
+
+[isolation]
+allow_env = ["LOG_LEVEL"]
+
+[network]
+egress_allow = ["api.example.com"]
+egress_id_allow = [{{ type = "cidr", value = "10.0.0.0/8" }}]
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "primary-data"
+attach = "explicit"
+schema_id = "vaultwarden/data/v1"
+
+[services.main]
+target = "app"
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/var/lib/app"
+"#
+    )
+}
+
 fn parse_json(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).expect("valid json")
 }
@@ -154,7 +191,7 @@ fn inspect_requirements_json_succeeds_for_local_manifest() {
 #[test]
 fn inspect_requirements_json_succeeds_for_remote_manifest() {
     let manifest = requirements_manifest("inspect-remote");
-    let expected_path = "/v1/manifest/capsules/by/demo/inspect-remote";
+    let expected_path = "/v1/capsules/by/demo/inspect-remote";
     let base_url = spawn_capsule_detail_server(
         expected_path,
         serde_json::json!({
@@ -195,6 +232,34 @@ fn inspect_requirements_json_succeeds_for_remote_manifest() {
         payload["requirements"]["state"][0]["schemaId"],
         "vaultwarden/data/v1"
     );
+}
+
+#[test]
+fn inspect_requirements_json_succeeds_for_local_chml_manifest() {
+    let temp = TempDir::new().unwrap();
+    write_file(
+        &temp.path().join("capsule.toml"),
+        &chml_requirements_manifest("inspect-local-chml"),
+    );
+
+    let output = capsule()
+        .args(["inspect", "requirements"])
+        .arg(temp.path())
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{:?}", output);
+    let payload = parse_json(&output.stdout);
+
+    assert_eq!(payload["schemaVersion"], "1");
+    assert_eq!(payload["target"]["kind"], "local");
+    assert_eq!(
+        payload["requirements"]["secrets"][0]["key"],
+        "CLOUDFLARE_API_TOKEN"
+    );
+    assert_eq!(payload["requirements"]["env"][1]["key"], "LOG_LEVEL");
+    assert_eq!(payload["requirements"]["state"][0]["key"], "data");
 }
 
 #[test]

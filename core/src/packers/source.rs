@@ -249,11 +249,36 @@ fn validate_entrypoint(manifest_path: &Path, manifest_dir: &Path) -> Result<()> 
         .filter(|s| !s.is_empty())
         .ok_or_else(|| CapsuleError::Pack("default_target is required".to_string()))?;
 
-    let entrypoint = manifest
+    let target = manifest
         .get("targets")
         .and_then(|t| t.as_table())
         .and_then(|t| t.get(default_target))
-        .and_then(|s| s.get("entrypoint"))
+        .and_then(|t| t.as_table())
+        .ok_or_else(|| {
+            CapsuleError::Pack(format!(
+                "default_target '{}' is missing from targets",
+                default_target
+            ))
+        })?;
+
+    let runtime = target
+        .get("runtime")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let run_command = target
+        .get("run_command")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    // v0.3 run-command targets are valid without a file entrypoint.
+    if runtime == "source" && run_command.is_some() {
+        return Ok(());
+    }
+
+    let entrypoint = target
+        .get("entrypoint")
         .and_then(|e| e.as_str())
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
@@ -307,7 +332,11 @@ fn validate_entrypoint(manifest_path: &Path, manifest_dir: &Path) -> Result<()> 
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::parse_bool_env;
+    use super::validate_entrypoint;
+    use tempfile::tempdir;
 
     #[test]
     fn parse_bool_env_accepts_truthy_values() {
@@ -315,6 +344,27 @@ mod tests {
             let parsed = parse_bool_env("TEST", value).expect("parse env");
             assert!(parsed, "value should be true: {}", value);
         }
+    }
+
+    #[test]
+    fn validate_entrypoint_allows_v03_run_command_without_entrypoint() {
+        let temp = tempdir().expect("tempdir");
+        let manifest_path = temp.path().join("capsule.toml");
+        fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.3"
+name = "deno-demo"
+version = "0.1.0"
+type = "app"
+runtime = "source/deno"
+run = "deno task start"
+"#,
+        )
+        .expect("write manifest");
+
+        validate_entrypoint(&manifest_path, temp.path())
+            .expect("run-command manifest should validate");
     }
 
     #[test]

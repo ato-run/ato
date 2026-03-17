@@ -7,6 +7,8 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use capsule_core::packers::payload::compute_manifest_hash_without_signatures;
+use capsule_core::types::CapsuleManifest;
 use tempfile::TempDir;
 
 struct ServerGuard {
@@ -72,6 +74,30 @@ fn wait_for_well_known(base_url: &str) -> Result<()> {
         thread::sleep(Duration::from_millis(100));
     }
     anyhow::bail!("local registry did not become ready: {}", url);
+}
+
+fn seed_minimal_deno_lockfiles(workspace_root: &Path) -> Result<()> {
+    let manifest_text = std::fs::read_to_string(workspace_root.join("capsule.toml"))
+        .context("read manifest for lockfile")?;
+    let manifest =
+        CapsuleManifest::from_toml(&manifest_text).context("parse manifest for lockfile")?;
+    let manifest_hash = compute_manifest_hash_without_signatures(&manifest)
+        .context("compute manifest hash for lockfile")?;
+
+    std::fs::write(
+        workspace_root.join("deno.lock"),
+        r#"{"version":"4","specifiers":{},"packages":{}}"#,
+    )?;
+
+    std::fs::write(
+        workspace_root.join("capsule.lock.json"),
+        format!(
+            "version = \"1\"\n\n[meta]\ncreated_at = \"2026-03-03T07:20:13.289516+00:00\"\nmanifest_hash = \"{}\"\n\n[runtimes.deno]\nprovider = \"official\"\nversion = \"1.46.3\"\n\n[runtimes.deno.targets.aarch64-apple-darwin]\nurl = \"https://github.com/denoland/deno/releases/download/v1.46.3/deno-aarch64-apple-darwin.zip\"\nsha256 = \"e74f8ddd6d8205654905a4e42b5a605ab110722a7898aef68bc35d6e704c2946\"\n\n[targets]\n",
+            manifest_hash
+        ),
+    )?;
+
+    Ok(())
 }
 
 fn run_ato_with_home(
@@ -372,25 +398,22 @@ fn e2e_local_registry_build_publish_install_search_download() -> Result<()> {
 name = "test-local"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
+default_target = "static"
 
-[targets.cli]
-runtime = "source"
-driver = "deno"
-runtime_version = "1.46.3"
-entrypoint = "main.ts"
+[targets.static]
+runtime = "web"
+driver = "static"
+entrypoint = "dist"
+port = 4173
 
 [build.lifecycle]
 prepare = "echo prepare"
 "#,
     )?;
+    std::fs::create_dir_all(project_dir.join("dist"))?;
     std::fs::write(
-        project_dir.join("main.ts"),
-        r#"console.log("hello local registry");"#,
-    )?;
-    std::fs::write(
-        project_dir.join("deno.lock"),
-        r#"{"version":"5","specifiers":{},"packages":{}}"#,
+        project_dir.join("dist").join("index.html"),
+        r#"<!doctype html><title>hello local registry</title>"#,
     )?;
 
     let Some((_guard, base_url)) = start_local_registry_or_skip(
@@ -721,14 +744,7 @@ repository = "Koh0920/file2api"
         project_dir.join("ato-entry.ts"),
         "console.log('file2api package-json prepare');\n",
     )?;
-    std::fs::write(
-        project_dir.join("capsule.lock.json"),
-        "{\n  \"version\": \"1\",\n  \"meta\": {\n    \"created_at\": \"2026-01-01T00:00:00Z\",\n    \"manifest_hash\": \"sha256:dummy\"\n  },\n  \"targets\": {}\n}\n",
-    )?;
-    std::fs::write(
-        project_dir.join("deno.lock"),
-        r#"{"version":"5","specifiers":{},"packages":{}}"#,
-    )?;
+    seed_minimal_deno_lockfiles(&project_dir)?;
 
     let Some((_guard, base_url)) = start_local_registry_or_skip(
         &ato,
@@ -1204,8 +1220,8 @@ entrypoint = "main.py"
     );
     assert!(
         node_no_lock_stderr.contains("package-lock.json")
-            && !node_no_lock_stderr.contains("pnpm-lock.yaml")
-            && !node_no_lock_stderr.contains("yarn.lock"),
+            && node_no_lock_stderr.contains("pnpm-lock.yaml")
+            && node_no_lock_stderr.contains("bun.lock"),
         "expected node lockfile requirement to be surfaced; stderr={}",
         node_no_lock_stderr
     );
@@ -1258,7 +1274,9 @@ entrypoint = "main.py"
     let node_policy_violation_stderr = String::from_utf8_lossy(&node_policy_violation_run.stderr);
     assert!(
         node_policy_violation_stderr.contains("ATO_ERR_POLICY_VIOLATION")
-            || node_policy_violation_stderr.contains("PermissionDenied: Requires net access"),
+            || node_policy_violation_stderr.contains("PermissionDenied: Requires net access")
+            || node_policy_violation_stderr.contains("NotCapable: Requires net access")
+            || node_policy_violation_stderr.contains("Requires net access to \"example.com:443\""),
         "expected policy violation signal for node permission violation; stderr={}",
         node_policy_violation_stderr
     );

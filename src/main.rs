@@ -204,7 +204,7 @@ enum Commands {
         about = "Run a capsule app or local project"
     )]
     Run {
-        /// Local path (./, ../, ~/, /...) or store scoped ID (publisher/slug). Default: current directory
+        /// Local path (./, ../, ~/, /...), store scoped ID (publisher/slug), or GitHub repo (github.com/owner/repo). Default: current directory
         #[arg(default_value = ".")]
         path: PathBuf,
 
@@ -272,6 +272,10 @@ enum Commands {
         #[arg(short = 'y', long = "yes", default_value_t = false)]
         yes: bool,
 
+        /// Keep failed GitHub checkout artifacts and generated manifests for debugging
+        #[arg(long, hide = true, default_value_t = false)]
+        keep_failed_artifacts: bool,
+
         /// Allow installing/running unverified signatures in non-production environments
         #[arg(long, default_value_t = false)]
         allow_unverified: bool,
@@ -333,6 +337,10 @@ enum Commands {
         /// Emit machine-readable JSON output
         #[arg(long)]
         json: bool,
+
+        /// Keep failed GitHub checkout artifacts and generated manifests for debugging
+        #[arg(long, hide = true, default_value_t = false)]
+        keep_failed_artifacts: bool,
     },
 
     #[command(
@@ -1650,6 +1658,7 @@ fn run() -> Result<()> {
             unsafe_bypass_sandbox_legacy,
             dangerously_skip_permissions,
             yes,
+            keep_failed_artifacts,
             allow_unverified,
         } => execute_run_like_command(
             path,
@@ -1666,6 +1675,7 @@ fn run() -> Result<()> {
             unsafe_bypass_sandbox_legacy,
             dangerously_skip_permissions,
             yes,
+            keep_failed_artifacts,
             allow_unverified,
             skill,
             from_skill,
@@ -1715,6 +1725,7 @@ fn run() -> Result<()> {
             unsafe_bypass_sandbox_legacy,
             dangerously_skip_permissions,
             yes,
+            false,
             false,
             None,
             None,
@@ -1926,6 +1937,7 @@ fn run() -> Result<()> {
             project,
             no_project,
             json,
+            keep_failed_artifacts,
         } => {
             if skip_verify_legacy {
                 anyhow::bail!(
@@ -1960,6 +1972,7 @@ fn run() -> Result<()> {
                     projection_preference,
                     json,
                     can_prompt,
+                    keep_failed_artifacts,
                 ))?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -3611,6 +3624,7 @@ fn execute_run_like_command(
     unsafe_bypass_sandbox_legacy: bool,
     dangerously_skip_permissions: bool,
     yes: bool,
+    keep_failed_artifacts: bool,
     allow_unverified: bool,
     skill: Option<String>,
     from_skill: Option<PathBuf>,
@@ -3672,6 +3686,7 @@ fn execute_run_like_command(
     let path = rt.block_on(resolve_run_target_or_install(
         path,
         yes,
+        keep_failed_artifacts,
         allow_unverified,
         registry.as_deref(),
         reporter.clone(),
@@ -3703,6 +3718,7 @@ fn execute_run_like_command(
 async fn resolve_run_target_or_install(
     path: PathBuf,
     yes: bool,
+    keep_failed_artifacts: bool,
     allow_unverified: bool,
     registry: Option<&str>,
     reporter: std::sync::Arc<reporters::CliReporter>,
@@ -3713,13 +3729,38 @@ async fn resolve_run_target_or_install(
         return Ok(expanded_local);
     }
 
-    let json_mode = matches!(reporter.as_ref(), reporters::CliReporter::Json(_));
     if let Some(repository) = install::parse_github_run_ref(&raw)? {
-        if registry.is_some() {
-            anyhow::bail!("--registry cannot be used with GitHub repository run targets");
+        let json_mode = matches!(reporter.as_ref(), reporters::CliReporter::Json(_));
+        if json_mode && !yes {
+            anyhow::bail!(
+                "Non-interactive JSON mode requires -y/--yes when auto-installing missing capsules"
+            );
         }
 
-        let result = install_github_repository(
+        if !yes
+            && !can_prompt_interactively(
+                std::io::stdin().is_terminal(),
+                std::io::stdout().is_terminal(),
+            )
+        {
+            anyhow::bail!(
+                "Interactive install confirmation requires a TTY. Re-run with -y/--yes in CI or non-interactive environments."
+            );
+        }
+
+        if !yes {
+            let approved = prompt_github_run_confirmation(&repository)?;
+            if !approved {
+                anyhow::bail!("Installation cancelled by user");
+            }
+        } else {
+            debug!(
+                repository = %repository,
+                "GitHub repository not installed locally; continuing with -y auto-install"
+            );
+        }
+
+        let install_result = install_github_repository(
             &repository,
             None,
             yes,
@@ -3730,9 +3771,10 @@ async fn resolve_run_target_or_install(
                     std::io::stdin().is_terminal(),
                     std::io::stderr().is_terminal(),
                 ),
+            keep_failed_artifacts,
         )
         .await?;
-        return Ok(result.path);
+        return Ok(install_result.path);
     }
 
     let scoped_ref = match install::parse_capsule_ref(&raw) {
@@ -3822,22 +3864,12 @@ async fn resolve_run_target_or_install(
     }
 
     let json_mode = matches!(reporter.as_ref(), reporters::CliReporter::Json(_));
-    if json_mode && !yes {
-        anyhow::bail!(
-            "Non-interactive JSON mode requires -y/--yes when auto-installing missing capsules"
-        );
-    }
-
-    if !yes
-        && !can_prompt_interactively(
-            std::io::stdin().is_terminal(),
-            std::io::stdout().is_terminal(),
-        )
-    {
-        anyhow::bail!(
-            "Interactive install confirmation requires a TTY. Re-run with -y/--yes in CI or non-interactive environments."
-        );
-    }
+    ensure_run_auto_install_allowed(
+        yes,
+        json_mode,
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+    )?;
 
     let effective_registry = registry.unwrap_or(DEFAULT_RUN_REGISTRY_URL);
     let detail = if let Some(detail) = registry_detail {
@@ -3980,8 +4012,10 @@ async fn install_github_repository(
     projection_preference: install::ProjectionPreference,
     json: bool,
     can_prompt: bool,
+    keep_failed_artifacts: bool,
 ) -> Result<install::InstallResult> {
     const MAX_GITHUB_DRAFT_RETRIES: u8 = 3;
+    let invocation_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let install_draft = match install::fetch_github_install_draft(repository).await {
         Ok(draft) => Some(draft),
@@ -3994,7 +4028,7 @@ async fn install_github_repository(
             None
         }
     };
-    let checkout = install::download_github_repository_at_ref(
+    let mut checkout = install::download_github_repository_at_ref(
         repository,
         install_draft
             .as_ref()
@@ -4005,6 +4039,14 @@ async fn install_github_repository(
         .as_ref()
         .map(|draft| draft.normalize_preview_toml_for_checkout(&checkout.checkout_dir))
         .transpose()?;
+    if let Some(draft) = install_draft.as_ref() {
+        if let Err(error) =
+            show_github_draft_preview(&invocation_dir, repository, draft, yes, can_prompt, json)
+        {
+            maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
+            return Err(error);
+        }
+    }
     let injected_manifest = install_draft
         .as_ref()
         .and_then(|draft| draft.preview_toml.clone());
@@ -4046,6 +4088,7 @@ async fn install_github_repository(
         checkout.checkout_dir.clone(),
         json,
         injected_manifest.clone(),
+        keep_failed_artifacts,
     )
     .await
     {
@@ -4068,8 +4111,9 @@ async fn install_github_repository(
                     eprintln!("Reason: {}", report.message);
                 }
                 if draft_requires_manual_review(draft) {
+                    maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
                     return Err(build_github_manual_intervention_error(
-                        &checkout.checkout_dir,
+                        &invocation_dir,
                         repository,
                         draft,
                         inference_attempt.as_ref(),
@@ -4148,6 +4192,7 @@ async fn install_github_repository(
                         checkout.checkout_dir.clone(),
                         json,
                         current_draft.preview_toml.clone(),
+                        keep_failed_artifacts,
                     )
                     .await
                     {
@@ -4178,8 +4223,9 @@ async fn install_github_repository(
                 } else if draft_requires_manual_review(
                     latest_install_draft.as_ref().unwrap_or(draft),
                 ) {
+                    maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
                     return Err(build_github_manual_intervention_error(
-                        &checkout.checkout_dir,
+                        &invocation_dir,
                         repository,
                         latest_install_draft.as_ref().unwrap_or(draft),
                         inference_attempt.as_ref(),
@@ -4188,42 +4234,126 @@ async fn install_github_repository(
                 } else if can_prompt {
                     let draft_for_manual_fix = latest_install_draft.as_ref().unwrap_or(draft);
                     if let Some(recovered) = retry_github_build_after_manual_fix(
+                        &invocation_dir,
                         &checkout.checkout_dir,
                         repository,
                         draft_for_manual_fix,
                         inference_attempt.as_ref(),
                         json,
+                        keep_failed_artifacts,
                     )
                     .await?
                     {
                         recovered
                     } else {
+                        maybe_keep_failed_github_checkout(
+                            &mut checkout,
+                            keep_failed_artifacts,
+                            json,
+                        );
                         return Err(last_error);
                     }
                 } else {
+                    maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
                     return Err(last_error);
                 }
             } else {
+                maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
                 return Err(last_error);
             }
         }
     };
-    let artifact = build_result.artifact.ok_or_else(|| {
-        anyhow::anyhow!("GitHub repository did not produce an installable .capsule artifact")
-    })?;
-    install::install_built_github_artifact(
-        &artifact,
-        &checkout.publisher,
-        &checkout.repository,
-        install::InstallExecutionOptions {
-            output_dir,
-            yes,
-            projection_preference,
-            json_output: json,
-            can_prompt_interactively: can_prompt,
-        },
-    )
-    .await
+    let result = async {
+        let artifact = build_result.artifact.ok_or_else(|| {
+            anyhow::anyhow!("GitHub repository did not produce an installable .capsule artifact")
+        })?;
+        install::install_built_github_artifact(
+            &artifact,
+            &checkout.publisher,
+            &checkout.repository,
+            install::InstallExecutionOptions {
+                output_dir,
+                yes,
+                projection_preference,
+                json_output: json,
+                can_prompt_interactively: can_prompt,
+            },
+        )
+        .await
+    }
+    .await;
+
+    if result.is_err() {
+        maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
+    }
+
+    result
+}
+
+fn show_github_draft_preview(
+    invocation_dir: &std::path::Path,
+    repository: &str,
+    install_draft: &install::GitHubInstallDraftResponse,
+    yes: bool,
+    can_prompt: bool,
+    json: bool,
+) -> Result<()> {
+    if json || install_draft.manifest_source != "inferred" {
+        return Ok(());
+    }
+
+    let Some(preview_toml) = install_draft.preview_toml.as_deref() else {
+        return Ok(());
+    };
+
+    let preview_label = format!(
+        "preview-{}",
+        install_draft
+            .resolved_ref
+            .sha
+            .chars()
+            .take(12)
+            .collect::<String>()
+    );
+    let preview_path =
+        inference_feedback::build_manual_manifest_path(invocation_dir, repository, &preview_label);
+    inference_feedback::write_manual_manifest(&preview_path, preview_toml)?;
+
+    eprintln!(
+        "   Generated capsule.toml preview: {}",
+        preview_path.display()
+    );
+    eprintln!("   ----- capsule.toml -----");
+    for (index, line) in preview_toml.lines().enumerate() {
+        eprintln!("   {:>3} | {}", index + 1, line);
+    }
+    eprintln!("   -----------------------");
+
+    if can_prompt && !yes {
+        let approved = inference_feedback::prompt_yes_no(
+            "Continue with this generated capsule.toml? [Y/n]: ",
+            true,
+        )?;
+        if !approved {
+            anyhow::bail!("Aborted after reviewing generated capsule.toml");
+        }
+    }
+
+    Ok(())
+}
+
+fn maybe_keep_failed_github_checkout(
+    checkout: &mut install::GitHubCheckout,
+    keep_failed_artifacts: bool,
+    json: bool,
+) {
+    if keep_failed_artifacts && !json {
+        let kept_checkout = checkout.preserve_for_debugging();
+        eprintln!(
+            "⚠️  Kept failed GitHub checkout for debugging: {}",
+            kept_checkout.display()
+        );
+    }
 }
 
 async fn run_blocking_github_install_step<T, F>(operation: F) -> Result<T>
@@ -4240,6 +4370,7 @@ async fn build_github_repository_checkout(
     checkout_dir: PathBuf,
     json: bool,
     injected_manifest: Option<String>,
+    keep_failed_artifacts: bool,
 ) -> Result<commands::build::BuildResult> {
     run_blocking_github_install_step(move || {
         let reporter = std::sync::Arc::new(reporters::CliReporter::new(json));
@@ -4249,7 +4380,7 @@ async fn build_github_repository_checkout(
             None,
             false,
             false,
-            false,
+            keep_failed_artifacts,
             false,
             EnforcementMode::Strict.as_str().to_string(),
             reporter,
@@ -4263,11 +4394,13 @@ async fn build_github_repository_checkout(
 }
 
 async fn retry_github_build_after_manual_fix(
+    invocation_dir: &std::path::Path,
     checkout_dir: &std::path::Path,
     repository: &str,
     install_draft: &install::GitHubInstallDraftResponse,
     inference_attempt: Option<&inference_feedback::InferenceAttemptHandle>,
     json: bool,
+    keep_failed_artifacts: bool,
 ) -> Result<Option<commands::build::BuildResult>> {
     let should_edit =
         inference_feedback::prompt_yes_no("Edit generated capsule.toml and retry? [Y/n]: ", true)?;
@@ -4278,7 +4411,8 @@ async fn retry_github_build_after_manual_fix(
     let attempt_label = inference_attempt
         .map(|attempt| attempt.attempt_id.as_str())
         .unwrap_or("manual");
-    let manifest_path = inference_feedback::build_manual_manifest_path(checkout_dir, attempt_label);
+    let manifest_path =
+        inference_feedback::build_manual_manifest_path(invocation_dir, repository, attempt_label);
     let inferred_manifest = install_draft
         .preview_toml
         .as_deref()
@@ -4286,12 +4420,12 @@ async fn retry_github_build_after_manual_fix(
     inference_feedback::write_manual_manifest(&manifest_path, inferred_manifest)?;
 
     eprintln!("Open editor for {}", manifest_path.display());
-    if !inference_feedback::has_configured_editor() {
+    if !inference_feedback::can_open_editor_automatically() {
         return Err(anyhow::anyhow!(build_github_manual_intervention_message(
             repository,
             install_draft,
             &manifest_path,
-            "VISUAL or EDITOR is not set for manual fix mode",
+            "No editor launcher is available for manual fix mode",
         )));
     }
     inference_feedback::open_editor(&manifest_path)?;
@@ -4304,6 +4438,7 @@ async fn retry_github_build_after_manual_fix(
         checkout_dir.to_path_buf(),
         json,
         Some(edited_manifest.clone()),
+        keep_failed_artifacts,
     )
     .await?;
 
@@ -4367,7 +4502,7 @@ fn draft_requires_manual_review(draft: &install::GitHubInstallDraftResponse) -> 
 }
 
 fn build_github_manual_intervention_error(
-    checkout_dir: &std::path::Path,
+    invocation_dir: &std::path::Path,
     repository: &str,
     install_draft: &install::GitHubInstallDraftResponse,
     inference_attempt: Option<&inference_feedback::InferenceAttemptHandle>,
@@ -4376,7 +4511,8 @@ fn build_github_manual_intervention_error(
     let attempt_label = inference_attempt
         .map(|attempt| attempt.attempt_id.as_str())
         .unwrap_or("manual");
-    let manifest_path = inference_feedback::build_manual_manifest_path(checkout_dir, attempt_label);
+    let manifest_path =
+        inference_feedback::build_manual_manifest_path(invocation_dir, repository, attempt_label);
     if let Some(preview_toml) = install_draft.preview_toml.as_deref() {
         inference_feedback::write_manual_manifest(&manifest_path, preview_toml)?;
     }
@@ -4415,9 +4551,9 @@ fn build_github_manual_intervention_message(
         "Review {} and adjust the generated command or target settings as needed.",
         manifest_path.display()
     ));
-    if !inference_feedback::has_configured_editor() {
+    if !inference_feedback::can_open_editor_automatically() {
         next_steps.push(
-            "Set VISUAL or EDITOR if you want ato to open the file automatically.".to_string(),
+            "Install a text editor or set VISUAL/EDITOR if you want ato to open the file automatically.".to_string(),
         );
     }
     next_steps.push(format!(
@@ -4561,6 +4697,35 @@ fn prompt_install_confirmation(
     }
 }
 
+fn prompt_github_run_confirmation(repository: &str) -> Result<bool> {
+    println!();
+    println!(
+        "[!] GitHub repository 'github.com/{}' is not installed.",
+        repository
+    );
+    println!();
+    println!("ato will download, build, install, and run this repository.");
+    println!();
+
+    loop {
+        print!("? Do you want to install and run this repository? (Y/n): ");
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("Failed to read user input")?;
+
+        match input.trim().to_ascii_lowercase().as_str() {
+            "" | "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => {
+                println!("Please answer 'y' or 'n'.");
+            }
+        }
+    }
+}
+
 fn print_permission_summary(permissions: Option<&install::CapsulePermissions>) {
     println!("This capsule requests the following permissions:");
     let Some(permissions) = permissions else {
@@ -4615,6 +4780,27 @@ fn print_permission_summary(permissions: Option<&install::CapsulePermissions>) {
 
 fn can_prompt_interactively(stdin_is_tty: bool, stdout_is_tty: bool) -> bool {
     tui::can_launch_tui(stdin_is_tty, stdout_is_tty)
+}
+
+fn ensure_run_auto_install_allowed(
+    yes: bool,
+    json_mode: bool,
+    stdin_is_tty: bool,
+    stdout_is_tty: bool,
+) -> Result<()> {
+    if json_mode && !yes {
+        anyhow::bail!(
+            "Non-interactive JSON mode requires -y/--yes when auto-installing missing capsules"
+        );
+    }
+
+    if !yes && !can_prompt_interactively(stdin_is_tty, stdout_is_tty) {
+        anyhow::bail!(
+            "Interactive install confirmation requires a TTY. Re-run with -y/--yes in CI or non-interactive environments."
+        );
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -4938,6 +5124,71 @@ mod tests {
         assert!(!can_prompt_interactively(true, false));
         assert!(!can_prompt_interactively(false, true));
         assert!(!can_prompt_interactively(false, false));
+    }
+
+    #[test]
+    fn run_auto_install_gate_requires_yes_or_tty() {
+        assert!(ensure_run_auto_install_allowed(false, false, true, true).is_ok());
+        assert!(ensure_run_auto_install_allowed(true, false, false, false).is_ok());
+
+        let err = ensure_run_auto_install_allowed(false, false, false, false)
+            .expect_err("non-interactive auto-install must fail without --yes");
+        assert!(err
+            .to_string()
+            .contains("Interactive install confirmation requires a TTY"));
+
+        let err = ensure_run_auto_install_allowed(false, true, true, true)
+            .expect_err("json mode must require --yes");
+        assert!(err
+            .to_string()
+            .contains("Non-interactive JSON mode requires -y/--yes"));
+    }
+
+    #[test]
+    fn resolve_run_target_rejects_noncanonical_github_url_input() {
+        let reporter = std::sync::Arc::new(reporters::CliReporter::new(false));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let error = runtime
+            .block_on(resolve_run_target_or_install(
+                PathBuf::from("https://github.com/Koh0920/demo-repo"),
+                true,
+                false,
+                false,
+                None,
+                reporter,
+            ))
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("ato run github.com/Koh0920/demo-repo"),
+            "error={error:#}"
+        );
+    }
+
+    #[test]
+    fn resolve_run_target_requires_yes_or_tty_for_github_repo_install() {
+        let error = ensure_run_auto_install_allowed(false, false, false, false)
+            .expect_err("non-interactive auto-install must fail without --yes");
+        assert!(
+            error
+                .to_string()
+                .contains("Interactive install confirmation requires a TTY"),
+            "error={error:#}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_install_build_step_runs_outside_async_runtime_worker() {
+        let value = run_blocking_github_install_step(|| {
+            let runtime = tokio::runtime::Runtime::new()?;
+            Ok::<u8, anyhow::Error>(runtime.block_on(async { 7 }))
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(value, 7);
     }
 
     #[test]

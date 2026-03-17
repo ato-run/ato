@@ -1261,10 +1261,33 @@ fn test_run_help_shows_yes_flag() {
     cmd.args(["run", "--help"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("github.com/owner/repo"))
         .stdout(predicate::str::contains("--skill <SKILL>"))
         .stdout(predicate::str::contains("--yes"))
         .stdout(predicate::str::contains("--registry"))
         .stdout(predicate::str::contains("default: https://api.ato.run"));
+}
+
+#[test]
+fn test_run_rejects_noncanonical_github_url_input() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["run", "https://github.com/Koh0920/demo-repo", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "ato run github.com/Koh0920/demo-repo",
+        ));
+}
+
+#[test]
+fn test_run_requires_yes_or_tty_for_github_repo_install() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["run", "github.com/Koh0920/demo-repo"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Interactive install confirmation requires a TTY",
+        ));
 }
 
 #[test]
@@ -1419,43 +1442,36 @@ fn test_publish_json_error_uses_diagnostic_envelope() {
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    assert!(!output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    assert_eq!(value["ok"], false);
-    assert_eq!(value["code"], "CI_ONLY_PUBLISH");
-    assert!(value["phases"].is_array());
+    assert_eq!(value["schema_version"], "1");
+    assert_eq!(value["type"], "error");
+    assert_eq!(value["code"], "E999");
+    assert!(value["message"]
+        .as_str()
+        .expect("message string")
+        .contains("--deploy requires --artifact"));
 }
 
 #[test]
-fn test_publish_default_for_official_selects_deploy_only() {
+fn test_publish_json_missing_manifest_uses_diagnostic_envelope() {
     let output = Command::cargo_bin("ato")
         .unwrap()
         .args(["publish", "--json"])
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    assert!(!output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    let phases = value["phases"].as_array().expect("phases must be array");
-
-    let prepare = phases
-        .iter()
-        .find(|p| p["name"] == "prepare")
-        .expect("prepare phase");
-    let build = phases
-        .iter()
-        .find(|p| p["name"] == "build")
-        .expect("build phase");
-    let deploy = phases
-        .iter()
-        .find(|p| p["name"] == "deploy")
-        .expect("deploy phase");
-
-    assert_eq!(prepare["selected"], false);
-    assert_eq!(build["selected"], false);
-    assert_eq!(deploy["selected"], true);
+    assert_eq!(value["schema_version"], "1");
+    assert_eq!(value["type"], "error");
+    assert_eq!(value["code"], "E999");
+    assert!(value["message"]
+        .as_str()
+        .expect("message string")
+        .contains("Failed to read"));
 }
 
 #[test]

@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to `ato-cli` will be documented in this file.
+## [0.3.0] - 2026-03-17
+
+### What Changed
+
+#### Features
+- Preserve `run_command`, `outputs`, and `build_env` on public normalized target types for v0.3 runtime/build metadata
+
 ## [0.1.3] - 2026-03-12
 
 ### What Changed

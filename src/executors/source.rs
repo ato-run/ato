@@ -248,6 +248,12 @@ impl NacelleExecAdapter {
             env.push((key.clone(), value.clone()));
         }
 
+        if let Some(ipc_env) = launch_ctx.ipc_env_vars() {
+            for (key, value) in ipc_env {
+                env.push((key.clone(), value.clone()));
+            }
+        }
+
         let ipc_env = launch_ctx
             .ipc_env_vars()
             .map(|env| {

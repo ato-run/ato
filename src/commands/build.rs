@@ -2,15 +2,29 @@ use anyhow::{Context, Result};
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::CapsuleReporter;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+use std::fs;
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 use tracing::debug;
+use walkdir::WalkDir;
 
 use crate::init;
 use crate::native_delivery;
 use crate::reporters;
 use crate::runtime_overrides;
+
+const BUILD_CACHE_LAYOUT_VERSION: &str = "chml-build-cache-v1";
+const BUILD_CACHE_IGNORED_DIRS: &[&str] = &[
+    ".git",
+    ".tmp",
+    "node_modules",
+    ".venv",
+    "target",
+    "__pycache__",
+];
 
 #[derive(Debug, Serialize)]
 pub struct BuildResult {
@@ -116,7 +130,10 @@ pub fn execute_pack_command_with_injected_manifest(
             std::fs::write(&manifest, manifest_text).with_context(|| {
                 format!("Failed to write temporary manifest: {}", manifest.display())
             })?;
-            temporary_manifest = Some(TemporaryManifestGuard::new(manifest.clone()));
+            temporary_manifest = Some(TemporaryManifestGuard::new(
+                manifest.clone(),
+                !keep_failed_artifacts,
+            ));
         } else {
             futures::executor::block_on(reporter.warn(
                 "No `capsule.toml` found. Using defaults. Run `ato init` to generate an agent prompt, or `ato build --init` to create `capsule.toml` interactively.".to_string(),
@@ -125,7 +142,10 @@ pub fn execute_pack_command_with_injected_manifest(
             std::fs::write(&manifest, inferred).with_context(|| {
                 format!("Failed to write temporary manifest: {}", manifest.display())
             })?;
-            temporary_manifest = Some(TemporaryManifestGuard::new(manifest.clone()));
+            temporary_manifest = Some(TemporaryManifestGuard::new(
+                manifest.clone(),
+                !keep_failed_artifacts,
+            ));
         }
     }
 
@@ -142,17 +162,18 @@ pub fn execute_pack_command_with_injected_manifest(
         None,
     )?;
     let loaded_manifest = capsule_core::manifest::load_manifest(&manifest)?;
+    let raw_manifest: toml::Value = toml::from_str(&loaded_manifest.raw_text)
+        .context("Failed to parse manifest TOML for IPC validation")?;
     let capsule_name = loaded_manifest.model.name.clone();
     let capsule_version = loaded_manifest.model.version.clone();
     capsule_core::diagnostics::manifest::validate_manifest_for_build(
         &manifest,
         decision.plan.selected_target_label(),
     )?;
-    let ipc_diagnostics = crate::ipc::validate::validate_manifest(
-        &decision.plan.manifest,
-        &decision.plan.manifest_dir,
-    )
-    .map_err(|err| AtoExecutionError::policy_violation(format!("IPC validation failed: {err}")))?;
+    let ipc_diagnostics =
+        crate::ipc::validate::validate_manifest(&raw_manifest, &loaded_manifest.dir).map_err(
+            |err| AtoExecutionError::policy_violation(format!("IPC validation failed: {err}")),
+        )?;
     if crate::ipc::validate::has_errors(&ipc_diagnostics) {
         return Err(
             AtoExecutionError::policy_violation(crate::ipc::validate::format_diagnostics(
@@ -180,7 +201,6 @@ pub fn execute_pack_command_with_injected_manifest(
         reason = %decision.reason,
         "Build runtime routed"
     );
-
     let manifest_dir = manifest
         .parent()
         .map(|p| p.to_path_buf())
@@ -522,17 +542,23 @@ fn emit_timings(
 
 struct TemporaryManifestGuard {
     path: PathBuf,
+    cleanup_on_drop: bool,
 }
 
 impl TemporaryManifestGuard {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
+    fn new(path: PathBuf, cleanup_on_drop: bool) -> Self {
+        Self {
+            path,
+            cleanup_on_drop,
+        }
     }
 }
 
 impl Drop for TemporaryManifestGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        if self.cleanup_on_drop {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -661,10 +687,37 @@ fn run_v03_build_lifecycle_steps(
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
         {
+            let build_cache = prepare_v03_build_cache(&target_plan, &command, reporter)?;
+            if let Some(build_cache) = build_cache.as_ref() {
+                if build_cache.restore_outputs()? {
+                    futures::executor::block_on(reporter.notify(format!(
+                        "♻️  Build cache hit [{}]: restored {}",
+                        target_label,
+                        build_cache.describe_outputs()
+                    )))?;
+                    continue;
+                }
+            }
+
             futures::executor::block_on(
                 reporter.notify(format!("🏗️  Build [{}]: {}", target_label, command)),
             )?;
             run_build_lifecycle_shell_command(&target_plan, &command, "build")?;
+
+            if let Some(build_cache) = build_cache.as_ref() {
+                if build_cache.capture_outputs()? {
+                    futures::executor::block_on(reporter.notify(format!(
+                        "💾 Build cache saved [{}]: {}",
+                        target_label,
+                        build_cache.describe_outputs()
+                    )))?;
+                } else {
+                    futures::executor::block_on(reporter.warn(format!(
+                        "⚠️  Build cache skipped [{}]: declared outputs were not produced",
+                        target_label
+                    )))?;
+                }
+            }
         }
     }
 
@@ -733,6 +786,340 @@ fn plan_v03_build_provision_command(
     Ok(None)
 }
 
+#[derive(Debug, Clone)]
+struct BuildCacheOutputSpec {
+    relative_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct V03BuildCache {
+    working_dir: PathBuf,
+    cache_dir: PathBuf,
+    outputs: Vec<BuildCacheOutputSpec>,
+}
+
+impl V03BuildCache {
+    fn describe_outputs(&self) -> String {
+        self.outputs
+            .iter()
+            .map(|output| output.relative_path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn restore_outputs(&self) -> Result<bool> {
+        let cache_outputs_dir = self.cache_dir.join("outputs");
+        if !cache_outputs_dir.exists() {
+            return Ok(false);
+        }
+
+        for output in &self.outputs {
+            let source = cache_outputs_dir.join(&output.relative_path);
+            if !source.exists() {
+                return Ok(false);
+            }
+        }
+
+        for output in &self.outputs {
+            let source = cache_outputs_dir.join(&output.relative_path);
+            let destination = self.working_dir.join(&output.relative_path);
+            remove_path_if_exists(&destination)?;
+            copy_path_recursive(&source, &destination)?;
+        }
+
+        Ok(true)
+    }
+
+    fn capture_outputs(&self) -> Result<bool> {
+        remove_path_if_exists(&self.cache_dir)?;
+        let cache_outputs_dir = self.cache_dir.join("outputs");
+        fs::create_dir_all(&cache_outputs_dir)?;
+
+        let mut captured_any = false;
+        for output in &self.outputs {
+            let source = self.working_dir.join(&output.relative_path);
+            if !source.exists() {
+                continue;
+            }
+
+            let destination = cache_outputs_dir.join(&output.relative_path);
+            copy_path_recursive(&source, &destination)?;
+            captured_any = true;
+        }
+
+        if !captured_any {
+            remove_path_if_exists(&self.cache_dir)?;
+        }
+
+        Ok(captured_any)
+    }
+}
+
+fn prepare_v03_build_cache(
+    plan: &capsule_core::router::ManifestData,
+    build_command: &str,
+    reporter: &std::sync::Arc<reporters::CliReporter>,
+) -> Result<Option<V03BuildCache>> {
+    let outputs = plan.build_cache_outputs();
+    if outputs.is_empty() {
+        return Ok(None);
+    }
+
+    let output_specs = match normalize_build_cache_outputs(&outputs) {
+        Ok(specs) => specs,
+        Err(reason) => {
+            futures::executor::block_on(reporter.warn(format!(
+                "⚠️  Build cache disabled [{}]: {}",
+                plan.selected_target_label(),
+                reason
+            )))?;
+            return Ok(None);
+        }
+    };
+
+    let cache_key = compute_v03_build_cache_key(plan, &output_specs, build_command)?;
+    let cache_dir = capsule_core::common::paths::nacelle_home_dir()?
+        .join("build-cache")
+        .join("chml")
+        .join(cache_key);
+
+    Ok(Some(V03BuildCache {
+        working_dir: plan.execution_working_directory(),
+        cache_dir,
+        outputs: output_specs,
+    }))
+}
+
+fn normalize_build_cache_outputs(raw_outputs: &[String]) -> Result<Vec<BuildCacheOutputSpec>> {
+    let mut outputs = Vec::new();
+
+    for raw_output in raw_outputs {
+        let mut normalized = raw_output.trim();
+        if normalized.is_empty() {
+            continue;
+        }
+
+        if normalized.ends_with("/**") {
+            normalized = normalized.trim_end_matches("/**");
+        }
+        normalized = normalized.trim_start_matches("./");
+        normalized = normalized.trim_end_matches('/');
+
+        if normalized.is_empty() {
+            anyhow::bail!(
+                "outputs entries must resolve to a relative path inside the package root"
+            );
+        }
+        if normalized.contains('*') || normalized.contains('?') || normalized.contains('[') {
+            anyhow::bail!(
+                "unsupported outputs pattern '{}'; only exact relative paths and '<dir>/**' are supported",
+                raw_output
+            );
+        }
+
+        let path = Path::new(normalized);
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+        {
+            anyhow::bail!(
+                "outputs entry '{}' must stay inside the package root",
+                raw_output
+            );
+        }
+
+        outputs.push(BuildCacheOutputSpec {
+            relative_path: path.to_path_buf(),
+        });
+    }
+
+    Ok(outputs)
+}
+
+fn compute_v03_build_cache_key(
+    plan: &capsule_core::router::ManifestData,
+    outputs: &[BuildCacheOutputSpec],
+    build_command: &str,
+) -> Result<String> {
+    let working_dir = plan.execution_working_directory();
+    let mut hasher = Sha256::new();
+
+    update_hash_text(&mut hasher, BUILD_CACHE_LAYOUT_VERSION);
+    update_hash_text(&mut hasher, &plan.manifest_path.display().to_string());
+    update_hash_text(&mut hasher, plan.selected_target_label());
+    update_hash_text(&mut hasher, build_command);
+
+    if let Some(runtime) = plan.execution_runtime() {
+        update_hash_text(&mut hasher, &runtime);
+    }
+    if let Some(driver) = plan.execution_driver() {
+        update_hash_text(&mut hasher, &driver);
+    }
+
+    for dependency in plan.selected_target_package_order()? {
+        update_hash_text(&mut hasher, &dependency);
+    }
+
+    let mut build_env = plan.build_cache_env();
+    build_env.sort();
+    for key in build_env {
+        update_hash_text(&mut hasher, &key);
+        match std::env::var(&key) {
+            Ok(value) => update_hash_text(&mut hasher, &value),
+            Err(_) => update_hash_text(&mut hasher, "<missing>"),
+        }
+    }
+
+    for lockfile in native_lockfiles_for_build_cache(&working_dir) {
+        update_hash_text(&mut hasher, &lockfile.display().to_string());
+        hash_file_contents(&mut hasher, &lockfile)?;
+    }
+
+    for relative_path in collect_build_cache_source_files(&working_dir, outputs)? {
+        update_hash_text(&mut hasher, &relative_path.display().to_string());
+        hash_file_contents(&mut hasher, &working_dir.join(&relative_path))?;
+    }
+
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn native_lockfiles_for_build_cache(working_dir: &Path) -> Vec<PathBuf> {
+    let mut paths = [
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "bun.lock",
+        "bun.lockb",
+        "uv.lock",
+        "Cargo.lock",
+        "deno.lock",
+        "poetry.lock",
+    ]
+    .into_iter()
+    .map(|name| working_dir.join(name))
+    .filter(|path| path.exists())
+    .collect::<Vec<_>>();
+    paths.sort();
+    paths
+}
+
+fn collect_build_cache_source_files(
+    working_dir: &Path,
+    outputs: &[BuildCacheOutputSpec],
+) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let walker = WalkDir::new(working_dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            let Ok(relative_path) = entry.path().strip_prefix(working_dir) else {
+                return true;
+            };
+            if relative_path.as_os_str().is_empty() {
+                return true;
+            }
+            if entry.file_type().is_dir() {
+                if let Some(name) = relative_path.file_name().and_then(|value| value.to_str()) {
+                    if BUILD_CACHE_IGNORED_DIRS.contains(&name) {
+                        return false;
+                    }
+                }
+            }
+            !path_is_within_cached_outputs(relative_path, outputs)
+        });
+
+    for entry in walker {
+        let entry = entry?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative_path = entry
+            .path()
+            .strip_prefix(working_dir)
+            .with_context(|| format!("Failed to relativize {}", entry.path().display()))?;
+        if path_is_within_cached_outputs(relative_path, outputs) {
+            continue;
+        }
+        files.push(relative_path.to_path_buf());
+    }
+
+    files.sort();
+    Ok(files)
+}
+
+fn path_is_within_cached_outputs(path: &Path, outputs: &[BuildCacheOutputSpec]) -> bool {
+    outputs
+        .iter()
+        .any(|output| path.starts_with(&output.relative_path))
+}
+
+fn update_hash_text(hasher: &mut Sha256, value: &str) {
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn hash_file_contents(hasher: &mut Sha256, path: &Path) -> Result<()> {
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("Failed to read build cache input: {}", path.display()))?;
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(())
+}
+
+fn remove_path_if_exists(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    if path.is_dir() {
+        fs::remove_dir_all(path)
+            .with_context(|| format!("Failed to remove directory {}", path.display()))?;
+    } else {
+        fs::remove_file(path)
+            .with_context(|| format!("Failed to remove file {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn copy_path_recursive(source: &Path, destination: &Path) -> Result<()> {
+    if source.is_dir() {
+        fs::create_dir_all(destination).with_context(|| {
+            format!(
+                "Failed to create build cache directory {}",
+                destination.display()
+            )
+        })?;
+        for entry in fs::read_dir(source)
+            .with_context(|| format!("Failed to read directory {}", source.display()))?
+        {
+            let entry = entry?;
+            let child_source = entry.path();
+            let child_destination = destination.join(entry.file_name());
+            copy_path_recursive(&child_source, &child_destination)?;
+        }
+    } else {
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create build cache parent {}", parent.display())
+            })?;
+        }
+        fs::copy(source, destination).with_context(|| {
+            format!(
+                "Failed to copy build cache artifact from {} to {}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
 fn run_build_lifecycle_shell_command(
     plan: &capsule_core::router::ManifestData,
     command: &str,
@@ -799,7 +1186,7 @@ fn sign_if_requested(
 
 #[cfg(test)]
 mod tests {
-    use super::plan_v03_build_provision_command;
+    use super::{plan_v03_build_provision_command, run_v03_build_lifecycle_steps};
     use capsule_core::router::{ExecutionProfile, ManifestData};
     use std::path::PathBuf;
 
@@ -827,6 +1214,68 @@ mod tests {
 
         let command = plan_v03_build_provision_command(&plan).expect("plan provision");
         assert_eq!(command.as_deref(), Some("pnpm install --frozen-lockfile"));
+    }
+
+    #[test]
+    fn v03_build_cache_restores_outputs_and_skips_rebuild() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("main.ts"), "console.log('ok')").expect("write source");
+
+        let plan = manifest_with_schema_and_target(
+            "0.3",
+            tmp.path().to_path_buf(),
+            vec![
+                ("runtime", toml::Value::String("source".to_string())),
+                ("driver", toml::Value::String("native".to_string())),
+                (
+                    "build_command",
+                    toml::Value::String(
+                        "mkdir -p .tmp dist && printf x >> .tmp/build-count.txt && printf cached > dist/out.txt"
+                            .to_string(),
+                    ),
+                ),
+                (
+                    "outputs",
+                    toml::Value::Array(vec![toml::Value::String("dist/**".to_string())]),
+                ),
+                (
+                    "build_env",
+                    toml::Value::Array(vec![toml::Value::String(
+                        "ATO_BUILD_CACHE_TEST_ENV".to_string(),
+                    )]),
+                ),
+                (
+                    "run_command",
+                    toml::Value::String("./dist/out.txt".to_string()),
+                ),
+            ],
+        );
+        let reporter = std::sync::Arc::new(crate::reporters::CliReporter::new(true));
+
+        std::env::set_var("ATO_BUILD_CACHE_TEST_ENV", "test");
+        run_v03_build_lifecycle_steps(&plan, &reporter).expect("first build");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(".tmp/build-count.txt")).expect("read count"),
+            "x"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("dist/out.txt")).expect("read output"),
+            "cached"
+        );
+
+        std::fs::remove_dir_all(tmp.path().join("dist")).expect("remove dist");
+        run_v03_build_lifecycle_steps(&plan, &reporter).expect("cache restore");
+
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(".tmp/build-count.txt"))
+                .expect("read count after restore"),
+            "x"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("dist/out.txt")).expect("read restored output"),
+            "cached"
+        );
+        std::env::remove_var("ATO_BUILD_CACHE_TEST_ENV");
     }
 
     fn manifest_with_schema_and_target(
