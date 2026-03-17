@@ -90,7 +90,16 @@ pub struct GitHubCheckout {
     pub repository: String,
     pub publisher: String,
     pub checkout_dir: PathBuf,
-    _temp_dir: tempfile::TempDir,
+    temp_dir: Option<tempfile::TempDir>,
+}
+
+impl GitHubCheckout {
+    pub fn preserve_for_debugging(&mut self) -> PathBuf {
+        if let Some(temp_dir) = self.temp_dir.take() {
+            std::mem::forget(temp_dir);
+        }
+        self.checkout_dir.clone()
+    }
 }
 
 #[allow(dead_code)]
@@ -982,7 +991,7 @@ pub async fn download_github_repository_at_ref(
         repository: normalized,
         publisher,
         checkout_dir,
-        _temp_dir: temp_dir,
+        temp_dir: Some(temp_dir),
     })
 }
 
