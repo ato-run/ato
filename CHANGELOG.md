@@ -2,6 +2,13 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
+## [0.4.25] - 2026-03-17
+
+### What Changed
+
+#### Bug Fixes
+- Fix inferred GitHub Deno apps so `ato run github.com/...` packages required import maps and executes `deno task` targets through the Deno runtime instead of the generic shell path
+
 ## [0.4.24] - 2026-03-15
 
 ### What Changed
