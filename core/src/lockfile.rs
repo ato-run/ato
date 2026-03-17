@@ -628,12 +628,15 @@ fn collect_lockfile_input_paths(
         "pnpm-lock.yaml",
         "pyproject.toml",
         "requirements.txt",
+        "deno.lock",
         "deno.json",
         "deno.jsonc",
         "uv.lock",
     ] {
         paths.push(manifest_dir.join(name));
     }
+
+    paths.push(manifest_dir.join("source").join("deno.lock"));
 
     for language in ["python", "node"] {
         if let Some(path) = read_dependencies_path(manifest_raw, language, manifest_dir) {
@@ -1349,6 +1352,15 @@ async fn generate_deno_lock(
         // runtime=web/static など、ディレクトリを payload ルートにするケースでは
         // deno cache 対象が曖昧になり不要な解決失敗を引き起こすため lock 生成を行わない。
         return Ok(None);
+    }
+
+    for candidate in [
+        manifest_dir.join("deno.lock"),
+        manifest_dir.join("source").join("deno.lock"),
+    ] {
+        if candidate.exists() {
+            return Ok(Some(candidate));
+        }
     }
 
     reporter
@@ -3600,6 +3612,48 @@ entrypoint = "source/main.sh"
         let second_lock = read_lockfile(&second).unwrap();
 
         assert_eq!(first_lock.meta.created_at, second_lock.meta.created_at);
+        assert!(temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
+    }
+
+    #[test]
+    fn ensure_lockfile_accepts_existing_deno_lock() {
+        let temp = TempDir::new().unwrap();
+        let manifest_path = temp.path().join("capsule.toml");
+        let manifest_text = r#"
+schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "default"
+[targets.default]
+runtime = "source"
+driver = "deno"
+runtime_version = "1.46.3"
+entrypoint = "main.ts"
+"#;
+        fs::write(&manifest_path, manifest_text).unwrap();
+        fs::write(temp.path().join("main.ts"), "console.log('demo')").unwrap();
+        fs::write(
+            temp.path().join("deno.lock"),
+            r#"{"version":"4","specifiers":{},"packages":{}}"#,
+        )
+        .unwrap();
+
+        let manifest_raw: toml::Value = toml::from_str(manifest_text).unwrap();
+        let reporter: Arc<dyn CapsuleReporter + 'static> = Arc::new(crate::reporter::NoOpReporter);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let lock_path = rt
+            .block_on(ensure_lockfile(
+                &manifest_path,
+                &manifest_raw,
+                manifest_text,
+                reporter,
+                false,
+            ))
+            .unwrap();
+
+        assert!(lock_path.exists());
         assert!(temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
     }
 
