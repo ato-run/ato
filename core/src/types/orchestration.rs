@@ -33,6 +33,8 @@ pub struct ResolvedTargetRuntime {
     pub image: Option<String>,
     #[serde(default)]
     pub entrypoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_command: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cmd: Vec<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
