@@ -13,6 +13,9 @@ use capsule_core::packers::payload::build_distribution_manifest;
 use capsule_core::types::CapsuleManifest;
 use tempfile::{NamedTempFile, TempDir};
 
+#[cfg(windows)]
+const COMMAND_TIMEOUT_SECS: u64 = 300;
+#[cfg(not(windows))]
 const COMMAND_TIMEOUT_SECS: u64 = 120;
 use walkdir::WalkDir;
 
