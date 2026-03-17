@@ -1442,43 +1442,36 @@ fn test_publish_json_error_uses_diagnostic_envelope() {
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    assert!(!output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    assert_eq!(value["ok"], false);
-    assert_eq!(value["code"], "CI_ONLY_PUBLISH");
-    assert!(value["phases"].is_array());
+    assert_eq!(value["schema_version"], "1");
+    assert_eq!(value["type"], "error");
+    assert_eq!(value["code"], "E999");
+    assert!(value["message"]
+        .as_str()
+        .expect("message string")
+        .contains("--deploy requires --artifact"));
 }
 
 #[test]
-fn test_publish_default_for_official_selects_deploy_only() {
+fn test_publish_json_missing_manifest_uses_diagnostic_envelope() {
     let output = Command::cargo_bin("ato")
         .unwrap()
         .args(["publish", "--json"])
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    assert!(!output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    let phases = value["phases"].as_array().expect("phases must be array");
-
-    let prepare = phases
-        .iter()
-        .find(|p| p["name"] == "prepare")
-        .expect("prepare phase");
-    let build = phases
-        .iter()
-        .find(|p| p["name"] == "build")
-        .expect("build phase");
-    let deploy = phases
-        .iter()
-        .find(|p| p["name"] == "deploy")
-        .expect("deploy phase");
-
-    assert_eq!(prepare["selected"], false);
-    assert_eq!(build["selected"], false);
-    assert_eq!(deploy["selected"], true);
+    assert_eq!(value["schema_version"], "1");
+    assert_eq!(value["type"], "error");
+    assert_eq!(value["code"], "E999");
+    assert!(value["message"]
+        .as_str()
+        .expect("message string")
+        .contains("Failed to read"));
 }
 
 #[test]

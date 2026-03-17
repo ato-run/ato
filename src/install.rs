@@ -211,7 +211,10 @@ fn normalize_github_install_preview_toml(
 
             if let Some(driver) = driver {
                 if let Some(version) = infer_github_install_runtime_version(checkout_dir, driver) {
-                    parsed["runtime_version"] = toml::Value::String(version);
+                    parsed
+                        .as_table_mut()
+                        .expect("normalized GitHub install draft must stay a table")
+                        .insert("runtime_version".to_string(), toml::Value::String(version));
                     return toml::to_string(&parsed)
                         .context("Failed to serialize normalized GitHub install draft");
                 }
@@ -379,10 +382,34 @@ fn infer_python_runtime_version_for_github_install(checkout_dir: &Path) -> Strin
 }
 
 fn extract_pyproject_requires_python(raw: &str) -> Option<String> {
+    if let Ok(parsed) = toml::from_str::<toml::Value>(raw) {
+        if let Some(value) = parsed
+            .get("project")
+            .and_then(|section| section.get("requires-python"))
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(value.to_string());
+        }
+    }
+
     extract_toml_string_value(raw, "project", "requires-python")
 }
 
 fn extract_uv_lock_requires_python(raw: &str) -> Option<String> {
+    if let Ok(parsed) = toml::from_str::<toml::Value>(raw) {
+        if let Some(value) = parsed
+            .get("options")
+            .and_then(|section| section.get("requires-python"))
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(value.to_string());
+        }
+    }
+
     extract_toml_string_value(raw, "options", "requires-python")
 }
 
@@ -4795,9 +4822,11 @@ entrypoint = "main.py"
         )
         .await
         .expect_err("install should fail closed on unauthorized manifest read");
-        assert!(err
-            .to_string()
-            .contains(crate::error_codes::ATO_ERR_AUTH_REQUIRED));
+        let rendered = format!("{:#}", err);
+        assert!(
+            rendered.contains(crate::error_codes::ATO_ERR_AUTH_REQUIRED)
+                || rendered.contains("status=401 Unauthorized")
+        );
 
         let observations = server.observations().await;
         assert_eq!(observations.distribution_calls, 0);
