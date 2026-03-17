@@ -20,24 +20,17 @@ pub struct ValidateResult {
 
 pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
     let manifest_path = resolve_manifest_path(&path)?;
+    let raw_manifest_text = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
+    let raw_manifest: toml::Value = toml::from_str(&raw_manifest_text)
+        .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
 
     let decision = capsule_core::router::route_manifest(
         &manifest_path,
         capsule_core::router::ExecutionProfile::Release,
         None,
     )?;
-    let targets_to_validate = if decision
-        .plan
-        .manifest
-        .get("schema_version")
-        .and_then(toml::Value::as_str)
-        .map(str::trim)
-        == Some("0.3")
-    {
-        decision.plan.selected_target_package_order()?
-    } else {
-        vec![decision.plan.selected_target_label().to_string()]
-    };
+    let targets_to_validate = decision.plan.selected_target_package_order()?;
     for target_label in &targets_to_validate {
         capsule_core::diagnostics::manifest::validate_manifest_for_build(
             &manifest_path,
@@ -79,8 +72,8 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
     };
 
     let ipc_diagnostics = crate::ipc::validate::validate_manifest(
-        &decision.plan.manifest,
-        &decision.plan.manifest_dir,
+        &raw_manifest,
+        manifest_path.parent().unwrap_or_else(|| Path::new(".")),
     )
     .map_err(|err| AtoExecutionError::policy_violation(format!("IPC validation failed: {err}")))?;
     if crate::ipc::validate::has_errors(&ipc_diagnostics) {

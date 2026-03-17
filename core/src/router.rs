@@ -353,6 +353,7 @@ impl ManifestData {
                     (!target.entrypoint.trim().is_empty()).then(|| target.entrypoint.clone())
                 }),
                 entrypoint: target.entrypoint.clone(),
+                run_command: target.run_command.clone(),
                 cmd: target.cmd.clone(),
                 env: {
                     let mut env = self.target_env(&target_label);
@@ -527,6 +528,18 @@ impl ManifestData {
             .or_else(|| self.get_str(&["build", "lifecycle", "build"]))
     }
 
+    pub fn build_cache_outputs(&self) -> Vec<String> {
+        self.get_array(&["targets", &self.selected_target, "outputs"])
+            .map(|values| array_to_vec(values))
+            .unwrap_or_default()
+    }
+
+    pub fn build_cache_env(&self) -> Vec<String> {
+        self.get_array(&["targets", &self.selected_target, "build_env"])
+            .map(|values| array_to_vec(values))
+            .unwrap_or_default()
+    }
+
     pub fn execution_preference(&self) -> Option<Vec<RuntimeKind>> {
         let pref = self.get_array(&["targets", "preference"])?;
 
@@ -554,7 +567,16 @@ impl ManifestData {
     }
 
     pub fn targets_oci_cmd(&self) -> Vec<String> {
-        self.target_cmd(&self.selected_target)
+        let cmd = self.target_cmd(&self.selected_target);
+        if !cmd.is_empty() {
+            return cmd;
+        }
+
+        self.execution_run_command()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(|value| vec!["sh".to_string(), "-lc".to_string(), value])
+            .unwrap_or_default()
     }
 
     pub fn targets_oci_env(&self) -> HashMap<String, String> {
@@ -651,15 +673,35 @@ impl ManifestData {
         self.get_str(&["targets", target_label, "entrypoint"])
     }
 
+    pub fn target_run_command(&self, target_label: &str) -> Option<String> {
+        self.get_str(&["targets", target_label, "run_command"])
+    }
+
     pub fn target_image(&self, target_label: &str) -> Option<String> {
         self.get_str(&["targets", target_label, "image"])
             .or_else(|| self.target_entrypoint(target_label))
     }
 
     pub fn target_cmd(&self, target_label: &str) -> Vec<String> {
-        self.get_array(&["targets", target_label, "cmd"])
-            .map(|values| array_to_vec(values))
-            .unwrap_or_default()
+        if let Some(values) = self.get_array(&["targets", target_label, "cmd"]) {
+            return array_to_vec(values);
+        }
+
+        let is_oci = self
+            .target_runtime(target_label)
+            .map(|runtime| runtime.eq_ignore_ascii_case("oci"))
+            .unwrap_or(false);
+        if is_oci {
+            if let Some(run_command) = self
+                .target_run_command(target_label)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+            {
+                return vec!["sh".to_string(), "-lc".to_string(), run_command];
+            }
+        }
+
+        Vec::new()
     }
 
     pub fn target_env(&self, target_label: &str) -> HashMap<String, String> {
@@ -941,6 +983,37 @@ build = "pnpm --filter ui build"
                 .selected_target_package_order()
                 .expect("package order"),
             vec!["ui".to_string(), "api".to_string(), "web".to_string()]
+        );
+    }
+
+    #[test]
+    fn v03_oci_target_uses_shell_wrapped_run_command() {
+        let dir = write_manifest(
+            r#"
+schema_version = "0.3"
+name = "oci-demo"
+version = "0.1.0"
+type = "app"
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+run = "echo 'Hello World' && /app/server --port $PORT"
+"#,
+        );
+
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route manifest");
+
+        assert_eq!(
+            decision.plan.targets_oci_cmd(),
+            vec![
+                "sh".to_string(),
+                "-lc".to_string(),
+                "echo 'Hello World' && /app/server --port $PORT".to_string()
+            ]
         );
     }
 

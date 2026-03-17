@@ -37,7 +37,20 @@ pub async fn resolve_launch_context(
     plan: &ManifestData,
     reporter: &Arc<CliReporter>,
 ) -> Result<RuntimeLaunchContext> {
-    let diagnostics = crate::ipc::validate::validate_manifest(&plan.manifest, &plan.manifest_dir)
+    let raw_manifest_text = std::fs::read_to_string(&plan.manifest_path)
+        .map_err(|err| {
+            AtoExecutionError::policy_violation(format!(
+                "Failed to read manifest for IPC validation: {}",
+                err
+            ))
+        })?;
+    let raw_manifest: toml::Value = toml::from_str(&raw_manifest_text).map_err(|err| {
+        AtoExecutionError::policy_violation(format!(
+            "Failed to parse manifest for IPC validation: {}",
+            err
+        ))
+    })?;
+    let diagnostics = crate::ipc::validate::validate_manifest(&raw_manifest, &plan.manifest_dir)
         .map_err(|err| {
         AtoExecutionError::policy_violation(format!("IPC validation failed: {err}"))
     })?;
