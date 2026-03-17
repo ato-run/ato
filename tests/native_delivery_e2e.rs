@@ -6,12 +6,14 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use capsule_core::packers::payload::build_distribution_manifest;
 use capsule_core::types::CapsuleManifest;
-use tempfile::TempDir;
+use tempfile::{NamedTempFile, TempDir};
+
+const COMMAND_TIMEOUT_SECS: u64 = 120;
 use walkdir::WalkDir;
 
 #[cfg(unix)]
@@ -21,10 +23,28 @@ struct ServerGuard {
     child: std::process::Child,
 }
 
+fn ato_bin() -> PathBuf {
+    let current_exe = std::env::current_exe().expect("current test binary path");
+    let debug_dir = current_exe
+        .parent()
+        .and_then(Path::parent)
+        .expect("target/debug directory");
+    let resolved = debug_dir.join("ato");
+    assert!(resolved.is_file(), "ato test binary not found at {}", resolved.display());
+    resolved
+}
+
 impl Drop for ServerGuard {
     fn drop(&mut self) {
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(2) {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => thread::sleep(Duration::from_millis(50)),
+                Err(_) => return,
+            }
+        }
     }
 }
 
@@ -199,21 +219,106 @@ fn start_local_registry(ato: &Path, data_dir: &Path) -> Result<(ServerGuard, Str
     Ok((guard, base_url))
 }
 
+fn command_timeout() -> Duration {
+    std::env::var("ATO_E2E_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(COMMAND_TIMEOUT_SECS))
+}
+
+fn trace_e2e_commands() -> bool {
+    std::env::var("ATO_E2E_TRACE")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn read_command_output(
+    stdout_file: NamedTempFile,
+    stderr_file: NamedTempFile,
+    status: std::process::ExitStatus,
+) -> Result<Output> {
+    let stdout = std::fs::read(stdout_file.path())
+        .with_context(|| format!("failed to read {}", stdout_file.path().display()))?;
+    let stderr = std::fs::read(stderr_file.path())
+        .with_context(|| format!("failed to read {}", stderr_file.path().display()))?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn run_command_with_timeout(mut command: Command, cwd: &Path, label: &str) -> Result<Output> {
+    let output_dir = cwd.join(".tmp");
+    std::fs::create_dir_all(&output_dir)
+        .with_context(|| format!("failed to create {}", output_dir.display()))?;
+    let stdout_file = NamedTempFile::new_in(&output_dir)
+        .with_context(|| format!("failed to create temp stdout in {}", output_dir.display()))?;
+    let stderr_file = NamedTempFile::new_in(&output_dir)
+        .with_context(|| format!("failed to create temp stderr in {}", output_dir.display()))?;
+    let stdout_handle = stdout_file.reopen().context("failed to reopen stdout temp file")?;
+    let stderr_handle = stderr_file.reopen().context("failed to reopen stderr temp file")?;
+
+    command
+        .stdout(Stdio::from(stdout_handle))
+        .stderr(Stdio::from(stderr_handle));
+    let timeout = command_timeout();
+    if trace_e2e_commands() {
+        println!("[e2e] start {} timeout={}s", label, timeout.as_secs());
+    }
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to spawn {}", label))?;
+    let start = Instant::now();
+
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("failed to poll {}", label))?
+        {
+            let output = read_command_output(stdout_file, stderr_file, status)?;
+            if trace_e2e_commands() {
+                println!(
+                    "[e2e] finish {} elapsed={}ms status={}",
+                    label,
+                    start.elapsed().as_millis(),
+                    output.status
+                );
+            }
+            return Ok(output);
+        }
+
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let status = child
+                .wait()
+                .with_context(|| format!("failed to collect timed out {} status", label))?;
+            let output = read_command_output(stdout_file, stderr_file, status)?;
+            anyhow::bail!(
+                "{} timed out after {}s\nstdout:\n{}\nstderr:\n{}",
+                label,
+                timeout.as_secs(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn run_ato_with_home(ato: &Path, args: &[&str], cwd: &Path, home_dir: &Path) -> Result<Output> {
-    Command::new(ato)
-        .args(args)
-        .current_dir(cwd)
-        .env("HOME", home_dir)
-        .output()
-        .with_context(|| format!("failed to run ato {:?}", args))
+    let mut command = Command::new(ato);
+    command.args(args).current_dir(cwd).env("HOME", home_dir);
+    run_command_with_timeout(command, cwd, &format!("ato {:?}", args))
 }
 
 fn run_command(program: &str, args: &[&str], cwd: &Path) -> Result<Output> {
-    Command::new(program)
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .with_context(|| format!("failed to run {} {:?}", program, args))
+    let mut command = Command::new(program);
+    command.args(args).current_dir(cwd);
+    run_command_with_timeout(command, cwd, &format!("{} {:?}", program, args))
 }
 
 fn require_success(output: Output, context: &str) -> Result<Output> {
@@ -632,7 +737,7 @@ fn e2e_native_delivery_sample_tauri_unsigned_finalize() -> Result<()> {
         return Ok(());
     }
 
-    let ato = assert_cmd::cargo::cargo_bin("ato");
+    let ato = ato_bin();
     let tmp = TempDir::new().context("create temp dir")?;
     let home_dir = tmp.path().join("home");
     fs::create_dir_all(&home_dir)?;
@@ -1007,7 +1112,7 @@ fn e2e_native_delivery_windows_build_publish_install_run() -> Result<()> {
         return Ok(());
     }
 
-    let ato = assert_cmd::cargo::cargo_bin("ato");
+    let ato = ato_bin();
     let tmp = TempDir::new().context("create temp dir")?;
     let home_dir = tmp.path().join("home");
     fs::create_dir_all(&home_dir)?;
@@ -1155,7 +1260,7 @@ fn e2e_native_delivery_projection_symlink_lifecycle() -> Result<()> {
         return Ok(());
     }
 
-    let ato = assert_cmd::cargo::cargo_bin("ato");
+    let ato = ato_bin();
     let tmp = TempDir::new().context("create temp dir")?;
     let home_dir = tmp.path().join("home");
     fs::create_dir_all(&home_dir)?;

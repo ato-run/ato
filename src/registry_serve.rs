@@ -5575,8 +5575,9 @@ repository = "koh0920/sample"
             let home = tempfile::tempdir().expect("home");
             let home_guard = HomeGuard::set(home.path());
 
-            let manifest_dir = tempfile::tempdir().expect("manifest dir");
-            let manifest_path = manifest_dir.path().join("capsule.toml");
+            let manifest_dir = home.path().join("workspace");
+            std::fs::create_dir_all(&manifest_dir).expect("create manifest dir");
+            let manifest_path = manifest_dir.join("capsule.toml");
             std::fs::write(
                 &manifest_path,
                 r#"
@@ -5629,10 +5630,11 @@ target = "/var/lib/app"
         )
         .await
         .into_response();
-        assert_eq!(register_response.status(), StatusCode::CREATED);
+        let register_status = register_response.status();
         let register_body = to_bytes(register_response.into_body(), usize::MAX)
             .await
             .expect("read register body");
+        assert_eq!(register_status, StatusCode::CREATED);
         let registered: crate::registry_store::PersistentStateRecord =
             serde_json::from_slice(&register_body).expect("parse register json");
         assert_eq!(registered.owner_scope, "demo-app");
