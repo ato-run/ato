@@ -123,7 +123,10 @@ pub fn execute_pack_command_with_injected_manifest(
             std::fs::write(&manifest, manifest_text).with_context(|| {
                 format!("Failed to write temporary manifest: {}", manifest.display())
             })?;
-            temporary_manifest = Some(TemporaryManifestGuard::new(manifest.clone()));
+            temporary_manifest = Some(TemporaryManifestGuard::new(
+                manifest.clone(),
+                !keep_failed_artifacts,
+            ));
         } else {
             futures::executor::block_on(reporter.warn(
                 "No `capsule.toml` found. Using defaults. Run `ato init` to generate an agent prompt, or `ato build --init` to create `capsule.toml` interactively.".to_string(),
@@ -132,7 +135,10 @@ pub fn execute_pack_command_with_injected_manifest(
             std::fs::write(&manifest, inferred).with_context(|| {
                 format!("Failed to write temporary manifest: {}", manifest.display())
             })?;
-            temporary_manifest = Some(TemporaryManifestGuard::new(manifest.clone()));
+            temporary_manifest = Some(TemporaryManifestGuard::new(
+                manifest.clone(),
+                !keep_failed_artifacts,
+            ));
         }
     }
 
@@ -530,17 +536,23 @@ fn emit_timings(
 
 struct TemporaryManifestGuard {
     path: PathBuf,
+    cleanup_on_drop: bool,
 }
 
 impl TemporaryManifestGuard {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
+    fn new(path: PathBuf, cleanup_on_drop: bool) -> Self {
+        Self {
+            path,
+            cleanup_on_drop,
+        }
     }
 }
 
 impl Drop for TemporaryManifestGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        if self.cleanup_on_drop {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
