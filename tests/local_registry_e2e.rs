@@ -79,7 +79,8 @@ fn wait_for_well_known(base_url: &str) -> Result<()> {
 fn seed_minimal_deno_lockfiles(workspace_root: &Path) -> Result<()> {
     let manifest_text = std::fs::read_to_string(workspace_root.join("capsule.toml"))
         .context("read manifest for lockfile")?;
-    let manifest = CapsuleManifest::from_toml(&manifest_text).context("parse manifest for lockfile")?;
+    let manifest =
+        CapsuleManifest::from_toml(&manifest_text).context("parse manifest for lockfile")?;
     let manifest_hash = compute_manifest_hash_without_signatures(&manifest)
         .context("compute manifest hash for lockfile")?;
 

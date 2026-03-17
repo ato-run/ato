@@ -4040,14 +4040,9 @@ async fn install_github_repository(
         .map(|draft| draft.normalize_preview_toml_for_checkout(&checkout.checkout_dir))
         .transpose()?;
     if let Some(draft) = install_draft.as_ref() {
-        if let Err(error) = show_github_draft_preview(
-            &invocation_dir,
-            repository,
-            draft,
-            yes,
-            can_prompt,
-            json,
-        ) {
+        if let Err(error) =
+            show_github_draft_preview(&invocation_dir, repository, draft, yes, can_prompt, json)
+        {
             maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
             return Err(error);
         }
@@ -4313,16 +4308,21 @@ fn show_github_draft_preview(
 
     let preview_label = format!(
         "preview-{}",
-        install_draft.resolved_ref.sha.chars().take(12).collect::<String>()
+        install_draft
+            .resolved_ref
+            .sha
+            .chars()
+            .take(12)
+            .collect::<String>()
     );
-    let preview_path = inference_feedback::build_manual_manifest_path(
-        invocation_dir,
-        repository,
-        &preview_label,
-    );
+    let preview_path =
+        inference_feedback::build_manual_manifest_path(invocation_dir, repository, &preview_label);
     inference_feedback::write_manual_manifest(&preview_path, preview_toml)?;
 
-    eprintln!("   Generated capsule.toml preview: {}", preview_path.display());
+    eprintln!(
+        "   Generated capsule.toml preview: {}",
+        preview_path.display()
+    );
     eprintln!("   ----- capsule.toml -----");
     for (index, line) in preview_toml.lines().enumerate() {
         eprintln!("   {:>3} | {}", index + 1, line);

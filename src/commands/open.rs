@@ -570,7 +570,18 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
         notify_web_endpoint(&decision.plan, &args.reporter).await?;
     }
 
-    if decision.plan.execution_run_command().is_some() {
+    let run_command_uses_specialized_executor = decision
+        .plan
+        .execution_driver()
+        .map(|driver| {
+            matches!(
+                driver.trim().to_ascii_lowercase().as_str(),
+                "deno" | "node" | "python"
+            )
+        })
+        .unwrap_or(false);
+
+    if decision.plan.execution_run_command().is_some() && !run_command_uses_specialized_executor {
         let mut process = crate::executors::shell::execute(&decision.plan, mode, &launch_ctx)?;
         if args.background {
             let pid = process.child.id();

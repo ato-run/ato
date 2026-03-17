@@ -230,7 +230,10 @@ fn normalize_github_install_preview_toml(
             }
         }
 
-        return Ok(manifest_text.to_string());
+        changed_pack_include_from_checkout(&mut parsed, checkout_dir)?;
+
+        return toml::to_string(&parsed)
+            .context("Failed to serialize normalized GitHub install draft");
     }
 
     let Some(targets) = parsed
@@ -297,6 +300,59 @@ fn normalize_github_install_preview_toml(
     }
 
     toml::to_string(&parsed).context("Failed to serialize normalized GitHub install draft")
+}
+
+fn changed_pack_include_from_checkout(parsed: &mut toml::Value, checkout_dir: &Path) -> Result<()> {
+    let Some(pack) = parsed.get_mut("pack").and_then(toml::Value::as_table_mut) else {
+        return Ok(());
+    };
+    let Some(include) = pack.get_mut("include").and_then(toml::Value::as_array_mut) else {
+        return Ok(());
+    };
+
+    if let Some(import_map) = referenced_deno_import_map(checkout_dir)? {
+        let already_present = include.iter().any(|entry| {
+            entry
+                .as_str()
+                .map(|value| value.trim() == import_map)
+                .unwrap_or(false)
+        });
+        if !already_present {
+            include.push(toml::Value::String(import_map));
+        }
+    }
+
+    Ok(())
+}
+
+fn referenced_deno_import_map(checkout_dir: &Path) -> Result<Option<String>> {
+    let deno_json_path = checkout_dir.join("deno.json");
+    if !deno_json_path.exists() {
+        return Ok(None);
+    }
+
+    let raw = std::fs::read_to_string(&deno_json_path)
+        .with_context(|| format!("Failed to read {}", deno_json_path.display()))?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("Failed to parse {}", deno_json_path.display()))?;
+    let Some(import_map) = parsed
+        .get("importMap")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let normalized = import_map.trim_start_matches("./");
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    if checkout_dir.join(normalized).exists() {
+        return Ok(Some(normalized.to_string()));
+    }
+
+    Ok(None)
 }
 
 fn normalize_github_install_driver(driver: &str) -> String {
@@ -3501,6 +3557,38 @@ run = "node server.js"
         assert!(normalized.contains(r#"schema_version = "0.3""#));
         assert!(normalized.contains(r#"runtime_version = "20.12.0""#));
         assert!(normalized.contains(r#"runtime = "source/node""#));
+    }
+
+    #[test]
+    fn normalize_github_install_preview_toml_includes_deno_import_map() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("deno.json"),
+            r#"{
+  "importMap": "./import_map.json",
+  "tasks": {
+    "start": "deno run --allow-net main.ts"
+  }
+}"#,
+        )
+        .expect("write deno.json");
+        std::fs::write(tmp.path().join("import_map.json"), "{}").expect("write import_map.json");
+        let manifest = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+runtime = "source/deno"
+run = "deno task start"
+
+[pack]
+include = ["main.ts", "deno.json", "deno.lock"]
+"#;
+
+        let normalized =
+            normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+        assert!(normalized.contains(r#""import_map.json""#));
     }
 
     #[test]

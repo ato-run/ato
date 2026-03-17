@@ -206,18 +206,18 @@ pub fn validate_manifest_for_build(
         } else if runtime == "oci" && entrypoint.is_none() && image.is_some() {
             // OCI targets may boot from image metadata and optionally use run_command/cmd.
         } else {
-        let entrypoint = entrypoint.ok_or_else(|| {
-            manifest_err(
-                manifest_path,
-                format!("targets.{target_label}.entrypoint is required"),
-            )
-        })?;
-        let clean_entrypoint = entrypoint.trim_start_matches("./");
-        if clean_entrypoint.contains('/') || clean_entrypoint.contains('\\') {
-            let path_in_root = target_manifest_dir.join(clean_entrypoint);
-            let path_in_source = target_manifest_dir.join("source").join(clean_entrypoint);
-            if !path_in_root.exists() && !path_in_source.exists() {
-                return Err(manifest_err(
+            let entrypoint = entrypoint.ok_or_else(|| {
+                manifest_err(
+                    manifest_path,
+                    format!("targets.{target_label}.entrypoint is required"),
+                )
+            })?;
+            let clean_entrypoint = entrypoint.trim_start_matches("./");
+            if clean_entrypoint.contains('/') || clean_entrypoint.contains('\\') {
+                let path_in_root = target_manifest_dir.join(clean_entrypoint);
+                let path_in_source = target_manifest_dir.join("source").join(clean_entrypoint);
+                if !path_in_root.exists() && !path_in_source.exists() {
+                    return Err(manifest_err(
                     manifest_path,
                     format!(
                         "entrypoint not found: targets.{target_label}.entrypoint='{}'. Checked '{}' and '{}'",
@@ -226,8 +226,8 @@ pub fn validate_manifest_for_build(
                         path_in_source.display()
                     ),
                 ));
+                }
             }
-        }
         }
 
         if let Some(port_raw) = target.get("port") {

@@ -334,9 +334,8 @@ pub fn read_manual_manifest(path: &Path) -> Result<String> {
 }
 
 pub fn open_editor(path: &Path) -> Result<()> {
-    let editor_command = resolved_editor_command().ok_or_else(|| {
-        anyhow::anyhow!("No editor launcher is available for manual fix mode")
-    })?;
+    let editor_command = resolved_editor_command()
+        .ok_or_else(|| anyhow::anyhow!("No editor launcher is available for manual fix mode"))?;
     let (program, args) = editor_command
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("editor command was empty"))?;
@@ -430,7 +429,10 @@ fn resolved_editor_command() -> Option<Vec<String>> {
 }
 
 fn configured_editor_command() -> Option<Vec<String>> {
-    configured_editor_command_from_values(std::env::var("VISUAL").ok(), std::env::var("EDITOR").ok())
+    configured_editor_command_from_values(
+        std::env::var("VISUAL").ok(),
+        std::env::var("EDITOR").ok(),
+    )
 }
 
 fn configured_editor_command_from_values(
@@ -462,7 +464,9 @@ fn parse_editor_command(value: String) -> Option<Vec<String>> {
 }
 
 fn automatic_editor_command() -> Option<Vec<String>> {
-    fallback_editor_command_for(std::env::consts::OS, |command| which::which(command).is_ok())
+    fallback_editor_command_for(std::env::consts::OS, |command| {
+        which::which(command).is_ok()
+    })
 }
 
 fn fallback_editor_command_for<F>(os: &str, has_command: F) -> Option<Vec<String>>
@@ -567,10 +571,9 @@ mod tests {
 
     #[test]
     fn fallback_editor_command_prefers_macos_open() {
-        let command = fallback_editor_command_for("macos", |candidate| {
-            matches!(candidate, "open" | "nano")
-        })
-        .expect("mac fallback should resolve");
+        let command =
+            fallback_editor_command_for("macos", |candidate| matches!(candidate, "open" | "nano"))
+                .expect("mac fallback should resolve");
 
         assert_eq!(command, vec!["open", "-W", "-t"]);
     }
