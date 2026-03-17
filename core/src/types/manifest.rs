@@ -8,9 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use thiserror::Error;
 use toml::value::Table;
 use url::form_urlencoded;
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
 
 use super::error::CapsuleError;
 use super::utils::parse_memory_string;
@@ -553,8 +554,118 @@ fn is_v03_schema(raw: &toml::Value) -> bool {
         .unwrap_or(false)
 }
 
+fn is_chml_manifest(raw: &toml::Value) -> bool {
+    if raw.get("schema_version").is_some() {
+        return false;
+    }
+
+    let Some(table) = raw.as_table() else {
+        return false;
+    };
+
+    if table.contains_key("packages") || table.contains_key("workspace") {
+        return true;
+    }
+
+    table.get("build").and_then(toml::Value::as_str).is_some()
+        || table.get("run").and_then(toml::Value::as_str).is_some()
+        || table.get("runtime").and_then(toml::Value::as_str).is_some()
+        || table.contains_key("outputs")
+        || table.contains_key("build_env")
+        || table.contains_key("required_env")
+        || table.contains_key("runtime_version")
+        || table.contains_key("runtime_tools")
+        || table.contains_key("readiness_probe")
+        || table.contains_key("external_injection")
+        || table.contains_key("dependencies")
+        || table.contains_key("capsule_path")
+}
+
+fn is_v03_like_schema(raw: &toml::Value) -> bool {
+    is_v03_schema(raw) || is_chml_manifest(raw)
+}
+
 fn normalize_v03_capsule_type(value: &str) -> String {
     value.trim().to_ascii_lowercase()
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct V03PackageSurface {
+    #[serde(rename = "type", default)]
+    package_type: Option<String>,
+    #[serde(default)]
+    runtime: Option<String>,
+    #[serde(default)]
+    build: Option<String>,
+    #[serde(default)]
+    outputs: Vec<String>,
+    #[serde(default)]
+    build_env: Vec<String>,
+    #[serde(default)]
+    run: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    required_env: Vec<String>,
+    #[serde(default)]
+    runtime_version: Option<String>,
+    #[serde(default)]
+    runtime_tools: HashMap<String, String>,
+    #[serde(default)]
+    readiness_probe: Option<toml::Value>,
+    #[serde(default)]
+    driver: Option<String>,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    image: Option<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
+    #[serde(default)]
+    public: Vec<String>,
+}
+
+fn parse_v03_package_surface(
+    package_name: &str,
+    table: &Table,
+) -> Result<V03PackageSurface, CapsuleError> {
+    toml::Value::Table(table.clone())
+        .try_into()
+        .map_err(|error| {
+            CapsuleError::ParseError(format!(
+                "schema_version=0.3 package '{}' could not be parsed: {}",
+                package_name, error
+            ))
+        })
+}
+
+fn reject_v03_legacy_fields(table: &Table, context: &str) -> Result<(), CapsuleError> {
+    for field in ["entrypoint", "cmd"] {
+        if table.contains_key(field) {
+            return Err(CapsuleError::ParseError(format!(
+                "schema_version=0.3 {context} must not use legacy field '{}'; use 'run' instead",
+                field
+            )));
+        }
+    }
+
+    if let Some(targets) = table.get("targets").and_then(toml::Value::as_table) {
+        for (target_name, target_value) in targets {
+            let Some(target_table) = target_value.as_table() else {
+                continue;
+            };
+            for field in ["entrypoint", "cmd"] {
+                if target_table.contains_key(field) {
+                    return Err(CapsuleError::ParseError(format!(
+                        "schema_version=0.3 target '{}' must not use legacy field '{}'; use 'run' instead",
+                        target_name, field
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn shallow_merge_v03_tables(defaults: &Table, package: &Table) -> Table {
@@ -602,10 +713,6 @@ fn normalize_v03_runtime_selector(value: &str) -> (String, Option<String>) {
     }
 }
 
-fn tokenize_v03_run_command(value: &str) -> Vec<String> {
-    shell_words::split(value).unwrap_or_else(|_| vec![value.to_string()])
-}
-
 fn infer_v03_language_from_driver(driver: Option<&str>) -> Option<String> {
     match driver.map(|value| value.trim().to_ascii_lowercase()) {
         Some(driver) if matches!(driver.as_str(), "node" | "python" | "deno" | "bun") => {
@@ -613,73 +720,6 @@ fn infer_v03_language_from_driver(driver: Option<&str>) -> Option<String> {
         }
         _ => None,
     }
-}
-
-fn split_v03_run_command(driver: Option<&str>, run_command: &str) -> (String, Option<Vec<String>>) {
-    let tokens = tokenize_v03_run_command(run_command);
-    if tokens.is_empty() {
-        return (run_command.to_string(), None);
-    }
-
-    let normalized_driver = driver.map(|value| value.trim().to_ascii_lowercase());
-    let first = tokens[0].trim().to_ascii_lowercase();
-
-    let runtime_exec = match normalized_driver.as_deref() {
-        Some("node") if matches!(first.as_str(), "node" | "nodejs") => Some("node"),
-        Some("python") if matches!(first.as_str(), "python" | "python3" | "py") => Some("python"),
-        Some("deno") if first == "deno" => Some("deno"),
-        Some("native") if matches!(first.as_str(), "cargo" | "go") => Some("native"),
-        _ => None,
-    };
-
-    if runtime_exec.is_none() {
-        return (run_command.to_string(), None);
-    }
-
-    let entrypoint_index = match runtime_exec {
-        Some("node") | Some("python") => tokens
-            .iter()
-            .enumerate()
-            .skip(1)
-            .find_map(|(index, token)| (!token.starts_with('-')).then_some(index)),
-        Some("deno") => {
-            let mut index = 1;
-            while index < tokens.len() {
-                let token = tokens[index].as_str();
-                if token == "run" {
-                    index += 1;
-                    continue;
-                }
-                if token.starts_with('-') {
-                    index += 1;
-                    continue;
-                }
-                break;
-            }
-            (index < tokens.len()).then_some(index)
-        }
-        Some("native") => match first.as_str() {
-            "go" => tokens
-                .iter()
-                .enumerate()
-                .skip(1)
-                .find_map(|(index, token)| {
-                    (token == "run")
-                        .then_some(index + 1)
-                        .filter(|next_index| *next_index < tokens.len())
-                })
-                .or_else(|| (tokens.len() > 1).then_some(1)),
-            _ => None,
-        },
-        _ => None,
-    };
-
-    let Some(entrypoint_index) = entrypoint_index else {
-        return (run_command.to_string(), None);
-    };
-
-    let entrypoint = tokens[entrypoint_index].clone();
-    (entrypoint, Some(tokens))
 }
 
 fn apply_v03_readiness_probe(target_table: &mut Table, readiness_probe: toml::Value) {
@@ -762,32 +802,69 @@ fn apply_v03_readiness_probe(target_table: &mut Table, readiness_probe: toml::Va
     }
 }
 
-fn normalize_v03_target_table(table: &Table) -> Table {
+fn normalize_v03_target_table(package_name: &str, table: &Table) -> Result<Table, CapsuleError> {
+    reject_v03_legacy_fields(table, &format!("package '{}'", package_name))?;
+    let V03PackageSurface {
+        package_type,
+        runtime,
+        build,
+        outputs,
+        build_env,
+        run,
+        port,
+        required_env,
+        runtime_version,
+        runtime_tools,
+        readiness_probe,
+        driver,
+        language,
+        image,
+        env,
+        public,
+    } = parse_v03_package_surface(package_name, table)?;
     let mut target_table = Table::new();
 
-    if let Some(package_type) = table.get("type").and_then(toml::Value::as_str) {
+    if let Some(package_type) = package_type.as_deref() {
         target_table.insert(
             "package_type".to_string(),
             toml::Value::String(normalize_v03_capsule_type(package_type)),
         );
     }
 
-    if let Some(runtime_selector) = table
-        .get("runtime")
-        .and_then(toml::Value::as_str)
+    let mut normalized_driver = driver
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+
+    if let Some(runtime_selector) = runtime
+        .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
         let (runtime, driver) = normalize_v03_runtime_selector(runtime_selector);
         target_table.insert("runtime".to_string(), toml::Value::String(runtime));
         if let Some(driver) = driver {
+            normalized_driver = Some(driver.clone());
             target_table.insert("driver".to_string(), toml::Value::String(driver));
         }
+    } else if let Some(driver) = normalized_driver.as_ref() {
+        target_table.insert("driver".to_string(), toml::Value::String(driver.clone()));
     }
 
-    if let Some(run_command) = table
-        .get("run")
-        .and_then(toml::Value::as_str)
+    if let Some(language) = language
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        target_table.insert(
+            "language".to_string(),
+            toml::Value::String(language.to_string()),
+        );
+    }
+
+    if let Some(run_command) = run
+        .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
@@ -795,18 +872,6 @@ fn normalize_v03_target_table(table: &Table) -> Table {
             "run_command".to_string(),
             toml::Value::String(run_command.to_string()),
         );
-        let normalized_driver = target_table
-            .get("driver")
-            .and_then(toml::Value::as_str)
-            .map(|value| value.to_string());
-        let (entrypoint, cmd) = split_v03_run_command(normalized_driver.as_deref(), run_command);
-        target_table.insert("entrypoint".to_string(), toml::Value::String(entrypoint));
-        if let Some(cmd) = cmd {
-            target_table.insert(
-                "cmd".to_string(),
-                toml::Value::Array(cmd.into_iter().map(toml::Value::String).collect()),
-            );
-        }
         if let Some(language) = infer_v03_language_from_driver(normalized_driver.as_deref()) {
             target_table
                 .entry("language".to_string())
@@ -814,9 +879,8 @@ fn normalize_v03_target_table(table: &Table) -> Table {
         }
     }
 
-    if let Some(build_command) = table
-        .get("build")
-        .and_then(toml::Value::as_str)
+    if let Some(build_command) = build
+        .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
@@ -826,23 +890,66 @@ fn normalize_v03_target_table(table: &Table) -> Table {
         );
     }
 
-    if let Some(port) = table.get("port").cloned() {
-        target_table.insert("port".to_string(), port);
+    if !outputs.is_empty() {
+        target_table.insert(
+            "outputs".to_string(),
+            toml::Value::Array(outputs.into_iter().map(toml::Value::String).collect()),
+        );
     }
-    if let Some(required_env) = table.get("required_env").cloned() {
-        target_table.insert("required_env".to_string(), required_env);
+    if !build_env.is_empty() {
+        target_table.insert(
+            "build_env".to_string(),
+            toml::Value::Array(build_env.into_iter().map(toml::Value::String).collect()),
+        );
     }
-    if let Some(runtime_version) = table.get("runtime_version").cloned() {
-        target_table.insert("runtime_version".to_string(), runtime_version);
+
+    if let Some(port) = port {
+        target_table.insert("port".to_string(), toml::Value::Integer(i64::from(port)));
     }
-    if let Some(runtime_tools) = table.get("runtime_tools").cloned() {
-        target_table.insert("runtime_tools".to_string(), runtime_tools);
+    if !required_env.is_empty() {
+        target_table.insert(
+            "required_env".to_string(),
+            toml::Value::Array(required_env.into_iter().map(toml::Value::String).collect()),
+        );
     }
-    if let Some(readiness_probe) = table.get("readiness_probe").cloned() {
+    if let Some(runtime_version) = runtime_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        target_table.insert(
+            "runtime_version".to_string(),
+            toml::Value::String(runtime_version.to_string()),
+        );
+    }
+    if !runtime_tools.is_empty() {
+        target_table.insert(
+            "runtime_tools".to_string(),
+            toml::Value::try_from(runtime_tools).unwrap(),
+        );
+    }
+    if let Some(readiness_probe) = readiness_probe {
         apply_v03_readiness_probe(&mut target_table, readiness_probe);
     }
 
-    target_table
+    if let Some(image) = image
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        target_table.insert("image".to_string(), toml::Value::String(image.to_string()));
+    }
+    if !env.is_empty() {
+        target_table.insert("env".to_string(), toml::Value::try_from(env).unwrap());
+    }
+    if !public.is_empty() {
+        target_table.insert(
+            "public".to_string(),
+            toml::Value::Array(public.into_iter().map(toml::Value::String).collect()),
+        );
+    }
+
+    Ok(target_table)
 }
 
 #[derive(Debug, Clone)]
@@ -855,6 +962,16 @@ struct V03WorkspaceTarget {
 struct V03WorkspaceContext {
     package_dirs_by_label: HashMap<String, PathBuf>,
     labels_by_relative_path: HashMap<String, String>,
+}
+
+fn seed_v03_workspace_context_labels(packages: &Table) -> V03WorkspaceContext {
+    let mut context = V03WorkspaceContext::default();
+    for label in packages.keys() {
+        context
+            .package_dirs_by_label
+            .insert(label.clone(), PathBuf::new());
+    }
+    context
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -956,6 +1073,46 @@ fn workspace_members_globset(
     })
 }
 
+fn should_prune_workspace_member_walk_entry(workspace_root: &Path, entry: &DirEntry) -> bool {
+    const IGNORED_DIR_NAMES: &[&str] = &[
+        ".git",
+        ".hg",
+        ".svn",
+        ".next",
+        ".nuxt",
+        ".output",
+        ".svelte-kit",
+        ".turbo",
+        ".wrangler",
+        "node_modules",
+        "dist",
+        "build",
+        "target",
+        "coverage",
+        ".tmp",
+        "tmp",
+    ];
+
+    if !entry.file_type().is_dir() {
+        return false;
+    }
+
+    let Ok(relative) = entry.path().strip_prefix(workspace_root) else {
+        return false;
+    };
+    if relative.as_os_str().is_empty() {
+        return false;
+    }
+
+    relative.components().any(|component| match component {
+        Component::Normal(value) => {
+            let name = value.to_string_lossy();
+            name.starts_with('.') || IGNORED_DIR_NAMES.contains(&name.as_ref())
+        }
+        _ => false,
+    })
+}
+
 fn discover_v03_workspace_member_dirs(
     manifest_path: &Path,
     workspace_members: &[String],
@@ -975,6 +1132,7 @@ fn discover_v03_workspace_member_dirs(
         .min_depth(1)
         .follow_links(false)
         .into_iter()
+        .filter_entry(|entry| !should_prune_workspace_member_walk_entry(workspace_root, entry))
         .filter_map(std::result::Result::ok)
         .filter(|entry| entry.file_type().is_dir())
     {
@@ -1543,7 +1701,7 @@ fn normalize_workspace_target_from_package(
     package_dir: Option<&Path>,
     workspace_context: &V03WorkspaceContext,
 ) -> Result<V03WorkspaceTarget, CapsuleError> {
-    let mut target_table = normalize_v03_target_table(package_table);
+    let mut target_table = normalize_v03_target_table(package_name, package_table)?;
     let dependencies =
         normalize_v03_package_dependencies(package_name, package_table, workspace_context)?;
     let working_dir = match (root_manifest_path, package_dir) {
@@ -1749,12 +1907,20 @@ fn normalize_v03_workspace_targets(
                                 delegated_manifest_path.display()
                             ))
                         })?;
+                    let mut delegated_workspace_context = workspace_context.clone();
+                    let seeded_context = seed_v03_workspace_context_labels(&delegated_packages);
+                    for (label, package_dir) in seeded_context.package_dirs_by_label {
+                        delegated_workspace_context
+                            .package_dirs_by_label
+                            .entry(label)
+                            .or_insert(package_dir);
+                    }
                     normalize_v03_workspace_targets(
                         root_manifest_path,
                         Some(&delegated_manifest_path),
                         &delegated_defaults,
                         &delegated_packages,
-                        workspace_context,
+                        &delegated_workspace_context,
                         visiting,
                     )?
                 } else {
@@ -1787,6 +1953,7 @@ fn normalize_v03_workspace_targets(
         let package_dir = workspace_context
             .package_dirs_by_label
             .get(package_name)
+            .filter(|path| !path.as_os_str().is_empty())
             .map(PathBuf::as_path);
         targets.push(normalize_workspace_target_from_package(
             root_manifest_path,
@@ -1844,7 +2011,7 @@ fn normalize_v03_workspace_manifest_with_path(
     let workspace_context = manifest_path
         .map(|path| build_v03_workspace_context(path, &packages, &member_dirs))
         .transpose()?
-        .unwrap_or_default();
+        .unwrap_or_else(|| seed_v03_workspace_context_labels(&packages));
 
     let explicit_default_target = table
         .get("default_target")
@@ -1911,7 +2078,7 @@ fn normalize_v03_manifest_value_with_path(
     manifest_path: Option<&Path>,
     visiting: &mut HashSet<PathBuf>,
 ) -> Result<toml::Value, CapsuleError> {
-    if !is_v03_schema(&raw) {
+    if !is_v03_like_schema(&raw) {
         return Ok(raw);
     }
 
@@ -1919,11 +2086,27 @@ fn normalize_v03_manifest_value_with_path(
         CapsuleError::ParseError("schema_version=0.3 manifest must be a TOML table".to_string())
     })?;
 
+    if !table.contains_key("schema_version") {
+        table.insert(
+            "schema_version".to_string(),
+            toml::Value::String("0.3".to_string()),
+        );
+    }
+
+    if !table.contains_key("version") {
+        table.insert(
+            "version".to_string(),
+            toml::Value::String("0.0.0".to_string()),
+        );
+    }
+
     if table.contains_key("execution") {
         return Err(CapsuleError::ParseError(
             "legacy [execution] section is not supported in schema_version=0.3".to_string(),
         ));
     }
+
+    reject_v03_legacy_fields(&table, "manifest")?;
 
     if table.contains_key("packages") {
         return normalize_v03_workspace_manifest_with_path(table, manifest_path, visiting);
@@ -1936,33 +2119,33 @@ fn normalize_v03_manifest_value_with_path(
         );
     }
 
-    let runtime_selector = table
-        .get("runtime")
-        .and_then(toml::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
-    let run_command = table
-        .get("run")
-        .and_then(toml::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
-    let build_command = table
+    let has_top_level_build_command = table
         .get("build")
         .and_then(toml::Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+        .is_some();
 
-    if runtime_selector.is_some()
-        || run_command.is_some()
-        || build_command.is_some()
+    if table
+        .get("runtime")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+        || table
+            .get("run")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some()
+        || has_top_level_build_command
         || table.contains_key("required_env")
         || table.contains_key("runtime_version")
         || table.contains_key("runtime_tools")
         || table.contains_key("port")
         || table.contains_key("readiness_probe")
+        || table.contains_key("outputs")
+        || table.contains_key("build_env")
     {
         let default_target = table
             .get("default_target")
@@ -1980,67 +2163,8 @@ fn normalize_v03_manifest_value_with_path(
             .remove(&default_target)
             .and_then(|value| value.as_table().cloned())
             .unwrap_or_default();
-
-        if let Some(runtime_selector) = runtime_selector.as_deref() {
-            let (runtime, driver) = normalize_v03_runtime_selector(runtime_selector);
-            target_table.insert("runtime".to_string(), toml::Value::String(runtime));
-            if let Some(driver) = driver {
-                target_table.insert("driver".to_string(), toml::Value::String(driver));
-            }
-        }
-
-        if let Some(capsule_type) = table.get("type").and_then(toml::Value::as_str) {
-            target_table.insert(
-                "package_type".to_string(),
-                toml::Value::String(normalize_v03_capsule_type(capsule_type)),
-            );
-        }
-        if let Some(run_command) = run_command.as_ref() {
-            target_table.insert(
-                "run_command".to_string(),
-                toml::Value::String(run_command.clone()),
-            );
-            let normalized_driver = target_table
-                .get("driver")
-                .and_then(toml::Value::as_str)
-                .map(|value| value.to_string());
-            let (entrypoint, cmd) =
-                split_v03_run_command(normalized_driver.as_deref(), run_command);
-            target_table.insert("entrypoint".to_string(), toml::Value::String(entrypoint));
-            if let Some(cmd) = cmd {
-                target_table.insert(
-                    "cmd".to_string(),
-                    toml::Value::Array(cmd.into_iter().map(toml::Value::String).collect()),
-                );
-            }
-            if let Some(language) = infer_v03_language_from_driver(normalized_driver.as_deref()) {
-                target_table
-                    .entry("language".to_string())
-                    .or_insert_with(|| toml::Value::String(language));
-            }
-        }
-        if let Some(build_command) = build_command.as_ref() {
-            target_table.insert(
-                "build_command".to_string(),
-                toml::Value::String(build_command.clone()),
-            );
-        }
-
-        if let Some(port) = table.get("port").cloned() {
-            target_table.insert("port".to_string(), port);
-        }
-        if let Some(required_env) = table.get("required_env").cloned() {
-            target_table.insert("required_env".to_string(), required_env);
-        }
-        if let Some(runtime_version) = table.get("runtime_version").cloned() {
-            target_table.insert("runtime_version".to_string(), runtime_version);
-        }
-        if let Some(runtime_tools) = table.get("runtime_tools").cloned() {
-            target_table.insert("runtime_tools".to_string(), runtime_tools);
-        }
-        if let Some(readiness_probe) = table.get("readiness_probe").cloned() {
-            apply_v03_readiness_probe(&mut target_table, readiness_probe);
-        }
+        let normalized_target = normalize_v03_target_table(&default_target, &table)?;
+        target_table = shallow_merge_v03_tables(&target_table, &normalized_target);
         let external_injection = normalize_v03_external_injection_table(&default_target, &table)?;
         if !external_injection.is_empty() {
             let mut normalized_table = Table::new();
@@ -2089,6 +2213,20 @@ fn normalize_v03_manifest_value_with_path(
         );
         table.insert("targets".to_string(), toml::Value::Table(targets_table));
 
+        let build_command = table
+            .get("targets")
+            .and_then(toml::Value::as_table)
+            .and_then(|targets| {
+                table
+                    .get("default_target")
+                    .and_then(toml::Value::as_str)
+                    .and_then(|label| targets.get(label))
+            })
+            .and_then(toml::Value::as_table)
+            .and_then(|target| target.get("build_command"))
+            .and_then(toml::Value::as_str)
+            .map(ToOwned::to_owned);
+
         table.remove("runtime");
         table.remove("run");
         table.remove("port");
@@ -2096,6 +2234,8 @@ fn normalize_v03_manifest_value_with_path(
         table.remove("runtime_version");
         table.remove("runtime_tools");
         table.remove("readiness_probe");
+        table.remove("outputs");
+        table.remove("build_env");
 
         if let Some(build_command) = build_command {
             let mut lifecycle = Table::new();
@@ -2546,7 +2686,7 @@ pub struct NamedTarget {
     pub required_env: Vec<String>,
 
     /// Legacy public asset allowlist (deprecated for runtime=web; rejected by validation).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub public: Vec<String>,
 
     /// Optional listening port.
@@ -2564,6 +2704,14 @@ pub struct NamedTarget {
     /// Package-specific build command preserved from schema v0.3.
     #[serde(default)]
     pub build_command: Option<String>,
+
+    /// CHML build cache output globs preserved on the normalized target.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<String>,
+
+    /// CHML build cache environment keys preserved on the normalized target.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub build_env: Vec<String>,
 
     /// Preserved shell-native run command for schema v0.3.
     #[serde(default)]
@@ -3248,6 +3396,22 @@ impl CapsuleManifest {
                         )));
                     }
                 }
+
+                let target = named_targets
+                    .get(label)
+                    .expect("package_dependencies keys must exist in named_targets");
+                if target.outputs.iter().any(|value| value.trim().is_empty()) {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{}': outputs must not contain empty patterns",
+                        label
+                    )));
+                }
+                if target.build_env.iter().any(|value| value.trim().is_empty()) {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{}': build_env must not contain empty variable names",
+                        label
+                    )));
+                }
             }
 
             if let Err(err) = startup_order_from_dependencies(&package_dependencies) {
@@ -3872,124 +4036,47 @@ impl CapsuleManifest {
 }
 
 /// Validation error types
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ValidationError {
+    #[error("Invalid schema_version '{0}', expected '1' or legacy '0.2'/'0.3'")]
     InvalidSchemaVersion(String),
+    #[error("Invalid name '{0}', must be kebab-case")]
     InvalidName(String),
+    #[error("Invalid memory string for {field}: '{value}'")]
     InvalidMemoryString { field: &'static str, value: String },
+    #[error("Invalid version '{0}', must be semver (e.g., 1.0.0)")]
     InvalidVersion(String),
+    #[error("Inference Capsule must have capabilities defined")]
     MissingCapabilities,
+    #[error("Inference Capsule must have model config defined")]
     MissingModelConfig,
+    #[error("Invalid port {0}")]
     InvalidPort(u16),
+    #[error("Storage volumes are only supported for execution.runtime=docker")]
     StorageOnlyForDocker,
+    #[error("Invalid storage volume (requires unique name and absolute mount_path)")]
     InvalidStorageVolume,
+    #[error("default_target is required")]
     MissingDefaultTarget,
+    #[error("At least one [targets.<label>] entry is required")]
     MissingTargets,
+    #[error("default_target '{0}' does not exist under [targets]")]
     DefaultTargetNotFound(String),
+    #[error("Invalid target: {0}")]
     InvalidTarget(String),
+    #[error("Invalid target '{0}': unsupported driver '{1}' (allowed: static|deno|node|python|wasmtime|native)")]
     InvalidTargetDriver(String, String),
+    #[error("Invalid target '{0}': runtime_version is required for runtime=source driver='{1}'")]
     MissingRuntimeVersion(String, String),
+    #[error("Invalid web target '{0}': {1}")]
     InvalidWebTarget(String, String),
+    #[error("Invalid service '{0}': {1}")]
     InvalidService(String, String),
+    #[error("Invalid state '{0}': {1}")]
     InvalidState(String, String),
+    #[error("Invalid state binding for service '{0}': {1}")]
     InvalidStateBinding(String, String),
 }
-
-impl std::fmt::Display for ValidationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ValidationError::InvalidSchemaVersion(v) => {
-                write!(
-                    f,
-                    "Invalid schema_version '{}', expected '1' or legacy '0.2'/'0.3'",
-                    v
-                )
-            }
-            ValidationError::InvalidName(n) => {
-                write!(f, "Invalid name '{}', must be kebab-case", n)
-            }
-            ValidationError::InvalidMemoryString { field, value } => {
-                write!(f, "Invalid memory string for {}: '{}'", field, value)
-            }
-            ValidationError::InvalidVersion(v) => {
-                write!(f, "Invalid version '{}', must be semver (e.g., 1.0.0)", v)
-            }
-            ValidationError::MissingCapabilities => {
-                write!(f, "Inference Capsule must have capabilities defined")
-            }
-            ValidationError::MissingModelConfig => {
-                write!(f, "Inference Capsule must have model config defined")
-            }
-            ValidationError::InvalidPort(p) => {
-                write!(f, "Invalid port {}", p)
-            }
-            ValidationError::StorageOnlyForDocker => {
-                write!(
-                    f,
-                    "Storage volumes are only supported for execution.runtime=docker"
-                )
-            }
-            ValidationError::InvalidStorageVolume => {
-                write!(
-                    f,
-                    "Invalid storage volume (requires unique name and absolute mount_path)"
-                )
-            }
-            ValidationError::MissingDefaultTarget => {
-                write!(f, "default_target is required")
-            }
-            ValidationError::MissingTargets => {
-                write!(f, "At least one [targets.<label>] entry is required")
-            }
-            ValidationError::DefaultTargetNotFound(target) => {
-                write!(
-                    f,
-                    "default_target '{}' does not exist under [targets]",
-                    target
-                )
-            }
-            ValidationError::InvalidTarget(label) => {
-                write!(
-                    f,
-                    "Invalid target '{}': runtime and entrypoint are required",
-                    label
-                )
-            }
-            ValidationError::InvalidTargetDriver(label, driver) => {
-                write!(
-                    f,
-                    "Invalid target '{}': unsupported driver '{}' (allowed: static|deno|node|python|wasmtime|native)",
-                    label, driver
-                )
-            }
-            ValidationError::MissingRuntimeVersion(label, driver) => {
-                write!(
-                    f,
-                    "Invalid target '{}': runtime_version is required for runtime=source driver='{}'",
-                    label, driver
-                )
-            }
-            ValidationError::InvalidWebTarget(label, message) => {
-                write!(f, "Invalid web target '{}': {}", label, message)
-            }
-            ValidationError::InvalidService(name, message) => {
-                write!(f, "Invalid service '{}': {}", name, message)
-            }
-            ValidationError::InvalidState(name, message) => {
-                write!(f, "Invalid state '{}': {}", name, message)
-            }
-            ValidationError::InvalidStateBinding(name, message) => {
-                write!(
-                    f,
-                    "Invalid state binding for service '{}': {}",
-                    name, message
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for ValidationError {}
 
 /// Check if string is kebab-case
 fn is_kebab_case(s: &str) -> bool {
@@ -4193,7 +4280,8 @@ required_env = ["DATABASE_URL"]
         let target = manifest.resolve_default_target().expect("default target");
         assert_eq!(target.runtime, "source");
         assert_eq!(target.driver.as_deref(), Some("node"));
-        assert_eq!(target.entrypoint, "npm start");
+        assert!(target.entrypoint.is_empty());
+        assert!(target.cmd.is_empty());
         assert_eq!(target.run_command.as_deref(), Some("npm start"));
         assert_eq!(target.port, Some(3000));
         assert_eq!(target.required_env, vec!["DATABASE_URL".to_string()]);
@@ -4208,7 +4296,44 @@ required_env = ["DATABASE_URL"]
     }
 
     #[test]
-    fn test_from_toml_splits_v03_node_run_command_into_entrypoint_and_cmd() {
+    fn test_from_toml_accepts_chml_single_package_manifest() {
+        let toml = r#"
+name = "chml-demo"
+type = "app"
+runtime = "source/node"
+build = "npm run build"
+outputs = ["dist/**"]
+build_env = ["NODE_ENV", "API_BASE_URL"]
+run = "npm start"
+port = 3000
+required_env = ["DATABASE_URL"]
+
+[external_injection]
+MODEL_DIR = "directory"
+"#;
+
+        let manifest = CapsuleManifest::from_toml(toml).expect("parse CHML manifest");
+        assert_eq!(manifest.schema_version, "0.3");
+        assert_eq!(manifest.version, "0.0.0");
+        assert_eq!(manifest.default_target, "app");
+
+        let target = manifest.resolve_default_target().expect("default target");
+        assert_eq!(target.runtime, "source");
+        assert_eq!(target.driver.as_deref(), Some("node"));
+        assert_eq!(target.run_command.as_deref(), Some("npm start"));
+        assert_eq!(target.outputs, vec!["dist/**".to_string()]);
+        assert_eq!(
+            target.build_env,
+            vec!["NODE_ENV".to_string(), "API_BASE_URL".to_string()]
+        );
+        assert_eq!(
+            target.external_injection["MODEL_DIR"].injection_type,
+            "directory"
+        );
+    }
+
+    #[test]
+    fn test_from_toml_preserves_v03_run_command_without_splitting() {
         let toml = r#"
 schema_version = "0.3"
 name = "json-server"
@@ -4221,21 +4346,14 @@ run = "node src/bin.ts fixtures/db.json"
         let manifest = CapsuleManifest::from_toml(toml).expect("parse v0.3 manifest");
         let target = manifest.resolve_default_target().expect("default target");
 
-        assert_eq!(target.entrypoint, "src/bin.ts");
+        assert!(target.entrypoint.is_empty());
         assert_eq!(target.driver.as_deref(), Some("node"));
         assert_eq!(target.language.as_deref(), Some("node"));
         assert_eq!(
             target.run_command.as_deref(),
             Some("node src/bin.ts fixtures/db.json")
         );
-        assert_eq!(
-            target.cmd,
-            vec![
-                "node".to_string(),
-                "src/bin.ts".to_string(),
-                "fixtures/db.json".to_string()
-            ]
-        );
+        assert!(target.cmd.is_empty());
     }
 
     #[test]
@@ -4362,6 +4480,57 @@ build = "pnpm --filter ui build"
     }
 
     #[test]
+    fn test_from_toml_accepts_chml_workspace_packages_as_named_targets() {
+        let toml = r#"
+name = "workspace-demo"
+
+[workspace]
+members = ["apps/*"]
+
+[workspace.defaults]
+runtime = "source/node"
+required_env = ["DATABASE_URL"]
+
+[packages.web]
+type = "app"
+build = "pnpm --filter web build"
+outputs = ["apps/web/dist/**"]
+build_env = ["NODE_ENV"]
+run = "pnpm --filter web start"
+port = 3000
+
+    [packages.web.dependencies]
+    ui = "workspace:ui"
+
+[packages.ui]
+type = "library"
+build = "pnpm --filter ui build"
+outputs = ["packages/ui/dist/**"]
+"#;
+
+        let manifest = CapsuleManifest::from_toml(toml).expect("parse CHML workspace");
+        assert_eq!(manifest.schema_version, "0.3");
+        assert_eq!(manifest.version, "0.0.0");
+        assert_eq!(manifest.default_target, "web");
+
+        let web = manifest
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.named_target("web"))
+            .expect("web target");
+        assert_eq!(web.outputs, vec!["apps/web/dist/**".to_string()]);
+        assert_eq!(web.build_env, vec!["NODE_ENV".to_string()]);
+        assert_eq!(web.required_env, vec!["DATABASE_URL".to_string()]);
+
+        let ui = manifest
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.named_target("ui"))
+            .expect("ui target");
+        assert_eq!(ui.outputs, vec!["packages/ui/dist/**".to_string()]);
+    }
+
+    #[test]
     fn test_validate_v03_workspace_rejects_dependency_cycles() {
         let toml = r#"
 schema_version = "0.3"
@@ -4389,6 +4558,44 @@ build = "pnpm --filter ui build"
         assert!(errors.iter().any(|error| {
             matches!(error, ValidationError::InvalidTarget(message) if message.contains("circular dependency detected"))
         }));
+    }
+
+    #[test]
+    fn test_from_toml_rejects_v03_top_level_legacy_entrypoint() {
+        let toml = r#"
+schema_version = "0.3"
+name = "legacy-v03"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+entrypoint = "server.js"
+"#;
+
+        let error = CapsuleManifest::from_toml(toml).expect_err("v0.3 entrypoint must fail");
+        assert!(error
+            .to_string()
+            .contains("must not use legacy field 'entrypoint'"));
+    }
+
+    #[test]
+    fn test_from_toml_rejects_v03_target_legacy_cmd() {
+        let toml = r#"
+schema_version = "0.3"
+name = "legacy-v03"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+cmd = ["python", "app.py"]
+"#;
+
+        let error = CapsuleManifest::from_toml(toml).expect_err("v0.3 cmd must fail");
+        assert!(error
+            .to_string()
+            .contains("must not use legacy field 'cmd'"));
     }
 
     #[test]
@@ -4432,6 +4639,67 @@ run = "pnpm start"
         assert_eq!(manifest.default_target, "api");
         assert_eq!(api.run_command.as_deref(), Some("pnpm start"));
         assert_eq!(api.working_dir.as_deref(), Some("apps/api"));
+    }
+
+    #[test]
+    fn test_load_from_file_ignores_generated_workspace_member_dirs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root_manifest = tmp.path().join("capsule.toml");
+        let control_plane_dir = tmp.path().join("apps").join("control-plane");
+        let dashboard_dir = tmp.path().join("apps").join("dashboard");
+        let generated_duplicate_dir = dashboard_dir
+            .join(".next")
+            .join("standalone")
+            .join("apps")
+            .join("control-plane");
+        fs::create_dir_all(&control_plane_dir).expect("create control-plane dir");
+        fs::create_dir_all(&dashboard_dir).expect("create dashboard dir");
+        fs::create_dir_all(&generated_duplicate_dir).expect("create generated duplicate dir");
+
+        fs::write(
+            &root_manifest,
+            r#"
+name = "file2api"
+
+[workspace]
+members = ["apps/*"]
+
+[packages.control-plane]
+type = "app"
+runtime = "source/python"
+run = "uvicorn control_plane.modal_webhook:app --host 0.0.0.0 --port $PORT"
+port = 8000
+
+[packages.dashboard]
+type = "app"
+runtime = "source/node"
+build = "npm run build"
+run = "npm start"
+port = 3000
+"#,
+        )
+        .expect("write root manifest");
+
+        fs::write(
+            control_plane_dir.join("capsule.toml"),
+            "name = \"control-plane\"\ntype = \"app\"\nruntime = \"source/python\"\nrun = \"python main.py\"\n",
+        )
+        .expect("write control-plane manifest");
+        fs::write(
+            dashboard_dir.join("capsule.toml"),
+            "name = \"dashboard\"\ntype = \"app\"\nruntime = \"source/node\"\nrun = \"npm start\"\n",
+        )
+        .expect("write dashboard manifest");
+        fs::write(
+            generated_duplicate_dir.join("capsule.toml"),
+            "name = \"control-plane\"\ntype = \"app\"\nruntime = \"source/python\"\nrun = \"python generated.py\"\n",
+        )
+        .expect("write generated duplicate manifest");
+
+        let manifest = CapsuleManifest::load_from_file(&root_manifest).expect("load manifest");
+        let targets = manifest.targets.expect("targets");
+        assert!(targets.named_target("control-plane").is_some());
+        assert!(targets.named_target("dashboard").is_some());
     }
 
     #[test]

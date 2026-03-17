@@ -2,38 +2,28 @@
 //!
 //! This module defines error types used across the capsule_types module.
 
-use std::fmt;
-
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// Capsule-specific errors for UARC V1.1.0 Capsule Manifest
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Error)]
 pub enum CapsuleError {
     /// Failed to parse manifest file
+    #[error("Parse error: {0}")]
     ParseError(String),
     /// Failed to serialize manifest
+    #[error("Serialize error: {0}")]
     SerializeError(String),
     /// IO error (file not found, etc.)
+    #[error("IO error: {0}")]
     IoError(String),
     /// Invalid memory string format (e.g., "6GB")
+    #[error("Invalid memory string: {0}")]
     InvalidMemoryString(String),
     /// Validation failed
+    #[error("Validation error: {0}")]
     ValidationError(String),
 }
-
-impl fmt::Display for CapsuleError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CapsuleError::ParseError(msg) => write!(f, "Parse error: {}", msg),
-            CapsuleError::SerializeError(msg) => write!(f, "Serialize error: {}", msg),
-            CapsuleError::IoError(msg) => write!(f, "IO error: {}", msg),
-            CapsuleError::InvalidMemoryString(msg) => write!(f, "Invalid memory string: {}", msg),
-            CapsuleError::ValidationError(msg) => write!(f, "Validation error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for CapsuleError {}
 
 /// Structured error used across UARC components.
 #[derive(Debug)]
@@ -101,8 +91,8 @@ impl ManifestError {
     }
 }
 
-impl fmt::Display for ManifestError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for ManifestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.code, self.message)?;
         if let Some(hint) = &self.hint {
             write!(f, " (hint: {hint})")?;
