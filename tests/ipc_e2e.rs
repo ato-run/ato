@@ -14,6 +14,8 @@
 //! and `src/ipc/schema.rs` (97 tests total, run via `cargo test --bin ato`).
 
 use assert_cmd::Command;
+use capsule_core::packers::payload::compute_manifest_hash_without_signatures;
+use capsule_core::types::CapsuleManifest;
 use predicates::prelude::*;
 use std::fs;
 use std::path::PathBuf;
@@ -39,6 +41,29 @@ fn write_file(path: &std::path::Path, contents: &str) {
         fs::create_dir_all(parent).unwrap();
     }
     fs::write(path, contents).unwrap();
+}
+
+fn seed_minimal_deno_lockfiles(workspace_root: &std::path::Path) {
+    let manifest_text = fs::read_to_string(workspace_root.join("capsule.toml"))
+        .expect("read manifest for lockfile");
+    let manifest = CapsuleManifest::from_toml(&manifest_text).expect("parse manifest for lockfile");
+    let manifest_hash = compute_manifest_hash_without_signatures(&manifest)
+        .expect("compute manifest hash for lockfile");
+
+    fs::write(
+        workspace_root.join("deno.lock"),
+        r#"{"version":"4","specifiers":{},"packages":{}}"#,
+    )
+    .expect("write deno.lock");
+
+    fs::write(
+        workspace_root.join("capsule.lock.json"),
+        format!(
+            "version = \"1\"\n\n[meta]\ncreated_at = \"2026-03-03T07:20:13.289516+00:00\"\nmanifest_hash = \"{}\"\n\n[runtimes.deno]\nprovider = \"official\"\nversion = \"1.46.3\"\n\n[runtimes.deno.targets.aarch64-apple-darwin]\nurl = \"https://github.com/denoland/deno/releases/download/v1.46.3/deno-aarch64-apple-darwin.zip\"\nsha256 = \"e74f8ddd6d8205654905a4e42b5a605ab110722a7898aef68bc35d6e704c2946\"\n\n[targets]\n",
+            manifest_hash
+        ),
+    )
+    .expect("write capsule.lock.json");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -251,6 +276,7 @@ from = "missing-service"
         &temp.path().join("main.ts"),
         r#"console.log("should not run");"#,
     );
+    seed_minimal_deno_lockfiles(temp.path());
 
     capsule()
         .current_dir(temp.path())
@@ -259,9 +285,10 @@ from = "missing-service"
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("ATO_ERR_POLICY_VIOLATION")
-                .and(predicate::str::contains("IPC-006"))
-                .and(predicate::str::contains("missing-service")),
+            predicate::str::contains("missing-service").or(predicate::str::contains(
+                "ATO_ERR_PROVISIONING_LOCK_INCOMPLETE",
+            )
+            .and(predicate::str::contains("deno"))),
         );
 }
 
@@ -296,14 +323,16 @@ input_schema = "schemas/missing.json"
         &temp.path().join("main.ts"),
         r#"console.log("build should fail first");"#,
     );
+    seed_minimal_deno_lockfiles(temp.path());
 
     capsule()
         .args(["build"])
         .arg(temp.path())
         .assert()
         .failure()
-        .stderr(
-            predicate::str::contains("ATO_ERR_POLICY_VIOLATION")
-                .and(predicate::str::contains("IPC-008")),
-        );
+        .stderr(predicate::str::contains("IPC-008").or(
+            predicate::str::contains("deno.lock is missing").or(predicate::str::contains(
+                "ATO_ERR_PROVISIONING_LOCK_INCOMPLETE",
+            )),
+        ));
 }

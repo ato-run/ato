@@ -333,7 +333,7 @@ fn parse_remote_manifest(
     input: &str,
     manifest_toml: &str,
 ) -> Result<CapsuleManifest, InspectRequirementsError> {
-    let mut manifest = CapsuleManifest::from_toml(manifest_toml).map_err(|err| {
+    let manifest = CapsuleManifest::from_toml(manifest_toml).map_err(|err| {
         InspectRequirementsError::requirements_resolution_failed(
             input,
             format!("Failed to parse remote capsule.toml: {err}"),
@@ -350,10 +350,6 @@ fn parse_remote_manifest(
             input,
             format!("Remote capsule.toml validation failed: {details}"),
         ));
-    }
-
-    if manifest.schema_version.trim().is_empty() {
-        manifest.schema_version = "0.2".to_string();
     }
 
     Ok(manifest)

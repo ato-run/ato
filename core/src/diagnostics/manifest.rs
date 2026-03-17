@@ -44,6 +44,11 @@ pub fn validate_manifest_for_build(
         .and_then(|v| v.as_str())
         .map(|v| v.trim())
         .filter(|v| !v.is_empty());
+    let run_command = target
+        .get("run_command")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let has_services = raw
         .get("services")
         .and_then(|v| v.as_table())
@@ -119,11 +124,6 @@ pub fn validate_manifest_for_build(
 
             validate_web_services_mode(manifest_path, target_label, &raw, &runtime_tools)?;
         } else {
-            let run_command = target
-                .get("run_command")
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
             if run_command.is_some() && matches!(driver.as_str(), "node" | "deno" | "python") {
                 return Ok(());
             }
@@ -194,6 +194,18 @@ pub fn validate_manifest_for_build(
             }
         }
     } else {
+        let image = target
+            .get("image")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        if runtime == "source" && run_command.is_some() {
+            // Shell-native source targets are validated by the manifest parser; they do not
+            // require an entrypoint file on disk when run_command is present.
+        } else if runtime == "oci" && entrypoint.is_none() && image.is_some() {
+            // OCI targets may boot from image metadata and optionally use run_command/cmd.
+        } else {
         let entrypoint = entrypoint.ok_or_else(|| {
             manifest_err(
                 manifest_path,
@@ -215,6 +227,7 @@ pub fn validate_manifest_for_build(
                     ),
                 ));
             }
+        }
         }
 
         if let Some(port_raw) = target.get("port") {
