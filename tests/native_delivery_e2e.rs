@@ -29,7 +29,11 @@ fn ato_bin() -> PathBuf {
         .parent()
         .and_then(Path::parent)
         .expect("target/debug directory");
-    let resolved = debug_dir.join("ato");
+    let resolved = if cfg!(windows) {
+        debug_dir.join("ato.exe")
+    } else {
+        debug_dir.join("ato")
+    };
     assert!(resolved.is_file(), "ato test binary not found at {}", resolved.display());
     resolved
 }
