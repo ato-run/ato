@@ -272,6 +272,10 @@ enum Commands {
         #[arg(short = 'y', long = "yes", default_value_t = false)]
         yes: bool,
 
+        /// Keep failed GitHub checkout artifacts and generated manifests for debugging
+        #[arg(long, hide = true, default_value_t = false)]
+        keep_failed_artifacts: bool,
+
         /// Allow installing/running unverified signatures in non-production environments
         #[arg(long, default_value_t = false)]
         allow_unverified: bool,
@@ -333,6 +337,10 @@ enum Commands {
         /// Emit machine-readable JSON output
         #[arg(long)]
         json: bool,
+
+        /// Keep failed GitHub checkout artifacts and generated manifests for debugging
+        #[arg(long, hide = true, default_value_t = false)]
+        keep_failed_artifacts: bool,
     },
 
     #[command(
@@ -1650,6 +1658,7 @@ fn run() -> Result<()> {
             unsafe_bypass_sandbox_legacy,
             dangerously_skip_permissions,
             yes,
+            keep_failed_artifacts,
             allow_unverified,
         } => execute_run_like_command(
             path,
@@ -1666,6 +1675,7 @@ fn run() -> Result<()> {
             unsafe_bypass_sandbox_legacy,
             dangerously_skip_permissions,
             yes,
+            keep_failed_artifacts,
             allow_unverified,
             skill,
             from_skill,
@@ -1715,6 +1725,7 @@ fn run() -> Result<()> {
             unsafe_bypass_sandbox_legacy,
             dangerously_skip_permissions,
             yes,
+            false,
             false,
             None,
             None,
@@ -1926,6 +1937,7 @@ fn run() -> Result<()> {
             project,
             no_project,
             json,
+            keep_failed_artifacts,
         } => {
             if skip_verify_legacy {
                 anyhow::bail!(
@@ -1960,6 +1972,7 @@ fn run() -> Result<()> {
                     projection_preference,
                     json,
                     can_prompt,
+                    keep_failed_artifacts,
                 ))?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -3611,6 +3624,7 @@ fn execute_run_like_command(
     unsafe_bypass_sandbox_legacy: bool,
     dangerously_skip_permissions: bool,
     yes: bool,
+    keep_failed_artifacts: bool,
     allow_unverified: bool,
     skill: Option<String>,
     from_skill: Option<PathBuf>,
@@ -3672,6 +3686,7 @@ fn execute_run_like_command(
     let path = rt.block_on(resolve_run_target_or_install(
         path,
         yes,
+        keep_failed_artifacts,
         allow_unverified,
         registry.as_deref(),
         reporter.clone(),
@@ -3703,6 +3718,7 @@ fn execute_run_like_command(
 async fn resolve_run_target_or_install(
     path: PathBuf,
     yes: bool,
+    keep_failed_artifacts: bool,
     allow_unverified: bool,
     registry: Option<&str>,
     reporter: std::sync::Arc<reporters::CliReporter>,
@@ -3755,6 +3771,7 @@ async fn resolve_run_target_or_install(
                     std::io::stdin().is_terminal(),
                     std::io::stderr().is_terminal(),
                 ),
+            keep_failed_artifacts,
         )
         .await?;
         return Ok(install_result.path);
@@ -3995,8 +4012,10 @@ async fn install_github_repository(
     projection_preference: install::ProjectionPreference,
     json: bool,
     can_prompt: bool,
+    keep_failed_artifacts: bool,
 ) -> Result<install::InstallResult> {
     const MAX_GITHUB_DRAFT_RETRIES: u8 = 3;
+    let invocation_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let install_draft = match install::fetch_github_install_draft(repository).await {
         Ok(draft) => Some(draft),
@@ -4009,7 +4028,7 @@ async fn install_github_repository(
             None
         }
     };
-    let checkout = install::download_github_repository_at_ref(
+    let mut checkout = install::download_github_repository_at_ref(
         repository,
         install_draft
             .as_ref()
@@ -4020,6 +4039,19 @@ async fn install_github_repository(
         .as_ref()
         .map(|draft| draft.normalize_preview_toml_for_checkout(&checkout.checkout_dir))
         .transpose()?;
+    if let Some(draft) = install_draft.as_ref() {
+        if let Err(error) = show_github_draft_preview(
+            &invocation_dir,
+            repository,
+            draft,
+            yes,
+            can_prompt,
+            json,
+        ) {
+            maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
+            return Err(error);
+        }
+    }
     let injected_manifest = install_draft
         .as_ref()
         .and_then(|draft| draft.preview_toml.clone());
@@ -4061,6 +4093,7 @@ async fn install_github_repository(
         checkout.checkout_dir.clone(),
         json,
         injected_manifest.clone(),
+        keep_failed_artifacts,
     )
     .await
     {
@@ -4083,8 +4116,9 @@ async fn install_github_repository(
                     eprintln!("Reason: {}", report.message);
                 }
                 if draft_requires_manual_review(draft) {
+                    maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
                     return Err(build_github_manual_intervention_error(
-                        &checkout.checkout_dir,
+                        &invocation_dir,
                         repository,
                         draft,
                         inference_attempt.as_ref(),
@@ -4163,6 +4197,7 @@ async fn install_github_repository(
                         checkout.checkout_dir.clone(),
                         json,
                         current_draft.preview_toml.clone(),
+                        keep_failed_artifacts,
                     )
                     .await
                     {
@@ -4193,8 +4228,9 @@ async fn install_github_repository(
                 } else if draft_requires_manual_review(
                     latest_install_draft.as_ref().unwrap_or(draft),
                 ) {
+                    maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
                     return Err(build_github_manual_intervention_error(
-                        &checkout.checkout_dir,
+                        &invocation_dir,
                         repository,
                         latest_install_draft.as_ref().unwrap_or(draft),
                         inference_attempt.as_ref(),
@@ -4203,42 +4239,121 @@ async fn install_github_repository(
                 } else if can_prompt {
                     let draft_for_manual_fix = latest_install_draft.as_ref().unwrap_or(draft);
                     if let Some(recovered) = retry_github_build_after_manual_fix(
+                        &invocation_dir,
                         &checkout.checkout_dir,
                         repository,
                         draft_for_manual_fix,
                         inference_attempt.as_ref(),
                         json,
+                        keep_failed_artifacts,
                     )
                     .await?
                     {
                         recovered
                     } else {
+                        maybe_keep_failed_github_checkout(
+                            &mut checkout,
+                            keep_failed_artifacts,
+                            json,
+                        );
                         return Err(last_error);
                     }
                 } else {
+                    maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
                     return Err(last_error);
                 }
             } else {
+                maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
                 return Err(last_error);
             }
         }
     };
-    let artifact = build_result.artifact.ok_or_else(|| {
-        anyhow::anyhow!("GitHub repository did not produce an installable .capsule artifact")
-    })?;
-    install::install_built_github_artifact(
-        &artifact,
-        &checkout.publisher,
-        &checkout.repository,
-        install::InstallExecutionOptions {
-            output_dir,
-            yes,
-            projection_preference,
-            json_output: json,
-            can_prompt_interactively: can_prompt,
-        },
-    )
-    .await
+    let result = async {
+        let artifact = build_result.artifact.ok_or_else(|| {
+            anyhow::anyhow!("GitHub repository did not produce an installable .capsule artifact")
+        })?;
+        install::install_built_github_artifact(
+            &artifact,
+            &checkout.publisher,
+            &checkout.repository,
+            install::InstallExecutionOptions {
+                output_dir,
+                yes,
+                projection_preference,
+                json_output: json,
+                can_prompt_interactively: can_prompt,
+            },
+        )
+        .await
+    }
+    .await;
+
+    if result.is_err() {
+        maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
+    }
+
+    result
+}
+
+fn show_github_draft_preview(
+    invocation_dir: &std::path::Path,
+    repository: &str,
+    install_draft: &install::GitHubInstallDraftResponse,
+    yes: bool,
+    can_prompt: bool,
+    json: bool,
+) -> Result<()> {
+    if json || install_draft.manifest_source != "inferred" {
+        return Ok(());
+    }
+
+    let Some(preview_toml) = install_draft.preview_toml.as_deref() else {
+        return Ok(());
+    };
+
+    let preview_label = format!(
+        "preview-{}",
+        install_draft.resolved_ref.sha.chars().take(12).collect::<String>()
+    );
+    let preview_path = inference_feedback::build_manual_manifest_path(
+        invocation_dir,
+        repository,
+        &preview_label,
+    );
+    inference_feedback::write_manual_manifest(&preview_path, preview_toml)?;
+
+    eprintln!("   Generated capsule.toml preview: {}", preview_path.display());
+    eprintln!("   ----- capsule.toml -----");
+    for (index, line) in preview_toml.lines().enumerate() {
+        eprintln!("   {:>3} | {}", index + 1, line);
+    }
+    eprintln!("   -----------------------");
+
+    if can_prompt && !yes {
+        let approved = inference_feedback::prompt_yes_no(
+            "Continue with this generated capsule.toml? [Y/n]: ",
+            true,
+        )?;
+        if !approved {
+            anyhow::bail!("Aborted after reviewing generated capsule.toml");
+        }
+    }
+
+    Ok(())
+}
+
+fn maybe_keep_failed_github_checkout(
+    checkout: &mut install::GitHubCheckout,
+    keep_failed_artifacts: bool,
+    json: bool,
+) {
+    if keep_failed_artifacts && !json {
+        let kept_checkout = checkout.preserve_for_debugging();
+        eprintln!(
+            "⚠️  Kept failed GitHub checkout for debugging: {}",
+            kept_checkout.display()
+        );
+    }
 }
 
 async fn run_blocking_github_install_step<T, F>(operation: F) -> Result<T>
@@ -4255,6 +4370,7 @@ async fn build_github_repository_checkout(
     checkout_dir: PathBuf,
     json: bool,
     injected_manifest: Option<String>,
+    keep_failed_artifacts: bool,
 ) -> Result<commands::build::BuildResult> {
     run_blocking_github_install_step(move || {
         let reporter = std::sync::Arc::new(reporters::CliReporter::new(json));
@@ -4264,7 +4380,7 @@ async fn build_github_repository_checkout(
             None,
             false,
             false,
-            false,
+            keep_failed_artifacts,
             false,
             EnforcementMode::Strict.as_str().to_string(),
             reporter,
@@ -4278,11 +4394,13 @@ async fn build_github_repository_checkout(
 }
 
 async fn retry_github_build_after_manual_fix(
+    invocation_dir: &std::path::Path,
     checkout_dir: &std::path::Path,
     repository: &str,
     install_draft: &install::GitHubInstallDraftResponse,
     inference_attempt: Option<&inference_feedback::InferenceAttemptHandle>,
     json: bool,
+    keep_failed_artifacts: bool,
 ) -> Result<Option<commands::build::BuildResult>> {
     let should_edit =
         inference_feedback::prompt_yes_no("Edit generated capsule.toml and retry? [Y/n]: ", true)?;
@@ -4293,7 +4411,8 @@ async fn retry_github_build_after_manual_fix(
     let attempt_label = inference_attempt
         .map(|attempt| attempt.attempt_id.as_str())
         .unwrap_or("manual");
-    let manifest_path = inference_feedback::build_manual_manifest_path(checkout_dir, attempt_label);
+    let manifest_path =
+        inference_feedback::build_manual_manifest_path(invocation_dir, repository, attempt_label);
     let inferred_manifest = install_draft
         .preview_toml
         .as_deref()
@@ -4301,12 +4420,12 @@ async fn retry_github_build_after_manual_fix(
     inference_feedback::write_manual_manifest(&manifest_path, inferred_manifest)?;
 
     eprintln!("Open editor for {}", manifest_path.display());
-    if !inference_feedback::has_configured_editor() {
+    if !inference_feedback::can_open_editor_automatically() {
         return Err(anyhow::anyhow!(build_github_manual_intervention_message(
             repository,
             install_draft,
             &manifest_path,
-            "VISUAL or EDITOR is not set for manual fix mode",
+            "No editor launcher is available for manual fix mode",
         )));
     }
     inference_feedback::open_editor(&manifest_path)?;
@@ -4319,6 +4438,7 @@ async fn retry_github_build_after_manual_fix(
         checkout_dir.to_path_buf(),
         json,
         Some(edited_manifest.clone()),
+        keep_failed_artifacts,
     )
     .await?;
 
@@ -4382,7 +4502,7 @@ fn draft_requires_manual_review(draft: &install::GitHubInstallDraftResponse) -> 
 }
 
 fn build_github_manual_intervention_error(
-    checkout_dir: &std::path::Path,
+    invocation_dir: &std::path::Path,
     repository: &str,
     install_draft: &install::GitHubInstallDraftResponse,
     inference_attempt: Option<&inference_feedback::InferenceAttemptHandle>,
@@ -4391,7 +4511,8 @@ fn build_github_manual_intervention_error(
     let attempt_label = inference_attempt
         .map(|attempt| attempt.attempt_id.as_str())
         .unwrap_or("manual");
-    let manifest_path = inference_feedback::build_manual_manifest_path(checkout_dir, attempt_label);
+    let manifest_path =
+        inference_feedback::build_manual_manifest_path(invocation_dir, repository, attempt_label);
     if let Some(preview_toml) = install_draft.preview_toml.as_deref() {
         inference_feedback::write_manual_manifest(&manifest_path, preview_toml)?;
     }
@@ -4430,9 +4551,9 @@ fn build_github_manual_intervention_message(
         "Review {} and adjust the generated command or target settings as needed.",
         manifest_path.display()
     ));
-    if !inference_feedback::has_configured_editor() {
+    if !inference_feedback::can_open_editor_automatically() {
         next_steps.push(
-            "Set VISUAL or EDITOR if you want ato to open the file automatically.".to_string(),
+            "Install a text editor or set VISUAL/EDITOR if you want ato to open the file automatically.".to_string(),
         );
     }
     next_steps.push(format!(

@@ -281,10 +281,35 @@ pub async fn request_retry_install_draft(
     install::retry_github_install_draft(repository, &request).await
 }
 
-pub fn build_manual_manifest_path(checkout_dir: &Path, attempt_id: &str) -> PathBuf {
-    checkout_dir
+pub fn build_manual_manifest_path(base_dir: &Path, repository: &str, attempt_id: &str) -> PathBuf {
+    let repo_path = install::normalize_github_repository(repository)
+        .ok()
+        .and_then(|value| {
+            value
+                .split_once('/')
+                .map(|(owner, repo)| PathBuf::from("github.com").join(owner).join(repo))
+        })
+        .unwrap_or_else(|| {
+            let sanitized = repository
+                .chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+                .collect::<String>()
+                .split('-')
+                .filter(|segment| !segment.is_empty())
+                .collect::<Vec<_>>()
+                .join("-");
+            PathBuf::from("github.com").join(if sanitized.is_empty() {
+                "repository".to_string()
+            } else {
+                sanitized
+            })
+        });
+
+    base_dir
         .join(".tmp")
-        .join("ato-inference")
+        .join("ato")
+        .join("inference")
+        .join(repo_path)
         .join(attempt_id)
         .join("capsule.toml")
 }
@@ -309,21 +334,30 @@ pub fn read_manual_manifest(path: &Path) -> Result<String> {
 }
 
 pub fn open_editor(path: &Path) -> Result<()> {
-    let editor = configured_editor()
-        .ok_or_else(|| anyhow::anyhow!("VISUAL or EDITOR must be set for manual fix mode"))?;
+    let editor_command = resolved_editor_command().ok_or_else(|| {
+        anyhow::anyhow!("No editor launcher is available for manual fix mode")
+    })?;
+    let (program, args) = editor_command
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("editor command was empty"))?;
 
-    let status = Command::new(&editor)
+    let status = Command::new(program)
+        .args(args)
         .arg(path)
         .status()
-        .with_context(|| format!("failed to launch editor '{editor}'"))?;
+        .with_context(|| format!("failed to launch editor '{}'", editor_command.join(" ")))?;
     if !status.success() {
-        anyhow::bail!("editor '{}' exited with status {}", editor, status);
+        anyhow::bail!(
+            "editor '{}' exited with status {}",
+            editor_command.join(" "),
+            status
+        );
     }
     Ok(())
 }
 
-pub fn has_configured_editor() -> bool {
-    configured_editor().is_some()
+pub fn can_open_editor_automatically() -> bool {
+    resolved_editor_command().is_some()
 }
 
 pub fn prompt_yes_no(prompt: &str, default_yes: bool) -> Result<bool> {
@@ -391,15 +425,61 @@ pub fn build_manual_intervention_message(
     message
 }
 
-fn configured_editor() -> Option<String> {
-    std::env::var("VISUAL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            std::env::var("EDITOR")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })
+fn resolved_editor_command() -> Option<Vec<String>> {
+    configured_editor_command().or_else(automatic_editor_command)
+}
+
+fn configured_editor_command() -> Option<Vec<String>> {
+    configured_editor_command_from_values(std::env::var("VISUAL").ok(), std::env::var("EDITOR").ok())
+}
+
+fn configured_editor_command_from_values(
+    visual: Option<String>,
+    editor: Option<String>,
+) -> Option<Vec<String>> {
+    normalize_editor_value(visual)
+        .or_else(|| normalize_editor_value(editor))
+        .and_then(parse_editor_command)
+}
+
+fn normalize_editor_value(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn parse_editor_command(value: String) -> Option<Vec<String>> {
+    match shell_words::split(&value) {
+        Ok(parts) if !parts.is_empty() => Some(parts),
+        _ if !value.is_empty() => Some(vec![value]),
+        _ => None,
+    }
+}
+
+fn automatic_editor_command() -> Option<Vec<String>> {
+    fallback_editor_command_for(std::env::consts::OS, |command| which::which(command).is_ok())
+}
+
+fn fallback_editor_command_for<F>(os: &str, has_command: F) -> Option<Vec<String>>
+where
+    F: Fn(&str) -> bool,
+{
+    if os == "macos" && has_command("open") {
+        return Some(vec!["open".to_string(), "-W".to_string(), "-t".to_string()]);
+    }
+
+    for command in ["sensible-editor", "editor", "nano", "vim", "vi"] {
+        if has_command(command) {
+            return Some(vec![command.to_string()]);
+        }
+    }
+
+    None
 }
 
 fn cap_smoke_excerpt(input: &str) -> String {
@@ -464,6 +544,53 @@ mod tests {
     }
 
     #[test]
+    fn configured_editor_command_prefers_visual_and_splits_args() {
+        let command = configured_editor_command_from_values(
+            Some("code --wait".to_string()),
+            Some("nano".to_string()),
+        )
+        .expect("visual should resolve");
+
+        assert_eq!(command, vec!["code", "--wait"]);
+    }
+
+    #[test]
+    fn configured_editor_command_uses_editor_when_visual_is_blank() {
+        let command = configured_editor_command_from_values(
+            Some("   ".to_string()),
+            Some("nano".to_string()),
+        )
+        .expect("editor should resolve");
+
+        assert_eq!(command, vec!["nano"]);
+    }
+
+    #[test]
+    fn fallback_editor_command_prefers_macos_open() {
+        let command = fallback_editor_command_for("macos", |candidate| {
+            matches!(candidate, "open" | "nano")
+        })
+        .expect("mac fallback should resolve");
+
+        assert_eq!(command, vec!["open", "-W", "-t"]);
+    }
+
+    #[test]
+    fn fallback_editor_command_prefers_terminal_editor_on_linux() {
+        let command = fallback_editor_command_for("linux", |candidate| {
+            matches!(candidate, "editor" | "nano")
+        })
+        .expect("linux fallback should resolve");
+
+        assert_eq!(command, vec!["editor"]);
+    }
+
+    #[test]
+    fn fallback_editor_command_returns_none_without_candidates() {
+        assert!(fallback_editor_command_for("linux", |_| false).is_none());
+    }
+
+    #[test]
     fn manifest_diff_summary_counts_changed_lines() {
         let summary = summarize_manifest_diff(
             "schema_version = \"0.2\"\nname = \"demo\"\n",
@@ -474,10 +601,12 @@ mod tests {
 
     #[test]
     fn manual_manifest_path_uses_repo_tmp_directory() {
-        let path = build_manual_manifest_path(Path::new("/repo"), "attempt1");
+        let path = build_manual_manifest_path(Path::new("/repo"), "koh0920/ato-cli", "attempt1");
         assert_eq!(
             path,
-            PathBuf::from("/repo/.tmp/ato-inference/attempt1/capsule.toml")
+            PathBuf::from(
+                "/repo/.tmp/ato/inference/github.com/koh0920/ato-cli/attempt1/capsule.toml"
+            )
         );
     }
 
@@ -499,7 +628,7 @@ mod tests {
     #[test]
     fn manual_intervention_message_includes_path_and_steps() {
         let message = build_manual_intervention_message(
-            Path::new("/repo/.tmp/ato-inference/attempt1/capsule.toml"),
+            Path::new("/repo/.tmp/ato/inference/github.com/koh0920/ato-cli/attempt1/capsule.toml"),
             "DATABASE_URL is required",
             &[
                 "Set DATABASE_URL before rerunning.".to_string(),
