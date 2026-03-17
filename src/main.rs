@@ -5153,6 +5153,7 @@ mod tests {
                 PathBuf::from("https://github.com/Koh0920/demo-repo"),
                 true,
                 false,
+                false,
                 None,
                 reporter,
             ))
