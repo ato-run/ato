@@ -365,6 +365,10 @@ fn normalize_github_install_preview_toml(
             }
         }
 
+        if runtime.as_deref() == Some("source/node") {
+            normalize_v03_source_node_typescript_run(&mut parsed, checkout_dir)?;
+        }
+
         changed_pack_include_from_checkout(&mut parsed, checkout_dir)?;
         inspect_normalized_github_install_preview_manifest(&parsed, checkout_dir)?;
 
@@ -438,6 +442,134 @@ fn normalize_github_install_preview_toml(
     }
 
     toml::to_string(&parsed).context("Failed to serialize normalized GitHub install draft")
+}
+
+fn normalize_v03_source_node_typescript_run(
+    parsed: &mut toml::Value,
+    checkout_dir: &Path,
+) -> Result<()> {
+    let Some(table) = parsed.as_table_mut() else {
+        return Ok(());
+    };
+    let Some(run) = table
+        .get("run")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+
+    let run_parts = run.split_whitespace().collect::<Vec<_>>();
+    if run_parts.len() < 2 || run_parts[0] != "node" || !run_parts[1].ends_with(".ts") {
+        return Ok(());
+    }
+
+    let Some(package_json) = read_package_json(checkout_dir) else {
+        return Ok(());
+    };
+    let Some(build_script) = package_json
+        .get("scripts")
+        .and_then(|value| value.get("build"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    let Some(bin_path) = package_json_primary_bin_path(&package_json) else {
+        return Ok(());
+    };
+    if !bin_path.ends_with(".js") {
+        return Ok(());
+    }
+
+    let package_manager = infer_node_package_manager_command_prefix(checkout_dir, &package_json);
+    let build_command = normalize_package_script_command(package_manager, "build", build_script);
+    let trailing_args = run_parts
+        .iter()
+        .skip(2)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let run_command = if trailing_args.is_empty() {
+        format!("node {bin_path}")
+    } else {
+        format!("node {bin_path} {trailing_args}")
+    };
+
+    table.insert("build".to_string(), toml::Value::String(build_command));
+    table.insert("run".to_string(), toml::Value::String(run_command));
+    Ok(())
+}
+
+fn read_package_json(checkout_dir: &Path) -> Option<serde_json::Value> {
+    let package_json_path = checkout_dir.join("package.json");
+    let raw = std::fs::read_to_string(package_json_path).ok()?;
+    serde_json::from_str::<serde_json::Value>(&raw).ok()
+}
+
+fn package_json_primary_bin_path(package_json: &serde_json::Value) -> Option<String> {
+    if let Some(bin) = package_json.get("bin") {
+        if let Some(path) = bin.as_str() {
+            let normalized = path.trim().trim_start_matches("./");
+            if !normalized.is_empty() {
+                return Some(normalized.to_string());
+            }
+        }
+        if let Some(table) = bin.as_object() {
+            for value in table.values() {
+                if let Some(path) = value.as_str() {
+                    let normalized = path.trim().trim_start_matches("./");
+                    if !normalized.is_empty() {
+                        return Some(normalized.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn infer_node_package_manager_command_prefix(
+    checkout_dir: &Path,
+    package_json: &serde_json::Value,
+) -> &'static str {
+    if checkout_dir.join("pnpm-lock.yaml").exists()
+        || package_json
+            .get("packageManager")
+            .and_then(serde_json::Value::as_str)
+            .map(|value| value.trim().starts_with("pnpm@"))
+            .unwrap_or(false)
+    {
+        return "pnpm";
+    }
+    if checkout_dir.join("package-lock.json").exists() {
+        return "npm";
+    }
+    if checkout_dir.join("bun.lock").exists() || checkout_dir.join("bun.lockb").exists() {
+        return "bun";
+    }
+    "npm"
+}
+
+fn normalize_package_script_command(
+    package_manager: &str,
+    script_name: &str,
+    script_body: &str,
+) -> String {
+    let trimmed = script_body.trim();
+    if trimmed == format!("{package_manager} {script_name}")
+        || trimmed == format!("{package_manager} run {script_name}")
+    {
+        return trimmed.to_string();
+    }
+
+    match package_manager {
+        "pnpm" | "npm" => format!("{package_manager} run {script_name}"),
+        "bun" => format!("bun run {script_name}"),
+        _ => format!("{package_manager} run {script_name}"),
+    }
 }
 
 #[derive(Debug)]
@@ -4147,6 +4279,46 @@ include = ["main.ts", "deno.json", "deno.lock"]
             normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
 
         assert!(normalized.contains(r#""import_map.json""#));
+    }
+
+    #[test]
+    fn normalize_github_install_preview_toml_rewrites_node_typescript_entrypoint_to_build_output() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{
+  "packageManager": "pnpm@10.15.0",
+  "bin": {
+    "json-server": "lib/bin.js"
+  },
+  "scripts": {
+    "build": "rm -rf lib && tsc"
+  }
+}"#,
+        )
+        .expect("write package.json");
+        std::fs::write(
+            tmp.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        )
+        .expect("write pnpm lock");
+        let manifest = r#"
+schema_version = "0.3"
+name = "json-server"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node src/bin.ts fixtures/db.json"
+
+[pack]
+include = ["src/**", "fixtures/db.json", "package.json", "pnpm-lock.yaml"]
+"#;
+
+        let normalized =
+            normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+        assert!(normalized.contains("build = \"pnpm run build\""));
+        assert!(normalized.contains("run = \"node lib/bin.js fixtures/db.json\""));
     }
 
     #[test]
