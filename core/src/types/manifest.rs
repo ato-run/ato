@@ -629,14 +629,89 @@ fn parse_v03_package_surface(
     package_name: &str,
     table: &Table,
 ) -> Result<V03PackageSurface, CapsuleError> {
-    toml::Value::Table(table.clone())
-        .try_into()
-        .map_err(|error| {
-            CapsuleError::ParseError(format!(
-                "schema_version=0.3 package '{}' could not be parsed: {}",
-                package_name, error
-            ))
+    let normalized = normalize_v03_legacy_env_required(package_name, table)?;
+
+    toml::Value::Table(normalized).try_into().map_err(|error| {
+        CapsuleError::ParseError(format!(
+            "schema_version=0.3 package '{}' could not be parsed: {}",
+            package_name, error
+        ))
+    })
+}
+
+fn normalize_v03_legacy_env_required(
+    package_name: &str,
+    table: &Table,
+) -> Result<Table, CapsuleError> {
+    let Some(env_table) = table.get("env").and_then(toml::Value::as_table) else {
+        return Ok(table.clone());
+    };
+    let Some(legacy_required) = env_table.get("required") else {
+        return Ok(table.clone());
+    };
+    let Some(legacy_required) = legacy_required.as_array() else {
+        return Err(CapsuleError::ParseError(format!(
+            "schema_version=0.3 package '{}' could not be parsed: invalid type in env.required; expected an array of strings",
+            package_name,
+        )));
+    };
+
+    let mut normalized = table.clone();
+    let mut merged_required_env = normalized
+        .get("required_env")
+        .and_then(toml::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| {
+                    value.as_str().map(str::to_string).ok_or_else(|| {
+                        CapsuleError::ParseError(format!(
+                            "schema_version=0.3 package '{}' could not be parsed: invalid type in required_env; expected an array of strings",
+                            package_name,
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, CapsuleError>>()
         })
+        .transpose()?
+        .unwrap_or_default();
+
+    for value in legacy_required {
+        let value = value.as_str().ok_or_else(|| {
+            CapsuleError::ParseError(format!(
+                "schema_version=0.3 package '{}' could not be parsed: invalid type in env.required; expected an array of strings",
+                package_name,
+            ))
+        })?;
+
+        if !merged_required_env.iter().any(|existing| existing == value) {
+            merged_required_env.push(value.to_string());
+        }
+    }
+
+    normalized.insert(
+        "required_env".to_string(),
+        toml::Value::Array(
+            merged_required_env
+                .into_iter()
+                .map(toml::Value::String)
+                .collect(),
+        ),
+    );
+
+    let mut remove_env_table = false;
+    if let Some(env_table) = normalized
+        .get_mut("env")
+        .and_then(toml::Value::as_table_mut)
+    {
+        env_table.remove("required");
+        remove_env_table = env_table.is_empty();
+    }
+    if remove_env_table {
+        normalized.remove("env");
+    }
+
+    Ok(normalized)
 }
 
 fn reject_v03_legacy_fields(table: &Table, context: &str) -> Result<(), CapsuleError> {
@@ -2862,6 +2937,12 @@ impl TargetsConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationMode {
+    Strict,
+    Preview,
+}
+
 impl CapsuleManifest {
     fn from_toml_with_path_internal(
         content: &str,
@@ -3011,6 +3092,10 @@ impl CapsuleManifest {
 
     /// Validate the manifest
     pub fn validate(&self) -> Result<(), Vec<ValidationError>> {
+        self.validate_for_mode(ValidationMode::Strict)
+    }
+
+    pub fn validate_for_mode(&self, mode: ValidationMode) -> Result<(), Vec<ValidationError>> {
         let mut errors = Vec::new();
 
         if self
@@ -3207,6 +3292,7 @@ impl CapsuleManifest {
                         .as_ref()
                         .map(|v| v.trim().is_empty())
                         .unwrap_or(true)
+                    && !matches!(mode, ValidationMode::Preview)
                 {
                     errors.push(ValidationError::MissingRuntimeVersion(
                         label.clone(),
@@ -3223,7 +3309,7 @@ impl CapsuleManifest {
                     ));
                 }
 
-                if target.port.is_none() {
+                if target.port.is_none() && !matches!(mode, ValidationMode::Preview) {
                     errors.push(ValidationError::InvalidWebTarget(
                         label.clone(),
                         "port is required for runtime=web".to_string(),
@@ -4296,6 +4382,30 @@ required_env = ["DATABASE_URL"]
     }
 
     #[test]
+    fn test_from_toml_accepts_v03_legacy_env_required_compatibility() {
+        let toml = r#"
+schema_version = "0.3"
+name = "v03-demo"
+version = "0.1.0"
+type = "app"
+runtime = "source/python"
+run = "uv run main.py"
+required_env = ["DATABASE_URL"]
+
+[env]
+required = ["REDIS_URL"]
+"#;
+
+        let manifest = CapsuleManifest::from_toml(toml).expect("parse v0.3 manifest");
+        let target = manifest.resolve_default_target().expect("default target");
+
+        assert_eq!(
+            target.required_env,
+            vec!["DATABASE_URL".to_string(), "REDIS_URL".to_string()]
+        );
+    }
+
+    #[test]
     fn test_from_toml_accepts_chml_single_package_manifest() {
         let toml = r#"
 name = "chml-demo"
@@ -5081,6 +5191,16 @@ run = "python main.py"
     }
 
     #[test]
+    fn test_validate_preview_allows_missing_runtime_version() {
+        let toml = VALID_TOML.replace(
+            "[targets.cli]\nruntime = \"source\"\nentrypoint = \"server.py\"",
+            "[targets.cli]\nruntime = \"source\"\ndriver = \"python\"\nentrypoint = \"server.py\"",
+        );
+        let manifest = CapsuleManifest::from_toml(&toml).unwrap();
+        assert!(manifest.validate_for_mode(ValidationMode::Preview).is_ok());
+    }
+
+    #[test]
     fn test_validate_web_requires_driver_and_port() {
         let toml = r#"
 schema_version = "0.2"
@@ -5100,6 +5220,33 @@ entrypoint = "dist"
             ValidationError::InvalidWebTarget(_, msg) if msg.contains("driver is required")
         )));
         assert!(errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidWebTarget(_, msg) if msg.contains("port is required")
+        )));
+    }
+
+    #[test]
+    fn test_validate_preview_web_still_requires_driver_but_not_port() {
+        let toml = r#"
+schema_version = "0.2"
+name = "web-app"
+version = "0.1.0"
+type = "app"
+default_target = "static"
+
+[targets.static]
+runtime = "web"
+entrypoint = "dist"
+"#;
+        let manifest = CapsuleManifest::from_toml(toml).unwrap();
+        let errors = manifest
+            .validate_for_mode(ValidationMode::Preview)
+            .unwrap_err();
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidWebTarget(_, msg) if msg.contains("driver is required")
+        )));
+        assert!(!errors.iter().any(|e| matches!(
             e,
             ValidationError::InvalidWebTarget(_, msg) if msg.contains("port is required")
         )));

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::types::ValidationMode;
 use capsule_core::CapsuleReporter;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -154,21 +155,29 @@ pub fn execute_pack_command_with_injected_manifest(
     }
 
     let _temporary_manifest_guard = temporary_manifest;
+    let validation_mode = if injected_manifest.is_some() {
+        ValidationMode::Preview
+    } else {
+        ValidationMode::Strict
+    };
 
     let validation_started = Instant::now();
-    let decision = capsule_core::router::route_manifest(
+    let decision = capsule_core::router::route_manifest_with_validation_mode(
         &manifest,
         capsule_core::router::ExecutionProfile::Release,
         None,
+        validation_mode,
     )?;
-    let loaded_manifest = capsule_core::manifest::load_manifest(&manifest)?;
+    let loaded_manifest =
+        capsule_core::manifest::load_manifest_with_validation_mode(&manifest, validation_mode)?;
     let raw_manifest: toml::Value = toml::from_str(&loaded_manifest.raw_text)
         .context("Failed to parse manifest TOML for IPC validation")?;
     let capsule_name = loaded_manifest.model.name.clone();
     let capsule_version = loaded_manifest.model.version.clone();
-    capsule_core::diagnostics::manifest::validate_manifest_for_build(
+    capsule_core::diagnostics::manifest::validate_manifest_for_build_with_mode(
         &manifest,
         decision.plan.selected_target_label(),
+        validation_mode,
     )?;
     let ipc_diagnostics =
         crate::ipc::validate::validate_manifest(&raw_manifest, &loaded_manifest.dir).map_err(
@@ -731,17 +740,46 @@ fn plan_v03_build_provision_command(
     let driver = plan.execution_driver().unwrap_or_default();
     let runtime = runtime.trim().to_ascii_lowercase();
     let driver = driver.trim().to_ascii_lowercase();
-    let manifest_dir = plan.execution_working_directory();
+    let manifest_dir = plan.manifest_dir.clone();
+    let execution_working_directory = plan.execution_working_directory();
 
     if runtime == "web" && driver == "static" {
+        debug!(
+            phase = "build",
+            runtime,
+            driver,
+            manifest_dir = %manifest_dir.display(),
+            execution_working_directory = %execution_working_directory.display(),
+            lockfile_check_paths = ?Vec::<(&str, std::path::PathBuf, bool)>::new(),
+            "Provision command path diagnostics"
+        );
         return Ok(None);
     }
 
     if matches!(driver.as_str(), "node") {
-        let package_lock = manifest_dir.join("package-lock.json");
-        let pnpm_lock = manifest_dir.join("pnpm-lock.yaml");
-        let bun_lock = manifest_dir.join("bun.lock");
-        let bun_lockb = manifest_dir.join("bun.lockb");
+        let package_lock = execution_working_directory.join("package-lock.json");
+        let pnpm_lock = execution_working_directory.join("pnpm-lock.yaml");
+        let bun_lock = execution_working_directory.join("bun.lock");
+        let bun_lockb = execution_working_directory.join("bun.lockb");
+        let lockfile_check_paths = vec![
+            (
+                "package-lock.json",
+                package_lock.clone(),
+                package_lock.exists(),
+            ),
+            ("pnpm-lock.yaml", pnpm_lock.clone(), pnpm_lock.exists()),
+            ("bun.lock", bun_lock.clone(), bun_lock.exists()),
+            ("bun.lockb", bun_lockb.clone(), bun_lockb.exists()),
+        ];
+        debug!(
+            phase = "build",
+            runtime,
+            driver,
+            manifest_dir = %manifest_dir.display(),
+            execution_working_directory = %execution_working_directory.display(),
+            lockfile_check_paths = ?lockfile_check_paths,
+            "Provision command path diagnostics"
+        );
         let mut matches = Vec::new();
         if package_lock.exists() {
             matches.push("npm ci");
@@ -768,7 +806,17 @@ fn plan_v03_build_provision_command(
     }
 
     if matches!(driver.as_str(), "python") {
-        return if manifest_dir.join("uv.lock").exists() {
+        let uv_lock = execution_working_directory.join("uv.lock");
+        debug!(
+            phase = "build",
+            runtime,
+            driver,
+            manifest_dir = %manifest_dir.display(),
+            execution_working_directory = %execution_working_directory.display(),
+            lockfile_check_paths = ?vec![("uv.lock", uv_lock.clone(), uv_lock.exists())],
+            "Provision command path diagnostics"
+        );
+        return if uv_lock.exists() {
             Ok(Some("uv sync --frozen".to_string()))
         } else {
             Err(AtoExecutionError::lock_incomplete(
@@ -779,7 +827,17 @@ fn plan_v03_build_provision_command(
         };
     }
 
-    if matches!(driver.as_str(), "native") && manifest_dir.join("Cargo.lock").exists() {
+    let cargo_lock = execution_working_directory.join("Cargo.lock");
+    debug!(
+        phase = "build",
+        runtime,
+        driver,
+        manifest_dir = %manifest_dir.display(),
+        execution_working_directory = %execution_working_directory.display(),
+        lockfile_check_paths = ?vec![("Cargo.lock", cargo_lock.clone(), cargo_lock.exists())],
+        "Provision command path diagnostics"
+    );
+    if matches!(driver.as_str(), "native") && cargo_lock.exists() {
         return Ok(Some("cargo fetch --locked".to_string()));
     }
 
@@ -1188,7 +1246,31 @@ fn sign_if_requested(
 mod tests {
     use super::{plan_v03_build_provision_command, run_v03_build_lifecycle_steps};
     use capsule_core::router::{ExecutionProfile, ManifestData};
+    use std::ffi::OsString;
     use std::path::PathBuf;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn v03_build_provision_uses_target_working_dir() {
@@ -1219,6 +1301,8 @@ mod tests {
     #[test]
     fn v03_build_cache_restores_outputs_and_skips_rebuild() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let cache_home = tmp.path().join("ato-home");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &cache_home);
         std::fs::write(tmp.path().join("main.ts"), "console.log('ok')").expect("write source");
 
         let plan = manifest_with_schema_and_target(
