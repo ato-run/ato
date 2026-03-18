@@ -13,6 +13,7 @@ use futures::future::try_join_all;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tracing::debug;
 use url::form_urlencoded::byte_serialize;
 
 use crate::common::paths::{nacelle_home_dir, toolchain_cache_dir};
@@ -254,7 +255,7 @@ pub async fn generate_and_write_lockfile(
     )
     .await?;
     let output_path = manifest_dir.join(CAPSULE_LOCK_FILE_NAME);
-    let content = serde_json::to_vec_pretty(&lockfile).map_err(|e| {
+    let content = serde_jcs::to_vec(&lockfile).map_err(|e| {
         CapsuleError::Pack(format!(
             "Failed to serialize {}: {}",
             CAPSULE_LOCK_FILE_NAME, e
@@ -331,7 +332,7 @@ pub fn render_lockfile_for_manifest(
 ) -> Result<Vec<u8>> {
     let mut lockfile = read_lockfile(lockfile_path)?;
     lockfile.meta.manifest_hash = semantic_manifest_hash(manifest)?;
-    serde_json::to_vec_pretty(&lockfile).map_err(|e| {
+    serde_jcs::to_vec(&lockfile).map_err(|e| {
         CapsuleError::Pack(format!(
             "Failed to serialize {}: {}",
             CAPSULE_LOCK_FILE_NAME, e
@@ -1274,6 +1275,13 @@ async fn generate_uv_lock(
                 None
             }
         });
+    debug!(
+        manifest_dir = %manifest_dir.display(),
+        execution_working_directory = %manifest_dir.display(),
+        lockfile_check_paths = ?vec![("uv.lock", manifest_dir.join("uv.lock"), manifest_dir.join("uv.lock").exists())],
+        dependency_check_paths = ?deps_path.as_ref().map(|path| vec![path.clone()]).unwrap_or_default(),
+        "Lockfile generation path diagnostics"
+    );
     let Some(deps_path) = deps_path else {
         return Ok(None);
     };
@@ -1293,18 +1301,13 @@ async fn generate_pnpm_lock(
     _node_version: &str,
     reporter: Arc<dyn CapsuleReporter + 'static>,
 ) -> Result<Option<PathBuf>> {
+    let package_lock = manifest_dir.join("package-lock.json");
+    let pnpm_lock = manifest_dir.join("pnpm-lock.yaml");
+    let bun_lock = manifest_dir.join("bun.lock");
+    let bun_lockb = manifest_dir.join("bun.lockb");
     // npm プロジェクト（package-lock.json）では pnpm lock 生成を強制しない。
     // source/node 実行側は package-lock.json を Tier1 要件として扱うため、
     // ここでの pnpm 固定生成は不要かつ実運用で失敗要因になる。
-    if manifest_dir.join("package-lock.json").exists() {
-        reporter
-            .notify(
-                "ℹ️  package-lock.json detected; skipping pnpm-lock.yaml generation".to_string(),
-            )
-            .await?;
-        return Ok(None);
-    }
-
     let deps_path = read_dependencies_path(manifest, "node", manifest_dir).or_else(|| {
         let candidate = manifest_dir.join("package.json");
         if candidate.exists() {
@@ -1313,6 +1316,26 @@ async fn generate_pnpm_lock(
             None
         }
     });
+    debug!(
+        manifest_dir = %manifest_dir.display(),
+        execution_working_directory = %manifest_dir.display(),
+        lockfile_check_paths = ?vec![
+            ("package-lock.json", package_lock.clone(), package_lock.exists()),
+            ("pnpm-lock.yaml", pnpm_lock.clone(), pnpm_lock.exists()),
+            ("bun.lock", bun_lock.clone(), bun_lock.exists()),
+            ("bun.lockb", bun_lockb.clone(), bun_lockb.exists()),
+        ],
+        dependency_check_paths = ?deps_path.as_ref().map(|path| vec![path.clone()]).unwrap_or_default(),
+        "Lockfile generation path diagnostics"
+    );
+    if package_lock.exists() {
+        reporter
+            .notify(
+                "ℹ️  package-lock.json detected; skipping pnpm-lock.yaml generation".to_string(),
+            )
+            .await?;
+        return Ok(None);
+    }
     let Some(_) = deps_path else {
         return Ok(None);
     };
@@ -1341,10 +1364,24 @@ async fn generate_deno_lock(
             .map(|s| s.to_string())
     });
     let Some(entrypoint) = entrypoint else {
+        debug!(
+            manifest_dir = %manifest_dir.display(),
+            execution_working_directory = %manifest_dir.display(),
+            lockfile_check_paths = ?vec![("deno.lock", manifest_dir.join("deno.lock"), manifest_dir.join("deno.lock").exists())],
+            dependency_check_paths = ?Vec::<std::path::PathBuf>::new(),
+            "Lockfile generation path diagnostics"
+        );
         return Ok(None);
     };
 
     let entrypoint_path = manifest_dir.join(&entrypoint);
+    debug!(
+        manifest_dir = %manifest_dir.display(),
+        execution_working_directory = %manifest_dir.display(),
+        lockfile_check_paths = ?vec![("deno.lock", manifest_dir.join("deno.lock"), manifest_dir.join("deno.lock").exists())],
+        dependency_check_paths = ?vec![entrypoint_path.clone()],
+        "Lockfile generation path diagnostics"
+    );
     if !entrypoint_path.exists() {
         return Ok(None);
     }

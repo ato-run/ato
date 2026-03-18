@@ -281,6 +281,7 @@ pub async fn request_retry_install_draft(
     install::retry_github_install_draft(repository, &request).await
 }
 
+#[allow(dead_code)]
 pub fn build_manual_manifest_path(base_dir: &Path, repository: &str, attempt_id: &str) -> PathBuf {
     let repo_path = install::normalize_github_repository(repository)
         .ok()

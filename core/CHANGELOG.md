@@ -1,22 +1,34 @@
 # Changelog
 
 All notable changes to `ato-cli` will be documented in this file.
+
+## [0.3.1] - 2026-03-18
+
+### What Changed
+
+#### Features
+
+- Add preview validation and runtime guard modes so preview manifests can be inspected before full lockfile and sandbox enforcement
+
+#### Bug Fixes
+
+- Preserve execution working directory semantics when deriving runtime provisioning commands
+
 ## [0.3.0] - 2026-03-17
 
 ### What Changed
 
 #### Features
+
 - Preserve `run_command`, `outputs`, and `build_env` on public normalized target types for v0.3 runtime/build metadata
 
 ## [0.1.3] - 2026-03-12
 
 ### What Changed
 
-
 #### Bug Fixes
 
 - Correct argument passing in infer_source_driver function
-
 
 #### Features
 
@@ -65,7 +77,6 @@ All notable changes to `ato-cli` will be documented in this file.
 - Implement process management functionality
 
 - Update README and add tests for Python, Node, Deno, Bun, and custom app config generation
-
 
 #### Other Changes
 
@@ -117,11 +128,9 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Implement CLI reporters for metrics reporting: StdoutReporter and JsonReporter
 
-
 #### Refactoring
 
 - Clean up error handling and improve script documentation
-
 
 #### Tests
 
@@ -129,16 +138,13 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Verify SBOM embedding in capsule packer
 
-
 ## [0.1.2] - 2026-03-12
 
 ### What Changed
 
-
 #### Bug Fixes
 
 - Correct argument passing in infer_source_driver function
-
 
 #### Features
 
@@ -187,7 +193,6 @@ All notable changes to `ato-cli` will be documented in this file.
 - Implement process management functionality
 
 - Update README and add tests for Python, Node, Deno, Bun, and custom app config generation
-
 
 #### Other Changes
 
@@ -237,11 +242,9 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Implement CLI reporters for metrics reporting: StdoutReporter and JsonReporter
 
-
 #### Refactoring
 
 - Clean up error handling and improve script documentation
-
 
 #### Tests
 
@@ -249,16 +252,13 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Verify SBOM embedding in capsule packer
 
-
 ## [0.1.1] - 2026-03-12
 
 ### What Changed
 
-
 #### Bug Fixes
 
 - Correct argument passing in infer_source_driver function
-
 
 #### Features
 
@@ -308,7 +308,6 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Update README and add tests for Python, Node, Deno, Bun, and custom app config generation
 
-
 #### Other Changes
 
 - Refactor path handling and validation in manifest and execution plan
@@ -355,15 +354,12 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Implement CLI reporters for metrics reporting: StdoutReporter and JsonReporter
 
-
 #### Refactoring
 
 - Clean up error handling and improve script documentation
-
 
 #### Tests
 
 - Clarify capsule SBOM verification assertions
 
 - Verify SBOM embedding in capsule packer
-

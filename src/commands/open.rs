@@ -20,6 +20,7 @@ use tracing::debug;
 use crate::executors::source::ExecuteMode;
 use crate::executors::source::NacelleExecEvent;
 use crate::executors::target_runner::{self, TargetLaunchOptions};
+use crate::preview;
 use crate::reporters::CliReporter;
 use crate::runtime_manager;
 use crate::runtime_overrides;
@@ -55,6 +56,7 @@ pub struct OpenArgs {
     pub state_bindings: Vec<String>,
     pub inject_bindings: Vec<String>,
     pub reporter: Arc<CliReporter>,
+    pub preview_mode: bool,
 }
 
 pub async fn execute(args: OpenArgs) -> Result<()> {
@@ -102,6 +104,7 @@ async fn execute_capsule_file(args: &OpenArgs, capsule_path: &PathBuf) -> Result
             state_bindings: args.state_bindings.clone(),
             inject_bindings: args.inject_bindings.clone(),
             reporter: args.reporter.clone(),
+            preview_mode: args.preview_mode,
         };
         return execute_normal_mode(open_args).await;
     }
@@ -200,6 +203,7 @@ async fn execute_capsule_file(args: &OpenArgs, capsule_path: &PathBuf) -> Result
         state_bindings: args.state_bindings.clone(),
         inject_bindings: args.inject_bindings.clone(),
         reporter: args.reporter.clone(),
+        preview_mode: args.preview_mode,
     };
 
     execute_normal_mode(open_args).await
@@ -395,17 +399,32 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
     } else {
         args.target.clone()
     };
+    let preview_session = preview::load_preview_session_for_manifest(&manifest_path)?;
+    let preview_mode = args.preview_mode || preview_session.is_some();
 
-    let manifest = CapsuleManifest::load_from_file(&manifest_path)?;
+    let manifest = if preview_mode {
+        capsule_core::manifest::load_manifest_with_validation_mode(
+            &manifest_path,
+            capsule_core::types::ValidationMode::Preview,
+        )?
+        .model
+    } else {
+        CapsuleManifest::load_from_file(&manifest_path)?
+    };
     if manifest.schema_version.trim() == "0.3" && manifest.capsule_type == CapsuleType::Library {
         anyhow::bail!("schema_version=0.3 type=library package cannot be started with `ato run`");
     }
     let state_source_overrides = resolve_state_source_overrides(&manifest, &args.state_bindings)?;
-    let decision = capsule_core::router::route_manifest_with_state_overrides(
+    let decision = capsule_core::router::route_manifest_with_state_overrides_and_validation_mode(
         &manifest_path,
         router::ExecutionProfile::Dev,
         args.target_label.as_deref(),
         state_source_overrides,
+        if preview_mode {
+            capsule_core::types::ValidationMode::Preview
+        } else {
+            capsule_core::types::ValidationMode::Strict
+        },
     )?;
     if decision
         .plan
@@ -516,6 +535,7 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
             sandbox_mode: args.sandbox_mode,
             dangerously_skip_permissions: args.dangerously_skip_permissions,
             assume_yes: args.assume_yes,
+            preview_mode,
         },
     )?;
     let execution_plan = prepared.execution_plan;
@@ -1216,13 +1236,28 @@ fn execute_watch_mode(args: OpenArgs) -> Result<()> {
     } else {
         args.target.clone()
     };
-    let manifest = CapsuleManifest::load_from_file(&manifest_path)?;
+    let preview_mode =
+        args.preview_mode || preview::load_preview_session_for_manifest(&manifest_path)?.is_some();
+    let manifest = if preview_mode {
+        capsule_core::manifest::load_manifest_with_validation_mode(
+            &manifest_path,
+            capsule_core::types::ValidationMode::Preview,
+        )?
+        .model
+    } else {
+        CapsuleManifest::load_from_file(&manifest_path)?
+    };
     let state_source_overrides = resolve_state_source_overrides(&manifest, &args.state_bindings)?;
-    let decision = capsule_core::router::route_manifest_with_state_overrides(
+    let decision = capsule_core::router::route_manifest_with_state_overrides_and_validation_mode(
         &manifest_path,
         router::ExecutionProfile::Dev,
         args.target_label.as_deref(),
         state_source_overrides,
+        if preview_mode {
+            capsule_core::types::ValidationMode::Preview
+        } else {
+            capsule_core::types::ValidationMode::Strict
+        },
     )?;
     if decision.plan.is_orchestration_mode() {
         anyhow::bail!("--watch is not supported for orchestration mode");
@@ -1439,17 +1474,46 @@ fn plan_v03_provision_command(plan: &capsule_core::router::ManifestData) -> Resu
     let driver = plan.execution_driver().unwrap_or_default();
     let runtime = runtime.trim().to_ascii_lowercase();
     let driver = driver.trim().to_ascii_lowercase();
-    let manifest_dir = plan.execution_working_directory();
+    let manifest_dir = plan.manifest_dir.clone();
+    let execution_working_directory = plan.execution_working_directory();
 
     if runtime == "web" && driver == "static" {
+        debug!(
+            phase = "open",
+            runtime,
+            driver,
+            manifest_dir = %manifest_dir.display(),
+            execution_working_directory = %execution_working_directory.display(),
+            lockfile_check_paths = ?Vec::<(&str, std::path::PathBuf, bool)>::new(),
+            "Provision command path diagnostics"
+        );
         return Ok(None);
     }
 
     if matches!(driver.as_str(), "node") {
-        let package_lock = manifest_dir.join("package-lock.json");
-        let pnpm_lock = manifest_dir.join("pnpm-lock.yaml");
-        let bun_lock = manifest_dir.join("bun.lock");
-        let bun_lockb = manifest_dir.join("bun.lockb");
+        let package_lock = execution_working_directory.join("package-lock.json");
+        let pnpm_lock = execution_working_directory.join("pnpm-lock.yaml");
+        let bun_lock = execution_working_directory.join("bun.lock");
+        let bun_lockb = execution_working_directory.join("bun.lockb");
+        let lockfile_check_paths = vec![
+            (
+                "package-lock.json",
+                package_lock.clone(),
+                package_lock.exists(),
+            ),
+            ("pnpm-lock.yaml", pnpm_lock.clone(), pnpm_lock.exists()),
+            ("bun.lock", bun_lock.clone(), bun_lock.exists()),
+            ("bun.lockb", bun_lockb.clone(), bun_lockb.exists()),
+        ];
+        debug!(
+            phase = "open",
+            runtime,
+            driver,
+            manifest_dir = %manifest_dir.display(),
+            execution_working_directory = %execution_working_directory.display(),
+            lockfile_check_paths = ?lockfile_check_paths,
+            "Provision command path diagnostics"
+        );
         let mut matches = Vec::new();
         if package_lock.exists() {
             matches.push("npm ci");
@@ -1476,7 +1540,17 @@ fn plan_v03_provision_command(plan: &capsule_core::router::ManifestData) -> Resu
     }
 
     if matches!(driver.as_str(), "python") {
-        return if manifest_dir.join("uv.lock").exists() {
+        let uv_lock = execution_working_directory.join("uv.lock");
+        debug!(
+            phase = "open",
+            runtime,
+            driver,
+            manifest_dir = %manifest_dir.display(),
+            execution_working_directory = %execution_working_directory.display(),
+            lockfile_check_paths = ?vec![("uv.lock", uv_lock.clone(), uv_lock.exists())],
+            "Provision command path diagnostics"
+        );
+        return if uv_lock.exists() {
             Ok(Some("uv sync --frozen".to_string()))
         } else {
             Err(AtoExecutionError::lock_incomplete(
@@ -1487,7 +1561,17 @@ fn plan_v03_provision_command(plan: &capsule_core::router::ManifestData) -> Resu
         };
     }
 
-    if matches!(driver.as_str(), "native") && manifest_dir.join("Cargo.lock").exists() {
+    let cargo_lock = execution_working_directory.join("Cargo.lock");
+    debug!(
+        phase = "open",
+        runtime,
+        driver,
+        manifest_dir = %manifest_dir.display(),
+        execution_working_directory = %execution_working_directory.display(),
+        lockfile_check_paths = ?vec![("Cargo.lock", cargo_lock.clone(), cargo_lock.exists())],
+        "Provision command path diagnostics"
+    );
+    if matches!(driver.as_str(), "native") && cargo_lock.exists() {
         return Ok(Some("cargo fetch --locked".to_string()));
     }
 
