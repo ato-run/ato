@@ -33,12 +33,36 @@ pub struct RuntimeGuardResult {
     pub executor_kind: ExecutorKind,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeGuardMode {
+    Strict,
+    Preview,
+}
+
 pub fn evaluate(
     plan: &ExecutionPlan,
     manifest_dir: &Path,
     enforcement: &str,
     sandbox_mode: bool,
     dangerously_skip_permissions: bool,
+) -> Result<RuntimeGuardResult, AtoExecutionError> {
+    evaluate_for_mode(
+        plan,
+        manifest_dir,
+        enforcement,
+        sandbox_mode,
+        dangerously_skip_permissions,
+        RuntimeGuardMode::Strict,
+    )
+}
+
+pub fn evaluate_for_mode(
+    plan: &ExecutionPlan,
+    manifest_dir: &Path,
+    enforcement: &str,
+    sandbox_mode: bool,
+    dangerously_skip_permissions: bool,
+    mode: RuntimeGuardMode,
 ) -> Result<RuntimeGuardResult, AtoExecutionError> {
     let runtime = plan.target.runtime;
     let driver = plan.target.driver;
@@ -47,6 +71,7 @@ pub fn evaluate(
     if requires_capsule_lock(runtime, driver)
         && matches!(tier, ExecutionTier::Tier1)
         && !resolve_capsule_lock_path(manifest_dir).exists()
+        && !matches!(mode, RuntimeGuardMode::Preview)
     {
         return Err(AtoExecutionError::lock_incomplete(
             "capsule.lock.json is required for Tier1 execution",
@@ -57,7 +82,9 @@ pub fn evaluate(
     let required_lock = resolve_required_lock(runtime, driver)?;
     match required_lock {
         Some(RequiredLock::DenoLockOrPackageLock) => {
-            if resolve_deno_dependency_lock_path(manifest_dir).is_none() {
+            if resolve_deno_dependency_lock_path(manifest_dir).is_none()
+                && !matches!(mode, RuntimeGuardMode::Preview)
+            {
                 return Err(AtoExecutionError::lock_incomplete(
                     "deno.lock or package-lock.json is required for source/deno execution",
                     Some("deno.lock"),
@@ -65,7 +92,9 @@ pub fn evaluate(
             }
         }
         Some(RequiredLock::NodeDependencyLock) => {
-            if resolve_node_dependency_lock_path(manifest_dir).is_none() {
+            if resolve_node_dependency_lock_path(manifest_dir).is_none()
+                && !matches!(mode, RuntimeGuardMode::Preview)
+            {
                 return Err(AtoExecutionError::lock_incomplete(
                     "package-lock.json, pnpm-lock.yaml, bun.lock, or bun.lockb is required for source/node Tier1 execution",
                     Some("package-lock.json"),
@@ -73,7 +102,9 @@ pub fn evaluate(
             }
         }
         Some(RequiredLock::UvLock) => {
-            if resolve_uv_lock_path(manifest_dir).is_none() {
+            if resolve_uv_lock_path(manifest_dir).is_none()
+                && !matches!(mode, RuntimeGuardMode::Preview)
+            {
                 return Err(AtoExecutionError::lock_incomplete(
                     "uv.lock is required for source/python execution",
                     Some("uv.lock"),
@@ -90,13 +121,20 @@ pub fn evaluate(
             | (ExecutionRuntime::Web, ExecutionDriver::Python)
     );
 
-    if requires_sandbox_opt_in && !(sandbox_mode || dangerously_skip_permissions) {
+    if requires_sandbox_opt_in
+        && !(sandbox_mode || dangerously_skip_permissions)
+        && !matches!(mode, RuntimeGuardMode::Preview)
+    {
         return Err(AtoExecutionError::policy_violation(
             "source/native|python execution requires explicit --sandbox opt-in or --dangerously-skip-permissions",
         ));
     }
 
-    if requires_sandbox_opt_in && !dangerously_skip_permissions && enforcement != "strict" {
+    if requires_sandbox_opt_in
+        && !dangerously_skip_permissions
+        && enforcement != "strict"
+        && !matches!(mode, RuntimeGuardMode::Preview)
+    {
         return Err(AtoExecutionError::policy_violation(
             "source/native|python execution requires strict sandbox enforcement",
         ));
@@ -382,5 +420,25 @@ mod tests {
         let err = evaluate(&plan, tmp.path(), "strict", false, false).expect_err("must reject");
         assert_eq!(err.code, "ATO_ERR_POLICY_VIOLATION");
         assert!(err.message.contains("--sandbox"));
+    }
+
+    #[test]
+    fn preview_mode_skips_lock_and_sandbox_fail_closed_checks() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = sample_plan(ExecutionRuntime::Source, ExecutionDriver::Python);
+
+        let result = evaluate_for_mode(
+            &plan,
+            tmp.path(),
+            "best_effort",
+            false,
+            false,
+            RuntimeGuardMode::Preview,
+        )
+        .expect("preview guard pass");
+
+        assert!(result.requires_sandbox_opt_in);
+        assert_eq!(result.required_lock, Some(RequiredLock::UvLock));
+        assert_eq!(result.executor_kind, ExecutorKind::Native);
     }
 }

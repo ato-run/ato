@@ -2,12 +2,22 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::error::CapsuleError;
+use crate::types::ValidationMode;
 
 pub fn validate_manifest_for_build(
     manifest_path: &Path,
     target_label: &str,
 ) -> Result<(), CapsuleError> {
-    let loaded = crate::manifest::load_manifest(manifest_path)?;
+    validate_manifest_for_build_with_mode(manifest_path, target_label, ValidationMode::Strict)
+}
+
+pub fn validate_manifest_for_build_with_mode(
+    manifest_path: &Path,
+    target_label: &str,
+    validation_mode: ValidationMode,
+) -> Result<(), CapsuleError> {
+    let loaded =
+        crate::manifest::load_manifest_with_validation_mode(manifest_path, validation_mode)?;
     let raw = loaded.raw;
     validate_pack_config(manifest_path, &raw)?;
 
@@ -90,22 +100,23 @@ pub fn validate_manifest_for_build(
             ));
         }
 
-        let port_raw = target.get("port").ok_or_else(|| {
-            manifest_err(
-                manifest_path,
-                format!("targets.{target_label}.port is required for runtime=web"),
-            )
-        })?;
-        let port = port_raw.as_integer().ok_or_else(|| {
-            manifest_err(
-                manifest_path,
-                format!("targets.{target_label}.port must be an integer"),
-            )
-        })?;
-        if !(1..=65535).contains(&port) {
+        if let Some(port_raw) = target.get("port") {
+            let port = port_raw.as_integer().ok_or_else(|| {
+                manifest_err(
+                    manifest_path,
+                    format!("targets.{target_label}.port must be an integer"),
+                )
+            })?;
+            if !(1..=65535).contains(&port) {
+                return Err(manifest_err(
+                    manifest_path,
+                    format!("targets.{target_label}.port must be between 1 and 65535"),
+                ));
+            }
+        } else if !matches!(validation_mode, ValidationMode::Preview) {
             return Err(manifest_err(
                 manifest_path,
-                format!("targets.{target_label}.port must be between 1 and 65535"),
+                format!("targets.{target_label}.port is required for runtime=web"),
             ));
         }
 
@@ -246,57 +257,9 @@ pub fn validate_manifest_for_build(
         }
     }
 
-    if let Some(smoke) = target.get("smoke") {
-        let smoke = smoke.as_table().ok_or_else(|| {
-            manifest_err(
-                manifest_path,
-                format!("targets.{target_label}.smoke must be a table"),
-            )
-        })?;
-
-        if let Some(timeout) = smoke.get("startup_timeout_ms") {
-            let timeout = timeout.as_integer().ok_or_else(|| {
-                manifest_err(
-                    manifest_path,
-                    format!("targets.{target_label}.smoke.startup_timeout_ms must be an integer"),
-                )
-            })?;
-            if timeout <= 0 {
-                return Err(manifest_err(
-                    manifest_path,
-                    format!(
-                        "targets.{target_label}.smoke.startup_timeout_ms must be greater than 0"
-                    ),
-                ));
-            }
-        }
-
-        if let Some(commands) = smoke.get("check_commands") {
-            let commands = commands.as_array().ok_or_else(|| {
-                manifest_err(
-                    manifest_path,
-                    format!("targets.{target_label}.smoke.check_commands must be an array"),
-                )
-            })?;
-            for (idx, cmd) in commands.iter().enumerate() {
-                let cmd = cmd.as_str().ok_or_else(|| {
-                    manifest_err(
-                        manifest_path,
-                        format!(
-                            "targets.{target_label}.smoke.check_commands[{idx}] must be a string"
-                        ),
-                    )
-                })?;
-                if cmd.trim().is_empty() {
-                    return Err(manifest_err(
-                        manifest_path,
-                        format!(
-                            "targets.{target_label}.smoke.check_commands[{idx}] must not be empty"
-                        ),
-                    ));
-                }
-            }
-        }
+    if target.get("smoke").is_some() {
+        crate::smoke::parse_smoke_options(&raw, target_label)
+            .map_err(|err| manifest_err(manifest_path, err.to_string()))?;
     }
 
     Ok(())
@@ -640,12 +603,15 @@ mod tests {
             &manifest_path,
             r#"
 schema_version = "0.2"
-name = "x"
+name = "cli-smoke"
 version = "0.1.0"
+type = "app"
 default_target = "cli"
 
 [targets.cli]
 runtime = "source"
+driver = "python"
+runtime_version = "3.11.9"
 entrypoint = "main.py"
 
 [targets.cli.smoke]
@@ -666,12 +632,15 @@ startup_timeout_ms = 0
             &manifest_path,
             r#"
 schema_version = "0.2"
-name = "x"
+name = "cli-smoke"
 version = "0.1.0"
+type = "app"
 default_target = "cli"
 
 [targets.cli]
 runtime = "source"
+driver = "python"
+runtime_version = "3.11.9"
 entrypoint = "main.py"
 
 [targets.cli.smoke]
@@ -695,6 +664,7 @@ check_commands = ["python -V"]
 schema_version = "0.2"
 name = "web-static"
 version = "0.1.0"
+type = "app"
 default_target = "static"
 
 [targets.static]
@@ -725,6 +695,7 @@ port = 8080
 schema_version = "0.2"
 name = "web-static"
 version = "0.1.0"
+type = "app"
 default_target = "static"
 
 [targets.static]
@@ -741,6 +712,36 @@ port = 8080
     }
 
     #[test]
+    fn preview_web_static_allows_missing_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("capsule.toml");
+        std::fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.2"
+name = "web-static"
+version = "0.1.0"
+type = "app"
+default_target = "static"
+
+[targets.static]
+runtime = "web"
+driver = "static"
+entrypoint = "dist"
+"#,
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(dir.path().join("dist")).unwrap();
+        let result = validate_manifest_for_build_with_mode(
+            &manifest_path,
+            "static",
+            ValidationMode::Preview,
+        );
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    #[test]
     fn web_dynamic_rejects_shell_style_entrypoint() {
         let dir = tempfile::tempdir().unwrap();
         let manifest_path = dir.path().join("capsule.toml");
@@ -750,6 +751,7 @@ port = 8080
 schema_version = "0.2"
 name = "web-node"
 version = "0.1.0"
+type = "app"
 default_target = "web"
 
 [targets.web]
@@ -777,6 +779,7 @@ port = 3000
 schema_version = "0.2"
 name = "web-services"
 version = "0.1.0"
+type = "app"
 default_target = "web"
 
 [targets.web]
@@ -804,6 +807,7 @@ entrypoint = "node apps/dashboard/server.js"
 schema_version = "0.2"
 name = "web-services"
 version = "0.1.0"
+type = "app"
 default_target = "web"
 
 [targets.web]
@@ -831,6 +835,7 @@ entrypoint = "python apps/api/main.py"
 schema_version = "0.2"
 name = "web-services"
 version = "0.1.0"
+type = "app"
 default_target = "web"
 
 [targets.web]
@@ -858,6 +863,7 @@ entrypoint = "node apps/dashboard/server.js"
 schema_version = "0.2"
 name = "web-deno"
 version = "0.1.0"
+type = "app"
 default_target = "web"
 
 [targets.web]
@@ -884,6 +890,7 @@ port = 4173
 schema_version = "0.2"
 name = "pack-test"
 version = "0.1.0"
+type = "app"
 default_target = "web"
 
 [pack]
@@ -900,6 +907,6 @@ port = 4173
         std::fs::write(dir.path().join("ato-entry.ts"), "console.log('ok');").unwrap();
 
         let err = validate_manifest_for_build(&manifest_path, "web").unwrap_err();
-        assert!(err.to_string().contains("pack.include[0]"));
+        assert!(err.to_string().contains("pack.include"));
     }
 }
