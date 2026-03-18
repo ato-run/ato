@@ -260,7 +260,7 @@ pub fn write_lockfile(
     let lockfile = CapsuleLock {
         version: LOCKFILE_VERSION.to_string(),
         meta: LockMeta {
-            created_at: Utc::now().to_rfc3339(),
+            created_at: reproducible_created_at().to_rfc3339(),
             manifest_hash: payload::compute_manifest_hash_without_signatures(&loaded.model)
                 .map_err(|e| {
                     CapsuleError::Pack(format!("Failed to compute manifest hash: {}", e))
@@ -321,6 +321,15 @@ fn detect_platform() -> Result<(String, String)> {
     };
 
     Ok((os.to_string(), arch.to_string()))
+}
+
+fn reproducible_created_at() -> chrono::DateTime<Utc> {
+    let epoch = std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    chrono::DateTime::<Utc>::from_timestamp(epoch, 0)
+        .unwrap_or_else(|| chrono::DateTime::<Utc>::from_timestamp(0, 0).expect("unix epoch"))
 }
 
 fn target_triple(os: &str, arch: &str) -> Result<String> {
