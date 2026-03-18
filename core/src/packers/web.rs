@@ -100,12 +100,6 @@ pub fn pack(
         ZSTD_COMPRESSION_LEVEL,
     )
     .map_err(CapsuleError::Io)?;
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get() as u32)
-        .unwrap_or(1);
-    if threads > 1 {
-        zst_encoder.multithread(threads).map_err(CapsuleError::Io)?;
-    }
     let mut payload_reader =
         BufReader::new(fs::File::open(&payload_tar_path).map_err(CapsuleError::Io)?);
     std::io::copy(&mut payload_reader, &mut zst_encoder).map_err(CapsuleError::Io)?;
@@ -549,7 +543,7 @@ port = 8080
                 entry
                     .read_to_end(&mut manifest_toml_bytes)
                     .expect("read manifest TOML");
-            } else if path == "capsule.lock" {
+            } else if path == CAPSULE_LOCK_FILE_NAME || path == LEGACY_CAPSULE_LOCK_FILE_NAME {
                 has_lock = true;
             } else if path == "signature.json" {
                 has_signature = true;
@@ -590,7 +584,8 @@ port = 8080
 
         assert!(files.iter().any(|p| p == "dist/index.html"));
         assert!(files.iter().any(|p| p == "dist/assets/app.js"));
-        assert!(!files.iter().any(|p| p == "capsule.lock"));
+        assert!(!files.iter().any(|p| p == CAPSULE_LOCK_FILE_NAME));
+        assert!(!files.iter().any(|p| p == LEGACY_CAPSULE_LOCK_FILE_NAME));
         assert!(!files.iter().any(|p| p == "config.json"));
 
         let manifest_toml: CapsuleManifest =

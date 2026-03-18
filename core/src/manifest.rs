@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::{CapsuleError, Result};
-use crate::types::{CapsuleManifest, TargetsConfig};
+use crate::types::{CapsuleManifest, TargetsConfig, ValidationMode};
 
 pub struct LoadedManifest {
     pub raw: toml::Value,
@@ -12,6 +12,13 @@ pub struct LoadedManifest {
 }
 
 pub fn load_manifest(path: &Path) -> Result<LoadedManifest> {
+    load_manifest_with_validation_mode(path, ValidationMode::Strict)
+}
+
+pub fn load_manifest_with_validation_mode(
+    path: &Path,
+    validation_mode: ValidationMode,
+) -> Result<LoadedManifest> {
     let raw_text = std::fs::read_to_string(path).map_err(|e| {
         CapsuleError::Manifest(
             path.to_path_buf(),
@@ -26,7 +33,7 @@ pub fn load_manifest(path: &Path) -> Result<LoadedManifest> {
         )
     })?;
 
-    if let Err(errors) = model.validate() {
+    if let Err(errors) = model.validate_for_mode(validation_mode) {
         let details = errors
             .iter()
             .map(|e| e.to_string())
