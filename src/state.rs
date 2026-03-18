@@ -77,9 +77,19 @@ pub fn ensure_registered_state_binding(
     state_name: &str,
     locator: &str,
 ) -> Result<PersistentStateRecord> {
+    let store = open_state_store()?;
+
+    ensure_registered_state_binding_in_store(manifest, state_name, locator, &store)
+}
+
+pub fn ensure_registered_state_binding_in_store(
+    manifest: &CapsuleManifest,
+    state_name: &str,
+    locator: &str,
+    store: &RegistryStore,
+) -> Result<PersistentStateRecord> {
     let contract = persistent_state_contract(manifest, state_name)?;
     let backend_locator = prepare_backend_locator(locator)?;
-    let store = open_state_store()?;
 
     if let Some(existing) =
         store.find_persistent_state_by_owner_and_locator(&contract.owner_scope, &backend_locator)?

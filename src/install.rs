@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::Write;
-use std::io::{self};
 use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Once, OnceLock};
@@ -365,6 +364,10 @@ fn normalize_github_install_preview_toml(
             }
         }
 
+        if runtime.as_deref() == Some("source/node") {
+            normalize_v03_source_node_typescript_run(&mut parsed, checkout_dir)?;
+        }
+
         changed_pack_include_from_checkout(&mut parsed, checkout_dir)?;
         inspect_normalized_github_install_preview_manifest(&parsed, checkout_dir)?;
 
@@ -438,6 +441,207 @@ fn normalize_github_install_preview_toml(
     }
 
     toml::to_string(&parsed).context("Failed to serialize normalized GitHub install draft")
+}
+
+fn normalize_v03_source_node_typescript_run(
+    parsed: &mut toml::Value,
+    checkout_dir: &Path,
+) -> Result<()> {
+    let Some(run) = parsed
+        .get("run")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+
+    let run_parts = run.split_whitespace().collect::<Vec<_>>();
+    if run_parts.len() < 2 || run_parts[0] != "node" || !run_parts[1].ends_with(".ts") {
+        return Ok(());
+    }
+
+    let Some(package_json) = read_package_json(checkout_dir) else {
+        return Ok(());
+    };
+    let Some(build_script) = package_json
+        .get("scripts")
+        .and_then(|value| value.get("build"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    let Some(bin_path) = package_json_primary_bin_path(&package_json) else {
+        return Ok(());
+    };
+    if !bin_path.ends_with(".js") {
+        return Ok(());
+    }
+
+    let package_manager = infer_node_package_manager_command_prefix(checkout_dir, &package_json);
+    let build_command = normalize_package_script_command(package_manager, "build", build_script);
+    let trailing_args = run_parts
+        .iter()
+        .skip(2)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let run_command = if trailing_args.is_empty() {
+        format!("node {bin_path}")
+    } else {
+        format!("node {bin_path} {trailing_args}")
+    };
+
+    let mut include_entries = vec![recursive_parent_include(&bin_path)];
+    if let Some(files) = package_json
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+    {
+        for value in files {
+            let Some(path) = value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let normalized = path.trim_start_matches("./");
+            if normalized.is_empty() {
+                continue;
+            }
+            let candidate = checkout_dir.join(normalized);
+            let include = if candidate.is_dir() {
+                format!("{}/**", normalized.trim_end_matches('/'))
+            } else {
+                normalized.to_string()
+            };
+            include_entries.push(include);
+        }
+    }
+
+    let Some(table) = parsed.as_table_mut() else {
+        return Ok(());
+    };
+
+    table.insert("build".to_string(), toml::Value::String(build_command));
+    table.insert("run".to_string(), toml::Value::String(run_command));
+    for entry in include_entries {
+        ensure_pack_include_entry_in_table(table, entry);
+    }
+    Ok(())
+}
+
+fn ensure_pack_include_entry_in_table(table: &mut toml::value::Table, entry: String) {
+    if entry.trim().is_empty() {
+        return;
+    }
+
+    let pack = table
+        .entry("pack".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    let Some(pack_table) = pack.as_table_mut() else {
+        return;
+    };
+    let include = pack_table
+        .entry("include".to_string())
+        .or_insert_with(|| toml::Value::Array(Vec::new()));
+    let Some(include_array) = include.as_array_mut() else {
+        return;
+    };
+
+    let already_present = include_array.iter().any(|value| {
+        value
+            .as_str()
+            .map(|existing| existing.trim() == entry)
+            .unwrap_or(false)
+    });
+    if !already_present {
+        include_array.push(toml::Value::String(entry));
+    }
+}
+
+fn recursive_parent_include(path: &str) -> String {
+    let trimmed = path.trim().trim_start_matches("./");
+    let parent = Path::new(trimmed)
+        .parent()
+        .map(normalize_relative_path)
+        .filter(|value| !value.is_empty());
+
+    match parent {
+        Some(parent) => format!("{parent}/**"),
+        None => trimmed.to_string(),
+    }
+}
+
+fn read_package_json(checkout_dir: &Path) -> Option<serde_json::Value> {
+    let package_json_path = checkout_dir.join("package.json");
+    let raw = std::fs::read_to_string(package_json_path).ok()?;
+    serde_json::from_str::<serde_json::Value>(&raw).ok()
+}
+
+fn package_json_primary_bin_path(package_json: &serde_json::Value) -> Option<String> {
+    if let Some(bin) = package_json.get("bin") {
+        if let Some(path) = bin.as_str() {
+            let normalized = path.trim().trim_start_matches("./");
+            if !normalized.is_empty() {
+                return Some(normalized.to_string());
+            }
+        }
+        if let Some(table) = bin.as_object() {
+            for value in table.values() {
+                if let Some(path) = value.as_str() {
+                    let normalized = path.trim().trim_start_matches("./");
+                    if !normalized.is_empty() {
+                        return Some(normalized.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn infer_node_package_manager_command_prefix(
+    checkout_dir: &Path,
+    package_json: &serde_json::Value,
+) -> &'static str {
+    if checkout_dir.join("pnpm-lock.yaml").exists()
+        || package_json
+            .get("packageManager")
+            .and_then(serde_json::Value::as_str)
+            .map(|value| value.trim().starts_with("pnpm@"))
+            .unwrap_or(false)
+    {
+        return "pnpm";
+    }
+    if checkout_dir.join("package-lock.json").exists() {
+        return "npm";
+    }
+    if checkout_dir.join("bun.lock").exists() || checkout_dir.join("bun.lockb").exists() {
+        return "bun";
+    }
+    "npm"
+}
+
+fn normalize_package_script_command(
+    package_manager: &str,
+    script_name: &str,
+    script_body: &str,
+) -> String {
+    let trimmed = script_body.trim();
+    if trimmed == format!("{package_manager} {script_name}")
+        || trimmed == format!("{package_manager} run {script_name}")
+    {
+        return trimmed.to_string();
+    }
+
+    match package_manager {
+        "pnpm" | "npm" => format!("{package_manager} run {script_name}"),
+        "bun" => format!("bun run {script_name}"),
+        _ => format!("{package_manager} run {script_name}"),
+    }
 }
 
 #[derive(Debug)]
@@ -919,6 +1123,7 @@ pub struct InstallExecutionOptions {
     pub json_output: bool,
     pub can_prompt_interactively: bool,
     pub promotion_source: Option<PromotionSourceInfo>,
+    pub keep_progressive_flow_open: bool,
 }
 
 enum InstallSource {
@@ -1747,6 +1952,7 @@ pub async fn install_app(
             json_output,
             can_prompt_interactively,
             promotion_source: None,
+            keep_progressive_flow_open: false,
         },
         InstallSource::Registry(registry),
     )
@@ -1771,6 +1977,7 @@ async fn complete_install_from_bytes(
         json_output,
         can_prompt_interactively,
         promotion_source,
+        keep_progressive_flow_open,
     } = options;
     let computed_blake3 = compute_blake3(&bytes);
     if let Some(v3_manifest) = extract_payload_v3_manifest_from_capsule(&bytes)? {
@@ -2005,8 +2212,31 @@ async fn complete_install_from_bytes(
     }
 
     if !json_output {
-        eprintln!("✅ Installed to: {}", output_path.display());
-        eprintln!("   To run: ato run {}", output_path.display());
+        if crate::progressive_ui::can_use_progressive_ui(false) {
+            crate::progressive_ui::show_note(
+                "Installed 1 capsule",
+                format!(
+                    "{}\nSaved to    :\n{}\nRun with    :\n  ato run {}",
+                    scoped_ref.scoped_id,
+                    crate::progressive_ui::format_path_for_note(&output_path),
+                    output_path.display()
+                ),
+            )?;
+            if keep_progressive_flow_open && crate::progressive_ui::is_flow_active() {
+                crate::progressive_ui::show_step(format!(
+                    "Installed and linked: {}",
+                    output_path.display()
+                ))?;
+            } else {
+                crate::progressive_ui::show_outro(format!(
+                    "Done! Run persistently with: ato run {}",
+                    output_path.display()
+                ))?;
+            }
+        } else {
+            eprintln!("✅ Installed to: {}", output_path.display());
+            eprintln!("   To run: ato run {}", output_path.display());
+        }
     }
 
     Ok(InstallResult {
@@ -2097,17 +2327,11 @@ fn persist_installed_artifact(
 }
 
 fn prompt_for_confirmation(prompt: &str, default_yes: bool) -> Result<bool> {
-    eprint!("{prompt}");
-    io::stderr().flush().context("Failed to flush prompt")?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .context("Failed to read interactive input")?;
-    let trimmed = input.trim().to_ascii_lowercase();
-    if trimmed.is_empty() {
-        return Ok(default_yes);
-    }
-    Ok(matches!(trimmed.as_str(), "y" | "yes"))
+    crate::progressive_ui::confirm_with_fallback(
+        prompt,
+        default_yes,
+        crate::progressive_ui::can_use_progressive_ui(false),
+    )
 }
 
 fn normalize_install_segment(value: &str) -> Result<String> {
@@ -4147,6 +4371,49 @@ include = ["main.ts", "deno.json", "deno.lock"]
             normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
 
         assert!(normalized.contains(r#""import_map.json""#));
+    }
+
+    #[test]
+    fn normalize_github_install_preview_toml_rewrites_node_typescript_entrypoint_to_build_output() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{
+  "packageManager": "pnpm@10.15.0",
+  "bin": {
+    "json-server": "lib/bin.js"
+  },
+    "files": ["lib", "views", "schema.json"],
+  "scripts": {
+    "build": "rm -rf lib && tsc"
+  }
+}"#,
+        )
+        .expect("write package.json");
+        std::fs::write(
+            tmp.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        )
+        .expect("write pnpm lock");
+        let manifest = r#"
+schema_version = "0.3"
+name = "json-server"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node src/bin.ts fixtures/db.json"
+
+[pack]
+include = ["src/**", "fixtures/db.json", "package.json", "pnpm-lock.yaml"]
+"#;
+
+        let normalized =
+            normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+        assert!(normalized.contains("build = \"pnpm run build\""));
+        assert!(normalized.contains("run = \"node lib/bin.js fixtures/db.json\""));
+        assert!(normalized.contains("\"lib/**\""));
+        assert!(normalized.contains("\"schema.json\""));
     }
 
     #[test]
