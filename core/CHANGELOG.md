@@ -2,6 +2,20 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
+## [0.4.0] - 2026-03-18
+
+### What Changed
+
+#### Features
+
+- Add reusable launch spec, lifecycle event, and host isolation primitives for source execution and smoke validation
+
+#### Bug Fixes
+
+- Allow versionless v0.3 manifests while preserving validation for explicit semver values
+
+- Prepare isolated dependency installs and readiness signaling for host-executed source smoke tests
+
 ## [0.3.1] - 2026-03-18
 
 ### What Changed

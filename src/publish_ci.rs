@@ -99,11 +99,10 @@ pub async fn execute(
         .map_err(|err| anyhow::anyhow!("Failed to parse capsule.toml: {}", err))?;
 
     let tag = github.r#ref.strip_prefix("refs/tags/").unwrap_or_default();
-    let expected_tag = format!("v{}", manifest.version);
-    if tag != expected_tag {
+    let resolved_version = normalize_tag_version(tag)?;
+    if !manifest.version.trim().is_empty() && manifest.version.trim() != resolved_version {
         anyhow::bail!(
-            "Tag/version mismatch: expected refs/tags/{} from capsule.toml version {}, got {}",
-            expected_tag,
+            "Tag/version mismatch: expected version {} from capsule.toml, got tag {}",
             manifest.version,
             github.r#ref
         );
@@ -128,7 +127,7 @@ pub async fn execute(
             )
             .await?;
     }
-    let artifact_path = build_capsule_artifact(&manifest_path, &manifest.name, &manifest.version);
+    let artifact_path = build_capsule_artifact(&manifest_path, &manifest.name, &resolved_version);
     if !args.json_output {
         reporter.progress_finish(None).await?;
     }
@@ -156,13 +155,13 @@ pub async fn execute(
     let request_playground = manifest_store_playground_enabled(&manifest_raw);
     let metadata = CiMetadataPayload {
         capsule_slug: manifest.name.clone(),
-        version: manifest.version.clone(),
+        version: resolved_version.clone(),
         source_repo: source_repo.clone(),
         source_commit: github.sha.clone(),
         workflow_ref: github.workflow_ref.clone(),
         workflow_run_id: github.run_id.clone(),
         builder_identity: format!("github-actions:{}", github.workflow_ref),
-        idempotency_key: format!("{}:{}:{}", source_repo, expected_tag, github.sha),
+        idempotency_key: format!("{}:{}:{}", source_repo, tag, github.sha),
         did_signature: did_signature.clone(),
         artifact_sha256,
         artifact_blake3,
@@ -294,6 +293,15 @@ fn resolve_store_api_base_url() -> String {
 
 fn trim_trailing_slash(input: &str) -> String {
     input.trim_end_matches('/').to_string()
+}
+
+fn normalize_tag_version(tag: &str) -> Result<String> {
+    let trimmed = tag.trim();
+    let without_prefix = trimmed.strip_prefix('v').unwrap_or(trimmed);
+    if without_prefix.is_empty() {
+        anyhow::bail!("Git tag version is empty")
+    }
+    Ok(without_prefix.to_string())
 }
 
 fn find_manifest_repository(manifest_raw: &str) -> Option<String> {
@@ -510,4 +518,19 @@ Deploy latest ato-store (OIDC multipart CI publish), or point ATO_STORE_API_URL 
     }
 
     format!("CI publish failed ({}): {}", status, body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_tag_version;
+
+    #[test]
+    fn normalize_tag_version_strips_v_prefix() {
+        assert_eq!(normalize_tag_version("v1.2.3").unwrap(), "1.2.3");
+    }
+
+    #[test]
+    fn normalize_tag_version_rejects_empty_tag() {
+        assert!(normalize_tag_version("").is_err());
+    }
 }
