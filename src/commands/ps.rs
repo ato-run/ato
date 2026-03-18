@@ -11,6 +11,25 @@ pub struct PsArgs {
     pub all: bool,
 }
 
+fn status_display(status: ProcessStatus) -> &'static str {
+    match status {
+        ProcessStatus::Starting => "🟡 starting",
+        ProcessStatus::Ready => "🟢 ready",
+        ProcessStatus::Running => "🟢 running",
+        ProcessStatus::Exited => "⚪ exited",
+        ProcessStatus::Failed => "🔴 failed",
+        ProcessStatus::Stopped => "⚪ stopped",
+        ProcessStatus::Unknown => "🟡 unknown",
+    }
+}
+
+fn runtime_display(runtime: &str) -> String {
+    if let Some(base) = runtime.strip_suffix(" [host-fallback]") {
+        return format!("{} ⚠️ (Host Fallback)", base);
+    }
+    runtime.to_string()
+}
+
 pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
     let pm = ProcessManager::new()?;
     let cleaned = pm.cleanup_dead_processes_with_details()?;
@@ -37,7 +56,9 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
                     "pid": p.pid,
                     "workload_pid": p.workload_pid,
                     "status": p.status.to_string(),
+                    "status_display": status_display(p.status),
                     "runtime": p.runtime,
+                    "runtime_display": runtime_display(&p.runtime),
                     "uptime": uptime,
                     "manifest": p.manifest_path.as_ref().map(|m| m.display().to_string()),
                     "log_path": p.log_path.as_ref().map(|m| m.display().to_string()),
@@ -61,7 +82,7 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
 
         futures::executor::block_on(reporter.notify("-".repeat(100)))?;
         futures::executor::block_on(reporter.notify(format!(
-            "{:>8} {:>8} {:>12} {:>15} {:>20} {}",
+            "{:>8} {:>8} {:>12} {:>15} {:>34} {}",
             "PID", "ID", "NAME", "STATUS", "RUNTIME", "UPTIME"
         )))?;
         futures::executor::block_on(reporter.notify("-".repeat(100)))?;
@@ -71,15 +92,8 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
                 .map(format_duration)
                 .unwrap_or_else(|_| "unknown".to_string());
 
-            let status_str = match p.status {
-                ProcessStatus::Starting => "🟡 starting",
-                ProcessStatus::Ready => "🟢 ready",
-                ProcessStatus::Running => "🟢 running",
-                ProcessStatus::Exited => "⚪ exited",
-                ProcessStatus::Failed => "🔴 failed",
-                ProcessStatus::Stopped => "⚪ stopped",
-                ProcessStatus::Unknown => "🟡 unknown",
-            };
+            let status_str = status_display(p.status);
+            let runtime_str = runtime_display(&p.runtime);
 
             let name = if p.name.len() > 12 {
                 &p.name[..12]
@@ -90,8 +104,8 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
             let id = if p.id.len() > 8 { &p.id[..8] } else { &p.id };
 
             futures::executor::block_on(reporter.notify(format!(
-                "{:>8} {:>8} {:>12} {:>15} {:>20} {}",
-                p.pid, id, name, status_str, p.runtime, uptime
+                "{:>8} {:>8} {:>12} {:>15} {:>34} {}",
+                p.pid, id, name, status_str, runtime_str, uptime
             )))?;
         }
 
@@ -136,5 +150,18 @@ mod tests {
         };
         assert!(!args.json);
         assert!(args.all);
+    }
+
+    #[test]
+    fn runtime_display_adds_host_fallback_badge() {
+        assert_eq!(
+            runtime_display("source/node [host-fallback]"),
+            "source/node ⚠️ (Host Fallback)"
+        );
+    }
+
+    #[test]
+    fn status_display_keeps_existing_ready_badge() {
+        assert_eq!(status_display(ProcessStatus::Ready), "🟢 ready");
     }
 }

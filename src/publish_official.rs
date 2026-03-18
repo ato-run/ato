@@ -266,7 +266,7 @@ pub fn diagnose_official(cwd: &Path, registry_url: &str) -> OfficialPublishDiagn
     });
 
     let mut trigger_ok = true;
-    let expected_tag = version.as_ref().map(|v| format!("v{}", v));
+    let expected_tag = resolve_expected_tag(version.as_deref());
     if let Some(tag) = expected_tag.as_ref() {
         let tag_list = publish_preflight::run_git(&["tag", "--points-at", "HEAD"]);
         match tag_list {
@@ -334,6 +334,25 @@ pub fn diagnose_official(cwd: &Path, registry_url: &str) -> OfficialPublishDiagn
         needs_workflow_fix,
         can_handoff,
     }
+}
+
+fn resolve_expected_tag(version: Option<&str>) -> Option<String> {
+    if let Some(version) = version.map(str::trim).filter(|value| !value.is_empty()) {
+        return Some(format!("v{}", version));
+    }
+
+    let tags = publish_preflight::run_git(&["tag", "--points-at", "HEAD"]).ok()?;
+    for tag in tags
+        .lines()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let tag = tag.strip_prefix('v').unwrap_or(tag);
+        if tag.split('.').count() == 3 {
+            return Some(format!("v{}", tag));
+        }
+    }
+    None
 }
 
 pub fn apply_workflow_fix_once(cwd: &Path) -> Result<WorkflowFixResult> {

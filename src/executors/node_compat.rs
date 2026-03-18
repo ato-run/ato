@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 #[cfg(unix)]
 use std::{
@@ -18,6 +18,7 @@ use capsule_core::execution_plan::canonical::{
 };
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::execution_plan::model::{ExecutionPlan, ExecutionRuntime};
+use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::router::ManifestData;
 
 use crate::common::proxy;
@@ -42,26 +43,23 @@ pub fn execute(
 
     verify_execution_plan_hashes(execution_plan)?;
 
-    let entrypoint = plan
-        .execution_entrypoint()
-        .filter(|v| !v.trim().is_empty())
-        .ok_or_else(|| {
-            AtoExecutionError::policy_violation("source/node target requires entrypoint")
-        })?;
-
-    let runtime_dir = resolve_runtime_dir(&plan.manifest_dir, &entrypoint);
-    let package_lock = resolve_package_lock_path(&plan.manifest_dir, &runtime_dir);
-    let Some(_) = package_lock else {
+    let launch_spec = derive_launch_spec(plan)?;
+    let Some(_) = launch_spec.required_lockfile.as_ref() else {
         return Err(AtoExecutionError::lock_incomplete(
-            "package-lock.json is required for source/node Tier1 execution",
-            Some("package-lock.json"),
+            "source/node Tier1 execution requires a Node lockfile",
+            Some("package-lock.json|pnpm-lock.yaml|bun.lock"),
         )
         .into());
     };
 
     let use_compat_flag = deno_supports_compat_flag(&deno_bin)?;
 
-    run_provisioning(&deno_bin, &runtime_dir, &entrypoint, launch_ctx)?;
+    run_provisioning(
+        &deno_bin,
+        &launch_spec.working_dir,
+        &launch_spec.command,
+        launch_ctx,
+    )?;
     let PreparedCommand {
         mut cmd,
         #[cfg(unix)]
@@ -70,8 +68,9 @@ pub fn execute(
         &deno_bin,
         plan,
         execution_plan,
-        &runtime_dir,
-        &entrypoint,
+        &launch_spec.working_dir,
+        &launch_spec.command,
+        &launch_spec.args,
         launch_ctx,
         use_compat_flag,
         dangerously_skip_permissions,
@@ -96,26 +95,23 @@ pub fn spawn(
 
     verify_execution_plan_hashes(execution_plan)?;
 
-    let entrypoint = plan
-        .execution_entrypoint()
-        .filter(|v| !v.trim().is_empty())
-        .ok_or_else(|| {
-            AtoExecutionError::policy_violation("source/node target requires entrypoint")
-        })?;
-
-    let runtime_dir = resolve_runtime_dir(&plan.manifest_dir, &entrypoint);
-    let package_lock = resolve_package_lock_path(&plan.manifest_dir, &runtime_dir);
-    let Some(_) = package_lock else {
+    let launch_spec = derive_launch_spec(plan)?;
+    let Some(_) = launch_spec.required_lockfile.as_ref() else {
         return Err(AtoExecutionError::lock_incomplete(
-            "package-lock.json is required for source/node Tier1 execution",
-            Some("package-lock.json"),
+            "source/node Tier1 execution requires a Node lockfile",
+            Some("package-lock.json|pnpm-lock.yaml|bun.lock"),
         )
         .into());
     };
 
     let use_compat_flag = deno_supports_compat_flag(&deno_bin)?;
 
-    run_provisioning(&deno_bin, &runtime_dir, &entrypoint, launch_ctx)?;
+    run_provisioning(
+        &deno_bin,
+        &launch_spec.working_dir,
+        &launch_spec.command,
+        launch_ctx,
+    )?;
     let PreparedCommand {
         mut cmd,
         #[cfg(unix)]
@@ -124,8 +120,9 @@ pub fn spawn(
         &deno_bin,
         plan,
         execution_plan,
-        &runtime_dir,
-        &entrypoint,
+        &launch_spec.working_dir,
+        &launch_spec.command,
+        &launch_spec.args,
         launch_ctx,
         use_compat_flag,
         dangerously_skip_permissions,
@@ -181,6 +178,7 @@ fn build_runtime_command(
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     entrypoint: &str,
+    explicit_script_args: &[String],
     launch_ctx: &RuntimeLaunchContext,
     use_compat_flag: bool,
     dangerously_skip_permissions: bool,
@@ -262,7 +260,11 @@ fn build_runtime_command(
     }
 
     cmd.arg(entrypoint);
-    let args = plan.targets_oci_cmd();
+    let args = if explicit_script_args.is_empty() {
+        plan.targets_oci_cmd()
+    } else {
+        explicit_script_args.to_vec()
+    };
     if !args.is_empty() {
         cmd.args(args);
     }
@@ -289,23 +291,6 @@ fn deno_supports_compat_flag(deno_bin: &Path) -> Result<bool> {
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     Ok(stdout.contains("--compat"))
-}
-
-fn resolve_runtime_dir(manifest_dir: &Path, entrypoint: &str) -> PathBuf {
-    let source_dir = manifest_dir.join("source");
-    if source_dir.is_dir() && source_dir.join(entrypoint).exists() {
-        return source_dir;
-    }
-    manifest_dir.to_path_buf()
-}
-
-fn resolve_package_lock_path(manifest_dir: &Path, runtime_dir: &Path) -> Option<PathBuf> {
-    let candidates = [
-        runtime_dir.join("package-lock.json"),
-        manifest_dir.join("package-lock.json"),
-        manifest_dir.join("source").join("package-lock.json"),
-    ];
-    candidates.into_iter().find(|path| path.exists())
 }
 
 fn append_allow_env_permission(
@@ -510,39 +495,78 @@ fn verify_execution_plan_hashes(execution_plan: &ExecutionPlan) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        map_deno_permission_error, map_node_compat_error, resolve_package_lock_path,
-        resolve_runtime_dir,
-    };
+    use super::{map_deno_permission_error, map_node_compat_error};
 
-    #[test]
-    fn runtime_dir_uses_source_when_entrypoint_exists_only_there() {
-        let tmp = tempfile::tempdir().expect("create temp dir");
-        std::fs::create_dir_all(tmp.path().join("source")).expect("create source dir");
-        std::fs::write(
-            tmp.path().join("source").join("main.js"),
-            "console.log('ok');",
-        )
-        .expect("write source entrypoint");
+    use capsule_core::launch_spec::{derive_launch_spec, LaunchSpecSource};
+    use capsule_core::router::{ExecutionProfile, ManifestData};
+    use std::collections::HashMap;
 
-        let runtime_dir = resolve_runtime_dir(tmp.path(), "main.js");
-        assert_eq!(runtime_dir, tmp.path().join("source"));
+    fn plan_from_manifest(tmp: &tempfile::TempDir, manifest: &str) -> ManifestData {
+        let manifest_path = tmp.path().join("capsule.toml");
+        std::fs::write(&manifest_path, manifest).expect("write manifest");
+        let parsed: toml::Value = toml::from_str(manifest).expect("parse manifest");
+        ManifestData {
+            manifest: parsed,
+            manifest_path,
+            manifest_dir: tmp.path().to_path_buf(),
+            profile: ExecutionProfile::Dev,
+            selected_target: "app".to_string(),
+            state_source_overrides: HashMap::new(),
+        }
     }
 
     #[test]
-    fn package_lock_path_falls_back_to_source_dir() {
+    fn node_lock_path_falls_back_to_source_dir() {
         let tmp = tempfile::tempdir().expect("create temp dir");
         std::fs::create_dir_all(tmp.path().join("source")).expect("create source dir");
-        std::fs::write(tmp.path().join("source").join("package-lock.json"), "{}")
-            .expect("write source package-lock");
+        std::fs::write(
+            tmp.path().join("source").join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'",
+        )
+        .expect("write source pnpm-lock");
 
-        let runtime_dir = resolve_runtime_dir(tmp.path(), "main.js");
-        let lock_path = resolve_package_lock_path(tmp.path(), &runtime_dir)
-            .expect("must resolve package-lock.json");
-        assert_eq!(
-            lock_path,
-            tmp.path().join("source").join("package-lock.json")
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+[targets.app]
+runtime = "source"
+driver = "node"
+entrypoint = "main.js"
+"#,
         );
+        let spec = derive_launch_spec(&plan).expect("derive launch spec");
+
+        assert_eq!(
+            spec.required_lockfile,
+            Some(tmp.path().join("source").join("pnpm-lock.yaml"))
+        );
+    }
+
+    #[test]
+    fn run_command_spec_resolves_node_entrypoint_and_args() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        std::fs::create_dir_all(tmp.path().join("source")).expect("create source dir");
+        std::fs::write(
+            tmp.path().join("source").join("lib.js"),
+            "console.log('ok');",
+        )
+        .expect("write source script");
+
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+[targets.app]
+runtime = "source"
+driver = "node"
+run_command = "node lib.js fixtures/db.json --port 3000"
+"#,
+        );
+        let spec = derive_launch_spec(&plan).expect("derive launch spec");
+
+        assert_eq!(spec.working_dir, tmp.path().join("source"));
+        assert_eq!(spec.command, "lib.js");
+        assert_eq!(spec.args, vec!["fixtures/db.json", "--port", "3000"]);
+        assert_eq!(spec.source, LaunchSpecSource::RunCommand);
     }
 
     #[test]

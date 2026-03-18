@@ -386,7 +386,8 @@ pub struct CapsuleManifest {
     /// Unique capsule identifier (kebab-case)
     pub name: String,
 
-    /// Semantic version
+    /// Semantic version. Optional for versionless publish surfaces; empty means unset.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub version: String,
 
     /// Capsule type
@@ -2128,12 +2129,6 @@ fn normalize_v03_workspace_manifest_with_path(
     if !table.contains_key("type") {
         table.insert("type".to_string(), toml::Value::String("app".to_string()));
     }
-    if !table.contains_key("version") {
-        table.insert(
-            "version".to_string(),
-            toml::Value::String("0.0.0".to_string()),
-        );
-    }
     table.remove("workspace");
     table.insert("targets".to_string(), toml::Value::Table(targets_table));
     table.insert(
@@ -2165,13 +2160,6 @@ fn normalize_v03_manifest_value_with_path(
         table.insert(
             "schema_version".to_string(),
             toml::Value::String("0.3".to_string()),
-        );
-    }
-
-    if !table.contains_key("version") {
-        table.insert(
-            "version".to_string(),
-            toml::Value::String("0.0.0".to_string()),
         );
     }
 
@@ -3139,8 +3127,8 @@ impl CapsuleManifest {
             errors.push(ValidationError::InvalidName(self.name.clone()));
         }
 
-        // Version must be semver
-        if !is_semver(&self.version) {
+        // Version is optional for versionless manifests, but must still validate when present.
+        if !self.version.trim().is_empty() && !is_semver(&self.version) {
             errors.push(ValidationError::InvalidVersion(self.version.clone()));
         }
 
@@ -4424,8 +4412,13 @@ MODEL_DIR = "directory"
 
         let manifest = CapsuleManifest::from_toml(toml).expect("parse CHML manifest");
         assert_eq!(manifest.schema_version, "0.3");
-        assert_eq!(manifest.version, "0.0.0");
+        assert!(manifest.version.is_empty());
         assert_eq!(manifest.default_target, "app");
+        assert!(manifest.validate().is_ok());
+
+        let rendered = manifest.to_toml().expect("serialize manifest");
+        let rendered_value: toml::Value = toml::from_str(&rendered).expect("parse rendered toml");
+        assert!(rendered_value.get("version").is_none());
 
         let target = manifest.resolve_default_target().expect("default target");
         assert_eq!(target.runtime, "source");
@@ -4564,7 +4557,7 @@ build = "pnpm --filter ui build"
 
         let manifest = CapsuleManifest::from_toml(toml).expect("parse v0.3 workspace");
         assert_eq!(manifest.default_target, "web");
-        assert_eq!(manifest.version, "0.0.0");
+        assert!(manifest.version.is_empty());
 
         let web = manifest
             .targets
@@ -4620,8 +4613,9 @@ outputs = ["packages/ui/dist/**"]
 
         let manifest = CapsuleManifest::from_toml(toml).expect("parse CHML workspace");
         assert_eq!(manifest.schema_version, "0.3");
-        assert_eq!(manifest.version, "0.0.0");
+        assert!(manifest.version.is_empty());
         assert_eq!(manifest.default_target, "web");
+        assert!(manifest.validate().is_ok());
 
         let web = manifest
             .targets
