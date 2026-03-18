@@ -48,8 +48,8 @@ enum ResolvedPublishInput {
     },
     Artifact {
         artifact_path: PathBuf,
-        version: String,
         scoped_id: String,
+        version: String,
     },
 }
 
@@ -120,6 +120,7 @@ fn resolve_publish_input(args: &PublishPrivateArgs) -> Result<ResolvedPublishInp
     if let Some(artifact_path) = &args.artifact_path {
         let info = crate::publish_artifact::inspect_artifact_manifest(artifact_path)?;
         let slug = manifest_slug(&info.name)?;
+        let version = resolve_manifest_publish_version(&info.version);
         let scoped_id = resolve_scoped_id_for_artifact(
             args.publisher_hint.as_deref(),
             args.scoped_id.as_deref(),
@@ -128,7 +129,7 @@ fn resolve_publish_input(args: &PublishPrivateArgs) -> Result<ResolvedPublishInp
         )?;
         return Ok(ResolvedPublishInput::Artifact {
             artifact_path: artifact_path.clone(),
-            version: info.version,
+            version,
             scoped_id,
         });
     }
@@ -143,13 +144,23 @@ fn resolve_publish_input(args: &PublishPrivateArgs) -> Result<ResolvedPublishInp
     let slug = manifest_slug(&manifest.name)?;
     let publisher = resolve_private_publisher(args.publisher_hint.as_deref(), &manifest_raw);
     let scoped_id = format!("{}/{}", publisher, slug);
+    let version = resolve_manifest_publish_version(&manifest.version);
 
     Ok(ResolvedPublishInput::Build {
         manifest_path,
         name: manifest.name,
-        version: manifest.version,
+        version,
         scoped_id,
     })
+}
+
+fn resolve_manifest_publish_version(version: &str) -> String {
+    let trimmed = version.trim();
+    if trimmed.is_empty() {
+        "auto".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn resolve_scoped_id_for_artifact(
@@ -275,6 +286,24 @@ mod tests {
 
     use super::*;
     use tar::Builder;
+
+    struct CwdGuard {
+        previous: std::path::PathBuf,
+    }
+
+    impl CwdGuard {
+        fn set_to(path: &std::path::Path) -> Self {
+            let previous = std::env::current_dir().expect("current dir");
+            std::env::set_current_dir(path).expect("set current dir");
+            Self { previous }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.previous);
+        }
+    }
 
     fn write_test_artifact(path: &Path, name: &str, version: &str, repository: Option<&str>) {
         let repo_line = repository
@@ -404,6 +433,41 @@ entrypoint = "main.ts"
         .expect_err("must reject mismatched publisher hint");
 
         assert!(err.to_string().contains("must match publisher 'koh0920'"));
+    }
+
+    #[test]
+    fn summarize_build_mode_uses_auto_when_manifest_version_is_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = tmp.path().join("capsule.toml");
+        std::fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.3"
+name = "demo-app"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "deno"
+run = "deno main.ts"
+"#,
+        )
+        .expect("write manifest");
+
+        let _cwd_guard = CwdGuard::set_to(tmp.path());
+        let summary = summarize(&PublishPrivateArgs {
+            registry_url: "https://api.ato.run".to_string(),
+            publisher_hint: Some("koh0920".to_string()),
+            artifact_path: None,
+            force_large_payload: false,
+            scoped_id: None,
+            allow_existing: false,
+        })
+        .expect("summarize");
+
+        assert_eq!(summary.source, "build");
+        assert_eq!(summary.version, "auto");
     }
 
     #[test]

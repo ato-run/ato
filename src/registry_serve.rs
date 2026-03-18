@@ -36,7 +36,7 @@ use crate::registry_store::{
     EpochResolveRequest, KeyRevokeRequest, KeyRotateRequest, LeaseRefreshRequest,
     LeaseReleaseRequest, NegotiateRequest, RegistryStore, RollbackRequest, YankRequest,
 };
-use crate::state::{ensure_registered_state_binding, load_manifest, open_state_store};
+use crate::state::{ensure_registered_state_binding_in_store, load_manifest};
 
 const README_CANDIDATES: [&str; 4] = ["README.md", "README.mdx", "README.txt", "README"];
 const README_MAX_BYTES: usize = 512 * 1024;
@@ -3051,7 +3051,8 @@ async fn handle_list_persistent_states(
         .filter(|value| !value.is_empty());
 
     let _guard = state.lock.lock().await;
-    match open_state_store().and_then(|store| store.list_persistent_states(owner_scope, state_name))
+    match open_local_state_store(&state)
+        .and_then(|store| store.list_persistent_states(owner_scope, state_name))
     {
         Ok(records) => (StatusCode::OK, Json(records)).into_response(),
         Err(err) => json_error(
@@ -3081,7 +3082,9 @@ async fn handle_get_persistent_state(
     }
 
     let _guard = state.lock.lock().await;
-    match open_state_store().and_then(|store| store.find_persistent_state_by_id(state_id)) {
+    match open_local_state_store(&state)
+        .and_then(|store| store.find_persistent_state_by_id(state_id))
+    {
         Ok(Some(record)) => (StatusCode::OK, Json(record)).into_response(),
         Ok(None) => json_error(
             StatusCode::NOT_FOUND,
@@ -3262,8 +3265,14 @@ async fn handle_register_persistent_state(
     }
 
     let _guard = state.lock.lock().await;
-    let result = load_manifest(Path::new(manifest))
-        .and_then(|manifest| ensure_registered_state_binding(&manifest, state_name, path));
+    let result = load_manifest(Path::new(manifest)).and_then(|manifest| {
+        ensure_registered_state_binding_in_store(
+            &manifest,
+            state_name,
+            path,
+            &open_local_state_store(&state)?,
+        )
+    });
     match result {
         Ok(record) => (StatusCode::CREATED, Json(record)).into_response(),
         Err(err) => json_error(
@@ -3272,6 +3281,10 @@ async fn handle_register_persistent_state(
             &err.to_string(),
         ),
     }
+}
+
+fn open_local_state_store(state: &AppState) -> Result<RegistryStore> {
+    RegistryStore::open(&state.data_dir.join("state"))
 }
 
 async fn handle_register_service_binding(

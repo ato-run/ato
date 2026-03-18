@@ -24,6 +24,7 @@ pub struct TargetLaunchOptions {
     pub dangerously_skip_permissions: bool,
     pub assume_yes: bool,
     pub preview_mode: bool,
+    pub defer_consent: bool,
 }
 
 #[derive(Debug)]
@@ -122,7 +123,9 @@ pub fn prepare_target_execution(
         guard_mode,
     )?;
 
-    crate::consent_store::require_consent(&compiled.execution_plan, options.assume_yes)?;
+    if !options.defer_consent {
+        crate::consent_store::require_consent(&compiled.execution_plan, options.assume_yes)?;
+    }
 
     Ok(PreparedTargetExecution {
         execution_plan: compiled.execution_plan,

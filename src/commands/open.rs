@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use cliclack::ProgressBar;
 use ctrlc;
 use goblin::elf::dynamic::DT_VERNEED;
 use goblin::elf::Elf;
@@ -18,7 +19,6 @@ use std::time::{Duration, Instant, SystemTime};
 use tracing::debug;
 
 use crate::executors::source::ExecuteMode;
-use crate::executors::source::NacelleExecEvent;
 use crate::executors::target_runner::{self, TargetLaunchOptions};
 use crate::preview;
 use crate::reporters::CliReporter;
@@ -30,6 +30,7 @@ use crate::state::{
 };
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::execution_plan::guard::ExecutorKind;
+use capsule_core::lifecycle::LifecycleEvent;
 use capsule_core::lockfile::{
     lockfile_output_path, manifest_external_capsule_dependencies, parse_lockfile_text,
     resolve_existing_lockfile_path, verify_lockfile_external_dependencies, CAPSULE_LOCK_FILE_NAME,
@@ -52,6 +53,7 @@ pub struct OpenArgs {
     pub enforcement: String,
     pub sandbox_mode: bool,
     pub dangerously_skip_permissions: bool,
+    pub compatibility_fallback: Option<String>,
     pub assume_yes: bool,
     pub state_bindings: Vec<String>,
     pub inject_bindings: Vec<String>,
@@ -100,6 +102,7 @@ async fn execute_capsule_file(args: &OpenArgs, capsule_path: &PathBuf) -> Result
             enforcement: args.enforcement.clone(),
             sandbox_mode: args.sandbox_mode,
             dangerously_skip_permissions: args.dangerously_skip_permissions,
+            compatibility_fallback: args.compatibility_fallback.clone(),
             assume_yes: args.assume_yes,
             state_bindings: args.state_bindings.clone(),
             inject_bindings: args.inject_bindings.clone(),
@@ -199,6 +202,7 @@ async fn execute_capsule_file(args: &OpenArgs, capsule_path: &PathBuf) -> Result
         enforcement: args.enforcement.clone(),
         sandbox_mode: args.sandbox_mode,
         dangerously_skip_permissions: args.dangerously_skip_permissions,
+        compatibility_fallback: args.compatibility_fallback.clone(),
         assume_yes: args.assume_yes,
         state_bindings: args.state_bindings.clone(),
         inject_bindings: args.inject_bindings.clone(),
@@ -401,6 +405,16 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
     };
     let preview_session = preview::load_preview_session_for_manifest(&manifest_path)?;
     let preview_mode = args.preview_mode || preview_session.is_some();
+    let use_progressive_ui =
+        crate::progressive_ui::can_use_progressive_ui(false) && !args.background;
+    let source_label = preview_session
+        .as_ref()
+        .map(|session| session.target_reference.clone())
+        .unwrap_or_else(|| manifest_path.display().to_string());
+
+    if use_progressive_ui {
+        crate::progressive_ui::show_run_intro(&source_label)?;
+    }
 
     let manifest = if preview_mode {
         capsule_core::manifest::load_manifest_with_validation_mode(
@@ -536,6 +550,7 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
             dangerously_skip_permissions: args.dangerously_skip_permissions,
             assume_yes: args.assume_yes,
             preview_mode,
+            defer_consent: true,
         },
     )?;
     let execution_plan = prepared.execution_plan;
@@ -543,6 +558,15 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
     let tier = prepared.tier;
     let guard_result = prepared.guard_result;
     let launch_ctx = prepared.launch_ctx;
+
+    if use_progressive_ui {
+        if let Some(preview_session) = preview_session.as_ref() {
+            crate::progressive_ui::render_preview_plan(preview_session)?;
+            crate::progressive_ui::render_promotion_summary(
+                &preview_session.derived_plan.promotion_eligibility,
+            )?;
+        }
+    }
 
     run_v03_lifecycle_steps(&decision.plan, &args.reporter, &launch_ctx).await?;
 
@@ -655,9 +679,81 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
         return Ok(());
     }
 
+    let compatibility_host_mode = resolve_compatibility_host_mode(
+        guard_result.executor_kind,
+        args.compatibility_fallback.as_deref(),
+    )?;
+    let host_fallback_requested = matches!(compatibility_host_mode, CompatibilityHostMode::Enabled);
+
+    if use_progressive_ui {
+        if host_fallback_requested {
+            crate::progressive_ui::render_host_fallback_warning()?;
+        } else {
+            crate::progressive_ui::render_security_context(
+                guard_result.executor_kind,
+                host_fallback_requested,
+                args.dangerously_skip_permissions,
+                runtime_overrides::override_port(decision.plan.execution_port()),
+            )?;
+        }
+    }
+
+    let consent_already_granted = crate::consent_store::has_consent(&execution_plan)?;
+    if !consent_already_granted {
+        if use_progressive_ui {
+            crate::progressive_ui::render_execution_consent_summary(
+                &crate::consent_store::consent_summary(&execution_plan),
+            )?;
+            let prompt = if host_fallback_requested {
+                "Proceed with this Execution Plan and Host Fallback mode?"
+            } else {
+                "Proceed with this Execution Plan?"
+            };
+            if !crate::progressive_ui::confirm_action(prompt, false)? {
+                crate::progressive_ui::show_cancel("Execution cancelled.")?;
+                return Err(AtoExecutionError::policy_violation(
+                    "ExecutionPlan consent rejected by user",
+                )
+                .into());
+            }
+            crate::consent_store::record_consent(&execution_plan)?;
+        } else {
+            crate::consent_store::require_consent(&execution_plan, args.assume_yes)?;
+        }
+    } else if host_fallback_requested {
+        if use_progressive_ui {
+            if args.assume_yes {
+                crate::progressive_ui::show_warning(
+                    "Proceeding with Host Fallback mode (--yes specified)",
+                )?;
+            } else if !crate::progressive_ui::confirm_action(
+                "Proceed with Host Fallback mode?",
+                false,
+            )? {
+                crate::progressive_ui::show_cancel("Execution cancelled.")?;
+                return Ok(());
+            }
+        } else if !args.assume_yes {
+            anyhow::bail!(
+                "Host Fallback mode requires interactive confirmation. Re-run with --yes in non-interactive environments."
+            );
+        }
+        } else if use_progressive_ui
+            && preview_mode
+            && !args.assume_yes
+            && !crate::progressive_ui::confirm_action(
+                "Proceed with Preview Run? (Ephemeral Sandbox)",
+                true,
+            )?
+        {
+            crate::progressive_ui::show_cancel("Preview cancelled.")?;
+            return Ok(());
+    }
+
     match guard_result.executor_kind {
         ExecutorKind::Native => {
-            let mut process = if args.dangerously_skip_permissions {
+            let host_execution = args.dangerously_skip_permissions || host_fallback_requested;
+            let mut process = if host_execution {
                 crate::executors::source::execute_host(
                     &decision.plan,
                     args.reporter.clone(),
@@ -693,23 +789,23 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
                         .to_string(),
                     pid: pid as i32,
                     workload_pid: process.workload_pid.map(|value| value as i32),
-                    status: if args.dangerously_skip_permissions {
+                    status: if host_execution && process.event_rx.is_none() {
                         crate::process_manager::ProcessStatus::Ready
                     } else {
                         crate::process_manager::ProcessStatus::Starting
                     },
-                    runtime: if args.dangerously_skip_permissions {
-                        "host".to_string()
-                    } else {
-                        "nacelle".to_string()
-                    },
+                    runtime: process_runtime_label(
+                        &decision.plan,
+                        args.dangerously_skip_permissions,
+                        compatibility_host_mode,
+                    ),
                     start_time: now,
                     manifest_path: Some(decision.plan.manifest_path.clone()),
                     scoped_id: run_scoped_id.clone(),
                     target_label: Some(decision.plan.selected_target_label().to_string()),
                     requested_port: None,
                     log_path: process.log_path.clone(),
-                    ready_at: if args.dangerously_skip_permissions {
+                    ready_at: if host_execution && process.event_rx.is_none() {
                         Some(now)
                     } else {
                         None
@@ -722,7 +818,7 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
                 let pm = crate::process_manager::ProcessManager::new()?;
                 pm.write_pid(&info)?;
 
-                let (startup_outcome, event_rx) = if args.dangerously_skip_permissions {
+                let (startup_outcome, event_rx) = if host_execution && process.event_rx.is_none() {
                     (BackgroundStartupOutcome::Ready, None)
                 } else {
                     wait_for_background_native_startup(&mut process, &pm, &id)?
@@ -736,10 +832,7 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
                         let _ = event_rx;
                         let _ = pm.read_pid(&id)?;
                         args.reporter
-                            .notify(format!(
-                                "🚀 Capsule started in background and is ready (ID: {})",
-                                id
-                            ))
+                            .notify(background_ready_message(&id, compatibility_host_mode))
                             .await?;
                     }
                     BackgroundStartupOutcome::TimedOut => {
@@ -747,16 +840,12 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
                         let _ = event_rx;
                         let _ = pm.read_pid(&id)?;
                         args.reporter
-                            .warn(format!(
-                                "⏳ Capsule is still starting in background (ID: {}). Use `ato ps --all` to inspect readiness.",
-                                id
-                            ))
+                            .warn(background_timeout_message(&id, compatibility_host_mode))
                             .await?;
                     }
                     BackgroundStartupOutcome::FailedBeforeReady => {
                         let state = pm.read_pid(&id).ok();
-                        let mut message =
-                            format!("Background capsule failed before readiness (ID: {})", id);
+                        let mut message = background_failure_prefix(&id, compatibility_host_mode);
                         if let Some(state) = state {
                             if let Some(error) = state.last_error {
                                 message.push_str(&format!(": {}", error));
@@ -775,18 +864,155 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
                 return Ok(());
             }
 
+            let run_spinner = if use_progressive_ui {
+                Some(crate::progressive_ui::start_spinner("Running Preview..."))
+            } else {
+                None
+            };
             let readiness_notifier = spawn_foreground_native_event_reporter(
                 args.reporter.clone(),
                 process.event_rx.take(),
-                !args.dangerously_skip_permissions,
+                !host_execution,
                 launch_ctx
                     .socket_paths()
                     .map(|paths| !paths.is_empty())
                     .unwrap_or(false),
+                run_spinner.clone(),
             )?;
             let exit_code = crate::executors::source::wait_for_exit(&mut process.child).await?;
             if let Some(handle) = readiness_notifier {
                 let _ = handle.join();
+            }
+            if let Some(progress) = run_spinner {
+                progress.stop("Preview stopped.");
+            }
+            cleanup_process_artifacts(&process.cleanup_paths);
+
+            sidecar_cleanup.stop_now();
+
+            if exit_code != 0 {
+                if let Some(external_capsules) = external_capsules.as_mut() {
+                    external_capsules.shutdown_now();
+                }
+                std::process::exit(exit_code);
+            }
+        }
+        ExecutorKind::NodeCompat if host_fallback_requested => {
+            let mut process = crate::executors::source::execute_host(
+                &decision.plan,
+                args.reporter.clone(),
+                mode,
+                &launch_ctx,
+            )?;
+
+            if args.background {
+                let pid = process.child.id();
+                let id = format!("capsule-{}", pid);
+                let now = SystemTime::now();
+
+                let info = crate::process_manager::ProcessInfo {
+                    id: id.clone(),
+                    name: decision
+                        .plan
+                        .manifest_path
+                        .file_stem()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    pid: pid as i32,
+                    workload_pid: process.workload_pid.map(|value| value as i32),
+                    status: if process.event_rx.is_none() {
+                        crate::process_manager::ProcessStatus::Ready
+                    } else {
+                        crate::process_manager::ProcessStatus::Starting
+                    },
+                    runtime: process_runtime_label(&decision.plan, false, compatibility_host_mode),
+                    start_time: now,
+                    manifest_path: Some(decision.plan.manifest_path.clone()),
+                    scoped_id: run_scoped_id.clone(),
+                    target_label: Some(decision.plan.selected_target_label().to_string()),
+                    requested_port: None,
+                    log_path: process.log_path.clone(),
+                    ready_at: if process.event_rx.is_none() {
+                        Some(now)
+                    } else {
+                        None
+                    },
+                    last_event: Some("spawned".to_string()),
+                    last_error: None,
+                    exit_code: None,
+                };
+
+                let pm = crate::process_manager::ProcessManager::new()?;
+                pm.write_pid(&info)?;
+
+                let (startup_outcome, event_rx) = if process.event_rx.is_none() {
+                    (BackgroundStartupOutcome::Ready, None)
+                } else {
+                    wait_for_background_native_startup(&mut process, &pm, &id)?
+                };
+
+                cleanup_process_artifacts(&process.cleanup_paths);
+
+                match startup_outcome {
+                    BackgroundStartupOutcome::Ready => {
+                        let _ = process.child;
+                        let _ = event_rx;
+                        let _ = pm.read_pid(&id)?;
+                        args.reporter
+                            .notify(background_ready_message(&id, compatibility_host_mode))
+                            .await?;
+                    }
+                    BackgroundStartupOutcome::TimedOut => {
+                        let _ = process.child;
+                        let _ = event_rx;
+                        let _ = pm.read_pid(&id)?;
+                        args.reporter
+                            .warn(background_timeout_message(&id, compatibility_host_mode))
+                            .await?;
+                    }
+                    BackgroundStartupOutcome::FailedBeforeReady => {
+                        let state = pm.read_pid(&id).ok();
+                        let mut message = background_failure_prefix(&id, compatibility_host_mode);
+                        if let Some(state) = state {
+                            if let Some(error) = state.last_error {
+                                message.push_str(&format!(": {}", error));
+                            } else if let Some(code) = state.exit_code {
+                                message.push_str(&format!(": exit code {}", code));
+                            }
+                            if let Some(log_path) = state.log_path {
+                                message.push_str(&format!(". See logs at {}", log_path.display()));
+                            }
+                        }
+                        sidecar_cleanup.stop_now();
+                        anyhow::bail!(message);
+                    }
+                }
+                sidecar_cleanup.stop_now();
+                return Ok(());
+            }
+
+            let run_spinner = if use_progressive_ui {
+                Some(crate::progressive_ui::start_spinner("Running Preview..."))
+            } else {
+                None
+            };
+            let readiness_notifier = spawn_foreground_native_event_reporter(
+                args.reporter.clone(),
+                process.event_rx.take(),
+                false,
+                launch_ctx
+                    .socket_paths()
+                    .map(|paths| !paths.is_empty())
+                    .unwrap_or(false),
+                run_spinner.clone(),
+            )?;
+            let exit_code = crate::executors::source::wait_for_exit(&mut process.child).await?;
+            if let Some(handle) = readiness_notifier {
+                let _ = handle.join();
+            }
+            if let Some(progress) = run_spinner {
+                progress.stop("Preview stopped.");
             }
             cleanup_process_artifacts(&process.cleanup_paths);
 
@@ -991,18 +1217,95 @@ enum BackgroundStartupOutcome {
     FailedBeforeReady,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompatibilityHostMode {
+    Disabled,
+    Enabled,
+}
+
+fn resolve_compatibility_host_mode(
+    executor_kind: ExecutorKind,
+    compatibility_fallback: Option<&str>,
+) -> Result<CompatibilityHostMode> {
+    match compatibility_fallback {
+        None => Ok(CompatibilityHostMode::Disabled),
+        Some("host") if matches!(executor_kind, ExecutorKind::Native | ExecutorKind::NodeCompat) => {
+            Ok(CompatibilityHostMode::Enabled)
+        }
+        Some("host") => anyhow::bail!(
+            "--compatibility-fallback host is only supported for native and node-compatible source targets"
+        ),
+        Some(other) => anyhow::bail!("unsupported compatibility fallback backend: {other}"),
+    }
+}
+
+fn process_runtime_label(
+    plan: &capsule_core::router::ManifestData,
+    dangerous_skip_permissions: bool,
+    compatibility_host_mode: CompatibilityHostMode,
+) -> String {
+    if matches!(compatibility_host_mode, CompatibilityHostMode::Enabled) {
+        let runtime = plan
+            .execution_runtime()
+            .unwrap_or_else(|| "source".to_string());
+        let driver = plan.execution_driver();
+        return match driver {
+            Some(driver) if !driver.trim().is_empty() => {
+                format!("{}/{} [host-fallback]", runtime, driver)
+            }
+            _ => format!("{} [host-fallback]", runtime),
+        };
+    }
+    if dangerous_skip_permissions {
+        return "host".to_string();
+    }
+    "nacelle".to_string()
+}
+
+fn background_ready_message(id: &str, compatibility_host_mode: CompatibilityHostMode) -> String {
+    if matches!(compatibility_host_mode, CompatibilityHostMode::Enabled) {
+        return format!("✔ Capsule is ready (Host Fallback, ID: {id})");
+    }
+    format!("🚀 Capsule started in background and is ready (ID: {id})")
+}
+
+fn background_timeout_message(id: &str, compatibility_host_mode: CompatibilityHostMode) -> String {
+    if matches!(compatibility_host_mode, CompatibilityHostMode::Enabled) {
+        return format!(
+            "⏳ Capsule is still starting in compatibility mode (Host Fallback, ID: {}). Use `ato ps --all` to inspect readiness.",
+            id
+        );
+    }
+    format!(
+        "⏳ Capsule is still starting in background (ID: {}). Use `ato ps --all` to inspect readiness.",
+        id
+    )
+}
+
+fn background_failure_prefix(id: &str, compatibility_host_mode: CompatibilityHostMode) -> String {
+    if matches!(compatibility_host_mode, CompatibilityHostMode::Enabled) {
+        return format!("Background capsule failed before readiness in compatibility mode (Host Fallback, ID: {id})");
+    }
+    format!("Background capsule failed before readiness (ID: {id})")
+}
+
 fn spawn_foreground_native_event_reporter(
     reporter: Arc<CliReporter>,
-    event_rx: Option<Receiver<NacelleExecEvent>>,
+    event_rx: Option<Receiver<LifecycleEvent>>,
     sandbox_initialized: bool,
     ipc_socket_mapped: bool,
+    progress: Option<ProgressBar>,
 ) -> Result<Option<JoinHandle<()>>> {
     let Some(event_rx) = event_rx else {
         return Ok(None);
     };
 
     for message in initial_foreground_native_messages(sandbox_initialized, ipc_socket_mapped) {
-        futures::executor::block_on(CapsuleReporter::notify(&*reporter, message))?;
+        if let Some(progress) = progress.as_ref() {
+            progress.set_message(message);
+        } else {
+            futures::executor::block_on(CapsuleReporter::notify(&*reporter, message))?;
+        }
     }
 
     Ok(Some(std::thread::spawn(move || {
@@ -1011,18 +1314,27 @@ fn spawn_foreground_native_event_reporter(
             for message in foreground_native_event_messages(&event, ready_reported) {
                 match message {
                     ForegroundEventMessage::Notify(message) => {
-                        let _ = futures::executor::block_on(CapsuleReporter::notify(
-                            &*reporter, message,
-                        ));
+                        if let Some(progress) = progress.as_ref() {
+                            progress.set_message(message);
+                        } else {
+                            let _ = futures::executor::block_on(CapsuleReporter::notify(
+                                &*reporter, message,
+                            ));
+                        }
                     }
                     ForegroundEventMessage::Warn(message) => {
-                        let _ =
-                            futures::executor::block_on(CapsuleReporter::warn(&*reporter, message));
+                        if let Some(progress) = progress.as_ref() {
+                            progress.set_message(message);
+                        } else {
+                            let _ = futures::executor::block_on(CapsuleReporter::warn(
+                                &*reporter, message,
+                            ));
+                        }
                     }
                 }
             }
 
-            if matches!(event, NacelleExecEvent::IpcReady { .. }) {
+            if matches!(event, LifecycleEvent::Ready { .. }) {
                 ready_reported = true;
             }
         }
@@ -1033,7 +1345,7 @@ fn wait_for_background_native_startup(
     process: &mut crate::executors::source::CapsuleProcess,
     process_manager: &crate::process_manager::ProcessManager,
     process_id: &str,
-) -> Result<(BackgroundStartupOutcome, Option<Receiver<NacelleExecEvent>>)> {
+) -> Result<(BackgroundStartupOutcome, Option<Receiver<LifecycleEvent>>)> {
     let Some(event_rx) = process.event_rx.take() else {
         return Ok((BackgroundStartupOutcome::TimedOut, None));
     };
@@ -1111,19 +1423,19 @@ fn background_ready_wait_timeout() -> Duration {
 fn persist_background_native_event(
     process_manager: &crate::process_manager::ProcessManager,
     process_id: &str,
-    event: &NacelleExecEvent,
+    event: &LifecycleEvent,
 ) -> Result<BackgroundStartupOutcome> {
     let now = SystemTime::now();
     let updated = process_manager.update_pid(process_id, |info| match event {
-        NacelleExecEvent::IpcReady { .. } => {
+        LifecycleEvent::Ready { .. } => {
             info.status = crate::process_manager::ProcessStatus::Ready;
             info.ready_at = Some(now);
-            info.last_event = Some("ipc_ready".to_string());
+            info.last_event = Some("ready".to_string());
             info.last_error = None;
         }
-        NacelleExecEvent::ServiceExited { service, exit_code } => {
+        LifecycleEvent::Exited { service, exit_code } => {
             info.exit_code = *exit_code;
-            info.last_event = Some("service_exited".to_string());
+            info.last_event = Some("exited".to_string());
             if matches!(info.status, crate::process_manager::ProcessStatus::Starting) {
                 info.status = crate::process_manager::ProcessStatus::Failed;
                 info.last_error = Some(format!("service '{}' exited before readiness", service));
@@ -1182,22 +1494,22 @@ fn initial_foreground_native_messages(
 }
 
 fn foreground_native_event_messages(
-    event: &NacelleExecEvent,
+    event: &LifecycleEvent,
     ready_reported: bool,
 ) -> Vec<ForegroundEventMessage> {
     match event {
-        NacelleExecEvent::IpcReady { service, .. } if !ready_reported => {
+        LifecycleEvent::Ready { service, .. } if !ready_reported => {
             let ready_message = if service == "main" {
-                "[✓] Service is ready (ipc_ready received)".to_string()
+                "[✓] Service is ready (ready event received)".to_string()
             } else {
-                format!("[✓] Service '{service}' is ready (ipc_ready received)")
+                format!("[✓] Service '{service}' is ready (ready event received)")
             };
             vec![
                 ForegroundEventMessage::Notify(ready_message),
                 ForegroundEventMessage::Notify("    Streaming logs...".to_string()),
             ]
         }
-        NacelleExecEvent::ServiceExited { service, exit_code } if !ready_reported => {
+        LifecycleEvent::Exited { service, exit_code } if !ready_reported => {
             let exit_code = exit_code
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
@@ -2104,12 +2416,14 @@ fn resolve_python_dependency_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        foreground_native_event_messages, initial_foreground_native_messages,
-        plan_v03_provision_command, preflight_required_environment_variables,
-        resolve_python_dependency_lock_path, resolve_state_source_overrides,
-        ForegroundEventMessage,
+        background_ready_message, foreground_native_event_messages,
+        initial_foreground_native_messages, plan_v03_provision_command,
+        preflight_required_environment_variables, process_runtime_label,
+        resolve_compatibility_host_mode, resolve_python_dependency_lock_path,
+        resolve_state_source_overrides, CompatibilityHostMode, ForegroundEventMessage,
     };
-    use crate::executors::source::NacelleExecEvent;
+    use capsule_core::execution_plan::guard::ExecutorKind;
+    use capsule_core::lifecycle::LifecycleEvent;
     use capsule_core::router::{ExecutionProfile, ManifestData};
     use capsule_core::types::CapsuleManifest;
     use std::ffi::OsString;
@@ -2281,9 +2595,9 @@ mod tests {
     #[test]
     fn foreground_native_ipc_ready_message_matches_expected_copy() {
         let message = foreground_native_event_messages(
-            &NacelleExecEvent::IpcReady {
+            &LifecycleEvent::Ready {
                 service: "main".to_string(),
-                endpoint: "unix:///tmp/main.sock".to_string(),
+                endpoint: Some("unix:///tmp/main.sock".to_string()),
                 port: None,
             },
             false,
@@ -2293,7 +2607,7 @@ mod tests {
             message,
             vec![
                 ForegroundEventMessage::Notify(
-                    "[✓] Service is ready (ipc_ready received)".to_string()
+                    "[✓] Service is ready (ready event received)".to_string()
                 ),
                 ForegroundEventMessage::Notify("    Streaming logs...".to_string())
             ]
@@ -2303,7 +2617,7 @@ mod tests {
     #[test]
     fn foreground_native_service_exited_warns_before_readiness() {
         let message = foreground_native_event_messages(
-            &NacelleExecEvent::ServiceExited {
+            &LifecycleEvent::Exited {
                 service: "main".to_string(),
                 exit_code: Some(42),
             },
@@ -2316,6 +2630,53 @@ mod tests {
                 "❌ Service 'main' exited before readiness (exit code: 42)".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn compatibility_host_mode_enables_nodecompat_fallback() {
+        let mode = resolve_compatibility_host_mode(ExecutorKind::NodeCompat, Some("host"))
+            .expect("resolve fallback mode");
+        assert_eq!(mode, CompatibilityHostMode::Enabled);
+    }
+
+    #[test]
+    fn compatibility_host_mode_rejects_deno_fallback() {
+        let err = resolve_compatibility_host_mode(ExecutorKind::Deno, Some("host"))
+            .expect_err("must reject deno fallback");
+        assert!(err.to_string().contains("native and node-compatible"));
+    }
+
+    #[test]
+    fn compatibility_host_mode_changes_ready_copy() {
+        let message = background_ready_message("capsule-42", CompatibilityHostMode::Enabled);
+        assert_eq!(
+            message,
+            "✔ Capsule is ready (Host Fallback, ID: capsule-42)"
+        );
+    }
+
+    #[test]
+    fn process_runtime_label_preserves_runtime_under_host_fallback() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = ManifestData {
+            manifest: toml::from_str(
+                r#"
+                [targets.app]
+                runtime = "source"
+                driver = "node"
+                run_command = "node server.js"
+                "#,
+            )
+            .expect("manifest"),
+            manifest_path: tmp.path().join("capsule.toml"),
+            manifest_dir: tmp.path().to_path_buf(),
+            profile: ExecutionProfile::Dev,
+            selected_target: "app".to_string(),
+            state_source_overrides: std::collections::HashMap::new(),
+        };
+
+        let label = process_runtime_label(&plan, false, CompatibilityHostMode::Enabled);
+        assert_eq!(label, "source/node [host-fallback]");
     }
 
     #[test]
