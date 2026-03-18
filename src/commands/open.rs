@@ -738,14 +738,16 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
                 "Host Fallback mode requires interactive confirmation. Re-run with --yes in non-interactive environments."
             );
         }
-    } else if use_progressive_ui && preview_mode && !args.assume_yes {
-        if !crate::progressive_ui::confirm_action(
-            "Proceed with Preview Run? (Ephemeral Sandbox)",
-            true,
-        )? {
+        } else if use_progressive_ui
+            && preview_mode
+            && !args.assume_yes
+            && !crate::progressive_ui::confirm_action(
+                "Proceed with Preview Run? (Ephemeral Sandbox)",
+                true,
+            )?
+        {
             crate::progressive_ui::show_cancel("Preview cancelled.")?;
             return Ok(());
-        }
     }
 
     match guard_result.executor_kind {
