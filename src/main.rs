@@ -4483,6 +4483,7 @@ async fn build_github_repository_checkout(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn retry_github_build_after_manual_fix(
     preview_session: &mut preview::PreviewSession,
     manual_manifest_path: &std::path::Path,
@@ -4574,12 +4575,12 @@ fn github_build_error_manual_review_reason(error: &anyhow::Error) -> String {
         return message;
     }
 
-    github_build_error_requires_manual_intervention(error)
-        .then_some(
-            "Provisioning failed under inferred fail-closed lockfile checks. Review the generated draft and refresh the repository lockfiles before retrying."
-                .to_string(),
-        )
-        .unwrap_or_else(|| "GitHub inferred draft build failed and requires manual review.".to_string())
+    if github_build_error_requires_manual_intervention(error) {
+        "Provisioning failed under inferred fail-closed lockfile checks. Review the generated draft and refresh the repository lockfiles before retrying."
+            .to_string()
+    } else {
+        "GitHub inferred draft build failed and requires manual review.".to_string()
+    }
 }
 
 fn build_github_manual_intervention_error(

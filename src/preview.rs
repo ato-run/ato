@@ -25,18 +25,13 @@ pub enum PreviewTargetKind {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PreviewPromotionEligibility {
     Eligible,
+    #[default]
     RequiresManualReview,
     Blocked,
-}
-
-impl Default for PreviewPromotionEligibility {
-    fn default() -> Self {
-        Self::RequiresManualReview
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
