@@ -493,7 +493,7 @@ fn inspect_normalized_github_install_preview_manifest(
                 && path
                     .strip_prefix(checkout_dir)
                     .ok()
-                    .map(|relative| normalize_relative_path(relative))
+                    .map(normalize_relative_path)
                     .map(|relative| !pack_include_covers_path(&pack_include, &relative))
                     .unwrap_or(false)
         }) {
