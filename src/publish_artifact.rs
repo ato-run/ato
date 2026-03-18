@@ -141,7 +141,11 @@ pub fn publish_artifact(args: PublishArtifactArgs) -> Result<PublishArtifactResu
         &payload.publisher,
         &payload.slug,
         &payload.version,
-        &payload.file_name,
+        if payload.file_name.is_empty() {
+            None
+        } else {
+            Some(payload.file_name.as_str())
+        },
         args.allow_existing,
     );
 
@@ -210,19 +214,25 @@ fn build_upload_endpoint(
     publisher: &str,
     slug: &str,
     version: &str,
-    file_name: &str,
+    file_name: Option<&str>,
     allow_existing: bool,
 ) -> String {
     let mut endpoint = format!(
-        "{}/v1/local/capsules/{}/{}/{}?file_name={}",
+        "{}/v1/local/capsules/{}/{}/{}",
         base_url,
         urlencoding::encode(publisher),
         urlencoding::encode(slug),
-        urlencoding::encode(version),
-        urlencoding::encode(file_name)
+        urlencoding::encode(version)
     );
+    if let Some(file_name) = file_name.filter(|value| !value.trim().is_empty()) {
+        endpoint.push_str(&format!("?file_name={}", urlencoding::encode(file_name)));
+    }
     if allow_existing {
-        endpoint.push_str("&allow_existing=true");
+        endpoint.push_str(if endpoint.contains('?') {
+            "&allow_existing=true"
+        } else {
+            "?allow_existing=true"
+        });
     }
     endpoint
 }
@@ -256,12 +266,21 @@ fn load_artifact_payload(path: &Path, scoped_id: &str) -> Result<ArtifactPayload
         );
     }
 
-    let file_name = format!("{}-{}.capsule", scoped.slug, parsed.version);
+    let version = parsed.version.trim();
+    let file_name = if version.is_empty() {
+        String::new()
+    } else {
+        format!("{}-{}.capsule", scoped.slug, version)
+    };
 
     Ok(ArtifactPayload {
         publisher: scoped.publisher,
         slug: scoped.slug,
-        version: parsed.version,
+        version: if version.is_empty() {
+            "auto".to_string()
+        } else {
+            version.to_string()
+        },
         file_name,
         sha256: compute_sha256(&bytes),
         blake3: compute_blake3(&bytes),
@@ -963,7 +982,7 @@ entrypoint = "main.ts"
             "local",
             "demo-app",
             "1.0.0",
-            "demo-app-1.0.0.capsule",
+            Some("demo-app-1.0.0.capsule"),
             true,
         );
         assert!(endpoint.contains("allow_existing=true"));
@@ -977,7 +996,7 @@ entrypoint = "main.ts"
             "local",
             "demo-app",
             "1.0.0",
-            "demo-app-1.0.0.capsule",
+            Some("demo-app-1.0.0.capsule"),
             false,
         );
         assert!(!endpoint.contains("allow_existing="));
@@ -990,13 +1009,28 @@ entrypoint = "main.ts"
             "koh0920",
             "demo-app",
             "1.0.0",
-            "demo-app-1.0.0.capsule",
+            Some("demo-app-1.0.0.capsule"),
             false,
         );
 
         assert!(
             endpoint.starts_with("https://api.ato.run/v1/local/capsules/koh0920/demo-app/1.0.0")
         );
+    }
+
+    #[test]
+    fn build_upload_endpoint_omits_file_name_when_version_is_auto() {
+        let endpoint = build_upload_endpoint(
+            "http://127.0.0.1:8787",
+            "local",
+            "demo-app",
+            "auto",
+            None,
+            false,
+        );
+
+        assert!(!endpoint.contains("file_name="));
+        assert!(endpoint.ends_with("/auto"));
     }
 
     #[test]

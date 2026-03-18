@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use capsule_core::execution_plan::guard::ExecutorKind;
+use capsule_core::lifecycle::LifecycleEvent;
 use capsule_core::router::ManifestData;
 use capsule_core::runtime::oci::{
     BollardOciRuntimeClient, OciContainerRequest, OciLogChunk, OciMountSpec, OciNetworkRequest,
@@ -21,7 +22,7 @@ use capsule_core::types::{
 use capsule_core::CapsuleReporter;
 
 use super::launch_context::RuntimeLaunchContext;
-use super::source::{ExecuteMode, NacelleExecEvent};
+use super::source::ExecuteMode;
 use super::target_runner::{self, TargetLaunchOptions};
 use crate::reporters::CliReporter;
 use crate::runtime_overrides;
@@ -48,6 +49,7 @@ impl OrchestratorOptions {
             dangerously_skip_permissions: self.dangerously_skip_permissions,
             assume_yes: self.assume_yes,
             preview_mode: false,
+            defer_consent: false,
         }
     }
 }
@@ -173,7 +175,7 @@ struct RunningLocalService {
     stderr_thread: Option<JoinHandle<std::io::Result<()>>>,
     cleanup_paths: Vec<PathBuf>,
     exit_task: Option<tokio::task::JoinHandle<Result<i32>>>,
-    event_rx: Option<Receiver<NacelleExecEvent>>,
+    event_rx: Option<Receiver<LifecycleEvent>>,
     readiness_state: LocalReadinessState,
 }
 
@@ -668,11 +670,11 @@ fn poll_local_readiness_events(local: &mut RunningLocalService) -> Result<LocalR
     };
 
     match event_rx.try_recv() {
-        Ok(NacelleExecEvent::IpcReady { .. }) => {
+        Ok(LifecycleEvent::Ready { .. }) => {
             local.readiness_state = LocalReadinessState::Ready;
             Ok(local.readiness_state)
         }
-        Ok(NacelleExecEvent::ServiceExited { exit_code, .. }) => {
+        Ok(LifecycleEvent::Exited { exit_code, .. }) => {
             local.readiness_state = LocalReadinessState::Exited(exit_code.unwrap_or(1));
             Ok(local.readiness_state)
         }

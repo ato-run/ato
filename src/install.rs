@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::Write;
-use std::io::{self};
 use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Once, OnceLock};
@@ -448,10 +447,7 @@ fn normalize_v03_source_node_typescript_run(
     parsed: &mut toml::Value,
     checkout_dir: &Path,
 ) -> Result<()> {
-    let Some(table) = parsed.as_table_mut() else {
-        return Ok(());
-    };
-    let Some(run) = table
+    let Some(run) = parsed
         .get("run")
         .and_then(toml::Value::as_str)
         .map(str::trim)
@@ -498,9 +494,85 @@ fn normalize_v03_source_node_typescript_run(
         format!("node {bin_path} {trailing_args}")
     };
 
+    let mut include_entries = vec![recursive_parent_include(&bin_path)];
+    if let Some(files) = package_json
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+    {
+        for value in files {
+            let Some(path) = value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let normalized = path.trim_start_matches("./");
+            if normalized.is_empty() {
+                continue;
+            }
+            let candidate = checkout_dir.join(normalized);
+            let include = if candidate.is_dir() {
+                format!("{}/**", normalized.trim_end_matches('/'))
+            } else {
+                normalized.to_string()
+            };
+            include_entries.push(include);
+        }
+    }
+
+    let Some(table) = parsed.as_table_mut() else {
+        return Ok(());
+    };
+
     table.insert("build".to_string(), toml::Value::String(build_command));
     table.insert("run".to_string(), toml::Value::String(run_command));
+    for entry in include_entries {
+        ensure_pack_include_entry_in_table(table, entry);
+    }
     Ok(())
+}
+
+fn ensure_pack_include_entry_in_table(table: &mut toml::value::Table, entry: String) {
+    if entry.trim().is_empty() {
+        return;
+    }
+
+    let pack = table
+        .entry("pack".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    let Some(pack_table) = pack.as_table_mut() else {
+        return;
+    };
+    let include = pack_table
+        .entry("include".to_string())
+        .or_insert_with(|| toml::Value::Array(Vec::new()));
+    let Some(include_array) = include.as_array_mut() else {
+        return;
+    };
+
+    let already_present = include_array.iter().any(|value| {
+        value
+            .as_str()
+            .map(|existing| existing.trim() == entry)
+            .unwrap_or(false)
+    });
+    if !already_present {
+        include_array.push(toml::Value::String(entry));
+    }
+}
+
+fn recursive_parent_include(path: &str) -> String {
+    let trimmed = path.trim().trim_start_matches("./");
+    let parent = Path::new(trimmed)
+        .parent()
+        .map(normalize_relative_path)
+        .filter(|value| !value.is_empty());
+
+    match parent {
+        Some(parent) => format!("{parent}/**"),
+        None => trimmed.to_string(),
+    }
 }
 
 fn read_package_json(checkout_dir: &Path) -> Option<serde_json::Value> {
@@ -1051,6 +1123,7 @@ pub struct InstallExecutionOptions {
     pub json_output: bool,
     pub can_prompt_interactively: bool,
     pub promotion_source: Option<PromotionSourceInfo>,
+    pub keep_progressive_flow_open: bool,
 }
 
 enum InstallSource {
@@ -1879,6 +1952,7 @@ pub async fn install_app(
             json_output,
             can_prompt_interactively,
             promotion_source: None,
+            keep_progressive_flow_open: false,
         },
         InstallSource::Registry(registry),
     )
@@ -1903,6 +1977,7 @@ async fn complete_install_from_bytes(
         json_output,
         can_prompt_interactively,
         promotion_source,
+        keep_progressive_flow_open,
     } = options;
     let computed_blake3 = compute_blake3(&bytes);
     if let Some(v3_manifest) = extract_payload_v3_manifest_from_capsule(&bytes)? {
@@ -2137,8 +2212,31 @@ async fn complete_install_from_bytes(
     }
 
     if !json_output {
-        eprintln!("✅ Installed to: {}", output_path.display());
-        eprintln!("   To run: ato run {}", output_path.display());
+        if crate::progressive_ui::can_use_progressive_ui(false) {
+            crate::progressive_ui::show_note(
+                "Installed 1 capsule",
+                format!(
+                    "{}\nSaved to    :\n{}\nRun with    :\n  ato run {}",
+                    scoped_ref.scoped_id,
+                    crate::progressive_ui::format_path_for_note(&output_path),
+                    output_path.display()
+                ),
+            )?;
+            if keep_progressive_flow_open && crate::progressive_ui::is_flow_active() {
+                crate::progressive_ui::show_step(format!(
+                    "Installed and linked: {}",
+                    output_path.display()
+                ))?;
+            } else {
+                crate::progressive_ui::show_outro(format!(
+                    "Done! Run persistently with: ato run {}",
+                    output_path.display()
+                ))?;
+            }
+        } else {
+            eprintln!("✅ Installed to: {}", output_path.display());
+            eprintln!("   To run: ato run {}", output_path.display());
+        }
     }
 
     Ok(InstallResult {
@@ -2229,17 +2327,11 @@ fn persist_installed_artifact(
 }
 
 fn prompt_for_confirmation(prompt: &str, default_yes: bool) -> Result<bool> {
-    eprint!("{prompt}");
-    io::stderr().flush().context("Failed to flush prompt")?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .context("Failed to read interactive input")?;
-    let trimmed = input.trim().to_ascii_lowercase();
-    if trimmed.is_empty() {
-        return Ok(default_yes);
-    }
-    Ok(matches!(trimmed.as_str(), "y" | "yes"))
+    crate::progressive_ui::confirm_with_fallback(
+        prompt,
+        default_yes,
+        crate::progressive_ui::can_use_progressive_ui(false),
+    )
 }
 
 fn normalize_install_segment(value: &str) -> Result<String> {
@@ -4291,6 +4383,7 @@ include = ["main.ts", "deno.json", "deno.lock"]
   "bin": {
     "json-server": "lib/bin.js"
   },
+    "files": ["lib", "views", "schema.json"],
   "scripts": {
     "build": "rm -rf lib && tsc"
   }
@@ -4319,6 +4412,8 @@ include = ["src/**", "fixtures/db.json", "package.json", "pnpm-lock.yaml"]
 
         assert!(normalized.contains("build = \"pnpm run build\""));
         assert!(normalized.contains("run = \"node lib/bin.js fixtures/db.json\""));
+        assert!(normalized.contains("\"lib/**\""));
+        assert!(normalized.contains("\"schema.json\""));
     }
 
     #[test]

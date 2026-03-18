@@ -46,6 +46,19 @@ impl EnforcementMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CompatibilityFallbackBackend {
+    Host,
+}
+
+impl CompatibilityFallbackBackend {
+    fn as_str(self) -> &'static str {
+        match self {
+            CompatibilityFallbackBackend::Host => "host",
+        }
+    }
+}
+
 struct SidecarCleanup {
     sidecar: Option<common::sidecar::SidecarHandle>,
     reporter: std::sync::Arc<reporters::CliReporter>,
@@ -105,6 +118,7 @@ mod payload_guard;
 mod preview;
 mod process_manager;
 mod profile;
+mod progressive_ui;
 mod publish_artifact;
 mod publish_ci;
 mod publish_dry_run;
@@ -268,6 +282,10 @@ enum Commands {
             default_value_t = false
         )]
         dangerously_skip_permissions: bool,
+
+        /// Run with an explicit compatibility fallback backend instead of the standard runtime path
+        #[arg(long = "compatibility-fallback", value_enum)]
+        compatibility_fallback: Option<CompatibilityFallbackBackend>,
 
         /// Skip prompt and auto-install when app-id is not installed
         #[arg(short = 'y', long = "yes", default_value_t = false)]
@@ -802,6 +820,10 @@ enum Commands {
             default_value_t = false
         )]
         dangerously_skip_permissions: bool,
+
+        /// Run with an explicit compatibility fallback backend instead of the standard runtime path
+        #[arg(long = "compatibility-fallback", value_enum)]
+        compatibility_fallback: Option<CompatibilityFallbackBackend>,
 
         /// Skip prompt and auto-install when app-id is not installed
         #[arg(short = 'y', long = "yes", default_value_t = false)]
@@ -1658,6 +1680,7 @@ fn run() -> Result<()> {
             unsafe_mode_legacy,
             unsafe_bypass_sandbox_legacy,
             dangerously_skip_permissions,
+            compatibility_fallback,
             yes,
             keep_failed_artifacts,
             allow_unverified,
@@ -1675,6 +1698,7 @@ fn run() -> Result<()> {
             unsafe_mode_legacy,
             unsafe_bypass_sandbox_legacy,
             dangerously_skip_permissions,
+            compatibility_fallback,
             yes,
             keep_failed_artifacts,
             allow_unverified,
@@ -1710,6 +1734,7 @@ fn run() -> Result<()> {
             unsafe_mode_legacy,
             unsafe_bypass_sandbox_legacy,
             dangerously_skip_permissions,
+            compatibility_fallback,
             yes,
         } => execute_run_like_command(
             path,
@@ -1725,6 +1750,7 @@ fn run() -> Result<()> {
             unsafe_mode_legacy,
             unsafe_bypass_sandbox_legacy,
             dangerously_skip_permissions,
+            compatibility_fallback,
             yes,
             false,
             false,
@@ -1977,6 +2003,7 @@ fn run() -> Result<()> {
                 ))?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
+                } else if progressive_ui::can_use_progressive_ui(false) {
                 } else {
                     println!("\n✅ Installation complete!");
                     println!("   Capsule: {}", result.slug);
@@ -2039,6 +2066,7 @@ fn run() -> Result<()> {
 
                 if json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
+                } else if progressive_ui::can_use_progressive_ui(false) {
                 } else {
                     println!("\n✅ Installation complete!");
                     println!("   Capsule: {}", result.slug);
@@ -3350,7 +3378,12 @@ fn build_capsule_artifact_for_publish(cwd: &std::path::Path) -> Result<PathBuf> 
         .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
     let manifest = capsule_core::types::CapsuleManifest::from_toml(&manifest_raw)
         .map_err(|err| anyhow::anyhow!("Failed to parse capsule.toml: {}", err))?;
-    crate::publish_ci::build_capsule_artifact(&manifest_path, &manifest.name, &manifest.version)
+    let version = if manifest.version.trim().is_empty() {
+        "auto"
+    } else {
+        manifest.version.trim()
+    };
+    crate::publish_ci::build_capsule_artifact(&manifest_path, &manifest.name, version)
         .with_context(|| "Failed to build artifact for publish")
 }
 
@@ -3624,6 +3657,7 @@ fn execute_run_like_command(
     unsafe_mode_legacy: bool,
     unsafe_bypass_sandbox_legacy: bool,
     dangerously_skip_permissions: bool,
+    compatibility_fallback: Option<CompatibilityFallbackBackend>,
     yes: bool,
     keep_failed_artifacts: bool,
     allow_unverified: bool,
@@ -3666,6 +3700,7 @@ fn execute_run_like_command(
             enforcement,
             sandbox_requested,
             dangerously_skip_permissions,
+            compatibility_fallback,
             reporter.clone(),
         )?;
         return execute_open_command(
@@ -3677,6 +3712,9 @@ fn execute_run_like_command(
             effective_enforcement,
             sandbox_requested,
             dangerously_skip_permissions,
+            compatibility_fallback
+                .map(CompatibilityFallbackBackend::as_str)
+                .map(str::to_string),
             yes,
             state,
             inject,
@@ -3698,6 +3736,7 @@ fn execute_run_like_command(
         enforcement,
         sandbox_requested,
         dangerously_skip_permissions,
+        compatibility_fallback,
         reporter.clone(),
     )?;
     execute_open_command(
@@ -3709,6 +3748,9 @@ fn execute_run_like_command(
         effective_enforcement,
         sandbox_requested,
         dangerously_skip_permissions,
+        compatibility_fallback
+            .map(CompatibilityFallbackBackend::as_str)
+            .map(str::to_string),
         yes,
         state,
         inject,
@@ -3732,6 +3774,9 @@ async fn resolve_run_target_or_install(
 
     if let Some(repository) = install::parse_github_run_ref(&raw)? {
         let json_mode = matches!(reporter.as_ref(), reporters::CliReporter::Json(_));
+        if progressive_ui::can_use_progressive_ui(json_mode) {
+            progressive_ui::begin_flow()?;
+        }
         if json_mode && !yes {
             anyhow::bail!(
                 "Non-interactive JSON mode requires -y/--yes when auto-installing missing capsules"
@@ -3749,12 +3794,7 @@ async fn resolve_run_target_or_install(
             );
         }
 
-        if !yes {
-            let approved = prompt_github_run_confirmation(&repository)?;
-            if !approved {
-                anyhow::bail!("Installation cancelled by user");
-            }
-        } else {
+        if yes {
             debug!(
                 repository = %repository,
                 "GitHub repository not installed locally; continuing with -y auto-install"
@@ -4034,7 +4074,7 @@ async fn install_github_repository(
     let install_draft = preview_preparation.install_draft;
     let mut preview_session = preview_preparation.preview_session;
     if install_draft.is_some() {
-        if let Err(error) = show_github_draft_preview(&preview_session, yes, can_prompt, json) {
+        if let Err(error) = show_github_draft_preview(&preview_session, json) {
             maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
             return Err(error);
         }
@@ -4057,25 +4097,66 @@ async fn install_github_repository(
         }
     }
     if !json {
-        eprintln!(
-            "📦 Building {} from GitHub source in {}",
-            checkout.repository,
-            checkout.checkout_dir.display()
-        );
-        if let Some(draft) = install_draft.as_ref() {
+        if progressive_ui::can_use_progressive_ui(false) {
+            progressive_ui::show_note(
+                "GitHub Source Build",
+                format!(
+                    "Repository   : {}\nCheckout     :\n{}",
+                    checkout.repository,
+                    progressive_ui::format_path_for_note(&checkout.checkout_dir)
+                ),
+            )?;
+        } else {
             eprintln!(
-                "   Revision: {} ({})",
-                draft.resolved_ref.sha, draft.resolved_ref.ref_name
+                "📦 Building {} from GitHub source in {}",
+                checkout.repository,
+                checkout.checkout_dir.display()
             );
-            if draft.manifest_source == "inferred" {
+        }
+        if let Some(draft) = install_draft.as_ref() {
+            if progressive_ui::can_use_progressive_ui(false) {
+                progressive_ui::show_note(
+                    "Inference Draft",
+                    format!(
+                        "Revision     : {} ({})\nManifest     : {}\nConfidence   : {}",
+                        draft.resolved_ref.sha,
+                        draft.resolved_ref.ref_name,
+                        draft.manifest_source,
+                        draft
+                            .capsule_hint
+                            .as_ref()
+                            .map(|hint| hint.confidence.as_str())
+                            .unwrap_or("unknown")
+                    ),
+                )?;
+            } else {
                 eprintln!(
-                    "   Using store-generated capsule draft for {}",
-                    draft.repo_ref
+                    "   Revision: {} ({})",
+                    draft.resolved_ref.sha, draft.resolved_ref.ref_name
                 );
+            }
+            if draft.manifest_source == "inferred" {
+                if progressive_ui::can_use_progressive_ui(false) {
+                    progressive_ui::show_warning(format!(
+                        "Using store-generated capsule draft for {}",
+                        draft.repo_ref
+                    ))?;
+                } else {
+                    eprintln!(
+                        "   Using store-generated capsule draft for {}",
+                        draft.repo_ref
+                    );
+                }
                 if let Some(hint) = draft.capsule_hint.as_ref() {
-                    eprintln!("   Confidence: {}", hint.confidence);
-                    for warning in &hint.warnings {
-                        eprintln!("   Warning: {warning}");
+                    if progressive_ui::can_use_progressive_ui(false) {
+                        if !hint.warnings.is_empty() {
+                            progressive_ui::show_note("Draft Warnings", hint.warnings.join("\n"))?;
+                        }
+                    } else {
+                        eprintln!("   Confidence: {}", hint.confidence);
+                        for warning in &hint.warnings {
+                            eprintln!("   Warning: {warning}");
+                        }
                     }
                 }
             }
@@ -4083,6 +4164,21 @@ async fn install_github_repository(
     }
     if let Some(draft) = install_draft.as_ref() {
         if preview::draft_requires_manual_review(draft) {
+            if progressive_ui::can_use_progressive_ui(false) {
+                let warnings = draft
+                    .capsule_hint
+                    .as_ref()
+                    .map(|hint| hint.warnings.clone())
+                    .unwrap_or_default();
+                progressive_ui::render_manual_review_required(
+                    &preview_session.manifest_path,
+                    &preview::github_draft_manual_review_reason(draft),
+                    &warnings,
+                )?;
+                progressive_ui::show_cancel(
+                    "Manual review is required before fail-closed provisioning can continue.",
+                )?;
+            }
             preview_session.record_manual_intervention_required(
                 &preview::github_draft_manual_review_reason(draft),
             );
@@ -4100,12 +4196,23 @@ async fn install_github_repository(
             )?);
         }
     }
+    if can_prompt && !yes {
+        let approved = progressive_ui::confirm_with_fallback(
+            "Proceed with installation and run? ",
+            true,
+            progressive_ui::can_use_progressive_ui(json),
+        )?;
+        if !approved {
+            anyhow::bail!("Installation cancelled by user");
+        }
+    }
     let mut latest_install_draft = install_draft.clone();
     let build_result = match build_github_repository_checkout(
         checkout.checkout_dir.clone(),
         json,
         injected_manifest.clone(),
         keep_failed_artifacts,
+        true,
     )
     .await
     {
@@ -4240,6 +4347,7 @@ async fn install_github_repository(
                         json,
                         current_draft.preview_toml.clone(),
                         keep_failed_artifacts,
+                        true,
                     )
                     .await
                     {
@@ -4382,6 +4490,7 @@ async fn install_github_repository(
                         },
                     },
                 }),
+                keep_progressive_flow_open: true,
             },
         )
         .await
@@ -4395,12 +4504,7 @@ async fn install_github_repository(
     result
 }
 
-fn show_github_draft_preview(
-    preview_session: &preview::PreviewSession,
-    yes: bool,
-    can_prompt: bool,
-    json: bool,
-) -> Result<()> {
+fn show_github_draft_preview(preview_session: &preview::PreviewSession, json: bool) -> Result<()> {
     if json || preview_session.manifest_source.as_deref() != Some("inferred") {
         return Ok(());
     }
@@ -4409,24 +4513,21 @@ fn show_github_draft_preview(
         return Ok(());
     };
 
-    eprintln!(
-        "   Generated capsule.toml preview: {}",
-        preview_session.manifest_path.display()
-    );
-    eprintln!("   ----- capsule.toml -----");
-    for (index, line) in preview_toml.lines().enumerate() {
-        eprintln!("   {:>3} | {}", index + 1, line);
-    }
-    eprintln!("   -----------------------");
-
-    if can_prompt && !yes {
-        let approved = inference_feedback::prompt_yes_no(
-            "Continue with this generated capsule.toml? [Y/n]: ",
-            true,
+    if progressive_ui::can_use_progressive_ui(false) {
+        progressive_ui::render_generated_manifest_preview(
+            &preview_session.manifest_path,
+            preview_toml,
         )?;
-        if !approved {
-            anyhow::bail!("Aborted after reviewing generated capsule.toml");
+    } else {
+        eprintln!(
+            "   Generated capsule.toml preview: {}",
+            preview_session.manifest_path.display()
+        );
+        eprintln!("   ----- capsule.toml -----");
+        for (index, line) in preview_toml.lines().enumerate() {
+            eprintln!("   {:>3} | {}", index + 1, line);
         }
+        eprintln!("   -----------------------");
     }
 
     Ok(())
@@ -4461,6 +4562,7 @@ async fn build_github_repository_checkout(
     json: bool,
     injected_manifest: Option<String>,
     keep_failed_artifacts: bool,
+    suppress_injected_manifest_warning: bool,
 ) -> Result<commands::build::BuildResult> {
     run_blocking_github_install_step(move || {
         let reporter = std::sync::Arc::new(reporters::CliReporter::new(json));
@@ -4478,6 +4580,7 @@ async fn build_github_repository_checkout(
             json,
             None,
             injected_manifest.as_deref(),
+            suppress_injected_manifest_warning,
         )
     })
     .await
@@ -4494,8 +4597,11 @@ async fn retry_github_build_after_manual_fix(
     json: bool,
     keep_failed_artifacts: bool,
 ) -> Result<Option<commands::build::BuildResult>> {
-    let should_edit =
-        inference_feedback::prompt_yes_no("Edit generated capsule.toml and retry? [Y/n]: ", true)?;
+    let should_edit = progressive_ui::confirm_with_fallback(
+        "Edit generated capsule manifest and retry? ",
+        true,
+        progressive_ui::can_use_progressive_ui(false),
+    )?;
     if !should_edit {
         return Ok(None);
     }
@@ -4528,6 +4634,7 @@ async fn retry_github_build_after_manual_fix(
         json,
         Some(edited_manifest.clone()),
         keep_failed_artifacts,
+        false,
     )
     .await?;
 
@@ -4536,9 +4643,10 @@ async fn retry_github_build_after_manual_fix(
         inference_feedback::summarize_manifest_diff(inferred_manifest, &edited_manifest)
     );
     if let Some(attempt) = inference_attempt {
-        let should_share = inference_feedback::prompt_yes_no(
-            "The generated capsule.toml was fixed and smoke test passed. Share this corrected configuration to improve ato for public GitHub repositories? [Y/n]: ",
+        let should_share = progressive_ui::confirm_with_fallback(
+            "Share this corrected configuration to improve ato for public GitHub repositories? ",
             true,
+            progressive_ui::can_use_progressive_ui(false),
         )?;
         if should_share {
             let _ = inference_feedback::submit_verified_fix(attempt, &edited_manifest).await;
@@ -4753,35 +4861,6 @@ fn prompt_install_confirmation(
     }
 }
 
-fn prompt_github_run_confirmation(repository: &str) -> Result<bool> {
-    println!();
-    println!(
-        "[!] GitHub repository 'github.com/{}' is not installed.",
-        repository
-    );
-    println!();
-    println!("ato will download, build, install, and run this repository.");
-    println!();
-
-    loop {
-        print!("? Do you want to install and run this repository? (Y/n): ");
-        io::stdout().flush()?;
-
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .context("Failed to read user input")?;
-
-        match input.trim().to_ascii_lowercase().as_str() {
-            "" | "y" | "yes" => return Ok(true),
-            "n" | "no" => return Ok(false),
-            _ => {
-                println!("Please answer 'y' or 'n'.");
-            }
-        }
-    }
-}
-
 fn print_permission_summary(permissions: Option<&install::CapsulePermissions>) {
     println!("This capsule requests the following permissions:");
     let Some(permissions) = permissions else {
@@ -4915,6 +4994,7 @@ fn enforce_sandbox_mode_flags(
     enforcement: EnforcementMode,
     sandbox_requested: bool,
     dangerously_skip_permissions: bool,
+    compatibility_fallback: Option<CompatibilityFallbackBackend>,
     reporter: std::sync::Arc<reporters::CliReporter>,
 ) -> Result<EnforcementMode> {
     const ENV_ALLOW_UNSAFE: &str = "CAPSULE_ALLOW_UNSAFE";
@@ -4932,6 +5012,12 @@ fn enforce_sandbox_mode_flags(
         )?;
     }
 
+    if dangerously_skip_permissions && compatibility_fallback.is_some() {
+        anyhow::bail!(
+            "--dangerously-skip-permissions and --compatibility-fallback are mutually exclusive"
+        );
+    }
+
     if dangerously_skip_permissions {
         if std::env::var(ENV_ALLOW_UNSAFE).ok().as_deref() != Some("1") {
             anyhow::bail!(
@@ -4947,6 +5033,13 @@ fn enforce_sandbox_mode_flags(
         )?;
     }
 
+    if let Some(CompatibilityFallbackBackend::Host) = compatibility_fallback {
+        futures::executor::block_on(reporter.warn(
+            "⚠ Running in Compatibility Mode (Isolated Host Environment). Nacelle sandbox is disabled."
+                .to_string(),
+        ))?;
+    }
+
     Ok(enforcement)
 }
 
@@ -4960,6 +5053,7 @@ fn execute_open_command(
     enforcement: EnforcementMode,
     sandbox_mode: bool,
     dangerously_skip_permissions: bool,
+    compatibility_fallback: Option<String>,
     assume_yes: bool,
     state: Vec<String>,
     inject: Vec<String>,
@@ -4983,6 +5077,7 @@ fn execute_open_command(
         enforcement: enforcement.as_str().to_string(),
         sandbox_mode,
         dangerously_skip_permissions,
+        compatibility_fallback,
         assume_yes,
         state_bindings: state,
         inject_bindings: inject,
@@ -5369,7 +5464,7 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  nacelle-v1.2.3
         std::env::remove_var("CAPSULE_ALLOW_UNSAFE");
 
         let reporter = std::sync::Arc::new(reporters::CliReporter::new(true));
-        let err = enforce_sandbox_mode_flags(EnforcementMode::Strict, false, true, reporter)
+        let err = enforce_sandbox_mode_flags(EnforcementMode::Strict, false, true, None, reporter)
             .expect_err("must fail closed without env opt-in");
         assert!(err
             .to_string()
@@ -5382,10 +5477,26 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  nacelle-v1.2.3
         std::env::set_var("CAPSULE_ALLOW_UNSAFE", "1");
 
         let reporter = std::sync::Arc::new(reporters::CliReporter::new(true));
-        let result = enforce_sandbox_mode_flags(EnforcementMode::Strict, false, true, reporter);
+        let result =
+            enforce_sandbox_mode_flags(EnforcementMode::Strict, false, true, None, reporter);
         assert!(result.is_ok());
 
         std::env::remove_var("CAPSULE_ALLOW_UNSAFE");
+    }
+
+    #[test]
+    fn compatibility_fallback_is_mutually_exclusive_with_dangerous_mode() {
+        let reporter = std::sync::Arc::new(reporters::CliReporter::new(true));
+        let err = enforce_sandbox_mode_flags(
+            EnforcementMode::Strict,
+            false,
+            true,
+            Some(CompatibilityFallbackBackend::Host),
+            reporter,
+        )
+        .expect_err("must reject overlapping fallback and dangerous mode");
+
+        assert!(err.to_string().contains("mutually exclusive"));
     }
 
     #[test]

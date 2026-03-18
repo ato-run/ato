@@ -32,14 +32,7 @@ fn consent_record_for_plan(plan: &ExecutionPlan) -> ConsentRecord {
 }
 
 pub fn require_consent(plan: &ExecutionPlan, _assume_yes: bool) -> Result<(), AtoExecutionError> {
-    if is_zero_permission_plan(plan) {
-        return Ok(());
-    }
-
-    let store = ConsentStore::new()?;
-    let record = consent_record_for_plan(plan);
-
-    if store.is_consented(&record)? {
+    if has_consent(plan)? {
         return Ok(());
     }
 
@@ -50,8 +43,71 @@ pub fn require_consent(plan: &ExecutionPlan, _assume_yes: bool) -> Result<(), At
     }
 
     prompt_consent(plan)?;
+    record_consent(plan)
+}
+
+pub fn has_consent(plan: &ExecutionPlan) -> Result<bool, AtoExecutionError> {
+    if is_zero_permission_plan(plan) {
+        return Ok(true);
+    }
+
+    let store = ConsentStore::new()?;
+    let record = consent_record_for_plan(plan);
+
+    store.is_consented(&record)
+}
+
+pub fn record_consent(plan: &ExecutionPlan) -> Result<(), AtoExecutionError> {
+    if is_zero_permission_plan(plan) {
+        return Ok(());
+    }
+
+    let store = ConsentStore::new()?;
+    let record = consent_record_for_plan(plan);
+    if store.is_consented(&record)? {
+        return Ok(());
+    }
+
     store.append_consent(record)?;
     Ok(())
+}
+
+pub fn consent_summary(plan: &ExecutionPlan) -> String {
+    let network = if plan.runtime.policy.network.allow_hosts.is_empty() {
+        "None".to_string()
+    } else {
+        plan.runtime.policy.network.allow_hosts.join(", ")
+    };
+    let read_only = if plan.runtime.policy.filesystem.read_only.is_empty() {
+        "None".to_string()
+    } else {
+        plan.runtime.policy.filesystem.read_only.join(", ")
+    };
+    let read_write = if plan.runtime.policy.filesystem.read_write.is_empty() {
+        "None".to_string()
+    } else {
+        plan.runtime.policy.filesystem.read_write.join(", ")
+    };
+    let secrets = if plan.runtime.policy.secrets.allow_secret_ids.is_empty() {
+        "None".to_string()
+    } else {
+        plan.runtime.policy.secrets.allow_secret_ids.join(", ")
+    };
+
+    format!(
+        "Capsule      : {}@{}\nTarget       : {} (runtime={}, driver={})\nNetwork      : {}\nRead Only    : {}\nRead Write   : {}\nSecrets      : {}\nPolicy Hash  : {}\nProvisioning : {}",
+        plan.capsule.scoped_id,
+        plan.capsule.version,
+        plan.target.label,
+        plan.target.runtime.as_str(),
+        plan.target.driver.as_str(),
+        network,
+        read_only,
+        read_write,
+        secrets,
+        plan.consent.policy_segment_hash,
+        plan.consent.provisioning_policy_hash,
+    )
 }
 
 pub fn seed_consent(plan: &ExecutionPlan) -> Result<(), AtoExecutionError> {
@@ -176,38 +232,25 @@ impl ConsentStore {
 }
 
 fn prompt_consent(plan: &ExecutionPlan) -> Result<(), AtoExecutionError> {
-    println!();
-    println!("ExecutionPlan consent is required before run:");
-    println!(
-        "  capsule: {}@{}",
-        plan.capsule.scoped_id, plan.capsule.version
-    );
-    println!(
-        "  target: {} (runtime={}, driver={})",
-        plan.target.label,
-        plan.target.runtime.as_str(),
-        plan.target.driver.as_str()
-    );
-    println!(
-        "  policy_segment_hash: {}",
-        plan.consent.policy_segment_hash
-    );
-    println!(
-        "  provisioning_policy_hash: {}",
-        plan.consent.provisioning_policy_hash
-    );
-    print!("Approve this policy? [y/N]: ");
+    let summary = consent_summary(plan);
+    let use_tui = crate::progressive_ui::can_use_progressive_ui(false);
+    if use_tui {
+        crate::progressive_ui::render_execution_consent_summary(&summary).map_err(|err| {
+            AtoExecutionError::internal(format!("failed to render consent note: {err}"))
+        })?;
+    } else {
+        println!();
+        println!("ExecutionPlan consent is required before run:");
+        println!("{}", summary);
+    }
 
-    std::io::stdout()
-        .flush()
-        .map_err(|err| AtoExecutionError::internal(format!("failed to flush stdout: {err}")))?;
+    let accepted = crate::progressive_ui::confirm_with_fallback(
+        "Approve this Execution Plan? ",
+        false,
+        use_tui,
+    )
+    .map_err(|err| AtoExecutionError::internal(format!("failed to read consent input: {err}")))?;
 
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input).map_err(|err| {
-        AtoExecutionError::internal(format!("failed to read consent input: {err}"))
-    })?;
-
-    let accepted = matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes");
     if accepted {
         Ok(())
     } else {

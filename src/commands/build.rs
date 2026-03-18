@@ -78,6 +78,7 @@ pub fn execute_pack_command(
         cli_json,
         nacelle_override,
         None,
+        false,
     )
 }
 
@@ -96,6 +97,7 @@ pub fn execute_pack_command_with_injected_manifest(
     cli_json: bool,
     nacelle_override: Option<PathBuf>,
     injected_manifest: Option<&str>,
+    suppress_injected_manifest_warning: bool,
 ) -> Result<BuildResult> {
     let total_started = Instant::now();
     let mut timing_entries = Vec::new();
@@ -125,9 +127,17 @@ pub fn execute_pack_command_with_injected_manifest(
                 reporter.clone(),
             )?;
         } else if let Some(manifest_text) = injected_manifest {
-            futures::executor::block_on(reporter.warn(
-                "No `capsule.toml` found. Using draft returned by ato store for this GitHub repository.".to_string(),
-            ))?;
+            if !suppress_injected_manifest_warning
+                && crate::progressive_ui::can_use_progressive_ui(cli_json)
+            {
+                crate::progressive_ui::show_warning(
+                    "No `capsule.toml` found. Using draft returned by ato store for this GitHub repository.",
+                )?;
+            } else if !suppress_injected_manifest_warning {
+                futures::executor::block_on(reporter.warn(
+                    "No `capsule.toml` found. Using draft returned by ato store for this GitHub repository.".to_string(),
+                ))?;
+            }
             std::fs::write(&manifest, manifest_text).with_context(|| {
                 format!("Failed to write temporary manifest: {}", manifest.display())
             })?;
@@ -201,10 +211,17 @@ pub fn execute_pack_command_with_injected_manifest(
         validation_started.elapsed(),
     );
 
-    futures::executor::block_on(reporter.notify(format!(
-        "📦 Packing capsule \"{}\" (v{})...",
-        capsule_name, capsule_version
-    )))?;
+    if crate::progressive_ui::can_use_progressive_ui(cli_json) {
+        crate::progressive_ui::show_step(format!(
+            "Packing capsule \"{}\" (v{})...",
+            capsule_name, capsule_version
+        ))?;
+    } else {
+        futures::executor::block_on(reporter.notify(format!(
+            "📦 Packing capsule \"{}\" (v{})...",
+            capsule_name, capsule_version
+        )))?;
+    }
     debug!(
         runtime_kind = ?decision.kind,
         reason = %decision.reason,
@@ -226,11 +243,19 @@ pub fn execute_pack_command_with_injected_manifest(
         )?;
         let _ = sign_if_requested(&result.artifact_path, key.as_ref(), reporter.clone())?;
         let size = std::fs::metadata(&result.artifact_path)?.len();
-        futures::executor::block_on(reporter.notify(format!(
-            "✅ Successfully built: {} ({:.1} KB)",
-            result.artifact_path.display(),
-            size as f64 / 1024.0
-        )))?;
+        if crate::progressive_ui::can_use_progressive_ui(cli_json) {
+            crate::progressive_ui::show_success(format!(
+                "Successfully built: {} ({:.1} KB)",
+                result.artifact_path.display(),
+                size as f64 / 1024.0
+            ))?;
+        } else {
+            futures::executor::block_on(reporter.notify(format!(
+                "✅ Successfully built: {} ({:.1} KB)",
+                result.artifact_path.display(),
+                size as f64 / 1024.0
+            )))?;
+        }
         record_timing(&mut timing_entries, "build.total", total_started.elapsed());
         emit_timings(reporter.clone(), timings, &timing_entries)?;
         return Ok(BuildResult {
@@ -1065,6 +1090,7 @@ fn collect_build_cache_source_files(
     working_dir: &Path,
     outputs: &[BuildCacheOutputSpec],
 ) -> Result<Vec<PathBuf>> {
+    let ignored_dynamic_roots = dynamic_build_cache_ignored_roots(working_dir);
     let mut files = Vec::new();
     let walker = WalkDir::new(working_dir)
         .follow_links(false)
@@ -1075,6 +1101,9 @@ fn collect_build_cache_source_files(
             };
             if relative_path.as_os_str().is_empty() {
                 return true;
+            }
+            if path_is_within_any_root(relative_path, &ignored_dynamic_roots) {
+                return false;
             }
             if entry.file_type().is_dir() {
                 if let Some(name) = relative_path.file_name().and_then(|value| value.to_str()) {
@@ -1095,6 +1124,9 @@ fn collect_build_cache_source_files(
             .path()
             .strip_prefix(working_dir)
             .with_context(|| format!("Failed to relativize {}", entry.path().display()))?;
+        if path_is_within_any_root(relative_path, &ignored_dynamic_roots) {
+            continue;
+        }
         if path_is_within_cached_outputs(relative_path, outputs) {
             continue;
         }
@@ -1109,6 +1141,22 @@ fn path_is_within_cached_outputs(path: &Path, outputs: &[BuildCacheOutputSpec]) 
     outputs
         .iter()
         .any(|output| path.starts_with(&output.relative_path))
+}
+
+fn dynamic_build_cache_ignored_roots(working_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(ato_home) = capsule_core::common::paths::nacelle_home_dir() {
+        if let Ok(relative) = ato_home.strip_prefix(working_dir) {
+            if !relative.as_os_str().is_empty() {
+                roots.push(relative.to_path_buf());
+            }
+        }
+    }
+    roots
+}
+
+fn path_is_within_any_root(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
 }
 
 fn update_hash_text(hasher: &mut Sha256, value: &str) {
