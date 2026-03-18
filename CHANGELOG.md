@@ -2,11 +2,24 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
+## [0.4.26] - 2026-03-18
+
+### What Changed
+
+#### Features
+
+- Add preview session persistence and preview-aware manifest execution paths for store-draft and local preview workflows
+
+#### Bug Fixes
+
+- Resolve runtime lockfile checks from the effective execution working directory for source builds and runs
+
 ## [0.4.25] - 2026-03-17
 
 ### What Changed
 
 #### Bug Fixes
+
 - Fix inferred GitHub Deno apps so `ato run github.com/...` packages required import maps and executes `deno task` targets through the Deno runtime instead of the generic shell path
 
 ## [0.4.24] - 2026-03-15
@@ -14,9 +27,11 @@ All notable changes to `ato-cli` will be documented in this file.
 ### What Changed
 
 #### Features
+
 - Add v0.3 runtime and capsule lock support
 
 #### Documentation
+
 - Update v0.3 and registry guidance
 
 ## [0.4.23] - 2026-03-13
@@ -24,6 +39,7 @@ All notable changes to `ato-cli` will be documented in this file.
 ### What Changed
 
 #### Bug Fixes
+
 - Include the current Ato session token when reading capsule metadata and manifests
 
 ## [0.4.22] - 2026-03-13
@@ -31,11 +47,12 @@ All notable changes to `ato-cli` will be documented in this file.
 ### What Changed
 
 #### Bug Fixes
+
 - Use `https://api.ato.run` as the default registry fallback
+
 ## [0.4.21] - 2026-03-13
 
 ### What Changed
-
 
 #### Bug Fixes
 
@@ -46,7 +63,6 @@ All notable changes to `ato-cli` will be documented in this file.
 ## [0.4.20] - 2026-03-12
 
 ### What Changed
-
 
 #### Bug Fixes
 
@@ -102,7 +118,6 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Update errno function to use std::io::Error for better error handling
 
-
 #### CI
 
 - [native-only] add fast native delivery path
@@ -112,7 +127,6 @@ All notable changes to `ato-cli` will be documented in this file.
 - Tighten release workflow permissions
 
 - Add release readiness workflows
-
 
 #### Documentation
 
@@ -127,7 +141,6 @@ All notable changes to `ato-cli` will be documented in this file.
 - Update CLI docs and add artifact publish scripts
 
 - Add Apache-2.0 LICENSE and trademark guidelines
-
 
 #### Features
 
@@ -289,7 +302,6 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Add Rust/Go binary distribution flow
 
-
 #### Other Changes
 
 - Refactor path handling and validation in manifest and execution plan
@@ -438,7 +450,7 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Update Cargo.lock
 
-- Update  version
+- Update version
 
 - Refactor CI workflows and clean up dependencies
 
@@ -466,7 +478,6 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Initial commit
 
-
 #### Refactoring
 
 - Refactor native delivery platform abstractions
@@ -476,7 +487,6 @@ All notable changes to `ato-cli` will be documented in this file.
 - Simplify variable initialization in persistent state test
 
 - Clean up error handling and improve script documentation
-
 
 #### Tests
 

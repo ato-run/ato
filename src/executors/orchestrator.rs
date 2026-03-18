@@ -47,6 +47,7 @@ impl OrchestratorOptions {
             sandbox_mode: self.sandbox_mode,
             dangerously_skip_permissions: self.dangerously_skip_permissions,
             assume_yes: self.assume_yes,
+            preview_mode: false,
         }
     }
 }
