@@ -4,10 +4,11 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::execution_plan::guard::{self, RuntimeGuardResult};
+use capsule_core::execution_plan::guard::{self, RuntimeGuardMode, RuntimeGuardResult};
 use capsule_core::execution_plan::model::{ExecutionPlan, ExecutionTier};
 use capsule_core::lockfile;
 use capsule_core::router::{ManifestData, RuntimeDecision};
+use capsule_core::types::ValidationMode;
 use capsule_core::CapsuleReporter;
 use tracing::debug;
 
@@ -22,6 +23,7 @@ pub struct TargetLaunchOptions {
     pub sandbox_mode: bool,
     pub dangerously_skip_permissions: bool,
     pub assume_yes: bool,
+    pub preview_mode: bool,
 }
 
 #[derive(Debug)]
@@ -92,18 +94,32 @@ pub fn prepare_target_execution(
     preflight_web_services_requirements(plan)?;
     verify_lockfile_integrity(&plan.manifest_path)?;
 
-    let compiled = capsule_core::execution_plan::derive::compile_execution_plan(
-        &plan.manifest_path,
-        plan.profile,
-        Some(plan.selected_target_label()),
-    )?;
+    let validation_mode = if options.preview_mode {
+        ValidationMode::Preview
+    } else {
+        ValidationMode::Strict
+    };
+    let guard_mode = if options.preview_mode {
+        RuntimeGuardMode::Preview
+    } else {
+        RuntimeGuardMode::Strict
+    };
 
-    let guard_result = guard::evaluate(
+    let compiled =
+        capsule_core::execution_plan::derive::compile_execution_plan_with_validation_mode(
+            &plan.manifest_path,
+            plan.profile,
+            Some(plan.selected_target_label()),
+            validation_mode,
+        )?;
+
+    let guard_result = guard::evaluate_for_mode(
         &compiled.execution_plan,
         &compiled.runtime_decision.plan.manifest_dir,
         &options.enforcement,
         options.sandbox_mode,
         options.dangerously_skip_permissions,
+        guard_mode,
     )?;
 
     crate::consent_store::require_consent(&compiled.execution_plan, options.assume_yes)?;

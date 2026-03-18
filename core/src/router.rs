@@ -8,7 +8,7 @@ use crate::orchestration;
 use crate::types::{
     CapsuleManifest, ExternalInjectionSpec, Mount, NamedTarget, OrchestrationPlan, ReadinessProbe,
     ResolvedService, ResolvedServiceNetwork, ResolvedServiceRuntime, ResolvedTargetRuntime,
-    ServiceConnectionInfo, ServiceSpec,
+    ServiceConnectionInfo, ServiceSpec, ValidationMode,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +47,12 @@ pub fn route_manifest(
     profile: ExecutionProfile,
     target_label: Option<&str>,
 ) -> Result<RuntimeDecision> {
-    route_manifest_with_state_overrides(manifest_path, profile, target_label, HashMap::new())
+    route_manifest_with_validation_mode(
+        manifest_path,
+        profile,
+        target_label,
+        ValidationMode::Strict,
+    )
 }
 
 pub fn route_manifest_with_state_overrides(
@@ -56,7 +61,38 @@ pub fn route_manifest_with_state_overrides(
     target_label: Option<&str>,
     state_source_overrides: HashMap<String, String>,
 ) -> Result<RuntimeDecision> {
-    let loaded = manifest::load_manifest(manifest_path)?;
+    route_manifest_with_state_overrides_and_validation_mode(
+        manifest_path,
+        profile,
+        target_label,
+        state_source_overrides,
+        ValidationMode::Strict,
+    )
+}
+
+pub fn route_manifest_with_validation_mode(
+    manifest_path: &Path,
+    profile: ExecutionProfile,
+    target_label: Option<&str>,
+    validation_mode: ValidationMode,
+) -> Result<RuntimeDecision> {
+    route_manifest_with_state_overrides_and_validation_mode(
+        manifest_path,
+        profile,
+        target_label,
+        HashMap::new(),
+        validation_mode,
+    )
+}
+
+pub fn route_manifest_with_state_overrides_and_validation_mode(
+    manifest_path: &Path,
+    profile: ExecutionProfile,
+    target_label: Option<&str>,
+    state_source_overrides: HashMap<String, String>,
+    validation_mode: ValidationMode,
+) -> Result<RuntimeDecision> {
+    let loaded = manifest::load_manifest_with_validation_mode(manifest_path, validation_mode)?;
     let manifest = loaded.raw;
     let manifest_dir = loaded.dir.clone();
     let selected_target = resolve_target_label(&manifest, target_label)?;

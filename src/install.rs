@@ -19,6 +19,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Once, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
+use tracing::debug;
 
 use capsule_core::packers::payload as manifest_payload;
 use capsule_core::resource::cas::LocalCasIndex;
@@ -51,6 +52,7 @@ pub struct InstallResult {
     pub launchable: Option<LaunchableTarget>,
     pub local_derivation: Option<LocalDerivationInfo>,
     pub projection: Option<ProjectionInfo>,
+    pub promotion: Option<PromotionInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -86,6 +88,47 @@ pub struct ProjectionInfo {
     pub metadata_path: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct PromotionInfo {
+    pub performed: bool,
+    pub preview_id: Option<String>,
+    pub source_reference: Option<String>,
+    pub source_metadata_path: Option<PathBuf>,
+    pub source_manifest_path: Option<PathBuf>,
+    pub manifest_source: Option<String>,
+    pub inference_mode: Option<String>,
+    pub resolved_ref: Option<GitHubInstallDraftResolvedRef>,
+    pub derived_plan: Option<PromotionDerivedPlanSnapshot>,
+    pub promotion_metadata_path: Option<PathBuf>,
+    pub content_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PromotionDerivedPlanSnapshot {
+    pub runtime: Option<String>,
+    pub driver: Option<String>,
+    pub resolved_runtime_version: Option<String>,
+    pub resolved_port: Option<u16>,
+    pub resolved_lock_files: Vec<PathBuf>,
+    pub resolved_pack_include: Vec<String>,
+    pub warnings: Vec<String>,
+    pub deferred_constraints: Vec<String>,
+    pub promotion_eligibility: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PromotionSourceInfo {
+    pub preview_id: String,
+    pub source_reference: String,
+    pub source_metadata_path: PathBuf,
+    pub source_manifest_path: PathBuf,
+    pub manifest_source: Option<String>,
+    pub inference_mode: Option<String>,
+    pub resolved_ref: Option<GitHubInstallDraftResolvedRef>,
+    pub derived_plan: PromotionDerivedPlanSnapshot,
+}
+
+#[derive(Debug)]
 pub struct GitHubCheckout {
     pub repository: String,
     pub publisher: String,
@@ -145,7 +188,7 @@ pub struct GitHubInstallDraftCapsuleToml {
     pub exists: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GitHubInstallDraftResolvedRef {
     #[serde(rename = "ref")]
     pub ref_name: String,
@@ -158,6 +201,12 @@ pub struct GitHubInstallDraftHint {
     pub warnings: Vec<String>,
     #[serde(default)]
     pub launchability: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubStoreErrorPayload {
+    error: String,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -183,6 +232,86 @@ impl GitHubInstallDraftResponse {
     }
 }
 
+const DEFAULT_GITHUB_INSTALL_WEB_STATIC_PORT: i64 = 8000;
+
+fn collapse_legacy_required_env_field(table: &mut toml::value::Table) -> bool {
+    let legacy_required = table
+        .get("env")
+        .and_then(|env| env.get("required"))
+        .and_then(toml::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        });
+
+    let Some(legacy_required) = legacy_required else {
+        return false;
+    };
+
+    let mut merged = table
+        .get("required_env")
+        .and_then(toml::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    for value in legacy_required {
+        if !merged.iter().any(|existing| existing == &value) {
+            merged.push(value);
+        }
+    }
+
+    table.insert(
+        "required_env".to_string(),
+        toml::Value::Array(merged.into_iter().map(toml::Value::String).collect()),
+    );
+
+    let mut remove_env_table = false;
+    if let Some(env_table) = table.get_mut("env").and_then(toml::Value::as_table_mut) {
+        env_table.remove("required");
+        remove_env_table = env_table.is_empty();
+    }
+    if remove_env_table {
+        table.remove("env");
+    }
+
+    true
+}
+
+fn apply_default_web_static_port(table: &mut toml::value::Table) -> bool {
+    if table.contains_key("port") {
+        return false;
+    }
+
+    let is_web_static = table
+        .get("runtime")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .map(|value| value.eq_ignore_ascii_case("web/static"))
+        .unwrap_or(false);
+    if !is_web_static {
+        return false;
+    }
+
+    table.insert(
+        "port".to_string(),
+        toml::Value::Integer(DEFAULT_GITHUB_INSTALL_WEB_STATIC_PORT),
+    );
+    true
+}
+
 fn normalize_github_install_preview_toml(
     checkout_dir: &Path,
     manifest_text: &str,
@@ -198,6 +327,14 @@ fn normalize_github_install_preview_toml(
         .unwrap_or(false)
         && parsed.get("targets").is_none()
     {
+        {
+            let table = parsed
+                .as_table_mut()
+                .expect("normalized GitHub install draft must stay a table");
+            collapse_legacy_required_env_field(table);
+            apply_default_web_static_port(table);
+        }
+
         let runtime = parsed
             .get("runtime")
             .and_then(toml::Value::as_str)
@@ -224,13 +361,12 @@ fn normalize_github_install_preview_toml(
                         .as_table_mut()
                         .expect("normalized GitHub install draft must stay a table")
                         .insert("runtime_version".to_string(), toml::Value::String(version));
-                    return toml::to_string(&parsed)
-                        .context("Failed to serialize normalized GitHub install draft");
                 }
             }
         }
 
         changed_pack_include_from_checkout(&mut parsed, checkout_dir)?;
+        inspect_normalized_github_install_preview_manifest(&parsed, checkout_dir)?;
 
         return toml::to_string(&parsed)
             .context("Failed to serialize normalized GitHub install draft");
@@ -295,11 +431,259 @@ fn normalize_github_install_preview_toml(
         }
     }
 
+    inspect_normalized_github_install_preview_manifest(&parsed, checkout_dir)?;
+
     if !changed {
         return Ok(manifest_text.to_string());
     }
 
     toml::to_string(&parsed).context("Failed to serialize normalized GitHub install draft")
+}
+
+#[derive(Debug)]
+struct GitHubInstallPreviewTargetInspection {
+    label: String,
+    runtime: String,
+    driver: String,
+    working_dir: Option<String>,
+}
+
+fn inspect_normalized_github_install_preview_manifest(
+    parsed: &toml::Value,
+    checkout_dir: &Path,
+) -> Result<()> {
+    let manifest_dir = checkout_dir;
+    let pack_include = parsed
+        .get("pack")
+        .and_then(|pack| pack.get("include"))
+        .and_then(toml::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    for target in github_install_preview_targets_for_inspection(parsed) {
+        let execution_working_directory = target
+            .working_dir
+            .as_deref()
+            .map(|relative| checkout_dir.join(relative))
+            .unwrap_or_else(|| checkout_dir.to_path_buf());
+        let lockfile_check_paths =
+            github_install_lockfile_checks(&target.driver, &execution_working_directory);
+        debug!(
+            checkout_dir = %checkout_dir.display(),
+            manifest_dir = %manifest_dir.display(),
+            execution_working_directory = %execution_working_directory.display(),
+            target = %target.label,
+            runtime = %target.runtime,
+            driver = %target.driver,
+            lockfile_check_paths = ?lockfile_check_paths,
+            pack_include = ?pack_include,
+            "GitHub install preview path diagnostics"
+        );
+
+        if let Some((_, missing_path, _)) = lockfile_check_paths.iter().find(|(_, path, exists)| {
+            *exists
+                && path
+                    .strip_prefix(checkout_dir)
+                    .ok()
+                    .map(|relative| normalize_relative_path(relative))
+                    .map(|relative| !pack_include_covers_path(&pack_include, &relative))
+                    .unwrap_or(false)
+        }) {
+            let relative = normalize_relative_path(
+                missing_path
+                    .strip_prefix(checkout_dir)
+                    .unwrap_or(missing_path.as_path()),
+            );
+            bail!(
+                "GitHub install preview manifest is inconsistent: target '{}' runs from '{}' but pack.include does not cover required lockfile '{}'",
+                target.label,
+                execution_working_directory.display(),
+                relative,
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn github_install_preview_targets_for_inspection(
+    parsed: &toml::Value,
+) -> Vec<GitHubInstallPreviewTargetInspection> {
+    if let Some(targets) = parsed.get("targets").and_then(toml::Value::as_table) {
+        return targets
+            .iter()
+            .filter_map(|(label, value)| {
+                let target = value.as_table()?;
+                let runtime = target.get("runtime")?.as_str()?.trim().to_string();
+                let driver = target
+                    .get("driver")
+                    .and_then(toml::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| infer_driver_from_runtime(&runtime));
+                Some(GitHubInstallPreviewTargetInspection {
+                    label: label.to_string(),
+                    runtime,
+                    driver,
+                    working_dir: target
+                        .get("working_dir")
+                        .and_then(toml::Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string),
+                })
+            })
+            .collect();
+    }
+
+    parsed
+        .get("runtime")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|runtime| {
+            vec![GitHubInstallPreviewTargetInspection {
+                label: parsed
+                    .get("default_target")
+                    .and_then(toml::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("app")
+                    .to_string(),
+                runtime: runtime.to_string(),
+                driver: parsed
+                    .get("driver")
+                    .and_then(toml::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| infer_driver_from_runtime(runtime)),
+                working_dir: parsed
+                    .get("working_dir")
+                    .and_then(toml::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
+            }]
+        })
+        .unwrap_or_default()
+}
+
+fn infer_driver_from_runtime(runtime: &str) -> String {
+    runtime
+        .split('/')
+        .nth(1)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn github_install_lockfile_checks(
+    driver: &str,
+    execution_working_directory: &Path,
+) -> Vec<(&'static str, PathBuf, bool)> {
+    match driver.trim().to_ascii_lowercase().as_str() {
+        "node" => {
+            let package_lock = execution_working_directory.join("package-lock.json");
+            let pnpm_lock = execution_working_directory.join("pnpm-lock.yaml");
+            let bun_lock = execution_working_directory.join("bun.lock");
+            let bun_lockb = execution_working_directory.join("bun.lockb");
+            vec![
+                (
+                    "package-lock.json",
+                    package_lock.clone(),
+                    package_lock.exists(),
+                ),
+                ("pnpm-lock.yaml", pnpm_lock.clone(), pnpm_lock.exists()),
+                ("bun.lock", bun_lock.clone(), bun_lock.exists()),
+                ("bun.lockb", bun_lockb.clone(), bun_lockb.exists()),
+            ]
+        }
+        "python" => {
+            let uv_lock = execution_working_directory.join("uv.lock");
+            vec![("uv.lock", uv_lock.clone(), uv_lock.exists())]
+        }
+        "native" => {
+            let cargo_lock = execution_working_directory.join("Cargo.lock");
+            vec![("Cargo.lock", cargo_lock.clone(), cargo_lock.exists())]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn normalize_relative_path(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            Component::CurDir => None,
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn pack_include_covers_path(pack_include: &[String], relative_path: &str) -> bool {
+    pack_include
+        .iter()
+        .any(|pattern| pack_include_pattern_matches(pattern, relative_path))
+}
+
+fn pack_include_pattern_matches(pattern: &str, relative_path: &str) -> bool {
+    let normalized_pattern = pattern.trim().trim_start_matches("./").replace('\\', "/");
+    if normalized_pattern.is_empty() {
+        return false;
+    }
+    if normalized_pattern == relative_path
+        || normalized_pattern == "**"
+        || normalized_pattern == "*"
+    {
+        return true;
+    }
+    if let Some(prefix) = normalized_pattern.strip_suffix("/**") {
+        return relative_path == prefix || relative_path.starts_with(&format!("{prefix}/"));
+    }
+    if !normalized_pattern.contains('*') && !normalized_pattern.contains('?') {
+        return false;
+    }
+
+    let mut regex_source = String::from("^");
+    let chars = normalized_pattern.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        match chars[index] {
+            '*' if chars.get(index + 1) == Some(&'*') => {
+                regex_source.push_str(".*");
+                index += 2;
+            }
+            '*' => {
+                regex_source.push_str("[^/]*");
+                index += 1;
+            }
+            '?' => {
+                regex_source.push_str("[^/]");
+                index += 1;
+            }
+            ch => {
+                regex_source.push_str(&regex::escape(&ch.to_string()));
+                index += 1;
+            }
+        }
+    }
+    regex_source.push('$');
+
+    Regex::new(&regex_source)
+        .map(|regex| regex.is_match(relative_path))
+        .unwrap_or(false)
 }
 
 fn changed_pack_include_from_checkout(parsed: &mut toml::Value, checkout_dir: &Path) -> Result<()> {
@@ -534,6 +918,7 @@ pub struct InstallExecutionOptions {
     pub projection_preference: ProjectionPreference,
     pub json_output: bool,
     pub can_prompt_interactively: bool,
+    pub promotion_source: Option<PromotionSourceInfo>,
 }
 
 enum InstallSource {
@@ -1021,6 +1406,38 @@ pub async fn download_github_repository_at_ref(
         .send()
         .await
         .with_context(|| format!("Failed to fetch GitHub repository archive: {normalized}"))?;
+    let session_token = crate::auth::current_session_token();
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        if let Some(token) = session_token.as_deref() {
+            let archive_bytes = download_private_github_repository_archive_via_store(
+                &client,
+                &normalized,
+                resolved_ref,
+                token,
+            )
+            .await?;
+            let temp_root = github_checkout_root()?;
+            let temp_dir = tempfile::Builder::new()
+                .prefix("gh-install-")
+                .tempdir_in(temp_root)
+                .with_context(|| "Failed to create GitHub checkout directory")?;
+            let checkout_dir = normalize_github_checkout_dir(
+                unpack_github_tarball(&archive_bytes, temp_dir.path())?,
+                repo,
+            )?;
+            return Ok(GitHubCheckout {
+                repository: normalized,
+                publisher,
+                checkout_dir,
+                temp_dir: Some(temp_dir),
+            });
+        }
+
+        bail!(
+            "GitHub repository archive returned 404 Not Found for '{}'. If this is a private repository, run `ato login` and ensure the ato GitHub App is installed on the repository owner account.",
+            normalized
+        );
+    }
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
@@ -1049,6 +1466,93 @@ pub async fn download_github_repository_at_ref(
         checkout_dir,
         temp_dir: Some(temp_dir),
     })
+}
+
+async fn download_private_github_repository_archive_via_store(
+    client: &reqwest::Client,
+    normalized_repository: &str,
+    resolved_ref: Option<&str>,
+    session_token: &str,
+) -> Result<Vec<u8>> {
+    let (owner, repo) = normalized_repository
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("repository must include owner/repo"))?;
+    let endpoint = format!(
+        "{}/v1/github/repos/{}/{}/authed/archive",
+        resolve_store_api_base_url(),
+        urlencoding::encode(owner),
+        urlencoding::encode(repo)
+    );
+    let response = client
+        .get(&endpoint)
+        .query(&[("ref", resolved_ref.unwrap_or_default())])
+        .header(reqwest::header::USER_AGENT, "ato-cli")
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", session_token),
+        )
+        .send()
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to fetch private GitHub repository archive via ato store: {}",
+                normalized_repository
+            )
+        })?;
+
+    if response.status().is_success() {
+        return response
+            .bytes()
+            .await
+            .map(|bytes| bytes.to_vec())
+            .with_context(|| {
+                format!(
+                    "Failed to read private GitHub repository archive via ato store: {}",
+                    normalized_repository
+                )
+            });
+    }
+
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let payload = serde_json::from_str::<GitHubStoreErrorPayload>(&body).ok();
+    let message = match payload.as_ref().map(|value| value.error.as_str()) {
+        Some("auth_required") => {
+            "Private GitHub repository access requires an ato store session. Run `ato login` and retry.".to_string()
+        }
+        Some("publisher_required") => {
+            "Private GitHub repository access requires a publisher profile. Complete publisher setup, then retry.".to_string()
+        }
+        Some("github_app_required") => payload
+            .as_ref()
+            .map(|value| {
+                format!(
+                    "{} Re-run after installing or reconnecting the ato GitHub App for this owner.",
+                    value.message
+                )
+            })
+            .unwrap_or_else(|| {
+                "Install or reconnect the ato GitHub App for this repository owner, then retry.".to_string()
+            }),
+        Some("repo_not_found") => format!(
+            "GitHub repository '{}' could not be found, or the connected GitHub App installation cannot access it.",
+            normalized_repository
+        ),
+        Some("github_archive_not_found") => payload
+            .as_ref()
+            .map(|value| value.message.clone())
+            .unwrap_or_else(|| "GitHub archive could not be fetched for the requested ref.".to_string()),
+        _ => payload
+            .as_ref()
+            .map(|value| value.message.clone())
+            .unwrap_or(body),
+    };
+
+    bail!(
+        "Failed to fetch private GitHub repository archive via ato store (status={}): {}",
+        status,
+        message
+    );
 }
 
 pub(crate) fn resolve_store_api_base_url() -> String {
@@ -1242,6 +1746,7 @@ pub async fn install_app(
             projection_preference,
             json_output,
             can_prompt_interactively,
+            promotion_source: None,
         },
         InstallSource::Registry(registry),
     )
@@ -1265,6 +1770,7 @@ async fn complete_install_from_bytes(
         projection_preference,
         json_output,
         can_prompt_interactively,
+        promotion_source,
     } = options;
     let computed_blake3 = compute_blake3(&bytes);
     if let Some(v3_manifest) = extract_payload_v3_manifest_from_capsule(&bytes)? {
@@ -1335,6 +1841,11 @@ async fn complete_install_from_bytes(
             &bytes,
             &computed_blake3,
         )?;
+        let promotion =
+            persist_promotion_info(&output_path, promotion_source.as_ref(), &computed_blake3)?;
+        if promotion.is_some() {
+            let _ = runtime_tree::prepare_promoted_runtime_for_capsule(&output_path)?;
+        }
 
         let projection = match projection_preference {
             ProjectionPreference::Skip => {
@@ -1474,6 +1985,7 @@ async fn complete_install_from_bytes(
                 derived_digest: Some(finalize_result.derived_digest),
             }),
             projection: Some(projection),
+            promotion,
         });
     }
 
@@ -1486,6 +1998,11 @@ async fn complete_install_from_bytes(
         &bytes,
         &computed_blake3,
     )?;
+    let promotion =
+        persist_promotion_info(&output_path, promotion_source.as_ref(), &computed_blake3)?;
+    if promotion.is_some() {
+        let _ = runtime_tree::prepare_promoted_runtime_for_capsule(&output_path)?;
+    }
 
     if !json_output {
         eprintln!("✅ Installed to: {}", output_path.display());
@@ -1506,7 +2023,48 @@ async fn complete_install_from_bytes(
         }),
         local_derivation: None,
         projection: None,
+        promotion,
     })
+}
+
+fn persist_promotion_info(
+    artifact_path: &Path,
+    promotion_source: Option<&PromotionSourceInfo>,
+    content_hash: &str,
+) -> Result<Option<PromotionInfo>> {
+    let Some(source) = promotion_source else {
+        return Ok(None);
+    };
+
+    let install_dir = artifact_path.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "installed artifact must have a parent directory: {}",
+            artifact_path.display()
+        )
+    })?;
+    let metadata_path = install_dir.join("promotion.json");
+    let promotion = PromotionInfo {
+        performed: true,
+        preview_id: Some(source.preview_id.clone()),
+        source_reference: Some(source.source_reference.clone()),
+        source_metadata_path: Some(source.source_metadata_path.clone()),
+        source_manifest_path: Some(source.source_manifest_path.clone()),
+        manifest_source: source.manifest_source.clone(),
+        inference_mode: source.inference_mode.clone(),
+        resolved_ref: source.resolved_ref.clone(),
+        derived_plan: Some(source.derived_plan.clone()),
+        promotion_metadata_path: Some(metadata_path.clone()),
+        content_hash: Some(content_hash.to_string()),
+    };
+    let serialized =
+        serde_json::to_vec_pretty(&promotion).context("Failed to serialize promotion metadata")?;
+    std::fs::write(&metadata_path, serialized).with_context(|| {
+        format!(
+            "Failed to write promotion metadata: {}",
+            metadata_path.display()
+        )
+    })?;
+    Ok(Some(promotion))
 }
 
 fn persist_installed_artifact(
@@ -3592,6 +4150,141 @@ include = ["main.ts", "deno.json", "deno.lock"]
     }
 
     #[test]
+    fn normalize_github_install_preview_toml_collapses_legacy_env_required() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+runtime = "source/python"
+run = "uv run app.py"
+required_env = ["DATABASE_URL"]
+
+[env]
+required = ["REDIS_URL"]
+"#;
+
+        let normalized =
+            normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+        assert!(normalized.contains(r#"required_env = ["DATABASE_URL", "REDIS_URL"]"#));
+        assert!(!normalized.contains("[env]"));
+        assert!(!normalized.contains("required = ["));
+    }
+
+    #[test]
+    fn normalize_github_install_preview_toml_adds_default_port_to_web_static() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+runtime = "web/static"
+run = "index.html"
+"#;
+
+        let normalized =
+            normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+        assert!(normalized.contains("port = 8000"));
+    }
+
+    #[test]
+    fn normalize_github_install_preview_toml_accepts_root_pnpm_lockfile_include() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
+            .expect("write pnpm lock");
+        let manifest = r#"
+schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[pack]
+include = ["package.json", "pnpm-lock.yaml", "src/**"]
+
+[targets.app]
+runtime = "source"
+driver = "node"
+entrypoint = "src/main.ts"
+run_command = "pnpm dev"
+"#;
+
+        let normalized =
+            normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+        assert!(normalized.contains(r#""pnpm-lock.yaml""#));
+    }
+
+    #[test]
+    fn normalize_github_install_preview_toml_accepts_subdir_pnpm_lockfile_include() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let app_dir = tmp.path().join("apps").join("web");
+        std::fs::create_dir_all(&app_dir).expect("create app dir");
+        std::fs::write(app_dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
+            .expect("write pnpm lock");
+        let manifest = r#"
+schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[pack]
+include = ["apps/web/**"]
+
+[targets.app]
+runtime = "source"
+driver = "node"
+working_dir = "apps/web"
+entrypoint = "src/main.ts"
+run_command = "pnpm dev"
+"#;
+
+        let normalized =
+            normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+        assert!(normalized.contains(r#"working_dir = "apps/web""#));
+    }
+
+    #[test]
+    fn normalize_github_install_preview_toml_rejects_subdir_lockfile_missing_from_pack_include() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let app_dir = tmp.path().join("apps").join("web");
+        std::fs::create_dir_all(&app_dir).expect("create app dir");
+        std::fs::write(app_dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
+            .expect("write pnpm lock");
+        let manifest = r#"
+schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[pack]
+include = ["package.json", "src/**"]
+
+[targets.app]
+runtime = "source"
+driver = "node"
+working_dir = "apps/web"
+entrypoint = "src/main.ts"
+run_command = "pnpm dev"
+"#;
+
+        let err =
+            normalize_github_install_preview_toml(tmp.path(), manifest).expect_err("must fail");
+
+        assert!(err
+            .to_string()
+            .contains("pack.include does not cover required lockfile"));
+        assert!(err.to_string().contains("apps/web/pnpm-lock.yaml"));
+    }
+
+    #[test]
     fn native_install_documented_json_contract_fields_are_present() {
         let value = serde_json::to_value(InstallResult {
             capsule_id: "capsule-123".to_string(),
@@ -3622,6 +4315,32 @@ include = ["main.ts", "deno.json", "deno.lock"]
                 schema_version: Some("0.1".to_string()),
                 metadata_path: Some(PathBuf::from("/tmp/projection.json")),
             }),
+            promotion: Some(PromotionInfo {
+                performed: true,
+                preview_id: Some("preview-123".to_string()),
+                source_reference: Some("github.com/octocat/hello-world".to_string()),
+                source_metadata_path: Some(PathBuf::from("/tmp/preview/metadata.json")),
+                source_manifest_path: Some(PathBuf::from("/tmp/preview/capsule.toml")),
+                manifest_source: Some("inferred".to_string()),
+                inference_mode: Some("rules".to_string()),
+                resolved_ref: Some(GitHubInstallDraftResolvedRef {
+                    ref_name: "main".to_string(),
+                    sha: "abc123".to_string(),
+                }),
+                derived_plan: Some(PromotionDerivedPlanSnapshot {
+                    runtime: Some("source".to_string()),
+                    driver: Some("python".to_string()),
+                    resolved_runtime_version: Some("3.11.10".to_string()),
+                    resolved_port: Some(8000),
+                    resolved_lock_files: vec![PathBuf::from("uv.lock")],
+                    resolved_pack_include: vec!["src/**".to_string()],
+                    warnings: vec!["generated lockfile".to_string()],
+                    deferred_constraints: vec!["author must commit uv.lock".to_string()],
+                    promotion_eligibility: "eligible".to_string(),
+                }),
+                promotion_metadata_path: Some(PathBuf::from("/tmp/install/promotion.json")),
+                content_hash: Some("blake3:artifact".to_string()),
+            }),
         })
         .expect("serialize install result");
 
@@ -3632,6 +4351,7 @@ include = ["main.ts", "deno.json", "deno.lock"]
                 "launchable",
                 "local_derivation",
                 "projection",
+                "promotion",
             ],
         );
 
@@ -3649,6 +4369,80 @@ include = ["main.ts", "deno.json", "deno.lock"]
             &value["projection"],
             &["schema_version", "metadata_path", "state"],
         );
+
+        assert_json_object_has_keys(
+            &value["promotion"],
+            &[
+                "preview_id",
+                "source_reference",
+                "derived_plan",
+                "promotion_metadata_path",
+                "content_hash",
+            ],
+        );
+
+        assert_json_object_has_keys(
+            &value["promotion"]["derived_plan"],
+            &[
+                "runtime",
+                "driver",
+                "resolved_lock_files",
+                "promotion_eligibility",
+            ],
+        );
+    }
+
+    #[test]
+    fn persist_promotion_info_writes_snapshot_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact_path = temp.path().join("sample-1.0.0.capsule");
+        std::fs::write(&artifact_path, b"capsule").expect("write artifact");
+
+        let promotion = persist_promotion_info(
+            &artifact_path,
+            Some(&PromotionSourceInfo {
+                preview_id: "preview-123".to_string(),
+                source_reference: "github.com/octocat/hello-world".to_string(),
+                source_metadata_path: PathBuf::from("/tmp/preview/metadata.json"),
+                source_manifest_path: PathBuf::from("/tmp/preview/capsule.toml"),
+                manifest_source: Some("inferred".to_string()),
+                inference_mode: Some("rules".to_string()),
+                resolved_ref: Some(GitHubInstallDraftResolvedRef {
+                    ref_name: "main".to_string(),
+                    sha: "abc123".to_string(),
+                }),
+                derived_plan: PromotionDerivedPlanSnapshot {
+                    runtime: Some("source".to_string()),
+                    driver: Some("python".to_string()),
+                    resolved_runtime_version: Some("3.11.10".to_string()),
+                    resolved_port: Some(8000),
+                    resolved_lock_files: vec![PathBuf::from("uv.lock")],
+                    resolved_pack_include: vec!["src/**".to_string()],
+                    warnings: vec!["generated lockfile".to_string()],
+                    deferred_constraints: vec!["author must commit uv.lock".to_string()],
+                    promotion_eligibility: "eligible".to_string(),
+                },
+            }),
+            "blake3:artifact",
+        )
+        .expect("persist promotion")
+        .expect("promotion info");
+
+        let metadata_path = temp.path().join("promotion.json");
+        assert_eq!(
+            promotion.promotion_metadata_path.as_deref(),
+            Some(metadata_path.as_path())
+        );
+        assert!(metadata_path.exists());
+
+        let value: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&metadata_path).expect("read promotion metadata"),
+        )
+        .expect("parse promotion metadata");
+        assert_eq!(value["preview_id"], "preview-123");
+        assert_eq!(value["manifest_source"], "inferred");
+        assert_eq!(value["derived_plan"]["resolved_port"], 8000);
+        assert_eq!(value["derived_plan"]["promotion_eligibility"], "eligible");
     }
 
     fn test_scoped_ref() -> ScopedCapsuleRef {
@@ -4506,6 +5300,80 @@ entrypoint = "main.py"
         let err =
             unpack_github_tarball(&archive_bytes, temp.path()).expect_err("must reject traversal");
         assert!(err.to_string().contains("unsafe path traversal components"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn download_github_repository_at_ref_maps_private_repo_404_to_auth_message() {
+        use axum::extract::Query;
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::response::IntoResponse;
+        use axum::routing::get;
+        use axum::Router;
+        use serde_json::json;
+        use std::collections::HashMap;
+
+        async fn github_tarball() -> impl IntoResponse {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "message": "Not Found",
+                    "documentation_url": "https://docs.github.com/rest/repos/contents#download-a-repository-archive-tar",
+                    "status": "404"
+                })),
+            )
+        }
+
+        async fn store_archive(
+            headers: HeaderMap,
+            Query(query): Query<HashMap<String, String>>,
+        ) -> impl IntoResponse {
+            assert_eq!(
+                headers
+                    .get(reqwest::header::AUTHORIZATION.as_str())
+                    .and_then(|v| v.to_str().ok()),
+                Some("Bearer session-token-private")
+            );
+            assert_eq!(query.get("ref").map(String::as_str), Some("main"));
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": "github_app_required",
+                    "message": "Install the ato GitHub App on the \"octocat\" account to access private repositories."
+                })),
+            )
+        }
+
+        let _env_lock = acquire_test_env_lock().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock github/store server");
+        let addr = listener.local_addr().expect("local addr");
+        let app = Router::new()
+            .route(
+                "/repos/octocat/private-repo/tarball/main",
+                get(github_tarball),
+            )
+            .route(
+                "/v1/github/repos/octocat/private-repo/authed/archive",
+                get(store_archive),
+            );
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let base_url = format!("http://{}", addr);
+        let _github_guard = EnvVarGuard::set("ATO_GITHUB_API_BASE_URL", Some(base_url.as_str()));
+        let _store_guard = EnvVarGuard::set("ATO_STORE_API_URL", Some(base_url.as_str()));
+        let _token_guard = EnvVarGuard::set("ATO_TOKEN", Some("session-token-private"));
+
+        let err = download_github_repository_at_ref("octocat/private-repo", Some("main"))
+            .await
+            .expect_err("private repo archive should surface auth guidance");
+        let rendered = format!("{:#}", err);
+        assert!(rendered.contains("GitHub App"));
+        assert!(rendered.contains("private repositories"));
+
+        server.abort();
     }
 
     #[test]

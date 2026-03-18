@@ -102,6 +102,7 @@ mod local_input;
 mod native_delivery;
 mod new;
 mod payload_guard;
+mod preview;
 mod process_manager;
 mod profile;
 mod publish_artifact;
@@ -4017,32 +4018,23 @@ async fn install_github_repository(
     const MAX_GITHUB_DRAFT_RETRIES: u8 = 3;
     let invocation_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    let install_draft = match install::fetch_github_install_draft(repository).await {
-        Ok(draft) => Some(draft),
-        Err(error) => {
-            if !json {
-                eprintln!(
-                    "⚠️  Failed to fetch ato store install draft: {error}. Falling back to local zero-config inference."
-                );
-            }
-            None
+    let preview_preparation =
+        preview::prepare_github_preview_session(repository, &invocation_dir).await?;
+    if let Some(warning) = preview_preparation.draft_fetch_warning.as_deref() {
+        if !json {
+            eprintln!("⚠️  {warning}");
         }
-    };
-    let mut checkout = install::download_github_repository_at_ref(
-        repository,
-        install_draft
-            .as_ref()
-            .map(|draft| draft.resolved_ref.sha.as_str()),
-    )
-    .await?;
-    let install_draft = install_draft
-        .as_ref()
-        .map(|draft| draft.normalize_preview_toml_for_checkout(&checkout.checkout_dir))
-        .transpose()?;
-    if let Some(draft) = install_draft.as_ref() {
-        if let Err(error) =
-            show_github_draft_preview(&invocation_dir, repository, draft, yes, can_prompt, json)
-        {
+    }
+    if let Some(warning) = preview_preparation.session_persist_warning.as_deref() {
+        if !json {
+            eprintln!("⚠️  {warning}");
+        }
+    }
+    let mut checkout = preview_preparation.checkout;
+    let install_draft = preview_preparation.install_draft;
+    let mut preview_session = preview_preparation.preview_session;
+    if install_draft.is_some() {
+        if let Err(error) = show_github_draft_preview(&preview_session, yes, can_prompt, json) {
             maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
             return Err(error);
         }
@@ -4058,6 +4050,12 @@ async fn install_github_repository(
     } else {
         None
     };
+    preview_session.set_inference_attempt(inference_attempt.as_ref());
+    if let Some(warning) = preview::persist_session_with_warning(&preview_session) {
+        if !json {
+            eprintln!("⚠️  {warning}");
+        }
+    }
     if !json {
         eprintln!(
             "📦 Building {} from GitHub source in {}",
@@ -4083,6 +4081,25 @@ async fn install_github_repository(
             }
         }
     }
+    if let Some(draft) = install_draft.as_ref() {
+        if preview::draft_requires_manual_review(draft) {
+            preview_session.record_manual_intervention_required(
+                &preview::github_draft_manual_review_reason(draft),
+            );
+            if let Some(warning) = preview::persist_session_with_warning(&preview_session) {
+                if !json {
+                    eprintln!("⚠️  {warning}");
+                }
+            }
+            maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
+            return Err(build_github_manual_intervention_error(
+                &preview_session.manifest_path,
+                repository,
+                draft,
+                &preview::github_draft_manual_review_reason(draft),
+            )?);
+        }
+    }
     let mut latest_install_draft = install_draft.clone();
     let build_result = match build_github_repository_checkout(
         checkout.checkout_dir.clone(),
@@ -4095,6 +4112,17 @@ async fn install_github_repository(
         Ok(result) => result,
         Err(error) => {
             let mut last_error = error;
+            if let Some(draft) = install_draft.as_ref() {
+                if github_build_error_requires_manual_intervention(&last_error) {
+                    maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
+                    return Err(build_github_manual_intervention_error(
+                        &preview_session.manifest_path,
+                        repository,
+                        draft,
+                        &github_build_error_manual_review_reason(&last_error),
+                    )?);
+                }
+            }
             let smoke_report = last_error
                 .downcast_ref::<commands::build::InferredManifestSmokeFailure>()
                 .map(|failure| failure.report.clone());
@@ -4104,19 +4132,32 @@ async fn install_github_repository(
             {
                 let _ = inference_feedback::submit_smoke_failed(attempt, report).await;
             }
+            if let Some(report) = smoke_report.as_ref() {
+                preview_session.record_smoke_failure(report);
+                if let Some(warning) = preview::persist_session_with_warning(&preview_session) {
+                    if !json {
+                        eprintln!("⚠️  {warning}");
+                    }
+                }
+            }
 
             if let (Some(draft), Some(report)) = (install_draft.as_ref(), smoke_report.as_ref()) {
                 if !json {
                     eprintln!("Failed to run with inferred capsule.toml.");
                     eprintln!("Reason: {}", report.message);
                 }
-                if draft_requires_manual_review(draft) {
+                if preview::draft_requires_manual_review(draft) {
+                    preview_session.record_manual_intervention_required(&report.message);
+                    if let Some(warning) = preview::persist_session_with_warning(&preview_session) {
+                        if !json {
+                            eprintln!("⚠️  {warning}");
+                        }
+                    }
                     maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
                     return Err(build_github_manual_intervention_error(
-                        &invocation_dir,
+                        &preview_session.manifest_path,
                         repository,
                         draft,
-                        inference_attempt.as_ref(),
                         &report.message,
                     )?);
                 }
@@ -4154,6 +4195,12 @@ async fn install_github_repository(
                     let next_toml = next_draft.preview_toml.clone().unwrap_or_default();
                     let draft_changed = next_toml.trim() != previous_toml.trim();
                     latest_install_draft = Some(next_draft.clone());
+                    preview_session.record_retry_draft(&next_draft, retry_ordinal);
+                    if let Some(warning) = preview::persist_session_with_warning(&preview_session) {
+                        if !json {
+                            eprintln!("⚠️  {warning}");
+                        }
+                    }
                     current_draft = next_draft;
 
                     if !draft_changed {
@@ -4209,6 +4256,14 @@ async fn install_github_repository(
                                 break;
                             };
                             current_report = retry_report.clone();
+                            preview_session.record_smoke_failure(&retry_report);
+                            if let Some(warning) =
+                                preview::persist_session_with_warning(&preview_session)
+                            {
+                                if !json {
+                                    eprintln!("⚠️  {warning}");
+                                }
+                            }
                             if let Some(attempt) = inference_attempt.as_ref() {
                                 let _ =
                                     inference_feedback::submit_smoke_failed(attempt, &retry_report)
@@ -4220,21 +4275,28 @@ async fn install_github_repository(
 
                 if let Some(result) = recovered_build {
                     result
-                } else if draft_requires_manual_review(
+                } else if preview::draft_requires_manual_review(
                     latest_install_draft.as_ref().unwrap_or(draft),
                 ) {
+                    preview_session.record_manual_intervention_required(&current_report.message);
+                    if let Some(warning) = preview::persist_session_with_warning(&preview_session) {
+                        if !json {
+                            eprintln!("⚠️  {warning}");
+                        }
+                    }
                     maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
                     return Err(build_github_manual_intervention_error(
-                        &invocation_dir,
+                        &preview_session.manifest_path,
                         repository,
                         latest_install_draft.as_ref().unwrap_or(draft),
-                        inference_attempt.as_ref(),
                         &current_report.message,
                     )?);
                 } else if can_prompt {
                     let draft_for_manual_fix = latest_install_draft.as_ref().unwrap_or(draft);
+                    let manual_manifest_path = preview_session.manifest_path.clone();
                     if let Some(recovered) = retry_github_build_after_manual_fix(
-                        &invocation_dir,
+                        &mut preview_session,
+                        &manual_manifest_path,
                         &checkout.checkout_dir,
                         repository,
                         draft_for_manual_fix,
@@ -4277,6 +4339,49 @@ async fn install_github_repository(
                 projection_preference,
                 json_output: json,
                 can_prompt_interactively: can_prompt,
+                promotion_source: Some(install::PromotionSourceInfo {
+                    preview_id: preview_session.preview_id.clone(),
+                    source_reference: preview_session.target_reference.clone(),
+                    source_metadata_path: preview_session.metadata_path.clone(),
+                    source_manifest_path: preview_session.manifest_path.clone(),
+                    manifest_source: preview_session.manifest_source.clone(),
+                    inference_mode: preview_session.inference_mode.clone(),
+                    resolved_ref: preview_session.resolved_ref.clone(),
+                    derived_plan: install::PromotionDerivedPlanSnapshot {
+                        runtime: preview_session.derived_plan.runtime.clone(),
+                        driver: preview_session.derived_plan.driver.clone(),
+                        resolved_runtime_version: preview_session
+                            .derived_plan
+                            .resolved_runtime_version
+                            .clone(),
+                        resolved_port: preview_session.derived_plan.resolved_port,
+                        resolved_lock_files: preview_session
+                            .derived_plan
+                            .resolved_lock_files
+                            .clone(),
+                        resolved_pack_include: preview_session
+                            .derived_plan
+                            .resolved_pack_include
+                            .clone(),
+                        warnings: preview_session.derived_plan.warnings.clone(),
+                        deferred_constraints: preview_session
+                            .derived_plan
+                            .deferred_constraints
+                            .clone(),
+                        promotion_eligibility: match preview_session
+                            .derived_plan
+                            .promotion_eligibility
+                        {
+                            preview::PreviewPromotionEligibility::Eligible => {
+                                "eligible".to_string()
+                            }
+                            preview::PreviewPromotionEligibility::RequiresManualReview => {
+                                "requires_manual_review".to_string()
+                            }
+                            preview::PreviewPromotionEligibility::Blocked => "blocked".to_string(),
+                        },
+                    },
+                }),
             },
         )
         .await
@@ -4291,37 +4396,22 @@ async fn install_github_repository(
 }
 
 fn show_github_draft_preview(
-    invocation_dir: &std::path::Path,
-    repository: &str,
-    install_draft: &install::GitHubInstallDraftResponse,
+    preview_session: &preview::PreviewSession,
     yes: bool,
     can_prompt: bool,
     json: bool,
 ) -> Result<()> {
-    if json || install_draft.manifest_source != "inferred" {
+    if json || preview_session.manifest_source.as_deref() != Some("inferred") {
         return Ok(());
     }
 
-    let Some(preview_toml) = install_draft.preview_toml.as_deref() else {
+    let Some(preview_toml) = preview_session.preview_toml.as_deref() else {
         return Ok(());
     };
 
-    let preview_label = format!(
-        "preview-{}",
-        install_draft
-            .resolved_ref
-            .sha
-            .chars()
-            .take(12)
-            .collect::<String>()
-    );
-    let preview_path =
-        inference_feedback::build_manual_manifest_path(invocation_dir, repository, &preview_label);
-    inference_feedback::write_manual_manifest(&preview_path, preview_toml)?;
-
     eprintln!(
         "   Generated capsule.toml preview: {}",
-        preview_path.display()
+        preview_session.manifest_path.display()
     );
     eprintln!("   ----- capsule.toml -----");
     for (index, line) in preview_toml.lines().enumerate() {
@@ -4394,7 +4484,8 @@ async fn build_github_repository_checkout(
 }
 
 async fn retry_github_build_after_manual_fix(
-    invocation_dir: &std::path::Path,
+    preview_session: &mut preview::PreviewSession,
+    manual_manifest_path: &std::path::Path,
     checkout_dir: &std::path::Path,
     repository: &str,
     install_draft: &install::GitHubInstallDraftResponse,
@@ -4408,31 +4499,28 @@ async fn retry_github_build_after_manual_fix(
         return Ok(None);
     }
 
-    let attempt_label = inference_attempt
-        .map(|attempt| attempt.attempt_id.as_str())
-        .unwrap_or("manual");
-    let manifest_path =
-        inference_feedback::build_manual_manifest_path(invocation_dir, repository, attempt_label);
     let inferred_manifest = install_draft
         .preview_toml
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("store draft previewToml missing for manual fix"))?;
-    inference_feedback::write_manual_manifest(&manifest_path, inferred_manifest)?;
+    inference_feedback::write_manual_manifest(manual_manifest_path, inferred_manifest)?;
 
-    eprintln!("Open editor for {}", manifest_path.display());
+    eprintln!("Open editor for {}", manual_manifest_path.display());
     if !inference_feedback::can_open_editor_automatically() {
         return Err(anyhow::anyhow!(build_github_manual_intervention_message(
             repository,
             install_draft,
-            &manifest_path,
+            manual_manifest_path,
             "No editor launcher is available for manual fix mode",
         )));
     }
-    inference_feedback::open_editor(&manifest_path)?;
-    let edited_manifest = inference_feedback::read_manual_manifest(&manifest_path)?;
+    inference_feedback::open_editor(manual_manifest_path)?;
+    let edited_manifest = inference_feedback::read_manual_manifest(manual_manifest_path)?;
     if edited_manifest.trim().is_empty() {
         anyhow::bail!("edited capsule.toml is empty");
     }
+    preview_session.record_manual_fix(&edited_manifest);
+    let _ = preview::persist_session_with_warning(preview_session);
 
     let retry_result = build_github_repository_checkout(
         checkout_dir.to_path_buf(),
@@ -4459,67 +4547,54 @@ async fn retry_github_build_after_manual_fix(
     Ok(Some(retry_result))
 }
 
-fn draft_requires_manual_review(draft: &install::GitHubInstallDraftResponse) -> bool {
-    if draft
-        .capsule_hint
-        .as_ref()
-        .and_then(|hint| hint.launchability.as_deref())
-        == Some("manual_review")
-    {
-        return true;
-    }
-    if draft.retryable {
-        return false;
+fn github_build_error_requires_manual_intervention(error: &anyhow::Error) -> bool {
+    let combined = error
+        .chain()
+        .map(|cause| cause.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
+
+    combined.contains("uv.lock is missing")
+        || combined.contains("uv.lock is required")
+        || combined.contains("requires uv.lock")
+        || combined.contains("pnpm-lock.yaml is missing")
+        || combined.contains("package-lock.json")
+        || combined.contains("requires one of package-lock.json")
+        || combined.contains("multiple node lockfiles detected")
+        || combined.contains("fail-closed provisioning")
+        || combined.contains("bun install --frozen-lockfile")
+        || combined.contains("lockfile had changes, but lockfile is frozen")
+        || combined.contains("lockfile is frozen")
+}
+
+fn github_build_error_manual_review_reason(error: &anyhow::Error) -> String {
+    let message = error.to_string();
+    if !message.trim().is_empty() {
+        return message;
     }
 
-    let has_required_env = draft
-        .preview_toml
-        .as_deref()
-        .map(required_env_from_preview_toml)
-        .map(|values| !values.is_empty())
-        .unwrap_or(false);
-    let has_manual_review_warning = draft
-        .capsule_hint
-        .as_ref()
-        .map(|hint| {
-            hint.warnings.iter().any(|warning| {
-                let lowered = warning.to_ascii_lowercase();
-                lowered.contains("manual")
-                    || lowered.contains("database")
-                    || lowered.contains("redis")
-                    || lowered.contains(".env")
-                    || lowered.contains("credential")
-                    || lowered.contains("secret")
-                    || lowered.contains("token")
-                    || warning.contains("環境変数")
-                    || warning.contains("手動")
-                    || warning.contains("外部")
-            })
-        })
-        .unwrap_or(false);
-
-    has_required_env || has_manual_review_warning
+    github_build_error_requires_manual_intervention(error)
+        .then_some(
+            "Provisioning failed under inferred fail-closed lockfile checks. Review the generated draft and refresh the repository lockfiles before retrying."
+                .to_string(),
+        )
+        .unwrap_or_else(|| "GitHub inferred draft build failed and requires manual review.".to_string())
 }
 
 fn build_github_manual_intervention_error(
-    invocation_dir: &std::path::Path,
+    manual_manifest_path: &std::path::Path,
     repository: &str,
     install_draft: &install::GitHubInstallDraftResponse,
-    inference_attempt: Option<&inference_feedback::InferenceAttemptHandle>,
     failure_reason: &str,
 ) -> Result<anyhow::Error> {
-    let attempt_label = inference_attempt
-        .map(|attempt| attempt.attempt_id.as_str())
-        .unwrap_or("manual");
-    let manifest_path =
-        inference_feedback::build_manual_manifest_path(invocation_dir, repository, attempt_label);
     if let Some(preview_toml) = install_draft.preview_toml.as_deref() {
-        inference_feedback::write_manual_manifest(&manifest_path, preview_toml)?;
+        inference_feedback::write_manual_manifest(manual_manifest_path, preview_toml)?;
     }
     Ok(anyhow::anyhow!(build_github_manual_intervention_message(
         repository,
         install_draft,
-        &manifest_path,
+        manual_manifest_path,
         failure_reason,
     )))
 }
@@ -4534,7 +4609,7 @@ fn build_github_manual_intervention_message(
     let required_env = install_draft
         .preview_toml
         .as_deref()
-        .map(required_env_from_preview_toml)
+        .map(preview::required_env_from_preview_toml)
         .unwrap_or_default();
     if !required_env.is_empty() {
         next_steps.push(format!(
@@ -4564,26 +4639,6 @@ fn build_github_manual_intervention_message(
         failure_reason,
         &next_steps,
     )
-}
-
-fn required_env_from_preview_toml(manifest_text: &str) -> Vec<String> {
-    let Ok(parsed) = toml::from_str::<toml::Value>(manifest_text) else {
-        return Vec::new();
-    };
-    parsed
-        .get("env")
-        .and_then(|env| env.get("required"))
-        .and_then(toml::Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(toml::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn resolve_installed_capsule_archive_in_store(
@@ -4931,6 +4986,7 @@ fn execute_open_command(
         state_bindings: state,
         inject_bindings: inject,
         reporter,
+        preview_mode: false,
     }))
 }
 
@@ -5557,10 +5613,24 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  nacelle-v1.2.3
 
     #[test]
     fn github_manual_intervention_extracts_required_env() {
-        let required = required_env_from_preview_toml(
+        let required = preview::required_env_from_preview_toml(
             r#"
 [env]
 required = ["DATABASE_URL", "REDIS_URL"]
+"#,
+        );
+
+        assert_eq!(required, vec!["DATABASE_URL", "REDIS_URL"]);
+    }
+
+    #[test]
+    fn github_manual_intervention_prefers_root_required_env() {
+        let required = preview::required_env_from_preview_toml(
+            r#"
+required_env = ["DATABASE_URL", "REDIS_URL"]
+
+[env]
+required = ["LEGACY_ONLY"]
 "#,
         );
 
@@ -5612,5 +5682,26 @@ required = ["DATABASE_URL"]
         assert!(message.contains("DATABASE_URL"));
         assert!(message.contains("github.com/octocat/hello-world"));
         assert!(message.contains("/repo/.tmp/ato-inference/attempt/capsule.toml"));
+    }
+
+    #[test]
+    fn github_build_error_requires_manual_intervention_for_missing_uv_lock() {
+        let error = anyhow::anyhow!(
+            "uv.lock is missing for '/tmp/demo/pyproject.toml'. Generate it with `uv lock`."
+        );
+
+        assert!(github_build_error_requires_manual_intervention(&error));
+        assert!(github_build_error_manual_review_reason(&error).contains("uv.lock"));
+    }
+
+    #[test]
+    fn github_build_error_requires_manual_intervention_for_stale_bun_lock() {
+        let error = anyhow::anyhow!(
+            "provision command failed with exit code 1: bun install --frozen-lockfile\nerror: lockfile had changes, but lockfile is frozen"
+        );
+
+        assert!(github_build_error_requires_manual_intervention(&error));
+        assert!(github_build_error_manual_review_reason(&error)
+            .contains("bun install --frozen-lockfile"));
     }
 }
