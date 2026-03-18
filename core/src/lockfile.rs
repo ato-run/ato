@@ -1336,6 +1336,9 @@ async fn generate_pnpm_lock(
             .await?;
         return Ok(None);
     }
+    if pnpm_lock.exists() {
+        return Ok(Some(pnpm_lock));
+    }
     let Some(_) = deps_path else {
         return Ok(None);
     };
@@ -3673,6 +3676,55 @@ entrypoint = "main.ts"
         fs::write(
             temp.path().join("deno.lock"),
             r#"{"version":"4","specifiers":{},"packages":{}}"#,
+        )
+        .unwrap();
+
+        let manifest_raw: toml::Value = toml::from_str(manifest_text).unwrap();
+        let reporter: Arc<dyn CapsuleReporter + 'static> = Arc::new(crate::reporter::NoOpReporter);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let lock_path = rt
+            .block_on(ensure_lockfile(
+                &manifest_path,
+                &manifest_raw,
+                manifest_text,
+                reporter,
+                false,
+            ))
+            .unwrap();
+
+        assert!(lock_path.exists());
+        assert!(temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
+    }
+
+    #[test]
+    fn ensure_lockfile_accepts_existing_pnpm_lock() {
+        let temp = TempDir::new().unwrap();
+        let manifest_path = temp.path().join("capsule.toml");
+        let manifest_text = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node src/bin.ts fixtures/db.json"
+
+[pack]
+include = ["src/**", "fixtures/db.json", "package.json", "pnpm-lock.yaml"]
+"#;
+        fs::write(&manifest_path, manifest_text).unwrap();
+        fs::create_dir_all(temp.path().join("src")).unwrap();
+        fs::create_dir_all(temp.path().join("fixtures")).unwrap();
+        fs::write(temp.path().join("src/bin.ts"), "console.log('demo')").unwrap();
+        fs::write(temp.path().join("fixtures/db.json"), "{}\n").unwrap();
+        fs::write(
+            temp.path().join("package.json"),
+            r#"{"name":"demo","packageManager":"pnpm@10.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
         )
         .unwrap();
 

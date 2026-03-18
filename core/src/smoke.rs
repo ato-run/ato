@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use std::os::unix::process::CommandExt;
 
 use crate::error::CapsuleError;
+use crate::isolation::HostIsolationContext;
 
 const DEFAULT_STARTUP_TIMEOUT_MS: u64 = 2000;
 const PORT_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -246,10 +247,13 @@ pub fn run_capsule_smoke(
             None,
         )
     })?;
+    let isolated_env = prepare_isolated_host_environment(extract_dir.path())?;
+    prepare_smoke_working_directory(extract_dir.path(), &service, &isolated_env)?;
 
-    let mut child = spawn_main_service(extract_dir.path(), &service).map_err(|err| {
-        SmokeFailureReport::new(SmokeFailureClass::SpawnFailed, err.to_string(), "", None)
-    })?;
+    let mut child =
+        spawn_main_service(extract_dir.path(), &service, &isolated_env).map_err(|err| {
+            SmokeFailureReport::new(SmokeFailureClass::SpawnFailed, err.to_string(), "", None)
+        })?;
     let mut stderr_capture = StderrTailCapture::from_child(&mut child);
     let startup_timeout = Duration::from_millis(options.startup_timeout_ms);
     let deadline = Instant::now() + startup_timeout;
@@ -318,7 +322,9 @@ pub fn run_capsule_smoke(
         }
     }
 
-    if let Err(mut report) = run_check_commands(extract_dir.path(), &service, &options) {
+    if let Err(mut report) =
+        run_check_commands(extract_dir.path(), &service, &options, &isolated_env)
+    {
         let _ = kill_child(&mut child);
         report.stderr_tail =
             combine_stderr(finish_capture(&mut stderr_capture), report.stderr_tail);
@@ -532,7 +538,11 @@ fn resolve_required_port(
     Ok(None)
 }
 
-fn spawn_main_service(root: &Path, service: &MainService) -> std::io::Result<Child> {
+fn spawn_main_service(
+    root: &Path,
+    service: &MainService,
+    isolated_env: &HostIsolationContext,
+) -> std::io::Result<Child> {
     let cwd_path = resolve_path(root, &service.cwd);
     let executable = resolve_path_with_cwd(root, &cwd_path, &service.executable);
     let mut cmd = Command::new(&executable);
@@ -546,13 +556,7 @@ fn spawn_main_service(root: &Path, service: &MainService) -> std::io::Result<Chi
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::piped());
-
-    for (k, v) in &service.env {
-        cmd.env(k, resolve_env_value(root, v));
-    }
-    for (k, v) in &service.ports {
-        cmd.env(k, v.to_string());
-    }
+    apply_isolated_command_env(&mut cmd, root, service, isolated_env);
 
     #[cfg(unix)]
     unsafe {
@@ -575,10 +579,72 @@ fn spawn_main_service(root: &Path, service: &MainService) -> std::io::Result<Chi
     })
 }
 
+fn prepare_smoke_working_directory(
+    root: &Path,
+    service: &MainService,
+    isolated_env: &HostIsolationContext,
+) -> std::result::Result<(), SmokeFailureReport> {
+    let cwd_path = resolve_path(root, &service.cwd);
+    let package_json = cwd_path.join("package.json");
+    let node_modules = cwd_path.join("node_modules");
+    if !package_json.exists() || node_modules.exists() {
+        return Ok(());
+    }
+
+    let install = if cwd_path.join("pnpm-lock.yaml").exists() {
+        Some(("pnpm", vec!["install", "--frozen-lockfile"]))
+    } else if cwd_path.join("package-lock.json").exists() {
+        Some(("npm", vec!["ci"]))
+    } else if cwd_path.join("bun.lock").exists() || cwd_path.join("bun.lockb").exists() {
+        Some(("bun", vec!["install", "--frozen-lockfile"]))
+    } else {
+        None
+    };
+
+    let Some((program, args)) = install else {
+        return Ok(());
+    };
+    let joined_args = args.join(" ");
+
+    let mut command = Command::new(program);
+    command.args(&args);
+    command.current_dir(&cwd_path);
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::piped());
+    apply_isolated_command_env(&mut command, root, service, isolated_env);
+
+    let output = command.output().map_err(|err| {
+        SmokeFailureReport::new(
+            SmokeFailureClass::SpawnFailed,
+            format!(
+                "failed to prepare smoke dependencies with '{program} {}': {err}",
+                joined_args
+            ),
+            "",
+            None,
+        )
+    })?;
+    if !output.status.success() {
+        return Err(SmokeFailureReport::new(
+            SmokeFailureClass::SpawnFailed,
+            format!(
+                "smoke dependency preparation failed (status {}): {} {}",
+                output.status, program, joined_args
+            ),
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            output.status.code(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn run_check_commands(
     root: &Path,
     service: &MainService,
     options: &SmokeOptions,
+    isolated_env: &HostIsolationContext,
 ) -> std::result::Result<(), SmokeFailureReport> {
     if options.check_commands.is_empty() {
         return Ok(());
@@ -609,12 +675,7 @@ fn run_check_commands(
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::piped());
-        for (k, v) in &service.env {
-            cmd.env(k, resolve_env_value(root, v));
-        }
-        for (k, v) in &service.ports {
-            cmd.env(k, v.to_string());
-        }
+        apply_isolated_command_env(&mut cmd, root, service, isolated_env);
 
         let output = cmd.output().map_err(|e| {
             SmokeFailureReport::new(
@@ -638,6 +699,39 @@ fn run_check_commands(
     }
 
     Ok(())
+}
+
+fn prepare_isolated_host_environment(
+    root: &Path,
+) -> std::result::Result<HostIsolationContext, SmokeFailureReport> {
+    HostIsolationContext::new(root, "smoke").map_err(|err| {
+        SmokeFailureReport::new(
+            SmokeFailureClass::ConfigInvalid,
+            format!("failed to prepare isolated smoke environment: {err}"),
+            "",
+            None,
+        )
+    })
+}
+
+fn apply_isolated_command_env(
+    command: &mut Command,
+    root: &Path,
+    service: &MainService,
+    isolated_env: &HostIsolationContext,
+) {
+    let extra_env = service
+        .env
+        .iter()
+        .map(|(key, value)| (key.clone(), resolve_env_value(root, value)))
+        .chain(
+            service
+                .ports
+                .iter()
+                .map(|(key, value)| (key.clone(), value.to_string())),
+        )
+        .collect::<Vec<_>>();
+    isolated_env.apply_to_command(command, extra_env);
 }
 
 fn kill_child(child: &mut Child) -> Result<(), CapsuleError> {
@@ -831,6 +925,34 @@ fn combine_stderr(primary: String, secondary: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    struct PathGuard {
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl PathGuard {
+        fn prepend(path: &Path) -> Self {
+            let original = std::env::var_os("PATH");
+            let mut parts = vec![path.to_path_buf()];
+            if let Some(existing) = &original {
+                parts.extend(std::env::split_paths(existing));
+            }
+            let joined = std::env::join_paths(parts).expect("join PATH");
+            std::env::set_var("PATH", &joined);
+            Self { original }
+        }
+    }
+
+    impl Drop for PathGuard {
+        fn drop(&mut self) {
+            if let Some(original) = &self.original {
+                std::env::set_var("PATH", original);
+            } else {
+                std::env::remove_var("PATH");
+            }
+        }
+    }
 
     #[test]
     fn parse_smoke_defaults() {
@@ -888,6 +1010,93 @@ startup_timeout_ms = 0
         let combined = combine_stderr("main stderr".to_string(), "check stderr".to_string());
         assert!(combined.contains("main stderr"));
         assert!(combined.contains("check stderr"));
+    }
+
+    #[test]
+    fn prepare_smoke_working_directory_installs_pnpm_dependencies_when_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_dir = temp.path().join("source");
+        fs::create_dir_all(&source_dir).expect("mkdir source");
+        fs::write(source_dir.join("package.json"), "{}\n").expect("write package.json");
+        fs::write(
+            source_dir.join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        )
+        .expect("write pnpm lock");
+
+        let bin_dir = temp.path().join("bin");
+        fs::create_dir_all(&bin_dir).expect("mkdir bin");
+        let pnpm_path = bin_dir.join("pnpm");
+        let env_capture_path = temp.path().join("captured-env.txt");
+        fs::write(
+            &pnpm_path,
+            format!(
+                "#!/bin/sh\n{{\nprintf 'HOME=%s\\n' \"$HOME\"\nprintf 'TMPDIR=%s\\n' \"$TMPDIR\"\nprintf 'npm_config_cache=%s\\n' \"$npm_config_cache\"\nprintf 'pnpm_config_store_dir=%s\\n' \"$pnpm_config_store_dir\"\nprintf 'SECRET_HOST_TOKEN=%s\\n' \"$SECRET_HOST_TOKEN\"\n}} > '{}'\nmkdir -p node_modules\nexit 0\n",
+                env_capture_path.display()
+            ),
+        )
+        .expect("write fake pnpm");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&pnpm_path).expect("stat pnpm").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&pnpm_path, perms).expect("chmod pnpm");
+        }
+
+        let _path_guard = PathGuard::prepend(&bin_dir);
+        let service = MainService {
+            executable: "sh".to_string(),
+            args: vec!["-c".to_string(), "echo ok".to_string()],
+            cwd: "source".to_string(),
+            env: HashMap::new(),
+            ports: HashMap::new(),
+            health_port: None,
+        };
+
+        std::env::set_var("SECRET_HOST_TOKEN", "do-not-leak");
+        let isolated_env = prepare_isolated_host_environment(temp.path()).expect("isolated env");
+
+        prepare_smoke_working_directory(temp.path(), &service, &isolated_env)
+            .expect("prepare deps");
+
+        assert!(source_dir.join("node_modules").is_dir());
+        let captured = fs::read_to_string(&env_capture_path).expect("read captured env");
+        let isolated_home = temp
+            .path()
+            .join(".ato-smoke-host")
+            .join("home")
+            .to_string_lossy()
+            .to_string();
+        let isolated_tmp = temp
+            .path()
+            .join(".ato-smoke-host")
+            .join("tmp")
+            .to_string_lossy()
+            .to_string();
+        let isolated_npm_cache = temp
+            .path()
+            .join(".ato-smoke-host")
+            .join("cache")
+            .join("npm")
+            .to_string_lossy()
+            .to_string();
+        let isolated_pnpm_store = temp
+            .path()
+            .join(".ato-smoke-host")
+            .join("cache")
+            .join("pnpm-store")
+            .to_string_lossy()
+            .to_string();
+
+        assert!(captured.contains(&format!("HOME={isolated_home}")));
+        assert!(captured.contains(&format!("TMPDIR={isolated_tmp}")));
+        assert!(captured.contains(&format!("npm_config_cache={isolated_npm_cache}")));
+        assert!(captured.contains(&format!("pnpm_config_store_dir={isolated_pnpm_store}")));
+        assert!(captured.contains("SECRET_HOST_TOKEN="));
+        assert!(!captured.contains("do-not-leak"));
+
+        std::env::remove_var("SECRET_HOST_TOKEN");
     }
 
     #[cfg(unix)]
