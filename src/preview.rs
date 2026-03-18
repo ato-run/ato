@@ -343,22 +343,9 @@ pub fn draft_requires_manual_review(draft: &GitHubInstallDraftResponse) -> bool 
         .capsule_hint
         .as_ref()
         .map(|hint| {
-            hint.warnings.iter().any(|warning| {
-                let lowered = warning.to_ascii_lowercase();
-                lowered.contains("manual")
-                    || lowered.contains("lockfile")
-                    || lowered.contains("frozen-lockfile")
-                    || lowered.contains("uv.lock")
-                    || lowered.contains("database")
-                    || lowered.contains("redis")
-                    || lowered.contains(".env")
-                    || lowered.contains("credential")
-                    || lowered.contains("secret")
-                    || lowered.contains("token")
-                    || warning.contains("環境変数")
-                    || warning.contains("手動")
-                    || warning.contains("外部")
-            })
+            hint.warnings
+                .iter()
+                .any(|warning| warning_requires_manual_review(warning))
         })
         .unwrap_or(false);
 
@@ -367,19 +354,40 @@ pub fn draft_requires_manual_review(draft: &GitHubInstallDraftResponse) -> bool 
 
 pub fn github_draft_manual_review_reason(draft: &GitHubInstallDraftResponse) -> String {
     if let Some(warning) = draft.capsule_hint.as_ref().and_then(|hint| {
-        hint.warnings.iter().find(|warning| {
-            let lowered = warning.to_ascii_lowercase();
-            lowered.contains("manual")
-                || lowered.contains("lockfile")
-                || lowered.contains("frozen-lockfile")
-                || lowered.contains("uv.lock")
-        })
+        hint.warnings
+            .iter()
+            .find(|warning| warning_requires_manual_review(warning))
     }) {
         return warning.clone();
     }
 
     "Generated draft requires manual review before fail-closed provisioning can continue."
         .to_string()
+}
+
+fn warning_requires_manual_review(warning: &str) -> bool {
+    let lowered = warning.to_ascii_lowercase();
+
+    lowered.contains("frozen-lockfile")
+        || lowered.contains("uv.lock")
+        || lowered.contains("package-lock.json")
+        || lowered.contains("pnpm-lock.yaml")
+        || lowered.contains("bun.lock")
+        || lowered.contains("multiple node lockfiles")
+        || lowered.contains("database")
+        || lowered.contains("redis")
+        || lowered.contains("credential")
+        || lowered.contains("secret")
+        || lowered.contains("token")
+        || lowered.contains("requires manual intervention")
+        || lowered.contains("manual intervention required")
+        || lowered.contains("required environment variable")
+        || lowered.contains("required environment variables")
+        || warning.contains("必須環境変数")
+        || warning.contains("環境変数が必要")
+        || warning.contains("環境変数を設定")
+        || warning.contains("外部DB")
+        || warning.contains("認証")
 }
 
 pub fn required_env_from_preview_toml(manifest_text: &str) -> Vec<String> {
@@ -559,9 +567,9 @@ fn summarize_preview_toml(manifest_text: &str) -> PreviewTomlSummary {
 #[cfg(test)]
 mod tests {
     use super::{
-        draft_requires_manual_review, preview_root, preview_session_layout,
-        required_env_from_preview_toml, DerivedExecutionPlan, PreviewPromotionEligibility,
-        PreviewSession, PreviewTargetKind, ENV_PREVIEW_ROOT,
+        draft_requires_manual_review, github_draft_manual_review_reason, preview_root,
+        preview_session_layout, required_env_from_preview_toml, DerivedExecutionPlan,
+        PreviewPromotionEligibility, PreviewSession, PreviewTargetKind, ENV_PREVIEW_ROOT,
     };
     use crate::install::{
         GitHubInstallDraftCapsuleToml, GitHubInstallDraftHint, GitHubInstallDraftRepo,
@@ -703,6 +711,120 @@ mod tests {
         };
 
         assert!(draft_requires_manual_review(&draft));
+    }
+
+    #[test]
+    fn draft_allows_deno_advisory_warnings_when_launchable() {
+        let draft = GitHubInstallDraftResponse {
+            repo: GitHubInstallDraftRepo {
+                owner: "jellydn".to_string(),
+                repo: "hono-minimal-deno-app".to_string(),
+                full_name: "jellydn/hono-minimal-deno-app".to_string(),
+                default_branch: "main".to_string(),
+            },
+            capsule_toml: GitHubInstallDraftCapsuleToml { exists: false },
+            repo_ref: "jellydn/hono-minimal-deno-app".to_string(),
+            proposed_run_command: None,
+            proposed_install_command: "ato run github.com/jellydn/hono-minimal-deno-app"
+                .to_string(),
+            resolved_ref: GitHubInstallDraftResolvedRef {
+                ref_name: "main".to_string(),
+                sha: "deadbeef".to_string(),
+            },
+            manifest_source: "inferred".to_string(),
+            preview_toml: Some(
+                "schema_version = \"0.3\"\nname = \"hono-minimal-deno-app\"\nruntime = \"source/deno\"\nrun = \"deno task start\"\n"
+                    .to_string(),
+            ),
+            capsule_hint: Some(GitHubInstallDraftHint {
+                confidence: "high".to_string(),
+                warnings: vec![
+                    "Deno runtime detected but runtime field set to source/node per ExtractedFacts; actual runtime is Deno which requires 'deno run' commands, not Node.js package managers. The capsule.toml v0.3 schema does not have a dedicated source/deno runtime; consider manual review if Deno-specific provisioning is required.".to_string(),
+                    "deno.lock exists but Deno lockfile provisioning is not covered by standard Node.js package manager inference; Deno's native lockfile handling may require custom provision logic.".to_string(),
+                ],
+                launchability: Some("runnable".to_string()),
+            }),
+            inference_mode: Some("rules".to_string()),
+            retryable: false,
+        };
+
+        assert!(!draft_requires_manual_review(&draft));
+    }
+
+    #[test]
+    fn draft_requires_manual_review_for_explicit_lockfile_blocker_warning() {
+        let draft = GitHubInstallDraftResponse {
+            repo: GitHubInstallDraftRepo {
+                owner: "example".to_string(),
+                repo: "repo".to_string(),
+                full_name: "example/repo".to_string(),
+                default_branch: "main".to_string(),
+            },
+            capsule_toml: GitHubInstallDraftCapsuleToml { exists: false },
+            repo_ref: "example/repo".to_string(),
+            proposed_run_command: None,
+            proposed_install_command: "ato run github.com/example/repo".to_string(),
+            resolved_ref: GitHubInstallDraftResolvedRef {
+                ref_name: "main".to_string(),
+                sha: "abc123".to_string(),
+            },
+            manifest_source: "inferred".to_string(),
+            preview_toml: Some("schema_version = \"0.3\"\nname = \"demo\"\n".to_string()),
+            capsule_hint: Some(GitHubInstallDraftHint {
+                confidence: "high".to_string(),
+                warnings: vec![
+                    "pnpm-lock.yaml is required for fail-closed provisioning".to_string()
+                ],
+                launchability: Some("runnable".to_string()),
+            }),
+            inference_mode: Some("rules".to_string()),
+            retryable: false,
+        };
+
+        assert!(draft_requires_manual_review(&draft));
+        assert_eq!(
+            github_draft_manual_review_reason(&draft),
+            "pnpm-lock.yaml is required for fail-closed provisioning"
+        );
+    }
+
+    #[test]
+    fn draft_allows_optional_port_env_advisory_warning() {
+        let draft = GitHubInstallDraftResponse {
+            repo: GitHubInstallDraftRepo {
+                owner: "typicode".to_string(),
+                repo: "json-server".to_string(),
+                full_name: "typicode/json-server".to_string(),
+                default_branch: "main".to_string(),
+            },
+            capsule_toml: GitHubInstallDraftCapsuleToml { exists: false },
+            repo_ref: "typicode/json-server".to_string(),
+            proposed_run_command: None,
+            proposed_install_command: "ato run github.com/typicode/json-server".to_string(),
+            resolved_ref: GitHubInstallDraftResolvedRef {
+                ref_name: "main".to_string(),
+                sha: "deadbeef".to_string(),
+            },
+            manifest_source: "inferred".to_string(),
+            preview_toml: Some(
+                "schema_version = \"0.3\"\nname = \"json-server\"\nruntime = \"source/node\"\nrun = \"node src/bin.ts fixtures/db.json\"\n"
+                    .to_string(),
+            ),
+            capsule_hint: Some(GitHubInstallDraftHint {
+                confidence: "high".to_string(),
+                warnings: vec![
+                    "db.jsonファイルが必須です。実行時に第1引数として指定する必要があります。"
+                        .to_string(),
+                    "PORT環境変数またはコマンドラインオプション-pで3000以外のポートを指定できます。"
+                        .to_string(),
+                ],
+                launchability: Some("runnable".to_string()),
+            }),
+            inference_mode: Some("rules".to_string()),
+            retryable: false,
+        };
+
+        assert!(!draft_requires_manual_review(&draft));
     }
 
     #[test]
