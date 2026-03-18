@@ -352,7 +352,7 @@ fn extract_capsule(capsule_path: &Path, out_dir: &Path) -> Result<(), CapsuleErr
     Ok(())
 }
 
-fn parse_smoke_options(
+pub(crate) fn parse_smoke_options(
     manifest: &toml::Value,
     target_label: &str,
 ) -> Result<SmokeOptions, CapsuleError> {

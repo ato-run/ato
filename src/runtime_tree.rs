@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use rand::RngCore;
+use serde::Deserialize;
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
@@ -15,6 +16,13 @@ use capsule_core::types::CapsuleManifest;
 const STORE_DIR: &str = ".ato/store";
 const RUNTIMES_DIR: &str = ".ato/runtimes";
 const CURRENT_SYMLINK: &str = "current";
+const PROMOTED_NAMESPACE: &str = "promoted";
+
+#[derive(Debug, Clone, Deserialize)]
+struct StoredPromotionMetadata {
+    performed: bool,
+    content_hash: Option<String>,
+}
 
 pub fn prepare_runtime_tree(
     publisher: &str,
@@ -60,7 +68,59 @@ fn prepare_runtime_tree_at(
 }
 
 pub fn prepare_store_runtime_for_capsule(capsule_path: &Path) -> Result<Option<PathBuf>> {
-    let Some((publisher, slug, version)) = parse_store_capsule_identity(capsule_path)? else {
+    prepare_store_runtime_for_capsule_at(capsule_path, &store_root()?, &runtime_root()?)
+}
+
+pub fn prepare_promoted_runtime_for_capsule(capsule_path: &Path) -> Result<Option<PathBuf>> {
+    let store_root = store_root()?;
+    let runtime_root = runtime_root()?;
+    let Some((publisher, slug, version)) =
+        parse_store_capsule_identity_at(capsule_path, &store_root)?
+    else {
+        return Ok(None);
+    };
+    let install_dir = capsule_path
+        .parent()
+        .context("Installed capsule must have parent directory")?;
+    let promotion = load_promotion_metadata(&install_dir.join("promotion.json"))?;
+    let Some(promotion) = promotion else {
+        return Ok(None);
+    };
+    if !promotion.performed {
+        return Ok(None);
+    }
+
+    let bytes = fs::read(capsule_path).with_context(|| {
+        format!(
+            "Failed to read installed capsule: {}",
+            capsule_path.display()
+        )
+    })?;
+    validate_promotion_metadata(capsule_path, &promotion, &bytes)?;
+    let manifest_path = prepare_runtime_tree_at(
+        &runtime_root.join(PROMOTED_NAMESPACE),
+        &publisher,
+        &slug,
+        &version,
+        &bytes,
+    )?;
+    Ok(Some(manifest_path))
+}
+
+fn prepare_store_runtime_for_capsule_at(
+    capsule_path: &Path,
+    store_root: &Path,
+    runtime_root: &Path,
+) -> Result<Option<PathBuf>> {
+    if let Some(manifest_path) =
+        prepare_promoted_runtime_for_capsule_at(capsule_path, store_root, runtime_root)?
+    {
+        return Ok(Some(manifest_path));
+    }
+
+    let Some((publisher, slug, version)) =
+        parse_store_capsule_identity_at(capsule_path, store_root)?
+    else {
         return Ok(None);
     };
     let bytes = fs::read(capsule_path).with_context(|| {
@@ -69,7 +129,45 @@ pub fn prepare_store_runtime_for_capsule(capsule_path: &Path) -> Result<Option<P
             capsule_path.display()
         )
     })?;
-    let manifest_path = prepare_runtime_tree(&publisher, &slug, &version, &bytes)?;
+    let manifest_path = prepare_runtime_tree_at(runtime_root, &publisher, &slug, &version, &bytes)?;
+    Ok(Some(manifest_path))
+}
+
+fn prepare_promoted_runtime_for_capsule_at(
+    capsule_path: &Path,
+    store_root: &Path,
+    runtime_root: &Path,
+) -> Result<Option<PathBuf>> {
+    let Some((publisher, slug, version)) =
+        parse_store_capsule_identity_at(capsule_path, store_root)?
+    else {
+        return Ok(None);
+    };
+    let install_dir = capsule_path
+        .parent()
+        .context("Installed capsule must have parent directory")?;
+    let promotion = load_promotion_metadata(&install_dir.join("promotion.json"))?;
+    let Some(promotion) = promotion else {
+        return Ok(None);
+    };
+    if !promotion.performed {
+        return Ok(None);
+    }
+
+    let bytes = fs::read(capsule_path).with_context(|| {
+        format!(
+            "Failed to read installed capsule: {}",
+            capsule_path.display()
+        )
+    })?;
+    validate_promotion_metadata(capsule_path, &promotion, &bytes)?;
+    let manifest_path = prepare_runtime_tree_at(
+        &runtime_root.join(PROMOTED_NAMESPACE),
+        &publisher,
+        &slug,
+        &version,
+        &bytes,
+    )?;
     Ok(Some(manifest_path))
 }
 
@@ -86,9 +184,11 @@ fn store_root() -> Result<PathBuf> {
     Ok(home.join(STORE_DIR))
 }
 
-fn parse_store_capsule_identity(capsule_path: &Path) -> Result<Option<(String, String, String)>> {
-    let store_root = store_root()?;
-    let Ok(relative) = capsule_path.strip_prefix(&store_root) else {
+fn parse_store_capsule_identity_at(
+    capsule_path: &Path,
+    store_root: &Path,
+) -> Result<Option<(String, String, String)>> {
+    let Ok(relative) = capsule_path.strip_prefix(store_root) else {
         return Ok(None);
     };
     let components = relative
@@ -103,6 +203,37 @@ fn parse_store_capsule_identity(capsule_path: &Path) -> Result<Option<(String, S
         components[1].clone(),
         components[2].clone(),
     )))
+}
+
+fn load_promotion_metadata(path: &Path) -> Result<Option<StoredPromotionMetadata>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read(path)
+        .with_context(|| format!("Failed to read promotion metadata: {}", path.display()))?;
+    let metadata = serde_json::from_slice(&raw)
+        .with_context(|| format!("Failed to parse promotion metadata: {}", path.display()))?;
+    Ok(Some(metadata))
+}
+
+fn validate_promotion_metadata(
+    capsule_path: &Path,
+    promotion: &StoredPromotionMetadata,
+    capsule_bytes: &[u8],
+) -> Result<()> {
+    let Some(expected_hash) = promotion.content_hash.as_deref() else {
+        return Ok(());
+    };
+    let actual_hash = format!("blake3:{}", blake3::hash(capsule_bytes).to_hex());
+    if actual_hash != expected_hash {
+        bail!(
+            "Promotion metadata hash mismatch for {}: expected {}, got {}",
+            capsule_path.display(),
+            expected_hash,
+            actual_hash
+        );
+    }
+    Ok(())
 }
 
 fn extract_capsule_to_runtime_dir(capsule_bytes: &[u8], runtime_dir: &Path) -> Result<()> {
@@ -257,7 +388,7 @@ fn random_suffix() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{prepare_runtime_tree_at, random_suffix};
+    use super::{prepare_runtime_tree_at, prepare_store_runtime_for_capsule_at, random_suffix};
     use std::fs;
     use std::io::Cursor;
 
@@ -350,5 +481,56 @@ mod tests {
         let value = random_suffix();
         assert_eq!(value.len(), 16);
         assert!(value.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn prepare_store_runtime_prefers_promoted_namespace_when_promotion_exists() {
+        let store_root = tempfile::tempdir().expect("store");
+        let runtime_root = tempfile::tempdir().expect("runtime");
+
+        let version = "1.0.0";
+        let capsule = build_test_capsule(version, "source/main.txt", b"promoted");
+        let artifact_hash = format!("blake3:{}", blake3::hash(&capsule).to_hex());
+
+        let install_dir = store_root
+            .path()
+            .join("koh0920")
+            .join("sample")
+            .join(version);
+        fs::create_dir_all(&install_dir).expect("install dir");
+        let capsule_path = install_dir.join("sample-1.0.0.capsule");
+        fs::write(&capsule_path, &capsule).expect("write capsule");
+        fs::write(
+            install_dir.join("promotion.json"),
+            format!(
+                "{{\n  \"performed\": true,\n  \"content_hash\": \"{}\"\n}}",
+                artifact_hash
+            ),
+        )
+        .expect("write promotion");
+
+        let manifest_path = prepare_store_runtime_for_capsule_at(
+            &capsule_path,
+            store_root.path(),
+            runtime_root.path(),
+        )
+        .expect("prepare")
+        .expect("manifest path");
+
+        assert!(manifest_path.starts_with(runtime_root.path().join("promoted")));
+        let current = runtime_root
+            .path()
+            .join("promoted")
+            .join("koh0920")
+            .join("sample")
+            .join("current");
+        let target = fs::read_link(&current).expect("current symlink");
+        let resolved = current
+            .parent()
+            .expect("parent")
+            .join(target)
+            .join("source")
+            .join("main.txt");
+        assert_eq!(fs::read(resolved).expect("payload"), b"promoted");
     }
 }

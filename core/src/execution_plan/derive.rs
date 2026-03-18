@@ -14,6 +14,7 @@ use crate::execution_plan::model::{
 };
 use crate::manifest;
 use crate::router::{self, ExecutionProfile, RuntimeDecision};
+use crate::types::ValidationMode;
 
 #[derive(Debug, Clone)]
 pub struct CompiledExecutionPlan {
@@ -27,11 +28,32 @@ pub fn compile_execution_plan(
     profile: ExecutionProfile,
     target_label: Option<&str>,
 ) -> Result<CompiledExecutionPlan, AtoExecutionError> {
-    let loaded = manifest::load_manifest(manifest_path).map_err(|err| {
-        AtoExecutionError::policy_violation(format!("failed to load manifest: {err}"))
-    })?;
+    compile_execution_plan_with_validation_mode(
+        manifest_path,
+        profile,
+        target_label,
+        ValidationMode::Strict,
+    )
+}
 
-    let decision = router::route_manifest(manifest_path, profile, target_label).map_err(|err| {
+pub fn compile_execution_plan_with_validation_mode(
+    manifest_path: &Path,
+    profile: ExecutionProfile,
+    target_label: Option<&str>,
+    validation_mode: ValidationMode,
+) -> Result<CompiledExecutionPlan, AtoExecutionError> {
+    let loaded = manifest::load_manifest_with_validation_mode(manifest_path, validation_mode)
+        .map_err(|err| {
+            AtoExecutionError::policy_violation(format!("failed to load manifest: {err}"))
+        })?;
+
+    let decision = router::route_manifest_with_validation_mode(
+        manifest_path,
+        profile,
+        target_label,
+        validation_mode,
+    )
+    .map_err(|err| {
         AtoExecutionError::policy_violation(format!("failed to route manifest: {err}"))
     })?;
 
