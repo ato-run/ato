@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -358,20 +357,6 @@ pub fn open_editor(path: &Path) -> Result<()> {
 
 pub fn can_open_editor_automatically() -> bool {
     resolved_editor_command().is_some()
-}
-
-pub fn prompt_yes_no(prompt: &str, default_yes: bool) -> Result<bool> {
-    print!("{prompt}");
-    io::stdout().flush().context("failed to flush prompt")?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .context("failed to read prompt input")?;
-    let normalized = input.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
-        return Ok(default_yes);
-    }
-    Ok(matches!(normalized.as_str(), "y" | "yes"))
 }
 
 pub fn summarize_manifest_diff(inferred_toml: &str, actual_toml: &str) -> String {

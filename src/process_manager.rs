@@ -331,7 +331,10 @@ fn is_process_alive(pid: i32) -> bool {
     #[cfg(unix)]
     unsafe {
         let result = libc::kill(pid, 0);
-        result == 0 || errno() != libc::ESRCH
+        if result != 0 && errno() == libc::ESRCH {
+            return false;
+        }
+        !is_unix_zombie(pid)
     }
 
     #[cfg(windows)]
@@ -356,6 +359,26 @@ fn is_process_alive(pid: i32) -> bool {
     {
         false
     }
+}
+
+#[cfg(unix)]
+fn is_unix_zombie(pid: i32) -> bool {
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "stat="])
+        .output();
+
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .chars()
+        .next()
+        .is_some_and(|state| state == 'Z')
 }
 
 #[cfg(unix)]
@@ -660,6 +683,36 @@ mod tests {
     }
 
     #[test]
+    fn host_fallback_process_info_round_trips() {
+        let info = ProcessInfo {
+            id: "test-host-fallback".to_string(),
+            name: "json-server".to_string(),
+            pid: 22222,
+            workload_pid: None,
+            status: ProcessStatus::Ready,
+            runtime: "source/node [host-fallback]".to_string(),
+            start_time: SystemTime::UNIX_EPOCH,
+            manifest_path: Some(PathBuf::from("/workspace/capsule.toml")),
+            scoped_id: Some("typicode/json-server".to_string()),
+            target_label: Some("app".to_string()),
+            requested_port: Some(3000),
+            log_path: None,
+            ready_at: Some(SystemTime::UNIX_EPOCH),
+            last_event: Some("ready".to_string()),
+            last_error: None,
+            exit_code: None,
+        };
+
+        let serialized = toml::to_string(&info).expect("serialize host fallback process info");
+        let deserialized: ProcessInfo =
+            toml::from_str(&serialized).expect("deserialize host fallback process info");
+
+        assert_eq!(deserialized.runtime, "source/node [host-fallback]");
+        assert_eq!(deserialized.requested_port, Some(3000));
+        assert_eq!(deserialized.status, ProcessStatus::Ready);
+    }
+
+    #[test]
     fn cleanup_scoped_processes_removes_matching_records() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let run_dir = tmp.path().join("run");
@@ -744,8 +797,54 @@ mod tests {
     fn non_nacelle_runtime_skips_strict_identity_check() {
         assert!(runtime_identity_matches("host", None));
         assert!(runtime_identity_matches(
+            "source/node [host-fallback]",
+            None
+        ));
+        assert!(runtime_identity_matches(
             "host",
             Some("/usr/bin/python app.py")
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_process_terminates_host_fallback_record() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run_dir = tmp.path().join("run");
+        fs::create_dir_all(&run_dir).expect("create run dir");
+        let pm = ProcessManager { run_dir };
+
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+
+        let info = ProcessInfo {
+            id: "host-fallback-stop".to_string(),
+            name: "json-server".to_string(),
+            pid: child.id() as i32,
+            workload_pid: None,
+            status: ProcessStatus::Running,
+            runtime: "source/node [host-fallback]".to_string(),
+            start_time: SystemTime::UNIX_EPOCH,
+            manifest_path: None,
+            scoped_id: Some("typicode/json-server".to_string()),
+            target_label: Some("app".to_string()),
+            requested_port: Some(3000),
+            log_path: None,
+            ready_at: Some(SystemTime::UNIX_EPOCH),
+            last_event: Some("ready".to_string()),
+            last_error: None,
+            exit_code: None,
+        };
+
+        pm.write_pid(&info).expect("write pid file");
+
+        let stopped = pm
+            .stop_process("host-fallback-stop", true)
+            .expect("stop process");
+        assert!(stopped);
+        assert!(!pm.pid_file_path("host-fallback-stop").exists());
+        assert!(child.try_wait().expect("try_wait").is_some());
     }
 }

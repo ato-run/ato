@@ -67,19 +67,22 @@ pub async fn execute(args: PublishDryRunArgs) -> Result<PublishDryRunResult> {
         eprintln!("📦 Simulating deterministic build...");
     }
 
-    let artifact_path = crate::publish_ci::build_capsule_artifact(
-        &manifest_path,
-        &manifest.name,
-        &manifest.version,
-    )
-    .with_context(|| "Failed to build local dry-run artifact")?;
+    let version = if manifest.version.trim().is_empty() {
+        "auto"
+    } else {
+        manifest.version.trim()
+    };
+
+    let artifact_path =
+        crate::publish_ci::build_capsule_artifact(&manifest_path, &manifest.name, version)
+            .with_context(|| "Failed to build local dry-run artifact")?;
     let artifact_size_bytes = fs::metadata(&artifact_path)
         .with_context(|| format!("Failed to inspect {}", artifact_path.display()))?
         .len();
 
     Ok(PublishDryRunResult {
         capsule_name: manifest.name,
-        version: manifest.version,
+        version: version.to_string(),
         artifact_path,
         artifact_size_bytes,
         git,

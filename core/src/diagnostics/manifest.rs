@@ -19,6 +19,12 @@ pub fn validate_manifest_for_build_with_mode(
     let loaded =
         crate::manifest::load_manifest_with_validation_mode(manifest_path, validation_mode)?;
     let raw = loaded.raw;
+    let original_raw: toml::Value = toml::from_str(&loaded.raw_text).map_err(|err| {
+        manifest_err(
+            manifest_path,
+            format!("failed to parse original manifest TOML: {err}"),
+        )
+    })?;
     validate_pack_config(manifest_path, &raw)?;
 
     let target = raw
@@ -257,8 +263,17 @@ pub fn validate_manifest_for_build_with_mode(
         }
     }
 
-    if target.get("smoke").is_some() {
-        crate::smoke::parse_smoke_options(&raw, target_label)
+    let original_target = original_raw
+        .get("targets")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get(target_label))
+        .and_then(|v| v.as_table());
+
+    if original_target
+        .and_then(|target| target.get("smoke"))
+        .is_some()
+    {
+        crate::smoke::parse_smoke_options(&original_raw, target_label)
             .map_err(|err| manifest_err(manifest_path, err.to_string()))?;
     }
 
