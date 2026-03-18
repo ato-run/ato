@@ -2,6 +2,22 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
+## [0.4.27] - 2026-03-18
+
+### What Changed
+
+#### Features
+
+- Add progressive cliclack-based run/install flows with preview plans, manifest review, and unified GitHub auto-install confirmations
+
+- Add compatibility host fallback execution for native and node source targets with isolated host runtime state
+
+#### Bug Fixes
+
+- Keep inferred GitHub source builds and generated manifests on a single interactive timeline without duplicate warnings
+
+- Resolve source launch commands, package includes, and readiness tracking more reliably across node, python, and host-fallback execution paths
+
 ## [0.4.26] - 2026-03-18
 
 ### What Changed
