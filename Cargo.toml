@@ -42,6 +42,7 @@ base64 = "0.22"
 regex = "1"
 walkdir = "2"
 tracing = "0.1"
+pathdiff = "0.2"
 axum = { version = "0.7", features = ["multipart"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 jsonschema = "0.17"
