@@ -33,7 +33,7 @@ pub mod tsnet;
 pub mod types;
 pub mod validation;
 
-pub use error::{CapsuleError, Result};
+pub use error::{AtoError, AtoErrorPhase, CapsuleError, Result};
 pub use metrics::{MetricsSession, ResourceStats, RuntimeMetadata, UnifiedMetrics};
 pub use reporter::{CapsuleReporter, NoOpReporter, UsageReporter};
 pub use runner::{SessionRunner, SessionRunnerConfig};

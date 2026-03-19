@@ -5,6 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use capsule_core::execution_plan::error::AtoExecutionError;
+
 use crate::install::{self, GitHubInstallDraftResponse};
 
 const ENV_TELEMETRY: &str = "ATO_TELEMETRY";
@@ -408,6 +410,18 @@ pub fn build_manual_intervention_message(
         message.pop();
     }
     message
+}
+
+pub fn build_manual_intervention_error(
+    manifest_path: &Path,
+    failure_reason: &str,
+    next_steps: &[String],
+) -> AtoExecutionError {
+    AtoExecutionError::manual_intervention_required(
+        build_manual_intervention_message(manifest_path, failure_reason, next_steps),
+        Some(&manifest_path.display().to_string()),
+        next_steps.to_vec(),
+    )
 }
 
 fn resolved_editor_command() -> Option<Vec<String>> {

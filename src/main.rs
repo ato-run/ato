@@ -10,6 +10,7 @@ use std::thread;
 use std::time::Duration;
 use tracing::debug;
 
+use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::CapsuleReporter;
 
 fn print_animated_logo() {
@@ -119,6 +120,7 @@ mod preview;
 mod process_manager;
 mod profile;
 mod progressive_ui;
+mod provisioner;
 mod publish_artifact;
 mod publish_ci;
 mod publish_dry_run;
@@ -1638,7 +1640,8 @@ fn main() {
                 println!("{}", payload);
             } else {
                 println!(
-                    r#"{{"schema_version":"1","type":"error","code":"E999","message":"failed to serialize error payload","causes":[]}}"#
+                    "{}",
+                    r#"{"schema_version":"1","status":"error","error":{"code":"E999","name":"internal_error","phase":"internal","message":"failed to serialize error payload","retryable":true,"interactive_resolution":false,"causes":[]}}"#
                 );
             }
         } else {
@@ -4614,12 +4617,12 @@ async fn retry_github_build_after_manual_fix(
 
     eprintln!("Open editor for {}", manual_manifest_path.display());
     if !inference_feedback::can_open_editor_automatically() {
-        return Err(anyhow::anyhow!(build_github_manual_intervention_message(
+        return Err(build_github_manual_intervention_error(
+            manual_manifest_path,
             repository,
             install_draft,
-            manual_manifest_path,
             "No editor launcher is available for manual fix mode",
-        )));
+        )?);
     }
     inference_feedback::open_editor(manual_manifest_path)?;
     let edited_manifest = inference_feedback::read_manual_manifest(manual_manifest_path)?;
@@ -4700,20 +4703,95 @@ fn build_github_manual_intervention_error(
     if let Some(preview_toml) = install_draft.preview_toml.as_deref() {
         inference_feedback::write_manual_manifest(manual_manifest_path, preview_toml)?;
     }
-    Ok(anyhow::anyhow!(build_github_manual_intervention_message(
+
+    let next_steps = build_github_manual_intervention_next_steps(
         repository,
         install_draft,
         manual_manifest_path,
+    );
+    let required_env = install_draft
+        .preview_toml
+        .as_deref()
+        .map(preview::required_env_from_preview_toml)
+        .unwrap_or_default();
+    let lowered = failure_reason.to_ascii_lowercase();
+
+    if !required_env.is_empty()
+        && (lowered.contains("required environment")
+            || lowered.contains("environment variable")
+            || lowered.contains("must be set")
+            || required_env.iter().any(|key| failure_reason.contains(key)))
+    {
+        return Ok(AtoExecutionError::missing_required_env(
+            format!(
+                "missing required environment variables for inferred GitHub draft: {}",
+                required_env.join(", ")
+            ),
+            required_env,
+            Some("github-inference"),
+        )
+        .into());
+    }
+
+    let lockfile_target = if lowered.contains("uv.lock") {
+        Some("uv.lock")
+    } else if lowered.contains("pnpm-lock.yaml") {
+        Some("pnpm-lock.yaml")
+    } else if lowered.contains("package-lock.json") {
+        Some("package-lock.json")
+    } else if lowered.contains("bun.lockb") {
+        Some("bun.lockb")
+    } else if lowered.contains("bun.lock") {
+        Some("bun.lock")
+    } else if lowered.contains("multiple node lockfiles") {
+        Some("node-lockfile")
+    } else {
+        None
+    };
+    if let Some(lockfile_target) = lockfile_target {
+        return Ok(AtoExecutionError::lock_incomplete(
+            failure_reason.to_string(),
+            Some(lockfile_target),
+        )
+        .into());
+    }
+
+    if lowered.contains("ambiguous entrypoint")
+        || lowered.contains("multiple candidate entrypoints")
+        || lowered.contains("more than one entrypoint")
+    {
+        return Ok(
+            AtoExecutionError::ambiguous_entrypoint(failure_reason.to_string(), Vec::new()).into(),
+        );
+    }
+
+    Ok(inference_feedback::build_manual_intervention_error(
+        manual_manifest_path,
         failure_reason,
-    )))
+        &next_steps,
+    )
+    .into())
 }
 
+#[cfg(test)]
 fn build_github_manual_intervention_message(
     repository: &str,
     install_draft: &install::GitHubInstallDraftResponse,
     manifest_path: &std::path::Path,
     failure_reason: &str,
 ) -> String {
+    inference_feedback::build_manual_intervention_message(
+        manifest_path,
+        failure_reason,
+        &build_github_manual_intervention_next_steps(repository, install_draft, manifest_path),
+    )
+}
+
+fn build_github_manual_intervention_next_steps(
+    repository: &str,
+    install_draft: &install::GitHubInstallDraftResponse,
+    manifest_path: &std::path::Path,
+) -> Vec<String> {
     let mut next_steps = Vec::new();
     let required_env = install_draft
         .preview_toml
@@ -4743,11 +4821,7 @@ fn build_github_manual_intervention_message(
     next_steps.push(format!(
         "Rerun `ato run {repository}` after the prerequisites are ready."
     ));
-    inference_feedback::build_manual_intervention_message(
-        manifest_path,
-        failure_reason,
-        &next_steps,
-    )
+    next_steps
 }
 
 fn resolve_installed_capsule_archive_in_store(
@@ -5815,5 +5889,83 @@ required = ["DATABASE_URL"]
         assert!(github_build_error_requires_manual_intervention(&error));
         assert!(github_build_error_manual_review_reason(&error)
             .contains("bun install --frozen-lockfile"));
+    }
+
+    #[test]
+    fn github_manual_intervention_returns_e103_for_required_env_failure() {
+        let draft = install::GitHubInstallDraftResponse {
+            repo: install::GitHubInstallDraftRepo {
+                owner: "octocat".to_string(),
+                repo: "hello-world".to_string(),
+                full_name: "octocat/hello-world".to_string(),
+                default_branch: "main".to_string(),
+            },
+            capsule_toml: install::GitHubInstallDraftCapsuleToml { exists: false },
+            repo_ref: "octocat/hello-world".to_string(),
+            proposed_run_command: None,
+            proposed_install_command: "ato run github.com/octocat/hello-world".to_string(),
+            resolved_ref: install::GitHubInstallDraftResolvedRef {
+                ref_name: "main".to_string(),
+                sha: "deadbeef".to_string(),
+            },
+            manifest_source: "inferred".to_string(),
+            preview_toml: Some("required_env = [\"DATABASE_URL\"]\n".to_string()),
+            capsule_hint: None,
+            inference_mode: Some("rules".to_string()),
+            retryable: false,
+        };
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let manifest_path = tempdir.path().join("capsule.toml");
+
+        let err = build_github_manual_intervention_error(
+            &manifest_path,
+            "github.com/octocat/hello-world",
+            &draft,
+            "DATABASE_URL is required",
+        )
+        .expect("manual intervention error");
+        let execution_err = err
+            .downcast_ref::<AtoExecutionError>()
+            .expect("ato execution error");
+        assert_eq!(execution_err.name, "missing_required_env");
+    }
+
+    #[test]
+    fn github_manual_intervention_returns_e104_for_lockfile_failure() {
+        let draft = install::GitHubInstallDraftResponse {
+            repo: install::GitHubInstallDraftRepo {
+                owner: "octocat".to_string(),
+                repo: "hello-world".to_string(),
+                full_name: "octocat/hello-world".to_string(),
+                default_branch: "main".to_string(),
+            },
+            capsule_toml: install::GitHubInstallDraftCapsuleToml { exists: false },
+            repo_ref: "octocat/hello-world".to_string(),
+            proposed_run_command: None,
+            proposed_install_command: "ato run github.com/octocat/hello-world".to_string(),
+            resolved_ref: install::GitHubInstallDraftResolvedRef {
+                ref_name: "main".to_string(),
+                sha: "deadbeef".to_string(),
+            },
+            manifest_source: "inferred".to_string(),
+            preview_toml: Some("required_env = []\n".to_string()),
+            capsule_hint: None,
+            inference_mode: Some("rules".to_string()),
+            retryable: false,
+        };
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let manifest_path = tempdir.path().join("capsule.toml");
+
+        let err = build_github_manual_intervention_error(
+            &manifest_path,
+            "github.com/octocat/hello-world",
+            &draft,
+            "uv.lock is missing for '/tmp/demo/pyproject.toml'. Generate it with `uv lock`.",
+        )
+        .expect("manual intervention error");
+        let execution_err = err
+            .downcast_ref::<AtoExecutionError>()
+            .expect("ato execution error");
+        assert_eq!(execution_err.name, "dependency_lock_missing");
     }
 }
