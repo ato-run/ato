@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::PathBuf;
