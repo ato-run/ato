@@ -2,6 +2,18 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
+## [0.5.0] - 2026-03-20
+
+### What Changed
+
+#### Features
+
+- Add typed AtoError and AtoExecutionError metadata for phase-aware error transport across execution plan flows
+
+#### Bug Fixes
+
+- Preserve structured details for consent, lockfile, environment, runtime, and manual-intervention failures
+
 ## [0.4.0] - 2026-03-18
 
 ### What Changed

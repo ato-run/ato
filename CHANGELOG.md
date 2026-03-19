@@ -2,6 +2,18 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
+## [0.4.28] - 2026-03-20
+
+### What Changed
+
+#### Features
+
+- Refine CLI and transport error taxonomy with structured inference, provisioning, execution, and internal diagnostics
+
+#### Bug Fixes
+
+- Reclassify consent, preflight, and inferred GitHub draft failures into stable typed error codes with JSON envelopes
+
 ## [0.4.27] - 2026-03-18
 
 ### What Changed
