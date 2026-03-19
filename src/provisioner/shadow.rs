@@ -665,7 +665,7 @@ run_command = "node server.js"
             "[project]\nname='demo'\nversion='0.1.0'\n",
         )
         .expect("pyproject");
-        if !which::which("uv").is_ok() {
+        if which::which("uv").is_err() {
             return;
         }
 
@@ -679,7 +679,7 @@ run_command = "node server.js"
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("requirements.txt"), "requests==2.32.0\n")
             .expect("requirements");
-        if !which::which("uv").is_ok() {
+        if which::which("uv").is_err() {
             return;
         }
 
@@ -734,7 +734,7 @@ run_command = "python app.py"
 
     #[test]
     fn records_failed_node_lockfile_generation_in_audit() {
-        if !which::which("npm").is_ok() {
+        if which::which("npm").is_err() {
             return;
         }
 
@@ -784,7 +784,7 @@ run_command = "node app.js"
 
     #[test]
     fn records_failed_python_lockfile_generation_in_audit() {
-        if !which::which("uv").is_ok() {
+        if which::which("uv").is_err() {
             return;
         }
 

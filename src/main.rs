@@ -1639,10 +1639,8 @@ fn main() {
             if let Ok(payload) = serde_json::to_string(&diagnostic.to_json_envelope()) {
                 println!("{}", payload);
             } else {
-                println!(
-                    "{}",
-                    r#"{"schema_version":"1","status":"error","error":{"code":"E999","name":"internal_error","phase":"internal","message":"failed to serialize error payload","retryable":true,"interactive_resolution":false,"causes":[]}}"#
-                );
+                let fallback_payload = r#"{"schema_version":"1","status":"error","error":{"code":"E999","name":"internal_error","phase":"internal","message":"failed to serialize error payload","retryable":true,"interactive_resolution":false,"causes":[]}}"#;
+                println!("{fallback_payload}");
             }
         } else {
             eprintln!("{:?}", miette::Report::new(diagnostic));
