@@ -180,6 +180,7 @@ pub struct CliDiagnostic {
 }
 
 impl CliDiagnostic {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         code: CliDiagnosticCode,
         message: impl Into<String>,
