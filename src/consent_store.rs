@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::PathBuf;
@@ -7,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::execution_plan::model::ExecutionPlan;
+use capsule_core::AtoError;
 
 const CONSENT_FILE_NAME: &str = "executionplan_v1.jsonl";
 
@@ -37,9 +40,14 @@ pub fn require_consent(plan: &ExecutionPlan, _assume_yes: bool) -> Result<(), At
     }
 
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        return Err(AtoExecutionError::policy_violation(
-            "ExecutionPlan consent missing in non-interactive mode. Seed consent from an interactive run first; --yes does not bypass execution consent.",
-        ));
+        return Err(AtoExecutionError::from_ato_error(AtoError::ExecutionContractInvalid {
+            message: "ExecutionPlan consent missing in non-interactive mode. Seed consent from an interactive run first; --yes does not bypass execution consent.".to_string(),
+            hint: Some(
+                "対話モードで一度 Execution Plan を確認して承認を保存してから再実行してください。".to_string(),
+            ),
+            field: Some("execution_plan.consent".to_string()),
+            service: None,
+        }));
     }
 
     prompt_consent(plan)?;
@@ -254,8 +262,16 @@ fn prompt_consent(plan: &ExecutionPlan) -> Result<(), AtoExecutionError> {
     if accepted {
         Ok(())
     } else {
-        Err(AtoExecutionError::policy_violation(
-            "ExecutionPlan consent rejected by user",
+        Err(AtoExecutionError::from_ato_error(
+            AtoError::ExecutionContractInvalid {
+                message: "ExecutionPlan consent rejected by user".to_string(),
+                hint: Some(
+                    "Execution Plan の要約を確認し、許可する場合のみ再実行してください。"
+                        .to_string(),
+                ),
+                field: Some("execution_plan.consent".to_string()),
+                service: None,
+            },
         ))
     }
 }
