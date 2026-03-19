@@ -21,6 +21,7 @@ use tracing::debug;
 use crate::executors::source::ExecuteMode;
 use crate::executors::target_runner::{self, TargetLaunchOptions};
 use crate::preview;
+use crate::provisioner::{self, AutoProvisioningOptions};
 use crate::reporters::CliReporter;
 use crate::runtime_manager;
 use crate::runtime_overrides;
@@ -496,6 +497,53 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
         .with_injected_env(merged_injected_env)
         .with_injected_mounts(injected_data.mounts);
 
+    let mut decision = decision;
+    let mut launch_ctx = launch_ctx;
+
+    let provisioning_outcome = provisioner::run_auto_provisioning_phase(
+        &decision.plan,
+        &launch_ctx,
+        args.reporter.clone(),
+        &AutoProvisioningOptions {
+            preview_mode,
+            background: args.background,
+        },
+    )
+    .await?;
+    launch_ctx = launch_ctx
+        .with_injected_env(provisioning_outcome.additional_env)
+        .with_injected_mounts(provisioning_outcome.additional_mounts);
+
+    if let Some(shadow_workspace) = provisioning_outcome.shadow_workspace.as_ref() {
+        debug!(
+            issue_count = provisioning_outcome.plan.issues.len(),
+            action_count = provisioning_outcome.plan.actions.len(),
+            shadow_root = %shadow_workspace.root_dir.display(),
+            audit_path = %shadow_workspace.audit_path.display(),
+            shadow_manifest = shadow_workspace.manifest_path.as_ref().map(|path| path.display().to_string()),
+            "Auto-provisioning shadow workspace prepared"
+        );
+
+        if let Some(shadow_manifest_path) = shadow_workspace.manifest_path.as_ref() {
+            decision =
+                capsule_core::router::route_manifest_with_state_overrides_and_validation_mode(
+                    shadow_manifest_path,
+                    router::ExecutionProfile::Dev,
+                    Some(decision.plan.selected_target_label()),
+                    decision.plan.state_source_overrides.clone(),
+                    if preview_mode {
+                        capsule_core::types::ValidationMode::Preview
+                    } else {
+                        capsule_core::types::ValidationMode::Strict
+                    },
+                )?;
+            launch_ctx = target_runner::resolve_launch_context(&decision.plan, &args.reporter)
+                .await?
+                .with_injected_env(launch_ctx.merged_env())
+                .with_injected_mounts(launch_ctx.injected_mounts().to_vec());
+        }
+    }
+
     if decision.plan.is_orchestration_mode() {
         if args.background {
             anyhow::bail!("--background is not supported for orchestration mode");
@@ -711,8 +759,16 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
             };
             if !crate::progressive_ui::confirm_action(prompt, false)? {
                 crate::progressive_ui::show_cancel("Execution cancelled.")?;
-                return Err(AtoExecutionError::policy_violation(
-                    "ExecutionPlan consent rejected by user",
+                return Err(AtoExecutionError::from_ato_error(
+                    capsule_core::AtoError::ExecutionContractInvalid {
+                        message: "ExecutionPlan consent rejected by user".to_string(),
+                        hint: Some(
+                            "Execution Plan の要約を確認し、許可する場合のみ再実行してください。"
+                                .to_string(),
+                        ),
+                        field: Some("execution_plan.consent".to_string()),
+                        service: None,
+                    },
                 )
                 .into());
             }
@@ -738,16 +794,16 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
                 "Host Fallback mode requires interactive confirmation. Re-run with --yes in non-interactive environments."
             );
         }
-        } else if use_progressive_ui
-            && preview_mode
-            && !args.assume_yes
-            && !crate::progressive_ui::confirm_action(
-                "Proceed with Preview Run? (Ephemeral Sandbox)",
-                true,
-            )?
-        {
-            crate::progressive_ui::show_cancel("Preview cancelled.")?;
-            return Ok(());
+    } else if use_progressive_ui
+        && preview_mode
+        && !args.assume_yes
+        && !crate::progressive_ui::confirm_action(
+            "Proceed with Preview Run? (Ephemeral Sandbox)",
+            true,
+        )?
+    {
+        crate::progressive_ui::show_cancel("Preview cancelled.")?;
+        return Ok(());
     }
 
     match guard_result.executor_kind {

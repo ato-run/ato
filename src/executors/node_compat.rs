@@ -351,12 +351,10 @@ fn map_deno_permission_error(stderr: &[u8]) -> Option<AtoExecutionError> {
         "network policy violation: blocked egress".to_string()
     };
 
-    Some(AtoExecutionError::new(
-        capsule_core::execution_plan::error::AtoErrorCode::AtoErrPolicyViolation,
+    Some(AtoExecutionError::security_policy_violation(
         message,
         Some("network"),
         target.as_deref(),
-        None,
     ))
 }
 
@@ -374,8 +372,10 @@ fn map_node_compat_error(stderr: &[u8]) -> Option<AtoExecutionError> {
         return None;
     }
 
-    Some(AtoExecutionError::policy_violation(
+    Some(AtoExecutionError::execution_contract_invalid(
         "node compat runtime rejected an unsupported node feature (fail-closed)",
+        None,
+        None,
     ))
 }
 

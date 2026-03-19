@@ -108,15 +108,19 @@ pub fn run_ipc_start(path: PathBuf, json_output: bool) -> Result<()> {
         .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
     let diagnostics =
         crate::ipc::validate::validate_manifest(&raw, &capsule_root).map_err(|err| {
-            AtoExecutionError::policy_violation(format!("IPC validation failed: {err}"))
+            AtoExecutionError::execution_contract_invalid(
+                format!("IPC validation failed: {err}"),
+                None,
+                None,
+            )
         })?;
     if crate::ipc::validate::has_errors(&diagnostics) {
-        return Err(
-            AtoExecutionError::policy_violation(crate::ipc::validate::format_diagnostics(
-                &diagnostics,
-            ))
-            .into(),
-        );
+        return Err(AtoExecutionError::execution_contract_invalid(
+            crate::ipc::validate::format_diagnostics(&diagnostics),
+            None,
+            None,
+        )
+        .into());
     }
 
     let ipc_config = parse_ipc_section(&raw)?;
