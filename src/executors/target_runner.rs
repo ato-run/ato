@@ -41,29 +41,35 @@ pub async fn resolve_launch_context(
     reporter: &Arc<CliReporter>,
 ) -> Result<RuntimeLaunchContext> {
     let raw_manifest_text = std::fs::read_to_string(&plan.manifest_path).map_err(|err| {
-        AtoExecutionError::policy_violation(format!(
-            "Failed to read manifest for IPC validation: {}",
-            err
-        ))
+        AtoExecutionError::execution_contract_invalid(
+            format!("Failed to read manifest for IPC validation: {err}"),
+            Some("manifest"),
+            None,
+        )
     })?;
     let raw_manifest: toml::Value = toml::from_str(&raw_manifest_text).map_err(|err| {
-        AtoExecutionError::policy_violation(format!(
-            "Failed to parse manifest for IPC validation: {}",
-            err
-        ))
+        AtoExecutionError::execution_contract_invalid(
+            format!("Failed to parse manifest for IPC validation: {err}"),
+            Some("manifest"),
+            None,
+        )
     })?;
     let diagnostics = crate::ipc::validate::validate_manifest(&raw_manifest, &plan.manifest_dir)
         .map_err(|err| {
-            AtoExecutionError::policy_violation(format!("IPC validation failed: {err}"))
+            AtoExecutionError::execution_contract_invalid(
+                format!("IPC validation failed: {err}"),
+                None,
+                None,
+            )
         })?;
 
     if crate::ipc::validate::has_errors(&diagnostics) {
-        return Err(
-            AtoExecutionError::policy_violation(crate::ipc::validate::format_diagnostics(
-                &diagnostics,
-            ))
-            .into(),
-        );
+        return Err(AtoExecutionError::execution_contract_invalid(
+            crate::ipc::validate::format_diagnostics(&diagnostics),
+            None,
+            None,
+        )
+        .into());
     }
 
     for diagnostic in diagnostics {
@@ -174,11 +180,15 @@ pub fn preflight_required_environment_variables(
         return Ok(());
     }
 
-    Err(AtoExecutionError::policy_violation(format!(
-        "missing required environment variables for target '{}': {} (set them before `ato run`)",
-        plan.selected_target_label(),
-        missing.join(", ")
-    ))
+    Err(AtoExecutionError::missing_required_env(
+        format!(
+            "missing required environment variables for target '{}': {} (set them before `ato run`)",
+            plan.selected_target_label(),
+            missing.join(", ")
+        ),
+        missing,
+        Some(plan.selected_target_label()),
+    )
     .into())
 }
 
@@ -189,8 +199,10 @@ fn preflight_web_services_requirements(plan: &ManifestData) -> Result<()> {
 
     let services = plan.services();
     if !services.contains_key("main") {
-        return Err(AtoExecutionError::policy_violation(
+        return Err(AtoExecutionError::execution_contract_invalid(
             "web/deno services mode requires top-level [services.main]",
+            Some("services.main"),
+            Some("main"),
         )
         .into());
     }
@@ -212,7 +224,7 @@ fn verify_lockfile_integrity(manifest_path: &Path) -> Result<()> {
         if err.to_string().contains("manifest hash mismatch") {
             AtoExecutionError::lockfile_tampered(err.to_string(), Some("capsule.lock"))
         } else {
-            AtoExecutionError::policy_violation(err.to_string())
+            AtoExecutionError::lock_incomplete(err.to_string(), Some("capsule.lock"))
         }
     })?;
     debug!("capsule.lock integrity verified");

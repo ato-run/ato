@@ -805,12 +805,10 @@ fn map_deno_permission_error(stderr: &[u8]) -> Option<AtoExecutionError> {
         "network policy violation: blocked egress".to_string()
     };
 
-    Some(AtoExecutionError::new(
-        capsule_core::execution_plan::error::AtoErrorCode::AtoErrPolicyViolation,
+    Some(AtoExecutionError::security_policy_violation(
         message,
         Some("network"),
         target.as_deref(),
-        None,
     ))
 }
 

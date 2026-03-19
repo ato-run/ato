@@ -1,5 +1,6 @@
 use anyhow::Error as AnyhowError;
 use serde::Serialize;
+use serde_json::Value;
 
 use capsule_core::execution_plan::error::AtoExecutionError;
 
@@ -7,23 +8,34 @@ use capsule_core::execution_plan::error::AtoExecutionError;
 struct AtoErrorEvent<'a> {
     level: &'static str,
     code: &'a str,
+    name: &'a str,
+    phase: &'a str,
     message: &'a str,
+    retryable: bool,
+    interactive_resolution: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     resource: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hint: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<&'a Value>,
 }
 
 pub fn emit_ato_error_jsonl(err: &AtoExecutionError) {
     let payload = AtoErrorEvent {
         level: "fatal",
         code: err.code,
+        name: err.name,
+        phase: err.phase,
         message: &err.message,
+        retryable: err.retryable,
+        interactive_resolution: err.interactive_resolution,
         resource: err.resource.as_deref(),
         target: err.target.as_deref(),
         hint: err.hint.as_deref(),
+        details: err.details.as_ref(),
     };
 
     if let Ok(line) = serde_json::to_string(&payload) {
@@ -59,7 +71,9 @@ pub fn try_emit_from_anyhow(err: &AnyhowError, json_mode: bool) -> bool {
     }
 
     if message.contains("runtime=oci") && message.contains("not supported") {
-        emit_ato_error_jsonl(&AtoExecutionError::policy_violation(message));
+        emit_ato_error_jsonl(&AtoExecutionError::execution_contract_invalid(
+            message, None, None,
+        ));
         return true;
     }
 

@@ -75,14 +75,20 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
         &raw_manifest,
         manifest_path.parent().unwrap_or_else(|| Path::new(".")),
     )
-    .map_err(|err| AtoExecutionError::policy_violation(format!("IPC validation failed: {err}")))?;
+    .map_err(|err| {
+        AtoExecutionError::execution_contract_invalid(
+            format!("IPC validation failed: {err}"),
+            None,
+            None,
+        )
+    })?;
     if crate::ipc::validate::has_errors(&ipc_diagnostics) {
-        return Err(
-            AtoExecutionError::policy_violation(crate::ipc::validate::format_diagnostics(
-                &ipc_diagnostics,
-            ))
-            .into(),
-        );
+        return Err(AtoExecutionError::execution_contract_invalid(
+            crate::ipc::validate::format_diagnostics(&ipc_diagnostics),
+            None,
+            None,
+        )
+        .into());
     }
 
     let result = ValidateResult {
