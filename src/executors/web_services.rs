@@ -259,22 +259,39 @@ fn resolve_executable(runtime_dir: &Path, token: &str, bins: &RuntimeBins) -> Re
         "deno" => bins
             .deno
             .clone()
-            .ok_or_else(|| AtoExecutionError::policy_violation("deno runtime is not resolved"))
+            .ok_or_else(|| {
+                AtoExecutionError::runtime_not_resolved(
+                    "deno runtime is not resolved",
+                    Some("deno"),
+                )
+            })
             .map_err(Into::into),
         "node" => bins
             .node
             .clone()
-            .ok_or_else(|| AtoExecutionError::policy_violation("node runtime is not resolved"))
+            .ok_or_else(|| {
+                AtoExecutionError::runtime_not_resolved(
+                    "node runtime is not resolved",
+                    Some("node"),
+                )
+            })
             .map_err(Into::into),
         "python" | "python3" => bins
             .python
             .clone()
-            .ok_or_else(|| AtoExecutionError::policy_violation("python runtime is not resolved"))
+            .ok_or_else(|| {
+                AtoExecutionError::runtime_not_resolved(
+                    "python runtime is not resolved",
+                    Some("python"),
+                )
+            })
             .map_err(Into::into),
         "uv" => bins
             .uv
             .clone()
-            .ok_or_else(|| AtoExecutionError::policy_violation("uv runtime is not resolved"))
+            .ok_or_else(|| {
+                AtoExecutionError::runtime_not_resolved("uv runtime is not resolved", Some("uv"))
+            })
             .map_err(Into::into),
         _ => {
             let raw = PathBuf::from(token);
@@ -334,10 +351,14 @@ fn wait_until_ready(
     }
 
     let service = running.get_mut(service_name).ok_or_else(|| {
-        AtoExecutionError::policy_violation(format!(
-            "service '{}' was not started before readiness check",
-            service_name
-        ))
+        AtoExecutionError::execution_contract_invalid(
+            format!(
+                "service '{}' was not started before readiness check",
+                service_name
+            ),
+            None,
+            Some(service_name),
+        )
     })?;
 
     let Some(probe) = service.spec.readiness_probe.as_ref() else {
@@ -350,10 +371,14 @@ fn wait_until_ready(
     loop {
         if let Some(status) = service.child.try_wait()? {
             let code = status.code().unwrap_or(1);
-            return Err(AtoExecutionError::policy_violation(format!(
-                "service '{}' exited before readiness check passed (exit code: {})",
-                service_name, code
-            ))
+            return Err(AtoExecutionError::execution_contract_invalid(
+                format!(
+                    "service '{}' exited before readiness check passed (exit code: {})",
+                    service_name, code
+                ),
+                None,
+                Some(service_name),
+            )
             .into());
         }
 
@@ -363,11 +388,15 @@ fn wait_until_ready(
         }
 
         if Instant::now() >= deadline {
-            return Err(AtoExecutionError::policy_violation(format!(
-                "service '{}' readiness check timed out after {}s",
-                service_name,
-                READINESS_TIMEOUT.as_secs()
-            ))
+            return Err(AtoExecutionError::execution_contract_invalid(
+                format!(
+                    "service '{}' readiness check timed out after {}s",
+                    service_name,
+                    READINESS_TIMEOUT.as_secs()
+                ),
+                Some("readiness_probe"),
+                Some(service_name),
+            )
             .into());
         }
         thread::sleep(READINESS_INTERVAL);
@@ -381,23 +410,35 @@ fn resolve_probe_port(
 ) -> Result<u16> {
     let key = probe.port.trim();
     if key.is_empty() {
-        return Err(AtoExecutionError::policy_violation(format!(
-            "services.{}.readiness_probe.port must be a non-empty env placeholder",
-            service_name
-        ))
+        return Err(AtoExecutionError::execution_contract_invalid(
+            format!(
+                "services.{}.readiness_probe.port must be a non-empty env placeholder",
+                service_name
+            ),
+            Some("services.<name>.readiness_probe.port"),
+            Some(service_name),
+        )
         .into());
     }
     let value = env.get(key).ok_or_else(|| {
-        AtoExecutionError::policy_violation(format!(
-            "services.{}.readiness_probe.port '{}' is not defined in service env",
-            service_name, key
-        ))
+        AtoExecutionError::execution_contract_invalid(
+            format!(
+                "services.{}.readiness_probe.port '{}' is not defined in service env",
+                service_name, key
+            ),
+            Some("services.<name>.readiness_probe.port"),
+            Some(service_name),
+        )
     })?;
     value.parse::<u16>().map_err(|_| {
-        AtoExecutionError::policy_violation(format!(
-            "services.{}.readiness_probe.port '{}' resolved to non-numeric value '{}'",
-            service_name, key, value
-        ))
+        AtoExecutionError::execution_contract_invalid(
+            format!(
+                "services.{}.readiness_probe.port '{}' resolved to non-numeric value '{}'",
+                service_name, key, value
+            ),
+            Some("services.<name>.readiness_probe.port"),
+            Some(service_name),
+        )
         .into()
     })
 }
@@ -419,10 +460,12 @@ fn readiness_probe_ok(probe: &capsule_core::types::ReadinessProbe, port: u16) ->
     {
         return Ok(tcp_probe(target, port));
     }
-    Err(
-        AtoExecutionError::policy_violation("readiness_probe must define http_get or tcp_connect")
-            .into(),
+    Err(AtoExecutionError::execution_contract_invalid(
+        "readiness_probe must define http_get or tcp_connect",
+        Some("readiness_probe"),
+        None,
     )
+    .into())
 }
 
 fn http_probe(path: &str, port: u16) -> bool {
