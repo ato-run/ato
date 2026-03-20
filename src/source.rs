@@ -4,7 +4,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthManager;
-use crate::registry::RegistryResolver;
 
 const ENV_SESSION_TOKEN: &str = "ATO_TOKEN";
 
@@ -58,14 +57,6 @@ fn read_env_non_empty(key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-async fn resolve_registry_url(registry_url: Option<&str>) -> Result<String> {
-    if let Some(url) = registry_url {
-        return Ok(url.to_string());
-    }
-    let resolver = RegistryResolver::default();
-    Ok(resolver.resolve("localhost").await?.url)
-}
-
 fn resolve_auth_tokens() -> Result<(Option<String>, Option<String>)> {
     let session_token = read_env_non_empty(ENV_SESSION_TOKEN);
     if let Some(token) = session_token {
@@ -112,7 +103,7 @@ async fn preflight_source_operation(
     session_token: Option<&str>,
     bearer_token: Option<&str>,
 ) -> Result<()> {
-    let registry = resolve_registry_url(registry_url).await?;
+    let registry = crate::registry_url::resolve_registry_url(registry_url).await?;
     let client = reqwest::Client::new();
     let request = client
         .post(format!("{}/v1/sources/{}/preflight", registry, source_id))
@@ -142,7 +133,7 @@ pub async fn fetch_sync_run_status(
     registry_url: Option<&str>,
     json_output: bool,
 ) -> Result<SourceSyncRunStatus> {
-    let registry = resolve_registry_url(registry_url).await?;
+    let registry = crate::registry_url::resolve_registry_url(registry_url).await?;
     let (session_token, bearer_token) = resolve_auth_tokens()?;
     let client = reqwest::Client::new();
     let request = client.get(format!(
@@ -188,7 +179,7 @@ pub async fn rebuild_source(
     registry_url: Option<&str>,
     json_output: bool,
 ) -> Result<SourceRebuildResult> {
-    let registry = resolve_registry_url(registry_url).await?;
+    let registry = crate::registry_url::resolve_registry_url(registry_url).await?;
     let (session_token, bearer_token) = resolve_auth_tokens()?;
     preflight_source_operation(
         source_id,

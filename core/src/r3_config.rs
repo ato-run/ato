@@ -450,6 +450,140 @@ fn build_target_service_spec(service: &ResolvedService, standalone: bool) -> Res
     })
 }
 
+fn command_tokens(entrypoint: &str, command: Option<&str>) -> (String, Vec<String>) {
+    let mut tokens =
+        shell_words::split(entrypoint).unwrap_or_else(|_| vec![entrypoint.to_string()]);
+    if let Some(command) = command {
+        if !command.trim().is_empty() {
+            let extra = shell_words::split(command).unwrap_or_else(|_| vec![command.to_string()]);
+            tokens.extend(extra);
+        }
+    }
+    let program = tokens
+        .first()
+        .cloned()
+        .unwrap_or_else(|| entrypoint.to_string());
+    (program, tokens)
+}
+
+fn resolve_language_command(
+    program: &str,
+    tokens: &[String],
+    standalone: bool,
+    env: &mut HashMap<String, String>,
+    language: Option<&str>,
+    synthesize_default_args: bool,
+) -> (String, Vec<String>) {
+    let args = tokens.get(1..).unwrap_or(&[]).to_vec();
+    match language {
+        Some("python") => {
+            let args = if synthesize_default_args && args.is_empty() {
+                vec![program.to_string()]
+            } else {
+                args
+            };
+            env.insert("PYTHONDONTWRITEBYTECODE".to_string(), "1".to_string());
+            if standalone {
+                env.insert("PYTHONHOME".to_string(), "runtime/python".to_string());
+                env.insert("PYTHONPATH".to_string(), "source".to_string());
+                ("runtime/python/bin/python3".to_string(), args)
+            } else {
+                let mut uv_args = vec![
+                    "run".to_string(),
+                    "--offline".to_string(),
+                    "python3".to_string(),
+                ];
+                uv_args.extend(args);
+                ("uv".to_string(), uv_args)
+            }
+        }
+        Some("node") => {
+            let args = if synthesize_default_args && args.is_empty() {
+                vec![program.to_string()]
+            } else {
+                args
+            };
+            if standalone {
+                ("runtime/node/bin/node".to_string(), args)
+            } else {
+                ("node".to_string(), args)
+            }
+        }
+        Some("deno") => {
+            let args = if synthesize_default_args && args.is_empty() {
+                vec!["run".to_string(), "-A".to_string(), program.to_string()]
+            } else {
+                args
+            };
+            if standalone {
+                ("runtime/deno/bin/deno".to_string(), args)
+            } else {
+                ("deno".to_string(), args)
+            }
+        }
+        Some("bun") => {
+            let args = if synthesize_default_args && args.is_empty() {
+                vec![program.to_string()]
+            } else {
+                args
+            };
+            if standalone {
+                ("runtime/bun/bin/bun".to_string(), args)
+            } else {
+                ("bun".to_string(), args)
+            }
+        }
+        _ => (
+            normalize_program(program, standalone),
+            tokens.get(1..).unwrap_or(&[]).to_vec(),
+        ),
+    }
+}
+
+fn merged_manifest_env(manifest: &toml::Value) -> HashMap<String, String> {
+    let mut env = selected_target_table(manifest)
+        .and_then(|t| t.get("env"))
+        .and_then(|e| e.as_table())
+        .map(|tbl| {
+            tbl.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.to_string(), s.to_string())))
+                .collect::<HashMap<String, String>>()
+        })
+        .unwrap_or_default();
+
+    let execution_env = manifest
+        .get("execution")
+        .and_then(|e| e.get("env"))
+        .and_then(|e| e.as_table())
+        .map(|tbl| {
+            tbl.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.to_string(), s.to_string())))
+                .collect::<HashMap<String, String>>()
+        })
+        .unwrap_or_default();
+    env.extend(execution_env);
+    env
+}
+
+fn execution_signals(manifest: &toml::Value) -> Option<SignalsConfig> {
+    manifest
+        .get("execution")
+        .and_then(|e| e.get("signals"))
+        .and_then(|s| s.as_table())
+        .map(|tbl| SignalsConfig {
+            stop: tbl
+                .get("stop")
+                .and_then(|v| v.as_str())
+                .unwrap_or("SIGTERM")
+                .to_string(),
+            kill: tbl
+                .get("kill")
+                .and_then(|v| v.as_str())
+                .unwrap_or("SIGKILL")
+                .to_string(),
+        })
+}
+
 fn resolve_target_command(
     runtime: &ResolvedTargetRuntime,
     standalone: bool,
@@ -472,11 +606,7 @@ fn resolve_target_command(
     }
 
     let entrypoint = runtime.entrypoint.as_str();
-    let tokens = shell_words::split(entrypoint).unwrap_or_else(|_| vec![entrypoint.to_string()]);
-    let program = tokens
-        .first()
-        .cloned()
-        .unwrap_or_else(|| entrypoint.to_string());
+    let (program, tokens) = command_tokens(entrypoint, None);
 
     let language = runtime
         .driver
@@ -487,72 +617,14 @@ fn resolve_target_command(
 
     let mut env = runtime.env.clone();
 
-    let (executable, args) = if let Some(lang) = language.as_deref() {
-        match lang {
-            "python" => {
-                let mut args = tokens.get(1..).unwrap_or(&[]).to_vec();
-                if tokens.len() <= 1 {
-                    args = vec![program.clone()];
-                }
-                env.insert("PYTHONDONTWRITEBYTECODE".to_string(), "1".to_string());
-                if standalone {
-                    env.insert("PYTHONHOME".to_string(), "runtime/python".to_string());
-                    env.insert("PYTHONPATH".to_string(), "source".to_string());
-                    ("runtime/python/bin/python3".to_string(), args)
-                } else {
-                    let mut uv_args = vec![
-                        "run".to_string(),
-                        "--offline".to_string(),
-                        "python3".to_string(),
-                    ];
-                    uv_args.extend(args);
-                    ("uv".to_string(), uv_args)
-                }
-            }
-            "node" => {
-                let mut args = tokens.get(1..).unwrap_or(&[]).to_vec();
-                if tokens.len() <= 1 {
-                    args = vec![program.clone()];
-                }
-                if standalone {
-                    ("runtime/node/bin/node".to_string(), args)
-                } else {
-                    ("node".to_string(), args)
-                }
-            }
-            "deno" => {
-                let mut args = tokens.get(1..).unwrap_or(&[]).to_vec();
-                if tokens.len() <= 1 {
-                    args = vec!["run".to_string(), "-A".to_string(), program.clone()];
-                }
-                if standalone {
-                    ("runtime/deno/bin/deno".to_string(), args)
-                } else {
-                    ("deno".to_string(), args)
-                }
-            }
-            "bun" => {
-                let mut args = tokens.get(1..).unwrap_or(&[]).to_vec();
-                if tokens.len() <= 1 {
-                    args = vec![program.clone()];
-                }
-                if standalone {
-                    ("runtime/bun/bin/bun".to_string(), args)
-                } else {
-                    ("bun".to_string(), args)
-                }
-            }
-            _ => (
-                normalize_program(&program, standalone),
-                tokens.get(1..).unwrap_or(&[]).to_vec(),
-            ),
-        }
-    } else {
-        (
-            normalize_program(&program, standalone),
-            tokens.get(1..).unwrap_or(&[]).to_vec(),
-        )
-    };
+    let (executable, args) = resolve_language_command(
+        &program,
+        &tokens,
+        standalone,
+        &mut env,
+        language.as_deref(),
+        true,
+    );
 
     let (executable, mut args) = if let Some((cmd_executable, cmd_args)) =
         resolve_explicit_cmd_override(&runtime.cmd, standalone, &mut env)
@@ -663,50 +735,13 @@ fn read_entrypoint(manifest: &toml::Value) -> Result<String> {
 }
 
 fn resolve_shell_command(command: &str, manifest: &toml::Value) -> CommandResolution {
-    let mut env = selected_target_table(manifest)
-        .and_then(|t| t.get("env"))
-        .and_then(|e| e.as_table())
-        .map(|tbl| {
-            tbl.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.to_string(), s.to_string())))
-                .collect::<HashMap<String, String>>()
-        })
-        .unwrap_or_default();
-
-    let execution_env = manifest
-        .get("execution")
-        .and_then(|e| e.get("env"))
-        .and_then(|e| e.as_table())
-        .map(|tbl| {
-            tbl.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.to_string(), s.to_string())))
-                .collect::<HashMap<String, String>>()
-        })
-        .unwrap_or_default();
-    env.extend(execution_env);
-
-    let signals = manifest
-        .get("execution")
-        .and_then(|e| e.get("signals"))
-        .and_then(|s| s.as_table())
-        .map(|tbl| SignalsConfig {
-            stop: tbl
-                .get("stop")
-                .and_then(|v| v.as_str())
-                .unwrap_or("SIGTERM")
-                .to_string(),
-            kill: tbl
-                .get("kill")
-                .and_then(|v| v.as_str())
-                .unwrap_or("SIGKILL")
-                .to_string(),
-        });
+    let env = merged_manifest_env(manifest);
 
     (
         "sh".to_string(),
         vec!["-c".to_string(), command.to_string()],
         if env.is_empty() { None } else { Some(env) },
-        signals,
+        execution_signals(manifest),
     )
 }
 
@@ -970,119 +1005,21 @@ fn resolve_command(
     manifest: &toml::Value,
     standalone: bool,
 ) -> CommandResolution {
-    // `execution.entrypoint` is the program (and optional args) to start.
-    // `execution.command` is an additional argument string, commonly used like:
-    // entrypoint = "bash"
-    // command = "-c 'echo Hello'"
-    // We treat it as extra tokens appended to the entrypoint tokens.
-    let mut tokens =
-        shell_words::split(entrypoint).unwrap_or_else(|_| vec![entrypoint.to_string()]);
-    if let Some(command) = command {
-        if !command.trim().is_empty() {
-            let extra = shell_words::split(command).unwrap_or_else(|_| vec![command.to_string()]);
-            tokens.extend(extra);
-        }
-    }
-    let program = tokens
-        .first()
-        .cloned()
-        .unwrap_or_else(|| entrypoint.to_string());
+    let (program, tokens) = command_tokens(entrypoint, command);
 
     let language = read_language(manifest)
         .or_else(|| detect_language_from_program(&program))
         .or_else(|| detect_language_from_entrypoint(entrypoint));
 
-    let mut env = HashMap::new();
-    let target_env = selected_target_table(manifest)
-        .and_then(|t| t.get("env"))
-        .and_then(|e| e.as_table())
-        .map(|tbl| {
-            tbl.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.to_string(), s.to_string())))
-                .collect::<HashMap<String, String>>()
-        })
-        .unwrap_or_default();
-    env.extend(target_env);
-
-    let execution_env = manifest
-        .get("execution")
-        .and_then(|e| e.get("env"))
-        .and_then(|e| e.as_table())
-        .map(|tbl| {
-            tbl.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.to_string(), s.to_string())))
-                .collect::<HashMap<String, String>>()
-        })
-        .unwrap_or_default();
-
-    env.extend(execution_env);
-
-    let (executable, mut args) = if let Some(lang) = language.as_deref() {
-        match lang {
-            "python" => {
-                let mut args = tokens.get(1..).unwrap_or(&[]).to_vec();
-                if tokens.len() <= 1 {
-                    args = vec![program.clone()];
-                }
-                env.insert("PYTHONDONTWRITEBYTECODE".to_string(), "1".to_string());
-                if standalone {
-                    env.insert("PYTHONHOME".to_string(), "runtime/python".to_string());
-                    env.insert("PYTHONPATH".to_string(), "source".to_string());
-                    ("runtime/python/bin/python3".to_string(), args)
-                } else {
-                    let mut uv_args = vec![
-                        "run".to_string(),
-                        "--offline".to_string(),
-                        "python3".to_string(),
-                    ];
-                    uv_args.extend(args);
-                    ("uv".to_string(), uv_args)
-                }
-            }
-            "node" => {
-                let mut args = tokens.get(1..).unwrap_or(&[]).to_vec();
-                if tokens.len() <= 1 {
-                    args = vec![program.clone()];
-                }
-                if standalone {
-                    ("runtime/node/bin/node".to_string(), args)
-                } else {
-                    ("node".to_string(), args)
-                }
-            }
-            "deno" => {
-                let mut args = tokens.get(1..).unwrap_or(&[]).to_vec();
-                if tokens.len() <= 1 {
-                    args = vec!["run".to_string(), "-A".to_string(), program.clone()];
-                }
-                if standalone {
-                    ("runtime/deno/bin/deno".to_string(), args)
-                } else {
-                    ("deno".to_string(), args)
-                }
-            }
-            "bun" => {
-                let mut args = tokens.get(1..).unwrap_or(&[]).to_vec();
-                if tokens.len() <= 1 {
-                    args = vec![program.clone()];
-                }
-                if standalone {
-                    ("runtime/bun/bin/bun".to_string(), args)
-                } else {
-                    ("bun".to_string(), args)
-                }
-            }
-            _ => (
-                normalize_program(&program, standalone),
-                tokens.get(1..).unwrap_or(&[]).to_vec(),
-            ),
-        }
-    } else {
-        (
-            normalize_program(&program, standalone),
-            tokens.get(1..).unwrap_or(&[]).to_vec(),
-        )
-    };
+    let mut env = merged_manifest_env(manifest);
+    let (executable, mut args) = resolve_language_command(
+        &program,
+        &tokens,
+        standalone,
+        &mut env,
+        language.as_deref(),
+        true,
+    );
 
     if !args.is_empty() {
         args = args
@@ -1091,28 +1028,11 @@ fn resolve_command(
             .collect();
     }
 
-    let signals = manifest
-        .get("execution")
-        .and_then(|e| e.get("signals"))
-        .and_then(|s| s.as_table())
-        .map(|tbl| SignalsConfig {
-            stop: tbl
-                .get("stop")
-                .and_then(|v| v.as_str())
-                .unwrap_or("SIGTERM")
-                .to_string(),
-            kill: tbl
-                .get("kill")
-                .and_then(|v| v.as_str())
-                .unwrap_or("SIGKILL")
-                .to_string(),
-        });
-
     (
         executable,
         args,
         if env.is_empty() { None } else { Some(env) },
-        signals,
+        execution_signals(manifest),
     )
 }
 
@@ -1157,50 +1077,14 @@ fn resolve_explicit_cmd_override(
         return None;
     }
 
-    let args = runtime_cmd.get(1..).unwrap_or(&[]).to_vec();
-
-    let resolved = match detect_language_from_program(&program).as_deref() {
-        Some("python") => {
-            env.insert("PYTHONDONTWRITEBYTECODE".to_string(), "1".to_string());
-            if standalone {
-                env.insert("PYTHONHOME".to_string(), "runtime/python".to_string());
-                env.insert("PYTHONPATH".to_string(), "source".to_string());
-                ("runtime/python/bin/python3".to_string(), args)
-            } else {
-                let mut uv_args = vec![
-                    "run".to_string(),
-                    "--offline".to_string(),
-                    "python3".to_string(),
-                ];
-                uv_args.extend(args);
-                ("uv".to_string(), uv_args)
-            }
-        }
-        Some("node") => {
-            if standalone {
-                ("runtime/node/bin/node".to_string(), args)
-            } else {
-                ("node".to_string(), args)
-            }
-        }
-        Some("deno") => {
-            if standalone {
-                ("runtime/deno/bin/deno".to_string(), args)
-            } else {
-                ("deno".to_string(), args)
-            }
-        }
-        Some("bun") => {
-            if standalone {
-                ("runtime/bun/bin/bun".to_string(), args)
-            } else {
-                ("bun".to_string(), args)
-            }
-        }
-        _ => (normalize_program(&program, standalone), args),
-    };
-
-    Some(resolved)
+    Some(resolve_language_command(
+        &program,
+        runtime_cmd,
+        standalone,
+        env,
+        detect_language_from_program(&program).as_deref(),
+        false,
+    ))
 }
 
 fn normalize_language(lang: &str) -> String {

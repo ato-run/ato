@@ -1,7 +1,6 @@
 mod fail_closed_support;
 
 use std::fs;
-use std::path::PathBuf;
 use std::process::Stdio;
 
 use fail_closed_support::*;
@@ -40,10 +39,20 @@ fn consent_store_permissions_are_hardened() {
 #[test]
 #[ignore = "fixture needs a runtime-complete capsule.lock.json to execute the Deno runtime path"]
 fn npm_lifecycle_isolation() {
-    let pwn_target = PathBuf::from("/tmp/ato_pwned_test_6");
+    let (_workspace, fixture) = prepare_fixture_workspace("malicious-npm-capsule");
+    let home = prepare_consent_home(&fixture);
+    let pwn_target = fixture.join(".tmp").join("ato_pwned_test_6");
     let _ = fs::remove_file(&pwn_target);
 
-    let output = run_with_seeded_consent("malicious-npm-capsule", &[], &[]);
+    let output = ato_cmd()
+        .arg("run")
+        .arg("--yes")
+        .arg(&fixture)
+        .env("HOME", home.path())
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .output()
+        .expect("failed to execute ato");
 
     assert!(
         output.status.success(),

@@ -8,6 +8,8 @@ use ed25519_dalek::Signer;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
+use crate::artifact_hash::{compute_blake3_label, compute_sha256_hex};
+
 const DEFAULT_STORE_API_URL: &str = "https://api.ato.run";
 const ENV_STORE_API_URL: &str = "ATO_STORE_API_URL";
 const OIDC_AUDIENCE: &str = "api.ato.run";
@@ -485,19 +487,6 @@ fn build_ephemeral_signature(content_hash: &str) -> DidSignaturePayload {
         signature: BASE64_STANDARD.encode(signature.to_bytes()),
         signed_at: chrono::Utc::now().timestamp(),
     }
-}
-
-fn compute_sha256_hex(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hex::encode(hasher.finalize())
-}
-
-fn compute_blake3_label(data: &[u8]) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(data);
-    format!("blake3:{}", hex::encode(hasher.finalize().as_bytes()))
 }
 
 fn classify_ci_publish_http_error(status: reqwest::StatusCode, body: &str) -> String {

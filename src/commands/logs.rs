@@ -67,7 +67,7 @@ pub fn execute(args: LogsArgs, reporter: Arc<CliReporter>) -> Result<()> {
 }
 
 fn get_log_path(id: &str) -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from(".").join(".tmp"));
     home.join(".ato")
         .join("logs")
         .join(format!("{}{}", id, LOG_FILE_EXT))

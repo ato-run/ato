@@ -351,9 +351,7 @@ pub fn create_cas_client_from_env() -> Result<Box<dyn CasClient>> {
             let cache_dir = std::env::var("ATO_CAS_CACHE")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| {
-                    crate::common::paths::nacelle_home_dir()
-                        .unwrap_or_else(|_| PathBuf::from("/tmp").join(".ato"))
-                        .join("cas-cache")
+                    crate::common::paths::nacelle_home_dir_or_workspace_tmp().join("cas-cache")
                 });
             Ok(Box::new(HttpCasClient::new(endpoint, cache_dir)?))
         }
@@ -361,9 +359,7 @@ pub fn create_cas_client_from_env() -> Result<Box<dyn CasClient>> {
             let root = std::env::var("ATO_CAS_ROOT")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| {
-                    crate::common::paths::nacelle_home_dir()
-                        .unwrap_or_else(|_| PathBuf::from("/tmp").join(".ato"))
-                        .join("cas")
+                    crate::common::paths::nacelle_home_dir_or_workspace_tmp().join("cas")
                 });
             Ok(Box::new(LocalCasClient::new(root)?))
         }
@@ -373,9 +369,7 @@ pub fn create_cas_client_from_env() -> Result<Box<dyn CasClient>> {
             let root = std::env::var("ATO_CAS_ROOT")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| {
-                    crate::common::paths::nacelle_home_dir()
-                        .unwrap_or_else(|_| PathBuf::from("/tmp").join(".ato"))
-                        .join("cas")
+                    crate::common::paths::nacelle_home_dir_or_workspace_tmp().join("cas")
                 });
             Ok(Box::new(LocalCasClient::new(root)?))
         }
