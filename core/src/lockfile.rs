@@ -1009,6 +1009,7 @@ async fn generate_lockfile(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn configure_python_lockfile(
     manifest_raw: &toml::Value,
     manifest_dir: &Path,
@@ -1083,6 +1084,7 @@ async fn configure_python_lockfile(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn configure_node_lockfile(
     manifest_raw: &toml::Value,
     manifest_dir: &Path,
@@ -1165,6 +1167,7 @@ async fn configure_node_lockfile(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn configure_deno_lockfile(
     manifest_raw: &toml::Value,
     manifest_dir: &Path,
