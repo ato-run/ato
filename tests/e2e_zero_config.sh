@@ -14,7 +14,8 @@ log_info() { echo -e "${GREEN}✓${NC} $1"; }
 log_error() { echo -e "${RED}✗${NC} $1"; }
 log_warn() { echo -e "${YELLOW}⚠${NC} $1"; }
 
-E2E_WORK_DIR="$(mktemp -d /tmp/ato-zero-config-e2e-XXXX)"
+mkdir -p "${ATO_CLI_DIR}/.tmp"
+E2E_WORK_DIR="$(mktemp -d "${ATO_CLI_DIR}/.tmp/ato-zero-config-e2e-XXXX")"
 cleanup() {
   rm -rf "${E2E_WORK_DIR}"
 }

@@ -1,7 +1,6 @@
 mod fail_closed_support;
 
 use std::fs;
-use std::path::PathBuf;
 use std::process::Stdio;
 
 use fail_closed_support::*;
@@ -18,7 +17,11 @@ fn tier2_native_fs_isolation_enforced() {
         .parent()
         .expect("fixture must have parent")
         .join("pwned-outside.txt");
-    let leak_tmp = PathBuf::from("/tmp/ato_host_leak_test_17.txt");
+    let leak_tmp = fixture
+        .parent()
+        .expect("fixture must have parent")
+        .join(".tmp")
+        .join("ato_host_leak_test_17.txt");
     let _ = fs::remove_file(&leak_outside);
     let _ = fs::remove_file(&leak_tmp);
 
