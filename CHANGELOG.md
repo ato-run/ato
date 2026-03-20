@@ -2,6 +2,14 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
+## [0.4.29] - 2026-03-20
+
+### What Changed
+
+#### Bug Fixes
+
+- Unblock `Build (Multi OS)` by resolving `clippy::too_many_arguments` failures in the lockfile and install helper paths
+
 ## [0.4.28] - 2026-03-20
 
 ### What Changed
