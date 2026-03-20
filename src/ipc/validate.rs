@@ -317,7 +317,7 @@ fn check_import_resolvability(
             }
         } else {
             // Named dependency — check local store
-            let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+            let home = capsule_core::common::paths::home_dir_or_workspace_tmp();
             let store_path = if from.starts_with('@') {
                 let without_at = from.strip_prefix('@').unwrap_or(from);
                 let name = without_at.split(':').next().unwrap_or(without_at);

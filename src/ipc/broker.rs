@@ -162,11 +162,11 @@ impl IpcBroker {
         }
 
         if let Some(path) = from.strip_prefix("~/") {
-            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+            let home = capsule_core::common::paths::home_dir_or_workspace_tmp();
             return home.join(path);
         }
 
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+        let home = capsule_core::common::paths::home_dir_or_workspace_tmp();
         let store_dir = home.join(".ato").join("store");
 
         if from.starts_with('@') {

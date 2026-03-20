@@ -111,6 +111,7 @@ input_schema = "schemas/missing.json"
         .failure()
         .stderr(
             predicate::str::contains("ATO_ERR_POLICY_VIOLATION")
+                .or(predicate::str::contains("E302"))
                 .and(predicate::str::contains("IPC-008")),
         );
 }

@@ -115,6 +115,16 @@ pub fn resolve_registered_state_reference(
     state_name: &str,
     state_ref: &str,
 ) -> Result<PersistentStateRecord> {
+    let store = open_state_store()?;
+    resolve_registered_state_reference_in_store(manifest, state_name, state_ref, &store)
+}
+
+pub fn resolve_registered_state_reference_in_store(
+    manifest: &CapsuleManifest,
+    state_name: &str,
+    state_ref: &str,
+    store: &RegistryStore,
+) -> Result<PersistentStateRecord> {
     let state_id = parse_state_reference(state_ref).ok_or_else(|| {
         anyhow::anyhow!(
             "persistent state binding '{}' must use an absolute host path or state id",
@@ -122,7 +132,6 @@ pub fn resolve_registered_state_reference(
         )
     })?;
     let contract = persistent_state_contract(manifest, state_name)?;
-    let store = open_state_store()?;
     let existing = store
         .find_persistent_state_by_id(state_id)?
         .ok_or_else(|| {

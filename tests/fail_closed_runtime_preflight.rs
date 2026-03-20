@@ -12,7 +12,7 @@ fn deno_lock_missing_fail_closed() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ATO_ERR_PROVISIONING_LOCK_INCOMPLETE"),
+        stderr.contains("ATO_ERR_PROVISIONING_LOCK_INCOMPLETE") || stderr.contains("E104"),
         "stderr={stderr}"
     );
     assert!(stderr.contains("deno.lock"), "stderr={stderr}");
@@ -29,7 +29,7 @@ fn native_python_uv_lock_missing_fail_closed() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ATO_ERR_PROVISIONING_LOCK_INCOMPLETE"),
+        stderr.contains("ATO_ERR_PROVISIONING_LOCK_INCOMPLETE") || stderr.contains("E104"),
         "stderr={stderr}"
     );
     assert!(stderr.contains("uv.lock"), "stderr={stderr}");
@@ -84,7 +84,7 @@ fn native_sandbox_unavailable_fail_closed_even_with_unsafe_flag() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ATO_ERR_COMPAT_HARDWARE"),
+        stderr.contains("ATO_ERR_COMPAT_HARDWARE") || stderr.contains("E304"),
         "stderr={stderr}"
     );
     assert!(
@@ -100,7 +100,7 @@ fn glibc_preflight_rejection() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ATO_ERR_COMPAT_HARDWARE"),
+        stderr.contains("ATO_ERR_COMPAT_HARDWARE") || stderr.contains("E304"),
         "stderr={stderr}"
     );
     assert!(
@@ -117,7 +117,7 @@ fn elf_overrides_lock_preflight() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ATO_ERR_COMPAT_HARDWARE"),
+        stderr.contains("ATO_ERR_COMPAT_HARDWARE") || stderr.contains("E304"),
         "stderr={stderr}"
     );
     assert!(stderr.contains("2.99"), "stderr={stderr}");

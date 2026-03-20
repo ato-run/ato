@@ -257,7 +257,7 @@ async fn materialize_directory_injection(
             .join("dirs")
             .join(digest.strip_prefix("sha256:").unwrap_or(&digest));
         if !dir_path.exists() {
-            copy_dir_recursive(&local_path, &dir_path)?;
+            crate::fs_copy::copy_path_recursive(&local_path, &dir_path)?;
             set_read_only_recursive(&dir_path)?;
         }
         let (env_value, mount) = external_injection_path(plan, key, &dir_path);
@@ -462,23 +462,6 @@ fn sha256_dir(root: &Path) -> Result<(String, u64)> {
         format!("sha256:{}", hex::encode(hasher.finalize())),
         total_bytes,
     ))
-}
-
-fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
-    fs::create_dir_all(dest)?;
-    for entry in WalkDir::new(src).min_depth(1).into_iter().flatten() {
-        let rel = entry.path().strip_prefix(src).unwrap_or(entry.path());
-        let target = dest.join(rel);
-        if entry.file_type().is_dir() {
-            fs::create_dir_all(&target)?;
-        } else if entry.file_type().is_file() {
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(entry.path(), &target)?;
-        }
-    }
-    Ok(())
 }
 
 fn extract_archive_if_needed(archive_path: &Path, dest: &Path) -> Result<()> {
