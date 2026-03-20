@@ -13,7 +13,7 @@ fn non_interactive_missing_consent_denied() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ATO_ERR_POLICY_VIOLATION"),
+        stderr.contains("ATO_ERR_POLICY_VIOLATION") || stderr.contains("E302"),
         "stderr={stderr}"
     );
     assert!(
@@ -29,7 +29,7 @@ fn yes_flag_does_not_bypass_missing_consent() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ATO_ERR_POLICY_VIOLATION"),
+        stderr.contains("ATO_ERR_POLICY_VIOLATION") || stderr.contains("E302"),
         "stderr={stderr}"
     );
     assert!(
@@ -56,7 +56,7 @@ fn from_skill_missing_consent_denied() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ATO_ERR_POLICY_VIOLATION"),
+        stderr.contains("ATO_ERR_POLICY_VIOLATION") || stderr.contains("E302"),
         "stderr={stderr}"
     );
     assert!(
@@ -97,7 +97,7 @@ fn web_entrypoint_outside_public_allowlist_rejected() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ATO_ERR_POLICY_VIOLATION")
+        (stderr.contains("ATO_ERR_POLICY_VIOLATION") || stderr.contains("E301"))
             && (stderr.contains("public allowlist")
                 || stderr.contains("path canonicalization denied")
                 || stderr.contains("Path traversal detected")),

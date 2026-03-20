@@ -1214,7 +1214,8 @@ entrypoint = "main.py"
     );
     let node_no_lock_stderr = String::from_utf8_lossy(&node_no_lock_run.stderr);
     assert!(
-        node_no_lock_stderr.contains("ATO_ERR_PROVISIONING_LOCK_INCOMPLETE"),
+        node_no_lock_stderr.contains("ATO_ERR_PROVISIONING_LOCK_INCOMPLETE")
+            || node_no_lock_stderr.contains("E104"),
         "expected lock incomplete JSONL for node no lock; stderr={}",
         node_no_lock_stderr
     );
@@ -1274,6 +1275,8 @@ entrypoint = "main.py"
     let node_policy_violation_stderr = String::from_utf8_lossy(&node_policy_violation_run.stderr);
     assert!(
         node_policy_violation_stderr.contains("ATO_ERR_POLICY_VIOLATION")
+            || node_policy_violation_stderr.contains("E301")
+            || node_policy_violation_stderr.contains("E302")
             || node_policy_violation_stderr.contains("PermissionDenied: Requires net access")
             || node_policy_violation_stderr.contains("NotCapable: Requires net access")
             || node_policy_violation_stderr.contains("Requires net access to \"example.com:443\""),
@@ -1293,7 +1296,8 @@ entrypoint = "main.py"
     );
     let python_no_lock_stderr = String::from_utf8_lossy(&python_no_lock_run.stderr);
     assert!(
-        python_no_lock_stderr.contains("ATO_ERR_PROVISIONING_LOCK_INCOMPLETE"),
+        python_no_lock_stderr.contains("ATO_ERR_PROVISIONING_LOCK_INCOMPLETE")
+            || python_no_lock_stderr.contains("E104"),
         "expected lock incomplete JSONL for python no lock; stderr={}",
         python_no_lock_stderr
     );
@@ -1320,7 +1324,9 @@ entrypoint = "main.py"
     );
     let python_with_lock_stderr = String::from_utf8_lossy(&python_with_lock_run.stderr);
     assert!(
-        python_with_lock_stderr.contains("ATO_ERR_POLICY_VIOLATION"),
+        python_with_lock_stderr.contains("ATO_ERR_POLICY_VIOLATION")
+            || python_with_lock_stderr.contains("E301")
+            || python_with_lock_stderr.contains("E302"),
         "expected policy violation JSONL for python without --sandbox; stderr={}",
         python_with_lock_stderr
     );

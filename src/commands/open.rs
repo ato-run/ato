@@ -22,12 +22,15 @@ use crate::executors::source::ExecuteMode;
 use crate::executors::target_runner::{self, TargetLaunchOptions};
 use crate::preview;
 use crate::provisioner::{self, AutoProvisioningOptions};
+use crate::registry_store::RegistryStore;
 use crate::reporters::CliReporter;
 use crate::runtime_manager;
 use crate::runtime_overrides;
 use crate::runtime_tree;
 use crate::state::{
-    ensure_registered_state_binding, parse_state_reference, resolve_registered_state_reference,
+    ensure_registered_state_binding, ensure_registered_state_binding_in_store,
+    parse_state_reference, resolve_registered_state_reference,
+    resolve_registered_state_reference_in_store,
 };
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::execution_plan::guard::ExecutorKind;
@@ -40,7 +43,13 @@ use capsule_core::lockfile::{
 use capsule_core::types::{CapsuleManifest, CapsuleType, StateDurability};
 use capsule_core::{router, CapsuleReporter};
 
+mod background;
+mod preflight;
 mod watch;
+
+use background::*;
+pub(crate) use preflight::preflight_native_sandbox;
+use preflight::*;
 
 const BACKGROUND_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const BACKGROUND_READY_WAIT_TIMEOUT_ENV: &str = "ATO_BACKGROUND_READY_WAIT_TIMEOUT_SECS";
@@ -285,7 +294,7 @@ async fn copy_source_files(
 
         if file_name == "source" && path.is_dir() {
             let dest = extract_dir.join("source");
-            copy_dir_recursive(&path, &dest)?;
+            crate::fs_copy::copy_path_recursive(&path, &dest)?;
             debug!("Copied source/");
         } else if path.is_file() {
             let dest = extract_dir.join(&file_name);
@@ -293,7 +302,7 @@ async fn copy_source_files(
             debug!(file = %file_name.to_string_lossy(), "Copied file into extracted capsule");
         } else if path.is_dir() && !is_hidden(&file_name) {
             let dest = extract_dir.join(&file_name);
-            copy_dir_recursive(&path, &dest)?;
+            crate::fs_copy::copy_path_recursive(&path, &dest)?;
             debug!(dir = %file_name.to_string_lossy(), "Copied directory into extracted capsule");
         }
     }
@@ -376,26 +385,6 @@ fn is_source_file(file_name: &std::ffi::OsString) -> bool {
 fn is_hidden(file_name: &std::ffi::OsString) -> bool {
     let bytes = file_name.as_os_str().as_encoded_bytes();
     bytes.first() == Some(&b'.') && bytes.len() > 1
-}
-
-fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
-    if !to.exists() {
-        fs::create_dir_all(to)?;
-    }
-
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let path = entry.path();
-        let dest = to.join(entry.file_name());
-
-        if path.is_dir() {
-            copy_dir_recursive(&path, &dest)?;
-        } else {
-            fs::copy(&path, &dest)?;
-        }
-    }
-
-    Ok(())
 }
 
 async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
@@ -809,7 +798,7 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
     match guard_result.executor_kind {
         ExecutorKind::Native => {
             let host_execution = args.dangerously_skip_permissions || host_fallback_requested;
-            let mut process = if host_execution {
+            let process = if host_execution {
                 crate::executors::source::execute_host(
                     &decision.plan,
                     args.reporter.clone(),
@@ -830,120 +819,37 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
             };
 
             if args.background {
-                let pid = process.child.id();
-                let id = format!("capsule-{}", pid);
-                let now = SystemTime::now();
-
-                let info = crate::process_manager::ProcessInfo {
-                    id: id.clone(),
-                    name: decision
-                        .plan
-                        .manifest_path
-                        .file_stem()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    pid: pid as i32,
-                    workload_pid: process.workload_pid.map(|value| value as i32),
-                    status: if host_execution && process.event_rx.is_none() {
-                        crate::process_manager::ProcessStatus::Ready
-                    } else {
-                        crate::process_manager::ProcessStatus::Starting
-                    },
-                    runtime: process_runtime_label(
-                        &decision.plan,
-                        args.dangerously_skip_permissions,
-                        compatibility_host_mode,
-                    ),
-                    start_time: now,
-                    manifest_path: Some(decision.plan.manifest_path.clone()),
-                    scoped_id: run_scoped_id.clone(),
-                    target_label: Some(decision.plan.selected_target_label().to_string()),
-                    requested_port: None,
-                    log_path: process.log_path.clone(),
-                    ready_at: if host_execution && process.event_rx.is_none() {
-                        Some(now)
-                    } else {
-                        None
-                    },
-                    last_event: Some("spawned".to_string()),
-                    last_error: None,
-                    exit_code: None,
-                };
-
-                let pm = crate::process_manager::ProcessManager::new()?;
-                pm.write_pid(&info)?;
-
-                let (startup_outcome, event_rx) = if host_execution && process.event_rx.is_none() {
-                    (BackgroundStartupOutcome::Ready, None)
-                } else {
-                    wait_for_background_native_startup(&mut process, &pm, &id)?
-                };
-
-                cleanup_process_artifacts(&process.cleanup_paths);
-
-                match startup_outcome {
-                    BackgroundStartupOutcome::Ready => {
-                        let _ = process.child;
-                        let _ = event_rx;
-                        let _ = pm.read_pid(&id)?;
-                        args.reporter
-                            .notify(background_ready_message(&id, compatibility_host_mode))
-                            .await?;
-                    }
-                    BackgroundStartupOutcome::TimedOut => {
-                        let _ = process.child;
-                        let _ = event_rx;
-                        let _ = pm.read_pid(&id)?;
-                        args.reporter
-                            .warn(background_timeout_message(&id, compatibility_host_mode))
-                            .await?;
-                    }
-                    BackgroundStartupOutcome::FailedBeforeReady => {
-                        let state = pm.read_pid(&id).ok();
-                        let mut message = background_failure_prefix(&id, compatibility_host_mode);
-                        if let Some(state) = state {
-                            if let Some(error) = state.last_error {
-                                message.push_str(&format!(": {}", error));
-                            } else if let Some(code) = state.exit_code {
-                                message.push_str(&format!(": exit code {}", code));
-                            }
-                            if let Some(log_path) = state.log_path {
-                                message.push_str(&format!(". See logs at {}", log_path.display()));
-                            }
-                        }
-                        sidecar_cleanup.stop_now();
-                        anyhow::bail!(message);
-                    }
-                }
+                let runtime = process_runtime_label(
+                    &decision.plan,
+                    args.dangerously_skip_permissions,
+                    compatibility_host_mode,
+                );
+                let ready_without_events = host_execution && process.event_rx.is_none();
+                complete_background_source_process(
+                    process,
+                    &decision.plan,
+                    runtime,
+                    run_scoped_id.clone(),
+                    ready_without_events,
+                    compatibility_host_mode,
+                    &args.reporter,
+                )
+                .await?;
                 sidecar_cleanup.stop_now();
                 return Ok(());
             }
 
-            let run_spinner = if use_progressive_ui {
-                Some(crate::progressive_ui::start_spinner("Running Preview..."))
-            } else {
-                None
-            };
-            let readiness_notifier = spawn_foreground_native_event_reporter(
+            let exit_code = complete_foreground_source_process(
+                process,
                 args.reporter.clone(),
-                process.event_rx.take(),
                 !host_execution,
                 launch_ctx
                     .socket_paths()
                     .map(|paths| !paths.is_empty())
                     .unwrap_or(false),
-                run_spinner.clone(),
-            )?;
-            let exit_code = crate::executors::source::wait_for_exit(&mut process.child).await?;
-            if let Some(handle) = readiness_notifier {
-                let _ = handle.join();
-            }
-            if let Some(progress) = run_spinner {
-                progress.stop("Preview stopped.");
-            }
-            cleanup_process_artifacts(&process.cleanup_paths);
-
+                use_progressive_ui,
+            )
+            .await?;
             sidecar_cleanup.stop_now();
 
             if exit_code != 0 {
@@ -954,7 +860,7 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
             }
         }
         ExecutorKind::NodeCompat if host_fallback_requested => {
-            let mut process = crate::executors::source::execute_host(
+            let process = crate::executors::source::execute_host(
                 &decision.plan,
                 args.reporter.clone(),
                 mode,
@@ -962,116 +868,33 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
             )?;
 
             if args.background {
-                let pid = process.child.id();
-                let id = format!("capsule-{}", pid);
-                let now = SystemTime::now();
-
-                let info = crate::process_manager::ProcessInfo {
-                    id: id.clone(),
-                    name: decision
-                        .plan
-                        .manifest_path
-                        .file_stem()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    pid: pid as i32,
-                    workload_pid: process.workload_pid.map(|value| value as i32),
-                    status: if process.event_rx.is_none() {
-                        crate::process_manager::ProcessStatus::Ready
-                    } else {
-                        crate::process_manager::ProcessStatus::Starting
-                    },
-                    runtime: process_runtime_label(&decision.plan, false, compatibility_host_mode),
-                    start_time: now,
-                    manifest_path: Some(decision.plan.manifest_path.clone()),
-                    scoped_id: run_scoped_id.clone(),
-                    target_label: Some(decision.plan.selected_target_label().to_string()),
-                    requested_port: None,
-                    log_path: process.log_path.clone(),
-                    ready_at: if process.event_rx.is_none() {
-                        Some(now)
-                    } else {
-                        None
-                    },
-                    last_event: Some("spawned".to_string()),
-                    last_error: None,
-                    exit_code: None,
-                };
-
-                let pm = crate::process_manager::ProcessManager::new()?;
-                pm.write_pid(&info)?;
-
-                let (startup_outcome, event_rx) = if process.event_rx.is_none() {
-                    (BackgroundStartupOutcome::Ready, None)
-                } else {
-                    wait_for_background_native_startup(&mut process, &pm, &id)?
-                };
-
-                cleanup_process_artifacts(&process.cleanup_paths);
-
-                match startup_outcome {
-                    BackgroundStartupOutcome::Ready => {
-                        let _ = process.child;
-                        let _ = event_rx;
-                        let _ = pm.read_pid(&id)?;
-                        args.reporter
-                            .notify(background_ready_message(&id, compatibility_host_mode))
-                            .await?;
-                    }
-                    BackgroundStartupOutcome::TimedOut => {
-                        let _ = process.child;
-                        let _ = event_rx;
-                        let _ = pm.read_pid(&id)?;
-                        args.reporter
-                            .warn(background_timeout_message(&id, compatibility_host_mode))
-                            .await?;
-                    }
-                    BackgroundStartupOutcome::FailedBeforeReady => {
-                        let state = pm.read_pid(&id).ok();
-                        let mut message = background_failure_prefix(&id, compatibility_host_mode);
-                        if let Some(state) = state {
-                            if let Some(error) = state.last_error {
-                                message.push_str(&format!(": {}", error));
-                            } else if let Some(code) = state.exit_code {
-                                message.push_str(&format!(": exit code {}", code));
-                            }
-                            if let Some(log_path) = state.log_path {
-                                message.push_str(&format!(". See logs at {}", log_path.display()));
-                            }
-                        }
-                        sidecar_cleanup.stop_now();
-                        anyhow::bail!(message);
-                    }
-                }
+                let runtime = process_runtime_label(&decision.plan, false, compatibility_host_mode);
+                let ready_without_events = process.event_rx.is_none();
+                complete_background_source_process(
+                    process,
+                    &decision.plan,
+                    runtime,
+                    run_scoped_id.clone(),
+                    ready_without_events,
+                    compatibility_host_mode,
+                    &args.reporter,
+                )
+                .await?;
                 sidecar_cleanup.stop_now();
                 return Ok(());
             }
 
-            let run_spinner = if use_progressive_ui {
-                Some(crate::progressive_ui::start_spinner("Running Preview..."))
-            } else {
-                None
-            };
-            let readiness_notifier = spawn_foreground_native_event_reporter(
+            let exit_code = complete_foreground_source_process(
+                process,
                 args.reporter.clone(),
-                process.event_rx.take(),
                 false,
                 launch_ctx
                     .socket_paths()
                     .map(|paths| !paths.is_empty())
                     .unwrap_or(false),
-                run_spinner.clone(),
-            )?;
-            let exit_code = crate::executors::source::wait_for_exit(&mut process.child).await?;
-            if let Some(handle) = readiness_notifier {
-                let _ = handle.join();
-            }
-            if let Some(progress) = run_spinner {
-                progress.stop("Preview stopped.");
-            }
-            cleanup_process_artifacts(&process.cleanup_paths);
-
+                use_progressive_ui,
+            )
+            .await?;
             sidecar_cleanup.stop_now();
 
             if exit_code != 0 {
@@ -1180,6 +1003,14 @@ fn resolve_state_source_overrides(
     manifest: &CapsuleManifest,
     raw_bindings: &[String],
 ) -> Result<std::collections::HashMap<String, String>> {
+    resolve_state_source_overrides_with_store(manifest, raw_bindings, None)
+}
+
+fn resolve_state_source_overrides_with_store(
+    manifest: &CapsuleManifest,
+    raw_bindings: &[String],
+    store: Option<&RegistryStore>,
+) -> Result<std::collections::HashMap<String, String>> {
     let mut requested = std::collections::HashMap::new();
     for raw in raw_bindings {
         let (state_name, locator) = raw.split_once('=').ok_or_else(|| {
@@ -1249,9 +1080,19 @@ fn resolve_state_source_overrides(
             )
         })?;
         let record = if parse_state_reference(locator).is_some() {
-            resolve_registered_state_reference(manifest, state_name, locator)?
+            match store {
+                Some(store) => resolve_registered_state_reference_in_store(
+                    manifest, state_name, locator, store,
+                )?,
+                None => resolve_registered_state_reference(manifest, state_name, locator)?,
+            }
         } else {
-            ensure_registered_state_binding(manifest, state_name, locator)?
+            match store {
+                Some(store) => {
+                    ensure_registered_state_binding_in_store(manifest, state_name, locator, store)?
+                }
+                None => ensure_registered_state_binding(manifest, state_name, locator)?,
+            }
         };
 
         resolved.insert(state_name.clone(), record.backend_locator);
@@ -1293,309 +1134,6 @@ fn resolve_compatibility_host_mode(
         ),
         Some(other) => anyhow::bail!("unsupported compatibility fallback backend: {other}"),
     }
-}
-
-fn process_runtime_label(
-    plan: &capsule_core::router::ManifestData,
-    dangerous_skip_permissions: bool,
-    compatibility_host_mode: CompatibilityHostMode,
-) -> String {
-    if matches!(compatibility_host_mode, CompatibilityHostMode::Enabled) {
-        let runtime = plan
-            .execution_runtime()
-            .unwrap_or_else(|| "source".to_string());
-        let driver = plan.execution_driver();
-        return match driver {
-            Some(driver) if !driver.trim().is_empty() => {
-                format!("{}/{} [host-fallback]", runtime, driver)
-            }
-            _ => format!("{} [host-fallback]", runtime),
-        };
-    }
-    if dangerous_skip_permissions {
-        return "host".to_string();
-    }
-    "nacelle".to_string()
-}
-
-fn background_ready_message(id: &str, compatibility_host_mode: CompatibilityHostMode) -> String {
-    if matches!(compatibility_host_mode, CompatibilityHostMode::Enabled) {
-        return format!("✔ Capsule is ready (Host Fallback, ID: {id})");
-    }
-    format!("🚀 Capsule started in background and is ready (ID: {id})")
-}
-
-fn background_timeout_message(id: &str, compatibility_host_mode: CompatibilityHostMode) -> String {
-    if matches!(compatibility_host_mode, CompatibilityHostMode::Enabled) {
-        return format!(
-            "⏳ Capsule is still starting in compatibility mode (Host Fallback, ID: {}). Use `ato ps --all` to inspect readiness.",
-            id
-        );
-    }
-    format!(
-        "⏳ Capsule is still starting in background (ID: {}). Use `ato ps --all` to inspect readiness.",
-        id
-    )
-}
-
-fn background_failure_prefix(id: &str, compatibility_host_mode: CompatibilityHostMode) -> String {
-    if matches!(compatibility_host_mode, CompatibilityHostMode::Enabled) {
-        return format!("Background capsule failed before readiness in compatibility mode (Host Fallback, ID: {id})");
-    }
-    format!("Background capsule failed before readiness (ID: {id})")
-}
-
-fn spawn_foreground_native_event_reporter(
-    reporter: Arc<CliReporter>,
-    event_rx: Option<Receiver<LifecycleEvent>>,
-    sandbox_initialized: bool,
-    ipc_socket_mapped: bool,
-    progress: Option<ProgressBar>,
-) -> Result<Option<JoinHandle<()>>> {
-    let Some(event_rx) = event_rx else {
-        return Ok(None);
-    };
-
-    for message in initial_foreground_native_messages(sandbox_initialized, ipc_socket_mapped) {
-        if let Some(progress) = progress.as_ref() {
-            progress.set_message(message);
-        } else {
-            futures::executor::block_on(CapsuleReporter::notify(&*reporter, message))?;
-        }
-    }
-
-    Ok(Some(std::thread::spawn(move || {
-        let mut ready_reported = false;
-        for event in event_rx {
-            for message in foreground_native_event_messages(&event, ready_reported) {
-                match message {
-                    ForegroundEventMessage::Notify(message) => {
-                        if let Some(progress) = progress.as_ref() {
-                            progress.set_message(message);
-                        } else {
-                            let _ = futures::executor::block_on(CapsuleReporter::notify(
-                                &*reporter, message,
-                            ));
-                        }
-                    }
-                    ForegroundEventMessage::Warn(message) => {
-                        if let Some(progress) = progress.as_ref() {
-                            progress.set_message(message);
-                        } else {
-                            let _ = futures::executor::block_on(CapsuleReporter::warn(
-                                &*reporter, message,
-                            ));
-                        }
-                    }
-                }
-            }
-
-            if matches!(event, LifecycleEvent::Ready { .. }) {
-                ready_reported = true;
-            }
-        }
-    })))
-}
-
-fn wait_for_background_native_startup(
-    process: &mut crate::executors::source::CapsuleProcess,
-    process_manager: &crate::process_manager::ProcessManager,
-    process_id: &str,
-) -> Result<(BackgroundStartupOutcome, Option<Receiver<LifecycleEvent>>)> {
-    let Some(event_rx) = process.event_rx.take() else {
-        return Ok((BackgroundStartupOutcome::TimedOut, None));
-    };
-    let event_rx = Some(event_rx);
-
-    let deadline = Instant::now() + background_ready_wait_timeout();
-
-    loop {
-        if let Some(status) = process.child.try_wait()? {
-            let exit_code = status.code();
-            let _ = process_manager.update_pid(process_id, |info| {
-                info.exit_code = exit_code;
-                info.last_event = Some("process_exited".to_string());
-                if matches!(info.status, crate::process_manager::ProcessStatus::Starting) {
-                    info.status = crate::process_manager::ProcessStatus::Failed;
-                    if info.last_error.is_none() {
-                        info.last_error = Some("process exited before readiness".to_string());
-                    }
-                } else if info.status.is_active() {
-                    info.status = crate::process_manager::ProcessStatus::Exited;
-                }
-            });
-            return Ok((BackgroundStartupOutcome::FailedBeforeReady, event_rx));
-        }
-
-        let now = Instant::now();
-        if now >= deadline {
-            let _ = process_manager.update_pid(process_id, |info| {
-                info.last_event = Some("startup_timeout".to_string());
-            });
-            return Ok((BackgroundStartupOutcome::TimedOut, event_rx));
-        }
-
-        let wait_for = std::cmp::min(Duration::from_millis(100), deadline - now);
-        match event_rx
-            .as_ref()
-            .expect("event receiver should still be present during startup wait")
-            .recv_timeout(wait_for)
-        {
-            Ok(event) => {
-                match persist_background_native_event(process_manager, process_id, &event)? {
-                    BackgroundStartupOutcome::Ready => {
-                        return Ok((BackgroundStartupOutcome::Ready, event_rx));
-                    }
-                    BackgroundStartupOutcome::FailedBeforeReady => {
-                        return Ok((BackgroundStartupOutcome::FailedBeforeReady, event_rx));
-                    }
-                    BackgroundStartupOutcome::TimedOut => {}
-                }
-            }
-            Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => {
-                let _ = process_manager.update_pid(process_id, |info| {
-                    if matches!(info.status, crate::process_manager::ProcessStatus::Starting) {
-                        info.status = crate::process_manager::ProcessStatus::Unknown;
-                        info.last_error =
-                            Some("event stream disconnected before readiness".to_string());
-                    }
-                });
-                return Ok((BackgroundStartupOutcome::TimedOut, None));
-            }
-        }
-    }
-}
-
-fn background_ready_wait_timeout() -> Duration {
-    std::env::var(BACKGROUND_READY_WAIT_TIMEOUT_ENV)
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .filter(|duration| !duration.is_zero())
-        .unwrap_or(BACKGROUND_READY_WAIT_TIMEOUT)
-}
-
-fn persist_background_native_event(
-    process_manager: &crate::process_manager::ProcessManager,
-    process_id: &str,
-    event: &LifecycleEvent,
-) -> Result<BackgroundStartupOutcome> {
-    let now = SystemTime::now();
-    let updated = process_manager.update_pid(process_id, |info| match event {
-        LifecycleEvent::Ready { .. } => {
-            info.status = crate::process_manager::ProcessStatus::Ready;
-            info.ready_at = Some(now);
-            info.last_event = Some("ready".to_string());
-            info.last_error = None;
-        }
-        LifecycleEvent::Exited { service, exit_code } => {
-            info.exit_code = *exit_code;
-            info.last_event = Some("exited".to_string());
-            if matches!(info.status, crate::process_manager::ProcessStatus::Starting) {
-                info.status = crate::process_manager::ProcessStatus::Failed;
-                info.last_error = Some(format!("service '{}' exited before readiness", service));
-            } else if info.status.is_active() {
-                info.status = crate::process_manager::ProcessStatus::Exited;
-            }
-        }
-    })?;
-
-    Ok(match updated.status {
-        crate::process_manager::ProcessStatus::Ready => BackgroundStartupOutcome::Ready,
-        crate::process_manager::ProcessStatus::Failed => {
-            BackgroundStartupOutcome::FailedBeforeReady
-        }
-        _ => BackgroundStartupOutcome::TimedOut,
-    })
-}
-
-fn cleanup_process_artifacts(paths: &[PathBuf]) {
-    for path in paths {
-        if path.exists() {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
-async fn cleanup_existing_scoped_processes_before_run(
-    scoped_id: &str,
-    reporter: &Arc<CliReporter>,
-) -> Result<()> {
-    let process_manager = crate::process_manager::ProcessManager::new()?;
-    let cleaned = process_manager.cleanup_scoped_processes(scoped_id, true)?;
-    if cleaned > 0 {
-        reporter
-            .warn(format!(
-                "🧹 Cleaned up {} existing process record(s) for {} before run",
-                cleaned, scoped_id
-            ))
-            .await?;
-    }
-    Ok(())
-}
-
-fn initial_foreground_native_messages(
-    sandbox_initialized: bool,
-    ipc_socket_mapped: bool,
-) -> Vec<String> {
-    let mut messages = Vec::new();
-    if sandbox_initialized {
-        messages.push("[✓] Sandbox initialized".to_string());
-    }
-    if ipc_socket_mapped {
-        messages.push("[✓] IPC socket mapped".to_string());
-    }
-    messages
-}
-
-fn foreground_native_event_messages(
-    event: &LifecycleEvent,
-    ready_reported: bool,
-) -> Vec<ForegroundEventMessage> {
-    match event {
-        LifecycleEvent::Ready { service, .. } if !ready_reported => {
-            let ready_message = if service == "main" {
-                "[✓] Service is ready (ready event received)".to_string()
-            } else {
-                format!("[✓] Service '{service}' is ready (ready event received)")
-            };
-            vec![
-                ForegroundEventMessage::Notify(ready_message),
-                ForegroundEventMessage::Notify("    Streaming logs...".to_string()),
-            ]
-        }
-        LifecycleEvent::Exited { service, exit_code } if !ready_reported => {
-            let exit_code = exit_code
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            vec![ForegroundEventMessage::Warn(format!(
-                "❌ Service '{service}' exited before readiness (exit code: {exit_code})"
-            ))]
-        }
-        _ => Vec::new(),
-    }
-}
-
-async fn notify_web_endpoint(
-    plan: &capsule_core::router::ManifestData,
-    reporter: &Arc<CliReporter>,
-) -> Result<()> {
-    let port = runtime_overrides::override_port(plan.execution_port()).ok_or_else(|| {
-        anyhow::anyhow!(
-            "runtime=web target '{}' requires targets.<label>.port",
-            plan.selected_target_label()
-        )
-    })?;
-
-    reporter
-        .notify(format!(
-            "🌐 Web target '{}' is available at http://127.0.0.1:{}/",
-            plan.selected_target_label(),
-            port
-        ))
-        .await?;
-    Ok(())
 }
 
 fn execute_watch_mode(args: OpenArgs) -> Result<()> {
@@ -1671,804 +1209,6 @@ fn execute_watch_mode(args: OpenArgs) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn preflight_native_sandbox(
-    nacelle_override: Option<PathBuf>,
-    plan: &capsule_core::router::ManifestData,
-    reporter: &Arc<CliReporter>,
-) -> Result<PathBuf> {
-    preflight_python_uv_lock_for_source_driver(plan)?;
-    preflight_python_uv_binary_for_source_driver(plan)?;
-    preflight_glibc_compat(plan)?;
-    preflight_macos_compat(plan)?;
-
-    let nacelle = resolve_nacelle_for_tier2(nacelle_override, plan, reporter)?;
-    let response = capsule_core::engine::run_internal(
-        &nacelle,
-        "features",
-        &json!({ "spec_version": "0.1.0" }),
-    )?;
-    let capabilities = response
-        .get("data")
-        .and_then(|v| v.get("capabilities"))
-        .or_else(|| response.get("capabilities"));
-
-    let sandbox = capabilities
-        .and_then(|v| v.get("sandbox"))
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    if sandbox.is_empty() {
-        return Err(AtoExecutionError::compat_hardware(
-            "No compatible native sandbox backend is available",
-            Some("sandbox"),
-        )
-        .into());
-    }
-
-    Ok(nacelle)
-}
-
-fn resolve_nacelle_for_tier2(
-    nacelle_override: Option<PathBuf>,
-    plan: &capsule_core::router::ManifestData,
-    reporter: &Arc<CliReporter>,
-) -> Result<PathBuf> {
-    let request = capsule_core::engine::EngineRequest {
-        explicit_path: nacelle_override.clone(),
-        manifest_path: Some(plan.manifest_path.clone()),
-    };
-
-    match capsule_core::engine::discover_nacelle(request) {
-        Ok(path) => Ok(path),
-        Err(err) => {
-            if !should_attempt_nacelle_auto_bootstrap(
-                nacelle_override.as_deref(),
-                &plan.manifest_path,
-            )? {
-                return Err(AtoExecutionError::engine_missing(
-                    format!(
-                        "Tier 2 execution requires 'nacelle', but the configured engine is not usable: {err}"
-                    ),
-                    Some("nacelle"),
-                )
-                .into());
-            }
-
-            crate::engine_manager::auto_bootstrap_nacelle(&**reporter)
-                .map(|installed| installed.path)
-                .map_err(|bootstrap_err| {
-                    AtoExecutionError::engine_missing(
-                        format!(
-                            "Tier 2 execution requires 'nacelle', and auto-bootstrap failed: {bootstrap_err}"
-                        ),
-                        Some("nacelle"),
-                    )
-                    .into()
-                })
-        }
-    }
-}
-
-fn should_attempt_nacelle_auto_bootstrap(
-    nacelle_override: Option<&Path>,
-    manifest_path: &Path,
-) -> Result<bool> {
-    if nacelle_override.is_some() {
-        return Ok(false);
-    }
-    if std::env::var("NACELLE_PATH")
-        .ok()
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
-    {
-        return Ok(false);
-    }
-    if manifest_declares_engine_override(manifest_path)? {
-        return Ok(false);
-    }
-
-    Ok(true)
-}
-
-fn manifest_declares_engine_override(manifest_path: &Path) -> Result<bool> {
-    if !manifest_path.exists() {
-        return Ok(false);
-    }
-
-    let raw = fs::read_to_string(manifest_path)
-        .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
-    let parsed = toml::from_str::<toml::Value>(&raw)
-        .with_context(|| format!("Failed to parse manifest TOML: {}", manifest_path.display()))?;
-    Ok(parsed.get("engine").is_some())
-}
-
-#[cfg(test)]
-fn preflight_required_environment_variables(
-    plan: &capsule_core::router::ManifestData,
-) -> Result<()> {
-    target_runner::preflight_required_environment_variables(
-        plan,
-        &crate::executors::launch_context::RuntimeLaunchContext::empty(),
-    )
-}
-
-async fn run_v03_lifecycle_steps(
-    plan: &capsule_core::router::ManifestData,
-    reporter: &Arc<CliReporter>,
-    launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
-) -> Result<()> {
-    let schema_version = plan
-        .manifest
-        .get("schema_version")
-        .and_then(toml::Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
-    if schema_version != "0.3" {
-        return Ok(());
-    }
-
-    let mut provisioned_roots = std::collections::HashSet::new();
-    for target_label in plan.selected_target_package_order()? {
-        let target_plan = plan.with_selected_target(target_label.clone());
-        let working_dir = target_plan.execution_working_directory();
-
-        if provisioned_roots.insert(working_dir.clone()) {
-            if let Some(command) = plan_v03_provision_command(&target_plan)? {
-                reporter
-                    .notify(format!("⚙️  Provision [{}]: {}", target_label, command))
-                    .await?;
-                run_lifecycle_shell_command(&target_plan, launch_ctx, &command, "provision")?;
-            }
-        }
-
-        if let Some(command) = target_plan
-            .build_lifecycle_build()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
-            reporter
-                .notify(format!("🏗️  Build [{}]: {}", target_label, command))
-                .await?;
-            run_lifecycle_shell_command(&target_plan, launch_ctx, &command, "build")?;
-        }
-    }
-
-    Ok(())
-}
-
-fn plan_v03_provision_command(plan: &capsule_core::router::ManifestData) -> Result<Option<String>> {
-    let runtime = plan.execution_runtime().unwrap_or_default();
-    let driver = plan.execution_driver().unwrap_or_default();
-    let runtime = runtime.trim().to_ascii_lowercase();
-    let driver = driver.trim().to_ascii_lowercase();
-    let manifest_dir = plan.manifest_dir.clone();
-    let execution_working_directory = plan.execution_working_directory();
-
-    if runtime == "web" && driver == "static" {
-        debug!(
-            phase = "open",
-            runtime,
-            driver,
-            manifest_dir = %manifest_dir.display(),
-            execution_working_directory = %execution_working_directory.display(),
-            lockfile_check_paths = ?Vec::<(&str, std::path::PathBuf, bool)>::new(),
-            "Provision command path diagnostics"
-        );
-        return Ok(None);
-    }
-
-    if matches!(driver.as_str(), "node") {
-        let package_lock = execution_working_directory.join("package-lock.json");
-        let pnpm_lock = execution_working_directory.join("pnpm-lock.yaml");
-        let bun_lock = execution_working_directory.join("bun.lock");
-        let bun_lockb = execution_working_directory.join("bun.lockb");
-        let lockfile_check_paths = vec![
-            (
-                "package-lock.json",
-                package_lock.clone(),
-                package_lock.exists(),
-            ),
-            ("pnpm-lock.yaml", pnpm_lock.clone(), pnpm_lock.exists()),
-            ("bun.lock", bun_lock.clone(), bun_lock.exists()),
-            ("bun.lockb", bun_lockb.clone(), bun_lockb.exists()),
-        ];
-        debug!(
-            phase = "open",
-            runtime,
-            driver,
-            manifest_dir = %manifest_dir.display(),
-            execution_working_directory = %execution_working_directory.display(),
-            lockfile_check_paths = ?lockfile_check_paths,
-            "Provision command path diagnostics"
-        );
-        let mut matches = Vec::new();
-        if package_lock.exists() {
-            matches.push("npm ci");
-        }
-        if pnpm_lock.exists() {
-            matches.push("pnpm install --frozen-lockfile");
-        }
-        if bun_lock.exists() || bun_lockb.exists() {
-            matches.push("bun install --frozen-lockfile");
-        }
-        return match matches.as_slice() {
-            [] => Err(AtoExecutionError::lock_incomplete(
-                "source/node target requires one of package-lock.json, pnpm-lock.yaml, bun.lock, or bun.lockb",
-                Some("package-lock.json"),
-            )
-            .into()),
-            [command] => Ok(Some((*command).to_string())),
-            _ => Err(AtoExecutionError::lock_incomplete(
-                "multiple node lockfiles detected; keep only one of package-lock.json, pnpm-lock.yaml, bun.lock, or bun.lockb",
-                Some("package-lock.json"),
-            )
-            .into()),
-        };
-    }
-
-    if matches!(driver.as_str(), "python") {
-        let uv_lock = execution_working_directory.join("uv.lock");
-        debug!(
-            phase = "open",
-            runtime,
-            driver,
-            manifest_dir = %manifest_dir.display(),
-            execution_working_directory = %execution_working_directory.display(),
-            lockfile_check_paths = ?vec![("uv.lock", uv_lock.clone(), uv_lock.exists())],
-            "Provision command path diagnostics"
-        );
-        return if uv_lock.exists() {
-            Ok(Some("uv sync --frozen".to_string()))
-        } else {
-            Err(AtoExecutionError::lock_incomplete(
-                "source/python target requires uv.lock for fail-closed provisioning",
-                Some("uv.lock"),
-            )
-            .into())
-        };
-    }
-
-    let cargo_lock = execution_working_directory.join("Cargo.lock");
-    debug!(
-        phase = "open",
-        runtime,
-        driver,
-        manifest_dir = %manifest_dir.display(),
-        execution_working_directory = %execution_working_directory.display(),
-        lockfile_check_paths = ?vec![("Cargo.lock", cargo_lock.clone(), cargo_lock.exists())],
-        "Provision command path diagnostics"
-    );
-    if matches!(driver.as_str(), "native") && cargo_lock.exists() {
-        return Ok(Some("cargo fetch --locked".to_string()));
-    }
-
-    Ok(None)
-}
-
-fn run_lifecycle_shell_command(
-    plan: &capsule_core::router::ManifestData,
-    launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
-    command: &str,
-    phase: &str,
-) -> Result<()> {
-    #[cfg(windows)]
-    let mut cmd = {
-        let mut cmd = std::process::Command::new("cmd");
-        cmd.args(["/C", command]);
-        cmd
-    };
-
-    #[cfg(not(windows))]
-    let mut cmd = {
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-lc", command]);
-        cmd
-    };
-
-    cmd.current_dir(plan.execution_working_directory())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit());
-
-    for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
-        cmd.env(key, value);
-    }
-    launch_ctx.apply_allowlisted_env(&mut cmd)?;
-
-    let status = cmd
-        .status()
-        .with_context(|| format!("Failed to execute {} command", phase))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            "{} command failed with exit code {}: {}",
-            phase,
-            status.code().unwrap_or(1),
-            command
-        ))
-    }
-}
-
-fn preflight_macos_compat(plan: &capsule_core::router::ManifestData) -> Result<()> {
-    let required_raw = match detect_required_macos_from_entrypoint(plan)? {
-        Some(value) => value,
-        None => return Ok(()),
-    };
-
-    let required_version = normalize_version(&required_raw).ok_or_else(|| {
-        AtoExecutionError::compat_hardware(
-            format!("Invalid macOS version constraint '{}'", required_raw),
-            Some("macos"),
-        )
-    })?;
-
-    let host_os = std::env::consts::OS;
-    if host_os != "macos" {
-        return Err(AtoExecutionError::compat_hardware(
-            format!(
-                "macOS {} is required but host OS is {}",
-                required_raw, host_os
-            ),
-            Some("macos"),
-        )
-        .into());
-    }
-
-    let host_raw = detect_host_macos_version().ok_or_else(|| {
-        AtoExecutionError::compat_hardware(
-            "Unable to detect host macOS version".to_string(),
-            Some("macos"),
-        )
-    })?;
-
-    let host_version = normalize_version(&host_raw).ok_or_else(|| {
-        AtoExecutionError::compat_hardware(
-            format!("Unable to parse host macOS version '{}'", host_raw),
-            Some("macos"),
-        )
-    })?;
-
-    if compare_versions(&host_version, &required_version) < 0 {
-        return Err(AtoExecutionError::compat_hardware(
-            format!(
-                "macOS {} is required but host has {}",
-                required_raw, host_raw
-            ),
-            Some("macos"),
-        )
-        .into());
-    }
-
-    Ok(())
-}
-
-fn preflight_python_uv_lock_for_source_driver(
-    plan: &capsule_core::router::ManifestData,
-) -> Result<()> {
-    if !is_python_source_target(plan) {
-        return Ok(());
-    }
-
-    if resolve_python_dependency_lock_path(&plan.manifest_dir).is_some() {
-        return Ok(());
-    }
-
-    Err(AtoExecutionError::lock_incomplete(
-        "source/python target requires uv.lock for fail-closed provisioning",
-        Some("uv.lock"),
-    )
-    .into())
-}
-
-fn preflight_python_uv_binary_for_source_driver(
-    plan: &capsule_core::router::ManifestData,
-) -> Result<()> {
-    if !is_python_source_target(plan) {
-        return Ok(());
-    }
-
-    runtime_manager::ensure_uv_binary(plan)
-        .map(|_| ())
-        .map_err(|_| {
-            AtoExecutionError::lock_incomplete(
-                "source/python target requires hermetic uv from capsule.lock.json (tools.uv)",
-                Some(CAPSULE_LOCK_FILE_NAME),
-            )
-            .into()
-        })
-}
-
-fn is_python_source_target(plan: &capsule_core::router::ManifestData) -> bool {
-    let runtime = plan.execution_runtime().unwrap_or_default();
-    if !runtime.eq_ignore_ascii_case("source") {
-        return false;
-    }
-
-    let driver = plan.execution_driver().unwrap_or_default();
-    if !driver.eq_ignore_ascii_case("native") && !driver.eq_ignore_ascii_case("python") {
-        return false;
-    }
-
-    plan.execution_entrypoint()
-        .map(|entry| entry.trim().to_ascii_lowercase().ends_with(".py"))
-        .unwrap_or(false)
-}
-
-fn preflight_glibc_compat(plan: &capsule_core::router::ManifestData) -> Result<()> {
-    let required_from_elf = detect_required_glibc_from_entrypoint(plan)?;
-
-    let lock_path = match plan.manifest_path.parent() {
-        Some(parent) => {
-            resolve_existing_lockfile_path(parent).unwrap_or_else(|| lockfile_output_path(parent))
-        }
-        None => {
-            if required_from_elf.is_none() {
-                return Ok(());
-            }
-            PathBuf::from(CAPSULE_LOCK_FILE_NAME)
-        }
-    };
-
-    let required_from_lock = detect_required_glibc_from_lock(&lock_path)?;
-    let required_raw = match required_from_elf.or(required_from_lock) {
-        Some(value) => value,
-        None => return Ok(()),
-    };
-
-    let required_version = normalize_version(&required_raw).ok_or_else(|| {
-        AtoExecutionError::compat_hardware(
-            format!("Invalid glibc version constraint '{}'", required_raw),
-            Some("glibc"),
-        )
-    })?;
-
-    let host_os = std::env::consts::OS;
-    if host_os != "linux" {
-        return Err(AtoExecutionError::compat_hardware(
-            format!(
-                "glibc {} is required but host OS is {}",
-                required_raw, host_os
-            ),
-            Some("glibc"),
-        )
-        .into());
-    }
-
-    let host_raw = detect_host_glibc_version().ok_or_else(|| {
-        AtoExecutionError::compat_hardware(
-            "Unable to detect host glibc version".to_string(),
-            Some("glibc"),
-        )
-    })?;
-
-    let host_version = normalize_version(&host_raw).ok_or_else(|| {
-        AtoExecutionError::compat_hardware(
-            format!("Unable to parse host glibc version '{}'", host_raw),
-            Some("glibc"),
-        )
-    })?;
-
-    if compare_versions(&host_version, &required_version) < 0 {
-        return Err(AtoExecutionError::compat_hardware(
-            format!(
-                "glibc {} is required but host has {}",
-                required_raw, host_raw
-            ),
-            Some("glibc"),
-        )
-        .into());
-    }
-
-    Ok(())
-}
-
-fn detect_required_glibc_from_lock(lock_path: &Path) -> Result<Option<String>> {
-    if !lock_path.exists() {
-        return Ok(None);
-    }
-
-    let raw = fs::read_to_string(lock_path)
-        .with_context(|| format!("Failed to read {}", lock_path.display()))?;
-    let lockfile = parse_lockfile_text(&raw, lock_path)
-        .with_context(|| format!("Failed to parse {}", lock_path.display()))?;
-
-    Ok(lockfile
-        .targets
-        .values()
-        .find_map(|target| target.constraints.as_ref().and_then(|c| c.glibc.clone())))
-}
-
-fn detect_required_glibc_from_entrypoint(
-    plan: &capsule_core::router::ManifestData,
-) -> Result<Option<String>> {
-    let entrypoint = match plan
-        .execution_entrypoint()
-        .filter(|value| !value.trim().is_empty())
-    {
-        Some(value) => value,
-        None => return Ok(None),
-    };
-
-    let path = {
-        let candidate = PathBuf::from(entrypoint);
-        if candidate.is_absolute() {
-            candidate
-        } else {
-            plan.manifest_dir.join(candidate)
-        }
-    };
-
-    if !path.exists() || !path.is_file() {
-        return Ok(None);
-    }
-
-    let bytes = fs::read(&path)
-        .with_context(|| format!("Failed to read native entrypoint {}", path.display()))?;
-    if bytes.len() < 4 || &bytes[0..4] != b"\x7FELF" {
-        return Ok(None);
-    }
-
-    let elf = Elf::parse(&bytes).map_err(|err| {
-        AtoExecutionError::compat_hardware(
-            format!(
-                "Failed to parse ELF entrypoint '{}': {}",
-                path.display(),
-                err
-            ),
-            Some("glibc"),
-        )
-    })?;
-
-    let has_verneed = elf
-        .dynamic
-        .as_ref()
-        .map(|dynamic| dynamic.dyns.iter().any(|entry| entry.d_tag == DT_VERNEED))
-        .unwrap_or(false);
-    if !has_verneed {
-        return Ok(None);
-    }
-
-    let regex =
-        Regex::new(r"GLIBC_[0-9]+(?:\.[0-9]+)+").expect("failed to compile GLIBC version regex");
-    let corpus = String::from_utf8_lossy(&bytes);
-
-    let mut best_raw: Option<String> = None;
-    let mut best_parts: Option<Vec<u32>> = None;
-    for matched in regex.find_iter(&corpus).map(|m| m.as_str().to_string()) {
-        let Some(parts) = normalize_version(&matched) else {
-            continue;
-        };
-        if best_parts
-            .as_ref()
-            .map(|current| compare_versions(current, &parts) < 0)
-            .unwrap_or(true)
-        {
-            best_raw = Some(matched);
-            best_parts = Some(parts);
-        }
-    }
-
-    Ok(best_raw)
-}
-
-fn detect_required_macos_from_entrypoint(
-    plan: &capsule_core::router::ManifestData,
-) -> Result<Option<String>> {
-    let entrypoint = match plan
-        .execution_entrypoint()
-        .filter(|value| !value.trim().is_empty())
-    {
-        Some(value) => value,
-        None => return Ok(None),
-    };
-
-    let path = {
-        let candidate = PathBuf::from(entrypoint);
-        if candidate.is_absolute() {
-            candidate
-        } else {
-            plan.manifest_dir.join(candidate)
-        }
-    };
-
-    if !path.exists() || !path.is_file() {
-        return Ok(None);
-    }
-
-    let bytes = fs::read(&path)
-        .with_context(|| format!("Failed to read native entrypoint {}", path.display()))?;
-    let mach = match Mach::parse(&bytes) {
-        Ok(parsed) => parsed,
-        Err(_) => return Ok(None),
-    };
-
-    let mut best_raw: Option<String> = None;
-    let mut best_parts: Option<Vec<u32>> = None;
-
-    let mut update_best = |candidate: String| {
-        let Some(parts) = normalize_version(&candidate) else {
-            return;
-        };
-        if best_parts
-            .as_ref()
-            .map(|current| compare_versions(current, &parts) < 0)
-            .unwrap_or(true)
-        {
-            best_raw = Some(candidate);
-            best_parts = Some(parts);
-        }
-    };
-
-    match mach {
-        Mach::Binary(binary) => {
-            if let Some(ver) = extract_min_macos_from_macho(&binary) {
-                update_best(ver);
-            }
-        }
-        Mach::Fat(fat) => {
-            for entry in fat.into_iter() {
-                let Ok(entry) = entry else {
-                    continue;
-                };
-                if let SingleArch::MachO(binary) = entry {
-                    if let Some(ver) = extract_min_macos_from_macho(&binary) {
-                        update_best(ver);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(best_raw)
-}
-
-fn extract_min_macos_from_macho(binary: &goblin::mach::MachO<'_>) -> Option<String> {
-    let mut best_raw: Option<String> = None;
-    let mut best_parts: Option<Vec<u32>> = None;
-
-    for cmd in &binary.load_commands {
-        let raw = match &cmd.command {
-            CommandVariant::BuildVersion(build) => decode_macho_version(build.minos),
-            CommandVariant::VersionMinMacosx(min) => decode_macho_version(min.version),
-            _ => None,
-        };
-
-        let Some(candidate) = raw else {
-            continue;
-        };
-        let Some(parts) = normalize_version(&candidate) else {
-            continue;
-        };
-
-        if best_parts
-            .as_ref()
-            .map(|current| compare_versions(current, &parts) < 0)
-            .unwrap_or(true)
-        {
-            best_parts = Some(parts);
-            best_raw = Some(candidate);
-        }
-    }
-
-    best_raw
-}
-
-fn decode_macho_version(encoded: u32) -> Option<String> {
-    let major = (encoded >> 16) & 0xffff;
-    let minor = (encoded >> 8) & 0xff;
-    let patch = encoded & 0xff;
-    if major == 0 {
-        return None;
-    }
-    Some(format!("{}.{}.{}", major, minor, patch))
-}
-
-fn normalize_version(value: &str) -> Option<Vec<u32>> {
-    let normalized = value
-        .trim()
-        .trim_start_matches("GLIBC_")
-        .trim_start_matches("GLIBC")
-        .trim_start_matches("glibc")
-        .trim_start_matches('-')
-        .trim_start_matches('=')
-        .trim();
-    if normalized.is_empty() {
-        return None;
-    }
-
-    let mut out = Vec::new();
-    for segment in normalized.split('.') {
-        if segment.is_empty() {
-            continue;
-        }
-        let digits = segment
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect::<String>();
-        if digits.is_empty() {
-            break;
-        }
-        let parsed = digits.parse::<u32>().ok()?;
-        out.push(parsed);
-    }
-
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
-}
-
-fn compare_versions(left: &[u32], right: &[u32]) -> i32 {
-    let max_len = left.len().max(right.len());
-    for idx in 0..max_len {
-        let l = *left.get(idx).unwrap_or(&0);
-        let r = *right.get(idx).unwrap_or(&0);
-        if l < r {
-            return -1;
-        }
-        if l > r {
-            return 1;
-        }
-    }
-    0
-}
-
-fn detect_host_glibc_version() -> Option<String> {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
-        let ptr = unsafe { libc::gnu_get_libc_version() };
-        if ptr.is_null() {
-            return None;
-        }
-        let cstr = unsafe { std::ffi::CStr::from_ptr(ptr) };
-        Some(cstr.to_string_lossy().to_string())
-    }
-
-    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-    {
-        None
-    }
-}
-
-fn detect_host_macos_version() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        let output = Command::new("sw_vers")
-            .arg("-productVersion")
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if version.is_empty() {
-            None
-        } else {
-            Some(version)
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
-}
-
-fn resolve_uv_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
-    let candidates = [
-        manifest_dir.join("uv.lock"),
-        manifest_dir.join("source").join("uv.lock"),
-    ];
-    candidates.into_iter().find(|path| path.exists())
-}
-
-fn resolve_python_dependency_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
-    resolve_uv_lock_path(manifest_dir)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2476,44 +1216,14 @@ mod tests {
         initial_foreground_native_messages, plan_v03_provision_command,
         preflight_required_environment_variables, process_runtime_label,
         resolve_compatibility_host_mode, resolve_python_dependency_lock_path,
-        resolve_state_source_overrides, CompatibilityHostMode, ForegroundEventMessage,
+        resolve_state_source_overrides_with_store, CompatibilityHostMode, ForegroundEventMessage,
     };
+    use crate::registry_store::RegistryStore;
     use capsule_core::execution_plan::guard::ExecutorKind;
     use capsule_core::lifecycle::LifecycleEvent;
     use capsule_core::router::{ExecutionProfile, ManifestData};
     use capsule_core::types::CapsuleManifest;
-    use std::ffi::OsString;
     use std::path::PathBuf;
-    use std::sync::{Mutex, OnceLock};
-
-    /// Serialize tests that mutate process-global environment variables like `HOME`.
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    /// RAII helper that restores the previous `HOME` environment variable on drop.
-    struct HomeGuard {
-        previous: Option<OsString>,
-    }
-
-    impl HomeGuard {
-        fn set(path: &std::path::Path) -> Self {
-            let previous = std::env::var_os("HOME");
-            std::env::set_var("HOME", path);
-            Self { previous }
-        }
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            if let Some(previous) = self.previous.take() {
-                std::env::set_var("HOME", previous);
-            } else {
-                std::env::remove_var("HOME");
-            }
-        }
-    }
 
     #[test]
     fn resolve_python_dependency_lock_path_prefers_source_uv_lock() {
@@ -2737,9 +1447,8 @@ mod tests {
 
     #[test]
     fn resolve_state_source_overrides_registers_persistent_state_binding() {
-        let _guard = env_lock().lock().unwrap();
-        let home = tempfile::tempdir().expect("home");
-        let _home_guard = HomeGuard::set(home.path());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = RegistryStore::open(&tmp.path().join("state-store")).expect("open store");
 
         let manifest = CapsuleManifest::from_toml(
             r#"
@@ -2770,23 +1479,29 @@ target = "/var/lib/app"
         )
         .unwrap();
 
-        let bind_dir = home.path().join("bind").join("data");
-        let overrides =
-            resolve_state_source_overrides(&manifest, &[format!("data={}", bind_dir.display())])
-                .expect("state override");
+        let bind_dir = tmp.path().join("bind").join("data");
+        let overrides = resolve_state_source_overrides_with_store(
+            &manifest,
+            &[format!("data={}", bind_dir.display())],
+            Some(&store),
+        )
+        .expect("state override");
 
         assert_eq!(
             overrides.get("data").map(|value| value.as_str()),
             Some(bind_dir.canonicalize().unwrap().to_string_lossy().as_ref())
         );
-        assert!(home.path().join(".ato/state/registry.sqlite3").exists());
+        assert!(tmp
+            .path()
+            .join("state-store")
+            .join("registry.sqlite3")
+            .exists());
     }
 
     #[test]
     fn resolve_state_source_overrides_accepts_state_id_binding() {
-        let _guard = env_lock().lock().unwrap();
-        let home = tempfile::tempdir().expect("home");
-        let _home_guard = HomeGuard::set(home.path());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = RegistryStore::open(&tmp.path().join("state-store")).expect("open store");
 
         let manifest = CapsuleManifest::from_toml(
             r#"
@@ -2817,30 +1532,34 @@ target = "/var/lib/app"
         )
         .unwrap();
 
-        let bind_dir = home.path().join("bind").join("data");
-        let first =
-            resolve_state_source_overrides(&manifest, &[format!("data={}", bind_dir.display())])
-                .expect("initial state registration");
-        let record = crate::state::open_state_store()
-            .expect("open state store")
+        let bind_dir = tmp.path().join("bind").join("data");
+        let first = resolve_state_source_overrides_with_store(
+            &manifest,
+            &[format!("data={}", bind_dir.display())],
+            Some(&store),
+        )
+        .expect("initial state registration");
+        let record = store
             .list_persistent_states(Some("demo-app"), Some("data"))
             .expect("list states")
             .into_iter()
             .next()
             .expect("registered state");
 
-        let second =
-            resolve_state_source_overrides(&manifest, &[format!("data={}", record.state_id)])
-                .expect("state id bind");
+        let second = resolve_state_source_overrides_with_store(
+            &manifest,
+            &[format!("data={}", record.state_id)],
+            Some(&store),
+        )
+        .expect("state id bind");
 
         assert_eq!(first, second);
     }
 
     #[test]
     fn resolve_state_source_overrides_rejects_incompatible_registry_entry() {
-        let _guard = env_lock().lock().unwrap();
-        let home = tempfile::tempdir().expect("home");
-        let _home_guard = HomeGuard::set(home.path());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = RegistryStore::open(&tmp.path().join("state-store")).expect("open store");
 
         let manifest_a = CapsuleManifest::from_toml(
             r#"
@@ -2899,13 +1618,20 @@ target = "/var/lib/app"
         )
         .unwrap();
 
-        let bind_dir = home.path().join("bind").join("data");
-        resolve_state_source_overrides(&manifest_a, &[format!("data={}", bind_dir.display())])
-            .expect("first bind");
+        let bind_dir = tmp.path().join("bind").join("data");
+        resolve_state_source_overrides_with_store(
+            &manifest_a,
+            &[format!("data={}", bind_dir.display())],
+            Some(&store),
+        )
+        .expect("first bind");
 
-        let err =
-            resolve_state_source_overrides(&manifest_b, &[format!("data={}", bind_dir.display())])
-                .expect_err("incompatible bind must fail");
+        let err = resolve_state_source_overrides_with_store(
+            &manifest_b,
+            &[format!("data={}", bind_dir.display())],
+            Some(&store),
+        )
+        .expect_err("incompatible bind must fail");
         assert!(err
             .to_string()
             .contains("producer/purpose/schema_id must match exactly"));

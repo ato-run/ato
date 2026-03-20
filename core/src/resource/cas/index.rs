@@ -26,9 +26,7 @@ impl LocalCasIndex {
         let base = std::env::var("ATO_CAS_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {
-                crate::common::paths::nacelle_home_dir()
-                    .unwrap_or_else(|_| PathBuf::from("/tmp").join(".ato"))
-                    .join("cas")
+                crate::common::paths::nacelle_home_dir_or_workspace_tmp().join("cas")
             });
         Self::open(base)
     }
