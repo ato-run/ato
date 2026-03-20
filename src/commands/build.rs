@@ -278,43 +278,19 @@ pub fn execute_pack_command_with_injected_manifest(
 
     let result = match decision.kind {
         capsule_core::router::RuntimeKind::Source => {
-            let prepare_started = Instant::now();
-            let prepared_config = capsule_core::packers::source::prepare_source_config(
-                &manifest,
-                enforcement.clone(),
-                standalone,
-            )?;
-            record_timing(
-                &mut timing_entries,
-                "build.prepare_source_config",
-                prepare_started.elapsed(),
-            );
-            futures::executor::block_on(reporter.progress_start(
-                "⏳ [build] Preparing source runtime bundle...".to_string(),
-                None,
-            ))?;
-            let pack_started = Instant::now();
-            let artifact_path = capsule_core::packers::source::pack(
+            let artifact_path = pack_source_bundle(
                 &decision.plan,
-                capsule_core::packers::source::SourcePackOptions {
-                    manifest_path: manifest.clone(),
-                    manifest_dir: manifest_dir.clone(),
-                    config_json: prepared_config.config_json.clone(),
-                    config_path: prepared_config.config_path.clone(),
-                    output: None,
-                    runtime: None,
-                    skip_l1: false,
-                    skip_validation: false,
-                    nacelle_override,
-                    standalone,
-                    strict_manifest,
-                    timings,
-                },
+                &manifest,
+                &manifest_dir,
+                &enforcement,
+                standalone,
+                strict_manifest,
+                timings,
+                nacelle_override.clone(),
                 reporter.clone(),
-            );
-            futures::executor::block_on(reporter.progress_finish(None))?;
-            let artifact_path = artifact_path?;
-            record_timing(&mut timing_entries, "build.pack", pack_started.elapsed());
+                &mut timing_entries,
+                "⏳ [build] Preparing source runtime bundle...",
+            )?;
 
             if standalone {
                 futures::executor::block_on(
@@ -359,26 +335,13 @@ pub fn execute_pack_command_with_injected_manifest(
                 }
             }
 
-            let payload_guard_started = Instant::now();
-            crate::payload_guard::ensure_payload_size(
+            finalize_built_artifact(
                 &artifact_path,
                 force_large_payload,
-                "--force-large-payload",
-            )?;
-            record_timing(
+                key.as_ref(),
+                reporter.clone(),
                 &mut timing_entries,
-                "build.payload_guard",
-                payload_guard_started.elapsed(),
-            );
-            let sign_started = Instant::now();
-            let _ = sign_if_requested(&artifact_path, key.as_ref(), reporter.clone())?;
-            record_timing(&mut timing_entries, "build.sign", sign_started.elapsed());
-            let size = std::fs::metadata(&artifact_path)?.len();
-            futures::executor::block_on(reporter.notify(format!(
-                "✅ Successfully built: {} ({:.1} KB)",
-                artifact_path.display(),
-                size as f64 / 1024.0
-            )))?;
+            )?;
             BuildResult {
                 ok: true,
                 kind: "capsule".to_string(),
@@ -479,43 +442,19 @@ pub fn execute_pack_command_with_injected_manifest(
                     reporter.clone(),
                 )?
             } else {
-                let prepare_started = Instant::now();
-                let prepared_config = capsule_core::packers::source::prepare_source_config(
-                    &manifest,
-                    enforcement.clone(),
-                    standalone,
-                )?;
-                record_timing(
-                    &mut timing_entries,
-                    "build.prepare_source_config",
-                    prepare_started.elapsed(),
-                );
-                futures::executor::block_on(reporter.progress_start(
-                    "⏳ [build] Preparing web runtime bundle...".to_string(),
-                    None,
-                ))?;
-                let pack_started = Instant::now();
-                let artifact = capsule_core::packers::source::pack(
+                let artifact = pack_source_bundle(
                     &decision.plan,
-                    capsule_core::packers::source::SourcePackOptions {
-                        manifest_path: manifest.clone(),
-                        manifest_dir: manifest_dir.clone(),
-                        config_json: prepared_config.config_json.clone(),
-                        config_path: prepared_config.config_path.clone(),
-                        output: None,
-                        runtime: None,
-                        skip_l1: false,
-                        skip_validation: false,
-                        nacelle_override,
-                        standalone,
-                        strict_manifest,
-                        timings,
-                    },
+                    &manifest,
+                    &manifest_dir,
+                    &enforcement,
+                    standalone,
+                    strict_manifest,
+                    timings,
+                    nacelle_override.clone(),
                     reporter.clone(),
-                );
-                futures::executor::block_on(reporter.progress_finish(None))?;
-                let artifact = artifact?;
-                record_timing(&mut timing_entries, "build.pack", pack_started.elapsed());
+                    &mut timing_entries,
+                    "⏳ [build] Preparing web runtime bundle...",
+                )?;
 
                 if standalone {
                     futures::executor::block_on(
@@ -528,18 +467,13 @@ pub fn execute_pack_command_with_injected_manifest(
                 artifact
             };
 
-            crate::payload_guard::ensure_payload_size(
+            finalize_built_artifact(
                 &artifact_path,
                 force_large_payload,
-                "--force-large-payload",
+                key.as_ref(),
+                reporter.clone(),
+                &mut timing_entries,
             )?;
-            let _ = sign_if_requested(&artifact_path, key.as_ref(), reporter.clone())?;
-            let size = std::fs::metadata(&artifact_path)?.len();
-            futures::executor::block_on(reporter.notify(format!(
-                "✅ Successfully built: {} ({:.1} KB)",
-                artifact_path.display(),
-                size as f64 / 1024.0
-            )))?;
             BuildResult {
                 ok: true,
                 kind: "capsule".to_string(),
@@ -577,6 +511,87 @@ fn emit_timings(
             reporter.notify(format!("⏱ [timings] {label}: {} ms", elapsed.as_millis())),
         )?;
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pack_source_bundle(
+    plan: &capsule_core::router::ManifestData,
+    manifest: &Path,
+    manifest_dir: &Path,
+    enforcement: &str,
+    standalone: bool,
+    strict_manifest: bool,
+    timings: bool,
+    nacelle_override: Option<PathBuf>,
+    reporter: std::sync::Arc<reporters::CliReporter>,
+    timing_entries: &mut Vec<(String, Duration)>,
+    progress_label: &str,
+) -> Result<PathBuf> {
+    let prepare_started = Instant::now();
+    let prepared_config = capsule_core::packers::source::prepare_source_config(
+        manifest,
+        enforcement.to_string(),
+        standalone,
+    )?;
+    record_timing(
+        timing_entries,
+        "build.prepare_source_config",
+        prepare_started.elapsed(),
+    );
+    futures::executor::block_on(reporter.progress_start(progress_label.to_string(), None))?;
+    let pack_started = Instant::now();
+    let artifact = capsule_core::packers::source::pack(
+        plan,
+        capsule_core::packers::source::SourcePackOptions {
+            manifest_path: manifest.to_path_buf(),
+            manifest_dir: manifest_dir.to_path_buf(),
+            config_json: prepared_config.config_json.clone(),
+            config_path: prepared_config.config_path.clone(),
+            output: None,
+            runtime: None,
+            skip_l1: false,
+            skip_validation: false,
+            nacelle_override,
+            standalone,
+            strict_manifest,
+            timings,
+        },
+        reporter.clone(),
+    );
+    futures::executor::block_on(reporter.progress_finish(None))?;
+    let artifact = artifact?;
+    record_timing(timing_entries, "build.pack", pack_started.elapsed());
+    Ok(artifact)
+}
+
+fn finalize_built_artifact(
+    artifact_path: &Path,
+    force_large_payload: bool,
+    key: Option<&PathBuf>,
+    reporter: std::sync::Arc<reporters::CliReporter>,
+    timing_entries: &mut Vec<(String, Duration)>,
+) -> Result<()> {
+    let payload_guard_started = Instant::now();
+    crate::payload_guard::ensure_payload_size(
+        artifact_path,
+        force_large_payload,
+        "--force-large-payload",
+    )?;
+    record_timing(
+        timing_entries,
+        "build.payload_guard",
+        payload_guard_started.elapsed(),
+    );
+    let sign_started = Instant::now();
+    let _ = sign_if_requested(artifact_path, key, reporter.clone())?;
+    record_timing(timing_entries, "build.sign", sign_started.elapsed());
+    let size = std::fs::metadata(artifact_path)?.len();
+    futures::executor::block_on(reporter.notify(format!(
+        "✅ Successfully built: {} ({:.1} KB)",
+        artifact_path.display(),
+        size as f64 / 1024.0
+    )))?;
     Ok(())
 }
 
@@ -913,7 +928,7 @@ impl V03BuildCache {
             let source = cache_outputs_dir.join(&output.relative_path);
             let destination = self.working_dir.join(&output.relative_path);
             remove_path_if_exists(&destination)?;
-            copy_path_recursive(&source, &destination)?;
+            crate::fs_copy::copy_path_recursive(&source, &destination)?;
         }
 
         Ok(true)
@@ -932,7 +947,7 @@ impl V03BuildCache {
             }
 
             let destination = cache_outputs_dir.join(&output.relative_path);
-            copy_path_recursive(&source, &destination)?;
+            crate::fs_copy::copy_path_recursive(&source, &destination)?;
             captured_any = true;
         }
 
@@ -1195,40 +1210,6 @@ fn remove_path_if_exists(path: &Path) -> Result<()> {
         fs::remove_file(path)
             .with_context(|| format!("Failed to remove file {}", path.display()))?;
     }
-    Ok(())
-}
-
-fn copy_path_recursive(source: &Path, destination: &Path) -> Result<()> {
-    if source.is_dir() {
-        fs::create_dir_all(destination).with_context(|| {
-            format!(
-                "Failed to create build cache directory {}",
-                destination.display()
-            )
-        })?;
-        for entry in fs::read_dir(source)
-            .with_context(|| format!("Failed to read directory {}", source.display()))?
-        {
-            let entry = entry?;
-            let child_source = entry.path();
-            let child_destination = destination.join(entry.file_name());
-            copy_path_recursive(&child_source, &child_destination)?;
-        }
-    } else {
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("Failed to create build cache parent {}", parent.display())
-            })?;
-        }
-        fs::copy(source, destination).with_context(|| {
-            format!(
-                "Failed to copy build cache artifact from {} to {}",
-                source.display(),
-                destination.display()
-            )
-        })?;
-    }
-
     Ok(())
 }
 

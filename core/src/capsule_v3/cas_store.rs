@@ -75,11 +75,7 @@ impl CasStore {
             }
         }
 
-        if let Some(home) = dirs::home_dir() {
-            return Self::new(home.join(DEFAULT_CAS_DIR));
-        }
-
-        Self::new(PathBuf::from("/tmp").join(DEFAULT_CAS_DIR))
+        Self::new(crate::common::paths::home_dir_or_workspace_tmp().join(DEFAULT_CAS_DIR))
     }
 
     pub fn root(&self) -> &Path {
