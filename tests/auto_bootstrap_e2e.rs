@@ -104,7 +104,10 @@ fn auto_bootstrap_offline_fail_closed_without_prefetched_engine() {
         String::from_utf8_lossy(&output.stdout)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("ATO_ERR_ENGINE_MISSING"), "stderr={stderr}");
+    assert!(
+        stderr.contains("E205") || stderr.contains("ATO_ERR_ENGINE_MISSING"),
+        "stderr={stderr}"
+    );
     assert!(
         stderr.contains("ATO_OFFLINE") || stderr.contains("auto-bootstrap is disabled"),
         "stderr={stderr}"

@@ -7,6 +7,10 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::artifact_hash::{
+    compute_blake3_label as compute_blake3, compute_sha256_label as compute_sha256,
+};
+
 #[derive(Debug, Clone)]
 pub struct PublishArtifactArgs {
     pub artifact_path: PathBuf,
@@ -128,7 +132,7 @@ pub enum PublishArtifactError {
 }
 
 pub fn publish_artifact(args: PublishArtifactArgs) -> Result<PublishArtifactResult> {
-    let base_url = normalize_registry_url(&args.registry_url)?;
+    let base_url = crate::registry_http::normalize_registry_url(&args.registry_url, "--registry")?;
     crate::payload_guard::ensure_payload_size(
         &args.artifact_path,
         args.force_large_payload,
@@ -157,11 +161,7 @@ pub fn publish_artifact(args: PublishArtifactArgs) -> Result<PublishArtifactResu
         .header("x-ato-sha256", &payload.sha256)
         .header("x-ato-blake3", &payload.blake3);
 
-    let request = if let Some(token) = read_ato_token() {
-        request.header("authorization", format!("Bearer {}", token))
-    } else {
-        request
-    };
+    let request = crate::registry_http::with_blocking_ato_token(request);
 
     let response = request
         .body(payload.bytes)
@@ -368,7 +368,7 @@ fn sync_v3_chunks_if_present(base_url: &str, payload: Option<&V3SyncPayload>) ->
         .timeout(Duration::from_secs(30))
         .build()
         .context("Failed to create v3 sync client")?;
-    let token = read_ato_token();
+    let token = crate::registry_http::current_ato_token();
 
     let negotiate_request = SyncNegotiateRequest {
         artifact_hash: payload.manifest.artifact_hash.clone(),
@@ -505,10 +505,6 @@ fn is_sync_not_supported_status(status: StatusCode) -> bool {
     )
 }
 
-fn normalize_registry_url(raw: &str) -> Result<String> {
-    crate::registry_http::normalize_registry_url(raw, "--registry")
-}
-
 fn classify_upload_failure(status: StatusCode, body: &str) -> PublishArtifactError {
     let parsed = serde_json::from_str::<RegistryErrorPayload>(body).ok();
     if is_version_exists_conflict(status, parsed.as_ref(), body) {
@@ -591,24 +587,6 @@ fn normalize_segment(input: &str) -> String {
     }
 
     out.trim_matches('-').to_string()
-}
-
-fn read_ato_token() -> Option<String> {
-    crate::auth::current_session_token()
-}
-
-fn compute_blake3(data: &[u8]) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(data);
-    let hash = hasher.finalize();
-    format!("blake3:{}", hex::encode(hash.as_bytes()))
-}
-
-fn compute_sha256(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 #[cfg(test)]

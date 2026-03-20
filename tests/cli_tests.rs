@@ -1430,8 +1430,8 @@ fn test_build_invalid_manifest_outputs_single_json_error() {
 
     let value: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(value["schema_version"], "1");
-    assert_eq!(value["type"], "error");
-    assert_eq!(value["code"], "E001");
+    assert_eq!(value["status"], "error");
+    assert_eq!(value["error"]["code"], "E001");
 }
 
 #[test]
@@ -1446,9 +1446,9 @@ fn test_publish_json_error_uses_diagnostic_envelope() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(value["schema_version"], "1");
-    assert_eq!(value["type"], "error");
-    assert_eq!(value["code"], "E999");
-    assert!(value["message"]
+    assert_eq!(value["status"], "error");
+    assert_eq!(value["error"]["code"], "E999");
+    assert!(value["error"]["message"]
         .as_str()
         .expect("message string")
         .contains("--deploy requires --artifact"));
@@ -1466,9 +1466,9 @@ fn test_publish_json_missing_manifest_uses_diagnostic_envelope() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(value["schema_version"], "1");
-    assert_eq!(value["type"], "error");
-    assert_eq!(value["code"], "E999");
-    assert!(value["message"]
+    assert_eq!(value["status"], "error");
+    assert_eq!(value["error"]["code"], "E999");
+    assert!(value["error"]["message"]
         .as_str()
         .expect("message string")
         .contains("Failed to read"));
@@ -1491,8 +1491,8 @@ fn test_publish_legacy_full_publish_rejected_for_private_registry() {
     assert!(!output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    assert_eq!(value["code"], "E999");
-    assert!(value["message"]
+    assert_eq!(value["error"]["code"], "E999");
+    assert!(value["error"]["message"]
         .as_str()
         .unwrap_or_default()
         .contains("--legacy-full-publish is only available for official registry publish"));
