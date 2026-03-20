@@ -173,83 +173,78 @@ impl AuthManager {
         &self.legacy_credentials_path
     }
 
-    fn resolve_session_token(&self) -> Result<Option<String>> {
-        if let Some(token) = read_env_non_empty(ENV_ATO_TOKEN) {
-            return Ok(Some(token));
+    fn resolve_persisted_token<F>(
+        &self,
+        env_key: Option<&str>,
+        keyring_account: &str,
+        selector: F,
+    ) -> Result<Option<String>>
+    where
+        F: Fn(&Credentials) -> Option<&String>,
+    {
+        if let Some(key) = env_key {
+            if let Some(token) = read_env_non_empty(key) {
+                return Ok(Some(token));
+            }
         }
-        if let Some(token) = self.load_keyring_token(&self.keyring_session_account)? {
+        if let Some(token) = self.load_keyring_token(keyring_account)? {
             return Ok(Some(token));
         }
         if let Some(creds) = self.load_canonical_credentials()? {
-            if let Some(token) = creds.session_token.filter(|value| !value.trim().is_empty()) {
-                return Ok(Some(token));
+            if let Some(token) = selector(&creds).filter(|value| !value.trim().is_empty()) {
+                return Ok(Some(token.clone()));
             }
         }
         if let Some(creds) = self.load_legacy_credentials()? {
-            if let Some(token) = creds.session_token.filter(|value| !value.trim().is_empty()) {
-                return Ok(Some(token));
+            if let Some(token) = selector(&creds).filter(|value| !value.trim().is_empty()) {
+                return Ok(Some(token.clone()));
             }
         }
         Ok(None)
+    }
+
+    fn resolve_session_token(&self) -> Result<Option<String>> {
+        self.resolve_persisted_token(
+            Some(ENV_ATO_TOKEN),
+            &self.keyring_session_account,
+            |creds| creds.session_token.as_ref(),
+        )
     }
 
     fn resolve_github_token(&self) -> Result<Option<String>> {
-        if let Some(token) = self.load_keyring_token(&self.keyring_github_account)? {
-            return Ok(Some(token));
+        self.resolve_persisted_token(None, &self.keyring_github_account, |creds| {
+            creds.github_token.as_ref()
+        })
+    }
+
+    async fn save_keyring_token_async(&self, account: &str, token: String) -> Result<()> {
+        #[cfg(test)]
+        if self.is_test_keyring() {
+            self.test_keyring_set(account, &token);
+            return Ok(());
         }
-        if let Some(creds) = self.load_canonical_credentials()? {
-            if let Some(token) = creds.github_token.filter(|value| !value.trim().is_empty()) {
-                return Ok(Some(token));
-            }
-        }
-        if let Some(creds) = self.load_legacy_credentials()? {
-            if let Some(token) = creds.github_token.filter(|value| !value.trim().is_empty()) {
-                return Ok(Some(token));
-            }
-        }
-        Ok(None)
+
+        let service = self.keyring_service.clone();
+        let account = account.to_string();
+        tokio::task::spawn_blocking(move || {
+            let entry = Entry::new(&service, &account)
+                .map_err(|err| anyhow::anyhow!(format_keyring_error_message("save", &err)))?;
+            entry
+                .set_password(&token)
+                .map_err(|err| anyhow::anyhow!(format_keyring_error_message("save", &err)))
+        })
+        .await
+        .map_err(|err| anyhow::anyhow!("Keyring worker failed: {err}"))?
     }
 
     async fn save_session_token_async(&self, token: String) -> Result<()> {
-        #[cfg(test)]
-        if self.is_test_keyring() {
-            self.test_keyring_set(&self.keyring_session_account, &token);
-            return Ok(());
-        }
-
-        let service = self.keyring_service.clone();
-        let account = self.keyring_session_account.clone();
-        let token = token.clone();
-        tokio::task::spawn_blocking(move || {
-            let entry = Entry::new(&service, &account)
-                .map_err(|err| anyhow::anyhow!(format_keyring_error_message("save", &err)))?;
-            entry
-                .set_password(&token)
-                .map_err(|err| anyhow::anyhow!(format_keyring_error_message("save", &err)))
-        })
-        .await
-        .map_err(|err| anyhow::anyhow!("Keyring worker failed: {err}"))?
+        self.save_keyring_token_async(&self.keyring_session_account, token)
+            .await
     }
 
     async fn save_github_token_async(&self, token: String) -> Result<()> {
-        #[cfg(test)]
-        if self.is_test_keyring() {
-            self.test_keyring_set(&self.keyring_github_account, &token);
-            return Ok(());
-        }
-
-        let service = self.keyring_service.clone();
-        let account = self.keyring_github_account.clone();
-        let token = token.clone();
-        tokio::task::spawn_blocking(move || {
-            let entry = Entry::new(&service, &account)
-                .map_err(|err| anyhow::anyhow!(format_keyring_error_message("save", &err)))?;
-            entry
-                .set_password(&token)
-                .map_err(|err| anyhow::anyhow!(format_keyring_error_message("save", &err)))
-        })
-        .await
-        .map_err(|err| anyhow::anyhow!("Keyring worker failed: {err}"))?
+        self.save_keyring_token_async(&self.keyring_github_account, token)
+            .await
     }
 
     fn keyring_entry(&self, account: &str) -> Result<Entry> {
