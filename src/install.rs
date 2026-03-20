@@ -1235,6 +1235,7 @@ async fn complete_install_from_bytes(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn complete_native_install_from_bytes(
     capsule_id: String,
     scoped_ref: ScopedCapsuleRef,
@@ -1308,6 +1309,7 @@ fn complete_native_install_from_bytes(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn complete_standard_install_from_bytes(
     capsule_id: String,
     scoped_ref: ScopedCapsuleRef,
