@@ -25,7 +25,7 @@ use super::launch_context::RuntimeLaunchContext;
 use super::source::ExecuteMode;
 use super::target_runner::{self, TargetLaunchOptions};
 use crate::reporters::CliReporter;
-use crate::runtime_overrides;
+use crate::runtime::overrides as runtime_overrides;
 
 const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 const READINESS_INTERVAL: Duration = Duration::from_millis(250);

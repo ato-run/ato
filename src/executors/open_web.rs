@@ -6,8 +6,8 @@ use std::process::{Command, Stdio};
 use capsule_core::router::ManifestData;
 
 use crate::reporters::CliReporter;
-use crate::runtime_manager;
-use crate::runtime_overrides;
+use crate::runtime::manager as runtime_manager;
+use crate::runtime::overrides as runtime_overrides;
 
 const STATIC_SERVER_SCRIPT: &str = include_str!("../assets/static_file_server.ts");
 

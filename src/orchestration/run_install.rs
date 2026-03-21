@@ -40,7 +40,7 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
 
     let resolved_skill_path = match (args.skill, args.from_skill) {
-        (Some(skill_name), None) => Some(crate::skill_resolver::resolve_skill_path(&skill_name)?),
+        (Some(skill_name), None) => Some(crate::skills::resolve_skill_path(&skill_name)?),
         (None, Some(path)) => Some(path),
         (None, None) => None,
         (Some(_), Some(_)) => {
@@ -56,7 +56,7 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
             anyhow::bail!("--skill/--from-skill does not support --background in MVP mode");
         }
 
-        let generated = crate::skill::materialize_skill_capsule(&skill_path)?;
+        let generated = crate::skills::materialize_skill_capsule(&skill_path)?;
         debug!(
             manifest_path = %generated.manifest_path().display(),
             "Translated SKILL.md to capsule"

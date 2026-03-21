@@ -132,7 +132,7 @@ pub enum PublishArtifactError {
 }
 
 pub fn publish_artifact(args: PublishArtifactArgs) -> Result<PublishArtifactResult> {
-    let base_url = crate::registry_http::normalize_registry_url(&args.registry_url, "--registry")?;
+    let base_url = crate::registry::http::normalize_registry_url(&args.registry_url, "--registry")?;
     crate::payload_guard::ensure_payload_size(
         &args.artifact_path,
         args.force_large_payload,
@@ -153,7 +153,7 @@ pub fn publish_artifact(args: PublishArtifactArgs) -> Result<PublishArtifactResu
         args.allow_existing,
     );
 
-    let request = crate::registry_http::blocking_client_builder(&base_url)
+    let request = crate::registry::http::blocking_client_builder(&base_url)
         .build()
         .context("Failed to create registry upload client")?
         .put(&endpoint)
@@ -161,7 +161,7 @@ pub fn publish_artifact(args: PublishArtifactArgs) -> Result<PublishArtifactResu
         .header("x-ato-sha256", &payload.sha256)
         .header("x-ato-blake3", &payload.blake3);
 
-    let request = crate::registry_http::with_blocking_ato_token(request);
+    let request = crate::registry::http::with_blocking_ato_token(request);
 
     let response = request
         .body(payload.bytes)
@@ -364,11 +364,11 @@ fn sync_v3_chunks_if_present(base_url: &str, payload: Option<&V3SyncPayload>) ->
         }
     };
 
-    let client = crate::registry_http::blocking_client_builder(base_url)
+    let client = crate::registry::http::blocking_client_builder(base_url)
         .timeout(Duration::from_secs(30))
         .build()
         .context("Failed to create v3 sync client")?;
-    let token = crate::registry_http::current_ato_token();
+    let token = crate::registry::http::current_ato_token();
 
     let negotiate_request = SyncNegotiateRequest {
         artifact_hash: payload.manifest.artifact_hash.clone(),

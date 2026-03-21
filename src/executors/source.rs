@@ -17,8 +17,8 @@ use capsule_core::{RuntimeMetadata, SessionRunner, SessionRunnerConfig};
 use super::launch_context::RuntimeLaunchContext;
 use crate::common::proxy;
 use crate::reporters::CliReporter;
-use crate::runtime_manager;
-use crate::runtime_overrides;
+use crate::runtime::manager as runtime_manager;
+use crate::runtime::overrides as runtime_overrides;
 
 use capsule_core::engine;
 use capsule_core::isolation::HostIsolationContext;

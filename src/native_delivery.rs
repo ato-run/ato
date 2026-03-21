@@ -11,7 +11,7 @@ use walkdir::WalkDir;
 use crate::artifact_hash::compute_blake3_label as compute_blake3;
 use crate::capsule_archive::extract_payload_tar_from_capsule;
 use crate::install;
-use crate::registry_http;
+use crate::registry::http;
 
 #[path = "native_delivery/filesystem.rs"]
 mod filesystem;
@@ -532,7 +532,7 @@ pub async fn execute_fetch(
     let scoped_ref = request.scoped_ref;
     let requested_version =
         install::merge_requested_version(request.version.as_deref(), resolved.version.as_deref())?;
-    let registry = crate::registry_url::resolve_normalized_registry_url(
+    let registry = crate::registry::url::resolve_normalized_registry_url(
         resolved.registry_url.as_deref(),
         "registry",
         "resolved registry",
@@ -703,7 +703,7 @@ fn merge_registry_override(
 }
 
 fn normalized_registry_url_for_compare(input: &str) -> String {
-    registry_http::normalize_registry_url(input, "registry")
+    http::normalize_registry_url(input, "registry")
         .unwrap_or_else(|_| input.trim().trim_end_matches('/').to_ascii_lowercase())
 }
 

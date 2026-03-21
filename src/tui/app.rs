@@ -3,7 +3,7 @@ use std::{collections::HashMap, collections::HashSet};
 
 use tui_input::Input;
 
-use crate::search::CapsuleSummary;
+use crate::commands::search::CapsuleSummary;
 
 pub struct App {
     pub query: Input,

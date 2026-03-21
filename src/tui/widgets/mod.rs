@@ -1,4 +1,4 @@
-use crate::search::CapsuleSummary;
+use crate::commands::search::CapsuleSummary;
 
 pub fn detail_lines(item: Option<&CapsuleSummary>) -> Vec<String> {
     match item {

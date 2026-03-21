@@ -12,8 +12,8 @@ use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::router::ManifestData;
 use capsule_core::types::ServiceSpec;
 
-use crate::runtime_manager;
-use crate::runtime_overrides;
+use crate::runtime::manager as runtime_manager;
+use crate::runtime::overrides as runtime_overrides;
 
 use super::launch_context::RuntimeLaunchContext;
 

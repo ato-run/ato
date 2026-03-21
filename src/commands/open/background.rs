@@ -76,17 +76,17 @@ fn background_process_info(
     runtime: String,
     scoped_id: Option<String>,
     ready_without_events: bool,
-) -> crate::process_manager::ProcessInfo {
+) -> crate::runtime::process::ProcessInfo {
     let now = SystemTime::now();
-    crate::process_manager::ProcessInfo {
+    crate::runtime::process::ProcessInfo {
         id: process_id.to_string(),
         name: background_process_name(plan),
         pid: process.child.id() as i32,
         workload_pid: process.workload_pid.map(|value| value as i32),
         status: if ready_without_events {
-            crate::process_manager::ProcessStatus::Ready
+            crate::runtime::process::ProcessStatus::Ready
         } else {
-            crate::process_manager::ProcessStatus::Starting
+            crate::runtime::process::ProcessStatus::Starting
         },
         runtime,
         start_time: now,
@@ -121,7 +121,7 @@ pub(super) async fn complete_background_source_process(
         ready_without_events,
     );
 
-    let process_manager = crate::process_manager::ProcessManager::new()?;
+    let process_manager = crate::runtime::process::ProcessManager::new()?;
     process_manager.write_pid(&info)?;
 
     let (startup_outcome, event_rx) = if ready_without_events {
@@ -259,7 +259,7 @@ pub(super) fn spawn_foreground_native_event_reporter(
 
 pub(super) fn wait_for_background_native_startup(
     process: &mut crate::executors::source::CapsuleProcess,
-    process_manager: &crate::process_manager::ProcessManager,
+    process_manager: &crate::runtime::process::ProcessManager,
     process_id: &str,
 ) -> Result<(BackgroundStartupOutcome, Option<Receiver<LifecycleEvent>>)> {
     let Some(event_rx) = process.event_rx.take() else {
@@ -275,13 +275,16 @@ pub(super) fn wait_for_background_native_startup(
             let _ = process_manager.update_pid(process_id, |info| {
                 info.exit_code = exit_code;
                 info.last_event = Some("process_exited".to_string());
-                if matches!(info.status, crate::process_manager::ProcessStatus::Starting) {
-                    info.status = crate::process_manager::ProcessStatus::Failed;
+                if matches!(
+                    info.status,
+                    crate::runtime::process::ProcessStatus::Starting
+                ) {
+                    info.status = crate::runtime::process::ProcessStatus::Failed;
                     if info.last_error.is_none() {
                         info.last_error = Some("process exited before readiness".to_string());
                     }
                 } else if info.status.is_active() {
-                    info.status = crate::process_manager::ProcessStatus::Exited;
+                    info.status = crate::runtime::process::ProcessStatus::Exited;
                 }
             });
             return Ok((BackgroundStartupOutcome::FailedBeforeReady, event_rx));
@@ -315,8 +318,11 @@ pub(super) fn wait_for_background_native_startup(
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => {
                 let _ = process_manager.update_pid(process_id, |info| {
-                    if matches!(info.status, crate::process_manager::ProcessStatus::Starting) {
-                        info.status = crate::process_manager::ProcessStatus::Unknown;
+                    if matches!(
+                        info.status,
+                        crate::runtime::process::ProcessStatus::Starting
+                    ) {
+                        info.status = crate::runtime::process::ProcessStatus::Unknown;
                         info.last_error =
                             Some("event stream disconnected before readiness".to_string());
                     }
@@ -337,14 +343,14 @@ fn background_ready_wait_timeout() -> Duration {
 }
 
 fn persist_background_native_event(
-    process_manager: &crate::process_manager::ProcessManager,
+    process_manager: &crate::runtime::process::ProcessManager,
     process_id: &str,
     event: &LifecycleEvent,
 ) -> Result<BackgroundStartupOutcome> {
     let now = SystemTime::now();
     let updated = process_manager.update_pid(process_id, |info| match event {
         LifecycleEvent::Ready { .. } => {
-            info.status = crate::process_manager::ProcessStatus::Ready;
+            info.status = crate::runtime::process::ProcessStatus::Ready;
             info.ready_at = Some(now);
             info.last_event = Some("ready".to_string());
             info.last_error = None;
@@ -352,18 +358,21 @@ fn persist_background_native_event(
         LifecycleEvent::Exited { service, exit_code } => {
             info.exit_code = *exit_code;
             info.last_event = Some("exited".to_string());
-            if matches!(info.status, crate::process_manager::ProcessStatus::Starting) {
-                info.status = crate::process_manager::ProcessStatus::Failed;
+            if matches!(
+                info.status,
+                crate::runtime::process::ProcessStatus::Starting
+            ) {
+                info.status = crate::runtime::process::ProcessStatus::Failed;
                 info.last_error = Some(format!("service '{}' exited before readiness", service));
             } else if info.status.is_active() {
-                info.status = crate::process_manager::ProcessStatus::Exited;
+                info.status = crate::runtime::process::ProcessStatus::Exited;
             }
         }
     })?;
 
     Ok(match updated.status {
-        crate::process_manager::ProcessStatus::Ready => BackgroundStartupOutcome::Ready,
-        crate::process_manager::ProcessStatus::Failed => {
+        crate::runtime::process::ProcessStatus::Ready => BackgroundStartupOutcome::Ready,
+        crate::runtime::process::ProcessStatus::Failed => {
             BackgroundStartupOutcome::FailedBeforeReady
         }
         _ => BackgroundStartupOutcome::TimedOut,
@@ -382,7 +391,7 @@ pub(super) async fn cleanup_existing_scoped_processes_before_run(
     scoped_id: &str,
     reporter: &Arc<CliReporter>,
 ) -> Result<()> {
-    let process_manager = crate::process_manager::ProcessManager::new()?;
+    let process_manager = crate::runtime::process::ProcessManager::new()?;
     let cleaned = process_manager.cleanup_scoped_processes(scoped_id, true)?;
     if cleaned > 0 {
         reporter

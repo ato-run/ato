@@ -356,7 +356,7 @@ fn resolve_expected_tag(version: Option<&str>) -> Option<String> {
 }
 
 pub fn apply_workflow_fix_once(cwd: &Path) -> Result<WorkflowFixResult> {
-    let outcome = crate::gen_ci::sync_workflow_in_dir(cwd)?;
+    let outcome = crate::commands::gen_ci::sync_workflow_in_dir(cwd)?;
     Ok(WorkflowFixResult {
         attempted: true,
         applied: outcome.changed,

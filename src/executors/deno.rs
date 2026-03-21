@@ -22,8 +22,8 @@ use capsule_core::execution_plan::model::{ExecutionPlan, ExecutionRuntime};
 use capsule_core::router::ManifestData;
 
 use crate::common::proxy;
-use crate::runtime_manager;
-use crate::runtime_overrides;
+use crate::runtime::manager as runtime_manager;
+use crate::runtime::overrides as runtime_overrides;
 
 use super::launch_context::RuntimeLaunchContext;
 

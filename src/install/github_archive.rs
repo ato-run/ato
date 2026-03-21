@@ -162,7 +162,7 @@ pub(crate) async fn sync_v3_chunks_from_manifest(
             return Ok(V3SyncOutcome::SkippedDisabledCas(reason));
         }
     };
-    let token = crate::registry_http::current_ato_token();
+    let token = crate::registry::http::current_ato_token();
     let concurrency = sync_concurrency_limit();
     sync_v3_chunks_from_manifest_with_options(client, registry, manifest, cas, token, concurrency)
         .await

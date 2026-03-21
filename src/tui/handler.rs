@@ -73,7 +73,7 @@ pub fn handle_key_event(app: &mut App, event: KeyEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::{CapsuleSummary, PublisherInfo};
+    use crate::commands::search::{CapsuleSummary, PublisherInfo};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
