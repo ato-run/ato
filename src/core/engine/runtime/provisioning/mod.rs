@@ -37,34 +37,41 @@ impl<'a> AuditReporter<'a> {
 
     pub fn body(&self) -> String {
         let mut lines = Vec::new();
+        let mut generated_shadow_lockfile = false;
+        let mut injected_synthetic_env = false;
 
-        if self.audit.materialization_records.iter().any(|record| {
-            record.stage == "shadow_lockfile"
-                && record.status == ProvisioningMaterializationStatus::Applied
-        }) {
+        for record in &self.audit.materialization_records {
+            if record.status != ProvisioningMaterializationStatus::Applied {
+                continue;
+            }
+
+            match record.stage.as_str() {
+                "shadow_lockfile" => generated_shadow_lockfile = true,
+                "synthetic_env" => injected_synthetic_env = true,
+                _ => {}
+            }
+        }
+
+        if generated_shadow_lockfile {
             lines.push("Automatically generated a shadow lockfile.".to_string());
         }
 
-        if self.audit.materialization_records.iter().any(|record| {
-            record.stage == "synthetic_env"
-                && record.status == ProvisioningMaterializationStatus::Applied
-        }) {
+        if injected_synthetic_env {
             let injected_database_env = self.audit.actions.iter().any(|action| {
                 matches!(
                     action,
                     ProvisioningAction::InjectSyntheticEnv { missing_keys, .. }
-                        if missing_keys.iter().any(|key| {
-                            let normalized = key.trim().to_ascii_uppercase();
-                            normalized.contains("DATABASE") || normalized.ends_with("_DB")
-                        })
+                        if missing_keys.iter().any(|key| is_database_env_key(key))
                 )
             });
-            lines.push(if injected_database_env {
-                "Injected placeholder database environment variables via a synthetic .env file."
-                    .to_string()
+            let env_kind = if injected_database_env {
+                "database environment"
             } else {
-                "Injected placeholder environment variables via a synthetic .env file.".to_string()
-            });
+                "environment"
+            };
+            lines.push(format!(
+                "Injected placeholder {env_kind} variables via a synthetic .env file."
+            ));
         }
 
         if self.audit.shadow_manifest_path.is_some() {
@@ -75,6 +82,14 @@ impl<'a> AuditReporter<'a> {
 
         lines.join("\n")
     }
+}
+
+fn is_database_env_key(key: &str) -> bool {
+    let normalized = key.trim().to_ascii_uppercase();
+    matches!(normalized.as_str(), "DATABASE" | "DATABASE_URL" | "DB")
+        || normalized.ends_with("_DATABASE")
+        || normalized.ends_with("_DATABASE_URL")
+        || normalized.ends_with("_DB")
 }
 
 pub async fn run_auto_provisioning_phase(
@@ -260,5 +275,13 @@ run_command = "node server.js"
         let body = AuditReporter { audit: &audit }.body();
 
         assert!(!body.contains("Automatically generated a shadow lockfile."));
+    }
+
+    #[test]
+    fn database_env_key_detection_is_specific_to_runtime_keys() {
+        assert!(super::is_database_env_key("DATABASE_URL"));
+        assert!(super::is_database_env_key("POSTGRES_DB"));
+        assert!(!super::is_database_env_key("API_KEY"));
+        assert!(!super::is_database_env_key("DATABASE_BACKUP_ENABLED"));
     }
 }
