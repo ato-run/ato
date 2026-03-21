@@ -4,6 +4,14 @@ use serde_json::Value;
 
 use capsule_core::execution_plan::error::AtoExecutionError;
 
+pub const EXIT_USER_ERROR: i32 = 1;
+pub const EXIT_SYSTEM_ERROR: i32 = 2;
+pub const EXIT_NETWORK_ERROR: i32 = 3;
+pub const EXIT_RUNTIME_ERROR: i32 = 5;
+
+pub const ATO_ERR_AUTH_REQUIRED: &str = "ATO_ERR_AUTH_REQUIRED";
+pub const ATO_ERR_INTEGRITY_FAILURE: &str = "ATO_ERR_INTEGRITY_FAILURE";
+
 #[derive(Debug, Serialize)]
 struct AtoErrorEvent<'a> {
     level: &'static str,

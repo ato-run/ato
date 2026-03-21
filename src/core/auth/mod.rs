@@ -3,6 +3,7 @@
 //! Manages authentication credentials for the ato CLI.
 //! Stores canonical credentials in `$XDG_CONFIG_HOME/ato/credentials.toml`.
 
+pub(crate) mod consent_store;
 mod github;
 mod prompt;
 mod publisher;

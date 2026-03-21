@@ -1,5 +1,7 @@
 mod binding;
+pub(crate) mod commands;
 mod config;
+pub(crate) mod dispatch;
 mod inspect;
 mod ipc;
 mod key;
@@ -8,6 +10,7 @@ mod profile;
 mod project;
 mod registry;
 mod root;
+pub(crate) mod scoped_id_prompt;
 mod shared;
 mod source;
 mod state;
