@@ -10,6 +10,7 @@ ignore = [
     { id = "RUSTSEC-2024-0445", reason = "cap-primitives is pulled in by the same pinned wasmtime 16 stack and is being handled in that upgrade." },
     { id = "RUSTSEC-2025-0046", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
     { id = "RUSTSEC-2025-0118", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
+    { id = "RUSTSEC-2026-0049", reason = "The current axum-server/rustls stack still pulls the vulnerable rustls-webpki path until the next TLS dependency refresh lands." },
     { id = "RUSTSEC-2026-0020", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
     { id = "RUSTSEC-2026-0021", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
 ]
