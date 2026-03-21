@@ -28,6 +28,7 @@
 
 pub mod broker;
 pub mod dag;
+pub(crate) mod guest_protocol;
 pub mod inject;
 pub(crate) mod jsonrpc;
 #[cfg(test)]
