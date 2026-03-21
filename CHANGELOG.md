@@ -2,6 +2,26 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
+## [0.4.30] - 2026-03-21
+
+### What Changed
+
+#### Features
+
+- Add official and private publish routing with phased publish execution
+
+- Add payload size validation and progressive UI handling across CLI flows
+
+- Add a terminal search UI with event-driven interaction
+
+#### Refactoring
+
+- Reorganize CLI modules plus state and skill handling for a cleaner internal layout
+
+#### CI
+
+- Retry release signing after the previous release signing path regressed
+
 ## [0.4.29] - 2026-03-20
 
 ### What Changed

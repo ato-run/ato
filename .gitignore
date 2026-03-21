@@ -23,6 +23,8 @@ tmp/
 
 # Build artifacts
 **/build/
+!src/core/engine/build/
+!src/core/engine/build/**
 
 # Secrets and envs
 .env
