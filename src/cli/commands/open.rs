@@ -1552,7 +1552,7 @@ run_command = "node server.js"
                     .map(String::as_str),
                 Some("sqlite://shadow.db")
             );
-            assert_eq!(rerouted_ctx.injected_mounts(), &[mount.clone()]);
+            assert_eq!(rerouted_ctx.injected_mounts(), std::slice::from_ref(&mount));
         }
     }
 
