@@ -9,7 +9,7 @@ use crate::reporters::CliReporter;
 use crate::runtime::manager as runtime_manager;
 use crate::runtime::overrides as runtime_overrides;
 
-const STATIC_SERVER_SCRIPT: &str = include_str!("../assets/static_file_server.ts");
+const STATIC_SERVER_SCRIPT: &str = include_str!("../../../assets/static_file_server.ts");
 
 pub fn execute(plan: &ManifestData, _reporter: std::sync::Arc<CliReporter>) -> Result<()> {
     let (deno_bin, args) = build_static_server_command(plan)?;

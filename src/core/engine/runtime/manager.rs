@@ -524,13 +524,13 @@ mod tests {
     #[test]
     fn consumer_paths_do_not_spawn_git_commands() {
         let files = [
-            "src/commands/open.rs",
-            "src/install/mod.rs",
-            "src/commands/search.rs",
-            "src/executors/deno.rs",
-            "src/executors/node_compat.rs",
-            "src/executors/open_web.rs",
-            "src/executors/source.rs",
+            "src/cli/commands/open.rs",
+            "src/core/engine/install/mod.rs",
+            "src/cli/commands/search.rs",
+            "src/core/engine/executors/deno.rs",
+            "src/core/engine/executors/node_compat.rs",
+            "src/core/engine/executors/open_web.rs",
+            "src/core/engine/executors/source.rs",
         ];
 
         for rel in files {
