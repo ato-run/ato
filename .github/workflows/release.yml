@@ -331,6 +331,29 @@ jobs:
           set -euo pipefail
           mkdir -p generated
 
+          sign_blob_with_retry() {
+            local input_path="$1"
+            local bundle_path="$2"
+            local max_attempts=5
+            local attempt
+
+            for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+              rm -f "$bundle_path"
+              if cosign sign-blob --yes --bundle "$bundle_path" "$input_path"; then
+                return 0
+              fi
+
+              if (( attempt == max_attempts )); then
+                echo "::error::cosign sign-blob failed for $(basename "$input_path") after ${max_attempts} attempts"
+                return 1
+              fi
+
+              local sleep_seconds=$((attempt * 10))
+              echo "::warning::cosign sign-blob failed for $(basename "$input_path") on attempt ${attempt}/${max_attempts}; retrying in ${sleep_seconds}s"
+              sleep "$sleep_seconds"
+            done
+          }
+
           mapfile -t release_assets < <(find artifacts -maxdepth 1 -type f | sort)
           if [[ "${#release_assets[@]}" -eq 0 ]]; then
             echo "::error::No release assets found to sign"
@@ -348,17 +371,13 @@ jobs:
                 ;;
             esac
 
-            cosign sign-blob --yes \
-              --bundle "generated/${asset_name}.sigstore.json" \
-              "$asset"
+            sign_blob_with_retry "$asset" "generated/${asset_name}.sigstore.json"
           done
 
           shopt -s nullglob
           for sbom in generated/*.sbom.spdx.json; do
             sbom_name="$(basename "$sbom")"
-            cosign sign-blob --yes \
-              --bundle "generated/${sbom_name}.sigstore.json" \
-              "$sbom"
+            sign_blob_with_retry "$sbom" "generated/${sbom_name}.sigstore.json"
           done
           shopt -u nullglob
       - name: Upload SBOMs and signatures
