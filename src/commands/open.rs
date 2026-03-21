@@ -21,12 +21,12 @@ use tracing::debug;
 use crate::executors::source::ExecuteMode;
 use crate::executors::target_runner::{self, TargetLaunchOptions};
 use crate::preview;
-use crate::provisioner::{self, AutoProvisioningOptions};
-use crate::registry_store::RegistryStore;
+use crate::registry::store::RegistryStore;
 use crate::reporters::CliReporter;
-use crate::runtime_manager;
-use crate::runtime_overrides;
-use crate::runtime_tree;
+use crate::runtime::manager as runtime_manager;
+use crate::runtime::overrides as runtime_overrides;
+use crate::runtime::provisioning::{self as provisioner, AutoProvisioningOptions};
+use crate::runtime::tree as runtime_tree;
 use crate::state::{
     ensure_registered_state_binding, ensure_registered_state_binding_in_store,
     parse_state_reference, resolve_registered_state_reference,
@@ -669,7 +669,7 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
             let id = format!("capsule-{}", pid);
             let now = SystemTime::now();
 
-            let info = crate::process_manager::ProcessInfo {
+            let info = crate::runtime::process::ProcessInfo {
                 id: id.clone(),
                 name: decision
                     .plan
@@ -680,7 +680,7 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
                     .to_string(),
                 pid: pid as i32,
                 workload_pid: None,
-                status: crate::process_manager::ProcessStatus::Ready,
+                status: crate::runtime::process::ProcessStatus::Ready,
                 runtime: "shell".to_string(),
                 start_time: now,
                 manifest_path: Some(decision.plan.manifest_path.clone()),
@@ -694,7 +694,7 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
                 exit_code: None,
             };
 
-            let pm = crate::process_manager::ProcessManager::new()?;
+            let pm = crate::runtime::process::ProcessManager::new()?;
             pm.write_pid(&info)?;
             args.reporter
                 .notify(format!("🚀 Capsule started in background (ID: {})", id))
@@ -924,7 +924,7 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
                 let pid = child.id();
                 let id = format!("capsule-{}", pid);
 
-                let info = crate::process_manager::ProcessInfo {
+                let info = crate::runtime::process::ProcessInfo {
                     id: id.clone(),
                     name: decision
                         .plan
@@ -935,7 +935,7 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
                         .to_string(),
                     pid: pid as i32,
                     workload_pid: None,
-                    status: crate::process_manager::ProcessStatus::Ready,
+                    status: crate::runtime::process::ProcessStatus::Ready,
                     runtime: "web-static".to_string(),
                     start_time: std::time::SystemTime::now(),
                     manifest_path: Some(decision.plan.manifest_path.clone()),
@@ -949,7 +949,7 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
                     exit_code: None,
                 };
 
-                let pm = crate::process_manager::ProcessManager::new()?;
+                let pm = crate::runtime::process::ProcessManager::new()?;
                 pm.write_pid(&info)?;
 
                 args.reporter
@@ -1218,7 +1218,7 @@ mod tests {
         resolve_compatibility_host_mode, resolve_python_dependency_lock_path,
         resolve_state_source_overrides_with_store, CompatibilityHostMode, ForegroundEventMessage,
     };
-    use crate::registry_store::RegistryStore;
+    use crate::registry::store::RegistryStore;
     use capsule_core::execution_plan::guard::ExecutorKind;
     use capsule_core::lifecycle::LifecycleEvent;
     use capsule_core::router::{ExecutionProfile, ManifestData};

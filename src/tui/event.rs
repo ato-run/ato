@@ -1,6 +1,6 @@
 use crossterm::event::KeyEvent;
 
-use crate::search::SearchResult;
+use crate::commands::search::SearchResult;
 
 pub enum AppEvent {
     Input(KeyEvent),

@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::process_manager::ProcessManager;
 use crate::reporters::CliReporter;
+use crate::runtime::process::ProcessManager;
 use capsule_core::CapsuleReporter;
 
 const LOG_FILE_EXT: &str = ".log";

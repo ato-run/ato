@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use capsule_core::router::ManifestData;
 
 use crate::common::proxy;
-use crate::runtime_overrides;
+use crate::runtime::overrides as runtime_overrides;
 
 use super::launch_context::RuntimeLaunchContext;
 use super::source::{CapsuleProcess, ExecuteMode};
