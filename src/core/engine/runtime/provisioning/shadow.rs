@@ -64,6 +64,7 @@ pub fn materialize_synthetic_env(
     plan: &ManifestData,
     summary: &ProvisioningPlan,
     shadow_workspace: &ShadowWorkspaceRef,
+    audit: &mut ProvisioningAudit,
 ) -> Result<std::collections::HashMap<String, String>> {
     let env_values = summary
         .actions
@@ -99,6 +100,26 @@ pub fn materialize_synthetic_env(
     }
     fs::write(&env_path, lines)
         .with_context(|| format!("Failed to write synthetic env file: {}", env_path.display()))?;
+    audit.record_materialization(
+        "synthetic_env",
+        plan.selected_target_label(),
+        plan.execution_driver().as_deref(),
+        ProvisioningMaterializationStatus::Applied,
+        {
+            let mut keys = String::new();
+            for key in env_values.keys() {
+                if !keys.is_empty() {
+                    keys.push_str(", ");
+                }
+                keys.push_str(key);
+            }
+            format!(
+                "wrote synthetic .env with placeholder values for {} at {}",
+                keys,
+                env_path.display()
+            )
+        },
+    );
     Ok(env_values)
 }
 
@@ -647,7 +668,9 @@ run_command = "node server.js"
             }],
         };
 
-        let env_values = materialize_synthetic_env(&plan, &summary, &shadow).expect("env values");
+        let mut audit = test_audit(&plan, &summary);
+        let env_values =
+            materialize_synthetic_env(&plan, &summary, &shadow, &mut audit).expect("env values");
         assert_eq!(
             env_values.get("API_KEY").map(String::as_str),
             Some("ato-placeholder")
@@ -655,6 +678,11 @@ run_command = "node server.js"
         let env_file = workspace_dir.join(".env");
         let rendered = std::fs::read_to_string(env_file).expect("env file");
         assert!(rendered.contains("DATABASE_URL=sqlite://"));
+        assert_eq!(audit.materialization_records.len(), 1);
+        let record = &audit.materialization_records[0];
+        assert_eq!(record.stage, "synthetic_env");
+        assert_eq!(record.status, ProvisioningMaterializationStatus::Applied);
+        assert!(record.detail.contains("DATABASE_URL"));
     }
 
     #[test]
@@ -965,7 +993,9 @@ run_command = "node server.js"
             }],
         };
 
-        materialize_synthetic_env(&plan, &summary, &shadow).expect("env materialization");
+        let mut audit = test_audit(&plan, &summary);
+        materialize_synthetic_env(&plan, &summary, &shadow, &mut audit)
+            .expect("env materialization");
 
         // .env must NOT be written to the original source directory.
         assert!(
