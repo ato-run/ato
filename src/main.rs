@@ -158,5 +158,5 @@ fn run() -> Result<()> {
 }
 
 #[cfg(test)]
-#[path = "main_tests.rs"]
+#[path = "main/tests.rs"]
 mod tests;
