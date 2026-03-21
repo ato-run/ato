@@ -493,7 +493,7 @@ mod tests {
 
     use super::{
         materialize_shadow_lockfiles, materialize_shadow_manifest, materialize_synthetic_env,
-        python_lock_generation_command,
+        prepare_shadow_workspace, python_lock_generation_command,
     };
 
     fn test_plan(dir: &Path, target_manifest: &str) -> ManifestData {
@@ -828,5 +828,207 @@ run_command = "python app.py"
         assert_eq!(record.status, ProvisioningMaterializationStatus::Failed);
         assert_eq!(record.driver.as_deref(), Some("python"));
         assert!(record.detail.contains("uv lock"));
+    }
+
+    // --- Read-only guarantee tests (policy: issue #169) ---
+    // All provisioning operations must write only to the shadow workspace under
+    // `.tmp/ato-auto-provision/run-<id>/`. The original source directory must
+    // never be modified or have new files created directly in it.
+
+    #[test]
+    fn prepare_shadow_workspace_does_not_modify_original_source_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let original_pkg = r#"{"name":"demo","version":"0.1.0"}"#;
+        let original_server = "console.log('hello');";
+        std::fs::write(dir.path().join("package.json"), original_pkg).expect("package.json");
+        std::fs::write(dir.path().join("server.js"), original_server).expect("server.js");
+
+        let plan = test_plan(
+            dir.path(),
+            r#"
+name = "demo"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "node"
+run_command = "node server.js"
+"#,
+        );
+        let summary = ProvisioningPlan {
+            issues: Vec::new(),
+            actions: Vec::new(),
+        };
+        let audit = test_audit(&plan, &summary);
+
+        let shadow = prepare_shadow_workspace(&plan, &audit).expect("shadow workspace");
+
+        // Original source files must be unchanged.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("package.json")).expect("read"),
+            original_pkg,
+            "package.json in original dir must not be modified"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("server.js")).expect("read"),
+            original_server,
+            "server.js in original dir must not be modified"
+        );
+        // No new lockfile must appear directly in the original dir.
+        assert!(
+            !dir.path().join("package-lock.json").exists(),
+            "package-lock.json must not be created in original dir"
+        );
+        // Shadow workspace must contain copies of the source files with correct content.
+        assert_eq!(
+            std::fs::read_to_string(shadow.workspace_dir.join("package.json")).expect("shadow read"),
+            original_pkg,
+            "shadow workspace must contain an accurate copy of package.json"
+        );
+        assert_eq!(
+            std::fs::read_to_string(shadow.workspace_dir.join("server.js")).expect("shadow read"),
+            original_server,
+            "shadow workspace must contain an accurate copy of server.js"
+        );
+    }
+
+    #[test]
+    fn materialize_shadow_manifest_does_not_modify_original_capsule_toml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan = test_plan(
+            dir.path(),
+            r#"
+name = "demo"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "node"
+run_command = "node server.js"
+"#,
+        );
+        let original_toml =
+            std::fs::read_to_string(dir.path().join("capsule.toml")).expect("original manifest");
+
+        let shadow = test_shadow_workspace(dir.path(), "run-ro-manifest");
+        let summary = ProvisioningPlan {
+            issues: Vec::new(),
+            actions: vec![ProvisioningAction::SelectRuntime {
+                target: "app".to_string(),
+                runtime: "source".to_string(),
+                driver: "node".to_string(),
+                safety: ProvisioningSafetyClass::SafeDefault,
+            }],
+        };
+
+        let shadow_manifest = materialize_shadow_manifest(&plan, &summary, &shadow)
+            .expect("materialize")
+            .expect("path");
+
+        // Shadow manifest must be written inside shadow root, not the original dir.
+        assert!(
+            shadow_manifest.starts_with(&shadow.root_dir),
+            "shadow manifest {:?} must be under shadow root {:?}",
+            shadow_manifest,
+            shadow.root_dir
+        );
+        // Original capsule.toml must be unchanged.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("capsule.toml")).expect("read after"),
+            original_toml,
+            "original capsule.toml must not be modified during shadow manifest materialization"
+        );
+    }
+
+    #[test]
+    fn materialize_synthetic_env_does_not_write_env_to_original_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan = test_plan(
+            dir.path(),
+            r#"
+name = "demo"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "node"
+run_command = "node server.js"
+"#,
+        );
+        let shadow = test_shadow_workspace(dir.path(), "run-ro-env");
+        let summary = ProvisioningPlan {
+            issues: Vec::new(),
+            actions: vec![ProvisioningAction::InjectSyntheticEnv {
+                target: "app".to_string(),
+                missing_keys: vec!["DATABASE_URL".to_string(), "API_KEY".to_string()],
+                safety: ProvisioningSafetyClass::SafeDefault,
+            }],
+        };
+
+        materialize_synthetic_env(&plan, &summary, &shadow).expect("env materialization");
+
+        // .env must NOT be written to the original source directory.
+        assert!(
+            !dir.path().join(".env").exists(),
+            ".env must not be created in the original source directory"
+        );
+        // .env must be written only to the shadow workspace.
+        assert!(
+            shadow.workspace_dir.join(".env").exists(),
+            ".env must be created in the shadow workspace"
+        );
+    }
+
+    #[test]
+    fn materialize_shadow_lockfiles_node_does_not_create_lockfile_in_original_dir() {
+        if which::which("npm").is_err() {
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let original_pkg = r#"{"name":"demo","version":"0.1.0","scripts":{"start":"node server.js"}}"#;
+        std::fs::write(dir.path().join("package.json"), original_pkg).expect("package.json");
+
+        let plan = test_plan(
+            dir.path(),
+            r#"
+name = "demo"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "node"
+run_command = "node server.js"
+"#,
+        );
+        let shadow = test_shadow_workspace(dir.path(), "run-ro-lockfile");
+        std::fs::write(shadow.workspace_dir.join("package.json"), original_pkg)
+            .expect("shadow package.json");
+        let summary = ProvisioningPlan {
+            issues: Vec::new(),
+            actions: vec![ProvisioningAction::GenerateShadowLockfile {
+                target: "app".to_string(),
+                driver: "node".to_string(),
+                safety: ProvisioningSafetyClass::SafeDefault,
+            }],
+        };
+        let mut audit = test_audit(&plan, &summary);
+
+        // The result is intentionally not unwrapped: the test validates the read-only guarantee
+        // regardless of whether lockfile generation succeeds or is skipped. In either case no
+        // files must be written to the original source directory.
+        let _ = materialize_shadow_lockfiles(&plan, &summary, &shadow, &mut audit);
+
+        // package-lock.json must not be created in the original source directory.
+        assert!(
+            !dir.path().join("package-lock.json").exists(),
+            "package-lock.json must not be created in the original source directory"
+        );
+        // Original package.json must be unchanged.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("package.json")).expect("read"),
+            original_pkg,
+            "package.json in original dir must not be modified"
+        );
     }
 }
