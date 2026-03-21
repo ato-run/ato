@@ -12,10 +12,10 @@ use std::time::{Duration, Instant};
 use tracing::debug;
 use walkdir::WalkDir;
 
-use crate::init;
-use crate::native_delivery;
+use crate::build::native_delivery;
+use crate::project::init;
 use crate::reporters;
-use crate::runtime_overrides;
+use crate::runtime::overrides as runtime_overrides;
 
 const BUILD_CACHE_LAYOUT_VERSION: &str = "chml-build-cache-v1";
 const BUILD_CACHE_IGNORED_DIRS: &[&str] = &[

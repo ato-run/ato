@@ -1,7 +1,7 @@
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::search;
+use crate::commands::search;
 
 use super::event::AppEvent;
 

@@ -15,7 +15,7 @@ use tracing::debug;
 use super::launch_context::RuntimeLaunchContext;
 use crate::ipc::inject::IpcContext;
 use crate::reporters::CliReporter;
-use crate::runtime_overrides;
+use crate::runtime::overrides as runtime_overrides;
 
 #[derive(Debug, Clone)]
 pub struct TargetLaunchOptions {
