@@ -255,6 +255,7 @@ impl ProvisioningAudit {
 #[derive(Debug, Clone, Default)]
 pub struct ProvisioningOutcome {
     pub plan: ProvisioningPlan,
+    pub audit: Option<ProvisioningAudit>,
     pub shadow_workspace: Option<ShadowWorkspaceRef>,
     pub additional_env: HashMap<String, String>,
     pub additional_mounts: Vec<InjectedMount>,
