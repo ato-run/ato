@@ -1395,7 +1395,7 @@ fn test_legacy_open_still_available() {
     cmd.args(["open", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Usage: ato open"))
+        .stdout(predicate::str::contains("Usage: ato run"))
         .stdout(predicate::str::contains("--yes"))
         .stdout(predicate::str::contains("--registry"));
 }

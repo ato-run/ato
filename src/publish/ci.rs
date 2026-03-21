@@ -375,8 +375,9 @@ pub(crate) fn build_capsule_artifact(
         .with_context(|| format!("Failed to create {}", artifact_dir.display()))?;
     let artifact_path = artifact_dir.join(format!("{}-{}.capsule", name, version));
 
-    if let Some(plan) = crate::native_delivery::detect_build_strategy(manifest_dir)? {
-        let result = crate::native_delivery::build_native_artifact(&plan, Some(&artifact_path))?;
+    if let Some(plan) = crate::build::native_delivery::detect_build_strategy(manifest_dir)? {
+        let result =
+            crate::build::native_delivery::build_native_artifact(&plan, Some(&artifact_path))?;
         return Ok(result.artifact_path);
     }
 

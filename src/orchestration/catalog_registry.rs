@@ -81,7 +81,7 @@ pub(crate) fn execute_registry_command(command: crate::RegistryCommands) -> Resu
                 {
                     anyhow::bail!("--auth-token is required when --host is not 127.0.0.1");
                 }
-                crate::registry_serve::serve(crate::registry_serve::RegistryServerConfig {
+                crate::registry::serve::serve(crate::registry::serve::RegistryServerConfig {
                     host,
                     port,
                     data_dir,
@@ -101,7 +101,7 @@ pub(crate) fn execute_source_sync_status_command(
 ) -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let result = crate::source::fetch_sync_run_status(
+        let result = crate::commands::source::fetch_sync_run_status(
             &source_id,
             &sync_run_id,
             registry.as_deref(),
@@ -124,7 +124,7 @@ pub(crate) fn execute_source_rebuild_command(
 ) -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let result = crate::source::rebuild_source(
+        let result = crate::commands::source::rebuild_source(
             &source_id,
             reference.as_deref(),
             wait,
@@ -163,7 +163,7 @@ pub(crate) fn execute_search_command(args: SearchCommandArgs) -> Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let result = crate::search::search_capsules(
+        let result = crate::commands::search::search_capsules(
             args.query.as_deref(),
             args.category.as_deref(),
             Some(args.tags.as_slice()),

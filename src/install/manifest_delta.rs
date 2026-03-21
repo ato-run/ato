@@ -4,7 +4,7 @@ pub(crate) async fn resolve_registry_url(
     registry_url: Option<&str>,
     emit_log: bool,
 ) -> Result<String> {
-    crate::registry_url::resolve_registry_url_with_log(registry_url, emit_log).await
+    crate::registry::url::resolve_registry_url_with_log(registry_url, emit_log).await
 }
 
 pub(crate) async fn resolve_manifest_target(
@@ -26,7 +26,7 @@ pub(crate) async fn resolve_manifest_target(
             urlencoding::encode(&scoped_ref.slug),
             urlencoding::encode(version)
         );
-        let response = crate::registry_http::with_ato_token(client.get(&endpoint))
+        let response = crate::registry::http::with_ato_token(client.get(&endpoint))
             .send()
             .await
             .with_context(|| "Failed to resolve versioned manifest hash")?;
@@ -83,7 +83,7 @@ pub(crate) async fn resolve_manifest_target(
     }
 
     let epoch_endpoint = format!("{}/v1/manifest/epoch/resolve", base);
-    let epoch_response = crate::registry_http::with_ato_token(
+    let epoch_response = crate::registry::http::with_ato_token(
         client
             .post(&epoch_endpoint)
             .json(&serde_json::json!({ "scoped_id": scoped_ref.scoped_id })),
@@ -193,10 +193,11 @@ pub(crate) async fn download_capsule_artifact_via_distribution(
     }
 
     let has_token = has_ato_token();
-    let distribution_response = crate::registry_http::with_ato_token(client.get(&distribution_url))
-        .send()
-        .await
-        .with_context(|| "Failed to resolve distribution fallback for install")?;
+    let distribution_response =
+        crate::registry::http::with_ato_token(client.get(&distribution_url))
+            .send()
+            .await
+            .with_context(|| "Failed to resolve distribution fallback for install")?;
     if distribution_response.status() == reqwest::StatusCode::UNAUTHORIZED && !has_token {
         bail!(
             "{}: registry requires authentication for capsule download APIs. Run `ato login` or set `ATO_TOKEN=<token>`.",

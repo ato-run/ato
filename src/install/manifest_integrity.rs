@@ -211,7 +211,7 @@ pub(crate) async fn verify_manifest_supply_chain(
         )
         .await?
     } else {
-        let response = crate::registry_http::with_ato_token(
+        let response = crate::registry::http::with_ato_token(
             client
                 .post(&endpoint)
                 .json(&serde_json::json!({ "scoped_id": scoped_ref.scoped_id })),
@@ -267,7 +267,7 @@ pub(crate) async fn verify_manifest_supply_chain(
         base,
         urlencoding::encode(&target_manifest_hash)
     );
-    let manifest_response = crate::registry_http::with_ato_token(client.get(&manifest_endpoint))
+    let manifest_response = crate::registry::http::with_ato_token(client.get(&manifest_endpoint))
         .send()
         .await
         .with_context(|| "Failed to fetch manifest payload")?;
@@ -336,7 +336,7 @@ pub(crate) fn artifact_request_builder(
 ) -> reqwest::RequestBuilder {
     let request = client.get(artifact_url);
     if should_attach_ato_token_to_artifact_url(registry, artifact_url) {
-        crate::registry_http::with_ato_token(request)
+        crate::registry::http::with_ato_token(request)
     } else {
         request
     }
@@ -356,7 +356,7 @@ pub(crate) fn should_attach_ato_token_to_artifact_url(registry: &str, artifact_u
 }
 
 pub(crate) fn has_ato_token() -> bool {
-    crate::registry_http::current_ato_token().is_some()
+    crate::registry::http::current_ato_token().is_some()
 }
 
 pub(crate) fn verify_epoch_signature(epoch: &ManifestEpochResolveResponse) -> Result<()> {

@@ -864,7 +864,7 @@ pub(crate) fn resolve_publish_target_from_sources(
 }
 
 fn resolve_explicit_publish_target(raw: &str) -> Result<ResolvedPublishTarget> {
-    let normalized = crate::registry_http::normalize_registry_url(raw, "registry")?;
+    let normalized = crate::registry::http::normalize_registry_url(raw, "registry")?;
     if is_legacy_dock_publish_registry(&normalized) {
         anyhow::bail!(
             "Registry URL `{}` is no longer supported. Personal Dock publish now uses `https://api.ato.run`; `/d/<handle>` is a UI page, not a registry.",

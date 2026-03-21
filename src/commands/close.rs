@@ -1,8 +1,8 @@
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::process_manager::ProcessManager;
 use crate::reporters::CliReporter;
+use crate::runtime::process::ProcessManager;
 use capsule_core::CapsuleReporter;
 
 pub struct CloseArgs {

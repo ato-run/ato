@@ -2,8 +2,8 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::binding;
-use crate::process_manager::{format_duration, get_process_uptime, ProcessManager, ProcessStatus};
 use crate::reporters::CliReporter;
+use crate::runtime::process::{format_duration, get_process_uptime, ProcessManager, ProcessStatus};
 use capsule_core::CapsuleReporter;
 
 pub struct PsArgs {
