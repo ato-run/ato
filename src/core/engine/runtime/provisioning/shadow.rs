@@ -993,7 +993,9 @@ run_command = "node server.js"
             }],
         };
 
-        materialize_synthetic_env(&plan, &summary, &shadow).expect("env materialization");
+        let mut audit = test_audit(&plan, &summary);
+        materialize_synthetic_env(&plan, &summary, &shadow, &mut audit)
+            .expect("env materialization");
 
         // .env must NOT be written to the original source directory.
         assert!(
