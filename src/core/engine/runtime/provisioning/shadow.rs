@@ -105,11 +105,20 @@ pub fn materialize_synthetic_env(
         plan.selected_target_label(),
         plan.execution_driver().as_deref(),
         ProvisioningMaterializationStatus::Applied,
-        format!(
-            "wrote synthetic .env with placeholder values for {} at {}",
-            env_values.keys().cloned().collect::<Vec<_>>().join(", "),
-            env_path.display()
-        ),
+        {
+            let mut keys = String::new();
+            for key in env_values.keys() {
+                if !keys.is_empty() {
+                    keys.push_str(", ");
+                }
+                keys.push_str(key);
+            }
+            format!(
+                "wrote synthetic .env with placeholder values for {} at {}",
+                keys,
+                env_path.display()
+            )
+        },
     );
     Ok(env_values)
 }

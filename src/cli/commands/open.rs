@@ -526,7 +526,7 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
         if let Some(shadow_manifest_path) = shadow_workspace.manifest_path.as_ref() {
             if use_progressive_ui {
                 crate::progressive_ui::show_step(
-                    "Auto-provisioning: re-routing execution through the shadow workspace",
+                    "Auto-provisioning: rerouting execution through the shadow workspace",
                 )?;
             }
             (decision, launch_ctx) = reroute_auto_provisioned_execution(
@@ -1524,34 +1524,36 @@ run_command = "node server.js"
             target: "/var/run/ato/injected/db".to_string(),
             readonly: true,
         };
-        let launch_ctx = RuntimeLaunchContext::empty()
-            .with_injected_env(
-                [("DATABASE_URL".to_string(), "sqlite://shadow.db".to_string())]
-                    .into_iter()
-                    .collect(),
+        for preview_mode in [false, true] {
+            let launch_ctx = RuntimeLaunchContext::empty()
+                .with_injected_env(
+                    [("DATABASE_URL".to_string(), "sqlite://shadow.db".to_string())]
+                        .into_iter()
+                        .collect(),
+                )
+                .with_injected_mounts(vec![mount.clone()]);
+
+            let (rerouted, rerouted_ctx) = reroute_auto_provisioned_execution(
+                decision.clone(),
+                launch_ctx,
+                Arc::new(CliReporter::new(false)),
+                preview_mode,
+                &shadow_manifest_path,
             )
-            .with_injected_mounts(vec![mount.clone()]);
+            .await
+            .expect("reroute");
 
-        let (rerouted, rerouted_ctx) = reroute_auto_provisioned_execution(
-            decision,
-            launch_ctx,
-            Arc::new(CliReporter::new(false)),
-            false,
-            &shadow_manifest_path,
-        )
-        .await
-        .expect("reroute");
-
-        assert_eq!(rerouted.plan.manifest_path, shadow_manifest_path);
-        assert_eq!(rerouted.plan.state_source_overrides, state_overrides);
-        assert_eq!(
-            rerouted_ctx
-                .injected_env()
-                .get("DATABASE_URL")
-                .map(String::as_str),
-            Some("sqlite://shadow.db")
-        );
-        assert_eq!(rerouted_ctx.injected_mounts(), &[mount]);
+            assert_eq!(rerouted.plan.manifest_path, shadow_manifest_path);
+            assert_eq!(rerouted.plan.state_source_overrides, state_overrides);
+            assert_eq!(
+                rerouted_ctx
+                    .injected_env()
+                    .get("DATABASE_URL")
+                    .map(String::as_str),
+                Some("sqlite://shadow.db")
+            );
+            assert_eq!(rerouted_ctx.injected_mounts(), &[mount.clone()]);
+        }
     }
 
     #[test]
