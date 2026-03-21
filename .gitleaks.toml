@@ -27,6 +27,8 @@ paths = [
 description = "Test fixture placeholders in auth/profile/identity tests"
 paths = [
   '''^src/auth\.rs$''',
+  '''^src/auth/tests\.rs$''',
+  '''^src/core/auth/tests\.rs$''',
   '''^core/src/types/profile\.rs$''',
   '''^core/src/types/identity\.rs$''',
 ]
