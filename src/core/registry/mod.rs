@@ -9,8 +9,11 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+pub(crate) mod binding;
 pub(crate) mod http;
+pub(crate) mod publish;
 pub(crate) mod serve;
+pub(crate) mod state;
 pub(crate) mod store;
 pub(crate) mod url;
 
