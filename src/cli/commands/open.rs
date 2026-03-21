@@ -499,6 +499,16 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
         },
     )
     .await?;
+    if use_progressive_ui {
+        if let Some(audit_reporter) =
+            provisioner::AuditReporter::from_outcome(&provisioning_outcome)
+        {
+            let body = audit_reporter.body();
+            if !body.is_empty() {
+                crate::progressive_ui::show_note(audit_reporter.title(), body)?;
+            }
+        }
+    }
     launch_ctx = launch_ctx
         .with_injected_env(provisioning_outcome.additional_env)
         .with_injected_mounts(provisioning_outcome.additional_mounts);
@@ -514,22 +524,19 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
         );
 
         if let Some(shadow_manifest_path) = shadow_workspace.manifest_path.as_ref() {
-            decision =
-                capsule_core::router::route_manifest_with_state_overrides_and_validation_mode(
-                    shadow_manifest_path,
-                    router::ExecutionProfile::Dev,
-                    Some(decision.plan.selected_target_label()),
-                    decision.plan.state_source_overrides.clone(),
-                    if preview_mode {
-                        capsule_core::types::ValidationMode::Preview
-                    } else {
-                        capsule_core::types::ValidationMode::Strict
-                    },
+            if use_progressive_ui {
+                crate::progressive_ui::show_step(
+                    "Auto-provisioning: re-routing execution through the shadow workspace",
                 )?;
-            launch_ctx = target_runner::resolve_launch_context(&decision.plan, &args.reporter)
-                .await?
-                .with_injected_env(launch_ctx.merged_env())
-                .with_injected_mounts(launch_ctx.injected_mounts().to_vec());
+            }
+            (decision, launch_ctx) = reroute_auto_provisioned_execution(
+                decision,
+                launch_ctx,
+                args.reporter.clone(),
+                preview_mode,
+                shadow_manifest_path,
+            )
+            .await?;
         }
     }
 
@@ -999,6 +1006,36 @@ async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
     Ok(())
 }
 
+async fn reroute_auto_provisioned_execution(
+    decision: capsule_core::router::RuntimeDecision,
+    launch_ctx: crate::executors::launch_context::RuntimeLaunchContext,
+    reporter: Arc<CliReporter>,
+    preview_mode: bool,
+    shadow_manifest_path: &Path,
+) -> Result<(
+    capsule_core::router::RuntimeDecision,
+    crate::executors::launch_context::RuntimeLaunchContext,
+)> {
+    let rerouted_decision =
+        capsule_core::router::route_manifest_with_state_overrides_and_validation_mode(
+            shadow_manifest_path,
+            router::ExecutionProfile::Dev,
+            Some(decision.plan.selected_target_label()),
+            decision.plan.state_source_overrides.clone(),
+            if preview_mode {
+                capsule_core::types::ValidationMode::Preview
+            } else {
+                capsule_core::types::ValidationMode::Strict
+            },
+        )?;
+    let rerouted_launch_ctx =
+        target_runner::resolve_launch_context(&rerouted_decision.plan, &reporter)
+            .await?
+            .with_injected_env(launch_ctx.merged_env())
+            .with_injected_mounts(launch_ctx.injected_mounts().to_vec());
+    Ok((rerouted_decision, rerouted_launch_ctx))
+}
+
 fn resolve_state_source_overrides(
     manifest: &CapsuleManifest,
     raw_bindings: &[String],
@@ -1215,15 +1252,19 @@ mod tests {
         background_ready_message, foreground_native_event_messages,
         initial_foreground_native_messages, plan_v03_provision_command,
         preflight_required_environment_variables, process_runtime_label,
-        resolve_compatibility_host_mode, resolve_python_dependency_lock_path,
-        resolve_state_source_overrides_with_store, CompatibilityHostMode, ForegroundEventMessage,
+        reroute_auto_provisioned_execution, resolve_compatibility_host_mode,
+        resolve_python_dependency_lock_path, resolve_state_source_overrides_with_store,
+        CompatibilityHostMode, ForegroundEventMessage,
     };
+    use crate::executors::launch_context::{InjectedMount, RuntimeLaunchContext};
     use crate::registry::store::RegistryStore;
+    use crate::reporters::CliReporter;
     use capsule_core::execution_plan::guard::ExecutorKind;
     use capsule_core::lifecycle::LifecycleEvent;
-    use capsule_core::router::{ExecutionProfile, ManifestData};
+    use capsule_core::router::{self, ExecutionProfile, ManifestData};
     use capsule_core::types::CapsuleManifest;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     #[test]
     fn resolve_python_dependency_lock_path_prefers_source_uv_lock() {
@@ -1419,6 +1460,98 @@ mod tests {
             message,
             "✔ Capsule is ready (Host Fallback, ID: capsule-42)"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reroute_auto_provisioned_execution_preserves_injected_context() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let original_manifest_path = tmp.path().join("capsule.toml");
+        std::fs::write(
+            &original_manifest_path,
+            r#"
+schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "node"
+runtime_version = "20.11.0"
+run_command = "node server.js"
+"#,
+        )
+        .expect("write original manifest");
+        let shadow_root = tmp
+            .path()
+            .join(".tmp")
+            .join("ato-auto-provision")
+            .join("run-1");
+        std::fs::create_dir_all(&shadow_root).expect("shadow root");
+        let shadow_manifest_path = shadow_root.join("capsule.toml");
+        std::fs::write(
+            &shadow_manifest_path,
+            r#"
+schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "node"
+runtime_version = "20.11.0"
+working_dir = "workspace"
+run_command = "node server.js"
+"#,
+        )
+        .expect("write shadow manifest");
+
+        let mut state_overrides = std::collections::HashMap::new();
+        state_overrides.insert("data".to_string(), "/var/lib/demo".to_string());
+        let decision = router::route_manifest_with_state_overrides_and_validation_mode(
+            &original_manifest_path,
+            ExecutionProfile::Dev,
+            Some("app"),
+            state_overrides.clone(),
+            capsule_core::types::ValidationMode::Strict,
+        )
+        .expect("route original manifest");
+        let mount = InjectedMount {
+            source: tmp.path().join("db"),
+            target: "/var/run/ato/injected/db".to_string(),
+            readonly: true,
+        };
+        let launch_ctx = RuntimeLaunchContext::empty()
+            .with_injected_env(
+                [("DATABASE_URL".to_string(), "sqlite://shadow.db".to_string())]
+                    .into_iter()
+                    .collect(),
+            )
+            .with_injected_mounts(vec![mount.clone()]);
+
+        let (rerouted, rerouted_ctx) = reroute_auto_provisioned_execution(
+            decision,
+            launch_ctx,
+            Arc::new(CliReporter::new(false)),
+            false,
+            &shadow_manifest_path,
+        )
+        .await
+        .expect("reroute");
+
+        assert_eq!(rerouted.plan.manifest_path, shadow_manifest_path);
+        assert_eq!(rerouted.plan.state_source_overrides, state_overrides);
+        assert_eq!(
+            rerouted_ctx
+                .injected_env()
+                .get("DATABASE_URL")
+                .map(String::as_str),
+            Some("sqlite://shadow.db")
+        );
+        assert_eq!(rerouted_ctx.injected_mounts(), &[mount]);
     }
 
     #[test]
