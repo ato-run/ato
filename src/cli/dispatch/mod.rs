@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use crate::application::ports::OutputPort;
 use crate::auth;
 use crate::cli::{Cli, Commands};
 use crate::commands;
@@ -107,13 +108,19 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             reporter.clone(),
         ),
 
-        Commands::New { name, template } => crate_project::new::execute(
-            crate_project::new::NewArgs {
-                name,
-                template: Some(template),
-            },
-            reporter.clone(),
-        ),
+        Commands::New { name, template } => {
+            let result = crate_project::new::execute(
+                crate_project::new::NewArgs {
+                    name,
+                    template: Some(template),
+                },
+                reporter.clone(),
+            )?;
+            if reporter.is_json() {
+                println!("{}", serde_json::to_string(&result)?);
+            }
+            Ok(())
+        }
 
         Commands::Build {
             dir,
