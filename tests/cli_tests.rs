@@ -163,6 +163,36 @@ fn extract_manifest_from_archive(path: &Path) -> String {
     );
 }
 
+fn create_fake_node_dir() -> tempfile::TempDir {
+    let dir = tempdir().expect("fake node tempdir");
+    #[cfg(windows)]
+    let node_path = dir.path().join("node.cmd");
+    #[cfg(not(windows))]
+    let node_path = dir.path().join("node");
+
+    #[cfg(windows)]
+    fs::write(&node_path, "@echo off\r\nexit /B 0\r\n").expect("write fake node");
+    #[cfg(not(windows))]
+    {
+        fs::write(&node_path, "#!/bin/sh\nexit 0\n").expect("write fake node");
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&node_path)
+            .expect("fake node metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&node_path, permissions).expect("chmod fake node");
+    }
+
+    dir
+}
+
+fn prepend_path(dir: &Path) -> std::ffi::OsString {
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![dir.to_path_buf()];
+    paths.extend(std::env::split_paths(&existing));
+    std::env::join_paths(paths).expect("join PATH entries")
+}
+
 #[test]
 fn test_cli_help() {
     let mut cmd = Command::cargo_bin("ato").unwrap();
@@ -326,6 +356,7 @@ fn test_install_from_gh_repo_without_manifest_uses_zero_config_build_fallback() 
     let tmp = tempdir().unwrap();
     let output_dir = tmp.path().join("installed");
     let runtime_root = tmp.path().join("runtime");
+    let fake_node = create_fake_node_dir();
     let archive = build_github_tarball(
         "Koh0920-demo-repo-a1b2c3",
         &[("index.js", "console.log('hello from zero config');\n")],
@@ -337,6 +368,7 @@ fn test_install_from_gh_repo_without_manifest_uses_zero_config_build_fallback() 
         .current_dir(tmp.path())
         .env("ATO_GITHUB_API_BASE_URL", &server.base_url)
         .env("ATO_RUNTIME_ROOT", &runtime_root)
+        .env("PATH", prepend_path(fake_node.path()))
         .args([
             "install",
             "--from-gh-repo",
@@ -376,6 +408,7 @@ fn test_install_from_gh_repo_accepts_host_path_and_metadata_archive() {
     let tmp = tempdir().unwrap();
     let output_dir = tmp.path().join("installed");
     let runtime_root = tmp.path().join("runtime");
+    let fake_node = create_fake_node_dir();
     let archive = build_github_tarball_with_global_pax_header(
         "Koh0920-demo-repo-a1b2c3",
         &[("index.js", "console.log('hello from host path');\n")],
@@ -387,6 +420,7 @@ fn test_install_from_gh_repo_accepts_host_path_and_metadata_archive() {
         .current_dir(tmp.path())
         .env("ATO_GITHUB_API_BASE_URL", &server.base_url)
         .env("ATO_RUNTIME_ROOT", &runtime_root)
+        .env("PATH", prepend_path(fake_node.path()))
         .args([
             "install",
             "--from-gh-repo",

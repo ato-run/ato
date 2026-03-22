@@ -199,6 +199,11 @@ fn main() {
     let ui_public = ui_dir.join("public");
     let ui_package = ui_dir.join("package.json");
     let ui_lockfile = ui_dir.join("package-lock.json");
+    let shared_packages = [
+        Path::new("../../packages/dock-domain"),
+        Path::new("../../packages/dock-data"),
+        Path::new("../../packages/dock-react"),
+    ];
     let ui_vite_bin = ui_dir
         .join("node_modules")
         .join(".bin")
@@ -216,6 +221,11 @@ fn main() {
     }
     if ui_public.exists() {
         println!("cargo:rerun-if-changed={}", ui_public.display());
+    }
+    for shared_package in shared_packages {
+        if shared_package.exists() {
+            println!("cargo:rerun-if-changed={}", shared_package.display());
+        }
     }
 
     if env::var("ATO_SKIP_UI_BUILD")

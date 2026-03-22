@@ -100,16 +100,48 @@ fn seed_minimal_deno_lockfiles(workspace_root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn ensure_fake_runtime_shims(home_dir: &Path) -> Result<std::ffi::OsString> {
+    let shims_dir = home_dir.join(".test-runtime-shims");
+    std::fs::create_dir_all(&shims_dir)?;
+
+    for binary in ["node", "bun", "python", "python3", "uv"] {
+        #[cfg(windows)]
+        let shim_path = shims_dir.join(format!("{binary}.cmd"));
+        #[cfg(not(windows))]
+        let shim_path = shims_dir.join(binary);
+
+        if !shim_path.exists() {
+            #[cfg(windows)]
+            std::fs::write(&shim_path, "@echo off\r\nexit /B 0\r\n")?;
+            #[cfg(not(windows))]
+            {
+                std::fs::write(&shim_path, "#!/bin/sh\nexit 0\n")?;
+                use std::os::unix::fs::PermissionsExt;
+                let mut permissions = std::fs::metadata(&shim_path)?.permissions();
+                permissions.set_mode(0o755);
+                std::fs::set_permissions(&shim_path, permissions)?;
+            }
+        }
+    }
+
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![shims_dir];
+    paths.extend(std::env::split_paths(&existing));
+    std::env::join_paths(paths).context("join PATH entries for runtime shims")
+}
+
 fn run_ato_with_home(
     ato: &Path,
     args: &[&str],
     cwd: &Path,
     home_dir: &Path,
 ) -> Result<std::process::Output> {
+    let path = ensure_fake_runtime_shims(home_dir)?;
     Command::new(ato)
         .args(args)
         .current_dir(cwd)
         .env("HOME", home_dir)
+        .env("PATH", path)
         .output()
         .with_context(|| format!("failed to run ato {:?}", args))
 }
