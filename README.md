@@ -14,11 +14,12 @@ English | [日本語](README_JA.md)
 `ato` is a meta-CLI that interprets `capsule.toml` to execute, distribute, and install capsules.
 It is designed around a Zero-Trust / fail-closed model: normal runs stay quiet, while consent prompts and policy violations are surfaced explicitly.
 
+For a single-file consolidated specification of current behavior, see `docs/current-spec.md`.
+
 ## Key Commands
 
 ```bash
 ato run [path|publisher/slug|github.com/owner/repo] [--registry <url>]
-ato open [path] [--watch]                 # compatibility command (deprecated; prefer run)
 ato ps
 ato close --id <capsule-id> | --name <name> [--all] [--force]
 ato logs --id <capsule-id> [--follow]
@@ -130,7 +131,7 @@ cargo build -p ato-cli
 ./target/debug/ato run .
 
 # hot reload during development
-./target/debug/ato open . --watch
+./target/debug/ato run . --watch
 
 # background process management
 ./target/debug/ato run . --background
@@ -143,7 +144,7 @@ cargo build -p ato-cli
 
 - Official registries (`https://api.ato.run`, `https://staging.api.ato.run`):
   `ato publish` is CI-first (OIDC). Direct local uploads are not allowed.
-  Default phase selection is `deploy` only (handoff/diagnostics). If you need local build checks, explicitly add `--build` (or `--prepare --build`) before `--deploy`.
+  Default execution is Publish only (handoff/diagnostics).
 - Personal Dock (default when logged in and no registry is specified):
   `ato publish` resolves the target from `ato login` and uploads directly to `https://api.ato.run/v1/local/capsules/...`.
   `--artifact` is recommended to avoid re-packing, and `--scoped-id` is auto-filled as `<handle>/<slug>`.
@@ -151,16 +152,22 @@ cargo build -p ato-cli
 - Custom/private registries (any other `--registry`):
   `ato publish --registry ...` performs direct uploads. `--artifact` is recommended to avoid re-packing.
   `--artifact` supports standalone artifact flow (no local `capsule.toml` required).
-  `--allow-existing` is available only on deploy phase (`--deploy`) for private/local registries.
+  `--allow-existing` is available only when the final Publish stage is selected.
 
-`ato publish` runs 3 internal phases in fixed order: `prepare -> build -> deploy`.
+`ato publish` uses the shared producer pipeline:
+`Prepare -> Build -> Verify -> Install -> Dry-run -> Publish`
 
-- Default (official registries): run `deploy` only.
-- Default (private/local registries): run all phases.
-- If any of `--prepare/--build/--deploy` is specified: run only selected phases.
-- `--artifact` always skips build phase.
-- `official + deploy` returns handoff only (no local upload).
-- `--legacy-full-publish` (official only) temporarily restores legacy default (`prepare -> build -> deploy`), is deprecated, and is scheduled for removal in the next major release.
+- Default (official registries): start and stop at Publish.
+- Default (private/local registries): start at Prepare and run through Publish.
+- `--prepare`, `--build`, and `--deploy` are stop points, not free-form phase toggles.
+- `--prepare` stops after Prepare.
+- `--build` stops after Verify. With source input, this means build then verify; with `--artifact`, it becomes Verify only.
+- `--deploy` stops after Publish.
+- `--artifact` changes the start phase to Verify.
+- `official + --deploy` remains Publish only (handoff, no local upload).
+- `private/local + --deploy` can auto-resolve earlier phases from source input, or run `Verify -> Publish` when `--artifact` is provided.
+- `--artifact --prepare` is invalid because the start phase would be after the selected stop point.
+- `--legacy-full-publish` (official only) temporarily restores the legacy default behavior, is deprecated, and is scheduled for removal in the next major release.
 - `--ci` / `--dry-run` cannot be combined with phase flags.
 
 Official registry helpers:
@@ -168,6 +175,12 @@ Official registry helpers:
 - `ato gen-ci` generates the fixed GitHub Actions workflow for OIDC publish.
 - `ato publish --fix` applies the official workflow fix once, then reruns diagnostics.
 - `ato publish --no-tui` disables the interactive handoff UI and prints CI guidance directly.
+
+### Migration Notes
+
+- `ato publish --build` now stops after Verify, not immediately after Build.
+- `ato open` has been removed; use `ato run` and `ato run --watch`.
+- `ato run --skill` and `ato run --from-skill` have been removed.
 
 ## Dock-first Flow (Personal Dock)
 
@@ -191,13 +204,14 @@ ato publish --artifact ./<name>.capsule
 ato build .
 ATO_TOKEN=pwd ato publish --registry http://127.0.0.1:18787 --artifact ./<name>.capsule
 
-# phase-filtered execution examples
+# stop-point examples
 ato publish --prepare
-ato publish --build
+ato publish --build                               # Prepare -> Build -> Verify
+ato publish --artifact ./<name>.capsule --build  # Verify only
 ato publish --artifact ./<name>.capsule          # default target: My Dock
 ATO_TOKEN=pwd ato publish --deploy --artifact ./<name>.capsule --registry http://127.0.0.1:18787
-ato publish --registry https://api.ato.run           # default: deploy only
-ato publish --registry https://api.ato.run --build   # explicit local build + official handoff
+ato publish --registry https://api.ato.run           # default: Publish only
+ato publish --registry https://api.ato.run --build   # explicit local build + verify, then stop
 ato publish --deploy --registry https://api.ato.run
 
 # temporary compatibility flag (official only; deprecated and will be removed in next major)
@@ -440,18 +454,6 @@ Notes:
 - `public` is deprecated for `runtime=web`.
 - For `runtime=web`, CLI prints the URL and does not auto-open a browser.
 
-## SKILL Execution
-
-```bash
-# Resolve by skill name (default search paths)
-ato run --skill <skill-name>
-
-# Point to a specific SKILL.md
-ato run --from-skill /path/to/SKILL.md
-```
-
-`--skill` and `--from-skill` are mutually exclusive.
-
 ## UX Policy (Silent Runner)
 
 - Minimal output on success (tool stdout-first)
@@ -468,7 +470,7 @@ ato run --from-skill /path/to/SKILL.md
 
 ## Environment Variable Reference (Core)
 
-- `CAPSULE_WATCH_DEBOUNCE_MS`: debounce interval for `open --watch` (ms, default: `300`)
+- `CAPSULE_WATCH_DEBOUNCE_MS`: debounce interval for `run --watch` (ms, default: `300`)
 - `CAPSULE_ALLOW_UNSAFE`: explicit allow for `--dangerously-skip-permissions` (only `1` is valid)
 - `ATO_TOKEN`: auth token for local/private registry publish
 - `ATO_STORE_API_URL`: API base URL for `ato search` / install flows (default: `https://api.ato.run`)
