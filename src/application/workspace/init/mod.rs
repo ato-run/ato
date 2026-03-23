@@ -139,6 +139,35 @@ pub fn execute_manifest_init(
     Ok(())
 }
 
+pub fn write_manual_manifest_stub(
+    path: Option<PathBuf>,
+    reporter: std::sync::Arc<crate::reporters::CliReporter>,
+) -> Result<PathBuf> {
+    let project_dir = path
+        .unwrap_or_else(|| PathBuf::from("."))
+        .canonicalize()
+        .context("Failed to resolve project directory")?;
+
+    let manifest_path = project_dir.join("capsule.toml");
+    if manifest_path.exists() {
+        anyhow::bail!(
+            "capsule.toml already exists!\n\
+            Delete or move the file before creating a manual starter manifest."
+        );
+    }
+
+    let detected = detect::detect_project(&project_dir)?;
+    let manifest_content = recipe::generate_manual_manifest_stub(&detected.name);
+    fs::write(&manifest_path, manifest_content).context("Failed to write capsule.toml")?;
+
+    futures::executor::block_on(reporter.notify(format!(
+        "📝 Created a manual starter capsule.toml at {}.\nEdit it, then rerun `ato run`.",
+        manifest_path.display()
+    )))?;
+
+    Ok(manifest_path)
+}
+
 fn prompt_for_details(
     mut info: recipe::ProjectInfo,
     reporter: std::sync::Arc<crate::reporters::CliReporter>,

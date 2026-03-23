@@ -227,7 +227,7 @@ fn resolve_host_command_path(working_dir: &Path, command: &str) -> PathBuf {
     }
     let relative = working_dir.join(command_path);
     if relative.exists() {
-        return relative;
+        return fs::canonicalize(&relative).unwrap_or(relative);
     }
     command_path.to_path_buf()
 }
@@ -662,6 +662,15 @@ mod tests {
             envs.get("APP_MODE").and_then(|value| value.clone()),
             Some("dev".to_string())
         );
+    }
+
+    #[test]
+    fn resolve_host_command_path_absolutizes_existing_relative_commands() {
+        let resolved =
+            resolve_host_command_path(Path::new("tests/fixtures/native-shell-capsule"), "run.sh");
+
+        assert!(resolved.is_absolute());
+        assert!(resolved.ends_with(Path::new("tests/fixtures/native-shell-capsule/run.sh")));
     }
 
     #[test]

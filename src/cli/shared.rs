@@ -30,6 +30,14 @@ impl CompatibilityFallbackBackend {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub(crate) enum RunAgentMode {
+    #[default]
+    Auto,
+    Off,
+    Force,
+}
+
 pub(super) fn cli_styles() -> clap::builder::Styles {
     use clap::builder::styling::{AnsiColor, Effects};
 

@@ -1,11 +1,14 @@
 use std::cmp::Ordering;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::CapsuleReporter;
+use tracing::debug;
 
+use crate::application::ports::OutputPort;
 use crate::commands;
 use crate::inference_feedback;
 use crate::install;
@@ -704,6 +707,999 @@ pub(crate) fn enforce_sandbox_mode_flags(
     Ok(enforcement)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedRunTarget {
+    pub(crate) path: PathBuf,
+    pub(crate) agent_local_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalRunManifestPreparationOutcome {
+    Ready,
+    CreatedManualManifest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LocalRunManifestStatus {
+    Valid,
+    Missing,
+    Invalid { error: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunManifestRecoveryChoice {
+    Generate,
+    Create,
+    Abort,
+}
+
+pub(crate) async fn resolve_run_target_or_install(
+    path: PathBuf,
+    yes: bool,
+    keep_failed_artifacts: bool,
+    allow_unverified: bool,
+    registry: Option<&str>,
+    reporter: Arc<reporters::CliReporter>,
+) -> Result<ResolvedRunTarget> {
+    let raw = path.to_string_lossy().to_string();
+    let expanded_local = crate::local_input::expand_local_path(&raw);
+    if crate::local_input::should_treat_input_as_local(&raw, &expanded_local) {
+        return Ok(ResolvedRunTarget {
+            agent_local_root: agent_local_root_for_path(&expanded_local),
+            path: expanded_local,
+        });
+    }
+
+    if let Some(repository) = install::parse_github_run_ref(&raw)? {
+        let json_mode = reporter.is_json();
+        if crate::progressive_ui::can_use_progressive_ui(json_mode) {
+            crate::progressive_ui::begin_flow_without_logo()?;
+        }
+        if json_mode && !yes {
+            anyhow::bail!(
+                "Non-interactive JSON mode requires -y/--yes when auto-installing missing capsules"
+            );
+        }
+
+        if !yes
+            && !crate::can_prompt_interactively(
+                std::io::stdin().is_terminal(),
+                std::io::stdout().is_terminal(),
+            )
+        {
+            anyhow::bail!(
+                "Interactive install confirmation requires a TTY. Re-run with -y/--yes in CI or non-interactive environments."
+            );
+        }
+
+        if yes {
+            debug!(
+                repository = %repository,
+                "GitHub repository not installed locally; continuing with -y auto-install"
+            );
+        }
+
+        let install_result = install_github_repository(
+            &repository,
+            None,
+            yes,
+            install::ProjectionPreference::Skip,
+            json_mode,
+            !json_mode
+                && crate::can_prompt_interactively(
+                    std::io::stdin().is_terminal(),
+                    std::io::stderr().is_terminal(),
+                ),
+            keep_failed_artifacts,
+        )
+        .await?;
+        return Ok(ResolvedRunTarget {
+            path: install_result.path,
+            agent_local_root: None,
+        });
+    }
+
+    let scoped_ref = match install::parse_capsule_ref(&raw) {
+        Ok(value) => value,
+        Err(error) => {
+            if install::is_slug_only_ref(&raw) {
+                let effective_registry = registry.unwrap_or(DEFAULT_RUN_REGISTRY_URL);
+                anyhow::bail!(
+                    "{}",
+                    crate::scoped_id_prompt::run_scoped_id_prompt(&raw, Some(effective_registry))
+                        .await?
+                );
+            }
+            return Err(error).context(
+                "Invalid run target. Use a local path or existing .capsule file, or publisher/slug for store capsules.",
+            );
+        }
+    };
+
+    let installed_capsule =
+        crate::resolve_installed_capsule_archive(&scoped_ref, registry, None).await?;
+    let mut registry_detail = None;
+    let mut registry_installable_version = None;
+
+    if let Some(explicit_registry) = registry {
+        match install::fetch_capsule_detail(&scoped_ref.scoped_id, Some(explicit_registry)).await {
+            Ok(detail) => {
+                registry_installable_version = detail
+                    .latest_version
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+
+                if let Some(version) = registry_installable_version.as_deref() {
+                    if let Some(installed_capsule) = crate::resolve_installed_capsule_archive(
+                        &scoped_ref,
+                        registry,
+                        Some(version),
+                    )
+                    .await?
+                    {
+                        debug!(
+                            capsule = %installed_capsule.display(),
+                            version = version,
+                            "Using installed capsule matching registry current version"
+                        );
+                        return Ok(ResolvedRunTarget {
+                            path: installed_capsule,
+                            agent_local_root: None,
+                        });
+                    }
+                }
+
+                registry_detail = Some(detail);
+            }
+            Err(error) => {
+                if let Some(installed_capsule) = installed_capsule {
+                    debug!(
+                        capsule = %installed_capsule.display(),
+                        error = %error,
+                        "Falling back to installed capsule after registry detail lookup failed"
+                    );
+                    return Ok(ResolvedRunTarget {
+                        path: installed_capsule,
+                        agent_local_root: None,
+                    });
+                }
+                return Err(error);
+            }
+        }
+    } else if let Some(installed_capsule) = installed_capsule {
+        debug!(
+            capsule = %installed_capsule.display(),
+            "Using installed capsule"
+        );
+        return Ok(ResolvedRunTarget {
+            path: installed_capsule,
+            agent_local_root: None,
+        });
+    }
+
+    let json_mode = reporter.is_json();
+    crate::ensure_run_auto_install_allowed(
+        yes,
+        json_mode,
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+    )?;
+
+    let effective_registry = registry.unwrap_or(DEFAULT_RUN_REGISTRY_URL);
+    let detail = if let Some(detail) = registry_detail {
+        detail
+    } else {
+        install::fetch_capsule_detail(&scoped_ref.scoped_id, Some(effective_registry)).await?
+    };
+    let installable_version = if let Some(version) = registry_installable_version {
+        version
+    } else {
+        detail
+            .latest_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Cannot auto-install '{}': no installable version is published.",
+                    detail.scoped_id
+                )
+            })?
+            .to_string()
+    };
+
+    if !yes {
+        let approved = crate::prompt_install_confirmation(&detail, &installable_version)?;
+        if !approved {
+            anyhow::bail!("Installation cancelled by user");
+        }
+    } else {
+        debug!(
+            scoped_id = %detail.scoped_id,
+            "Capsule not installed; continuing with -y auto-install"
+        );
+    }
+
+    let install_result = install::install_app(
+        &scoped_ref.scoped_id,
+        Some(effective_registry),
+        Some(installable_version.as_str()),
+        None,
+        false,
+        yes,
+        install::ProjectionPreference::Skip,
+        allow_unverified,
+        false,
+        json_mode,
+        !json_mode
+            && crate::can_prompt_interactively(
+                std::io::stdin().is_terminal(),
+                std::io::stderr().is_terminal(),
+            ),
+    )
+    .await?;
+    Ok(ResolvedRunTarget {
+        path: install_result.path,
+        agent_local_root: None,
+    })
+}
+
+pub(crate) fn agent_local_root_for_path(path: &PathBuf) -> Option<PathBuf> {
+    if path
+        .extension()
+        .map(|ext| ext.eq_ignore_ascii_case("capsule"))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    if path.is_dir() {
+        return Some(path.clone());
+    }
+
+    if path.file_name().and_then(|name| name.to_str()) == Some("capsule.toml") {
+        return path.parent().map(PathBuf::from);
+    }
+
+    None
+}
+
+pub(crate) fn ensure_local_manifest_ready_for_run(
+    resolved: &ResolvedRunTarget,
+    assume_yes: bool,
+    reporter: Arc<reporters::CliReporter>,
+) -> Result<LocalRunManifestPreparationOutcome> {
+    let Some(local_root) = resolved.agent_local_root.as_ref() else {
+        return Ok(LocalRunManifestPreparationOutcome::Ready);
+    };
+
+    let manifest_path = if resolved.path.is_file() {
+        resolved.path.clone()
+    } else {
+        local_root.join("capsule.toml")
+    };
+    let status = inspect_local_run_manifest(&manifest_path)?;
+    if matches!(status, LocalRunManifestStatus::Valid) {
+        return Ok(LocalRunManifestPreparationOutcome::Ready);
+    }
+
+    let reason = match &status {
+        LocalRunManifestStatus::Missing => format!(
+            "No valid `capsule.toml` was found for `ato run` at {}.",
+            manifest_path.display()
+        ),
+        LocalRunManifestStatus::Invalid { error } => format!(
+            "The existing `capsule.toml` is not valid for `ato run`: {}",
+            error
+        ),
+        LocalRunManifestStatus::Valid => return Ok(LocalRunManifestPreparationOutcome::Ready),
+    };
+
+    let can_prompt = crate::can_prompt_interactively(
+        std::io::stdin().is_terminal(),
+        std::io::stderr().is_terminal(),
+    );
+
+    if reporter.is_json() && !assume_yes {
+        anyhow::bail!(
+            "{} Non-interactive mode requires -y/--yes to auto-generate `capsule.toml`, or create/repair it manually before rerunning `ato run`.",
+            reason
+        );
+    }
+
+    if !assume_yes && !can_prompt {
+        anyhow::bail!(
+            "{} Non-interactive mode requires -y/--yes to auto-generate `capsule.toml`, or create/repair it manually before rerunning `ato run`.",
+            reason
+        );
+    }
+
+    let use_progressive_ui =
+        !reporter.is_json() && crate::progressive_ui::can_use_progressive_ui(false);
+    let action = if assume_yes {
+        RunManifestRecoveryChoice::Generate
+    } else {
+        if use_progressive_ui {
+            crate::progressive_ui::show_note(
+                "Run Manifest Required",
+                format!(
+                    "{}\n\nOptions:\n1. Generate an inferred `capsule.toml` now\n2. Create a minimal starter `capsule.toml` and stop\n3. Abort",
+                    reason
+                ),
+            )?;
+        } else {
+            futures::executor::block_on(reporter.warn(reason.clone()))?;
+            futures::executor::block_on(reporter.notify(
+                "Options:\n1. Generate an inferred `capsule.toml` now\n2. Create a minimal starter `capsule.toml` and stop\n3. Abort"
+                    .to_string(),
+            ))?;
+        }
+        prompt_run_manifest_recovery_choice(use_progressive_ui)?
+    };
+
+    let backup_path = if matches!(status, LocalRunManifestStatus::Invalid { .. }) {
+        let backup_path = backup_invalid_manifest(&manifest_path)?;
+        if reporter.is_json() {
+            futures::executor::block_on(reporter.warn(format!(
+                "Existing manifest is invalid. Backed up to {}.",
+                backup_path.display()
+            )))?;
+        } else if use_progressive_ui {
+            crate::progressive_ui::show_note(
+                "Manifest Backup",
+                format!(
+                    "Existing manifest is invalid.\nBacked up to:\n{}",
+                    crate::progressive_ui::format_path_for_note(&backup_path)
+                ),
+            )?;
+        } else {
+            futures::executor::block_on(reporter.notify(format!(
+                "Backed up invalid manifest to {}",
+                backup_path.display()
+            )))?;
+        }
+        Some(backup_path)
+    } else {
+        None
+    };
+
+    match action {
+        RunManifestRecoveryChoice::Generate => {
+            if assume_yes {
+                futures::executor::block_on(reporter.notify(format!(
+                    "{} Auto-generating `capsule.toml` because -y/--yes was provided.",
+                    reason
+                )))?;
+            } else if backup_path.is_some() {
+                futures::executor::block_on(
+                    reporter.notify("Attempting regeneration with inferred defaults.".to_string()),
+                )?;
+            }
+            crate::project::init::execute_manifest_init(
+                crate::project::init::InitArgs {
+                    path: Some(local_root.clone()),
+                    yes: true,
+                },
+                reporter,
+            )?;
+            Ok(LocalRunManifestPreparationOutcome::Ready)
+        }
+        RunManifestRecoveryChoice::Create => {
+            crate::project::init::write_manual_manifest_stub(Some(local_root.clone()), reporter)?;
+            Ok(LocalRunManifestPreparationOutcome::CreatedManualManifest)
+        }
+        RunManifestRecoveryChoice::Abort => {
+            anyhow::bail!("Create or repair `capsule.toml` manually, then rerun `ato run`.");
+        }
+    }
+}
+
+pub(crate) fn inspect_local_run_manifest(
+    manifest_path: &PathBuf,
+) -> Result<LocalRunManifestStatus> {
+    if !manifest_path.exists() {
+        return Ok(LocalRunManifestStatus::Missing);
+    }
+
+    match capsule_core::manifest::load_manifest_with_validation_mode(
+        manifest_path,
+        capsule_core::types::ValidationMode::Strict,
+    ) {
+        Ok(_) => Ok(LocalRunManifestStatus::Valid),
+        Err(error) => Ok(LocalRunManifestStatus::Invalid {
+            error: error.to_string(),
+        }),
+    }
+}
+
+fn prompt_run_manifest_recovery_choice(
+    use_progressive_ui: bool,
+) -> Result<RunManifestRecoveryChoice> {
+    loop {
+        if use_progressive_ui {
+            crate::progressive_ui::show_step(
+                "Select 1 to generate, 2 to create a starter manifest, or 3 to abort.",
+            )?;
+        } else {
+            eprintln!("Select 1 to generate, 2 to create a starter manifest, or 3 to abort.");
+        }
+
+        eprint!("Choice [1/2/3] (default: 1): ");
+        io::stderr()
+            .flush()
+            .context("failed to flush manifest recovery prompt")?;
+
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("failed to read manifest recovery choice")?;
+
+        match input.trim().to_ascii_lowercase().as_str() {
+            "" | "1" | "g" | "generate" => return Ok(RunManifestRecoveryChoice::Generate),
+            "2" | "c" | "create" => return Ok(RunManifestRecoveryChoice::Create),
+            "3" | "a" | "abort" => return Ok(RunManifestRecoveryChoice::Abort),
+            _ => {
+                if use_progressive_ui {
+                    crate::progressive_ui::show_warning("Please enter 1, 2, or 3.")?;
+                } else {
+                    eprintln!("Please enter 1, 2, or 3.");
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn backup_invalid_manifest(manifest_path: &Path) -> Result<PathBuf> {
+    let parent = manifest_path
+        .parent()
+        .with_context(|| format!("manifest has no parent: {}", manifest_path.display()))?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let backup_dir = parent
+        .join(".tmp")
+        .join("ato")
+        .join("run-invalid-manifests");
+    std::fs::create_dir_all(&backup_dir).with_context(|| {
+        format!(
+            "failed to create invalid manifest backup directory {}",
+            backup_dir.display()
+        )
+    })?;
+    let backup_path = backup_dir.join(format!("capsule.toml.invalid.{timestamp}"));
+    std::fs::rename(manifest_path, &backup_path).with_context(|| {
+        format!(
+            "failed to move invalid manifest {} -> {}",
+            manifest_path.display(),
+            backup_path.display()
+        )
+    })?;
+    Ok(backup_path)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn install_github_repository(
+    repository: &str,
+    output_dir: Option<PathBuf>,
+    yes: bool,
+    projection_preference: install::ProjectionPreference,
+    json: bool,
+    can_prompt: bool,
+    keep_failed_artifacts: bool,
+) -> Result<install::InstallResult> {
+    const MAX_GITHUB_DRAFT_RETRIES: u8 = 3;
+    let invocation_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let use_progressive_ui = !json && crate::progressive_ui::can_use_progressive_ui(false);
+
+    let prepare_spinner = if use_progressive_ui {
+        Some(crate::progressive_ui::start_logo_spinner(
+            "Fetching and preparing GitHub source...",
+        ))
+    } else {
+        None
+    };
+
+    let preview_preparation =
+        match crate::preview::prepare_github_preview_session(repository, &invocation_dir).await {
+            Ok(result) => {
+                if let Some(progress) = prepare_spinner {
+                    progress.stop("GitHub source prepared.");
+                }
+                result
+            }
+            Err(error) => {
+                if let Some(progress) = prepare_spinner {
+                    progress.stop("GitHub source preparation failed.");
+                }
+                return Err(error);
+            }
+        };
+    if let Some(warning) = preview_preparation.draft_fetch_warning.as_deref() {
+        if !json {
+            eprintln!("⚠️  {warning}");
+        }
+    }
+    if let Some(warning) = preview_preparation.session_persist_warning.as_deref() {
+        if !json {
+            eprintln!("⚠️  {warning}");
+        }
+    }
+    let mut checkout = preview_preparation.checkout;
+    let install_draft = preview_preparation.install_draft;
+    let mut preview_session = preview_preparation.preview_session;
+    if install_draft.is_some() {
+        if let Err(error) = crate::show_github_draft_preview(&preview_session, json) {
+            crate::maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
+            return Err(error);
+        }
+    }
+    let injected_manifest = install_draft
+        .as_ref()
+        .and_then(|draft| draft.preview_toml.clone());
+    let inference_attempt = if let Some(draft) = install_draft.as_ref() {
+        crate::inference_feedback::submit_attempt(repository, draft)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    preview_session.set_inference_attempt_id(
+        inference_attempt
+            .as_ref()
+            .map(|value| value.attempt_id.as_str()),
+    );
+    if let Some(warning) = crate::preview::persist_session_with_warning(&preview_session) {
+        if !json {
+            eprintln!("⚠️  {warning}");
+        }
+    }
+    if !json {
+        if crate::progressive_ui::can_use_progressive_ui(false) {
+            crate::progressive_ui::show_note(
+                "GitHub Source Build",
+                format!(
+                    "Repository   : {}\nCheckout     :\n{}",
+                    checkout.repository,
+                    crate::progressive_ui::format_path_for_note(&checkout.checkout_dir)
+                ),
+            )?;
+        } else {
+            eprintln!(
+                "📦 Building {} from GitHub source in {}",
+                checkout.repository,
+                checkout.checkout_dir.display()
+            );
+        }
+        if let Some(draft) = install_draft.as_ref() {
+            if crate::progressive_ui::can_use_progressive_ui(false) {
+                crate::progressive_ui::show_note(
+                    "Inference Draft",
+                    format!(
+                        "Revision     : {} ({})\nManifest     : {}\nConfidence   : {}",
+                        draft.resolved_ref.sha,
+                        draft.resolved_ref.ref_name,
+                        draft.manifest_source,
+                        draft
+                            .capsule_hint
+                            .as_ref()
+                            .map(|hint| hint.confidence.as_str())
+                            .unwrap_or("unknown")
+                    ),
+                )?;
+            } else {
+                eprintln!(
+                    "   Revision: {} ({})",
+                    draft.resolved_ref.sha, draft.resolved_ref.ref_name
+                );
+            }
+            if draft.manifest_source == "inferred" {
+                if crate::progressive_ui::can_use_progressive_ui(false) {
+                    crate::progressive_ui::show_warning(format!(
+                        "Using store-generated capsule draft for {}",
+                        draft.repo_ref
+                    ))?;
+                } else {
+                    eprintln!(
+                        "   Using store-generated capsule draft for {}",
+                        draft.repo_ref
+                    );
+                }
+                if let Some(hint) = draft.capsule_hint.as_ref() {
+                    if crate::progressive_ui::can_use_progressive_ui(false) {
+                        if !hint.warnings.is_empty() {
+                            crate::progressive_ui::show_note(
+                                "Draft Warnings",
+                                hint.warnings.join("\n"),
+                            )?;
+                        }
+                    } else {
+                        eprintln!("   Confidence: {}", hint.confidence);
+                        for warning in &hint.warnings {
+                            eprintln!("   Warning: {warning}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(draft) = install_draft.as_ref() {
+        if crate::preview::draft_requires_manual_review(draft) {
+            if crate::progressive_ui::can_use_progressive_ui(false) {
+                let warnings = draft
+                    .capsule_hint
+                    .as_ref()
+                    .map(|hint| hint.warnings.clone())
+                    .unwrap_or_default();
+                crate::progressive_ui::render_manual_review_required(
+                    &preview_session.manifest_path,
+                    &crate::preview::github_draft_manual_review_reason(draft),
+                    &warnings,
+                )?;
+                crate::progressive_ui::show_cancel(
+                    "Manual review is required before fail-closed provisioning can continue.",
+                )?;
+            }
+            preview_session.record_manual_intervention_required(
+                &crate::preview::github_draft_manual_review_reason(draft),
+            );
+            if let Some(warning) = crate::preview::persist_session_with_warning(&preview_session) {
+                if !json {
+                    eprintln!("⚠️  {warning}");
+                }
+            }
+            crate::maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
+            return Err(crate::build_github_manual_intervention_error(
+                &preview_session.manifest_path,
+                repository,
+                draft,
+                &crate::preview::github_draft_manual_review_reason(draft),
+            )?);
+        }
+    }
+    if can_prompt && !yes {
+        let approved = crate::progressive_ui::confirm_with_fallback(
+            "Proceed with installation and run? ",
+            true,
+            crate::progressive_ui::can_use_progressive_ui(json),
+        )?;
+        if !approved {
+            anyhow::bail!("Installation cancelled by user");
+        }
+    }
+    let mut latest_install_draft = install_draft.clone();
+    let build_result = match crate::build_github_repository_checkout(
+        checkout.checkout_dir.clone(),
+        json,
+        injected_manifest.clone(),
+        keep_failed_artifacts,
+        true,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let mut last_error = error;
+            if let Some(draft) = install_draft.as_ref() {
+                if crate::github_build_error_requires_manual_intervention(&last_error) {
+                    crate::maybe_keep_failed_github_checkout(
+                        &mut checkout,
+                        keep_failed_artifacts,
+                        json,
+                    );
+                    return Err(crate::build_github_manual_intervention_error(
+                        &preview_session.manifest_path,
+                        repository,
+                        draft,
+                        &crate::github_build_error_manual_review_reason(&last_error),
+                    )?);
+                }
+            }
+            let smoke_report = last_error
+                .downcast_ref::<crate::commands::build::InferredManifestSmokeFailure>()
+                .map(|failure| failure.report.clone());
+
+            if let (Some(attempt), Some(report)) =
+                (inference_attempt.as_ref(), smoke_report.as_ref())
+            {
+                let _ = crate::inference_feedback::submit_smoke_failed(attempt, report).await;
+            }
+            if let Some(report) = smoke_report.as_ref() {
+                preview_session.record_smoke_failure(report);
+                if let Some(warning) =
+                    crate::preview::persist_session_with_warning(&preview_session)
+                {
+                    if !json {
+                        eprintln!("⚠️  {warning}");
+                    }
+                }
+            }
+
+            if let (Some(draft), Some(report)) = (install_draft.as_ref(), smoke_report.as_ref()) {
+                if !json {
+                    eprintln!("Failed to run with inferred capsule.toml.");
+                    eprintln!("Reason: {}", report.message);
+                }
+                if crate::preview::draft_requires_manual_review(draft) {
+                    preview_session.record_manual_intervention_required(&report.message);
+                    if let Some(warning) =
+                        crate::preview::persist_session_with_warning(&preview_session)
+                    {
+                        if !json {
+                            eprintln!("⚠️  {warning}");
+                        }
+                    }
+                    crate::maybe_keep_failed_github_checkout(
+                        &mut checkout,
+                        keep_failed_artifacts,
+                        json,
+                    );
+                    return Err(crate::build_github_manual_intervention_error(
+                        &preview_session.manifest_path,
+                        repository,
+                        draft,
+                        &report.message,
+                    )?);
+                }
+
+                let mut recovered_build = None;
+                let mut current_draft = draft.clone();
+                let mut current_report = report.clone();
+                for retry_ordinal in 1..=MAX_GITHUB_DRAFT_RETRIES {
+                    let previous_toml = current_draft.preview_toml.clone().unwrap_or_default();
+                    if previous_toml.trim().is_empty() {
+                        break;
+                    }
+
+                    let next_draft = match crate::inference_feedback::request_retry_install_draft(
+                        repository,
+                        &current_draft,
+                        inference_attempt.as_ref(),
+                        &current_report,
+                        retry_ordinal,
+                    )
+                    .await
+                    {
+                        Ok(value) => value,
+                        Err(retry_error) => {
+                            if !json {
+                                eprintln!(
+                                    "⚠️  Failed to request retry draft ({retry_ordinal}/{MAX_GITHUB_DRAFT_RETRIES}): {retry_error}"
+                                );
+                            }
+                            break;
+                        }
+                    };
+                    let next_draft =
+                        next_draft.normalize_preview_toml_for_checkout(&checkout.checkout_dir)?;
+                    let next_toml = next_draft.preview_toml.clone().unwrap_or_default();
+                    let draft_changed = next_toml.trim() != previous_toml.trim();
+                    latest_install_draft = Some(next_draft.clone());
+                    preview_session.record_retry_draft(&next_draft, retry_ordinal);
+                    if let Some(warning) =
+                        crate::preview::persist_session_with_warning(&preview_session)
+                    {
+                        if !json {
+                            eprintln!("⚠️  {warning}");
+                        }
+                    }
+                    current_draft = next_draft;
+
+                    if !draft_changed {
+                        if !json {
+                            eprintln!(
+                                "ℹ️  Retry draft {retry_ordinal}/{MAX_GITHUB_DRAFT_RETRIES} did not change the generated capsule.toml."
+                            );
+                        }
+                        break;
+                    }
+                    if !current_draft.retryable {
+                        if !json {
+                            eprintln!(
+                                "ℹ️  Retry draft {retry_ordinal}/{MAX_GITHUB_DRAFT_RETRIES} requested manual review instead of another automatic retry."
+                            );
+                        }
+                        break;
+                    }
+
+                    if !json {
+                        eprintln!(
+                            "🔁 Retrying build with failure-aware draft ({retry_ordinal}/{MAX_GITHUB_DRAFT_RETRIES})..."
+                        );
+                        if let Some(hint) = current_draft.capsule_hint.as_ref() {
+                            eprintln!("   Confidence: {}", hint.confidence);
+                            if let Some(launchability) = hint.launchability.as_deref() {
+                                eprintln!("   Launchability: {}", launchability);
+                            }
+                            for warning in &hint.warnings {
+                                eprintln!("   Warning: {warning}");
+                            }
+                        }
+                    }
+
+                    match crate::build_github_repository_checkout(
+                        checkout.checkout_dir.clone(),
+                        json,
+                        current_draft.preview_toml.clone(),
+                        keep_failed_artifacts,
+                        true,
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            recovered_build = Some(result);
+                            break;
+                        }
+                        Err(retry_error) => {
+                            let retry_smoke_report = retry_error
+                                .downcast_ref::<crate::commands::build::InferredManifestSmokeFailure>()
+                                .map(|failure| failure.report.clone());
+                            last_error = retry_error;
+                            let Some(retry_report) = retry_smoke_report else {
+                                break;
+                            };
+                            current_report = retry_report.clone();
+                            preview_session.record_smoke_failure(&retry_report);
+                            if let Some(warning) =
+                                crate::preview::persist_session_with_warning(&preview_session)
+                            {
+                                if !json {
+                                    eprintln!("⚠️  {warning}");
+                                }
+                            }
+                            if let Some(attempt) = inference_attempt.as_ref() {
+                                let _ = crate::inference_feedback::submit_smoke_failed(
+                                    attempt,
+                                    &retry_report,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
+
+                if let Some(result) = recovered_build {
+                    result
+                } else if crate::preview::draft_requires_manual_review(
+                    latest_install_draft.as_ref().unwrap_or(draft),
+                ) {
+                    preview_session.record_manual_intervention_required(&current_report.message);
+                    if let Some(warning) =
+                        crate::preview::persist_session_with_warning(&preview_session)
+                    {
+                        if !json {
+                            eprintln!("⚠️  {warning}");
+                        }
+                    }
+                    crate::maybe_keep_failed_github_checkout(
+                        &mut checkout,
+                        keep_failed_artifacts,
+                        json,
+                    );
+                    return Err(crate::build_github_manual_intervention_error(
+                        &preview_session.manifest_path,
+                        repository,
+                        latest_install_draft.as_ref().unwrap_or(draft),
+                        &current_report.message,
+                    )?);
+                } else if can_prompt {
+                    let draft_for_manual_fix = latest_install_draft.as_ref().unwrap_or(draft);
+                    let manual_manifest_path = preview_session.manifest_path.clone();
+                    if let Some(recovered) = crate::retry_github_build_after_manual_fix(
+                        &mut preview_session,
+                        &manual_manifest_path,
+                        &checkout.checkout_dir,
+                        repository,
+                        draft_for_manual_fix,
+                        inference_attempt.as_ref(),
+                        json,
+                        keep_failed_artifacts,
+                    )
+                    .await?
+                    {
+                        recovered
+                    } else {
+                        crate::maybe_keep_failed_github_checkout(
+                            &mut checkout,
+                            keep_failed_artifacts,
+                            json,
+                        );
+                        return Err(last_error);
+                    }
+                } else {
+                    crate::maybe_keep_failed_github_checkout(
+                        &mut checkout,
+                        keep_failed_artifacts,
+                        json,
+                    );
+                    return Err(last_error);
+                }
+            } else {
+                crate::maybe_keep_failed_github_checkout(
+                    &mut checkout,
+                    keep_failed_artifacts,
+                    json,
+                );
+                return Err(last_error);
+            }
+        }
+    };
+    let result = async {
+        let artifact = build_result.artifact.ok_or_else(|| {
+            anyhow::anyhow!("GitHub repository did not produce an installable .capsule artifact")
+        })?;
+        install::install_built_github_artifact(
+            &artifact,
+            &checkout.publisher,
+            &checkout.repository,
+            install::InstallExecutionOptions {
+                output_dir,
+                yes,
+                projection_preference,
+                json_output: json,
+                can_prompt_interactively: can_prompt,
+                promotion_source: Some(install::PromotionSourceInfo {
+                    preview_id: preview_session.preview_id.clone(),
+                    source_reference: preview_session.target_reference.clone(),
+                    source_metadata_path: preview_session.metadata_path.clone(),
+                    source_manifest_path: preview_session.manifest_path.clone(),
+                    manifest_source: preview_session.manifest_source.clone(),
+                    inference_mode: preview_session.inference_mode.clone(),
+                    resolved_ref: preview_session.resolved_ref.clone(),
+                    derived_plan: install::PromotionDerivedPlanSnapshot {
+                        runtime: preview_session.derived_plan.runtime.clone(),
+                        driver: preview_session.derived_plan.driver.clone(),
+                        resolved_runtime_version: preview_session
+                            .derived_plan
+                            .resolved_runtime_version
+                            .clone(),
+                        resolved_port: preview_session.derived_plan.resolved_port,
+                        resolved_lock_files: preview_session
+                            .derived_plan
+                            .resolved_lock_files
+                            .clone(),
+                        resolved_pack_include: preview_session
+                            .derived_plan
+                            .resolved_pack_include
+                            .clone(),
+                        warnings: preview_session.derived_plan.warnings.clone(),
+                        deferred_constraints: preview_session
+                            .derived_plan
+                            .deferred_constraints
+                            .clone(),
+                        promotion_eligibility: match preview_session
+                            .derived_plan
+                            .promotion_eligibility
+                        {
+                            crate::preview::PreviewPromotionEligibility::Eligible => {
+                                "eligible".to_string()
+                            }
+                            crate::preview::PreviewPromotionEligibility::RequiresManualReview => {
+                                "requires_manual_review".to_string()
+                            }
+                            crate::preview::PreviewPromotionEligibility::Blocked => {
+                                "blocked".to_string()
+                            }
+                        },
+                    },
+                }),
+                keep_progressive_flow_open: true,
+            },
+        )
+        .await
+    }
+    .await;
+
+    if result.is_err() {
+        crate::maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
+    }
+
+    result
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_open_command(
     path: PathBuf,
@@ -716,6 +1712,8 @@ pub(crate) fn execute_open_command(
     dangerously_skip_permissions: bool,
     compatibility_fallback: Option<String>,
     assume_yes: bool,
+    agent_mode: crate::RunAgentMode,
+    agent_local_root: Option<PathBuf>,
     state: Vec<String>,
     inject: Vec<String>,
     reporter: std::sync::Arc<reporters::CliReporter>,
@@ -740,6 +1738,8 @@ pub(crate) fn execute_open_command(
         dangerously_skip_permissions,
         compatibility_fallback,
         assume_yes,
+        agent_mode,
+        agent_local_root,
         state_bindings: state,
         inject_bindings: inject,
         reporter,
