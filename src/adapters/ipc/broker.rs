@@ -22,7 +22,7 @@ use super::types::{IpcConfig, IpcRuntimeKind, IpcServiceInfo, IpcTransport, Shar
 
 /// IPC Broker — the central IPC coordinator.
 ///
-/// Owns the registry and token manager. Created once per `ato open`
+/// Owns the registry and token manager. Created once per `ato run`
 /// session and shared across the runtime.
 #[derive(Debug, Clone)]
 pub struct IpcBroker {

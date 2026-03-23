@@ -404,7 +404,7 @@ fn runtime_identity_matches(runtime: &str, commandline: Option<&str>) -> bool {
 
 fn is_expected_nacelle_commandline(commandline: &str) -> bool {
     let normalized = commandline.to_ascii_lowercase();
-    normalized.contains("nacelle") || normalized.contains("capsule open")
+    normalized.contains("nacelle") || normalized.contains("capsule run")
 }
 
 fn read_process_commandline(pid: i32) -> Option<String> {
@@ -780,7 +780,7 @@ mod tests {
         ));
         assert!(runtime_identity_matches(
             "nacelle",
-            Some("/usr/bin/ato capsule open ./sample")
+            Some("/usr/bin/ato capsule run ./sample")
         ));
         assert!(!runtime_identity_matches(
             "nacelle",
