@@ -465,38 +465,77 @@ pub(crate) enum Commands {
 
     #[command(
         next_help_heading = "Advanced Commands",
-        about = "Publish capsule (default: My Dock direct upload, official registry: CI-first)"
+        about = "Publish capsule artifacts through the unified pipeline (My Dock direct upload by default, official registry is CI-first)"
     )]
     Publish {
         #[arg(long)]
         registry: Option<String>,
-        #[arg(long, value_name = "PATH", conflicts_with_all = ["ci", "dry_run"])]
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with = "ci",
+            help = "Start at Verify using an existing .capsule artifact"
+        )]
         artifact: Option<PathBuf>,
         #[arg(
             long,
             value_name = "PUBLISHER/SLUG",
-            conflicts_with_all = ["ci", "dry_run"],
-            requires = "artifact"
+            conflicts_with = "ci",
+            requires = "artifact",
+            help = "Override publisher/slug for artifact uploads"
         )]
         scoped_id: Option<String>,
-        #[arg(long, default_value_t = false, conflicts_with_all = ["ci", "dry_run"])]
+        #[arg(
+            long,
+            default_value_t = false,
+            conflicts_with_all = ["ci", "dry_run"],
+            help = "Allow idempotent success when the final Publish phase sees the same artifact/version already present"
+        )]
         allow_existing: bool,
-        #[arg(long, default_value_t = false, conflicts_with_all = ["ci", "dry_run"])]
+        #[arg(
+            long,
+            default_value_t = false,
+            conflicts_with_all = ["ci", "dry_run"],
+            help = "Select Prepare as the stop point"
+        )]
         prepare: bool,
-        #[arg(long, default_value_t = false, conflicts_with_all = ["ci", "dry_run"])]
+        #[arg(
+            long,
+            default_value_t = false,
+            conflicts_with_all = ["ci", "dry_run"],
+            help = "Select Verify as the stop point (source input builds then verifies; artifact input verifies only)"
+        )]
         build: bool,
-        #[arg(long, default_value_t = false, conflicts_with_all = ["ci", "dry_run"])]
+        #[arg(
+            long,
+            default_value_t = false,
+            conflicts_with_all = ["ci", "dry_run"],
+            help = "Select Publish as the stop point"
+        )]
         deploy: bool,
-        #[arg(long, default_value_t = false, conflicts_with_all = ["ci", "dry_run"])]
+        #[arg(
+            long,
+            default_value_t = false,
+            conflicts_with_all = ["ci", "dry_run"],
+            help = "Temporary official-registry compatibility mode that restores the legacy full pipeline"
+        )]
         legacy_full_publish: bool,
         #[arg(long, default_value_t = false)]
         force_large_payload: bool,
-        #[arg(long, default_value_t = false, conflicts_with_all = ["ci", "dry_run"])]
+        #[arg(
+            long,
+            default_value_t = false,
+            conflicts_with_all = ["ci", "dry_run"],
+            help = "Apply the official workflow fix, then rerun Publish diagnostics"
+        )]
         fix: bool,
+        /// Run the official CI publish mode directly
         #[arg(long, conflicts_with = "dry_run")]
         ci: bool,
+        /// Run top-level dry-run mode (registry and permission simulation, no upload)
         #[arg(long, conflicts_with = "ci")]
         dry_run: bool,
+        /// Disable interactive handoff UI for official publish guidance
         #[arg(long, conflicts_with_all = ["ci", "dry_run", "json"])]
         no_tui: bool,
         #[arg(long)]

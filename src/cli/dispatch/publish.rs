@@ -15,7 +15,7 @@ pub(super) fn execute_publish_command(
     if ci {
         publish_command::execute_publish_ci_command(json, force_large_payload, reporter)
     } else if dry_run {
-        publish_command::execute_publish_dry_run_command(json, reporter)
+        publish_command::execute_publish_dry_run_command(args, reporter)
     } else {
         publish_command::execute_publish_command(args, reporter)
     }
