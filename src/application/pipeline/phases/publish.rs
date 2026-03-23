@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+use crate::application::pipeline::producer::PublishDryRunStageResult;
 use crate::application::ports::publish::{
     DestinationSpec, PublishableArtifact, PublishedLocation, SharedDestinationPort,
 };
@@ -24,6 +25,124 @@ impl PublishPhase {
             .publish(&request.artifact, &request.destination)
             .await
     }
+}
+
+pub struct DirectPublishDryRunRequest<'a> {
+    pub registry_url: &'a str,
+    pub scoped_id: &'a str,
+    pub version: &'a str,
+    pub artifact_version: &'a str,
+    pub allow_existing: bool,
+    pub requires_session_token: bool,
+}
+
+pub fn run_direct_publish_dry_run_phase(
+    request: &DirectPublishDryRunRequest<'_>,
+) -> Result<PublishDryRunStageResult> {
+    let registry =
+        crate::registry::http::normalize_registry_url(request.registry_url, "--registry")?;
+    let scoped = crate::install::parse_capsule_ref(request.scoped_id)?;
+    let upload_endpoint = build_direct_publish_upload_endpoint(
+        &registry,
+        request.scoped_id,
+        request.version,
+        upload_file_name_for_artifact(&scoped.slug, request.artifact_version).as_deref(),
+        request.allow_existing,
+    )?;
+    probe_registry_reachability(&registry)?;
+
+    let auth_ready = if request.requires_session_token {
+        crate::auth::current_session_token().is_some()
+    } else {
+        crate::registry::http::current_ato_token().is_some()
+    };
+
+    Ok(PublishDryRunStageResult {
+        kind: "direct_preflight",
+        diagnosis: None,
+        registry: Some(registry),
+        upload_endpoint: Some(upload_endpoint),
+        reachable: Some(true),
+        auth_ready: Some(auth_ready),
+        permission_check: Some("local_prereq_only".to_string()),
+    })
+}
+
+pub fn direct_publish_dry_run_is_ready(
+    result: &PublishDryRunStageResult,
+    requires_session_token: bool,
+) -> bool {
+    let reachable = result.reachable.unwrap_or(false);
+    let auth_ready = result.auth_ready.unwrap_or(false);
+    if requires_session_token {
+        reachable && auth_ready
+    } else {
+        reachable
+    }
+}
+
+pub fn direct_publish_dry_run_failure_message(
+    result: &PublishDryRunStageResult,
+    requires_session_token: bool,
+) -> String {
+    if !result.reachable.unwrap_or(false) {
+        return "registry reachability probe failed".to_string();
+    }
+    if requires_session_token && !result.auth_ready.unwrap_or(false) {
+        return "Personal Dock publish dry-run requires an active session token".to_string();
+    }
+    if !requires_session_token && !result.auth_ready.unwrap_or(false) {
+        return "publish preflight completed without ATO_TOKEN; continuing with local prereq-only readiness".to_string();
+    }
+    "publish preflight failed".to_string()
+}
+
+fn upload_file_name_for_artifact(slug: &str, manifest_version: &str) -> Option<String> {
+    let version = manifest_version.trim();
+    if version.is_empty() {
+        None
+    } else {
+        Some(format!("{}-{}.capsule", slug, version))
+    }
+}
+
+fn build_direct_publish_upload_endpoint(
+    registry_url: &str,
+    scoped_id: &str,
+    version: &str,
+    file_name: Option<&str>,
+    allow_existing: bool,
+) -> Result<String> {
+    let scoped = crate::install::parse_capsule_ref(scoped_id)?;
+    let mut endpoint = format!(
+        "{}/v1/local/capsules/{}/{}/{}",
+        registry_url,
+        urlencoding::encode(&scoped.publisher),
+        urlencoding::encode(&scoped.slug),
+        urlencoding::encode(version)
+    );
+    if let Some(file_name) = file_name.filter(|value| !value.trim().is_empty()) {
+        endpoint.push_str(&format!("?file_name={}", urlencoding::encode(file_name)));
+    }
+    if allow_existing {
+        endpoint.push_str(if endpoint.contains('?') {
+            "&allow_existing=true"
+        } else {
+            "?allow_existing=true"
+        });
+    }
+    Ok(endpoint)
+}
+
+fn probe_registry_reachability(registry_url: &str) -> Result<()> {
+    let client = crate::registry::http::blocking_client_builder(registry_url)
+        .build()
+        .map_err(|err| anyhow::anyhow!("Failed to create registry preflight client: {}", err))?;
+    client
+        .get(registry_url)
+        .send()
+        .map(|_| ())
+        .map_err(|err| anyhow::anyhow!("Failed to reach registry {}: {}", registry_url, err))
 }
 
 #[cfg(test)]
