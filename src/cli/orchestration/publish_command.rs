@@ -7,6 +7,7 @@ use capsule_core::CapsuleReporter;
 
 use crate::application::pipeline::executor::HourglassPhaseRunner;
 use crate::application::pipeline::phases::install as install_phase;
+use crate::application::pipeline::phases::publish as publish_phase;
 use crate::application::pipeline::producer::{
     self, ProducerPipeline, PublishDryRunStageResult, PublishInstallResult, PublishPhaseOptions,
     PublishPipelineRequest, PublishPipelineState,
@@ -312,7 +313,7 @@ impl<'a> PublishCommandExecution<'a> {
             message.clone(),
             Some("artifact_built".to_string()),
         );
-        self.state.artifact_path = Some(artifact_path);
+        self.state.record_built_artifact(artifact_path);
         hourglass::print_phase_line(
             self.args.json,
             PublishPhaseBoundary::Build,
@@ -334,7 +335,7 @@ impl<'a> PublishCommandExecution<'a> {
             .args
             .artifact
             .clone()
-            .or_else(|| self.state.artifact_path.clone())
+            .or_else(|| self.state.artifact_path_or(None))
         {
             path
         } else {
@@ -365,8 +366,8 @@ impl<'a> PublishCommandExecution<'a> {
             message.clone(),
             Some("artifact_verified".to_string()),
         );
-        self.state.artifact_path = Some(artifact_path);
-        self.state.verified_artifact = Some(verification);
+        self.state
+            .record_verified_artifact(artifact_path, verification);
         hourglass::print_phase_line(
             self.args.json,
             PublishPhaseBoundary::Verify,
@@ -390,15 +391,14 @@ impl<'a> PublishCommandExecution<'a> {
             .context("missing publish pipeline preview for install stage")?;
         let artifact_path = self
             .state
-            .artifact_path
-            .as_ref()
+            .artifact_path()
             .context("install phase requires a verified artifact")?;
         let verification = self
             .state
-            .verified_artifact
-            .as_ref()
+            .verified_artifact()
             .context("install phase requires verified artifact metadata")?;
-        let install_result = run_publish_install_stage(artifact_path, preview, verification)?;
+        let install_result =
+            install_phase::run_publish_install_phase(artifact_path, preview, verification)?;
         let message = format!("unpacked {}", install_result.path.display());
         phase_mark_ok(
             phase_mut(&mut self.phases, PublishPhaseBoundary::Install),
@@ -412,7 +412,7 @@ impl<'a> PublishCommandExecution<'a> {
             HourglassPhaseState::Ok,
             &message,
         );
-        self.state.install_result = Some(install_result);
+        self.state.record_install_result(install_result);
         Ok(())
     }
 
@@ -441,7 +441,7 @@ impl<'a> PublishCommandExecution<'a> {
             };
             let can_handoff = outcome.diagnosis.can_handoff;
             self.official_result = Some(outcome);
-            self.state.dry_run_result = Some(dry_run_result);
+            self.state.record_dry_run_result(dry_run_result);
             if can_handoff {
                 let message = "official CI handoff is ready".to_string();
                 phase_mark_ok(
@@ -511,20 +511,27 @@ impl<'a> PublishCommandExecution<'a> {
             .context("missing publish pipeline preview for dry-run stage")?;
         let verification = self
             .state
-            .verified_artifact
-            .as_ref()
+            .verified_artifact()
             .context("dry-run phase requires verified artifact metadata")?;
-        let dry_run_result = run_direct_publish_dry_run_stage(
-            &self.resolved_target,
-            preview,
-            verification,
-            self.args.allow_existing,
+        let dry_run_result = publish_phase::run_direct_publish_dry_run_phase(
+            &publish_phase::DirectPublishDryRunRequest {
+                registry_url: &self.resolved_target.registry_url,
+                scoped_id: &preview.scoped_id,
+                version: &preview.version,
+                artifact_version: &verification.version,
+                allow_existing: self.args.allow_existing,
+                requires_session_token: self.resolved_target.mode.is_personal_dock(),
+            },
         )?;
-        let dry_run_ok =
-            publish_direct_dry_run_is_ready(&dry_run_result, self.resolved_target.mode);
-        let failure_message =
-            publish_direct_dry_run_failure_message(&dry_run_result, self.resolved_target.mode);
-        self.state.dry_run_result = Some(dry_run_result);
+        let dry_run_ok = publish_phase::direct_publish_dry_run_is_ready(
+            &dry_run_result,
+            self.resolved_target.mode.is_personal_dock(),
+        );
+        let failure_message = publish_phase::direct_publish_dry_run_failure_message(
+            &dry_run_result,
+            self.resolved_target.mode.is_personal_dock(),
+        );
+        self.state.record_dry_run_result(dry_run_result);
         if dry_run_ok {
             let message = "publish preflight passed".to_string();
             phase_mark_ok(
@@ -628,8 +635,7 @@ impl<'a> PublishCommandExecution<'a> {
         let source_is_artifact = self.args.artifact.is_some();
         let publish_artifact = self
             .state
-            .artifact_path
-            .clone()
+            .artifact_path_or(None)
             .or_else(|| self.args.artifact.clone())
             .context("publish phase requires a verified artifact")?;
 
@@ -844,8 +850,8 @@ fn execute_publish_pipeline(
         emit_publish_json_output(
             &resolved_target,
             &phases,
-            state.install_result.as_ref(),
-            state.dry_run_result.as_ref(),
+            state.install_result(),
+            state.dry_run_result(),
             private_result.as_ref(),
             official_result.as_ref(),
             top_level_dry_run,
@@ -893,10 +899,10 @@ fn execute_publish_pipeline(
         }
     } else if top_level_dry_run {
         println!("✅ Dry-run successful! No upload performed.");
-        if let Some(install_result) = state.install_result.as_ref() {
+        if let Some(install_result) = state.install_result() {
             println!("📦 Test sandbox: {}", install_result.path.display());
         }
-        if let Some(dry_run_result) = state.dry_run_result.as_ref() {
+        if let Some(dry_run_result) = state.dry_run_result() {
             if let Some(registry) = dry_run_result.registry.as_deref() {
                 println!("🌐 Registry: {}", registry);
             }
@@ -949,142 +955,6 @@ fn run_official_deploy(registry_url: String, fix: bool) -> Result<OfficialDeploy
         fix_result,
         diagnosis,
     })
-}
-
-fn run_publish_install_stage(
-    artifact_path: &Path,
-    preview: &crate::publish_private::PublishPrivateSummary,
-    verification: &crate::publish_artifact::VerifiedArtifactInfo,
-) -> Result<PublishInstallResult> {
-    let version = preview.version.trim();
-    if version.is_empty() {
-        anyhow::bail!("publish install stage requires a resolved version");
-    }
-    let env =
-        futures::executor::block_on(install_phase::install_local_artifact_into_test_sandbox(
-            artifact_path.to_path_buf(),
-            &preview.scoped_id,
-            version,
-        ))?;
-    Ok(PublishInstallResult {
-        scoped_id: preview.scoped_id.clone(),
-        version: version.to_string(),
-        path: env.root_dir,
-        content_hash: verification.blake3.clone(),
-        install_kind: "test_sandbox",
-    })
-}
-
-fn upload_file_name_for_artifact(slug: &str, manifest_version: &str) -> Option<String> {
-    let version = manifest_version.trim();
-    if version.is_empty() {
-        None
-    } else {
-        Some(format!("{}-{}.capsule", slug, version))
-    }
-}
-
-fn build_direct_publish_upload_endpoint(
-    registry_url: &str,
-    scoped_id: &str,
-    version: &str,
-    file_name: Option<&str>,
-    allow_existing: bool,
-) -> Result<String> {
-    let scoped = crate::install::parse_capsule_ref(scoped_id)?;
-    let mut endpoint = format!(
-        "{}/v1/local/capsules/{}/{}/{}",
-        registry_url,
-        urlencoding::encode(&scoped.publisher),
-        urlencoding::encode(&scoped.slug),
-        urlencoding::encode(version)
-    );
-    if let Some(file_name) = file_name.filter(|value| !value.trim().is_empty()) {
-        endpoint.push_str(&format!("?file_name={}", urlencoding::encode(file_name)));
-    }
-    if allow_existing {
-        endpoint.push_str(if endpoint.contains('?') {
-            "&allow_existing=true"
-        } else {
-            "?allow_existing=true"
-        });
-    }
-    Ok(endpoint)
-}
-
-fn run_direct_publish_dry_run_stage(
-    resolved_target: &ResolvedPublishTarget,
-    preview: &crate::publish_private::PublishPrivateSummary,
-    verification: &crate::publish_artifact::VerifiedArtifactInfo,
-    allow_existing: bool,
-) -> Result<PublishDryRunStageResult> {
-    let registry =
-        crate::registry::http::normalize_registry_url(&resolved_target.registry_url, "--registry")?;
-    let scoped = crate::install::parse_capsule_ref(&preview.scoped_id)?;
-    let upload_endpoint = build_direct_publish_upload_endpoint(
-        &registry,
-        &preview.scoped_id,
-        &preview.version,
-        upload_file_name_for_artifact(&scoped.slug, &verification.version).as_deref(),
-        allow_existing,
-    )?;
-    probe_registry_reachability(&registry)?;
-
-    let auth_ready = if resolved_target.mode.is_personal_dock() {
-        crate::auth::current_session_token().is_some()
-    } else {
-        crate::registry::http::current_ato_token().is_some()
-    };
-
-    Ok(PublishDryRunStageResult {
-        kind: "direct_preflight",
-        diagnosis: None,
-        registry: Some(registry),
-        upload_endpoint: Some(upload_endpoint),
-        reachable: Some(true),
-        auth_ready: Some(auth_ready),
-        permission_check: Some("local_prereq_only".to_string()),
-    })
-}
-
-fn publish_direct_dry_run_is_ready(
-    result: &PublishDryRunStageResult,
-    target_mode: PublishTargetMode,
-) -> bool {
-    let reachable = result.reachable.unwrap_or(false);
-    let auth_ready = result.auth_ready.unwrap_or(false);
-    if target_mode.is_personal_dock() {
-        reachable && auth_ready
-    } else {
-        reachable
-    }
-}
-
-fn publish_direct_dry_run_failure_message(
-    result: &PublishDryRunStageResult,
-    target_mode: PublishTargetMode,
-) -> String {
-    if !result.reachable.unwrap_or(false) {
-        return "registry reachability probe failed".to_string();
-    }
-    if target_mode.is_personal_dock() && !result.auth_ready.unwrap_or(false) {
-        return "Personal Dock publish dry-run requires an active session token".to_string();
-    }
-    if !target_mode.is_personal_dock() && !result.auth_ready.unwrap_or(false) {
-        return "publish preflight completed without ATO_TOKEN; continuing with local prereq-only readiness".to_string();
-    }
-    "publish preflight failed".to_string()
-}
-
-fn probe_registry_reachability(registry_url: &str) -> Result<()> {
-    let client = crate::registry::http::blocking_client_builder(registry_url)
-        .build()
-        .context("Failed to create registry preflight client")?;
-    client
-        .get(registry_url)
-        .send()
-        .map(|_| ())
-        .map_err(|err| anyhow::anyhow!("Failed to reach registry {}: {}", registry_url, err))
 }
 
 fn print_official_diagnosis(outcome: &OfficialDeployOutcome) {

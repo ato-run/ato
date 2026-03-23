@@ -1,10 +1,11 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
 use crate::adapters::install::source::local::LocalArtifactSource;
 use crate::adapters::install::target::test_temp::{publish_test_sandbox_spec, TestSandboxTarget};
+use crate::application::pipeline::producer::PublishInstallResult;
 use crate::application::ports::install::{
     InstalledEnvironment, SharedSourcePort, SharedTargetPort, SourceSpec, TargetSpec,
 };
@@ -45,6 +46,31 @@ pub async fn install_local_artifact_into_test_sandbox(
     };
     let phase = InstallPhase::new(Arc::new(LocalArtifactSource), Arc::new(TestSandboxTarget));
     phase.execute(&request).await
+}
+
+pub fn run_publish_install_phase(
+    artifact_path: &Path,
+    preview: &crate::publish_private::PublishPrivateSummary,
+    verification: &crate::publish_artifact::VerifiedArtifactInfo,
+) -> Result<PublishInstallResult> {
+    let version = preview.version.trim();
+    if version.is_empty() {
+        anyhow::bail!("publish install stage requires a resolved version");
+    }
+
+    let env = futures::executor::block_on(install_local_artifact_into_test_sandbox(
+        artifact_path.to_path_buf(),
+        &preview.scoped_id,
+        version,
+    ))?;
+
+    Ok(PublishInstallResult {
+        scoped_id: preview.scoped_id.clone(),
+        version: version.to_string(),
+        path: env.root_dir,
+        content_hash: verification.blake3.clone(),
+        install_kind: "test_sandbox",
+    })
 }
 
 #[cfg(test)]
