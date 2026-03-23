@@ -63,8 +63,9 @@ pub fn detect_project(dir: &Path) -> Result<DetectedProject> {
     let base_name = dir
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("my-capsule")
-        .to_string();
+        .map(sanitize_manifest_name)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "my-capsule".to_string());
 
     let mut name = base_name;
 
@@ -137,8 +138,20 @@ fn detect_cargo_package_name(dir: &Path) -> Option<String> {
         .get("package")
         .and_then(|p| p.get("name"))
         .and_then(|n| n.as_str())
-        .map(|s| s.trim().to_string())
+        .map(sanitize_manifest_name)
         .filter(|s| !s.is_empty())
+}
+
+fn sanitize_manifest_name(raw: &str) -> String {
+    raw.trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 fn detect_node(dir: &Path) -> Result<DetectedNode> {
