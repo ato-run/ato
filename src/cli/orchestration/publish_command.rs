@@ -59,30 +59,13 @@ pub(crate) fn execute_publish_ci_command(
 }
 
 pub(crate) fn execute_publish_dry_run_command(
-    json_output: bool,
+    args: PublishCommandArgs,
     reporter: Arc<reporters::CliReporter>,
 ) -> Result<()> {
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        let result = crate::publish_dry_run::execute(crate::publish_dry_run::PublishDryRunArgs {
-            json_output,
-        })
-        .await?;
-
-        if json_output {
-            println!("{}", serde_json::to_string_pretty(&result)?);
-        } else {
-            println!("✅ Dry-run successful! Your capsule is ready to be published via CI.");
-            println!("   Capsule: {}", result.capsule_name);
-            println!("   Version: {}", result.version);
-            println!("   Artifact: {}", result.artifact_path.display());
-            println!("   Size: {} bytes", result.artifact_size_bytes);
-        }
-        futures::executor::block_on(
-            reporter.notify("Local publish dry-run completed (no upload performed).".to_string()),
-        )?;
-        Ok(())
-    })
+    if args.prepare || args.build || args.deploy {
+        anyhow::bail!("--dry-run cannot be combined with --prepare/--build/--deploy");
+    }
+    execute_publish_pipeline(args, reporter, true)
 }
 
 #[allow(dead_code)]
@@ -136,10 +119,45 @@ pub(crate) struct PublishCommandArgs {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PublishPhaseSelection {
-    pub(crate) prepare: bool,
-    pub(crate) build: bool,
-    pub(crate) deploy: bool,
+    pub(crate) start: PublishPhaseBoundary,
+    pub(crate) stop: PublishPhaseBoundary,
     pub(crate) explicit_filter: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PublishPhaseBoundary {
+    Prepare,
+    Build,
+    Verify,
+    Install,
+    DryRun,
+    Publish,
+}
+
+impl PublishPhaseSelection {
+    pub(crate) fn runs_prepare(self) -> bool {
+        self.start <= PublishPhaseBoundary::Prepare && self.stop >= PublishPhaseBoundary::Prepare
+    }
+
+    pub(crate) fn runs_build(self) -> bool {
+        self.start <= PublishPhaseBoundary::Build && self.stop >= PublishPhaseBoundary::Build
+    }
+
+    pub(crate) fn runs_verify(self) -> bool {
+        self.start <= PublishPhaseBoundary::Verify && self.stop >= PublishPhaseBoundary::Verify
+    }
+
+    pub(crate) fn runs_install(self) -> bool {
+        self.start <= PublishPhaseBoundary::Install && self.stop >= PublishPhaseBoundary::Install
+    }
+
+    pub(crate) fn runs_dry_run(self) -> bool {
+        self.start <= PublishPhaseBoundary::DryRun && self.stop >= PublishPhaseBoundary::DryRun
+    }
+
+    pub(crate) fn runs_publish(self) -> bool {
+        self.start <= PublishPhaseBoundary::Publish && self.stop >= PublishPhaseBoundary::Publish
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -153,6 +171,42 @@ struct PublishPhaseResult {
     message: String,
     result_kind: Option<String>,
     skipped_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PublishInstallResult {
+    scoped_id: String,
+    version: String,
+    path: PathBuf,
+    content_hash: String,
+    install_kind: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PublishDryRunStageResult {
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnosis: Option<crate::publish_official::OfficialPublishDiagnosis>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registry: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upload_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reachable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth_ready: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    permission_check: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct PublishPipelineState {
+    artifact_path: Option<PathBuf>,
+    verified_artifact: Option<crate::publish_artifact::VerifiedArtifactInfo>,
+    resolved_scoped_id: Option<String>,
+    resolved_version: Option<String>,
+    install_result: Option<PublishInstallResult>,
+    dry_run_result: Option<PublishDryRunStageResult>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,16 +252,30 @@ pub(crate) fn execute_publish_command(
     args: PublishCommandArgs,
     reporter: Arc<reporters::CliReporter>,
 ) -> Result<()> {
+    execute_publish_pipeline(args, reporter, false)
+}
+
+fn execute_publish_pipeline(
+    args: PublishCommandArgs,
+    reporter: Arc<reporters::CliReporter>,
+    top_level_dry_run: bool,
+) -> Result<()> {
+    ensure_publish_source_manifest_ready(&args)?;
     let resolved_target = resolve_publish_target(args.registry.clone())?;
     let is_official = resolved_target.mode.is_official();
-    let selection = select_publish_phases(
-        args.prepare,
-        args.build,
-        args.deploy,
-        is_official,
-        args.legacy_full_publish,
-    );
-    if resolved_target.mode.is_personal_dock() && selection.deploy {
+    let selection = if top_level_dry_run {
+        select_publish_dry_run_phases(args.artifact.is_some())
+    } else {
+        select_publish_phases(
+            args.prepare,
+            args.build,
+            args.deploy,
+            is_official,
+            args.legacy_full_publish,
+            args.artifact.is_some(),
+        )
+    };
+    if resolved_target.mode.is_personal_dock() && selection.runs_publish() {
         let _ = crate::auth::require_session_token()?;
     }
     validate_publish_phase_options(&args, selection, is_official)?;
@@ -215,17 +283,23 @@ pub(crate) fn execute_publish_command(
     let _ = args.no_tui;
 
     let mut phases = vec![
-        new_phase_result("prepare", selection.prepare),
-        new_phase_result("build", selection.build),
-        new_phase_result("deploy", selection.deploy),
+        new_phase_result("prepare", selection.runs_prepare()),
+        new_phase_result("build", selection.runs_build()),
+        new_phase_result("verify", selection.runs_verify()),
+        new_phase_result("install", selection.runs_install()),
+        new_phase_result("dry_run", selection.runs_dry_run()),
+        new_phase_result("publish", selection.runs_publish()),
     ];
 
     let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
-    let mut built_artifact_path: Option<PathBuf> = None;
+    let mut state = PublishPipelineState::default();
     let mut private_result: Option<crate::publish_private::PublishPrivateResult> = None;
     let mut official_result: Option<OfficialDeployOutcome> = None;
 
-    let private_preview = if selection.deploy && !is_official {
+    let pipeline_preview = if selection.runs_install()
+        || selection.runs_dry_run()
+        || (!is_official && selection.runs_publish())
+    {
         Some(crate::publish_private::summarize(
             &crate::publish_private::PublishPrivateArgs {
                 registry_url: resolved_target.registry_url.clone(),
@@ -239,8 +313,12 @@ pub(crate) fn execute_publish_command(
     } else {
         None
     };
+    if let Some(preview) = pipeline_preview.as_ref() {
+        state.resolved_scoped_id = Some(preview.scoped_id.clone());
+        state.resolved_version = Some(preview.version.clone());
+    }
 
-    if selection.prepare {
+    if selection.runs_prepare() {
         print_phase_line(args.json, "prepare", "RUN", "prepare command detection");
         let started = std::time::Instant::now();
         let prepare_spec = crate::publish_prepare::detect_prepare_command(&cwd)?;
@@ -250,7 +328,7 @@ pub(crate) fn execute_publish_command(
                 crate::publish_prepare::run_prepare_command(&spec, &cwd, args.json)
                     .context("Failed to run publish prepare command")?;
                 phase_mark_ok(
-                    &mut phases[0],
+                    phase_mut(&mut phases, PublishPhaseBoundary::Prepare),
                     started.elapsed().as_millis() as u64,
                     message.clone(),
                     None,
@@ -259,10 +337,10 @@ pub(crate) fn execute_publish_command(
             }
             None => {
                 let skipped_reason = "no prepare command configured".to_string();
-                if selection.explicit_filter {
+                if args.prepare {
                     let fix = "capsule.toml に [build.lifecycle].prepare を設定するか package.json scripts[\"capsule:prepare\"] を追加して再実行してください。".to_string();
                     phase_mark_failed(
-                        &mut phases[0],
+                        phase_mut(&mut phases, PublishPhaseBoundary::Prepare),
                         started.elapsed().as_millis() as u64,
                         "--prepare was selected but no prepare command was found".to_string(),
                         Some(fix.clone()),
@@ -276,7 +354,7 @@ pub(crate) fn execute_publish_command(
                     );
                 }
                 phase_mark_skipped(
-                    &mut phases[0],
+                    phase_mut(&mut phases, PublishPhaseBoundary::Prepare),
                     started.elapsed().as_millis() as u64,
                     skipped_reason.clone(),
                     skipped_reason.clone(),
@@ -286,7 +364,7 @@ pub(crate) fn execute_publish_command(
         }
     } else {
         phase_mark_skipped(
-            &mut phases[0],
+            phase_mut(&mut phases, PublishPhaseBoundary::Prepare),
             0,
             "prepare phase not selected".to_string(),
             "not selected".to_string(),
@@ -294,15 +372,15 @@ pub(crate) fn execute_publish_command(
         print_phase_line(args.json, "prepare", "SKIP", "not selected");
     }
 
-    if selection.build {
+    if selection.runs_build() {
         print_phase_line(args.json, "build", "RUN", "artifact build");
         let started = std::time::Instant::now();
         if args.artifact.is_some() {
-            let skipped_reason = "--artifact provided".to_string();
+            let skipped_reason = "start phase is Verify".to_string();
             phase_mark_skipped(
-                &mut phases[1],
+                phase_mut(&mut phases, PublishPhaseBoundary::Build),
                 started.elapsed().as_millis() as u64,
-                "build is skipped when --artifact is provided".to_string(),
+                "build is skipped because artifact input starts at Verify".to_string(),
                 skipped_reason.clone(),
             );
             print_phase_line(args.json, "build", "SKIP", &skipped_reason);
@@ -310,13 +388,18 @@ pub(crate) fn execute_publish_command(
             let artifact_path = build_capsule_artifact_for_publish(&cwd)?;
             let elapsed = started.elapsed().as_millis() as u64;
             let message = format!("artifact built: {}", artifact_path.display());
-            phase_mark_ok(&mut phases[1], elapsed, message.clone(), None);
-            built_artifact_path = Some(artifact_path);
+            phase_mark_ok(
+                phase_mut(&mut phases, PublishPhaseBoundary::Build),
+                elapsed,
+                message.clone(),
+                Some("artifact_built".to_string()),
+            );
+            state.artifact_path = Some(artifact_path);
             print_phase_line(args.json, "build", "OK", &message);
         }
     } else {
         phase_mark_skipped(
-            &mut phases[1],
+            phase_mut(&mut phases, PublishPhaseBoundary::Build),
             0,
             "build phase not selected".to_string(),
             "not selected".to_string(),
@@ -324,33 +407,234 @@ pub(crate) fn execute_publish_command(
         print_phase_line(args.json, "build", "SKIP", "not selected");
     }
 
-    if selection.deploy {
-        print_phase_line(args.json, "deploy", "RUN", "deploy execution");
+    if selection.runs_verify() {
+        print_phase_line(args.json, "verify", "RUN", "artifact verification");
+        let started = std::time::Instant::now();
+        let artifact_path = if let Some(path) = args
+            .artifact
+            .clone()
+            .or_else(|| state.artifact_path.clone())
+        {
+            path
+        } else {
+            phase_mark_failed(
+                phase_mut(&mut phases, PublishPhaseBoundary::Verify),
+                started.elapsed().as_millis() as u64,
+                "verify phase requires artifact input".to_string(),
+                None,
+            );
+            print_phase_line(args.json, "verify", "FAIL", "artifact input is missing");
+            anyhow::bail!("verify phase requires an artifact produced earlier in the pipeline");
+        };
+        let verification = crate::publish_artifact::verify_artifact(&artifact_path)?;
+        let message = format!(
+            "artifact verified: {} (sha256={}, size={} bytes)",
+            artifact_path.display(),
+            verification.sha256,
+            verification.size_bytes
+        );
+        phase_mark_ok(
+            phase_mut(&mut phases, PublishPhaseBoundary::Verify),
+            started.elapsed().as_millis() as u64,
+            message.clone(),
+            Some("artifact_verified".to_string()),
+        );
+        state.artifact_path = Some(artifact_path);
+        state.verified_artifact = Some(verification);
+        print_phase_line(args.json, "verify", "OK", &message);
+    } else {
+        phase_mark_skipped(
+            phase_mut(&mut phases, PublishPhaseBoundary::Verify),
+            0,
+            "verify phase not selected".to_string(),
+            "not selected".to_string(),
+        );
+        print_phase_line(args.json, "verify", "SKIP", "not selected");
+    }
+
+    if selection.runs_install() {
+        print_phase_line(
+            args.json,
+            "install",
+            "RUN",
+            "local verified artifact registration",
+        );
+        let started = std::time::Instant::now();
+        let preview = pipeline_preview
+            .as_ref()
+            .context("missing publish pipeline preview for install stage")?;
+        let artifact_path = state
+            .artifact_path
+            .as_ref()
+            .context("install phase requires a verified artifact")?;
+        let verification = state
+            .verified_artifact
+            .as_ref()
+            .context("install phase requires verified artifact metadata")?;
+        let install_result = run_publish_install_stage(artifact_path, preview, verification)?;
+        let message = format!("registered {}", install_result.path.display());
+        phase_mark_ok(
+            phase_mut(&mut phases, PublishPhaseBoundary::Install),
+            started.elapsed().as_millis() as u64,
+            message.clone(),
+            Some("local_registration".to_string()),
+        );
+        print_phase_line(args.json, "install", "OK", &message);
+        state.install_result = Some(install_result);
+    } else {
+        phase_mark_skipped(
+            phase_mut(&mut phases, PublishPhaseBoundary::Install),
+            0,
+            "install phase not selected".to_string(),
+            "not selected".to_string(),
+        );
+        print_phase_line(args.json, "install", "SKIP", "not selected");
+    }
+
+    if selection.runs_dry_run() {
+        print_phase_line(args.json, "dry_run", "RUN", "publish preflight");
+        let started = std::time::Instant::now();
+        if is_official {
+            let outcome = run_official_deploy(resolved_target.registry_url.clone(), args.fix)?;
+            if !args.json {
+                print_official_diagnosis(&outcome);
+            }
+            let dry_run_result = PublishDryRunStageResult {
+                kind: "official_ci_handoff",
+                diagnosis: Some(outcome.diagnosis.clone()),
+                registry: Some(outcome.route.registry_url.clone()),
+                upload_endpoint: None,
+                reachable: None,
+                auth_ready: None,
+                permission_check: None,
+            };
+            let can_handoff = outcome.diagnosis.can_handoff;
+            official_result = Some(outcome);
+            state.dry_run_result = Some(dry_run_result);
+            if can_handoff {
+                let message = "official CI handoff is ready".to_string();
+                phase_mark_ok(
+                    phase_mut(&mut phases, PublishPhaseBoundary::DryRun),
+                    started.elapsed().as_millis() as u64,
+                    message.clone(),
+                    Some("handoff".to_string()),
+                );
+                print_phase_line(args.json, "dry_run", "OK", &message);
+            } else {
+                let actions = crate::publish_official::collect_issue_actions(
+                    &official_result
+                        .as_ref()
+                        .expect("official outcome")
+                        .diagnosis
+                        .issues,
+                );
+                let fix_line = actions.first().cloned().unwrap_or_else(|| {
+                    "ato publish --deploy --registry https://api.ato.run".to_string()
+                });
+                phase_mark_failed(
+                    phase_mut(&mut phases, PublishPhaseBoundary::DryRun),
+                    started.elapsed().as_millis() as u64,
+                    "official publish diagnostics failed".to_string(),
+                    Some(fix_line.clone()),
+                );
+                print_phase_line(args.json, "dry_run", "FAIL", "official diagnostics failed");
+                if !args.json {
+                    println!("👉 次に打つコマンド: {}", fix_line);
+                    if !actions.is_empty() {
+                        println!();
+                        println!("詳細:");
+                        for issue in &official_result
+                            .as_ref()
+                            .expect("official outcome")
+                            .diagnosis
+                            .issues
+                        {
+                            println!(" - [{}] {}", issue.stage, issue.message);
+                        }
+                    }
+                    anyhow::bail!("official publish diagnostics failed");
+                }
+                if top_level_dry_run {
+                    emit_publish_json_output(
+                        &resolved_target,
+                        &phases,
+                        state.install_result.as_ref(),
+                        state.dry_run_result.as_ref(),
+                        private_result.as_ref(),
+                        official_result.as_ref(),
+                        top_level_dry_run,
+                    )?;
+                    return Ok(());
+                }
+            }
+        } else {
+            let preview = pipeline_preview
+                .as_ref()
+                .context("missing publish pipeline preview for dry-run stage")?;
+            let verification = state
+                .verified_artifact
+                .as_ref()
+                .context("dry-run phase requires verified artifact metadata")?;
+            let dry_run_result = run_direct_publish_dry_run_stage(
+                &resolved_target,
+                preview,
+                verification,
+                args.allow_existing,
+            )?;
+            let dry_run_ok = publish_direct_dry_run_is_ready(&dry_run_result, resolved_target.mode);
+            let failure_message =
+                publish_direct_dry_run_failure_message(&dry_run_result, resolved_target.mode);
+            state.dry_run_result = Some(dry_run_result);
+            if dry_run_ok {
+                let message = "publish preflight passed".to_string();
+                phase_mark_ok(
+                    phase_mut(&mut phases, PublishPhaseBoundary::DryRun),
+                    started.elapsed().as_millis() as u64,
+                    message.clone(),
+                    Some("preflight".to_string()),
+                );
+                print_phase_line(args.json, "dry_run", "OK", &message);
+            } else {
+                phase_mark_failed(
+                    phase_mut(&mut phases, PublishPhaseBoundary::DryRun),
+                    started.elapsed().as_millis() as u64,
+                    failure_message.clone(),
+                    None,
+                );
+                print_phase_line(args.json, "dry_run", "FAIL", &failure_message);
+                if top_level_dry_run && args.json {
+                    emit_publish_json_output(
+                        &resolved_target,
+                        &phases,
+                        state.install_result.as_ref(),
+                        state.dry_run_result.as_ref(),
+                        private_result.as_ref(),
+                        official_result.as_ref(),
+                        top_level_dry_run,
+                    )?;
+                    return Ok(());
+                }
+                anyhow::bail!("{}", failure_message);
+            }
+        }
+    } else {
+        phase_mark_skipped(
+            phase_mut(&mut phases, PublishPhaseBoundary::DryRun),
+            0,
+            "dry-run phase not selected".to_string(),
+            "not selected".to_string(),
+        );
+        print_phase_line(args.json, "dry_run", "SKIP", "not selected");
+    }
+
+    if selection.runs_publish() {
+        print_phase_line(args.json, "publish", "RUN", "publish execution");
         let started = std::time::Instant::now();
         if is_official {
             let outcome = run_official_deploy(resolved_target.registry_url.clone(), args.fix)?;
 
             if !args.json {
-                println!(
-                    "🔎 official publish route registry={} route={:?}",
-                    outcome.route.registry_url, outcome.route.route
-                );
-                for stage in &outcome.diagnosis.stages {
-                    let icon = if stage.ok { "✅" } else { "❌" };
-                    println!("{} {:<14} {}", icon, stage.key, stage.message);
-                }
-                if outcome.fix_result.attempted {
-                    if outcome.fix_result.applied {
-                        let label = if outcome.fix_result.created {
-                            "created"
-                        } else {
-                            "updated"
-                        };
-                        println!("🛠️  workflow {} via --fix", label);
-                    } else {
-                        println!("🛠️  --fix requested, but workflow was already up-to-date");
-                    }
-                }
+                print_official_diagnosis(&outcome);
             }
 
             if !outcome.diagnosis.can_handoff {
@@ -360,12 +644,12 @@ pub(crate) fn execute_publish_command(
                     "ato publish --deploy --registry https://api.ato.run".to_string()
                 });
                 phase_mark_failed(
-                    &mut phases[2],
+                    phase_mut(&mut phases, PublishPhaseBoundary::Publish),
                     started.elapsed().as_millis() as u64,
                     "official publish diagnostics failed".to_string(),
                     Some(fix_line.clone()),
                 );
-                print_phase_line(args.json, "deploy", "FAIL", "official diagnostics failed");
+                print_phase_line(args.json, "publish", "FAIL", "official diagnostics failed");
                 if !args.json {
                     println!("👉 次に打つコマンド: {}", fix_line);
                     if !actions.is_empty() {
@@ -381,40 +665,23 @@ pub(crate) fn execute_publish_command(
             } else {
                 let success_message = "official CI handoff is ready".to_string();
                 phase_mark_ok(
-                    &mut phases[2],
+                    phase_mut(&mut phases, PublishPhaseBoundary::Publish),
                     started.elapsed().as_millis() as u64,
                     success_message.clone(),
                     Some("handoff".to_string()),
                 );
-                print_phase_line(args.json, "deploy", "OK", &success_message);
+                print_phase_line(args.json, "publish", "OK", &success_message);
                 official_result = Some(outcome);
             }
         } else {
             let source_is_artifact = args.artifact.is_some();
-            let deploy_artifact = if let Some(path) = args.artifact.clone() {
-                path
-            } else if let Some(path) = built_artifact_path.clone() {
-                path
-            } else {
-                let fix_line =
-                    "ato publish --deploy --artifact <file.capsule> --registry <url> もしくは ato publish --build --deploy --registry <url>"
-                        .to_string();
-                phase_mark_failed(
-                    &mut phases[2],
-                    started.elapsed().as_millis() as u64,
-                    "deploy phase requires artifact input".to_string(),
-                    Some(fix_line.clone()),
-                );
-                print_phase_line(args.json, "deploy", "FAIL", "artifact input is missing");
-                if !args.json {
-                    println!("👉 次に打つコマンド: {}", fix_line);
-                }
-                anyhow::bail!(
-                    "--deploy requires artifact input for private registry. Use --artifact or include --build."
-                );
-            };
+            let publish_artifact = state
+                .artifact_path
+                .clone()
+                .or_else(|| args.artifact.clone())
+                .context("publish phase requires a verified artifact")?;
 
-            let preview = private_preview
+            let preview = pipeline_preview
                 .as_ref()
                 .context("missing private publish preview")?;
             if !args.json {
@@ -432,7 +699,9 @@ pub(crate) fn execute_publish_command(
             }
 
             let status = publish_private_status_message(resolved_target.mode, source_is_artifact);
-            futures::executor::block_on(reporter.progress_start(status.to_string(), None))?;
+            if !args.json {
+                futures::executor::block_on(reporter.progress_start(status.to_string(), None))?;
+            }
             let scoped_override = if source_is_artifact {
                 args.scoped_id.clone()
             } else {
@@ -442,40 +711,45 @@ pub(crate) fn execute_publish_command(
                 crate::publish_private::execute(crate::publish_private::PublishPrivateArgs {
                     registry_url: resolved_target.registry_url.clone(),
                     publisher_hint: resolved_target.publisher_handle.clone(),
-                    artifact_path: Some(deploy_artifact),
+                    artifact_path: Some(publish_artifact),
                     force_large_payload: args.force_large_payload,
                     scoped_id: scoped_override,
                     allow_existing: args.allow_existing,
                 });
-            futures::executor::block_on(reporter.progress_finish(None))?;
+            if !args.json {
+                futures::executor::block_on(reporter.progress_finish(None))?;
+            }
             let result = upload_result?;
 
             let success_message = format!("uploaded {}", result.file_name);
             phase_mark_ok(
-                &mut phases[2],
+                phase_mut(&mut phases, PublishPhaseBoundary::Publish),
                 started.elapsed().as_millis() as u64,
                 success_message.clone(),
                 Some("upload".to_string()),
             );
-            print_phase_line(args.json, "deploy", "OK", &success_message);
+            print_phase_line(args.json, "publish", "OK", &success_message);
             private_result = Some(result);
         }
     } else {
         phase_mark_skipped(
-            &mut phases[2],
+            phase_mut(&mut phases, PublishPhaseBoundary::Publish),
             0,
-            "deploy phase not selected".to_string(),
+            "publish phase not selected".to_string(),
             "not selected".to_string(),
         );
-        print_phase_line(args.json, "deploy", "SKIP", "not selected");
+        print_phase_line(args.json, "publish", "SKIP", "not selected");
     }
 
     if args.json {
         emit_publish_json_output(
             &resolved_target,
             &phases,
+            state.install_result.as_ref(),
+            state.dry_run_result.as_ref(),
             private_result.as_ref(),
             official_result.as_ref(),
+            top_level_dry_run,
         )?;
     } else if let Some(result) = private_result.as_ref() {
         if resolved_target.mode.is_personal_dock() {
@@ -502,9 +776,13 @@ pub(crate) fn execute_publish_command(
                 result.scoped_id, result.registry_url
             );
         }
-    } else if let Some(outcome) = official_result {
+    } else if let Some(outcome) = official_result.as_ref() {
         println!();
-        println!("✅ CI handoff ready. 次の順で実行してください:");
+        if top_level_dry_run {
+            println!("✅ Dry-run completed. 次の順で実行してください:");
+        } else {
+            println!("✅ CI handoff ready. 次の順で実行してください:");
+        }
         for command in &outcome.diagnosis.next_commands {
             println!("  {}", command);
         }
@@ -514,12 +792,30 @@ pub(crate) fn execute_publish_command(
                 repo
             );
         }
+    } else if top_level_dry_run {
+        println!("✅ Dry-run successful! No upload performed.");
+        if let Some(install_result) = state.install_result.as_ref() {
+            println!("📦 Local registration: {}", install_result.path.display());
+        }
+        if let Some(dry_run_result) = state.dry_run_result.as_ref() {
+            if let Some(registry) = dry_run_result.registry.as_deref() {
+                println!("🌐 Registry: {}", registry);
+            }
+            if let Some(endpoint) = dry_run_result.upload_endpoint.as_deref() {
+                println!("🧪 Upload endpoint: {}", endpoint);
+            }
+        }
     } else {
         println!("✅ Selected publish phases completed.");
     }
 
     if !args.json {
-        if selection.deploy && phases[2].ok {
+        if top_level_dry_run && phase_is_ok(&phases, PublishPhaseBoundary::DryRun) {
+            futures::executor::block_on(
+                reporter
+                    .notify("Local publish dry-run completed (no upload performed).".to_string()),
+            )?;
+        } else if selection.runs_publish() && phase_is_ok(&phases, PublishPhaseBoundary::Publish) {
             let notice = if is_official {
                 "Official publish handoff prepared (CI-first: local upload is not executed)."
             } else if resolved_target.mode.is_personal_dock() {
@@ -554,6 +850,212 @@ fn run_official_deploy(registry_url: String, fix: bool) -> Result<OfficialDeploy
         fix_result,
         diagnosis,
     })
+}
+
+fn phase_mut(
+    phases: &mut [PublishPhaseResult],
+    boundary: PublishPhaseBoundary,
+) -> &mut PublishPhaseResult {
+    &mut phases[phase_index(boundary)]
+}
+
+fn phase_is_ok(phases: &[PublishPhaseResult], boundary: PublishPhaseBoundary) -> bool {
+    phases
+        .get(phase_index(boundary))
+        .map(|phase| phase.ok)
+        .unwrap_or(false)
+}
+
+fn phase_index(boundary: PublishPhaseBoundary) -> usize {
+    match boundary {
+        PublishPhaseBoundary::Prepare => 0,
+        PublishPhaseBoundary::Build => 1,
+        PublishPhaseBoundary::Verify => 2,
+        PublishPhaseBoundary::Install => 3,
+        PublishPhaseBoundary::DryRun => 4,
+        PublishPhaseBoundary::Publish => 5,
+    }
+}
+
+fn select_publish_dry_run_phases(has_artifact: bool) -> PublishPhaseSelection {
+    PublishPhaseSelection {
+        start: if has_artifact {
+            PublishPhaseBoundary::Verify
+        } else {
+            PublishPhaseBoundary::Prepare
+        },
+        stop: PublishPhaseBoundary::DryRun,
+        explicit_filter: false,
+    }
+}
+
+fn run_publish_install_stage(
+    artifact_path: &Path,
+    preview: &crate::publish_private::PublishPrivateSummary,
+    verification: &crate::publish_artifact::VerifiedArtifactInfo,
+) -> Result<PublishInstallResult> {
+    let version = preview.version.trim();
+    if version.is_empty() {
+        anyhow::bail!("publish install stage requires a resolved version");
+    }
+    let scoped = crate::install::parse_capsule_ref(&preview.scoped_id)?;
+    let bytes = std::fs::read(artifact_path)
+        .with_context(|| format!("Failed to read artifact: {}", artifact_path.display()))?;
+    let file_name = normalized_install_artifact_file_name(&scoped.slug, version);
+    let path = crate::install::register_verified_artifact_for_publish(
+        None,
+        &preview.scoped_id,
+        version,
+        &file_name,
+        &bytes,
+        &verification.blake3,
+    )?;
+    Ok(PublishInstallResult {
+        scoped_id: preview.scoped_id.clone(),
+        version: version.to_string(),
+        path,
+        content_hash: verification.blake3.clone(),
+        install_kind: "local_registration",
+    })
+}
+
+fn normalized_install_artifact_file_name(slug: &str, version: &str) -> String {
+    format!("{}-{}.capsule", slug, version)
+}
+
+fn upload_file_name_for_artifact(slug: &str, manifest_version: &str) -> Option<String> {
+    let version = manifest_version.trim();
+    if version.is_empty() {
+        None
+    } else {
+        Some(format!("{}-{}.capsule", slug, version))
+    }
+}
+
+fn build_direct_publish_upload_endpoint(
+    registry_url: &str,
+    scoped_id: &str,
+    version: &str,
+    file_name: Option<&str>,
+    allow_existing: bool,
+) -> Result<String> {
+    let scoped = crate::install::parse_capsule_ref(scoped_id)?;
+    let mut endpoint = format!(
+        "{}/v1/local/capsules/{}/{}/{}",
+        registry_url,
+        urlencoding::encode(&scoped.publisher),
+        urlencoding::encode(&scoped.slug),
+        urlencoding::encode(version)
+    );
+    if let Some(file_name) = file_name.filter(|value| !value.trim().is_empty()) {
+        endpoint.push_str(&format!("?file_name={}", urlencoding::encode(file_name)));
+    }
+    if allow_existing {
+        endpoint.push_str(if endpoint.contains('?') {
+            "&allow_existing=true"
+        } else {
+            "?allow_existing=true"
+        });
+    }
+    Ok(endpoint)
+}
+
+fn run_direct_publish_dry_run_stage(
+    resolved_target: &ResolvedPublishTarget,
+    preview: &crate::publish_private::PublishPrivateSummary,
+    verification: &crate::publish_artifact::VerifiedArtifactInfo,
+    allow_existing: bool,
+) -> Result<PublishDryRunStageResult> {
+    let registry =
+        crate::registry::http::normalize_registry_url(&resolved_target.registry_url, "--registry")?;
+    let scoped = crate::install::parse_capsule_ref(&preview.scoped_id)?;
+    let upload_endpoint = build_direct_publish_upload_endpoint(
+        &registry,
+        &preview.scoped_id,
+        &preview.version,
+        upload_file_name_for_artifact(&scoped.slug, &verification.version).as_deref(),
+        allow_existing,
+    )?;
+    probe_registry_reachability(&registry)?;
+
+    let auth_ready = if resolved_target.mode.is_personal_dock() {
+        crate::auth::current_session_token().is_some()
+    } else {
+        crate::registry::http::current_ato_token().is_some()
+    };
+
+    Ok(PublishDryRunStageResult {
+        kind: "direct_preflight",
+        diagnosis: None,
+        registry: Some(registry),
+        upload_endpoint: Some(upload_endpoint),
+        reachable: Some(true),
+        auth_ready: Some(auth_ready),
+        permission_check: Some("local_prereq_only".to_string()),
+    })
+}
+
+fn publish_direct_dry_run_is_ready(
+    result: &PublishDryRunStageResult,
+    target_mode: PublishTargetMode,
+) -> bool {
+    let reachable = result.reachable.unwrap_or(false);
+    let auth_ready = result.auth_ready.unwrap_or(false);
+    if target_mode.is_personal_dock() {
+        reachable && auth_ready
+    } else {
+        reachable
+    }
+}
+
+fn publish_direct_dry_run_failure_message(
+    result: &PublishDryRunStageResult,
+    target_mode: PublishTargetMode,
+) -> String {
+    if !result.reachable.unwrap_or(false) {
+        return "registry reachability probe failed".to_string();
+    }
+    if target_mode.is_personal_dock() && !result.auth_ready.unwrap_or(false) {
+        return "Personal Dock publish dry-run requires an active session token".to_string();
+    }
+    if !target_mode.is_personal_dock() && !result.auth_ready.unwrap_or(false) {
+        return "publish preflight completed without ATO_TOKEN; continuing with local prereq-only readiness".to_string();
+    }
+    "publish preflight failed".to_string()
+}
+
+fn probe_registry_reachability(registry_url: &str) -> Result<()> {
+    let client = crate::registry::http::blocking_client_builder(registry_url)
+        .build()
+        .context("Failed to create registry preflight client")?;
+    client
+        .get(registry_url)
+        .send()
+        .map(|_| ())
+        .map_err(|err| anyhow::anyhow!("Failed to reach registry {}: {}", registry_url, err))
+}
+
+fn print_official_diagnosis(outcome: &OfficialDeployOutcome) {
+    println!(
+        "🔎 official publish route registry={} route={:?}",
+        outcome.route.registry_url, outcome.route.route
+    );
+    for stage in &outcome.diagnosis.stages {
+        let icon = if stage.ok { "✅" } else { "❌" };
+        println!("{} {:<14} {}", icon, stage.key, stage.message);
+    }
+    if outcome.fix_result.attempted {
+        if outcome.fix_result.applied {
+            let label = if outcome.fix_result.created {
+                "created"
+            } else {
+                "updated"
+            };
+            println!("🛠️  workflow {} via --fix", label);
+        } else {
+            println!("🛠️  --fix requested, but workflow was already up-to-date");
+        }
+    }
 }
 
 pub(crate) fn publish_private_status_message(
@@ -602,29 +1104,38 @@ pub(crate) fn select_publish_phases(
     deploy: bool,
     is_official: bool,
     legacy_full_publish: bool,
+    has_artifact: bool,
 ) -> PublishPhaseSelection {
     let explicit_filter = prepare || build || deploy;
-    if explicit_filter {
-        PublishPhaseSelection {
-            prepare,
-            build,
-            deploy,
-            explicit_filter,
-        }
-    } else if is_official && !legacy_full_publish {
-        PublishPhaseSelection {
-            prepare: false,
-            build: false,
-            deploy: true,
-            explicit_filter: false,
+    let stop = if explicit_filter {
+        if deploy {
+            PublishPhaseBoundary::Publish
+        } else if build {
+            PublishPhaseBoundary::Verify
+        } else {
+            PublishPhaseBoundary::Prepare
         }
     } else {
-        PublishPhaseSelection {
-            prepare: true,
-            build: true,
-            deploy: true,
-            explicit_filter: false,
-        }
+        PublishPhaseBoundary::Publish
+    };
+
+    let official_deploy_only = is_official && !legacy_full_publish && deploy && !prepare && !build;
+    let official_default_publish_only = is_official && !legacy_full_publish && !explicit_filter;
+
+    let start = if official_deploy_only {
+        PublishPhaseBoundary::Publish
+    } else if has_artifact {
+        PublishPhaseBoundary::Verify
+    } else if official_default_publish_only {
+        PublishPhaseBoundary::Publish
+    } else {
+        PublishPhaseBoundary::Prepare
+    };
+
+    PublishPhaseSelection {
+        start,
+        stop,
+        explicit_filter,
     }
 }
 
@@ -645,7 +1156,7 @@ pub(crate) fn validate_publish_phase_options(
     selection: PublishPhaseSelection,
     is_official: bool,
 ) -> Result<()> {
-    if args.fix && !(is_official && selection.deploy) {
+    if args.fix && !(is_official && selection.runs_publish()) {
         anyhow::bail!("--fix is only available when deploying to official registry");
     }
 
@@ -657,13 +1168,13 @@ pub(crate) fn validate_publish_phase_options(
         anyhow::bail!("--legacy-full-publish cannot be combined with --prepare/--build/--deploy");
     }
 
-    if args.allow_existing && (is_official || !selection.deploy) {
+    if args.allow_existing && (is_official || !selection.runs_publish()) {
         anyhow::bail!("--allow-existing is only available for private registry deploy phase");
     }
 
-    if !is_official && selection.deploy && !selection.build && args.artifact.is_none() {
+    if selection.start > selection.stop {
         anyhow::bail!(
-            "--deploy requires --artifact for private registry publish (or include --build)"
+            "The selected publish phase range is invalid. `--artifact` cannot be combined with stop points that end before Verify."
         );
     }
 
@@ -688,14 +1199,19 @@ fn build_capsule_artifact_for_publish(cwd: &Path) -> Result<PathBuf> {
 fn emit_publish_json_output(
     resolved_target: &ResolvedPublishTarget,
     phases: &[PublishPhaseResult],
+    install_result: Option<&PublishInstallResult>,
+    dry_run_result: Option<&PublishDryRunStageResult>,
     private_result: Option<&crate::publish_private::PublishPrivateResult>,
     official_result: Option<&OfficialDeployOutcome>,
+    top_level_dry_run: bool,
 ) -> Result<()> {
     if let Some(outcome) = official_result {
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "ok": outcome.diagnosis.can_handoff,
             "code": if outcome.diagnosis.can_handoff { "CI_HANDOFF_READY" } else { "CI_ONLY_PUBLISH" },
-            "message": if outcome.diagnosis.can_handoff {
+            "message": if outcome.diagnosis.can_handoff && top_level_dry_run {
+                "Official registry publish dry-run completed. CI handoff is ready."
+            } else if outcome.diagnosis.can_handoff {
                 "Official registry publishing is CI-first. Handoff is ready."
             } else {
                 "Official registry publishing is CI-first. Run the suggested local fixes, then push tag to trigger CI."
@@ -706,6 +1222,14 @@ fn emit_publish_json_output(
             "diagnosis": outcome.diagnosis,
             "phases": phases,
         });
+        if let serde_json::Value::Object(map) = &mut payload {
+            if let Some(install) = install_result {
+                map.insert("install".to_string(), serde_json::to_value(install)?);
+            }
+            if let Some(dry_run) = dry_run_result {
+                map.insert("dry_run".to_string(), serde_json::to_value(dry_run)?);
+            }
+        }
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
     }
@@ -714,19 +1238,41 @@ fn emit_publish_json_output(
         let mut payload = serde_json::to_value(result)?;
         if let serde_json::Value::Object(map) = &mut payload {
             map.insert("phases".to_string(), serde_json::to_value(phases)?);
+            if let Some(install) = install_result {
+                map.insert("install".to_string(), serde_json::to_value(install)?);
+            }
+            if let Some(dry_run) = dry_run_result {
+                map.insert("dry_run".to_string(), serde_json::to_value(dry_run)?);
+            }
         }
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
     }
 
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "ok": true,
-        "code": "PUBLISH_PHASES_COMPLETED",
-        "message": "Selected publish phases completed.",
+        "code": if top_level_dry_run {
+            "PUBLISH_DRY_RUN_COMPLETED"
+        } else {
+            "PUBLISH_PHASES_COMPLETED"
+        },
+        "message": if top_level_dry_run {
+            "Publish dry-run completed. No upload performed."
+        } else {
+            "Selected publish phases completed."
+        },
         "registry": resolved_target.registry_url,
         "route": resolved_target.mode.route_label(),
         "phases": phases,
     });
+    if let serde_json::Value::Object(map) = &mut payload {
+        if let Some(install) = install_result {
+            map.insert("install".to_string(), serde_json::to_value(install)?);
+        }
+        if let Some(dry_run) = dry_run_result {
+            map.insert("dry_run".to_string(), serde_json::to_value(dry_run)?);
+        }
+    }
     println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }
@@ -806,14 +1352,35 @@ fn print_phase_line(json_output: bool, phase: &str, state: &str, detail: &str) {
 }
 
 fn resolve_publish_target(cli_registry: Option<String>) -> Result<ResolvedPublishTarget> {
+    if let Some(url) = cli_registry {
+        return resolve_explicit_publish_target(&url);
+    }
+
     let manifest_registry = discover_manifest_publish_registry()?;
+    if let Some(url) = manifest_registry {
+        return resolve_explicit_publish_target(&url);
+    }
+
     let publisher_handle = crate::auth::current_publisher_handle()?;
 
-    resolve_publish_target_from_sources(
-        cli_registry.as_deref(),
-        manifest_registry.as_deref(),
-        publisher_handle.as_deref(),
-    )
+    resolve_publish_target_from_sources(None, None, publisher_handle.as_deref())
+}
+
+fn ensure_publish_source_manifest_ready(args: &PublishCommandArgs) -> Result<()> {
+    if args.artifact.is_some() {
+        return Ok(());
+    }
+
+    let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
+    let manifest_path = cwd.join("capsule.toml");
+    if !manifest_path.exists() {
+        anyhow::bail!(
+            "capsule.toml not found in current directory: {}",
+            manifest_path.display()
+        );
+    }
+
+    Ok(())
 }
 
 fn discover_manifest_publish_registry() -> Result<Option<String>> {
