@@ -61,7 +61,7 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
         args.compatibility_fallback,
         args.reporter.clone(),
     )?;
-    crate::execute_open_command(
+    crate::execute_run_command(
         install_phase.resolved_target.path,
         args.target,
         args.watch,

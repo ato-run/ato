@@ -54,7 +54,7 @@ const BACKGROUND_READY_WAIT_TIMEOUT_ENV: &str = "ATO_BACKGROUND_READY_WAIT_TIMEO
 
 type RunPipelineState = run_phase::RunPipelineState;
 
-pub struct OpenArgs {
+pub struct RunArgs {
     pub target: PathBuf,
     pub target_label: Option<String>,
     pub watch: bool,
@@ -73,7 +73,7 @@ pub struct OpenArgs {
     pub preview_mode: bool,
 }
 
-pub async fn execute(args: OpenArgs) -> Result<()> {
+pub async fn execute(args: RunArgs) -> Result<()> {
     let target = args.target.clone();
     let target_is_manifest_file =
         target.is_file() && target.file_name().and_then(|n| n.to_str()) == Some("capsule.toml");
@@ -99,13 +99,13 @@ pub async fn execute(args: OpenArgs) -> Result<()> {
     }
 }
 
-async fn execute_capsule_file(args: &OpenArgs, capsule_path: &PathBuf) -> Result<()> {
+async fn execute_capsule_file(args: &RunArgs, capsule_path: &PathBuf) -> Result<()> {
     if let Some(manifest_path) = runtime_tree::prepare_store_runtime_for_capsule(capsule_path)? {
         debug!(
             manifest_path = %manifest_path.display(),
             "Running capsule from isolated runtime tree"
         );
-        let open_args = OpenArgs {
+        let run_args = RunArgs {
             target: manifest_path,
             target_label: args.target_label.clone(),
             watch: args.watch,
@@ -123,7 +123,7 @@ async fn execute_capsule_file(args: &OpenArgs, capsule_path: &PathBuf) -> Result
             reporter: args.reporter.clone(),
             preview_mode: args.preview_mode,
         };
-        return execute_normal_mode(open_args).await;
+        return execute_normal_mode(run_args).await;
     }
 
     debug!(capsule = %capsule_path.display(), "Extracting capsule archive");
@@ -173,10 +173,10 @@ async fn execute_capsule_file(args: &OpenArgs, capsule_path: &PathBuf) -> Result
         capsule_core::capsule_v3::PayloadUnpackOutcome::RestoredFromV3
         | capsule_core::capsule_v3::PayloadUnpackOutcome::RestoredFromV2 => {}
         capsule_core::capsule_v3::PayloadUnpackOutcome::RestoredFromV2DueToCasDisabled(reason) => {
-            emit_open_cas_disabled_warning_once(&reason);
+            emit_run_cas_disabled_warning_once(&reason);
         }
         capsule_core::capsule_v3::PayloadUnpackOutcome::RestoredFromV2DueToV3Error(err) => {
-            emit_open_v3_fallback_warning_once(&err);
+            emit_run_v3_fallback_warning_once(&err);
         }
     }
     fs::remove_file(extract_dir.join("payload.tar.zst")).ok();
@@ -207,7 +207,7 @@ async fn execute_capsule_file(args: &OpenArgs, capsule_path: &PathBuf) -> Result
 
     debug!(extract_dir = %extract_dir.display(), "Running extracted capsule");
 
-    let open_args = OpenArgs {
+    let run_args = RunArgs {
         target: manifest_path,
         target_label: args.target_label.clone(),
         watch: args.watch,
@@ -226,10 +226,10 @@ async fn execute_capsule_file(args: &OpenArgs, capsule_path: &PathBuf) -> Result
         preview_mode: args.preview_mode,
     };
 
-    execute_normal_mode(open_args).await
+    execute_normal_mode(run_args).await
 }
 
-fn emit_open_cas_disabled_warning_once(reason: &capsule_core::capsule_v3::CasDisableReason) {
+fn emit_run_cas_disabled_warning_once(reason: &capsule_core::capsule_v3::CasDisableReason) {
     static STDERR_WARN_ONCE: Once = Once::new();
     STDERR_WARN_ONCE.call_once(|| {
         eprintln!(
@@ -239,7 +239,7 @@ fn emit_open_cas_disabled_warning_once(reason: &capsule_core::capsule_v3::CasDis
     });
 }
 
-fn emit_open_v3_fallback_warning_once(error_message: &str) {
+fn emit_run_v3_fallback_warning_once(error_message: &str) {
     static STDERR_WARN_ONCE: Once = Once::new();
     STDERR_WARN_ONCE.call_once(|| {
         eprintln!(
@@ -393,7 +393,7 @@ fn is_hidden(file_name: &std::ffi::OsString) -> bool {
     bytes.first() == Some(&b'.') && bytes.len() > 1
 }
 
-fn build_consumer_run_request(args: &OpenArgs) -> run_phase::ConsumerRunRequest {
+fn build_consumer_run_request(args: &RunArgs) -> run_phase::ConsumerRunRequest {
     run_phase::ConsumerRunRequest {
         target: args.target.clone(),
         target_label: args.target_label.clone(),
@@ -413,15 +413,15 @@ fn build_consumer_run_request(args: &OpenArgs) -> run_phase::ConsumerRunRequest 
     }
 }
 
-struct OpenRunProgress<'a> {
-    args: &'a OpenArgs,
+struct RunProgress<'a> {
+    args: &'a RunArgs,
 }
 
 #[derive(Default)]
-struct OpenRunExecuteHooks;
+struct RunExecuteHooks;
 
 #[async_trait(?Send)]
-impl run_phase::ConsumerRunExecuteHooks for OpenRunExecuteHooks {
+impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
     fn preflight_native_sandbox(
         &self,
         nacelle_override: Option<PathBuf>,
@@ -496,7 +496,7 @@ impl run_phase::ConsumerRunExecuteHooks for OpenRunExecuteHooks {
     }
 }
 
-impl run_phase::ConsumerRunProgress for OpenRunProgress<'_> {
+impl run_phase::ConsumerRunProgress for RunProgress<'_> {
     fn start(&self, phase: HourglassPhase) {
         emit_run_phase_start(self.args, phase);
     }
@@ -511,7 +511,7 @@ impl run_phase::ConsumerRunProgress for OpenRunProgress<'_> {
 }
 
 struct ConsumerRunPhaseRunner<'a> {
-    args: &'a OpenArgs,
+    args: &'a RunArgs,
     state: Option<RunPipelineState>,
 }
 
@@ -573,14 +573,14 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                 })
             }
             HourglassPhase::Install | HourglassPhase::Publish => anyhow::bail!(
-                "unsupported run pipeline phase {} in open command",
+                "unsupported run pipeline phase {} in run command",
                 phase.as_str()
             ),
         }
     }
 }
 
-async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
+async fn execute_normal_mode(args: RunArgs) -> Result<()> {
     let pipeline = ConsumerRunPipeline::standard();
     let mut runner = ConsumerRunPhaseRunner {
         args: &args,
@@ -604,7 +604,7 @@ fn run_phase_detail(boundary: HourglassPhase) -> &'static str {
 }
 
 fn emit_run_phase(
-    args: &OpenArgs,
+    args: &RunArgs,
     boundary: HourglassPhase,
     state: HourglassPhaseState,
     detail: &str,
@@ -617,7 +617,7 @@ fn emit_run_phase(
     hourglass::print_phase_line(args.reporter.is_json(), boundary, state, detail);
 }
 
-fn emit_run_phase_start(args: &OpenArgs, boundary: HourglassPhase) {
+fn emit_run_phase_start(args: &RunArgs, boundary: HourglassPhase) {
     emit_run_phase(
         args,
         boundary,
@@ -626,15 +626,15 @@ fn emit_run_phase_start(args: &OpenArgs, boundary: HourglassPhase) {
     );
 }
 
-fn emit_run_phase_ok(args: &OpenArgs, boundary: HourglassPhase, detail: &str) {
+fn emit_run_phase_ok(args: &RunArgs, boundary: HourglassPhase, detail: &str) {
     emit_run_phase(args, boundary, HourglassPhaseState::Ok, detail);
 }
 
-fn emit_run_phase_skip(args: &OpenArgs, boundary: HourglassPhase, detail: &str) {
+fn emit_run_phase_skip(args: &RunArgs, boundary: HourglassPhase, detail: &str) {
     emit_run_phase(args, boundary, HourglassPhaseState::Skip, detail);
 }
 
-fn emit_run_phase_failure(args: &OpenArgs, boundary: HourglassPhase, error: &anyhow::Error) {
+fn emit_run_phase_failure(args: &RunArgs, boundary: HourglassPhase, error: &anyhow::Error) {
     emit_run_phase(
         args,
         boundary,
@@ -643,34 +643,34 @@ fn emit_run_phase_failure(args: &OpenArgs, boundary: HourglassPhase, error: &any
     );
 }
 
-async fn run_prepare_phase(args: &OpenArgs) -> Result<RunPipelineState> {
+async fn run_prepare_phase(args: &RunArgs) -> Result<RunPipelineState> {
     let request = build_consumer_run_request(args);
-    let progress = OpenRunProgress { args };
+    let progress = RunProgress { args };
     run_phase::run_prepare_phase(&request, &progress).await
 }
 
-async fn run_build_phase(args: &OpenArgs, state: RunPipelineState) -> Result<RunPipelineState> {
+async fn run_build_phase(args: &RunArgs, state: RunPipelineState) -> Result<RunPipelineState> {
     let request = build_consumer_run_request(args);
-    let progress = OpenRunProgress { args };
+    let progress = RunProgress { args };
     run_phase::run_build_phase(&request, &progress, state).await
 }
 
-async fn run_verify_phase(args: &OpenArgs, state: RunPipelineState) -> Result<RunPipelineState> {
+async fn run_verify_phase(args: &RunArgs, state: RunPipelineState) -> Result<RunPipelineState> {
     let request = build_consumer_run_request(args);
-    let progress = OpenRunProgress { args };
+    let progress = RunProgress { args };
     run_phase::run_verify_phase(&request, &progress, state).await
 }
 
-async fn run_dry_run_phase(args: &OpenArgs, state: RunPipelineState) -> Result<RunPipelineState> {
+async fn run_dry_run_phase(args: &RunArgs, state: RunPipelineState) -> Result<RunPipelineState> {
     let request = build_consumer_run_request(args);
-    let progress = OpenRunProgress { args };
+    let progress = RunProgress { args };
     run_phase::run_dry_run_phase(&request, &progress, state).await
 }
 
-async fn run_execute_phase(args: &OpenArgs, state: RunPipelineState) -> Result<()> {
+async fn run_execute_phase(args: &RunArgs, state: RunPipelineState) -> Result<()> {
     let request = build_consumer_run_request(args);
-    let progress = OpenRunProgress { args };
-    run_phase::run_execute_phase(&request, &progress, state, &OpenRunExecuteHooks).await
+    let progress = RunProgress { args };
+    run_phase::run_execute_phase(&request, &progress, state, &RunExecuteHooks).await
 }
 
 #[cfg(test)]
@@ -733,7 +733,7 @@ fn resolve_compatibility_host_mode(
     run_phase::resolve_compatibility_host_mode(executor_kind, compatibility_fallback)
 }
 
-fn execute_watch_mode(args: OpenArgs) -> Result<()> {
+fn execute_watch_mode(args: RunArgs) -> Result<()> {
     let manifest_path = if args.target.is_dir() {
         args.target.join("capsule.toml")
     } else {

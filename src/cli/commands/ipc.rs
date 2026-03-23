@@ -192,7 +192,7 @@ pub fn run_ipc_start(path: PathBuf, json_output: bool) -> Result<()> {
     } else {
         println!("🚀 IPC service '{}' registered.", service_name);
         println!("   Capsule: {}", capsule_root.display());
-        println!("   Note: Full process launch requires `ato open` with IPC integration.");
+        println!("   Note: Full process launch requires `ato run` with IPC integration.");
         for diagnostic in diagnostics {
             println!("   {}", diagnostic.to_string().replace('\n', "\n   "));
         }

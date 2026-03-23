@@ -317,7 +317,7 @@ async fn start_service<C: OciRuntimeClient>(
                             &prepared.launch_ctx,
                         )?
                     } else {
-                        let nacelle = crate::commands::open::preflight_native_sandbox(
+                        let nacelle = crate::commands::run::preflight_native_sandbox(
                             options.nacelle.clone(),
                             managed_plan,
                             reporter,

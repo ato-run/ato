@@ -199,7 +199,7 @@ pub fn watch_directory(
 
 fn run_capsule(target: &Path, _reporter: &Arc<CliReporter>) -> Result<Child> {
     let mut cmd = Command::new("capsule");
-    cmd.arg("open");
+    cmd.arg("run");
     cmd.arg(target);
     cmd.env("CAPSULE_WATCH_MODE", "1");
     cmd.stdout(Stdio::inherit());

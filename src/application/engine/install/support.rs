@@ -1701,7 +1701,7 @@ pub(crate) async fn install_github_repository(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn execute_open_command(
+pub(crate) fn execute_run_command(
     path: PathBuf,
     target: Option<String>,
     watch: bool,
@@ -1727,7 +1727,7 @@ pub(crate) fn execute_open_command(
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(commands::open::execute(commands::open::OpenArgs {
+    rt.block_on(commands::run::execute(commands::run::RunArgs {
         target: target_path,
         target_label: target,
         watch,

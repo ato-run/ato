@@ -524,7 +524,7 @@ mod tests {
     #[test]
     fn consumer_paths_do_not_spawn_git_commands() {
         let files = [
-            "src/cli/commands/open.rs",
+            "src/cli/commands/run.rs",
             "src/application/engine/install/mod.rs",
             "src/application/search/mod.rs",
             "src/adapters/runtime/executors/deno.rs",

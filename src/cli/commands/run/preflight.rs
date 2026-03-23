@@ -184,7 +184,7 @@ pub(super) fn plan_v03_provision_command(
 
     if runtime == "web" && driver == "static" {
         debug!(
-            phase = "open",
+            phase = "run",
             runtime,
             driver,
             manifest_dir = %manifest_dir.display(),
@@ -211,7 +211,7 @@ pub(super) fn plan_v03_provision_command(
             ("bun.lockb", bun_lockb.clone(), bun_lockb.exists()),
         ];
         debug!(
-            phase = "open",
+            phase = "run",
             runtime,
             driver,
             manifest_dir = %manifest_dir.display(),
@@ -247,7 +247,7 @@ pub(super) fn plan_v03_provision_command(
     if matches!(driver.as_str(), "python") {
         let uv_lock = execution_working_directory.join("uv.lock");
         debug!(
-            phase = "open",
+            phase = "run",
             runtime,
             driver,
             manifest_dir = %manifest_dir.display(),
@@ -268,7 +268,7 @@ pub(super) fn plan_v03_provision_command(
 
     let cargo_lock = execution_working_directory.join("Cargo.lock");
     debug!(
-        phase = "open",
+        phase = "run",
         runtime,
         driver,
         manifest_dir = %manifest_dir.display(),
