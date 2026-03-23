@@ -143,6 +143,33 @@ pub struct PromotionSourceInfo {
     pub derived_plan: PromotionDerivedPlanSnapshot,
 }
 
+pub(crate) fn register_verified_artifact_for_publish(
+    output_dir: Option<PathBuf>,
+    scoped_id: &str,
+    version: &str,
+    normalized_file_name: &str,
+    bytes: &[u8],
+    content_hash: &str,
+) -> Result<PathBuf> {
+    if version.trim().is_empty() {
+        bail!("publish install stage requires a resolved version");
+    }
+    if normalized_file_name.trim().is_empty() {
+        bail!("publish install stage requires a normalized artifact file name");
+    }
+
+    let scoped = parse_capsule_ref(scoped_id)?;
+    persist_installed_artifact(
+        output_dir,
+        &scoped.publisher,
+        &scoped.slug,
+        version,
+        normalized_file_name,
+        bytes,
+        content_hash,
+    )
+}
+
 #[derive(Debug)]
 pub struct GitHubCheckout {
     pub repository: String,

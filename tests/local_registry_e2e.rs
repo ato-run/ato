@@ -352,6 +352,25 @@ prepare = "echo prepare"
         "first publish failed: {}",
         String::from_utf8_lossy(&first_publish.stderr)
     );
+    let first_value: serde_json::Value =
+        serde_json::from_slice(&first_publish.stdout).context("first publish json parse")?;
+    let first_phases = first_value
+        .get("phases")
+        .and_then(|value| value.as_array())
+        .context("missing publish phases")?;
+    assert_eq!(
+        first_phases.len(),
+        6,
+        "unexpected phases payload: {first_value}"
+    );
+    assert!(
+        first_value.get("install").is_some(),
+        "missing install result"
+    );
+    assert!(
+        first_value.get("dry_run").is_some(),
+        "missing dry_run result"
+    );
 
     let second_publish = run_ato_with_home(
         &ato,
@@ -409,6 +428,90 @@ prepare = "echo prepare"
         "expected reused-release message in allow-existing path; stdout={}",
         third_stdout
     );
+
+    Ok(())
+}
+
+#[test]
+#[serial_test::serial]
+fn e2e_publish_dry_run_artifact_reports_install_and_dry_run() -> Result<()> {
+    let ato = assert_cmd::cargo::cargo_bin("ato");
+    let tmp = TempDir::new().context("create temp dir")?;
+    let home_dir = tmp.path().join("home");
+    std::fs::create_dir_all(&home_dir)?;
+    let data_dir = tmp.path().join("registry-data");
+    let build_dir = tmp.path().join("build-project");
+    let publish_cwd = tmp.path().join("publish-cwd");
+    std::fs::create_dir_all(&build_dir)?;
+    std::fs::create_dir_all(&publish_cwd)?;
+
+    std::fs::write(
+        build_dir.join("capsule.toml"),
+        r#"schema_version = "0.2"
+name = "test-dry-run-artifact"
+version = "1.0.0"
+type = "app"
+default_target = "static"
+
+[targets.static]
+runtime = "web"
+driver = "static"
+entrypoint = "dist"
+port = 4173
+"#,
+    )?;
+    std::fs::create_dir_all(build_dir.join("dist"))?;
+    std::fs::write(
+        build_dir.join("dist").join("index.html"),
+        "<!doctype html><title>dry run artifact</title>",
+    )?;
+
+    let artifact_path =
+        build_capsule_artifact(&ato, &build_dir, "test-dry-run-artifact", &home_dir)?;
+    let Some((_guard, base_url)) = start_local_registry_or_skip(
+        &ato,
+        &data_dir,
+        "e2e_publish_dry_run_artifact_reports_install_and_dry_run",
+    )?
+    else {
+        return Ok(());
+    };
+
+    let output = run_ato_with_home(
+        &ato,
+        &[
+            "publish",
+            "--dry-run",
+            "--json",
+            "--registry",
+            &base_url,
+            "--artifact",
+            artifact_path.to_string_lossy().as_ref(),
+            "--scoped-id",
+            "team-x/test-dry-run-artifact",
+        ],
+        &publish_cwd,
+        &home_dir,
+    )?;
+    assert!(
+        output.status.success(),
+        "publish dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("dry-run json parse")?;
+    let phases = value
+        .get("phases")
+        .and_then(|entry| entry.as_array())
+        .context("missing phases payload")?;
+    assert_eq!(phases.len(), 6, "unexpected phases payload: {value}");
+    assert_eq!(phases[2]["status"], "ok");
+    assert_eq!(phases[3]["status"], "ok");
+    assert_eq!(phases[4]["status"], "ok");
+    assert_eq!(phases[5]["status"], "skipped");
+    assert!(value.get("install").is_some(), "missing install result");
+    assert!(value.get("dry_run").is_some(), "missing dry_run result");
 
     Ok(())
 }
