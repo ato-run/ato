@@ -1,4 +1,7 @@
+use std::path::PathBuf;
+
 use anyhow::Result;
+use serde::Serialize;
 
 use crate::application::pipeline::executor::HourglassPhaseRunner;
 use crate::application::pipeline::hourglass::{
@@ -34,6 +37,50 @@ pub(crate) struct PublishPipelineRequest {
 pub(crate) struct PublishPipelinePlan {
     pub(crate) selection: HourglassPhaseSelection,
     pub(crate) warn_legacy_full_publish: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PublishInstallResult {
+    pub(crate) scoped_id: String,
+    pub(crate) version: String,
+    pub(crate) path: PathBuf,
+    pub(crate) content_hash: String,
+    pub(crate) install_kind: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PublishDryRunStageResult {
+    pub(crate) kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) diagnosis: Option<crate::publish_official::OfficialPublishDiagnosis>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) registry: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) upload_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reachable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) auth_ready: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) permission_check: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct PublishPipelineState {
+    pub(crate) artifact_path: Option<PathBuf>,
+    pub(crate) verified_artifact: Option<crate::publish_artifact::VerifiedArtifactInfo>,
+    pub(crate) resolved_scoped_id: Option<String>,
+    pub(crate) resolved_version: Option<String>,
+    pub(crate) install_result: Option<PublishInstallResult>,
+    pub(crate) dry_run_result: Option<PublishDryRunStageResult>,
+}
+
+impl PublishPipelineState {
+    pub(crate) fn with_resolved_release(mut self, scoped_id: String, version: String) -> Self {
+        self.resolved_scoped_id = Some(scoped_id);
+        self.resolved_version = Some(version);
+        self
+    }
 }
 
 pub(crate) struct ProducerPipeline {
