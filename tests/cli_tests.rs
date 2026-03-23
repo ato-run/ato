@@ -1405,7 +1405,7 @@ fn test_run_json_missing_manifest_requires_yes() {
 }
 
 #[test]
-fn test_open_alias_is_removed() {
+fn test_legacy_open_subcommand_is_rejected() {
     let mut cmd = Command::cargo_bin("ato").unwrap();
     cmd.args(["open", "."])
         .assert()

@@ -38,7 +38,7 @@ pub(super) fn spawn_external_capsule_child(
     let executable = std::env::current_exe().context("failed to resolve current ato executable")?;
     let mut command = Command::new(executable);
     command
-        .arg("open")
+        .arg("run")
         .arg(manifest_path)
         .arg("--enforcement")
         .arg(&options.enforcement)

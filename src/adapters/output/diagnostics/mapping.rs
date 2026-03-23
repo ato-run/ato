@@ -24,7 +24,7 @@ pub fn detect_command_context(args: &[String]) -> CommandContext {
         }
         return match arg {
             "build" | "pack" => CommandContext::Build,
-            "run" | "open" => CommandContext::Run,
+            "run" => CommandContext::Run,
             "publish" => CommandContext::Publish,
             "source" => CommandContext::Source,
             _ => CommandContext::Other,
