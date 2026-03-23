@@ -6,23 +6,22 @@ pub(crate) mod adapters;
 pub(crate) mod application;
 pub(crate) mod cli;
 pub(crate) mod common;
-pub(crate) mod skills;
 pub(crate) mod utils;
 
-struct SidecarCleanup {
+pub(crate) struct SidecarCleanup {
     sidecar: Option<common::sidecar::SidecarHandle>,
     reporter: std::sync::Arc<reporters::CliReporter>,
 }
 
 impl SidecarCleanup {
-    fn new(
+    pub(crate) fn new(
         sidecar: Option<common::sidecar::SidecarHandle>,
         reporter: std::sync::Arc<reporters::CliReporter>,
     ) -> Self {
         Self { sidecar, reporter }
     }
 
-    fn stop_now(&mut self) {
+    pub(crate) fn stop_now(&mut self) {
         if let Some(sidecar) = self.sidecar.take() {
             if let Err(err) = sidecar.stop() {
                 let _ = futures::executor::block_on(
