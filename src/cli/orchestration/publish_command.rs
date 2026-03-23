@@ -868,7 +868,7 @@ fn execute_publish_pipeline(
         cwd,
         pipeline_preview,
     );
-    futures::executor::block_on(pipeline.run(&mut execution))?;
+    futures::executor::block_on(pipeline.run_until(selection.stop, &mut execution))?;
 
     let phases = execution.phases;
     let state = execution.state;
