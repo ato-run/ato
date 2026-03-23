@@ -1,9 +1,18 @@
 use anyhow::Result;
 
-use crate::application::pipeline::executor::{HourglassPhaseRunner, HourglassPipeline};
+use crate::application::pipeline::executor::HourglassPhaseRunner;
 use crate::application::pipeline::hourglass::{
     HourglassFlow, HourglassPhase, HourglassPhaseSelection,
 };
+
+const PRODUCER_PHASE_SEQUENCE: &[HourglassPhase] = &[
+    HourglassPhase::Prepare,
+    HourglassPhase::Build,
+    HourglassPhase::Verify,
+    HourglassPhase::Install,
+    HourglassPhase::DryRun,
+    HourglassPhase::Publish,
+];
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct PublishPhaseOptions {
@@ -28,21 +37,36 @@ pub(crate) struct PublishPipelinePlan {
 }
 
 pub(crate) struct ProducerPipeline {
-    inner: HourglassPipeline,
+    selection: HourglassPhaseSelection,
 }
 
 impl ProducerPipeline {
     pub(crate) fn new(selection: HourglassPhaseSelection) -> Self {
-        Self {
-            inner: HourglassPipeline::new(selection),
-        }
+        Self { selection }
     }
 
-    pub(crate) async fn run<R>(&self, runner: &mut R) -> Result<()>
+    pub(crate) async fn run_until<R>(
+        &self,
+        stop_point: HourglassPhase,
+        runner: &mut R,
+    ) -> Result<()>
     where
         R: HourglassPhaseRunner,
     {
-        self.inner.run(runner).await
+        for phase in PRODUCER_PHASE_SEQUENCE {
+            if *phase > stop_point {
+                runner.skip_phase(*phase).await?;
+                continue;
+            }
+
+            if self.selection.runs(*phase) {
+                runner.run_phase(*phase).await?;
+            } else {
+                runner.skip_phase(*phase).await?;
+            }
+        }
+
+        Ok(())
     }
 }
 pub(crate) fn build_publish_pipeline_plan(
@@ -168,12 +192,34 @@ pub(crate) fn should_warn_legacy_full_publish(
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
+    use async_trait::async_trait;
+
     use super::{
         build_publish_pipeline_plan, select_publish_dry_run_phases, select_publish_phases,
-        should_warn_legacy_full_publish, validate_publish_phase_options, PublishPhaseOptions,
-        PublishPipelineRequest,
+        should_warn_legacy_full_publish, validate_publish_phase_options, ProducerPipeline,
+        PublishPhaseOptions, PublishPipelineRequest,
     };
+    use crate::application::pipeline::executor::HourglassPhaseRunner;
     use crate::application::pipeline::hourglass::HourglassPhase;
+
+    #[derive(Default)]
+    struct Recorder {
+        entries: Vec<(HourglassPhase, &'static str)>,
+    }
+
+    #[async_trait(?Send)]
+    impl HourglassPhaseRunner for Recorder {
+        async fn run_phase(&mut self, phase: HourglassPhase) -> Result<()> {
+            self.entries.push((phase, "run"));
+            Ok(())
+        }
+
+        async fn skip_phase(&mut self, phase: HourglassPhase) -> Result<()> {
+            self.entries.push((phase, "skip"));
+            Ok(())
+        }
+    }
 
     #[test]
     fn private_deploy_runs_install_and_dry_run() {
@@ -249,5 +295,55 @@ mod tests {
         assert_eq!(plan.selection.start, HourglassPhase::Prepare);
         assert_eq!(plan.selection.stop, HourglassPhase::Publish);
         assert!(plan.warn_legacy_full_publish);
+    }
+
+    #[tokio::test]
+    async fn producer_pipeline_runs_publish_phases_in_publish_order() {
+        let pipeline = ProducerPipeline::new(select_publish_phases(
+            false, false, true, false, false, false,
+        ));
+        let mut recorder = Recorder::default();
+
+        pipeline
+            .run_until(HourglassPhase::Publish, &mut recorder)
+            .await
+            .expect("run pipeline");
+
+        assert_eq!(
+            recorder.entries,
+            vec![
+                (HourglassPhase::Prepare, "run"),
+                (HourglassPhase::Build, "run"),
+                (HourglassPhase::Verify, "run"),
+                (HourglassPhase::Install, "run"),
+                (HourglassPhase::DryRun, "run"),
+                (HourglassPhase::Publish, "run"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn producer_pipeline_run_until_skips_after_stop_point() {
+        let pipeline = ProducerPipeline::new(select_publish_phases(
+            false, false, true, false, false, false,
+        ));
+        let mut recorder = Recorder::default();
+
+        pipeline
+            .run_until(HourglassPhase::Verify, &mut recorder)
+            .await
+            .expect("run pipeline until verify");
+
+        assert_eq!(
+            recorder.entries,
+            vec![
+                (HourglassPhase::Prepare, "run"),
+                (HourglassPhase::Build, "run"),
+                (HourglassPhase::Verify, "run"),
+                (HourglassPhase::Install, "run"),
+                (HourglassPhase::DryRun, "skip"),
+                (HourglassPhase::Publish, "skip"),
+            ]
+        );
     }
 }
