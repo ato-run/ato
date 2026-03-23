@@ -1,3 +1,6 @@
+pub(crate) mod install;
+pub(crate) mod publish;
+
 use std::path::Path;
 use std::sync::Arc;
 

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use cliclack::ProgressBar;
 use ctrlc;
 use goblin::elf::dynamic::DT_VERNEED;
@@ -18,29 +19,25 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::debug;
 
-use crate::executors::source::ExecuteMode;
-use crate::executors::target_runner::{self, TargetLaunchOptions};
+use crate::application::pipeline::consumer::ConsumerRunPipeline;
+use crate::application::pipeline::executor::HourglassPhaseRunner;
+use crate::application::pipeline::phases::run as run_phase;
+use crate::application::ports::OutputPort;
+use crate::orchestration::hourglass;
+use crate::orchestration::hourglass::{HourglassPhase, HourglassPhaseState};
 use crate::preview;
+#[cfg(test)]
 use crate::registry::store::RegistryStore;
 use crate::reporters::CliReporter;
 use crate::runtime::manager as runtime_manager;
 use crate::runtime::overrides as runtime_overrides;
-use crate::runtime::provisioning::{self as provisioner, AutoProvisioningOptions};
 use crate::runtime::tree as runtime_tree;
-use crate::state::{
-    ensure_registered_state_binding, ensure_registered_state_binding_in_store,
-    parse_state_reference, resolve_registered_state_reference,
-    resolve_registered_state_reference_in_store,
-};
 use capsule_core::execution_plan::error::AtoExecutionError;
+#[cfg(test)]
 use capsule_core::execution_plan::guard::ExecutorKind;
 use capsule_core::lifecycle::LifecycleEvent;
-use capsule_core::lockfile::{
-    lockfile_output_path, manifest_external_capsule_dependencies, parse_lockfile_text,
-    resolve_existing_lockfile_path, verify_lockfile_external_dependencies, CAPSULE_LOCK_FILE_NAME,
-    LEGACY_CAPSULE_LOCK_FILE_NAME,
-};
-use capsule_core::types::{CapsuleManifest, CapsuleType, StateDurability};
+use capsule_core::lockfile::{CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME};
+use capsule_core::types::CapsuleManifest;
 use capsule_core::{router, CapsuleReporter};
 
 mod background;
@@ -48,11 +45,14 @@ mod preflight;
 mod watch;
 
 use background::*;
-pub(crate) use preflight::preflight_native_sandbox;
+#[cfg(test)]
 use preflight::*;
+pub(crate) use preflight::{preflight_native_sandbox, run_v03_lifecycle_steps};
 
 const BACKGROUND_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const BACKGROUND_READY_WAIT_TIMEOUT_ENV: &str = "ATO_BACKGROUND_READY_WAIT_TIMEOUT_SECS";
+
+type RunPipelineState = run_phase::RunPipelineState;
 
 pub struct OpenArgs {
     pub target: PathBuf,
@@ -65,6 +65,8 @@ pub struct OpenArgs {
     pub dangerously_skip_permissions: bool,
     pub compatibility_fallback: Option<String>,
     pub assume_yes: bool,
+    pub agent_mode: crate::RunAgentMode,
+    pub agent_local_root: Option<PathBuf>,
     pub state_bindings: Vec<String>,
     pub inject_bindings: Vec<String>,
     pub reporter: Arc<CliReporter>,
@@ -114,6 +116,8 @@ async fn execute_capsule_file(args: &OpenArgs, capsule_path: &PathBuf) -> Result
             dangerously_skip_permissions: args.dangerously_skip_permissions,
             compatibility_fallback: args.compatibility_fallback.clone(),
             assume_yes: args.assume_yes,
+            agent_mode: args.agent_mode,
+            agent_local_root: args.agent_local_root.clone(),
             state_bindings: args.state_bindings.clone(),
             inject_bindings: args.inject_bindings.clone(),
             reporter: args.reporter.clone(),
@@ -214,6 +218,8 @@ async fn execute_capsule_file(args: &OpenArgs, capsule_path: &PathBuf) -> Result
         dangerously_skip_permissions: args.dangerously_skip_permissions,
         compatibility_fallback: args.compatibility_fallback.clone(),
         assume_yes: args.assume_yes,
+        agent_mode: args.agent_mode,
+        agent_local_root: args.agent_local_root.clone(),
         state_bindings: args.state_bindings.clone(),
         inject_bindings: args.inject_bindings.clone(),
         reporter: args.reporter.clone(),
@@ -387,625 +393,287 @@ fn is_hidden(file_name: &std::ffi::OsString) -> bool {
     bytes.first() == Some(&b'.') && bytes.len() > 1
 }
 
-async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
-    let manifest_path = if args.target.is_dir() {
-        args.target.join("capsule.toml")
-    } else {
-        args.target.clone()
-    };
-    let preview_session = preview::load_preview_session_for_manifest(&manifest_path)?;
-    let preview_mode = args.preview_mode || preview_session.is_some();
-    let use_progressive_ui =
-        crate::progressive_ui::can_use_progressive_ui(false) && !args.background;
-    let source_label = preview_session
-        .as_ref()
-        .map(|session| session.target_reference.clone())
-        .unwrap_or_else(|| manifest_path.display().to_string());
-
-    if use_progressive_ui {
-        crate::progressive_ui::show_run_intro(&source_label)?;
+fn build_consumer_run_request(args: &OpenArgs) -> run_phase::ConsumerRunRequest {
+    run_phase::ConsumerRunRequest {
+        target: args.target.clone(),
+        target_label: args.target_label.clone(),
+        background: args.background,
+        nacelle: args.nacelle.clone(),
+        enforcement: args.enforcement.clone(),
+        sandbox_mode: args.sandbox_mode,
+        dangerously_skip_permissions: args.dangerously_skip_permissions,
+        compatibility_fallback: args.compatibility_fallback.clone(),
+        assume_yes: args.assume_yes,
+        agent_mode: args.agent_mode,
+        agent_local_root: args.agent_local_root.clone(),
+        state_bindings: args.state_bindings.clone(),
+        inject_bindings: args.inject_bindings.clone(),
+        reporter: args.reporter.clone(),
+        preview_mode: args.preview_mode,
     }
-
-    let manifest = if preview_mode {
-        capsule_core::manifest::load_manifest_with_validation_mode(
-            &manifest_path,
-            capsule_core::types::ValidationMode::Preview,
-        )?
-        .model
-    } else {
-        CapsuleManifest::load_from_file(&manifest_path)?
-    };
-    if manifest.schema_version.trim() == "0.3" && manifest.capsule_type == CapsuleType::Library {
-        anyhow::bail!("schema_version=0.3 type=library package cannot be started with `ato run`");
-    }
-    let state_source_overrides = resolve_state_source_overrides(&manifest, &args.state_bindings)?;
-    let decision = capsule_core::router::route_manifest_with_state_overrides_and_validation_mode(
-        &manifest_path,
-        router::ExecutionProfile::Dev,
-        args.target_label.as_deref(),
-        state_source_overrides,
-        if preview_mode {
-            capsule_core::types::ValidationMode::Preview
-        } else {
-            capsule_core::types::ValidationMode::Strict
-        },
-    )?;
-    if decision
-        .plan
-        .execution_package_type()
-        .is_some_and(|value| value.eq_ignore_ascii_case("library"))
-    {
-        anyhow::bail!(
-            "schema_version=0.3 type=library package '{}' cannot be started with `ato run`",
-            decision.plan.selected_target_label()
-        );
-    }
-    let external_dependencies = manifest_external_capsule_dependencies(&decision.plan.manifest)?;
-    let mut external_capsules = None;
-    if !external_dependencies.is_empty() {
-        if args.background {
-            anyhow::bail!("external capsule dependencies do not support --background yet");
-        }
-        let lockfile_path = manifest_path
-            .parent()
-            .and_then(resolve_existing_lockfile_path)
-            .ok_or_else(|| {
-                AtoExecutionError::lock_incomplete(
-                    "external capsule dependencies require capsule.lock.json",
-                    Some(CAPSULE_LOCK_FILE_NAME),
-                )
-            })?;
-        let raw = std::fs::read_to_string(&lockfile_path)
-            .with_context(|| format!("Failed to read {}", lockfile_path.display()))?;
-        let lockfile = parse_lockfile_text(&raw, &lockfile_path)?;
-        verify_lockfile_external_dependencies(&decision.plan.manifest, &lockfile)?;
-        external_capsules = Some(
-            crate::external_capsule::start_external_capsules(
-                &decision.plan,
-                &lockfile,
-                &args.inject_bindings,
-                args.reporter.clone(),
-                &crate::external_capsule::ExternalCapsuleOptions {
-                    enforcement: args.enforcement.clone(),
-                    sandbox_mode: args.sandbox_mode,
-                    dangerously_skip_permissions: args.dangerously_skip_permissions,
-                    assume_yes: args.assume_yes,
-                },
-            )
-            .await?,
-        );
-    }
-    let injected_data =
-        crate::data_injection::resolve_and_record(&decision.plan, &args.inject_bindings).await?;
-    let mut merged_injected_env = injected_data.env;
-    if let Some(external_capsules) = external_capsules.as_ref() {
-        merged_injected_env.extend(external_capsules.caller_env().clone());
-    }
-    let launch_ctx = target_runner::resolve_launch_context(&decision.plan, &args.reporter)
-        .await?
-        .with_injected_env(merged_injected_env)
-        .with_injected_mounts(injected_data.mounts);
-
-    let mut decision = decision;
-    let mut launch_ctx = launch_ctx;
-
-    let provisioning_outcome = provisioner::run_auto_provisioning_phase(
-        &decision.plan,
-        &launch_ctx,
-        args.reporter.clone(),
-        &AutoProvisioningOptions {
-            preview_mode,
-            background: args.background,
-        },
-    )
-    .await?;
-    if use_progressive_ui {
-        if let Some(audit_reporter) =
-            provisioner::AuditReporter::from_outcome(&provisioning_outcome)
-        {
-            let body = audit_reporter.body();
-            if !body.is_empty() {
-                crate::progressive_ui::show_note(audit_reporter.title(), body)?;
-            }
-        }
-    }
-    launch_ctx = launch_ctx
-        .with_injected_env(provisioning_outcome.additional_env)
-        .with_injected_mounts(provisioning_outcome.additional_mounts);
-
-    if let Some(shadow_workspace) = provisioning_outcome.shadow_workspace.as_ref() {
-        debug!(
-            issue_count = provisioning_outcome.plan.issues.len(),
-            action_count = provisioning_outcome.plan.actions.len(),
-            shadow_root = %shadow_workspace.root_dir.display(),
-            audit_path = %shadow_workspace.audit_path.display(),
-            shadow_manifest = shadow_workspace.manifest_path.as_ref().map(|path| path.display().to_string()),
-            "Auto-provisioning shadow workspace prepared"
-        );
-
-        if let Some(shadow_manifest_path) = shadow_workspace.manifest_path.as_ref() {
-            if use_progressive_ui {
-                crate::progressive_ui::show_step(
-                    "Auto-provisioning: rerouting execution through the shadow workspace",
-                )?;
-            }
-            (decision, launch_ctx) = reroute_auto_provisioned_execution(
-                decision,
-                launch_ctx,
-                args.reporter.clone(),
-                preview_mode,
-                shadow_manifest_path,
-            )
-            .await?;
-        }
-    }
-
-    if decision.plan.is_orchestration_mode() {
-        if args.background {
-            anyhow::bail!("--background is not supported for orchestration mode");
-        }
-
-        let exit = crate::executors::orchestrator::execute(
-            &decision.plan,
-            args.reporter.clone(),
-            &launch_ctx,
-            crate::executors::orchestrator::OrchestratorOptions {
-                enforcement: args.enforcement.clone(),
-                sandbox_mode: args.sandbox_mode,
-                dangerously_skip_permissions: args.dangerously_skip_permissions,
-                assume_yes: args.assume_yes,
-                nacelle: args.nacelle.clone(),
-            },
-        )
-        .await?;
-        if exit != 0 {
-            if let Some(external_capsules) = external_capsules.as_mut() {
-                external_capsules.shutdown_now();
-            }
-            std::process::exit(exit);
-        }
-        return Ok(());
-    }
-
-    if matches!(decision.kind, capsule_core::router::RuntimeKind::Oci) {
-        if args.background {
-            anyhow::bail!("--background is not supported for runtime=oci");
-        }
-
-        target_runner::preflight_required_environment_variables(&decision.plan, &launch_ctx)?;
-        let exit =
-            crate::executors::oci::execute(&decision.plan, args.reporter.clone(), &launch_ctx)
-                .await?;
-        if exit != 0 {
-            if let Some(external_capsules) = external_capsules.as_mut() {
-                external_capsules.shutdown_now();
-            }
-            std::process::exit(exit);
-        }
-        return Ok(());
-    }
-
-    let prepared = target_runner::prepare_target_execution(
-        &decision.plan,
-        launch_ctx.clone(),
-        &TargetLaunchOptions {
-            enforcement: args.enforcement.clone(),
-            sandbox_mode: args.sandbox_mode,
-            dangerously_skip_permissions: args.dangerously_skip_permissions,
-            assume_yes: args.assume_yes,
-            preview_mode,
-            defer_consent: true,
-        },
-    )?;
-    let execution_plan = prepared.execution_plan;
-    let decision = prepared.runtime_decision;
-    let tier = prepared.tier;
-    let guard_result = prepared.guard_result;
-    let launch_ctx = prepared.launch_ctx;
-
-    if use_progressive_ui {
-        if let Some(preview_session) = preview_session.as_ref() {
-            crate::progressive_ui::render_preview_plan(preview_session)?;
-            crate::progressive_ui::render_promotion_summary(
-                &preview_session.derived_plan.promotion_eligibility,
-            )?;
-        }
-    }
-
-    run_v03_lifecycle_steps(&decision.plan, &args.reporter, &launch_ctx).await?;
-
-    debug!(
-        runtime = execution_plan.target.runtime.as_str(),
-        driver = execution_plan.target.driver.as_str(),
-        ?tier,
-        executor = ?guard_result.executor_kind,
-        requires_sandbox_opt_in = guard_result.requires_sandbox_opt_in,
-        dangerously_skip_permissions = args.dangerously_skip_permissions,
-        "ExecutionPlan resolved"
-    );
-
-    let sidecar = match crate::common::sidecar::maybe_start_sidecar() {
-        Ok(Some(sidecar)) => {
-            debug!("Sidecar started");
-            Some(sidecar)
-        }
-        Ok(None) => {
-            debug!("Sidecar not available (no TSNET env)");
-            None
-        }
-        Err(err) => {
-            debug!(error = %err, "Sidecar start failed");
-            None
-        }
-    };
-
-    let mut sidecar_cleanup = crate::SidecarCleanup::new(sidecar, args.reporter.clone());
-
-    let mode = if args.background {
-        ExecuteMode::Background
-    } else {
-        ExecuteMode::Foreground
-    };
-
-    let run_scoped_id = runtime_overrides::scoped_id_override();
-    if args.background {
-        if let Some(scoped_id) = run_scoped_id.as_deref() {
-            cleanup_existing_scoped_processes_before_run(scoped_id, &args.reporter).await?;
-        }
-    }
-
-    if execution_plan.target.runtime == capsule_core::execution_plan::model::ExecutionRuntime::Web {
-        notify_web_endpoint(&decision.plan, &args.reporter).await?;
-    }
-
-    let run_command_uses_specialized_executor = decision
-        .plan
-        .execution_driver()
-        .map(|driver| {
-            matches!(
-                driver.trim().to_ascii_lowercase().as_str(),
-                "deno" | "node" | "python"
-            )
-        })
-        .unwrap_or(false);
-
-    if decision.plan.execution_run_command().is_some() && !run_command_uses_specialized_executor {
-        let mut process = crate::executors::shell::execute(&decision.plan, mode, &launch_ctx)?;
-        if args.background {
-            let pid = process.child.id();
-            let id = format!("capsule-{}", pid);
-            let now = SystemTime::now();
-
-            let info = crate::runtime::process::ProcessInfo {
-                id: id.clone(),
-                name: decision
-                    .plan
-                    .manifest_path
-                    .file_stem()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown")
-                    .to_string(),
-                pid: pid as i32,
-                workload_pid: None,
-                status: crate::runtime::process::ProcessStatus::Ready,
-                runtime: "shell".to_string(),
-                start_time: now,
-                manifest_path: Some(decision.plan.manifest_path.clone()),
-                scoped_id: run_scoped_id.clone(),
-                target_label: Some(decision.plan.selected_target_label().to_string()),
-                requested_port: None,
-                log_path: None,
-                ready_at: Some(now),
-                last_event: Some("spawned".to_string()),
-                last_error: None,
-                exit_code: None,
-            };
-
-            let pm = crate::runtime::process::ProcessManager::new()?;
-            pm.write_pid(&info)?;
-            args.reporter
-                .notify(format!("🚀 Capsule started in background (ID: {})", id))
-                .await?;
-            drop(process.child);
-            sidecar_cleanup.stop_now();
-            return Ok(());
-        }
-
-        let exit_code = crate::executors::source::wait_for_exit(&mut process.child).await?;
-        cleanup_process_artifacts(&process.cleanup_paths);
-        sidecar_cleanup.stop_now();
-        if exit_code != 0 {
-            if let Some(external_capsules) = external_capsules.as_mut() {
-                external_capsules.shutdown_now();
-            }
-            std::process::exit(exit_code);
-        }
-        return Ok(());
-    }
-
-    let compatibility_host_mode = resolve_compatibility_host_mode(
-        guard_result.executor_kind,
-        args.compatibility_fallback.as_deref(),
-    )?;
-    let host_fallback_requested = matches!(compatibility_host_mode, CompatibilityHostMode::Enabled);
-
-    if use_progressive_ui {
-        if host_fallback_requested {
-            crate::progressive_ui::render_host_fallback_warning()?;
-        } else {
-            crate::progressive_ui::render_security_context(
-                guard_result.executor_kind,
-                host_fallback_requested,
-                args.dangerously_skip_permissions,
-                runtime_overrides::override_port(decision.plan.execution_port()),
-            )?;
-        }
-    }
-
-    let consent_already_granted = crate::consent_store::has_consent(&execution_plan)?;
-    if !consent_already_granted {
-        if use_progressive_ui {
-            crate::progressive_ui::render_execution_consent_summary(
-                &crate::consent_store::consent_summary(&execution_plan),
-            )?;
-            let prompt = if host_fallback_requested {
-                "Proceed with this Execution Plan and Host Fallback mode?"
-            } else {
-                "Proceed with this Execution Plan?"
-            };
-            if !crate::progressive_ui::confirm_action(prompt, false)? {
-                crate::progressive_ui::show_cancel("Execution cancelled.")?;
-                return Err(AtoExecutionError::from_ato_error(
-                    capsule_core::AtoError::ExecutionContractInvalid {
-                        message: "ExecutionPlan consent rejected by user".to_string(),
-                        hint: Some(
-                            "Execution Plan の要約を確認し、許可する場合のみ再実行してください。"
-                                .to_string(),
-                        ),
-                        field: Some("execution_plan.consent".to_string()),
-                        service: None,
-                    },
-                )
-                .into());
-            }
-            crate::consent_store::record_consent(&execution_plan)?;
-        } else {
-            crate::consent_store::require_consent(&execution_plan, args.assume_yes)?;
-        }
-    } else if host_fallback_requested {
-        if use_progressive_ui {
-            if args.assume_yes {
-                crate::progressive_ui::show_warning(
-                    "Proceeding with Host Fallback mode (--yes specified)",
-                )?;
-            } else if !crate::progressive_ui::confirm_action(
-                "Proceed with Host Fallback mode?",
-                false,
-            )? {
-                crate::progressive_ui::show_cancel("Execution cancelled.")?;
-                return Ok(());
-            }
-        } else if !args.assume_yes {
-            anyhow::bail!(
-                "Host Fallback mode requires interactive confirmation. Re-run with --yes in non-interactive environments."
-            );
-        }
-    } else if use_progressive_ui
-        && preview_mode
-        && !args.assume_yes
-        && !crate::progressive_ui::confirm_action(
-            "Proceed with Preview Run? (Ephemeral Sandbox)",
-            true,
-        )?
-    {
-        crate::progressive_ui::show_cancel("Preview cancelled.")?;
-        return Ok(());
-    }
-
-    match guard_result.executor_kind {
-        ExecutorKind::Native => {
-            let host_execution = args.dangerously_skip_permissions || host_fallback_requested;
-            let process = if host_execution {
-                crate::executors::source::execute_host(
-                    &decision.plan,
-                    args.reporter.clone(),
-                    mode,
-                    &launch_ctx,
-                )?
-            } else {
-                let nacelle =
-                    preflight_native_sandbox(args.nacelle.clone(), &decision.plan, &args.reporter)?;
-                crate::executors::source::execute(
-                    &decision.plan,
-                    Some(nacelle),
-                    args.reporter.clone(),
-                    &args.enforcement,
-                    mode,
-                    &launch_ctx,
-                )?
-            };
-
-            if args.background {
-                let runtime = process_runtime_label(
-                    &decision.plan,
-                    args.dangerously_skip_permissions,
-                    compatibility_host_mode,
-                );
-                let ready_without_events = host_execution && process.event_rx.is_none();
-                complete_background_source_process(
-                    process,
-                    &decision.plan,
-                    runtime,
-                    run_scoped_id.clone(),
-                    ready_without_events,
-                    compatibility_host_mode,
-                    &args.reporter,
-                )
-                .await?;
-                sidecar_cleanup.stop_now();
-                return Ok(());
-            }
-
-            let exit_code = complete_foreground_source_process(
-                process,
-                args.reporter.clone(),
-                !host_execution,
-                launch_ctx
-                    .socket_paths()
-                    .map(|paths| !paths.is_empty())
-                    .unwrap_or(false),
-                use_progressive_ui,
-            )
-            .await?;
-            sidecar_cleanup.stop_now();
-
-            if exit_code != 0 {
-                if let Some(external_capsules) = external_capsules.as_mut() {
-                    external_capsules.shutdown_now();
-                }
-                std::process::exit(exit_code);
-            }
-        }
-        ExecutorKind::NodeCompat if host_fallback_requested => {
-            let process = crate::executors::source::execute_host(
-                &decision.plan,
-                args.reporter.clone(),
-                mode,
-                &launch_ctx,
-            )?;
-
-            if args.background {
-                let runtime = process_runtime_label(&decision.plan, false, compatibility_host_mode);
-                let ready_without_events = process.event_rx.is_none();
-                complete_background_source_process(
-                    process,
-                    &decision.plan,
-                    runtime,
-                    run_scoped_id.clone(),
-                    ready_without_events,
-                    compatibility_host_mode,
-                    &args.reporter,
-                )
-                .await?;
-                sidecar_cleanup.stop_now();
-                return Ok(());
-            }
-
-            let exit_code = complete_foreground_source_process(
-                process,
-                args.reporter.clone(),
-                false,
-                launch_ctx
-                    .socket_paths()
-                    .map(|paths| !paths.is_empty())
-                    .unwrap_or(false),
-                use_progressive_ui,
-            )
-            .await?;
-            sidecar_cleanup.stop_now();
-
-            if exit_code != 0 {
-                if let Some(external_capsules) = external_capsules.as_mut() {
-                    external_capsules.shutdown_now();
-                }
-                std::process::exit(exit_code);
-            }
-        }
-        ExecutorKind::Wasm => {
-            let exit = crate::executors::wasm::execute(
-                &decision.plan,
-                args.reporter.clone(),
-                &launch_ctx,
-            )?;
-            sidecar_cleanup.stop_now();
-            if exit != 0 {
-                if let Some(external_capsules) = external_capsules.as_mut() {
-                    external_capsules.shutdown_now();
-                }
-                std::process::exit(exit);
-            }
-        }
-        ExecutorKind::WebStatic => {
-            if args.background {
-                let child = crate::executors::open_web::spawn_background(&decision.plan)?;
-                let pid = child.id();
-                let id = format!("capsule-{}", pid);
-
-                let info = crate::runtime::process::ProcessInfo {
-                    id: id.clone(),
-                    name: decision
-                        .plan
-                        .manifest_path
-                        .file_stem()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    pid: pid as i32,
-                    workload_pid: None,
-                    status: crate::runtime::process::ProcessStatus::Ready,
-                    runtime: "web-static".to_string(),
-                    start_time: std::time::SystemTime::now(),
-                    manifest_path: Some(decision.plan.manifest_path.clone()),
-                    scoped_id: run_scoped_id.clone(),
-                    target_label: Some(decision.plan.selected_target_label().to_string()),
-                    requested_port: None,
-                    log_path: None,
-                    ready_at: Some(std::time::SystemTime::now()),
-                    last_event: Some("spawned".to_string()),
-                    last_error: None,
-                    exit_code: None,
-                };
-
-                let pm = crate::runtime::process::ProcessManager::new()?;
-                pm.write_pid(&info)?;
-
-                args.reporter
-                    .notify(format!("🚀 Capsule started in background (ID: {})", id))
-                    .await?;
-
-                drop(child);
-                sidecar_cleanup.stop_now();
-                return Ok(());
-            }
-
-            crate::executors::open_web::execute(&decision.plan, args.reporter.clone())?;
-            sidecar_cleanup.stop_now();
-        }
-        ExecutorKind::Deno => {
-            let exit = crate::executors::deno::execute(
-                &decision.plan,
-                &execution_plan,
-                &launch_ctx,
-                args.dangerously_skip_permissions,
-            )?;
-            sidecar_cleanup.stop_now();
-            if exit != 0 {
-                if let Some(external_capsules) = external_capsules.as_mut() {
-                    external_capsules.shutdown_now();
-                }
-                std::process::exit(exit);
-            }
-        }
-        ExecutorKind::NodeCompat => {
-            let exit = crate::executors::node_compat::execute(
-                &decision.plan,
-                &execution_plan,
-                &launch_ctx,
-                args.dangerously_skip_permissions,
-            )?;
-            sidecar_cleanup.stop_now();
-            if exit != 0 {
-                if let Some(external_capsules) = external_capsules.as_mut() {
-                    external_capsules.shutdown_now();
-                }
-                std::process::exit(exit);
-            }
-        }
-    }
-
-    Ok(())
 }
 
+struct OpenRunProgress<'a> {
+    args: &'a OpenArgs,
+}
+
+#[derive(Default)]
+struct OpenRunExecuteHooks;
+
+#[async_trait(?Send)]
+impl run_phase::ConsumerRunExecuteHooks for OpenRunExecuteHooks {
+    fn preflight_native_sandbox(
+        &self,
+        nacelle_override: Option<PathBuf>,
+        plan: &capsule_core::router::ManifestData,
+        reporter: &Arc<CliReporter>,
+    ) -> Result<PathBuf> {
+        preflight_native_sandbox(nacelle_override, plan, reporter)
+    }
+
+    async fn complete_background_source_process(
+        &self,
+        process: crate::executors::source::CapsuleProcess,
+        plan: &capsule_core::router::ManifestData,
+        runtime: String,
+        scoped_id: Option<String>,
+        ready_without_events: bool,
+        compatibility_host_mode: CompatibilityHostMode,
+        reporter: &Arc<CliReporter>,
+    ) -> Result<()> {
+        complete_background_source_process(
+            process,
+            plan,
+            runtime,
+            scoped_id,
+            ready_without_events,
+            compatibility_host_mode,
+            reporter,
+        )
+        .await
+    }
+
+    async fn complete_foreground_source_process(
+        &self,
+        process: crate::executors::source::CapsuleProcess,
+        reporter: Arc<CliReporter>,
+        sandbox_initialized: bool,
+        ipc_socket_mapped: bool,
+        use_progressive_ui: bool,
+    ) -> Result<i32> {
+        complete_foreground_source_process(
+            process,
+            reporter,
+            sandbox_initialized,
+            ipc_socket_mapped,
+            use_progressive_ui,
+        )
+        .await
+    }
+    async fn cleanup_existing_scoped_processes_before_run(
+        &self,
+        scoped_id: &str,
+        reporter: &Arc<CliReporter>,
+    ) -> Result<()> {
+        cleanup_existing_scoped_processes_before_run(scoped_id, reporter).await
+    }
+
+    async fn notify_web_endpoint(
+        &self,
+        plan: &capsule_core::router::ManifestData,
+        reporter: &Arc<CliReporter>,
+    ) -> Result<()> {
+        notify_web_endpoint(plan, reporter).await
+    }
+
+    fn process_runtime_label(
+        &self,
+        plan: &capsule_core::router::ManifestData,
+        dangerous_skip_permissions: bool,
+        compatibility_host_mode: CompatibilityHostMode,
+    ) -> String {
+        process_runtime_label(plan, dangerous_skip_permissions, compatibility_host_mode)
+    }
+}
+
+impl run_phase::ConsumerRunProgress for OpenRunProgress<'_> {
+    fn start(&self, phase: HourglassPhase) {
+        emit_run_phase_start(self.args, phase);
+    }
+
+    fn ok(&self, phase: HourglassPhase, detail: &str) {
+        emit_run_phase_ok(self.args, phase, detail);
+    }
+
+    fn skip(&self, phase: HourglassPhase, detail: &str) {
+        emit_run_phase_skip(self.args, phase, detail);
+    }
+}
+
+struct ConsumerRunPhaseRunner<'a> {
+    args: &'a OpenArgs,
+    state: Option<RunPipelineState>,
+}
+
+impl ConsumerRunPhaseRunner<'_> {
+    fn take_state(&mut self, phase: HourglassPhase) -> Result<RunPipelineState> {
+        self.state.take().with_context(|| {
+            format!(
+                "run pipeline phase {} requires the previous phase state",
+                phase.as_str()
+            )
+        })
+    }
+}
+
+#[async_trait(?Send)]
+impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
+    async fn run_phase(&mut self, phase: HourglassPhase) -> Result<()> {
+        match phase {
+            HourglassPhase::Prepare => {
+                let state = run_prepare_phase(self.args).await.map_err(|err| {
+                    emit_run_phase_failure(self.args, HourglassPhase::Prepare, &err);
+                    err
+                })?;
+                self.state = Some(state);
+                Ok(())
+            }
+            HourglassPhase::Build => {
+                let input = self.take_state(HourglassPhase::Build)?;
+                let state = run_build_phase(self.args, input).await.map_err(|err| {
+                    emit_run_phase_failure(self.args, HourglassPhase::Build, &err);
+                    err
+                })?;
+                self.state = Some(state);
+                Ok(())
+            }
+            HourglassPhase::Verify => {
+                let input = self.take_state(HourglassPhase::Verify)?;
+                let state = run_verify_phase(self.args, input).await.map_err(|err| {
+                    emit_run_phase_failure(self.args, HourglassPhase::Verify, &err);
+                    err
+                })?;
+                self.state = Some(state);
+                Ok(())
+            }
+            HourglassPhase::DryRun => {
+                let input = self.take_state(HourglassPhase::DryRun)?;
+                let state = run_dry_run_phase(self.args, input).await.map_err(|err| {
+                    emit_run_phase_failure(self.args, HourglassPhase::DryRun, &err);
+                    err
+                })?;
+                self.state = Some(state);
+                Ok(())
+            }
+            HourglassPhase::Execute => {
+                let input = self.take_state(HourglassPhase::Execute)?;
+                run_execute_phase(self.args, input).await.map_err(|err| {
+                    emit_run_phase_failure(self.args, HourglassPhase::Execute, &err);
+                    err
+                })
+            }
+            HourglassPhase::Install | HourglassPhase::Publish => anyhow::bail!(
+                "unsupported run pipeline phase {} in open command",
+                phase.as_str()
+            ),
+        }
+    }
+}
+
+async fn execute_normal_mode(args: OpenArgs) -> Result<()> {
+    let pipeline = ConsumerRunPipeline::standard();
+    let mut runner = ConsumerRunPhaseRunner {
+        args: &args,
+        state: None,
+    };
+
+    pipeline.run(&mut runner).await
+}
+
+fn run_phase_detail(boundary: HourglassPhase) -> &'static str {
+    match boundary {
+        HourglassPhase::Prepare => "manifest and launch context resolution",
+        HourglassPhase::Build => "build and lifecycle hooks",
+        HourglassPhase::Verify => "execution plan verification",
+        HourglassPhase::DryRun => "runtime preflight",
+        HourglassPhase::Execute => "capsule execution",
+        HourglassPhase::Install | HourglassPhase::Publish => {
+            panic!("unsupported run phase {}", boundary.as_str())
+        }
+    }
+}
+
+fn emit_run_phase(
+    args: &OpenArgs,
+    boundary: HourglassPhase,
+    state: HourglassPhaseState,
+    detail: &str,
+) {
+    debug!(
+        phase = boundary.as_str(),
+        state = state.as_str(),
+        "Running run pipeline phase"
+    );
+    hourglass::print_phase_line(args.reporter.is_json(), boundary, state, detail);
+}
+
+fn emit_run_phase_start(args: &OpenArgs, boundary: HourglassPhase) {
+    emit_run_phase(
+        args,
+        boundary,
+        HourglassPhaseState::Run,
+        run_phase_detail(boundary),
+    );
+}
+
+fn emit_run_phase_ok(args: &OpenArgs, boundary: HourglassPhase, detail: &str) {
+    emit_run_phase(args, boundary, HourglassPhaseState::Ok, detail);
+}
+
+fn emit_run_phase_skip(args: &OpenArgs, boundary: HourglassPhase, detail: &str) {
+    emit_run_phase(args, boundary, HourglassPhaseState::Skip, detail);
+}
+
+fn emit_run_phase_failure(args: &OpenArgs, boundary: HourglassPhase, error: &anyhow::Error) {
+    emit_run_phase(
+        args,
+        boundary,
+        HourglassPhaseState::Fail,
+        &error.to_string(),
+    );
+}
+
+async fn run_prepare_phase(args: &OpenArgs) -> Result<RunPipelineState> {
+    let request = build_consumer_run_request(args);
+    let progress = OpenRunProgress { args };
+    run_phase::run_prepare_phase(&request, &progress).await
+}
+
+async fn run_build_phase(args: &OpenArgs, state: RunPipelineState) -> Result<RunPipelineState> {
+    let request = build_consumer_run_request(args);
+    let progress = OpenRunProgress { args };
+    run_phase::run_build_phase(&request, &progress, state).await
+}
+
+async fn run_verify_phase(args: &OpenArgs, state: RunPipelineState) -> Result<RunPipelineState> {
+    let request = build_consumer_run_request(args);
+    let progress = OpenRunProgress { args };
+    run_phase::run_verify_phase(&request, &progress, state).await
+}
+
+async fn run_dry_run_phase(args: &OpenArgs, state: RunPipelineState) -> Result<RunPipelineState> {
+    let request = build_consumer_run_request(args);
+    let progress = OpenRunProgress { args };
+    run_phase::run_dry_run_phase(&request, &progress, state).await
+}
+
+async fn run_execute_phase(args: &OpenArgs, state: RunPipelineState) -> Result<()> {
+    let request = build_consumer_run_request(args);
+    let progress = OpenRunProgress { args };
+    run_phase::run_execute_phase(&request, &progress, state, &OpenRunExecuteHooks).await
+}
+
+#[cfg(test)]
 async fn reroute_auto_provisioned_execution(
     decision: capsule_core::router::RuntimeDecision,
     launch_ctx: crate::executors::launch_context::RuntimeLaunchContext,
@@ -1016,126 +684,30 @@ async fn reroute_auto_provisioned_execution(
     capsule_core::router::RuntimeDecision,
     crate::executors::launch_context::RuntimeLaunchContext,
 )> {
-    let rerouted_decision =
-        capsule_core::router::route_manifest_with_state_overrides_and_validation_mode(
-            shadow_manifest_path,
-            router::ExecutionProfile::Dev,
-            Some(decision.plan.selected_target_label()),
-            decision.plan.state_source_overrides.clone(),
-            if preview_mode {
-                capsule_core::types::ValidationMode::Preview
-            } else {
-                capsule_core::types::ValidationMode::Strict
-            },
-        )?;
-    let rerouted_launch_ctx =
-        target_runner::resolve_launch_context(&rerouted_decision.plan, &reporter)
-            .await?
-            .with_injected_env(launch_ctx.merged_env())
-            .with_injected_mounts(launch_ctx.injected_mounts().to_vec());
-    Ok((rerouted_decision, rerouted_launch_ctx))
+    run_phase::reroute_auto_provisioned_execution(
+        decision,
+        launch_ctx,
+        reporter,
+        preview_mode,
+        shadow_manifest_path,
+    )
+    .await
 }
 
 fn resolve_state_source_overrides(
     manifest: &CapsuleManifest,
     raw_bindings: &[String],
 ) -> Result<std::collections::HashMap<String, String>> {
-    resolve_state_source_overrides_with_store(manifest, raw_bindings, None)
+    run_phase::resolve_state_source_overrides(manifest, raw_bindings)
 }
 
+#[cfg(test)]
 fn resolve_state_source_overrides_with_store(
     manifest: &CapsuleManifest,
     raw_bindings: &[String],
     store: Option<&RegistryStore>,
 ) -> Result<std::collections::HashMap<String, String>> {
-    let mut requested = std::collections::HashMap::new();
-    for raw in raw_bindings {
-        let (state_name, locator) = raw.split_once('=').ok_or_else(|| {
-            anyhow::anyhow!(
-                "invalid --state binding '{}'; expected data=/absolute/path or data=state-...",
-                raw
-            )
-        })?;
-        let state_name = state_name.trim();
-        let locator = locator.trim();
-        if state_name.is_empty() || locator.is_empty() {
-            anyhow::bail!(
-                "invalid --state binding '{}'; expected data=/absolute/path or data=state-...",
-                raw
-            );
-        }
-        if requested
-            .insert(state_name.to_string(), locator.to_string())
-            .is_some()
-        {
-            anyhow::bail!(
-                "state '{}' was bound more than once via --state",
-                state_name
-            );
-        }
-    }
-
-    for state_name in requested.keys() {
-        let requirement = manifest.state.get(state_name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "--state references undeclared manifest state '{}'",
-                state_name
-            )
-        })?;
-        if requirement.durability != StateDurability::Persistent {
-            anyhow::bail!(
-                "--state only supports persistent manifest state; '{}' is {:?}",
-                state_name,
-                requirement.durability
-            );
-        }
-    }
-
-    let persistent_states: Vec<_> = manifest
-        .state
-        .iter()
-        .filter(|(_, requirement)| requirement.durability == StateDurability::Persistent)
-        .collect();
-    if persistent_states.is_empty() {
-        if requested.is_empty() {
-            return Ok(std::collections::HashMap::new());
-        }
-        anyhow::bail!(
-            "--state was provided but the manifest declares no persistent [state] entries"
-        );
-    }
-
-    let mut resolved = std::collections::HashMap::new();
-
-    for (state_name, _) in persistent_states {
-        let locator = requested.get(state_name.as_str()).ok_or_else(|| {
-            anyhow::anyhow!(
-                "persistent state '{}' requires an explicit --state {}=/absolute/path or --state {}=state-... binding",
-                state_name,
-                state_name,
-                state_name
-            )
-        })?;
-        let record = if parse_state_reference(locator).is_some() {
-            match store {
-                Some(store) => resolve_registered_state_reference_in_store(
-                    manifest, state_name, locator, store,
-                )?,
-                None => resolve_registered_state_reference(manifest, state_name, locator)?,
-            }
-        } else {
-            match store {
-                Some(store) => {
-                    ensure_registered_state_binding_in_store(manifest, state_name, locator, store)?
-                }
-                None => ensure_registered_state_binding(manifest, state_name, locator)?,
-            }
-        };
-
-        resolved.insert(state_name.clone(), record.backend_locator);
-    }
-
-    Ok(resolved)
+    run_phase::resolve_state_source_overrides_with_store(manifest, raw_bindings, store)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1151,26 +723,14 @@ enum BackgroundStartupOutcome {
     FailedBeforeReady,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CompatibilityHostMode {
-    Disabled,
-    Enabled,
-}
+type CompatibilityHostMode = run_phase::CompatibilityHostMode;
 
+#[cfg(test)]
 fn resolve_compatibility_host_mode(
     executor_kind: ExecutorKind,
     compatibility_fallback: Option<&str>,
 ) -> Result<CompatibilityHostMode> {
-    match compatibility_fallback {
-        None => Ok(CompatibilityHostMode::Disabled),
-        Some("host") if matches!(executor_kind, ExecutorKind::Native | ExecutorKind::NodeCompat) => {
-            Ok(CompatibilityHostMode::Enabled)
-        }
-        Some("host") => anyhow::bail!(
-            "--compatibility-fallback host is only supported for native and node-compatible source targets"
-        ),
-        Some(other) => anyhow::bail!("unsupported compatibility fallback backend: {other}"),
-    }
+    run_phase::resolve_compatibility_host_mode(executor_kind, compatibility_fallback)
 }
 
 fn execute_watch_mode(args: OpenArgs) -> Result<()> {
@@ -1254,7 +814,7 @@ mod tests {
         preflight_required_environment_variables, process_runtime_label,
         reroute_auto_provisioned_execution, resolve_compatibility_host_mode,
         resolve_python_dependency_lock_path, resolve_state_source_overrides_with_store,
-        CompatibilityHostMode, ForegroundEventMessage,
+        run_phase_detail, CompatibilityHostMode, ForegroundEventMessage,
     };
     use crate::executors::launch_context::{InjectedMount, RuntimeLaunchContext};
     use crate::registry::store::RegistryStore;
@@ -1554,6 +1114,30 @@ run_command = "node server.js"
             );
             assert_eq!(rerouted_ctx.injected_mounts(), std::slice::from_ref(&mount));
         }
+    }
+
+    #[test]
+    fn run_phase_details_match_hourglass_consumer_flow() {
+        assert_eq!(
+            run_phase_detail(super::HourglassPhase::Prepare),
+            "manifest and launch context resolution"
+        );
+        assert_eq!(
+            run_phase_detail(super::HourglassPhase::Build),
+            "build and lifecycle hooks"
+        );
+        assert_eq!(
+            run_phase_detail(super::HourglassPhase::Verify),
+            "execution plan verification"
+        );
+        assert_eq!(
+            run_phase_detail(super::HourglassPhase::DryRun),
+            "runtime preflight"
+        );
+        assert_eq!(
+            run_phase_detail(super::HourglassPhase::Execute),
+            "capsule execution"
+        );
     }
 
     #[test]
