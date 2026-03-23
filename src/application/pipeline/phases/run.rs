@@ -291,7 +291,7 @@ where
 {
     progress.start(HourglassPhase::Build);
 
-    if let Err(error) = crate::commands::open::run_v03_lifecycle_steps(
+    if let Err(error) = crate::commands::run::run_v03_lifecycle_steps(
         &state.decision.plan,
         &request.reporter,
         &state.launch_ctx,
@@ -318,7 +318,7 @@ where
         };
         state.decision = rerouted_decision;
         state.launch_ctx = rerouted_launch_ctx;
-        crate::commands::open::run_v03_lifecycle_steps(
+        crate::commands::run::run_v03_lifecycle_steps(
             &state.decision.plan,
             &request.reporter,
             &state.launch_ctx,
@@ -461,7 +461,7 @@ where
         && !request.dangerously_skip_permissions
         && !host_fallback_requested
     {
-        state.native_nacelle = Some(crate::commands::open::preflight_native_sandbox(
+        state.native_nacelle = Some(crate::commands::run::preflight_native_sandbox(
             request.nacelle.clone(),
             &state.decision.plan,
             &request.reporter,

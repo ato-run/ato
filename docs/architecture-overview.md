@@ -101,7 +101,7 @@ src/cli/commands は比較的単機能なコマンド実装を持ちます。例
 - inspect
 - logs
 - ps
-- open
+- run
 - update
 - validate
 

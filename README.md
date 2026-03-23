@@ -96,7 +96,7 @@ For the current `schema_version = "0.1"` generation, the repo documents and test
 - unproject JSON: `schema_version`, `projection_id`, `metadata_path`, `projected_path`, `removed_projected_path`, `removed_metadata`, `state_before`
 - install JSON: `install_kind`, `launchable`, `local_derivation`, `projection`
   - `install_kind = "NativeRequiresLocalDerivation"` means install succeeded, but the launchable path is the locally derived app bundle, not the stored `.capsule`
-  - `launchable.path` is the path a caller should use to open/run
+  - `launchable.path` is the path a caller should use to run
   - `local_derivation.provenance_path`, `parent_digest`, and `derived_digest` are the stable linkage between fetch/finalize/project/install
   - `projection.metadata_path` is the stable recovery handle for `ato unproject` and for launcher state inspection
 
@@ -179,7 +179,6 @@ Official registry helpers:
 ### Migration Notes
 
 - `ato publish --build` now stops after Verify, not immediately after Build.
-- `ato open` has been removed; use `ato run` and `ato run --watch`.
 - `ato run --skill` and `ato run --from-skill` have been removed.
 
 ## Dock-first Flow (Personal Dock)
@@ -452,7 +451,7 @@ Notes:
 - Unsupported or out-of-policy Node/Python behavior does not auto-fallback; it stops fail-closed.
 - `runtime=web` requires `driver` (`static|node|deno|python`).
 - `public` is deprecated for `runtime=web`.
-- For `runtime=web`, CLI prints the URL and does not auto-open a browser.
+- For `runtime=web`, CLI prints the URL and does not automatically launch a browser.
 
 ## UX Policy (Silent Runner)
 

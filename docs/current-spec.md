@@ -1064,7 +1064,7 @@ Current compatibility and deprecation status:
 - --legacy-full-publish is deprecated and scheduled for removal in the next major release
 - ato.delivery.toml remains accepted as compatibility metadata, not as canonical source of truth
 
-(Removed in recent versions: `open` alias for `run`, and `SKILL.md` execution support.)
+(Removed in recent versions: `SKILL.md` execution support.)
 
 ## 15. Recommended Authoring Patterns
 
