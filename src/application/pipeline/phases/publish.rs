@@ -1,9 +1,38 @@
-use anyhow::Result;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
 
 use crate::application::pipeline::producer::PublishDryRunStageResult;
 use crate::application::ports::publish::{
     DestinationSpec, PublishableArtifact, PublishedLocation, SharedDestinationPort,
 };
+
+pub type PrivatePublishResult = crate::publish_private::PublishPrivateResult;
+pub type PrivatePublishSummary = crate::publish_private::PublishPrivateSummary;
+
+#[derive(Debug, Clone)]
+pub struct PrivatePublishRequest {
+    pub registry_url: String,
+    pub publisher_hint: Option<String>,
+    pub artifact_path: Option<PathBuf>,
+    pub force_large_payload: bool,
+    pub scoped_id: Option<String>,
+    pub allow_existing: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct OfficialPublishRequest<'a> {
+    pub cwd: &'a Path,
+    pub registry_url: &'a str,
+    pub fix: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct OfficialPublishOutcome {
+    pub route: crate::publish_official::PublishRoutePlan,
+    pub fix_result: crate::publish_official::WorkflowFixResult,
+    pub diagnosis: crate::publish_official::OfficialPublishDiagnosis,
+}
 
 #[derive(Debug, Clone)]
 pub struct PublishPhaseRequest {
@@ -25,6 +54,89 @@ impl PublishPhase {
             .publish(&request.artifact, &request.destination)
             .await
     }
+}
+
+pub fn summarize_private_publish(request: &PrivatePublishRequest) -> Result<PrivatePublishSummary> {
+    crate::publish_private::summarize(&crate::publish_private::PublishPrivateArgs {
+        registry_url: request.registry_url.clone(),
+        publisher_hint: request.publisher_hint.clone(),
+        artifact_path: request.artifact_path.clone(),
+        force_large_payload: request.force_large_payload,
+        scoped_id: request.scoped_id.clone(),
+        allow_existing: request.allow_existing,
+    })
+}
+
+pub fn run_private_publish_phase(request: PrivatePublishRequest) -> Result<PrivatePublishResult> {
+    crate::publish_private::execute(crate::publish_private::PublishPrivateArgs {
+        registry_url: request.registry_url,
+        publisher_hint: request.publisher_hint,
+        artifact_path: request.artifact_path,
+        force_large_payload: request.force_large_payload,
+        scoped_id: request.scoped_id,
+        allow_existing: request.allow_existing,
+    })
+}
+
+pub fn run_official_publish_phase(
+    request: &OfficialPublishRequest<'_>,
+) -> Result<OfficialPublishOutcome> {
+    let route = crate::publish_official::build_route_plan(request.registry_url);
+
+    let mut fix_result = crate::publish_official::WorkflowFixResult::default();
+    let mut diagnosis =
+        crate::publish_official::diagnose_official(request.cwd, request.registry_url);
+    if request.fix && diagnosis.needs_workflow_fix {
+        fix_result = crate::publish_official::apply_workflow_fix_once(request.cwd)
+            .with_context(|| "Failed to apply official publish workflow fix")?;
+        diagnosis = crate::publish_official::diagnose_official(request.cwd, request.registry_url);
+    }
+
+    Ok(OfficialPublishOutcome {
+        route,
+        fix_result,
+        diagnosis,
+    })
+}
+
+pub fn official_publish_diagnosis_lines(outcome: &OfficialPublishOutcome) -> Vec<String> {
+    let mut lines = vec![format!(
+        "🔎 official publish route registry={} route={:?}",
+        outcome.route.registry_url, outcome.route.route
+    )];
+    lines.extend(outcome.diagnosis.stages.iter().map(|stage| {
+        let icon = if stage.ok { "✅" } else { "❌" };
+        format!("{} {:<14} {}", icon, stage.key, stage.message)
+    }));
+    if outcome.fix_result.attempted {
+        if outcome.fix_result.applied {
+            let label = if outcome.fix_result.created {
+                "created"
+            } else {
+                "updated"
+            };
+            lines.push(format!("🛠️  workflow {} via --fix", label));
+        } else {
+            lines.push("🛠️  --fix requested, but workflow was already up-to-date".to_string());
+        }
+    }
+    lines
+}
+
+pub fn official_publish_failure_action(outcome: &OfficialPublishOutcome) -> String {
+    crate::publish_official::collect_issue_actions(&outcome.diagnosis.issues)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "ato publish --deploy --registry https://api.ato.run".to_string())
+}
+
+pub fn official_publish_issue_lines(outcome: &OfficialPublishOutcome) -> Vec<String> {
+    outcome
+        .diagnosis
+        .issues
+        .iter()
+        .map(|issue| format!(" - [{}] {}", issue.stage, issue.message))
+        .collect()
 }
 
 pub struct DirectPublishDryRunRequest<'a> {

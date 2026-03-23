@@ -159,9 +159,9 @@ struct PublishCommandExecution<'a> {
     phases: Vec<PublishPhaseResult>,
     cwd: PathBuf,
     state: PublishPipelineState,
-    pipeline_preview: Option<crate::publish_private::PublishPrivateSummary>,
-    private_result: Option<crate::publish_private::PublishPrivateResult>,
-    official_result: Option<OfficialDeployOutcome>,
+    pipeline_preview: Option<publish_phase::PrivatePublishSummary>,
+    private_result: Option<publish_phase::PrivatePublishResult>,
+    official_result: Option<publish_phase::OfficialPublishOutcome>,
 }
 
 impl<'a> PublishCommandExecution<'a> {
@@ -173,7 +173,7 @@ impl<'a> PublishCommandExecution<'a> {
         is_official: bool,
         phases: Vec<PublishPhaseResult>,
         cwd: PathBuf,
-        pipeline_preview: Option<crate::publish_private::PublishPrivateSummary>,
+        pipeline_preview: Option<publish_phase::PrivatePublishSummary>,
     ) -> Self {
         let state = if let Some(preview) = pipeline_preview.as_ref() {
             PublishPipelineState::default()
@@ -425,10 +425,17 @@ impl<'a> PublishCommandExecution<'a> {
         );
         let started = std::time::Instant::now();
         if self.is_official {
-            let outcome =
-                run_official_deploy(self.resolved_target.registry_url.clone(), self.args.fix)?;
+            let outcome = publish_phase::run_official_publish_phase(
+                &publish_phase::OfficialPublishRequest {
+                    cwd: &self.cwd,
+                    registry_url: &self.resolved_target.registry_url,
+                    fix: self.args.fix,
+                },
+            )?;
             if !self.args.json {
-                print_official_diagnosis(&outcome);
+                for line in publish_phase::official_publish_diagnosis_lines(&outcome) {
+                    println!("{}", line);
+                }
             }
             let dry_run_result = PublishDryRunStageResult {
                 kind: "official_ci_handoff",
@@ -459,17 +466,9 @@ impl<'a> PublishCommandExecution<'a> {
                 return Ok(());
             }
 
-            let actions = crate::publish_official::collect_issue_actions(
-                &self
-                    .official_result
-                    .as_ref()
-                    .expect("official outcome")
-                    .diagnosis
-                    .issues,
+            let fix_line = publish_phase::official_publish_failure_action(
+                self.official_result.as_ref().expect("official outcome"),
             );
-            let fix_line = actions.first().cloned().unwrap_or_else(|| {
-                "ato publish --deploy --registry https://api.ato.run".to_string()
-            });
             phase_mark_failed(
                 phase_mut(&mut self.phases, PublishPhaseBoundary::DryRun),
                 started.elapsed().as_millis() as u64,
@@ -484,17 +483,14 @@ impl<'a> PublishCommandExecution<'a> {
             );
             if !self.args.json {
                 println!("👉 次に打つコマンド: {}", fix_line);
-                if !actions.is_empty() {
+                let issue_lines = publish_phase::official_publish_issue_lines(
+                    self.official_result.as_ref().expect("official outcome"),
+                );
+                if !issue_lines.is_empty() {
                     println!();
                     println!("詳細:");
-                    for issue in &self
-                        .official_result
-                        .as_ref()
-                        .expect("official outcome")
-                        .diagnosis
-                        .issues
-                    {
-                        println!(" - [{}] {}", issue.stage, issue.message);
+                    for line in issue_lines {
+                        println!("{}", line);
                     }
                 }
                 anyhow::bail!("official publish diagnostics failed");
@@ -576,18 +572,21 @@ impl<'a> PublishCommandExecution<'a> {
         );
         let started = std::time::Instant::now();
         if self.is_official {
-            let outcome =
-                run_official_deploy(self.resolved_target.registry_url.clone(), self.args.fix)?;
+            let outcome = publish_phase::run_official_publish_phase(
+                &publish_phase::OfficialPublishRequest {
+                    cwd: &self.cwd,
+                    registry_url: &self.resolved_target.registry_url,
+                    fix: self.args.fix,
+                },
+            )?;
             if !self.args.json {
-                print_official_diagnosis(&outcome);
+                for line in publish_phase::official_publish_diagnosis_lines(&outcome) {
+                    println!("{}", line);
+                }
             }
 
             if !outcome.diagnosis.can_handoff {
-                let actions =
-                    crate::publish_official::collect_issue_actions(&outcome.diagnosis.issues);
-                let fix_line = actions.first().cloned().unwrap_or_else(|| {
-                    "ato publish --deploy --registry https://api.ato.run".to_string()
-                });
+                let fix_line = publish_phase::official_publish_failure_action(&outcome);
                 phase_mark_failed(
                     phase_mut(&mut self.phases, PublishPhaseBoundary::Publish),
                     started.elapsed().as_millis() as u64,
@@ -602,11 +601,12 @@ impl<'a> PublishCommandExecution<'a> {
                 );
                 if !self.args.json {
                     println!("👉 次に打つコマンド: {}", fix_line);
-                    if !actions.is_empty() {
+                    let issue_lines = publish_phase::official_publish_issue_lines(&outcome);
+                    if !issue_lines.is_empty() {
                         println!();
                         println!("詳細:");
-                        for issue in &outcome.diagnosis.issues {
-                            println!(" - [{}] {}", issue.stage, issue.message);
+                        for line in issue_lines {
+                            println!("{}", line);
                         }
                     }
                     anyhow::bail!("official publish diagnostics failed");
@@ -667,7 +667,7 @@ impl<'a> PublishCommandExecution<'a> {
             Some(preview.scoped_id.clone())
         };
         let upload_result =
-            crate::publish_private::execute(crate::publish_private::PublishPrivateArgs {
+            publish_phase::run_private_publish_phase(publish_phase::PrivatePublishRequest {
                 registry_url: self.resolved_target.registry_url.clone(),
                 publisher_hint: self.resolved_target.publisher_handle.clone(),
                 artifact_path: Some(publish_artifact),
@@ -764,13 +764,6 @@ pub(crate) struct ResolvedPublishTarget {
     pub(crate) publisher_handle: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-struct OfficialDeployOutcome {
-    route: crate::publish_official::PublishRoutePlan,
-    fix_result: crate::publish_official::WorkflowFixResult,
-    diagnosis: crate::publish_official::OfficialPublishDiagnosis,
-}
-
 pub(crate) fn execute_publish_command(
     args: PublishCommandArgs,
     reporter: Arc<reporters::CliReporter>,
@@ -814,8 +807,8 @@ fn execute_publish_pipeline(
         || selection.runs_dry_run()
         || (!is_official && selection.runs_publish())
     {
-        Some(crate::publish_private::summarize(
-            &crate::publish_private::PublishPrivateArgs {
+        Some(publish_phase::summarize_private_publish(
+            &publish_phase::PrivatePublishRequest {
                 registry_url: resolved_target.registry_url.clone(),
                 publisher_hint: resolved_target.publisher_handle.clone(),
                 artifact_path: args.artifact.clone(),
@@ -939,47 +932,6 @@ fn execute_publish_pipeline(
     Ok(())
 }
 
-fn run_official_deploy(registry_url: String, fix: bool) -> Result<OfficialDeployOutcome> {
-    let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
-    let route = crate::publish_official::build_route_plan(&registry_url);
-
-    let mut fix_result = crate::publish_official::WorkflowFixResult::default();
-    let mut diagnosis = crate::publish_official::diagnose_official(&cwd, &registry_url);
-    if fix && diagnosis.needs_workflow_fix {
-        fix_result = crate::publish_official::apply_workflow_fix_once(&cwd)?;
-        diagnosis = crate::publish_official::diagnose_official(&cwd, &registry_url);
-    }
-
-    Ok(OfficialDeployOutcome {
-        route,
-        fix_result,
-        diagnosis,
-    })
-}
-
-fn print_official_diagnosis(outcome: &OfficialDeployOutcome) {
-    println!(
-        "🔎 official publish route registry={} route={:?}",
-        outcome.route.registry_url, outcome.route.route
-    );
-    for stage in &outcome.diagnosis.stages {
-        let icon = if stage.ok { "✅" } else { "❌" };
-        println!("{} {:<14} {}", icon, stage.key, stage.message);
-    }
-    if outcome.fix_result.attempted {
-        if outcome.fix_result.applied {
-            let label = if outcome.fix_result.created {
-                "created"
-            } else {
-                "updated"
-            };
-            println!("🛠️  workflow {} via --fix", label);
-        } else {
-            println!("🛠️  --fix requested, but workflow was already up-to-date");
-        }
-    }
-}
-
 pub(crate) fn publish_private_status_message(
     target_mode: PublishTargetMode,
     has_artifact: bool,
@@ -1048,8 +1000,8 @@ fn emit_publish_json_output(
     phases: &[PublishPhaseResult],
     install_result: Option<&PublishInstallResult>,
     dry_run_result: Option<&PublishDryRunStageResult>,
-    private_result: Option<&crate::publish_private::PublishPrivateResult>,
-    official_result: Option<&OfficialDeployOutcome>,
+    private_result: Option<&publish_phase::PrivatePublishResult>,
+    official_result: Option<&publish_phase::OfficialPublishOutcome>,
     top_level_dry_run: bool,
 ) -> Result<()> {
     if let Some(outcome) = official_result {
