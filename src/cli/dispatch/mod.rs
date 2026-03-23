@@ -49,8 +49,6 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
     match command {
         Commands::Run {
             path,
-            skill,
-            from_skill,
             target,
             watch,
             background,
@@ -65,6 +63,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             dangerously_skip_permissions,
             compatibility_fallback,
             yes,
+            agent,
             keep_failed_artifacts,
             allow_unverified,
         } => run_install::execute_run_like_command(run_install::RunLikeCommandArgs {
@@ -83,10 +82,9 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             dangerously_skip_permissions,
             compatibility_fallback,
             yes,
+            agent_mode: agent,
             keep_failed_artifacts,
             allow_unverified,
-            skill,
-            from_skill,
             deprecation_warning: None,
             reporter: reporter.clone(),
         }),

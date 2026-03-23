@@ -89,6 +89,35 @@ entrypoint = "{entrypoint}"
     )
 }
 
+pub fn generate_manual_manifest_stub(name: &str) -> String {
+    format!(
+        r#"# Capsule Manifest - Manual Starter
+# Edit this file before rerunning `ato run`.
+
+schema_version = "0.2"
+name = "{name}"
+version = "0.1.0"
+type = "app"
+default_target = "cli"
+
+[metadata]
+description = "Manual starter manifest. Edit [targets.cli] before running."
+
+[requirements]
+
+[targets.cli]
+runtime = "source"
+entrypoint = "echo"
+cmd = ["Edit capsule.toml before rerunning ato run"]
+
+[storage]
+
+[routing]
+"#,
+        name = toml_escape_string(name),
+    )
+}
+
 pub fn project_info_from_detection(detected: &DetectedProject) -> Result<ProjectInfo> {
     let name = detected.name.clone();
 

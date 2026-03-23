@@ -4,8 +4,6 @@ use std::fs;
 use std::process::Stdio;
 
 use fail_closed_support::*;
-use tempfile::TempDir;
-
 #[test]
 fn non_interactive_missing_consent_denied() {
     let output = run_without_seeded_consent("network-exfil-capsule", &[], &[]);
@@ -25,33 +23,6 @@ fn non_interactive_missing_consent_denied() {
 #[test]
 fn yes_flag_does_not_bypass_missing_consent() {
     let output = run_without_seeded_consent("network-exfil-capsule", &["--yes"], &[]);
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("ATO_ERR_POLICY_VIOLATION") || stderr.contains("E302"),
-        "stderr={stderr}"
-    );
-    assert!(
-        stderr.contains("consent") || stderr.contains("ExecutionPlan consent"),
-        "stderr={stderr}"
-    );
-}
-
-#[test]
-fn from_skill_missing_consent_denied() {
-    let home = TempDir::new().expect("failed to create temporary HOME");
-    let skill_path = fixture_dir("skill-default-deny").join("SKILL.md");
-
-    let output = ato_cmd()
-        .arg("run")
-        .arg("--from-skill")
-        .arg(&skill_path)
-        .env("HOME", home.path())
-        .stderr(Stdio::piped())
-        .stdout(Stdio::piped())
-        .output()
-        .expect("failed to execute ato --from-skill");
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
