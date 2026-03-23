@@ -1,5 +1,11 @@
 use super::*;
 
+#[cfg(test)]
+use crate::executors::target_runner;
+use capsule_core::lockfile::{
+    lockfile_output_path, parse_lockfile_text, resolve_existing_lockfile_path,
+};
+
 pub(crate) fn preflight_native_sandbox(
     nacelle_override: Option<PathBuf>,
     plan: &capsule_core::router::ManifestData,
@@ -122,7 +128,7 @@ pub(super) fn preflight_required_environment_variables(
     )
 }
 
-pub(super) async fn run_v03_lifecycle_steps(
+pub(crate) async fn run_v03_lifecycle_steps(
     plan: &capsule_core::router::ManifestData,
     reporter: &Arc<CliReporter>,
     launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,

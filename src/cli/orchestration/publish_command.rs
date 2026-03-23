@@ -2,9 +2,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use capsule_core::CapsuleReporter;
 use serde::Serialize;
 
+use crate::application::pipeline::executor::HourglassPhaseRunner;
+use crate::application::pipeline::phases::install as install_phase;
+use crate::application::pipeline::producer::{
+    self, ProducerPipeline, PublishPhaseOptions, PublishPipelineRequest,
+};
+use crate::orchestration::hourglass::{
+    self, phase_is_ok, phase_mark_failed, phase_mark_ok, phase_mark_skipped, phase_mut,
+    HourglassFlow, HourglassPhaseState,
+};
 use crate::reporters;
 
 pub(crate) fn execute_publish_ci_command(
@@ -117,61 +127,27 @@ pub(crate) struct PublishCommandArgs {
     pub(crate) json: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct PublishPhaseSelection {
-    pub(crate) start: PublishPhaseBoundary,
-    pub(crate) stop: PublishPhaseBoundary,
-    pub(crate) explicit_filter: bool,
+#[cfg(test)]
+pub(crate) use crate::application::pipeline::producer::select_publish_phases;
+pub(crate) use crate::orchestration::hourglass::HourglassPhase as PublishPhaseBoundary;
+#[cfg(test)]
+pub(crate) fn validate_publish_phase_options(
+    args: &PublishCommandArgs,
+    selection: crate::orchestration::hourglass::HourglassPhaseSelection,
+    is_official: bool,
+) -> Result<()> {
+    producer::validate_publish_phase_options(
+        PublishPhaseOptions {
+            fix: args.fix,
+            legacy_full_publish: args.legacy_full_publish,
+            allow_existing: args.allow_existing,
+        },
+        selection,
+        is_official,
+    )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum PublishPhaseBoundary {
-    Prepare,
-    Build,
-    Verify,
-    Install,
-    DryRun,
-    Publish,
-}
-
-impl PublishPhaseSelection {
-    pub(crate) fn runs_prepare(self) -> bool {
-        self.start <= PublishPhaseBoundary::Prepare && self.stop >= PublishPhaseBoundary::Prepare
-    }
-
-    pub(crate) fn runs_build(self) -> bool {
-        self.start <= PublishPhaseBoundary::Build && self.stop >= PublishPhaseBoundary::Build
-    }
-
-    pub(crate) fn runs_verify(self) -> bool {
-        self.start <= PublishPhaseBoundary::Verify && self.stop >= PublishPhaseBoundary::Verify
-    }
-
-    pub(crate) fn runs_install(self) -> bool {
-        self.start <= PublishPhaseBoundary::Install && self.stop >= PublishPhaseBoundary::Install
-    }
-
-    pub(crate) fn runs_dry_run(self) -> bool {
-        self.start <= PublishPhaseBoundary::DryRun && self.stop >= PublishPhaseBoundary::DryRun
-    }
-
-    pub(crate) fn runs_publish(self) -> bool {
-        self.start <= PublishPhaseBoundary::Publish && self.stop >= PublishPhaseBoundary::Publish
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PublishPhaseResult {
-    name: &'static str,
-    selected: bool,
-    ok: bool,
-    status: &'static str,
-    elapsed_ms: u64,
-    actionable_fix: Option<String>,
-    message: String,
-    result_kind: Option<String>,
-    skipped_reason: Option<String>,
-}
+type PublishPhaseResult = hourglass::HourglassPhaseResult;
 
 #[derive(Debug, Clone, Serialize)]
 struct PublishInstallResult {
@@ -207,6 +183,582 @@ struct PublishPipelineState {
     resolved_version: Option<String>,
     install_result: Option<PublishInstallResult>,
     dry_run_result: Option<PublishDryRunStageResult>,
+}
+
+struct PublishCommandExecution<'a> {
+    args: &'a PublishCommandArgs,
+    reporter: Arc<reporters::CliReporter>,
+    resolved_target: ResolvedPublishTarget,
+    top_level_dry_run: bool,
+    is_official: bool,
+    phases: Vec<PublishPhaseResult>,
+    cwd: PathBuf,
+    state: PublishPipelineState,
+    pipeline_preview: Option<crate::publish_private::PublishPrivateSummary>,
+    private_result: Option<crate::publish_private::PublishPrivateResult>,
+    official_result: Option<OfficialDeployOutcome>,
+}
+
+impl<'a> PublishCommandExecution<'a> {
+    fn new(
+        args: &'a PublishCommandArgs,
+        reporter: Arc<reporters::CliReporter>,
+        resolved_target: ResolvedPublishTarget,
+        top_level_dry_run: bool,
+        is_official: bool,
+        phases: Vec<PublishPhaseResult>,
+        cwd: PathBuf,
+        pipeline_preview: Option<crate::publish_private::PublishPrivateSummary>,
+    ) -> Self {
+        let mut state = PublishPipelineState::default();
+        if let Some(preview) = pipeline_preview.as_ref() {
+            state.resolved_scoped_id = Some(preview.scoped_id.clone());
+            state.resolved_version = Some(preview.version.clone());
+        }
+        Self {
+            args,
+            reporter,
+            resolved_target,
+            top_level_dry_run,
+            is_official,
+            phases,
+            cwd,
+            state,
+            pipeline_preview,
+            private_result: None,
+            official_result: None,
+        }
+    }
+
+    fn mark_not_selected(&mut self, boundary: PublishPhaseBoundary) {
+        phase_mark_skipped(
+            phase_mut(&mut self.phases, boundary),
+            0,
+            format!("{} phase not selected", boundary.as_str()),
+            "not selected".to_string(),
+        );
+        hourglass::print_phase_line(
+            self.args.json,
+            boundary,
+            HourglassPhaseState::Skip,
+            "not selected",
+        );
+    }
+
+    fn run_prepare_phase(&mut self) -> Result<()> {
+        hourglass::print_phase_line(
+            self.args.json,
+            PublishPhaseBoundary::Prepare,
+            HourglassPhaseState::Run,
+            "prepare command detection",
+        );
+        let started = std::time::Instant::now();
+        let prepare_spec = crate::publish_prepare::detect_prepare_command(&self.cwd)?;
+        match prepare_spec {
+            Some(spec) => {
+                let message = format!("running {}", spec.source.as_label());
+                crate::publish_prepare::run_prepare_command(&spec, &self.cwd, self.args.json)
+                    .context("Failed to run publish prepare command")?;
+                phase_mark_ok(
+                    phase_mut(&mut self.phases, PublishPhaseBoundary::Prepare),
+                    started.elapsed().as_millis() as u64,
+                    message.clone(),
+                    None,
+                );
+                hourglass::print_phase_line(
+                    self.args.json,
+                    PublishPhaseBoundary::Prepare,
+                    HourglassPhaseState::Ok,
+                    &message,
+                );
+                Ok(())
+            }
+            None => {
+                let skipped_reason = "no prepare command configured".to_string();
+                if self.args.prepare {
+                    let fix = "capsule.toml に [build.lifecycle].prepare を設定するか package.json scripts[\"capsule:prepare\"] を追加して再実行してください。".to_string();
+                    phase_mark_failed(
+                        phase_mut(&mut self.phases, PublishPhaseBoundary::Prepare),
+                        started.elapsed().as_millis() as u64,
+                        "--prepare was selected but no prepare command was found".to_string(),
+                        Some(fix.clone()),
+                    );
+                    hourglass::print_phase_line(
+                        self.args.json,
+                        PublishPhaseBoundary::Prepare,
+                        HourglassPhaseState::Fail,
+                        "prepare command not found",
+                    );
+                    if !self.args.json {
+                        println!("👉 次に打つコマンド: {}", fix);
+                    }
+                    anyhow::bail!(
+                        "--prepare was selected but no prepare command was found. Set `build.lifecycle.prepare` in capsule.toml or add package.json scripts[\"capsule:prepare\"]."
+                    );
+                }
+                phase_mark_skipped(
+                    phase_mut(&mut self.phases, PublishPhaseBoundary::Prepare),
+                    started.elapsed().as_millis() as u64,
+                    skipped_reason.clone(),
+                    skipped_reason.clone(),
+                );
+                hourglass::print_phase_line(
+                    self.args.json,
+                    PublishPhaseBoundary::Prepare,
+                    HourglassPhaseState::Skip,
+                    &skipped_reason,
+                );
+                Ok(())
+            }
+        }
+    }
+
+    fn run_build_phase(&mut self) -> Result<()> {
+        hourglass::print_phase_line(
+            self.args.json,
+            PublishPhaseBoundary::Build,
+            HourglassPhaseState::Run,
+            "artifact build",
+        );
+        let started = std::time::Instant::now();
+        if self.args.artifact.is_some() {
+            let skipped_reason = "start phase is Verify".to_string();
+            phase_mark_skipped(
+                phase_mut(&mut self.phases, PublishPhaseBoundary::Build),
+                started.elapsed().as_millis() as u64,
+                "build is skipped because artifact input starts at Verify".to_string(),
+                skipped_reason.clone(),
+            );
+            hourglass::print_phase_line(
+                self.args.json,
+                PublishPhaseBoundary::Build,
+                HourglassPhaseState::Skip,
+                &skipped_reason,
+            );
+            return Ok(());
+        }
+
+        let artifact_path = build_capsule_artifact_for_publish(&self.cwd)?;
+        let elapsed = started.elapsed().as_millis() as u64;
+        let message = format!("artifact built: {}", artifact_path.display());
+        phase_mark_ok(
+            phase_mut(&mut self.phases, PublishPhaseBoundary::Build),
+            elapsed,
+            message.clone(),
+            Some("artifact_built".to_string()),
+        );
+        self.state.artifact_path = Some(artifact_path);
+        hourglass::print_phase_line(
+            self.args.json,
+            PublishPhaseBoundary::Build,
+            HourglassPhaseState::Ok,
+            &message,
+        );
+        Ok(())
+    }
+
+    fn run_verify_phase(&mut self) -> Result<()> {
+        hourglass::print_phase_line(
+            self.args.json,
+            PublishPhaseBoundary::Verify,
+            HourglassPhaseState::Run,
+            "artifact verification",
+        );
+        let started = std::time::Instant::now();
+        let artifact_path = if let Some(path) = self
+            .args
+            .artifact
+            .clone()
+            .or_else(|| self.state.artifact_path.clone())
+        {
+            path
+        } else {
+            phase_mark_failed(
+                phase_mut(&mut self.phases, PublishPhaseBoundary::Verify),
+                started.elapsed().as_millis() as u64,
+                "verify phase requires artifact input".to_string(),
+                None,
+            );
+            hourglass::print_phase_line(
+                self.args.json,
+                PublishPhaseBoundary::Verify,
+                HourglassPhaseState::Fail,
+                "artifact input is missing",
+            );
+            anyhow::bail!("verify phase requires an artifact produced earlier in the pipeline");
+        };
+        let verification = crate::publish_artifact::verify_artifact(&artifact_path)?;
+        let message = format!(
+            "artifact verified: {} (sha256={}, size={} bytes)",
+            artifact_path.display(),
+            verification.sha256,
+            verification.size_bytes
+        );
+        phase_mark_ok(
+            phase_mut(&mut self.phases, PublishPhaseBoundary::Verify),
+            started.elapsed().as_millis() as u64,
+            message.clone(),
+            Some("artifact_verified".to_string()),
+        );
+        self.state.artifact_path = Some(artifact_path);
+        self.state.verified_artifact = Some(verification);
+        hourglass::print_phase_line(
+            self.args.json,
+            PublishPhaseBoundary::Verify,
+            HourglassPhaseState::Ok,
+            &message,
+        );
+        Ok(())
+    }
+
+    fn run_install_phase(&mut self) -> Result<()> {
+        hourglass::print_phase_line(
+            self.args.json,
+            PublishPhaseBoundary::Install,
+            HourglassPhaseState::Run,
+            "verified artifact unpack into dry-run sandbox",
+        );
+        let started = std::time::Instant::now();
+        let preview = self
+            .pipeline_preview
+            .as_ref()
+            .context("missing publish pipeline preview for install stage")?;
+        let artifact_path = self
+            .state
+            .artifact_path
+            .as_ref()
+            .context("install phase requires a verified artifact")?;
+        let verification = self
+            .state
+            .verified_artifact
+            .as_ref()
+            .context("install phase requires verified artifact metadata")?;
+        let install_result = run_publish_install_stage(artifact_path, preview, verification)?;
+        let message = format!("unpacked {}", install_result.path.display());
+        phase_mark_ok(
+            phase_mut(&mut self.phases, PublishPhaseBoundary::Install),
+            started.elapsed().as_millis() as u64,
+            message.clone(),
+            Some("sandboxed_unpack".to_string()),
+        );
+        hourglass::print_phase_line(
+            self.args.json,
+            PublishPhaseBoundary::Install,
+            HourglassPhaseState::Ok,
+            &message,
+        );
+        self.state.install_result = Some(install_result);
+        Ok(())
+    }
+
+    fn run_dry_run_phase(&mut self) -> Result<()> {
+        hourglass::print_phase_line(
+            self.args.json,
+            PublishPhaseBoundary::DryRun,
+            HourglassPhaseState::Run,
+            "publish preflight",
+        );
+        let started = std::time::Instant::now();
+        if self.is_official {
+            let outcome =
+                run_official_deploy(self.resolved_target.registry_url.clone(), self.args.fix)?;
+            if !self.args.json {
+                print_official_diagnosis(&outcome);
+            }
+            let dry_run_result = PublishDryRunStageResult {
+                kind: "official_ci_handoff",
+                diagnosis: Some(outcome.diagnosis.clone()),
+                registry: Some(outcome.route.registry_url.clone()),
+                upload_endpoint: None,
+                reachable: None,
+                auth_ready: None,
+                permission_check: None,
+            };
+            let can_handoff = outcome.diagnosis.can_handoff;
+            self.official_result = Some(outcome);
+            self.state.dry_run_result = Some(dry_run_result);
+            if can_handoff {
+                let message = "official CI handoff is ready".to_string();
+                phase_mark_ok(
+                    phase_mut(&mut self.phases, PublishPhaseBoundary::DryRun),
+                    started.elapsed().as_millis() as u64,
+                    message.clone(),
+                    Some("handoff".to_string()),
+                );
+                hourglass::print_phase_line(
+                    self.args.json,
+                    PublishPhaseBoundary::DryRun,
+                    HourglassPhaseState::Ok,
+                    &message,
+                );
+                return Ok(());
+            }
+
+            let actions = crate::publish_official::collect_issue_actions(
+                &self
+                    .official_result
+                    .as_ref()
+                    .expect("official outcome")
+                    .diagnosis
+                    .issues,
+            );
+            let fix_line = actions.first().cloned().unwrap_or_else(|| {
+                "ato publish --deploy --registry https://api.ato.run".to_string()
+            });
+            phase_mark_failed(
+                phase_mut(&mut self.phases, PublishPhaseBoundary::DryRun),
+                started.elapsed().as_millis() as u64,
+                "official publish diagnostics failed".to_string(),
+                Some(fix_line.clone()),
+            );
+            hourglass::print_phase_line(
+                self.args.json,
+                PublishPhaseBoundary::DryRun,
+                HourglassPhaseState::Fail,
+                "official diagnostics failed",
+            );
+            if !self.args.json {
+                println!("👉 次に打つコマンド: {}", fix_line);
+                if !actions.is_empty() {
+                    println!();
+                    println!("詳細:");
+                    for issue in &self
+                        .official_result
+                        .as_ref()
+                        .expect("official outcome")
+                        .diagnosis
+                        .issues
+                    {
+                        println!(" - [{}] {}", issue.stage, issue.message);
+                    }
+                }
+                anyhow::bail!("official publish diagnostics failed");
+            }
+            if self.top_level_dry_run {
+                return Ok(());
+            }
+            return Ok(());
+        }
+
+        let preview = self
+            .pipeline_preview
+            .as_ref()
+            .context("missing publish pipeline preview for dry-run stage")?;
+        let verification = self
+            .state
+            .verified_artifact
+            .as_ref()
+            .context("dry-run phase requires verified artifact metadata")?;
+        let dry_run_result = run_direct_publish_dry_run_stage(
+            &self.resolved_target,
+            preview,
+            verification,
+            self.args.allow_existing,
+        )?;
+        let dry_run_ok =
+            publish_direct_dry_run_is_ready(&dry_run_result, self.resolved_target.mode);
+        let failure_message =
+            publish_direct_dry_run_failure_message(&dry_run_result, self.resolved_target.mode);
+        self.state.dry_run_result = Some(dry_run_result);
+        if dry_run_ok {
+            let message = "publish preflight passed".to_string();
+            phase_mark_ok(
+                phase_mut(&mut self.phases, PublishPhaseBoundary::DryRun),
+                started.elapsed().as_millis() as u64,
+                message.clone(),
+                Some("preflight".to_string()),
+            );
+            hourglass::print_phase_line(
+                self.args.json,
+                PublishPhaseBoundary::DryRun,
+                HourglassPhaseState::Ok,
+                &message,
+            );
+            return Ok(());
+        }
+
+        phase_mark_failed(
+            phase_mut(&mut self.phases, PublishPhaseBoundary::DryRun),
+            started.elapsed().as_millis() as u64,
+            failure_message.clone(),
+            None,
+        );
+        hourglass::print_phase_line(
+            self.args.json,
+            PublishPhaseBoundary::DryRun,
+            HourglassPhaseState::Fail,
+            &failure_message,
+        );
+        if self.top_level_dry_run && self.args.json {
+            return Ok(());
+        }
+        anyhow::bail!("{}", failure_message)
+    }
+
+    fn run_publish_phase(&mut self) -> Result<()> {
+        hourglass::print_phase_line(
+            self.args.json,
+            PublishPhaseBoundary::Publish,
+            HourglassPhaseState::Run,
+            "publish execution",
+        );
+        let started = std::time::Instant::now();
+        if self.is_official {
+            let outcome =
+                run_official_deploy(self.resolved_target.registry_url.clone(), self.args.fix)?;
+            if !self.args.json {
+                print_official_diagnosis(&outcome);
+            }
+
+            if !outcome.diagnosis.can_handoff {
+                let actions =
+                    crate::publish_official::collect_issue_actions(&outcome.diagnosis.issues);
+                let fix_line = actions.first().cloned().unwrap_or_else(|| {
+                    "ato publish --deploy --registry https://api.ato.run".to_string()
+                });
+                phase_mark_failed(
+                    phase_mut(&mut self.phases, PublishPhaseBoundary::Publish),
+                    started.elapsed().as_millis() as u64,
+                    "official publish diagnostics failed".to_string(),
+                    Some(fix_line.clone()),
+                );
+                hourglass::print_phase_line(
+                    self.args.json,
+                    PublishPhaseBoundary::Publish,
+                    HourglassPhaseState::Fail,
+                    "official diagnostics failed",
+                );
+                if !self.args.json {
+                    println!("👉 次に打つコマンド: {}", fix_line);
+                    if !actions.is_empty() {
+                        println!();
+                        println!("詳細:");
+                        for issue in &outcome.diagnosis.issues {
+                            println!(" - [{}] {}", issue.stage, issue.message);
+                        }
+                    }
+                    anyhow::bail!("official publish diagnostics failed");
+                }
+                self.official_result = Some(outcome);
+                return Ok(());
+            }
+
+            let success_message = "official CI handoff is ready".to_string();
+            phase_mark_ok(
+                phase_mut(&mut self.phases, PublishPhaseBoundary::Publish),
+                started.elapsed().as_millis() as u64,
+                success_message.clone(),
+                Some("handoff".to_string()),
+            );
+            hourglass::print_phase_line(
+                self.args.json,
+                PublishPhaseBoundary::Publish,
+                HourglassPhaseState::Ok,
+                &success_message,
+            );
+            self.official_result = Some(outcome);
+            return Ok(());
+        }
+
+        let source_is_artifact = self.args.artifact.is_some();
+        let publish_artifact = self
+            .state
+            .artifact_path
+            .clone()
+            .or_else(|| self.args.artifact.clone())
+            .context("publish phase requires a verified artifact")?;
+
+        let preview = self
+            .pipeline_preview
+            .as_ref()
+            .context("missing private publish preview")?;
+        if !self.args.json {
+            println!(
+                "{}",
+                publish_private_start_summary_line(
+                    self.resolved_target.mode,
+                    &self.resolved_target.registry_url,
+                    preview.source,
+                    &preview.scoped_id,
+                    &preview.version,
+                    preview.allow_existing,
+                )
+            );
+        }
+
+        let status = publish_private_status_message(self.resolved_target.mode, source_is_artifact);
+        if !self.args.json {
+            futures::executor::block_on(self.reporter.progress_start(status.to_string(), None))?;
+        }
+        let scoped_override = if source_is_artifact {
+            self.args.scoped_id.clone()
+        } else {
+            Some(preview.scoped_id.clone())
+        };
+        let upload_result =
+            crate::publish_private::execute(crate::publish_private::PublishPrivateArgs {
+                registry_url: self.resolved_target.registry_url.clone(),
+                publisher_hint: self.resolved_target.publisher_handle.clone(),
+                artifact_path: Some(publish_artifact),
+                force_large_payload: self.args.force_large_payload,
+                scoped_id: scoped_override,
+                allow_existing: self.args.allow_existing,
+            });
+        if !self.args.json {
+            futures::executor::block_on(self.reporter.progress_finish(None))?;
+        }
+        let result = upload_result?;
+
+        let success_message = format!("uploaded {}", result.file_name);
+        phase_mark_ok(
+            phase_mut(&mut self.phases, PublishPhaseBoundary::Publish),
+            started.elapsed().as_millis() as u64,
+            success_message.clone(),
+            Some("upload".to_string()),
+        );
+        hourglass::print_phase_line(
+            self.args.json,
+            PublishPhaseBoundary::Publish,
+            HourglassPhaseState::Ok,
+            &success_message,
+        );
+        self.private_result = Some(result);
+        Ok(())
+    }
+}
+
+#[async_trait(?Send)]
+impl HourglassPhaseRunner for PublishCommandExecution<'_> {
+    async fn run_phase(&mut self, phase: PublishPhaseBoundary) -> Result<()> {
+        match phase {
+            PublishPhaseBoundary::Prepare => self.run_prepare_phase(),
+            PublishPhaseBoundary::Build => self.run_build_phase(),
+            PublishPhaseBoundary::Verify => self.run_verify_phase(),
+            PublishPhaseBoundary::Install => self.run_install_phase(),
+            PublishPhaseBoundary::DryRun => self.run_dry_run_phase(),
+            PublishPhaseBoundary::Publish => self.run_publish_phase(),
+            PublishPhaseBoundary::Execute => {
+                anyhow::bail!("unsupported publish pipeline phase {}", phase.as_str())
+            }
+        }
+    }
+
+    async fn skip_phase(&mut self, phase: PublishPhaseBoundary) -> Result<()> {
+        match phase {
+            PublishPhaseBoundary::Prepare
+            | PublishPhaseBoundary::Build
+            | PublishPhaseBoundary::Verify
+            | PublishPhaseBoundary::Install
+            | PublishPhaseBoundary::DryRun
+            | PublishPhaseBoundary::Publish => {
+                self.mark_not_selected(phase);
+                Ok(())
+            }
+            PublishPhaseBoundary::Execute => {
+                anyhow::bail!("unsupported publish pipeline phase {}", phase.as_str())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,39 +815,30 @@ fn execute_publish_pipeline(
     ensure_publish_source_manifest_ready(&args)?;
     let resolved_target = resolve_publish_target(args.registry.clone())?;
     let is_official = resolved_target.mode.is_official();
-    let selection = if top_level_dry_run {
-        select_publish_dry_run_phases(args.artifact.is_some())
-    } else {
-        select_publish_phases(
-            args.prepare,
-            args.build,
-            args.deploy,
+    let plan = producer::build_publish_pipeline_plan(
+        PublishPipelineRequest {
+            top_level_dry_run,
+            prepare: args.prepare,
+            build: args.build,
+            deploy: args.deploy,
             is_official,
-            args.legacy_full_publish,
-            args.artifact.is_some(),
-        )
-    };
+            has_artifact: args.artifact.is_some(),
+        },
+        PublishPhaseOptions {
+            fix: args.fix,
+            legacy_full_publish: args.legacy_full_publish,
+            allow_existing: args.allow_existing,
+        },
+    )?;
+    let selection = plan.selection;
     if resolved_target.mode.is_personal_dock() && selection.runs_publish() {
         let _ = crate::auth::require_session_token()?;
     }
-    validate_publish_phase_options(&args, selection, is_official)?;
-    maybe_warn_legacy_full_publish(&args, selection, is_official);
+    maybe_warn_legacy_full_publish(plan.warn_legacy_full_publish);
     let _ = args.no_tui;
-
-    let mut phases = vec![
-        new_phase_result("prepare", selection.runs_prepare()),
-        new_phase_result("build", selection.runs_build()),
-        new_phase_result("verify", selection.runs_verify()),
-        new_phase_result("install", selection.runs_install()),
-        new_phase_result("dry_run", selection.runs_dry_run()),
-        new_phase_result("publish", selection.runs_publish()),
-    ];
+    let phases = hourglass::new_phase_results(HourglassFlow::ProducerPublish, selection);
 
     let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
-    let mut state = PublishPipelineState::default();
-    let mut private_result: Option<crate::publish_private::PublishPrivateResult> = None;
-    let mut official_result: Option<OfficialDeployOutcome> = None;
-
     let pipeline_preview = if selection.runs_install()
         || selection.runs_dry_run()
         || (!is_official && selection.runs_publish())
@@ -313,433 +856,24 @@ fn execute_publish_pipeline(
     } else {
         None
     };
-    if let Some(preview) = pipeline_preview.as_ref() {
-        state.resolved_scoped_id = Some(preview.scoped_id.clone());
-        state.resolved_version = Some(preview.version.clone());
-    }
 
-    if selection.runs_prepare() {
-        print_phase_line(args.json, "prepare", "RUN", "prepare command detection");
-        let started = std::time::Instant::now();
-        let prepare_spec = crate::publish_prepare::detect_prepare_command(&cwd)?;
-        match prepare_spec {
-            Some(spec) => {
-                let message = format!("running {}", spec.source.as_label());
-                crate::publish_prepare::run_prepare_command(&spec, &cwd, args.json)
-                    .context("Failed to run publish prepare command")?;
-                phase_mark_ok(
-                    phase_mut(&mut phases, PublishPhaseBoundary::Prepare),
-                    started.elapsed().as_millis() as u64,
-                    message.clone(),
-                    None,
-                );
-                print_phase_line(args.json, "prepare", "OK", &message);
-            }
-            None => {
-                let skipped_reason = "no prepare command configured".to_string();
-                if args.prepare {
-                    let fix = "capsule.toml に [build.lifecycle].prepare を設定するか package.json scripts[\"capsule:prepare\"] を追加して再実行してください。".to_string();
-                    phase_mark_failed(
-                        phase_mut(&mut phases, PublishPhaseBoundary::Prepare),
-                        started.elapsed().as_millis() as u64,
-                        "--prepare was selected but no prepare command was found".to_string(),
-                        Some(fix.clone()),
-                    );
-                    print_phase_line(args.json, "prepare", "FAIL", "prepare command not found");
-                    if !args.json {
-                        println!("👉 次に打つコマンド: {}", fix);
-                    }
-                    anyhow::bail!(
-                        "--prepare was selected but no prepare command was found. Set `build.lifecycle.prepare` in capsule.toml or add package.json scripts[\"capsule:prepare\"]."
-                    );
-                }
-                phase_mark_skipped(
-                    phase_mut(&mut phases, PublishPhaseBoundary::Prepare),
-                    started.elapsed().as_millis() as u64,
-                    skipped_reason.clone(),
-                    skipped_reason.clone(),
-                );
-                print_phase_line(args.json, "prepare", "SKIP", &skipped_reason);
-            }
-        }
-    } else {
-        phase_mark_skipped(
-            phase_mut(&mut phases, PublishPhaseBoundary::Prepare),
-            0,
-            "prepare phase not selected".to_string(),
-            "not selected".to_string(),
-        );
-        print_phase_line(args.json, "prepare", "SKIP", "not selected");
-    }
+    let pipeline = ProducerPipeline::new(selection);
+    let mut execution = PublishCommandExecution::new(
+        &args,
+        reporter.clone(),
+        resolved_target.clone(),
+        top_level_dry_run,
+        is_official,
+        phases,
+        cwd,
+        pipeline_preview,
+    );
+    futures::executor::block_on(pipeline.run(&mut execution))?;
 
-    if selection.runs_build() {
-        print_phase_line(args.json, "build", "RUN", "artifact build");
-        let started = std::time::Instant::now();
-        if args.artifact.is_some() {
-            let skipped_reason = "start phase is Verify".to_string();
-            phase_mark_skipped(
-                phase_mut(&mut phases, PublishPhaseBoundary::Build),
-                started.elapsed().as_millis() as u64,
-                "build is skipped because artifact input starts at Verify".to_string(),
-                skipped_reason.clone(),
-            );
-            print_phase_line(args.json, "build", "SKIP", &skipped_reason);
-        } else {
-            let artifact_path = build_capsule_artifact_for_publish(&cwd)?;
-            let elapsed = started.elapsed().as_millis() as u64;
-            let message = format!("artifact built: {}", artifact_path.display());
-            phase_mark_ok(
-                phase_mut(&mut phases, PublishPhaseBoundary::Build),
-                elapsed,
-                message.clone(),
-                Some("artifact_built".to_string()),
-            );
-            state.artifact_path = Some(artifact_path);
-            print_phase_line(args.json, "build", "OK", &message);
-        }
-    } else {
-        phase_mark_skipped(
-            phase_mut(&mut phases, PublishPhaseBoundary::Build),
-            0,
-            "build phase not selected".to_string(),
-            "not selected".to_string(),
-        );
-        print_phase_line(args.json, "build", "SKIP", "not selected");
-    }
-
-    if selection.runs_verify() {
-        print_phase_line(args.json, "verify", "RUN", "artifact verification");
-        let started = std::time::Instant::now();
-        let artifact_path = if let Some(path) = args
-            .artifact
-            .clone()
-            .or_else(|| state.artifact_path.clone())
-        {
-            path
-        } else {
-            phase_mark_failed(
-                phase_mut(&mut phases, PublishPhaseBoundary::Verify),
-                started.elapsed().as_millis() as u64,
-                "verify phase requires artifact input".to_string(),
-                None,
-            );
-            print_phase_line(args.json, "verify", "FAIL", "artifact input is missing");
-            anyhow::bail!("verify phase requires an artifact produced earlier in the pipeline");
-        };
-        let verification = crate::publish_artifact::verify_artifact(&artifact_path)?;
-        let message = format!(
-            "artifact verified: {} (sha256={}, size={} bytes)",
-            artifact_path.display(),
-            verification.sha256,
-            verification.size_bytes
-        );
-        phase_mark_ok(
-            phase_mut(&mut phases, PublishPhaseBoundary::Verify),
-            started.elapsed().as_millis() as u64,
-            message.clone(),
-            Some("artifact_verified".to_string()),
-        );
-        state.artifact_path = Some(artifact_path);
-        state.verified_artifact = Some(verification);
-        print_phase_line(args.json, "verify", "OK", &message);
-    } else {
-        phase_mark_skipped(
-            phase_mut(&mut phases, PublishPhaseBoundary::Verify),
-            0,
-            "verify phase not selected".to_string(),
-            "not selected".to_string(),
-        );
-        print_phase_line(args.json, "verify", "SKIP", "not selected");
-    }
-
-    if selection.runs_install() {
-        print_phase_line(
-            args.json,
-            "install",
-            "RUN",
-            "local verified artifact registration",
-        );
-        let started = std::time::Instant::now();
-        let preview = pipeline_preview
-            .as_ref()
-            .context("missing publish pipeline preview for install stage")?;
-        let artifact_path = state
-            .artifact_path
-            .as_ref()
-            .context("install phase requires a verified artifact")?;
-        let verification = state
-            .verified_artifact
-            .as_ref()
-            .context("install phase requires verified artifact metadata")?;
-        let install_result = run_publish_install_stage(artifact_path, preview, verification)?;
-        let message = format!("registered {}", install_result.path.display());
-        phase_mark_ok(
-            phase_mut(&mut phases, PublishPhaseBoundary::Install),
-            started.elapsed().as_millis() as u64,
-            message.clone(),
-            Some("local_registration".to_string()),
-        );
-        print_phase_line(args.json, "install", "OK", &message);
-        state.install_result = Some(install_result);
-    } else {
-        phase_mark_skipped(
-            phase_mut(&mut phases, PublishPhaseBoundary::Install),
-            0,
-            "install phase not selected".to_string(),
-            "not selected".to_string(),
-        );
-        print_phase_line(args.json, "install", "SKIP", "not selected");
-    }
-
-    if selection.runs_dry_run() {
-        print_phase_line(args.json, "dry_run", "RUN", "publish preflight");
-        let started = std::time::Instant::now();
-        if is_official {
-            let outcome = run_official_deploy(resolved_target.registry_url.clone(), args.fix)?;
-            if !args.json {
-                print_official_diagnosis(&outcome);
-            }
-            let dry_run_result = PublishDryRunStageResult {
-                kind: "official_ci_handoff",
-                diagnosis: Some(outcome.diagnosis.clone()),
-                registry: Some(outcome.route.registry_url.clone()),
-                upload_endpoint: None,
-                reachable: None,
-                auth_ready: None,
-                permission_check: None,
-            };
-            let can_handoff = outcome.diagnosis.can_handoff;
-            official_result = Some(outcome);
-            state.dry_run_result = Some(dry_run_result);
-            if can_handoff {
-                let message = "official CI handoff is ready".to_string();
-                phase_mark_ok(
-                    phase_mut(&mut phases, PublishPhaseBoundary::DryRun),
-                    started.elapsed().as_millis() as u64,
-                    message.clone(),
-                    Some("handoff".to_string()),
-                );
-                print_phase_line(args.json, "dry_run", "OK", &message);
-            } else {
-                let actions = crate::publish_official::collect_issue_actions(
-                    &official_result
-                        .as_ref()
-                        .expect("official outcome")
-                        .diagnosis
-                        .issues,
-                );
-                let fix_line = actions.first().cloned().unwrap_or_else(|| {
-                    "ato publish --deploy --registry https://api.ato.run".to_string()
-                });
-                phase_mark_failed(
-                    phase_mut(&mut phases, PublishPhaseBoundary::DryRun),
-                    started.elapsed().as_millis() as u64,
-                    "official publish diagnostics failed".to_string(),
-                    Some(fix_line.clone()),
-                );
-                print_phase_line(args.json, "dry_run", "FAIL", "official diagnostics failed");
-                if !args.json {
-                    println!("👉 次に打つコマンド: {}", fix_line);
-                    if !actions.is_empty() {
-                        println!();
-                        println!("詳細:");
-                        for issue in &official_result
-                            .as_ref()
-                            .expect("official outcome")
-                            .diagnosis
-                            .issues
-                        {
-                            println!(" - [{}] {}", issue.stage, issue.message);
-                        }
-                    }
-                    anyhow::bail!("official publish diagnostics failed");
-                }
-                if top_level_dry_run {
-                    emit_publish_json_output(
-                        &resolved_target,
-                        &phases,
-                        state.install_result.as_ref(),
-                        state.dry_run_result.as_ref(),
-                        private_result.as_ref(),
-                        official_result.as_ref(),
-                        top_level_dry_run,
-                    )?;
-                    return Ok(());
-                }
-            }
-        } else {
-            let preview = pipeline_preview
-                .as_ref()
-                .context("missing publish pipeline preview for dry-run stage")?;
-            let verification = state
-                .verified_artifact
-                .as_ref()
-                .context("dry-run phase requires verified artifact metadata")?;
-            let dry_run_result = run_direct_publish_dry_run_stage(
-                &resolved_target,
-                preview,
-                verification,
-                args.allow_existing,
-            )?;
-            let dry_run_ok = publish_direct_dry_run_is_ready(&dry_run_result, resolved_target.mode);
-            let failure_message =
-                publish_direct_dry_run_failure_message(&dry_run_result, resolved_target.mode);
-            state.dry_run_result = Some(dry_run_result);
-            if dry_run_ok {
-                let message = "publish preflight passed".to_string();
-                phase_mark_ok(
-                    phase_mut(&mut phases, PublishPhaseBoundary::DryRun),
-                    started.elapsed().as_millis() as u64,
-                    message.clone(),
-                    Some("preflight".to_string()),
-                );
-                print_phase_line(args.json, "dry_run", "OK", &message);
-            } else {
-                phase_mark_failed(
-                    phase_mut(&mut phases, PublishPhaseBoundary::DryRun),
-                    started.elapsed().as_millis() as u64,
-                    failure_message.clone(),
-                    None,
-                );
-                print_phase_line(args.json, "dry_run", "FAIL", &failure_message);
-                if top_level_dry_run && args.json {
-                    emit_publish_json_output(
-                        &resolved_target,
-                        &phases,
-                        state.install_result.as_ref(),
-                        state.dry_run_result.as_ref(),
-                        private_result.as_ref(),
-                        official_result.as_ref(),
-                        top_level_dry_run,
-                    )?;
-                    return Ok(());
-                }
-                anyhow::bail!("{}", failure_message);
-            }
-        }
-    } else {
-        phase_mark_skipped(
-            phase_mut(&mut phases, PublishPhaseBoundary::DryRun),
-            0,
-            "dry-run phase not selected".to_string(),
-            "not selected".to_string(),
-        );
-        print_phase_line(args.json, "dry_run", "SKIP", "not selected");
-    }
-
-    if selection.runs_publish() {
-        print_phase_line(args.json, "publish", "RUN", "publish execution");
-        let started = std::time::Instant::now();
-        if is_official {
-            let outcome = run_official_deploy(resolved_target.registry_url.clone(), args.fix)?;
-
-            if !args.json {
-                print_official_diagnosis(&outcome);
-            }
-
-            if !outcome.diagnosis.can_handoff {
-                let actions =
-                    crate::publish_official::collect_issue_actions(&outcome.diagnosis.issues);
-                let fix_line = actions.first().cloned().unwrap_or_else(|| {
-                    "ato publish --deploy --registry https://api.ato.run".to_string()
-                });
-                phase_mark_failed(
-                    phase_mut(&mut phases, PublishPhaseBoundary::Publish),
-                    started.elapsed().as_millis() as u64,
-                    "official publish diagnostics failed".to_string(),
-                    Some(fix_line.clone()),
-                );
-                print_phase_line(args.json, "publish", "FAIL", "official diagnostics failed");
-                if !args.json {
-                    println!("👉 次に打つコマンド: {}", fix_line);
-                    if !actions.is_empty() {
-                        println!();
-                        println!("詳細:");
-                        for issue in &outcome.diagnosis.issues {
-                            println!(" - [{}] {}", issue.stage, issue.message);
-                        }
-                    }
-                    anyhow::bail!("official publish diagnostics failed");
-                }
-                official_result = Some(outcome);
-            } else {
-                let success_message = "official CI handoff is ready".to_string();
-                phase_mark_ok(
-                    phase_mut(&mut phases, PublishPhaseBoundary::Publish),
-                    started.elapsed().as_millis() as u64,
-                    success_message.clone(),
-                    Some("handoff".to_string()),
-                );
-                print_phase_line(args.json, "publish", "OK", &success_message);
-                official_result = Some(outcome);
-            }
-        } else {
-            let source_is_artifact = args.artifact.is_some();
-            let publish_artifact = state
-                .artifact_path
-                .clone()
-                .or_else(|| args.artifact.clone())
-                .context("publish phase requires a verified artifact")?;
-
-            let preview = pipeline_preview
-                .as_ref()
-                .context("missing private publish preview")?;
-            if !args.json {
-                println!(
-                    "{}",
-                    publish_private_start_summary_line(
-                        resolved_target.mode,
-                        &resolved_target.registry_url,
-                        preview.source,
-                        &preview.scoped_id,
-                        &preview.version,
-                        preview.allow_existing,
-                    )
-                );
-            }
-
-            let status = publish_private_status_message(resolved_target.mode, source_is_artifact);
-            if !args.json {
-                futures::executor::block_on(reporter.progress_start(status.to_string(), None))?;
-            }
-            let scoped_override = if source_is_artifact {
-                args.scoped_id.clone()
-            } else {
-                Some(preview.scoped_id.clone())
-            };
-            let upload_result =
-                crate::publish_private::execute(crate::publish_private::PublishPrivateArgs {
-                    registry_url: resolved_target.registry_url.clone(),
-                    publisher_hint: resolved_target.publisher_handle.clone(),
-                    artifact_path: Some(publish_artifact),
-                    force_large_payload: args.force_large_payload,
-                    scoped_id: scoped_override,
-                    allow_existing: args.allow_existing,
-                });
-            if !args.json {
-                futures::executor::block_on(reporter.progress_finish(None))?;
-            }
-            let result = upload_result?;
-
-            let success_message = format!("uploaded {}", result.file_name);
-            phase_mark_ok(
-                phase_mut(&mut phases, PublishPhaseBoundary::Publish),
-                started.elapsed().as_millis() as u64,
-                success_message.clone(),
-                Some("upload".to_string()),
-            );
-            print_phase_line(args.json, "publish", "OK", &success_message);
-            private_result = Some(result);
-        }
-    } else {
-        phase_mark_skipped(
-            phase_mut(&mut phases, PublishPhaseBoundary::Publish),
-            0,
-            "publish phase not selected".to_string(),
-            "not selected".to_string(),
-        );
-        print_phase_line(args.json, "publish", "SKIP", "not selected");
-    }
+    let phases = execution.phases;
+    let state = execution.state;
+    let private_result = execution.private_result;
+    let official_result = execution.official_result;
 
     if args.json {
         emit_publish_json_output(
@@ -795,7 +929,7 @@ fn execute_publish_pipeline(
     } else if top_level_dry_run {
         println!("✅ Dry-run successful! No upload performed.");
         if let Some(install_result) = state.install_result.as_ref() {
-            println!("📦 Local registration: {}", install_result.path.display());
+            println!("📦 Test sandbox: {}", install_result.path.display());
         }
         if let Some(dry_run_result) = state.dry_run_result.as_ref() {
             if let Some(registry) = dry_run_result.registry.as_deref() {
@@ -852,43 +986,6 @@ fn run_official_deploy(registry_url: String, fix: bool) -> Result<OfficialDeploy
     })
 }
 
-fn phase_mut(
-    phases: &mut [PublishPhaseResult],
-    boundary: PublishPhaseBoundary,
-) -> &mut PublishPhaseResult {
-    &mut phases[phase_index(boundary)]
-}
-
-fn phase_is_ok(phases: &[PublishPhaseResult], boundary: PublishPhaseBoundary) -> bool {
-    phases
-        .get(phase_index(boundary))
-        .map(|phase| phase.ok)
-        .unwrap_or(false)
-}
-
-fn phase_index(boundary: PublishPhaseBoundary) -> usize {
-    match boundary {
-        PublishPhaseBoundary::Prepare => 0,
-        PublishPhaseBoundary::Build => 1,
-        PublishPhaseBoundary::Verify => 2,
-        PublishPhaseBoundary::Install => 3,
-        PublishPhaseBoundary::DryRun => 4,
-        PublishPhaseBoundary::Publish => 5,
-    }
-}
-
-fn select_publish_dry_run_phases(has_artifact: bool) -> PublishPhaseSelection {
-    PublishPhaseSelection {
-        start: if has_artifact {
-            PublishPhaseBoundary::Verify
-        } else {
-            PublishPhaseBoundary::Prepare
-        },
-        stop: PublishPhaseBoundary::DryRun,
-        explicit_filter: false,
-    }
-}
-
 fn run_publish_install_stage(
     artifact_path: &Path,
     preview: &crate::publish_private::PublishPrivateSummary,
@@ -898,29 +995,19 @@ fn run_publish_install_stage(
     if version.is_empty() {
         anyhow::bail!("publish install stage requires a resolved version");
     }
-    let scoped = crate::install::parse_capsule_ref(&preview.scoped_id)?;
-    let bytes = std::fs::read(artifact_path)
-        .with_context(|| format!("Failed to read artifact: {}", artifact_path.display()))?;
-    let file_name = normalized_install_artifact_file_name(&scoped.slug, version);
-    let path = crate::install::register_verified_artifact_for_publish(
-        None,
-        &preview.scoped_id,
-        version,
-        &file_name,
-        &bytes,
-        &verification.blake3,
-    )?;
+    let env =
+        futures::executor::block_on(install_phase::install_local_artifact_into_test_sandbox(
+            artifact_path.to_path_buf(),
+            &preview.scoped_id,
+            version,
+        ))?;
     Ok(PublishInstallResult {
         scoped_id: preview.scoped_id.clone(),
         version: version.to_string(),
-        path,
+        path: env.root_dir,
         content_hash: verification.blake3.clone(),
-        install_kind: "local_registration",
+        install_kind: "test_sandbox",
     })
-}
-
-fn normalized_install_artifact_file_name(slug: &str, version: &str) -> String {
-    format!("{}-{}.capsule", slug, version)
 }
 
 fn upload_file_name_for_artifact(slug: &str, manifest_version: &str) -> Option<String> {
@@ -1098,87 +1185,12 @@ pub(crate) fn publish_private_start_summary_line(
     )
 }
 
-pub(crate) fn select_publish_phases(
-    prepare: bool,
-    build: bool,
-    deploy: bool,
-    is_official: bool,
-    legacy_full_publish: bool,
-    has_artifact: bool,
-) -> PublishPhaseSelection {
-    let explicit_filter = prepare || build || deploy;
-    let stop = if explicit_filter {
-        if deploy {
-            PublishPhaseBoundary::Publish
-        } else if build {
-            PublishPhaseBoundary::Verify
-        } else {
-            PublishPhaseBoundary::Prepare
-        }
-    } else {
-        PublishPhaseBoundary::Publish
-    };
-
-    let official_deploy_only = is_official && !legacy_full_publish && deploy && !prepare && !build;
-    let official_default_publish_only = is_official && !legacy_full_publish && !explicit_filter;
-
-    let start = if official_deploy_only {
-        PublishPhaseBoundary::Publish
-    } else if has_artifact {
-        PublishPhaseBoundary::Verify
-    } else if official_default_publish_only {
-        PublishPhaseBoundary::Publish
-    } else {
-        PublishPhaseBoundary::Prepare
-    };
-
-    PublishPhaseSelection {
-        start,
-        stop,
-        explicit_filter,
-    }
-}
-
-fn maybe_warn_legacy_full_publish(
-    args: &PublishCommandArgs,
-    selection: PublishPhaseSelection,
-    is_official: bool,
-) {
-    if args.legacy_full_publish && is_official && !selection.explicit_filter {
+fn maybe_warn_legacy_full_publish(should_warn: bool) {
+    if should_warn {
         eprintln!(
             "⚠️  --legacy-full-publish is deprecated and will be removed in a future release. Use explicit --prepare/--build/--deploy flags instead."
         );
     }
-}
-
-pub(crate) fn validate_publish_phase_options(
-    args: &PublishCommandArgs,
-    selection: PublishPhaseSelection,
-    is_official: bool,
-) -> Result<()> {
-    if args.fix && !(is_official && selection.runs_publish()) {
-        anyhow::bail!("--fix is only available when deploying to official registry");
-    }
-
-    if args.legacy_full_publish && !is_official {
-        anyhow::bail!("--legacy-full-publish is only available for official registry publish");
-    }
-
-    if args.legacy_full_publish && selection.explicit_filter {
-        anyhow::bail!("--legacy-full-publish cannot be combined with --prepare/--build/--deploy");
-    }
-
-    if args.allow_existing && (is_official || !selection.runs_publish()) {
-        anyhow::bail!("--allow-existing is only available for private registry deploy phase");
-    }
-
-    if selection.start > selection.stop {
-        anyhow::bail!(
-            "The selected publish phase range is invalid. `--artifact` cannot be combined with stop points that end before Verify."
-        );
-    }
-
-    Ok(())
 }
 
 fn build_capsule_artifact_for_publish(cwd: &Path) -> Result<PathBuf> {
@@ -1275,80 +1287,6 @@ fn emit_publish_json_output(
     }
     println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
-}
-
-fn new_phase_result(name: &'static str, selected: bool) -> PublishPhaseResult {
-    PublishPhaseResult {
-        name,
-        selected,
-        ok: !selected,
-        status: "skipped",
-        elapsed_ms: 0,
-        actionable_fix: None,
-        message: if selected {
-            "pending".to_string()
-        } else {
-            "not selected".to_string()
-        },
-        result_kind: None,
-        skipped_reason: if selected {
-            None
-        } else {
-            Some("not selected".to_string())
-        },
-    }
-}
-
-fn phase_mark_ok(
-    phase: &mut PublishPhaseResult,
-    elapsed_ms: u64,
-    message: String,
-    result_kind: Option<String>,
-) {
-    phase.ok = true;
-    phase.status = "ok";
-    phase.elapsed_ms = elapsed_ms;
-    phase.actionable_fix = None;
-    phase.message = message;
-    phase.result_kind = result_kind;
-    phase.skipped_reason = None;
-}
-
-fn phase_mark_skipped(
-    phase: &mut PublishPhaseResult,
-    elapsed_ms: u64,
-    message: String,
-    skipped_reason: String,
-) {
-    phase.ok = true;
-    phase.status = "skipped";
-    phase.elapsed_ms = elapsed_ms;
-    phase.actionable_fix = None;
-    phase.message = message;
-    phase.result_kind = None;
-    phase.skipped_reason = Some(skipped_reason);
-}
-
-fn phase_mark_failed(
-    phase: &mut PublishPhaseResult,
-    elapsed_ms: u64,
-    message: String,
-    actionable_fix: Option<String>,
-) {
-    phase.ok = false;
-    phase.status = "failed";
-    phase.elapsed_ms = elapsed_ms;
-    phase.actionable_fix = actionable_fix;
-    phase.message = message;
-    phase.result_kind = None;
-    phase.skipped_reason = None;
-}
-
-fn print_phase_line(json_output: bool, phase: &str, state: &str, detail: &str) {
-    if json_output {
-        return;
-    }
-    println!("PHASE {:<7} {:<4} {}", phase, state, detail);
 }
 
 fn resolve_publish_target(cli_registry: Option<String>) -> Result<ResolvedPublishTarget> {
