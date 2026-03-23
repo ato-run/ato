@@ -67,12 +67,12 @@ pub(crate) struct PublishDryRunStageResult {
 
 #[derive(Debug, Default)]
 pub(crate) struct PublishPipelineState {
-    pub(crate) artifact_path: Option<PathBuf>,
-    pub(crate) verified_artifact: Option<crate::publish_artifact::VerifiedArtifactInfo>,
-    pub(crate) resolved_scoped_id: Option<String>,
-    pub(crate) resolved_version: Option<String>,
-    pub(crate) install_result: Option<PublishInstallResult>,
-    pub(crate) dry_run_result: Option<PublishDryRunStageResult>,
+    artifact_path: Option<PathBuf>,
+    verified_artifact: Option<crate::publish_artifact::VerifiedArtifactInfo>,
+    resolved_scoped_id: Option<String>,
+    resolved_version: Option<String>,
+    install_result: Option<PublishInstallResult>,
+    dry_run_result: Option<PublishDryRunStageResult>,
 }
 
 impl PublishPipelineState {
@@ -80,6 +80,49 @@ impl PublishPipelineState {
         self.resolved_scoped_id = Some(scoped_id);
         self.resolved_version = Some(version);
         self
+    }
+
+    pub(crate) fn record_built_artifact(&mut self, artifact_path: PathBuf) {
+        self.artifact_path = Some(artifact_path);
+    }
+
+    pub(crate) fn artifact_path(&self) -> Option<&PathBuf> {
+        self.artifact_path.as_ref()
+    }
+
+    pub(crate) fn artifact_path_or(&self, fallback: Option<PathBuf>) -> Option<PathBuf> {
+        fallback.or_else(|| self.artifact_path.clone())
+    }
+
+    pub(crate) fn record_verified_artifact(
+        &mut self,
+        artifact_path: PathBuf,
+        verification: crate::publish_artifact::VerifiedArtifactInfo,
+    ) {
+        self.artifact_path = Some(artifact_path);
+        self.verified_artifact = Some(verification);
+    }
+
+    pub(crate) fn verified_artifact(
+        &self,
+    ) -> Option<&crate::publish_artifact::VerifiedArtifactInfo> {
+        self.verified_artifact.as_ref()
+    }
+
+    pub(crate) fn record_install_result(&mut self, result: PublishInstallResult) {
+        self.install_result = Some(result);
+    }
+
+    pub(crate) fn install_result(&self) -> Option<&PublishInstallResult> {
+        self.install_result.as_ref()
+    }
+
+    pub(crate) fn record_dry_run_result(&mut self, result: PublishDryRunStageResult) {
+        self.dry_run_result = Some(result);
+    }
+
+    pub(crate) fn dry_run_result(&self) -> Option<&PublishDryRunStageResult> {
+        self.dry_run_result.as_ref()
     }
 }
 
