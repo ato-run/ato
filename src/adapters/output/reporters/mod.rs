@@ -3,7 +3,7 @@ use std::io::{IsTerminal, Write};
 
 use capsule_core::{CapsuleReporter, UnifiedMetrics, UsageReporter};
 
-use crate::application::ports::OutputPort;
+use crate::application::ports::output::OutputPort;
 
 #[derive(Debug, Clone)]
 pub enum CliReporter {
