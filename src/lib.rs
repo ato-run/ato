@@ -77,7 +77,6 @@ pub(crate) use orchestration::publish_command as publish_command_orchestration;
 pub(crate) use orchestration::run_install as run_install_orchestration;
 pub(crate) use publish::artifact as publish_artifact;
 pub(crate) use publish::ci as publish_ci;
-pub(crate) use publish::dry_run as publish_dry_run;
 pub(crate) use publish::official as publish_official;
 pub(crate) use publish::preflight as publish_preflight;
 pub(crate) use publish::prepare as publish_prepare;

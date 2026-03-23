@@ -71,6 +71,15 @@ pub struct ArtifactManifestInfo {
     pub repository_owner: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct VerifiedArtifactInfo {
+    pub name: String,
+    pub version: String,
+    pub sha256: String,
+    pub blake3: String,
+    pub size_bytes: u64,
+}
+
 #[derive(Debug, Deserialize)]
 struct RegistryErrorPayload {
     #[serde(default)]
@@ -206,6 +215,35 @@ pub fn inspect_artifact_manifest(path: &Path) -> Result<ArtifactManifestInfo> {
         name: parsed.name,
         version: parsed.version,
         repository_owner: extract_repository_owner(&manifest),
+    })
+}
+
+pub fn verify_artifact(path: &Path) -> Result<VerifiedArtifactInfo> {
+    if !path.exists() {
+        bail!("Artifact not found: {}", path.display());
+    }
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| !ext.eq_ignore_ascii_case("capsule"))
+        .unwrap_or(true)
+    {
+        bail!("--artifact must point to a .capsule file");
+    }
+
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("Failed to read artifact: {}", path.display()))?;
+    let manifest = extract_manifest_from_capsule(&bytes)?;
+    let parsed = capsule_core::types::CapsuleManifest::from_toml(&manifest)
+        .map_err(|err| anyhow::anyhow!("Failed to parse capsule.toml from artifact: {}", err))?;
+    let _ = extract_payload_v3_manifest_from_capsule(&bytes)?;
+
+    Ok(VerifiedArtifactInfo {
+        name: parsed.name,
+        version: parsed.version,
+        sha256: compute_sha256(&bytes),
+        blake3: compute_blake3(&bytes),
+        size_bytes: bytes.len() as u64,
     })
 }
 
