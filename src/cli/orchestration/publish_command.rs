@@ -4,12 +4,12 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use capsule_core::CapsuleReporter;
-use serde::Serialize;
 
 use crate::application::pipeline::executor::HourglassPhaseRunner;
 use crate::application::pipeline::phases::install as install_phase;
 use crate::application::pipeline::producer::{
-    self, ProducerPipeline, PublishPhaseOptions, PublishPipelineRequest,
+    self, ProducerPipeline, PublishDryRunStageResult, PublishInstallResult, PublishPhaseOptions,
+    PublishPipelineRequest, PublishPipelineState,
 };
 use crate::orchestration::hourglass::{
     self, phase_is_ok, phase_mark_failed, phase_mark_ok, phase_mark_skipped, phase_mut,
@@ -149,42 +149,6 @@ pub(crate) fn validate_publish_phase_options(
 
 type PublishPhaseResult = hourglass::HourglassPhaseResult;
 
-#[derive(Debug, Clone, Serialize)]
-struct PublishInstallResult {
-    scoped_id: String,
-    version: String,
-    path: PathBuf,
-    content_hash: String,
-    install_kind: &'static str,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PublishDryRunStageResult {
-    kind: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    diagnosis: Option<crate::publish_official::OfficialPublishDiagnosis>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    registry: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    upload_endpoint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reachable: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    auth_ready: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    permission_check: Option<String>,
-}
-
-#[derive(Debug, Default)]
-struct PublishPipelineState {
-    artifact_path: Option<PathBuf>,
-    verified_artifact: Option<crate::publish_artifact::VerifiedArtifactInfo>,
-    resolved_scoped_id: Option<String>,
-    resolved_version: Option<String>,
-    install_result: Option<PublishInstallResult>,
-    dry_run_result: Option<PublishDryRunStageResult>,
-}
-
 struct PublishCommandExecution<'a> {
     args: &'a PublishCommandArgs,
     reporter: Arc<reporters::CliReporter>,
@@ -210,11 +174,12 @@ impl<'a> PublishCommandExecution<'a> {
         cwd: PathBuf,
         pipeline_preview: Option<crate::publish_private::PublishPrivateSummary>,
     ) -> Self {
-        let mut state = PublishPipelineState::default();
-        if let Some(preview) = pipeline_preview.as_ref() {
-            state.resolved_scoped_id = Some(preview.scoped_id.clone());
-            state.resolved_version = Some(preview.version.clone());
-        }
+        let state = if let Some(preview) = pipeline_preview.as_ref() {
+            PublishPipelineState::default()
+                .with_resolved_release(preview.scoped_id.clone(), preview.version.clone())
+        } else {
+            PublishPipelineState::default()
+        };
         Self {
             args,
             reporter,
