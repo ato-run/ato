@@ -1,28 +1,28 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Box,
   ChevronDown,
   ChevronLeft,
-  Shield,
   FileText,
-  Globe,
-  Hash,
-  Package,
   Play,
   ExternalLink,
   RotateCcw,
   Settings2,
+  Shield,
   Square,
   Terminal,
   Trash2,
   Plus,
-  Zap,
 } from "lucide-react";
+import {
+  DockCapsuleDetailSummary,
+  DockReadmePanel,
+  DockReleaseTable,
+} from "../dock/react";
+import { normalizeLocalDetail } from "../dock/domain";
 import {
   getPermissionModeMessage,
   PermissionModeSelector,
 } from "../components/PermissionModeSelector";
-import { ReadmeRenderer } from "../components/ReadmeRenderer";
 import { getProcessStatusMeta } from "../types";
 import type {
   Capsule,
@@ -87,20 +87,6 @@ function logTextClass(level: string): string {
   return "terminal-row-text";
 }
 
-function IconForCapsule({ iconKey }: { iconKey: Capsule["iconKey"] }): JSX.Element {
-  const common = { size: 18, strokeWidth: 1.5 };
-  if (iconKey === "globe") {
-    return <Globe {...common} />;
-  }
-  if (iconKey === "zap") {
-    return <Zap {...common} />;
-  }
-  if (iconKey === "box") {
-    return <Box {...common} />;
-  }
-  return <Package {...common} />;
-}
-
 function requiresPermissionGrant(capsule: Capsule, targetLabel: string): boolean {
   const target = capsule.targets.find((entry) => entry.label === targetLabel);
   if (!target) {
@@ -112,20 +98,6 @@ function requiresPermissionGrant(capsule: Capsule, targetLabel: string): boolean
     (runtime === "source" && (driver === "python" || driver === "native")) ||
     (runtime === "web" && driver === "python")
   );
-}
-
-function signatureTone(signatureStatus: string): string {
-  const normalized = signatureStatus.trim().toLowerCase();
-  if (normalized === "verified" || normalized === "signed") {
-    return "ready";
-  }
-  if (normalized.includes("warn") || normalized.includes("pending")) {
-    return "starting";
-  }
-  if (normalized.includes("invalid") || normalized.includes("fail") || normalized.includes("error")) {
-    return "failed";
-  }
-  return "unknown";
 }
 
 export function DetailPage({
@@ -176,6 +148,46 @@ export function DetailPage({
     selectedTarget,
   );
   const selectedPermissionMessage = getPermissionModeMessage(selectedPermissionMode);
+  const [publisher, slug] = capsule.scopedId.split("/", 2);
+  const sharedDetail = useMemo(
+    () =>
+      normalizeLocalDetail(
+        {
+          id: capsule.id,
+          description: capsule.longDescription || capsule.description,
+          latestVersion: capsule.version,
+          readmeMarkdown: capsule.readme,
+          readmeSource: capsule.readmeSource ?? null,
+          releases: capsule.releases.map((release) => ({
+            version: release.version,
+            manifestHash: release.manifestHash,
+            contentHash: release.contentHash,
+            signatureStatus: release.signatureStatus,
+            isCurrent: release.isCurrent,
+            yankedAt: release.yankedAt,
+          })),
+          storeMetadata: {
+            iconUrl: capsule.storeMetadata?.iconUrl,
+            text: capsule.longDescription || capsule.storeMetadata?.text,
+          },
+        },
+        {
+          publisher: publisher || capsule.publisher,
+          slug: slug || capsule.id,
+          scopedId: capsule.scopedId,
+          title: capsule.name,
+          verified:
+            capsule.trustLevel === "verified" || capsule.trustLevel === "signed",
+          trustBadge: capsule.trustLevel,
+          visibility: "local",
+          type: capsule.type,
+          version: capsule.version,
+          description: capsule.longDescription || capsule.description,
+          iconImage: capsule.storeMetadata?.iconUrl,
+        },
+      ),
+    [capsule, publisher, slug],
+  );
 
   useEffect(() => {
     if (tab !== "logs" || !logScrollRef.current) {
@@ -228,64 +240,59 @@ export function DetailPage({
 
   return (
     <div className="detail-page">
-      <header className="detail-header">
-        <button className="icon-btn" type="button" onClick={onBack} aria-label="Back to catalog">
-          <ChevronLeft size={15} strokeWidth={1.5} />
-        </button>
-        <div className="detail-icon">
-          {capsule.storeMetadata?.iconUrl ? (
-            <img
-              src={capsule.storeMetadata.iconUrl}
-              alt={`${capsule.scopedId} icon`}
-              className="detail-icon-image"
-            />
-          ) : (
-            <IconForCapsule iconKey={capsule.iconKey} />
-          )}
-        </div>
-        <div>
-          <div className="detail-title-row">
-            <span className="detail-title">{capsule.scopedId}</span>
-            <span className={`status-pill status-${status.tone}`}>
-              <span className={`status-pill-dot ${status.active ? "active" : ""}`} />
-              {status.label}
-            </span>
-          </div>
-          <div className="detail-meta">
-            <span className="detail-meta-item">
-              <Hash size={11} strokeWidth={1.5} />
-              {capsule.version}
-            </span>
-            <span className="detail-meta-sep">·</span>
-            <span className="detail-meta-item">{capsule.publisher}</span>
-            <span className="detail-meta-sep">·</span>
-            <span className="detail-meta-item">{capsule.size}</span>
-          </div>
-        </div>
-        <div className="detail-actions">
-          <button className="btn btn-danger" type="button" onClick={() => onDelete(capsule)} disabled={isRunning}>
-            <Trash2 size={12} strokeWidth={2} /> Delete
-          </button>
-          {isRunning ? (
-            <button className="btn btn-danger" type="button" onClick={() => onStop(capsule)}>
-              <Square size={12} strokeWidth={2} /> Stop
-            </button>
-          ) : null}
-          {isRunning ? (
-            <button
-              className="btn btn-ghost"
-              type="button"
-              onClick={() => onOpen(capsule, process)}
-              disabled={!openReady}
-            >
-              <ExternalLink size={12} strokeWidth={2} /> Open
-            </button>
-          ) : null}
-          <button className="btn btn-success" type="button" onClick={() => onRun(capsule)} disabled={!canRun}>
-            <Play size={12} strokeWidth={2} /> {isRunning ? "Spawn another" : "Run"}
-          </button>
-        </div>
-      </header>
+      <button className="icon-btn" type="button" onClick={onBack} aria-label="Back to catalog">
+        <ChevronLeft size={15} strokeWidth={1.5} />
+      </button>
+
+      <DockCapsuleDetailSummary
+        detail={{
+          ...sharedDetail,
+          updatedAt: process?.startedAt || sharedDetail.updatedAt,
+          createdAt: process?.startedAt || sharedDetail.createdAt,
+        }}
+        metrics={[
+          { label: "Status", value: status.label },
+          { label: "Version", value: `v${capsule.version}` },
+          { label: "Size", value: capsule.size },
+        ]}
+        actions={[
+          {
+            id: "delete",
+            label: "Delete",
+            tone: "danger",
+            icon: <Trash2 size={13} strokeWidth={1.8} />,
+            disabled: isRunning,
+            onAction: () => onDelete(capsule),
+          },
+          ...(isRunning
+            ? [
+                {
+                  id: "stop",
+                  label: "Stop",
+                  tone: "danger" as const,
+                  icon: <Square size={13} strokeWidth={1.8} />,
+                  onAction: () => onStop(capsule),
+                },
+                {
+                  id: "open",
+                  label: "Open",
+                  tone: "secondary" as const,
+                  icon: <ExternalLink size={13} strokeWidth={1.8} />,
+                  disabled: !openReady,
+                  onAction: () => onOpen(capsule, process),
+                },
+              ]
+            : []),
+          {
+            id: "run",
+            label: isRunning ? "Spawn another" : "Run",
+            tone: "primary",
+            icon: <Play size={13} strokeWidth={1.8} />,
+            disabled: !canRun,
+            onAction: () => onRun(capsule),
+          },
+        ]}
+      />
 
       <div className="tabs" role="tablist" aria-label="Detail tabs">
         <button
@@ -345,9 +352,11 @@ export function DetailPage({
 
       {tab === "docs" ? (
         <div className="docs-pane" role="tabpanel" aria-label="Readme">
-          <div className="docs-card">
-            <ReadmeRenderer readme={capsule.readme} />
-          </div>
+          <DockReadmePanel
+            markdown={sharedDetail.readmeMarkdown}
+            source={sharedDetail.readmeSource}
+            subtitle={sharedDetail.scopedId}
+          />
         </div>
       ) : null}
 
@@ -577,81 +586,51 @@ export function DetailPage({
 
       {tab === "releases" ? (
         <div className="docs-pane" role="tabpanel" aria-label="Releases and Security">
-          <div className="docs-card releases-card">
-            <div className="releases-summary-grid">
-              <div className="release-summary-tile">
-                <span className="section-title">Latest</span>
-                <strong>{capsule.version}</strong>
-              </div>
-              <div className="release-summary-tile">
-                <span className="section-title">Tracked releases</span>
-                <strong>{capsule.releases.length}</strong>
-              </div>
-              <div className="release-summary-tile">
-                <span className="section-title">Trust</span>
-                <strong>{capsule.trustLevel === "verified" || capsule.trustLevel === "signed" ? "Verified" : "Unverified"}</strong>
-              </div>
-            </div>
-
-            {capsule.releases.length === 0 ? (
-              <div className="release-empty">No release history is available for this capsule yet.</div>
-            ) : (
-              <div className="release-table-wrap">
-                <table className="release-table">
-                  <thead>
-                    <tr>
-                      <th>Version</th>
-                      <th>Content Hash</th>
-                      <th>Signature</th>
-                      <th style={{ textAlign: "right" }}>Operations</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {capsule.releases.map((release) => {
-                      const tone = signatureTone(release.signatureStatus);
-                      const actionable = Boolean(release.manifestHash);
-                      return (
-                        <tr key={`${release.version}-${release.contentHash}`}>
-                          <td className="mono">
-                            <div className="release-version-cell">
-                              <span>{release.version}</span>
-                              {release.isCurrent ? <span className="badge badge-current">Current</span> : null}
-                              {release.yankedAt ? <span className="badge badge-yanked">Yanked</span> : null}
-                            </div>
-                            {release.yankedAt ? <div className="row-meta">yanked at {new Date(release.yankedAt).toLocaleString()}</div> : null}
-                          </td>
-                          <td className="mono release-hash-cell">{release.contentHash}</td>
-                          <td>
-                            <span className={`badge status-badge status-${tone}`}>{release.signatureStatus}</span>
-                          </td>
-                          <td>
-                            <div className="release-actions">
-                              <button
-                                className="btn btn-ghost"
-                                type="button"
-                                disabled={!actionable}
-                                onClick={() => onRollbackRelease(capsule, release)}
-                              >
-                                Rollback
-                              </button>
-                              <button
-                                className="btn btn-danger"
-                                type="button"
-                                disabled={!actionable || Boolean(release.yankedAt)}
-                                onClick={() => onYankRelease(capsule, release)}
-                              >
-                                Yank
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
+          <DockReleaseTable
+            releases={sharedDetail.releases}
+            subtitle={`${capsule.releases.length} tracked releases`}
+            renderActions={(release) => {
+              const actionable = Boolean(release.manifestHash);
+              return (
+                <>
+                  <button
+                    className="btn btn-ghost"
+                    type="button"
+                    disabled={!actionable}
+                    onClick={() =>
+                      onRollbackRelease(capsule, {
+                        version: release.version,
+                        manifestHash: release.manifestHash,
+                        contentHash: release.contentHash,
+                        signatureStatus: release.signatureStatus,
+                        isCurrent: release.isCurrent ?? false,
+                        yankedAt: release.yankedAt,
+                      })
+                    }
+                  >
+                    Rollback
+                  </button>
+                  <button
+                    className="btn btn-danger"
+                    type="button"
+                    disabled={!actionable || Boolean(release.yankedAt)}
+                    onClick={() =>
+                      onYankRelease(capsule, {
+                        version: release.version,
+                        manifestHash: release.manifestHash,
+                        contentHash: release.contentHash,
+                        signatureStatus: release.signatureStatus,
+                        isCurrent: release.isCurrent ?? false,
+                        yankedAt: release.yankedAt,
+                      })
+                    }
+                  >
+                    Yank
+                  </button>
+                </>
+              );
+            }}
+          />
         </div>
       ) : null}
     </div>

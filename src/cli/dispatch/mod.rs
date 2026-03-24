@@ -1,26 +1,29 @@
+mod binding;
 mod config;
+mod engine;
 mod fetch;
 mod inspect;
+mod install;
 mod ipc;
 mod key;
 mod package;
 mod profile;
 mod project;
-mod publish;
+pub(crate) mod publish;
+pub(crate) mod registry;
+mod run;
 mod scaffold;
 mod source;
+mod state;
 
 use std::sync::Arc;
 
 use anyhow::Result;
 
+use crate::application::ports::OutputPort;
 use crate::auth;
 use crate::cli::{Cli, Commands};
 use crate::commands;
-use crate::orchestration::{
-    build_validate, catalog_registry, install_command, publish_command, run_install,
-    support_command,
-};
 use crate::project as crate_project;
 use crate::reporters;
 
@@ -48,8 +51,6 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
     match command {
         Commands::Run {
             path,
-            skill,
-            from_skill,
             target,
             watch,
             background,
@@ -64,9 +65,10 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             dangerously_skip_permissions,
             compatibility_fallback,
             yes,
+            agent,
             keep_failed_artifacts,
             allow_unverified,
-        } => run_install::execute_run_like_command(run_install::RunLikeCommandArgs {
+        } => run::execute_run_like_command(run::RunLikeCommandArgs {
             path,
             target,
             watch,
@@ -82,38 +84,43 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             dangerously_skip_permissions,
             compatibility_fallback,
             yes,
+            agent_mode: agent,
             keep_failed_artifacts,
             allow_unverified,
-            skill,
-            from_skill,
             deprecation_warning: None,
             reporter: reporter.clone(),
         }),
 
         Commands::Engine { command } => {
-            support_command::execute_engine_command(command, nacelle, reporter.clone())
+            engine::execute_engine_command(command, nacelle, reporter.clone())
         }
 
-        Commands::Registry { command } => catalog_registry::execute_registry_command(command),
+        Commands::Registry { command } => registry::execute_registry_command(command),
 
         Commands::Setup {
             engine,
             version,
             skip_verify,
-        } => support_command::execute_setup_command(engine, version, skip_verify, reporter.clone()),
+        } => engine::execute_setup_command(engine, version, skip_verify, reporter.clone()),
 
         Commands::Init => crate_project::init::execute_prompt(
             crate_project::init::PromptArgs { path: None },
             reporter.clone(),
         ),
 
-        Commands::New { name, template } => crate_project::new::execute(
-            crate_project::new::NewArgs {
-                name,
-                template: Some(template),
-            },
-            reporter.clone(),
-        ),
+        Commands::New { name, template } => {
+            let result = crate_project::new::execute(
+                crate_project::new::NewArgs {
+                    name,
+                    template: Some(template),
+                },
+                reporter.clone(),
+            )?;
+            if reporter.is_json() {
+                println!("{}", serde_json::to_string(&result)?);
+            }
+            Ok(())
+        }
 
         Commands::Build {
             dir,
@@ -125,26 +132,36 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             keep_failed_artifacts,
             timings,
             strict_v3,
-        } => build_validate::execute_build_like_command(build_validate::BuildLikeCommandArgs {
-            dir,
-            init,
-            key,
-            standalone,
-            force_large_payload,
-            enforcement: enforcement.as_str().to_string(),
-            keep_failed_artifacts,
-            timings,
-            strict_v3,
-            json,
-            nacelle,
-            deprecation_warning: None,
-            reporter: reporter.clone(),
-        }),
+        } => {
+            let result = crate::commands::build::execute_pack_command(
+                dir,
+                init,
+                key,
+                standalone,
+                force_large_payload,
+                keep_failed_artifacts,
+                strict_v3,
+                enforcement.as_str().to_string(),
+                reporter.clone(),
+                timings,
+                json,
+                nacelle,
+            )?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+
+            Ok(())
+        }
 
         Commands::Validate {
             path,
             json: command_json,
-        } => build_validate::execute_validate_command(path, json || command_json),
+        } => {
+            crate::commands::validate::execute(path, json || command_json)?;
+            Ok(())
+        }
 
         Commands::Update => {
             commands::update::update()?;
@@ -206,7 +223,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             no_project,
             json,
             keep_failed_artifacts,
-        } => install_command::execute_install_command(install_command::InstallCommandArgs {
+        } => install::execute_install_command(install::InstallCommandArgs {
             slug,
             from_gh_repo,
             registry,
@@ -232,7 +249,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             json,
             no_tui,
             show_manifest,
-        } => catalog_registry::execute_search_command(catalog_registry::SearchCommandArgs {
+        } => registry::execute_search_command(registry::SearchCommandArgs {
             query,
             category,
             tags,
@@ -298,7 +315,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             no_tui,
             json,
         } => execute_publish_command(
-            publish_command::PublishCommandArgs {
+            publish::PublishCommandArgs {
                 registry,
                 artifact,
                 scoped_id,
@@ -366,9 +383,9 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             reporter.clone(),
         ),
 
-        Commands::State { command } => support_command::execute_state_command(command),
+        Commands::State { command } => state::execute_state_command(command),
 
-        Commands::Binding { command } => support_command::execute_binding_command(command),
+        Commands::Binding { command } => binding::execute_binding_command(command),
 
         Commands::Guest { sync_path } => {
             commands::guest::execute(commands::guest::GuestArgs { sync_path })
