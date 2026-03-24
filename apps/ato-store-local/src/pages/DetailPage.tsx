@@ -17,8 +17,8 @@ import {
   DockCapsuleDetailSummary,
   DockReadmePanel,
   DockReleaseTable,
-} from "@ato/dock-react";
-import { normalizeLocalDetail } from "@ato/dock-domain";
+} from "../dock/react";
+import { normalizeLocalDetail } from "../dock/domain";
 import {
   getPermissionModeMessage,
   PermissionModeSelector,
