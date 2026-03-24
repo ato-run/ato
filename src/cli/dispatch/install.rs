@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use crate::install;
+use crate::install::support::can_prompt_interactively;
 
 pub(crate) struct InstallCommandArgs {
     pub(crate) slug: Option<String>,
@@ -30,7 +31,7 @@ pub(crate) fn execute_install_command(args: InstallCommandArgs) -> Result<()> {
 
     let projection_preference = projection_preference(args.project, args.no_project);
     let can_prompt = !args.json
-        && crate::can_prompt_interactively(
+        && can_prompt_interactively(
             std::io::stdin().is_terminal(),
             std::io::stderr().is_terminal(),
         );
@@ -44,7 +45,7 @@ pub(crate) fn execute_install_command(args: InstallCommandArgs) -> Result<()> {
             anyhow::bail!("--version cannot be used with --from-gh-repo");
         }
 
-        let result = rt.block_on(crate::run_install_orchestration::install_github_repository(
+        let result = rt.block_on(install::support::install_github_repository(
             repository,
             args.output,
             args.yes,

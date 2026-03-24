@@ -416,7 +416,7 @@ mod tests {
     async fn proxy_router_forwards_requests_to_upstream() {
         let upstream_app = Router::new().route(
             "/hello",
-            get(|| async { (StatusCode::OK, [("x-upstream", "ok")], "world") }),
+            get(|| async { (axum::http::StatusCode::OK, [("x-upstream", "ok")], "world") }),
         );
         let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await

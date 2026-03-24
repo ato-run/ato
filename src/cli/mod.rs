@@ -5,7 +5,6 @@ pub(crate) mod dispatch;
 mod inspect;
 mod ipc;
 mod key;
-pub(crate) mod orchestration;
 mod package;
 mod profile;
 mod project;

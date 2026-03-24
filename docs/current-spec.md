@@ -209,6 +209,14 @@ Current strictness contract:
 
 Publishes capsule artifacts to a registry.
 
+Implementation status during migration:
+
+- phase selection, stop-point validation, and phase ordering are already owned by application::pipeline::producer
+- the CLI entry is wired through cli::dispatch::publish, which hosts the phase runner integration for the publish command
+- application::pipeline::phases::publish already owns the wrapper APIs for summarize_private_publish, run_private_publish_phase, and run_official_publish_phase
+- private remote registry upload is now driven through DestinationPort in the main publish path
+- build-backed private publish now resolves source vs artifact input in application::pipeline::phases::publish before handing off to that same upload boundary
+
 Internal Pipeline Phases (Producer Flow):
 
 1. Prepare: diagnoses the source, prepares reproducible inputs, and generates any pre-build material needed for a deterministic artifact
