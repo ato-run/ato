@@ -634,7 +634,7 @@ where
                 assume_yes: request.assume_yes,
                 nacelle: request.nacelle.clone(),
             },
-            attempt.as_mut().map(|attempt| &mut **attempt),
+            attempt.as_deref_mut(),
         )
         .await?;
         if exit != 0 {
@@ -1069,7 +1069,7 @@ where
                 &execution_plan,
                 &launch_ctx,
                 request.dangerously_skip_permissions,
-                attempt.as_mut().map(|attempt| &mut **attempt),
+                attempt,
             )?;
             sidecar_cleanup.stop_now();
             if exit != 0 {
