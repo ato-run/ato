@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use capsule_core::CapsuleReporter;
 
+use crate::application::pipeline::cleanup::PipelineAttemptContext;
 use crate::application::pipeline::executor::HourglassPhaseRunner;
 use crate::application::pipeline::hourglass::{
     self, phase_is_ok, phase_mark_failed, phase_mark_ok, phase_mark_skipped, phase_mut,
@@ -386,7 +387,7 @@ impl<'a> PublishCommandExecution<'a> {
         Ok(())
     }
 
-    async fn run_install_phase(&mut self) -> Result<()> {
+    async fn run_install_phase(&mut self, attempt: &mut PipelineAttemptContext) -> Result<()> {
         hourglass::print_phase_line(
             self.args.json,
             PublishPhaseBoundary::Install,
@@ -406,9 +407,13 @@ impl<'a> PublishCommandExecution<'a> {
             .state
             .verified_artifact()
             .context("install phase requires verified artifact metadata")?;
-        let install_result =
-            install_phase::run_publish_install_phase_async(artifact_path, preview, verification)
-                .await?;
+        let install_result = install_phase::run_publish_install_phase_async(
+            artifact_path,
+            preview,
+            verification,
+            Some(attempt),
+        )
+        .await?;
         let message = format!("unpacked {}", install_result.path.display());
         phase_mark_ok(
             phase_mut(&mut self.phases, PublishPhaseBoundary::Install),
@@ -688,17 +693,16 @@ impl<'a> PublishCommandExecution<'a> {
         } else {
             Some(preview.scoped_id.clone())
         };
-        let upload_result = publish_phase::run_private_publish_phase_async(
-            publish_phase::PrivatePublishRequest {
+        let upload_result =
+            publish_phase::run_private_publish_phase_async(publish_phase::PrivatePublishRequest {
                 registry_url: self.resolved_target.registry_url.clone(),
                 publisher_hint: self.resolved_target.publisher_handle.clone(),
                 artifact_path: Some(publish_artifact),
                 force_large_payload: self.args.force_large_payload,
                 scoped_id,
                 allow_existing: self.args.allow_existing,
-            },
-        )
-        .await;
+            })
+            .await;
         if !self.args.json {
             self.reporter.progress_finish(None).await?;
         }
@@ -724,12 +728,16 @@ impl<'a> PublishCommandExecution<'a> {
 
 #[async_trait(?Send)]
 impl HourglassPhaseRunner for PublishCommandExecution<'_> {
-    async fn run_phase(&mut self, phase: PublishPhaseBoundary) -> Result<()> {
+    async fn run_phase(
+        &mut self,
+        phase: PublishPhaseBoundary,
+        attempt: &mut PipelineAttemptContext,
+    ) -> Result<()> {
         match phase {
             PublishPhaseBoundary::Prepare => self.run_prepare_phase(),
             PublishPhaseBoundary::Build => self.run_build_phase(),
             PublishPhaseBoundary::Verify => self.run_verify_phase(),
-            PublishPhaseBoundary::Install => self.run_install_phase().await,
+            PublishPhaseBoundary::Install => self.run_install_phase(attempt).await,
             PublishPhaseBoundary::DryRun => self.run_dry_run_phase().await,
             PublishPhaseBoundary::Publish => self.run_publish_phase().await,
             PublishPhaseBoundary::Execute => {
@@ -738,7 +746,11 @@ impl HourglassPhaseRunner for PublishCommandExecution<'_> {
         }
     }
 
-    async fn skip_phase(&mut self, phase: PublishPhaseBoundary) -> Result<()> {
+    async fn skip_phase(
+        &mut self,
+        phase: PublishPhaseBoundary,
+        _attempt: &mut PipelineAttemptContext,
+    ) -> Result<()> {
         match phase {
             PublishPhaseBoundary::Prepare
             | PublishPhaseBoundary::Build
@@ -835,9 +847,9 @@ fn execute_publish_pipeline(
         pipeline_preview,
     );
     match tokio::runtime::Handle::try_current() {
-        Ok(handle) => {
-            tokio::task::block_in_place(|| handle.block_on(pipeline.run_until(selection.stop, &mut execution)))?
-        }
+        Ok(handle) => tokio::task::block_in_place(|| {
+            handle.block_on(pipeline.run_until(selection.stop, &mut execution))
+        })?,
         Err(_) => {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(pipeline.run_until(selection.stop, &mut execution))?;

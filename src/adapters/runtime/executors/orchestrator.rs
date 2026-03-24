@@ -24,6 +24,7 @@ use capsule_core::CapsuleReporter;
 use super::launch_context::RuntimeLaunchContext;
 use super::source::ExecuteMode;
 use super::target_runner::{self, TargetLaunchOptions};
+use crate::application::pipeline::cleanup::PipelineAttemptContext;
 use crate::reporters::CliReporter;
 use crate::runtime::overrides as runtime_overrides;
 
@@ -59,10 +60,11 @@ pub async fn execute(
     reporter: std::sync::Arc<CliReporter>,
     launch_ctx: &RuntimeLaunchContext,
     options: OrchestratorOptions,
+    attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<i32> {
     let client = BollardOciRuntimeClient::connect_default()
         .context("Failed to connect to OCI engine via Docker-compatible API")?;
-    execute_with_client(plan, reporter, launch_ctx, &options, &client).await
+    execute_with_client(plan, reporter, launch_ctx, &options, attempt, &client).await
 }
 
 pub async fn execute_with_client<C: OciRuntimeClient>(
@@ -70,6 +72,7 @@ pub async fn execute_with_client<C: OciRuntimeClient>(
     reporter: std::sync::Arc<CliReporter>,
     launch_ctx: &RuntimeLaunchContext,
     options: &OrchestratorOptions,
+    attempt: Option<&mut PipelineAttemptContext>,
     client: &C,
 ) -> Result<i32> {
     let orchestration = plan.resolve_services()?;
@@ -95,6 +98,7 @@ pub async fn execute_with_client<C: OciRuntimeClient>(
 
     let mut running = HashMap::<String, RunningService>::new();
     let mut ready = HashMap::<String, bool>::new();
+    let mut startup_cleanup = attempt.map(|attempt| attempt.cleanup_scope());
 
     let startup_result = async {
         for service_name in &orchestration.startup_order {
@@ -124,11 +128,20 @@ pub async fn execute_with_client<C: OciRuntimeClient>(
                 options,
             )
             .await?;
+            if let (Some(scope), Some(pid)) =
+                (startup_cleanup.as_mut(), running_service.local_pid())
+            {
+                scope.register_kill_child_process(pid, service.name.clone());
+            }
             running.insert(service.name.clone(), running_service);
         }
 
         for service_name in &orchestration.startup_order {
             wait_until_ready(service_name, &mut running, &mut ready, client).await?;
+        }
+
+        if let Some(scope) = startup_cleanup.take() {
+            scope.commit_all();
         }
 
         Ok::<(), anyhow::Error>(())
@@ -162,6 +175,15 @@ struct RunningService {
     service: ResolvedService,
     env: HashMap<String, String>,
     handle: RunningHandle,
+}
+
+impl RunningService {
+    fn local_pid(&self) -> Option<u32> {
+        match &self.handle {
+            RunningHandle::Local(local) => Some(local.child.id()),
+            RunningHandle::Oci(_) => None,
+        }
+    }
 }
 
 enum RunningHandle {
@@ -1364,7 +1386,7 @@ target = "db"
             nacelle: None,
         };
 
-        let exit = execute_with_client(&plan, reporter, &launch_ctx, &options, &client)
+        let exit = execute_with_client(&plan, reporter, &launch_ctx, &options, None, &client)
             .await
             .expect("orchestrator exit");
         assert_eq!(exit, 0);

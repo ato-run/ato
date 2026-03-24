@@ -1,9 +1,4 @@
-import {
-  Eye,
-  Play,
-  Square,
-  Trash2,
-} from "lucide-react";
+import { Eye, Play, Square, Trash2 } from "lucide-react";
 import { DockCatalogView, type DockAction } from "../dock/react";
 import {
   normalizeLocalCatalogItem,
@@ -12,7 +7,10 @@ import {
 
 import type { Capsule, CatalogViewMode, OsFilter, Process } from "../types";
 
-function latestProcessForCapsule(processes: Process[], capsuleId: string): Process | undefined {
+function latestProcessForCapsule(
+  processes: Process[],
+  capsuleId: string,
+): Process | undefined {
   return [...processes]
     .filter((process) => process.capsuleId === capsuleId)
     .sort((left, right) => right.startedAt.localeCompare(left.startedAt))[0];
@@ -20,28 +18,32 @@ function latestProcessForCapsule(processes: Process[], capsuleId: string): Proce
 
 function toCatalogItem(capsule: Capsule): DockCatalogItem {
   const [publisher, slug] = capsule.scopedId.split("/", 2);
-  return normalizeLocalCatalogItem({
-    id: capsule.id,
-    slug: slug || capsule.id,
-    scopedId: capsule.scopedId,
-    name: capsule.name,
-    description: capsule.longDescription || capsule.description,
-    publisher: {
-      handle: publisher || capsule.publisher,
-      verified: capsule.trustLevel === "verified" || capsule.trustLevel === "signed",
+  return normalizeLocalCatalogItem(
+    {
+      id: capsule.id,
+      slug: slug || capsule.id,
+      scopedId: capsule.scopedId,
+      name: capsule.name,
+      description: capsule.longDescription || capsule.description,
+      publisher: {
+        handle: publisher || capsule.publisher,
+        verified:
+          capsule.trustLevel === "verified" || capsule.trustLevel === "signed",
+      },
+      type: capsule.type === "service" ? "service" : capsule.type,
+      latestVersion: capsule.version,
+      size: capsule.size,
+      storeMetadata: {
+        iconUrl: capsule.storeMetadata?.iconUrl,
+        text: capsule.longDescription || capsule.storeMetadata?.text,
+      },
     },
-    type: capsule.type === "service" ? "service" : capsule.type,
-    latestVersion: capsule.version,
-    size: capsule.size,
-    storeMetadata: {
-      iconUrl: capsule.storeMetadata?.iconUrl,
-      text: capsule.longDescription || capsule.storeMetadata?.text,
+    {
+      href: `/capsule/${encodeURIComponent(capsule.id)}`,
+      trustBadge: capsule.trustLevel,
+      visibility: "local",
     },
-  }, {
-    href: `/capsule/${encodeURIComponent(capsule.id)}`,
-    trustBadge: capsule.trustLevel,
-    visibility: "local",
-  });
+  );
 }
 
 interface CatalogPageProps {
@@ -136,7 +138,10 @@ export function CatalogPage({
         <h3>No capsules in this Dock.</h3>
         <p>To publish your first capsule, run:</p>
         {writeAuthRequired ? (
-          <p>If this Dock requires write auth, run <code>ato login</code> first. The publish command below will reuse your saved CLI session.</p>
+          <p>
+            If this Dock requires write auth, run <code>ato login</code> first.
+            The publish command below will reuse your saved CLI session.
+          </p>
         ) : null}
         <pre>{publishCommand}</pre>
         <button className="btn btn-ghost" type="button" onClick={onCopyCommand}>

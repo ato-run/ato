@@ -122,6 +122,71 @@ impl AtoErrorCode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AtoErrorClassification {
+    Manifest,
+    Source,
+    Provisioning,
+    Execution,
+    Internal,
+}
+
+impl AtoErrorClassification {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manifest => "manifest",
+            Self::Source => "source",
+            Self::Provisioning => "provisioning",
+            Self::Execution => "execution",
+            Self::Internal => "internal",
+        }
+    }
+
+    pub fn from_phase(phase: &str) -> Self {
+        match phase {
+            "manifest" | "inference" => Self::Manifest,
+            "source" | "build" => Self::Source,
+            "provisioning" => Self::Provisioning,
+            "execution" => Self::Execution,
+            _ => Self::Internal,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupStatus {
+    NotRequired,
+    Complete,
+    Partial,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupActionRecord {
+    pub action: String,
+    pub status: CleanupActionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupActionStatus {
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ManifestSuggestion {
+    pub kind: String,
+    pub path: String,
+    pub operation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Error)]
 #[error("{code}: {message}")]
 pub struct AtoExecutionError {
@@ -135,6 +200,10 @@ pub struct AtoExecutionError {
     pub retryable: bool,
     pub interactive_resolution: bool,
     pub details: Option<Value>,
+    pub classification: AtoErrorClassification,
+    pub cleanup_status: Option<CleanupStatus>,
+    pub cleanup_actions: Vec<CleanupActionRecord>,
+    pub manifest_suggestion: Option<ManifestSuggestion>,
 }
 
 impl AtoExecutionError {
@@ -156,6 +225,10 @@ impl AtoExecutionError {
             retryable: code.retryable(),
             interactive_resolution: code.interactive_resolution(),
             details: None,
+            classification: AtoErrorClassification::from_phase(code.phase()),
+            cleanup_status: None,
+            cleanup_actions: Vec::new(),
+            manifest_suggestion: None,
         }
     }
 
@@ -172,7 +245,31 @@ impl AtoExecutionError {
             retryable: error.retryable(),
             interactive_resolution: error.interactive_resolution(),
             details: error.details(),
+            classification: AtoErrorClassification::from_phase(error.phase().as_str()),
+            cleanup_status: None,
+            cleanup_actions: Vec::new(),
+            manifest_suggestion: None,
         }
+    }
+
+    pub fn with_classification(mut self, classification: AtoErrorClassification) -> Self {
+        self.classification = classification;
+        self
+    }
+
+    pub fn with_cleanup(
+        mut self,
+        cleanup_status: CleanupStatus,
+        cleanup_actions: Vec<CleanupActionRecord>,
+    ) -> Self {
+        self.cleanup_status = Some(cleanup_status);
+        self.cleanup_actions = cleanup_actions;
+        self
+    }
+
+    pub fn with_manifest_suggestion(mut self, suggestion: ManifestSuggestion) -> Self {
+        self.manifest_suggestion = Some(suggestion);
+        self
     }
 
     pub fn policy_violation(message: impl Into<String>) -> Self {

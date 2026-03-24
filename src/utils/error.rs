@@ -2,7 +2,11 @@ use anyhow::Error as AnyhowError;
 use serde::Serialize;
 use serde_json::Value;
 
-use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::execution_plan::error::{
+    AtoExecutionError, CleanupActionRecord, CleanupStatus, ManifestSuggestion,
+};
+
+use crate::application::pipeline::cleanup::PipelineAttemptError;
 
 pub const EXIT_USER_ERROR: i32 = 1;
 pub const EXIT_SYSTEM_ERROR: i32 = 2;
@@ -18,6 +22,7 @@ struct AtoErrorEvent<'a> {
     code: &'a str,
     name: &'a str,
     phase: &'a str,
+    classification: &'a str,
     message: &'a str,
     retryable: bool,
     interactive_resolution: bool,
@@ -29,6 +34,12 @@ struct AtoErrorEvent<'a> {
     hint: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<&'a Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cleanup_status: Option<CleanupStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    cleanup_actions: &'a Vec<CleanupActionRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manifest_suggestion: Option<&'a ManifestSuggestion>,
 }
 
 pub fn emit_ato_error_jsonl(err: &AtoExecutionError) {
@@ -37,6 +48,7 @@ pub fn emit_ato_error_jsonl(err: &AtoExecutionError) {
         code: err.code,
         name: err.name,
         phase: err.phase,
+        classification: err.classification.as_str(),
         message: &err.message,
         retryable: err.retryable,
         interactive_resolution: err.interactive_resolution,
@@ -44,6 +56,9 @@ pub fn emit_ato_error_jsonl(err: &AtoExecutionError) {
         target: err.target.as_deref(),
         hint: err.hint.as_deref(),
         details: err.details.as_ref(),
+        cleanup_status: err.cleanup_status,
+        cleanup_actions: &err.cleanup_actions,
+        manifest_suggestion: err.manifest_suggestion.as_ref(),
     };
 
     if let Ok(line) = serde_json::to_string(&payload) {
@@ -56,12 +71,30 @@ pub fn try_emit_from_anyhow(err: &AnyhowError, json_mode: bool) -> bool {
         return false;
     }
 
+    if let Some(attempt_err) = err.downcast_ref::<PipelineAttemptError>() {
+        if let Some(execution_err) = attempt_err
+            .source_error()
+            .downcast_ref::<AtoExecutionError>()
+        {
+            let enriched = execution_err.clone().with_cleanup(
+                attempt_err.cleanup_report().status,
+                attempt_err.cleanup_report().actions.clone(),
+            );
+            emit_ato_error_jsonl(&enriched);
+            return true;
+        }
+    }
+
     if let Some(execution_err) = err.downcast_ref::<AtoExecutionError>() {
         emit_ato_error_jsonl(execution_err);
         return true;
     }
 
-    let message = err.to_string();
+    let message = if let Some(attempt_err) = err.downcast_ref::<PipelineAttemptError>() {
+        attempt_err.source_error().to_string()
+    } else {
+        err.to_string()
+    };
 
     if message.contains("capsule.lock manifest hash mismatch") {
         emit_ato_error_jsonl(&AtoExecutionError::lockfile_tampered(message, None));
