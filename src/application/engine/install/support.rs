@@ -1681,6 +1681,7 @@ pub(crate) fn execute_run_command(
     watch: bool,
     background: bool,
     nacelle: Option<PathBuf>,
+    registry: Option<String>,
     enforcement: EnforcementMode,
     sandbox_mode: bool,
     dangerously_skip_permissions: bool,
@@ -1688,25 +1689,22 @@ pub(crate) fn execute_run_command(
     assume_yes: bool,
     agent_mode: crate::RunAgentMode,
     agent_local_root: Option<PathBuf>,
+    keep_failed_artifacts: bool,
+    allow_unverified: bool,
     state: Vec<String>,
     inject: Vec<String>,
     reporter: std::sync::Arc<reporters::CliReporter>,
 ) -> Result<()> {
-    let target_path = if path.is_file() || path.extension().is_some_and(|ext| ext == "capsule") {
-        path.clone()
-    } else {
-        path.join("capsule.toml")
-    };
-
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     rt.block_on(commands::run::execute(commands::run::RunArgs {
-        target: target_path,
+        target: path,
         target_label: target,
         watch,
         background,
         nacelle,
+        registry,
         enforcement: enforcement.as_str().to_string(),
         sandbox_mode,
         dangerously_skip_permissions,
@@ -1714,6 +1712,8 @@ pub(crate) fn execute_run_command(
         assume_yes,
         agent_mode,
         agent_local_root,
+        keep_failed_artifacts,
+        allow_unverified,
         state_bindings: state,
         inject_bindings: inject,
         reporter,

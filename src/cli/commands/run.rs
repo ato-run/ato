@@ -60,6 +60,7 @@ pub struct RunArgs {
     pub watch: bool,
     pub background: bool,
     pub nacelle: Option<PathBuf>,
+    pub registry: Option<String>,
     pub enforcement: String,
     pub sandbox_mode: bool,
     pub dangerously_skip_permissions: bool,
@@ -67,6 +68,8 @@ pub struct RunArgs {
     pub assume_yes: bool,
     pub agent_mode: crate::RunAgentMode,
     pub agent_local_root: Option<PathBuf>,
+    pub keep_failed_artifacts: bool,
+    pub allow_unverified: bool,
     pub state_bindings: Vec<String>,
     pub inject_bindings: Vec<String>,
     pub reporter: Arc<CliReporter>,
@@ -74,56 +77,37 @@ pub struct RunArgs {
 }
 
 pub async fn execute(args: RunArgs) -> Result<()> {
-    let target = args.target.clone();
-    let target_is_manifest_file =
-        target.is_file() && target.file_name().and_then(|n| n.to_str()) == Some("capsule.toml");
-    let target_is_manifest_dir = target.is_dir() && target.join("capsule.toml").exists();
-
-    if target
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        == Some("capsule".to_string())
-    {
-        execute_capsule_file(&args, &target).await
-    } else if target_is_manifest_dir || target_is_manifest_file {
-        if args.watch {
-            execute_watch_mode(args)
-        } else {
-            execute_normal_mode(args).await
-        }
+    if args.watch {
+        execute_watch_mode_with_install(args).await
     } else {
-        anyhow::bail!(
-            "Target is not a valid capsule: {} (expected .capsule file or directory with capsule.toml)",
-            target.display()
-        );
+        execute_normal_mode(args).await
     }
 }
 
-async fn execute_capsule_file(args: &RunArgs, capsule_path: &PathBuf) -> Result<()> {
+async fn execute_watch_mode_with_install(args: RunArgs) -> Result<()> {
+    let install = run_install_phase(&args).await?;
+    if matches!(
+        install.manifest_outcome,
+        crate::install::support::LocalRunManifestPreparationOutcome::CreatedManualManifest
+    ) {
+        return Ok(());
+    }
+
+    let target = normalize_run_target_after_install(&args, &install.resolved_target.path).await?;
+    execute_watch_mode(RunArgs {
+        target,
+        agent_local_root: install.resolved_target.agent_local_root,
+        ..args
+    })
+}
+
+async fn prepare_capsule_target(args: &RunArgs, capsule_path: &PathBuf) -> Result<PathBuf> {
     if let Some(manifest_path) = runtime_tree::prepare_store_runtime_for_capsule(capsule_path)? {
         debug!(
             manifest_path = %manifest_path.display(),
             "Running capsule from isolated runtime tree"
         );
-        let run_args = RunArgs {
-            target: manifest_path,
-            target_label: args.target_label.clone(),
-            watch: args.watch,
-            background: args.background,
-            nacelle: args.nacelle.clone(),
-            enforcement: args.enforcement.clone(),
-            sandbox_mode: args.sandbox_mode,
-            dangerously_skip_permissions: args.dangerously_skip_permissions,
-            compatibility_fallback: args.compatibility_fallback.clone(),
-            assume_yes: args.assume_yes,
-            agent_mode: args.agent_mode,
-            agent_local_root: args.agent_local_root.clone(),
-            state_bindings: args.state_bindings.clone(),
-            inject_bindings: args.inject_bindings.clone(),
-            reporter: args.reporter.clone(),
-            preview_mode: args.preview_mode,
-        };
-        return execute_normal_mode(run_args).await;
+        return Ok(manifest_path);
     }
 
     debug!(capsule = %capsule_path.display(), "Extracting capsule archive");
@@ -205,28 +189,7 @@ async fn execute_capsule_file(args: &RunArgs, capsule_path: &PathBuf) -> Result<
         debug!("Source files copied");
     }
 
-    debug!(extract_dir = %extract_dir.display(), "Running extracted capsule");
-
-    let run_args = RunArgs {
-        target: manifest_path,
-        target_label: args.target_label.clone(),
-        watch: args.watch,
-        background: args.background,
-        nacelle: args.nacelle.clone(),
-        enforcement: args.enforcement.clone(),
-        sandbox_mode: args.sandbox_mode,
-        dangerously_skip_permissions: args.dangerously_skip_permissions,
-        compatibility_fallback: args.compatibility_fallback.clone(),
-        assume_yes: args.assume_yes,
-        agent_mode: args.agent_mode,
-        agent_local_root: args.agent_local_root.clone(),
-        state_bindings: args.state_bindings.clone(),
-        inject_bindings: args.inject_bindings.clone(),
-        reporter: args.reporter.clone(),
-        preview_mode: args.preview_mode,
-    };
-
-    execute_normal_mode(run_args).await
+    Ok(manifest_path)
 }
 
 fn emit_run_cas_disabled_warning_once(reason: &capsule_core::capsule_v3::CasDisableReason) {
@@ -406,11 +369,25 @@ fn build_consumer_run_request(args: &RunArgs) -> run_phase::ConsumerRunRequest {
         assume_yes: args.assume_yes,
         agent_mode: args.agent_mode,
         agent_local_root: args.agent_local_root.clone(),
+        registry: args.registry.clone(),
+        keep_failed_artifacts: args.keep_failed_artifacts,
+        allow_unverified: args.allow_unverified,
         state_bindings: args.state_bindings.clone(),
         inject_bindings: args.inject_bindings.clone(),
         reporter: args.reporter.clone(),
         preview_mode: args.preview_mode,
     }
+}
+
+fn build_consumer_run_request_with_target(
+    args: &RunArgs,
+    target: &Path,
+    agent_local_root: Option<PathBuf>,
+) -> run_phase::ConsumerRunRequest {
+    let mut request = build_consumer_run_request(args);
+    request.target = target.to_path_buf();
+    request.agent_local_root = agent_local_root;
+    request
 }
 
 struct RunProgress<'a> {
@@ -513,6 +490,9 @@ impl run_phase::ConsumerRunProgress for RunProgress<'_> {
 struct ConsumerRunPhaseRunner<'a> {
     args: &'a RunArgs,
     state: Option<RunPipelineState>,
+    target: Option<PathBuf>,
+    agent_local_root: Option<PathBuf>,
+    should_stop_after_install: bool,
 }
 
 impl ConsumerRunPhaseRunner<'_> {
@@ -524,14 +504,46 @@ impl ConsumerRunPhaseRunner<'_> {
             )
         })
     }
+
+    fn resolved_target(&self) -> &Path {
+        self.target.as_deref().unwrap_or(self.args.target.as_path())
+    }
 }
 
 #[async_trait(?Send)]
 impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
+    fn should_continue(&self) -> bool {
+        !self.should_stop_after_install
+    }
+
     async fn run_phase(&mut self, phase: HourglassPhase) -> Result<()> {
         match phase {
+            HourglassPhase::Install => {
+                let install = run_install_phase(self.args).await.inspect_err(|err| {
+                    emit_run_phase_failure(self.args, HourglassPhase::Install, err);
+                })?;
+                self.target = Some(
+                    normalize_run_target_after_install(self.args, &install.resolved_target.path)
+                        .await
+                        .inspect_err(|err| {
+                            emit_run_phase_failure(self.args, HourglassPhase::Install, err);
+                        })?,
+                );
+                self.agent_local_root = install.resolved_target.agent_local_root;
+                self.should_stop_after_install = matches!(
+                    install.manifest_outcome,
+                    crate::install::support::LocalRunManifestPreparationOutcome::CreatedManualManifest
+                );
+                Ok(())
+            }
             HourglassPhase::Prepare => {
-                let state = run_prepare_phase(self.args).await.inspect_err(|err| {
+                let state = run_prepare_phase(
+                    self.args,
+                    self.resolved_target(),
+                    self.agent_local_root.clone(),
+                )
+                .await
+                .inspect_err(|err| {
                     emit_run_phase_failure(self.args, HourglassPhase::Prepare, err);
                 })?;
                 self.state = Some(state);
@@ -539,7 +551,14 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
             }
             HourglassPhase::Build => {
                 let input = self.take_state(HourglassPhase::Build)?;
-                let state = run_build_phase(self.args, input).await.inspect_err(|err| {
+                let state = run_build_phase(
+                    self.args,
+                    self.resolved_target(),
+                    self.agent_local_root.clone(),
+                    input,
+                )
+                .await
+                .inspect_err(|err| {
                     emit_run_phase_failure(self.args, HourglassPhase::Build, err);
                 })?;
                 self.state = Some(state);
@@ -547,7 +566,14 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
             }
             HourglassPhase::Verify => {
                 let input = self.take_state(HourglassPhase::Verify)?;
-                let state = run_verify_phase(self.args, input).await.inspect_err(|err| {
+                let state = run_verify_phase(
+                    self.args,
+                    self.resolved_target(),
+                    self.agent_local_root.clone(),
+                    input,
+                )
+                .await
+                .inspect_err(|err| {
                     emit_run_phase_failure(self.args, HourglassPhase::Verify, err);
                 })?;
                 self.state = Some(state);
@@ -555,7 +581,14 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
             }
             HourglassPhase::DryRun => {
                 let input = self.take_state(HourglassPhase::DryRun)?;
-                let state = run_dry_run_phase(self.args, input).await.inspect_err(|err| {
+                let state = run_dry_run_phase(
+                    self.args,
+                    self.resolved_target(),
+                    self.agent_local_root.clone(),
+                    input,
+                )
+                .await
+                .inspect_err(|err| {
                     emit_run_phase_failure(self.args, HourglassPhase::DryRun, err);
                 })?;
                 self.state = Some(state);
@@ -563,11 +596,18 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
             }
             HourglassPhase::Execute => {
                 let input = self.take_state(HourglassPhase::Execute)?;
-                run_execute_phase(self.args, input).await.inspect_err(|err| {
+                run_execute_phase(
+                    self.args,
+                    self.resolved_target(),
+                    self.agent_local_root.clone(),
+                    input,
+                )
+                .await
+                .inspect_err(|err| {
                     emit_run_phase_failure(self.args, HourglassPhase::Execute, err);
                 })
             }
-            HourglassPhase::Install | HourglassPhase::Publish => anyhow::bail!(
+            HourglassPhase::Publish => anyhow::bail!(
                 "unsupported run pipeline phase {} in run command",
                 phase.as_str()
             ),
@@ -580,6 +620,9 @@ async fn execute_normal_mode(args: RunArgs) -> Result<()> {
     let mut runner = ConsumerRunPhaseRunner {
         args: &args,
         state: None,
+        target: None,
+        agent_local_root: args.agent_local_root.clone(),
+        should_stop_after_install: false,
     };
 
     pipeline.run(&mut runner).await
@@ -587,12 +630,13 @@ async fn execute_normal_mode(args: RunArgs) -> Result<()> {
 
 fn run_phase_detail(boundary: HourglassPhase) -> &'static str {
     match boundary {
+        HourglassPhase::Install => "target resolution and install",
         HourglassPhase::Prepare => "manifest and launch context resolution",
         HourglassPhase::Build => "build and lifecycle hooks",
         HourglassPhase::Verify => "execution plan verification",
         HourglassPhase::DryRun => "runtime preflight",
         HourglassPhase::Execute => "capsule execution",
-        HourglassPhase::Install | HourglassPhase::Publish => {
+        HourglassPhase::Publish => {
             panic!("unsupported run phase {}", boundary.as_str())
         }
     }
@@ -638,32 +682,77 @@ fn emit_run_phase_failure(args: &RunArgs, boundary: HourglassPhase, error: &anyh
     );
 }
 
-async fn run_prepare_phase(args: &RunArgs) -> Result<RunPipelineState> {
+pub(crate) async fn normalize_run_target_after_install(
+    args: &RunArgs,
+    resolved_target: &Path,
+) -> Result<PathBuf> {
+    if resolved_target
+        .extension()
+        .map(|value| value.eq_ignore_ascii_case("capsule"))
+        .unwrap_or(false)
+    {
+        return prepare_capsule_target(args, &resolved_target.to_path_buf()).await;
+    }
+
+    Ok(resolved_target.to_path_buf())
+}
+
+async fn run_install_phase(args: &RunArgs) -> Result<run_phase::RunInstallPhaseResult> {
     let request = build_consumer_run_request(args);
+    let progress = RunProgress { args };
+    run_phase::run_install_phase(&request, &progress).await
+}
+
+async fn run_prepare_phase(
+    args: &RunArgs,
+    target: &Path,
+    agent_local_root: Option<PathBuf>,
+) -> Result<RunPipelineState> {
+    let request = build_consumer_run_request_with_target(args, target, agent_local_root);
     let progress = RunProgress { args };
     run_phase::run_prepare_phase(&request, &progress).await
 }
 
-async fn run_build_phase(args: &RunArgs, state: RunPipelineState) -> Result<RunPipelineState> {
-    let request = build_consumer_run_request(args);
+async fn run_build_phase(
+    args: &RunArgs,
+    target: &Path,
+    agent_local_root: Option<PathBuf>,
+    state: RunPipelineState,
+) -> Result<RunPipelineState> {
+    let request = build_consumer_run_request_with_target(args, target, agent_local_root);
     let progress = RunProgress { args };
     run_phase::run_build_phase(&request, &progress, state).await
 }
 
-async fn run_verify_phase(args: &RunArgs, state: RunPipelineState) -> Result<RunPipelineState> {
-    let request = build_consumer_run_request(args);
+async fn run_verify_phase(
+    args: &RunArgs,
+    target: &Path,
+    agent_local_root: Option<PathBuf>,
+    state: RunPipelineState,
+) -> Result<RunPipelineState> {
+    let request = build_consumer_run_request_with_target(args, target, agent_local_root);
     let progress = RunProgress { args };
     run_phase::run_verify_phase(&request, &progress, state).await
 }
 
-async fn run_dry_run_phase(args: &RunArgs, state: RunPipelineState) -> Result<RunPipelineState> {
-    let request = build_consumer_run_request(args);
+async fn run_dry_run_phase(
+    args: &RunArgs,
+    target: &Path,
+    agent_local_root: Option<PathBuf>,
+    state: RunPipelineState,
+) -> Result<RunPipelineState> {
+    let request = build_consumer_run_request_with_target(args, target, agent_local_root);
     let progress = RunProgress { args };
     run_phase::run_dry_run_phase(&request, &progress, state).await
 }
 
-async fn run_execute_phase(args: &RunArgs, state: RunPipelineState) -> Result<()> {
-    let request = build_consumer_run_request(args);
+async fn run_execute_phase(
+    args: &RunArgs,
+    target: &Path,
+    agent_local_root: Option<PathBuf>,
+    state: RunPipelineState,
+) -> Result<()> {
+    let request = build_consumer_run_request_with_target(args, target, agent_local_root);
     let progress = RunProgress { args };
     run_phase::run_execute_phase(&request, &progress, state, &RunExecuteHooks).await
 }
