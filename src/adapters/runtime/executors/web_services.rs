@@ -3,17 +3,21 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::router::ManifestData;
 use capsule_core::types::ServiceSpec;
 
-use crate::application::pipeline::cleanup::PipelineAttemptContext;
-use crate::application::services::ServiceGraphPlan;
+use crate::application::pipeline::cleanup::{CleanupScope, PipelineAttemptContext};
+use crate::application::services::{
+    ServiceGraphPlan, ServicePhaseCoordinator, ServicePhaseRuntime,
+};
 use crate::runtime::manager as runtime_manager;
 use crate::runtime::overrides as runtime_overrides;
 
@@ -23,7 +27,7 @@ const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 const READINESS_INTERVAL: Duration = Duration::from_millis(250);
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct RuntimeBins {
     deno: Option<PathBuf>,
     node: Option<PathBuf>,
@@ -39,45 +43,76 @@ struct RunningService {
     stderr_thread: Option<JoinHandle<std::io::Result<()>>>,
 }
 
-pub fn execute(
-    plan: &ManifestData,
-    launch_ctx: &RuntimeLaunchContext,
-    attempt: Option<&mut PipelineAttemptContext>,
-) -> Result<i32> {
-    if !plan.is_web_services_mode() {
-        return Err(AtoExecutionError::policy_violation(
-            "web services executor requires runtime=web driver=deno with top-level [services]",
-        )
-        .into());
+#[derive(Default)]
+struct ServiceStartupState {
+    running: HashMap<String, RunningService>,
+    ready: HashSet<String>,
+}
+
+#[derive(Clone)]
+struct ServiceStartupRuntime {
+    plan: ManifestData,
+    launch_ctx: RuntimeLaunchContext,
+    services: HashMap<String, ServiceSpec>,
+    runtime_dir: PathBuf,
+    runtime_bins: RuntimeBins,
+    state: Arc<Mutex<ServiceStartupState>>,
+    startup_cleanup: Arc<Mutex<Option<CleanupScope>>>,
+}
+
+impl ServiceStartupRuntime {
+    fn new(
+        plan: ManifestData,
+        launch_ctx: RuntimeLaunchContext,
+        services: &HashMap<String, ServiceSpec>,
+        runtime_dir: PathBuf,
+        runtime_bins: RuntimeBins,
+        startup_cleanup: Option<CleanupScope>,
+    ) -> Self {
+        Self {
+            plan,
+            launch_ctx,
+            services: services.clone(),
+            runtime_dir,
+            runtime_bins,
+            state: Arc::new(Mutex::new(ServiceStartupState::default())),
+            startup_cleanup: Arc::new(Mutex::new(startup_cleanup)),
+        }
     }
 
-    let graph = ServiceGraphPlan::from_manifest(plan)?;
-    let services = graph.services();
-    let startup_order = graph.startup_order().to_vec();
-    let runtime_bins = resolve_runtime_bins(plan, &services)?;
-    let runtime_dir = resolve_runtime_dir(&plan.manifest_dir);
+    fn commit_startup_cleanup(&self) {
+        let scope = self
+            .startup_cleanup
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take();
+        if let Some(scope) = scope {
+            scope.commit_all();
+        }
+    }
 
-    let mut running: HashMap<String, RunningService> = HashMap::new();
-    let mut ready: HashSet<String> = HashSet::new();
-    let mut startup_cleanup = attempt.map(|attempt| attempt.cleanup_scope());
+    fn into_running(self) -> HashMap<String, RunningService> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        std::mem::take(&mut state.running)
+    }
+}
 
-    for service_name in &startup_order {
-        let spec = services.get(service_name).ok_or_else(|| {
+#[async_trait]
+impl ServicePhaseRuntime for ServiceStartupRuntime {
+    async fn start_service(&self, service_name: &str) -> Result<()> {
+        let spec = self.services.get(service_name).ok_or_else(|| {
             AtoExecutionError::policy_violation(format!(
                 "services.{} is missing from parsed manifest",
                 service_name
             ))
         })?;
 
-        if let Some(depends_on) = spec.depends_on.as_ref() {
-            for dep in depends_on {
-                wait_until_ready(dep, &mut running, &mut ready)?;
-            }
-        }
-
-        let env = build_service_env(plan, service_name, spec, launch_ctx)?;
-        let mut cmd = build_service_command(&runtime_dir, spec, &runtime_bins)?;
-        cmd.current_dir(&runtime_dir)
+        let env = build_service_env(&self.plan, service_name, spec, &self.launch_ctx)?;
+        let mut cmd = build_service_command(&self.runtime_dir, spec, &self.runtime_bins)?;
+        cmd.current_dir(&self.runtime_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -96,31 +131,82 @@ pub fn execute(
         let stdout_thread = spawn_prefixed_stream(stdout, service_name, false);
         let stderr_thread = spawn_prefixed_stream(stderr, service_name, true);
 
-        if let Some(scope) = startup_cleanup.as_mut() {
-            scope.register_kill_child_process(pid, service_name.clone());
+        if let Some(scope) = self
+            .startup_cleanup
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_mut()
+        {
+            scope.register_kill_child_process(pid, service_name.to_string());
         }
 
-        running.insert(
-            service_name.clone(),
-            RunningService {
-                spec: spec.clone(),
-                env,
-                child,
-                stdout_thread: Some(stdout_thread),
-                stderr_thread: Some(stderr_thread),
-            },
-        );
+        self.state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .running
+            .insert(
+                service_name.to_string(),
+                RunningService {
+                    spec: spec.clone(),
+                    env,
+                    child,
+                    stdout_thread: Some(stdout_thread),
+                    stderr_thread: Some(stderr_thread),
+                },
+            );
+
+        Ok(())
     }
 
-    for service_name in &startup_order {
-        wait_until_ready(service_name, &mut running, &mut ready)?;
+    async fn await_readiness(&self, service_name: String) -> Result<()> {
+        let state = Arc::clone(&self.state);
+        tokio::task::spawn_blocking(move || wait_until_ready_in_state(&service_name, &state))
+            .await
+            .map_err(anyhow::Error::new)?
+    }
+}
+
+pub fn execute(
+    plan: &ManifestData,
+    launch_ctx: &RuntimeLaunchContext,
+    attempt: Option<&mut PipelineAttemptContext>,
+) -> Result<i32> {
+    if !plan.is_web_services_mode() {
+        return Err(AtoExecutionError::policy_violation(
+            "web services executor requires runtime=web driver=deno with top-level [services]",
+        )
+        .into());
     }
 
-    if let Some(scope) = startup_cleanup.take() {
-        scope.commit_all();
-    }
+    let graph = ServiceGraphPlan::from_manifest(plan)?;
+    let runtime_bins = resolve_runtime_bins(plan, graph.services())?;
+    let runtime_dir = resolve_runtime_dir(&plan.manifest_dir);
+    let runtime = ServiceStartupRuntime::new(
+        plan.clone(),
+        launch_ctx.clone(),
+        graph.services(),
+        runtime_dir,
+        runtime_bins,
+        attempt.map(|attempt| attempt.cleanup_scope()),
+    );
 
-    monitor_and_shutdown(running)
+    run_startup_coordinator(&graph, runtime.clone())?;
+    runtime.commit_startup_cleanup();
+
+    monitor_and_shutdown(runtime.into_running())
+}
+
+fn run_startup_coordinator(graph: &ServiceGraphPlan, runtime: ServiceStartupRuntime) -> Result<()> {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| {
+            handle.block_on(ServicePhaseCoordinator::new(graph).run(runtime))
+        })
+    } else {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(ServicePhaseCoordinator::new(graph).run(runtime))
+    }
 }
 
 fn resolve_runtime_dir(manifest_dir: &Path) -> PathBuf {
@@ -345,49 +431,57 @@ fn spawn_prefixed_stream(
     })
 }
 
-fn wait_until_ready(
+fn wait_until_ready_in_state(
     service_name: &str,
-    running: &mut HashMap<String, RunningService>,
-    ready: &mut HashSet<String>,
+    state: &Arc<Mutex<ServiceStartupState>>,
 ) -> Result<()> {
-    if ready.contains(service_name) {
-        return Ok(());
-    }
-
-    let service = running.get_mut(service_name).ok_or_else(|| {
-        AtoExecutionError::execution_contract_invalid(
-            format!(
-                "service '{}' was not started before readiness check",
-                service_name
-            ),
-            None,
-            Some(service_name),
-        )
-    })?;
-
-    let Some(probe) = service.spec.readiness_probe.as_ref() else {
-        ready.insert(service_name.to_string());
-        return Ok(());
-    };
-
-    let port = resolve_probe_port(&service.env, probe, service_name)?;
     let deadline = Instant::now() + READINESS_TIMEOUT;
     loop {
-        if let Some(status) = service.child.try_wait()? {
-            let code = status.code().unwrap_or(1);
-            return Err(AtoExecutionError::execution_contract_invalid(
-                format!(
-                    "service '{}' exited before readiness check passed (exit code: {})",
-                    service_name, code
-                ),
-                None,
-                Some(service_name),
-            )
-            .into());
-        }
+        let readiness = {
+            let mut state_guard = state.lock().unwrap_or_else(|poison| poison.into_inner());
+            if state_guard.ready.contains(service_name) {
+                return Ok(());
+            }
 
-        if readiness_probe_ok(probe, port)? {
-            ready.insert(service_name.to_string());
+            let service = state_guard.running.get_mut(service_name).ok_or_else(|| {
+                AtoExecutionError::execution_contract_invalid(
+                    format!(
+                        "service '{}' was not started before readiness check",
+                        service_name
+                    ),
+                    None,
+                    Some(service_name),
+                )
+            })?;
+
+            let Some(probe) = service.spec.readiness_probe.clone() else {
+                state_guard.ready.insert(service_name.to_string());
+                return Ok(());
+            };
+
+            let port = resolve_probe_port(&service.env, &probe, service_name)?;
+            if let Some(status) = service.child.try_wait()? {
+                let code = status.code().unwrap_or(1);
+                return Err(AtoExecutionError::execution_contract_invalid(
+                    format!(
+                        "service '{}' exited before readiness check passed (exit code: {})",
+                        service_name, code
+                    ),
+                    None,
+                    Some(service_name),
+                )
+                .into());
+            }
+
+            (probe, port)
+        };
+
+        if readiness_probe_ok(&readiness.0, readiness.1)? {
+            state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .ready
+                .insert(service_name.to_string());
             return Ok(());
         }
 
@@ -403,6 +497,7 @@ fn wait_until_ready(
             )
             .into());
         }
+
         thread::sleep(READINESS_INTERVAL);
     }
 }

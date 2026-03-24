@@ -64,8 +64,7 @@ pub(crate) trait HourglassPhaseRunner {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
     use anyhow::{anyhow, Result};
     use async_trait::async_trait;
@@ -104,7 +103,7 @@ mod tests {
     }
 
     struct FailingRunner {
-        events: Rc<RefCell<Vec<String>>>,
+        events: Arc<Mutex<Vec<String>>>,
     }
 
     #[async_trait(?Send)]
@@ -115,13 +114,13 @@ mod tests {
             attempt: &mut PipelineAttemptContext,
         ) -> Result<()> {
             if phase == HourglassPhase::Prepare {
-                let events = Rc::clone(&self.events);
+                let events = Arc::clone(&self.events);
                 let mut scope = attempt.cleanup_scope();
                 scope.register(move || CleanupActionRecord {
                     action: "remove_temp_dir".to_string(),
                     status: CleanupActionStatus::Succeeded,
                     detail: Some({
-                        events.borrow_mut().push("cleanup".to_string());
+                        events.lock().unwrap().push("cleanup".to_string());
                         ".tmp/work".to_string()
                     }),
                 });
@@ -189,16 +188,16 @@ mod tests {
             stop: HourglassPhase::Execute,
             explicit_filter: false,
         });
-        let events = Rc::new(RefCell::new(Vec::new()));
+        let events = Arc::new(Mutex::new(Vec::new()));
         let mut runner = FailingRunner {
-            events: Rc::clone(&events),
+            events: Arc::clone(&events),
         };
 
         let err = pipeline.run(&mut runner).await.unwrap_err();
         let attempt_err = err.downcast_ref::<PipelineAttemptError>().unwrap();
 
         assert_eq!(attempt_err.phase(), HourglassPhase::Prepare);
-        assert_eq!(events.borrow().as_slice(), ["cleanup".to_string()]);
+        assert_eq!(events.lock().unwrap().as_slice(), ["cleanup".to_string()]);
         assert_eq!(attempt_err.cleanup_report().actions.len(), 1);
     }
 }
