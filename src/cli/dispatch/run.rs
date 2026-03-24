@@ -141,7 +141,7 @@ mod tests {
     fn local_directory_is_agent_eligible() {
         let tmp = tempfile::tempdir().expect("tempdir");
         assert_eq!(
-            crate::install::support::agent_local_root_for_path(&tmp.path().to_path_buf()),
+            crate::install::support::agent_local_root_for_path(tmp.path()),
             Some(tmp.path().to_path_buf())
         );
     }

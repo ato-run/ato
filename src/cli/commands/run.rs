@@ -531,45 +531,40 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
     async fn run_phase(&mut self, phase: HourglassPhase) -> Result<()> {
         match phase {
             HourglassPhase::Prepare => {
-                let state = run_prepare_phase(self.args).await.map_err(|err| {
-                    emit_run_phase_failure(self.args, HourglassPhase::Prepare, &err);
-                    err
+                let state = run_prepare_phase(self.args).await.inspect_err(|err| {
+                    emit_run_phase_failure(self.args, HourglassPhase::Prepare, err);
                 })?;
                 self.state = Some(state);
                 Ok(())
             }
             HourglassPhase::Build => {
                 let input = self.take_state(HourglassPhase::Build)?;
-                let state = run_build_phase(self.args, input).await.map_err(|err| {
-                    emit_run_phase_failure(self.args, HourglassPhase::Build, &err);
-                    err
+                let state = run_build_phase(self.args, input).await.inspect_err(|err| {
+                    emit_run_phase_failure(self.args, HourglassPhase::Build, err);
                 })?;
                 self.state = Some(state);
                 Ok(())
             }
             HourglassPhase::Verify => {
                 let input = self.take_state(HourglassPhase::Verify)?;
-                let state = run_verify_phase(self.args, input).await.map_err(|err| {
-                    emit_run_phase_failure(self.args, HourglassPhase::Verify, &err);
-                    err
+                let state = run_verify_phase(self.args, input).await.inspect_err(|err| {
+                    emit_run_phase_failure(self.args, HourglassPhase::Verify, err);
                 })?;
                 self.state = Some(state);
                 Ok(())
             }
             HourglassPhase::DryRun => {
                 let input = self.take_state(HourglassPhase::DryRun)?;
-                let state = run_dry_run_phase(self.args, input).await.map_err(|err| {
-                    emit_run_phase_failure(self.args, HourglassPhase::DryRun, &err);
-                    err
+                let state = run_dry_run_phase(self.args, input).await.inspect_err(|err| {
+                    emit_run_phase_failure(self.args, HourglassPhase::DryRun, err);
                 })?;
                 self.state = Some(state);
                 Ok(())
             }
             HourglassPhase::Execute => {
                 let input = self.take_state(HourglassPhase::Execute)?;
-                run_execute_phase(self.args, input).await.map_err(|err| {
-                    emit_run_phase_failure(self.args, HourglassPhase::Execute, &err);
-                    err
+                run_execute_phase(self.args, input).await.inspect_err(|err| {
+                    emit_run_phase_failure(self.args, HourglassPhase::Execute, err);
                 })
             }
             HourglassPhase::Install | HourglassPhase::Publish => anyhow::bail!(

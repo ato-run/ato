@@ -6,6 +6,7 @@ use crate::application::ports::install::{
     InstalledEnvironment, SourceArtifact, TargetPort, TargetSpec,
 };
 
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub(crate) struct ExecutionSandboxTarget;
 
