@@ -121,7 +121,14 @@ pub fn summarize_private_publish(request: &PrivatePublishRequest) -> Result<Priv
     })
 }
 
+#[allow(dead_code)]
 pub fn run_private_publish_phase(request: PrivatePublishRequest) -> Result<PrivatePublishResult> {
+    futures::executor::block_on(run_private_publish_phase_async(request))
+}
+
+pub async fn run_private_publish_phase_async(
+    request: PrivatePublishRequest,
+) -> Result<PrivatePublishResult> {
     let prepared = prepare_private_publish_artifact(&request)?;
     let artifact_bytes = std::fs::read(&prepared.artifact_path).with_context(|| {
         format!(
@@ -130,7 +137,8 @@ pub fn run_private_publish_phase(request: PrivatePublishRequest) -> Result<Priva
         )
     })?;
 
-    run_direct_publish_phase(&DirectPublishRequest {
+    run_direct_publish_phase_async(
+        &DirectPublishRequest {
         artifact_path: prepared.artifact_path.clone(),
         registry_url: request.registry_url,
         scoped_id: prepared.scoped_id.clone(),
@@ -144,7 +152,10 @@ pub fn run_private_publish_phase(request: PrivatePublishRequest) -> Result<Priva
         content_hash: crate::artifact_hash::compute_blake3_label(&artifact_bytes),
         allow_existing: request.allow_existing,
         force_large_payload: request.force_large_payload,
-    })
+        },
+        artifact_bytes,
+    )
+    .await
 }
 
 fn prepare_private_publish_artifact(
@@ -346,6 +357,7 @@ fn normalize_segment(input: &str) -> String {
 
 #[derive(Debug, Clone)]
 pub struct DirectPublishRequest {
+    #[allow(dead_code)]
     pub artifact_path: PathBuf,
     pub registry_url: String,
     pub scoped_id: String,
@@ -356,17 +368,20 @@ pub struct DirectPublishRequest {
     pub force_large_payload: bool,
 }
 
+#[allow(dead_code)]
 pub fn run_direct_publish_phase(request: &DirectPublishRequest) -> Result<PrivatePublishResult> {
-    let artifact_bytes = std::fs::read(&request.artifact_path).with_context(|| {
-        format!(
-            "Failed to read artifact: {}",
-            request.artifact_path.display()
-        )
-    })?;
-    run_direct_publish_phase_with_bytes(request, artifact_bytes)
+    futures::executor::block_on(run_direct_publish_phase_async(
+        request,
+        std::fs::read(&request.artifact_path).with_context(|| {
+            format!(
+                "Failed to read artifact: {}",
+                request.artifact_path.display()
+            )
+        })?,
+    ))
 }
 
-fn run_direct_publish_phase_with_bytes(
+async fn run_direct_publish_phase_async(
     request: &DirectPublishRequest,
     artifact_bytes: Vec<u8>,
 ) -> Result<PrivatePublishResult> {
@@ -378,7 +393,8 @@ fn run_direct_publish_phase_with_bytes(
     let phase = PublishPhase::new(Arc::new(
         crate::adapters::publish::destination::remote_api::RemoteRegistryDestination,
     ));
-    let published = futures::executor::block_on(phase.execute(&PublishPhaseRequest {
+    let published = phase
+        .execute(&PublishPhaseRequest {
         artifact: PublishableArtifact {
             bytes: artifact_bytes,
             scoped_id: request.scoped_id.clone(),
@@ -393,7 +409,8 @@ fn run_direct_publish_phase_with_bytes(
             allow_existing: request.allow_existing,
             force_large_payload: request.force_large_payload,
         },
-    }))?;
+        })
+        .await?;
     let metadata = published
         .metadata
         .context("missing remote publish metadata from destination port")?;

@@ -572,7 +572,7 @@ impl<'a> PublishCommandExecution<'a> {
         anyhow::bail!("{}", failure_message)
     }
 
-    fn run_publish_phase(&mut self) -> Result<()> {
+    async fn run_publish_phase(&mut self) -> Result<()> {
         hourglass::print_phase_line(
             self.args.json,
             PublishPhaseBoundary::Publish,
@@ -668,24 +668,28 @@ impl<'a> PublishCommandExecution<'a> {
 
         let status = publish_private_status_message(self.resolved_target.mode, source_is_artifact);
         if !self.args.json {
-            futures::executor::block_on(self.reporter.progress_start(status.to_string(), None))?;
+            self.reporter
+                .progress_start(status.to_string(), None)
+                .await?;
         }
         let scoped_id = if source_is_artifact {
             self.args.scoped_id.clone()
         } else {
             Some(preview.scoped_id.clone())
         };
-        let upload_result =
-            publish_phase::run_private_publish_phase(publish_phase::PrivatePublishRequest {
+        let upload_result = publish_phase::run_private_publish_phase_async(
+            publish_phase::PrivatePublishRequest {
                 registry_url: self.resolved_target.registry_url.clone(),
                 publisher_hint: self.resolved_target.publisher_handle.clone(),
                 artifact_path: Some(publish_artifact),
                 force_large_payload: self.args.force_large_payload,
                 scoped_id,
                 allow_existing: self.args.allow_existing,
-            });
+            },
+        )
+        .await;
         if !self.args.json {
-            futures::executor::block_on(self.reporter.progress_finish(None))?;
+            self.reporter.progress_finish(None).await?;
         }
         let result = upload_result?;
 
@@ -716,7 +720,7 @@ impl HourglassPhaseRunner for PublishCommandExecution<'_> {
             PublishPhaseBoundary::Verify => self.run_verify_phase(),
             PublishPhaseBoundary::Install => self.run_install_phase(),
             PublishPhaseBoundary::DryRun => self.run_dry_run_phase(),
-            PublishPhaseBoundary::Publish => self.run_publish_phase(),
+            PublishPhaseBoundary::Publish => self.run_publish_phase().await,
             PublishPhaseBoundary::Execute => {
                 anyhow::bail!("unsupported publish pipeline phase {}", phase.as_str())
             }
