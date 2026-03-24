@@ -147,8 +147,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          sudo dpkg --add-architecture arm64
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross pkg-config libssl-dev:arm64
 
       - name: Add Rust target
         if: ${{ matrix.build_target != '' }}
@@ -163,6 +164,14 @@ jobs:
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: |
           set -euo pipefail
+          if [[ "${{ matrix.build_target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            export PKG_CONFIG_ALLOW_CROSS=1
+            export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+            export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+            export OPENSSL_DIR=/usr
+            export OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu
+            export OPENSSL_INCLUDE_DIR=/usr/include
+          fi
           if [[ -n "${{ matrix.build_target }}" ]]; then
             cargo build --release --locked --target "${{ matrix.build_target }}" --bin ato
           else
