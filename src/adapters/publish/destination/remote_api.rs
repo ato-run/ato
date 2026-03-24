@@ -2,7 +2,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::application::ports::publish::{
-    DestinationPort, DestinationSpec, PublishableArtifact, PublishedLocation,
+    DestinationPort, DestinationSpec, PublishReceiptMetadata, PublishableArtifact,
+    PublishedLocation,
 };
 
 #[derive(Debug, Default)]
@@ -12,23 +13,41 @@ pub(crate) struct RemoteRegistryDestination;
 impl DestinationPort for RemoteRegistryDestination {
     async fn publish(
         &self,
-        _artifact: &PublishableArtifact,
+        artifact: &PublishableArtifact,
         destination: &DestinationSpec,
     ) -> Result<PublishedLocation> {
         let DestinationSpec::RemoteRegistry {
             registry_url,
             scoped_id,
-            version,
+            version: _,
+            allow_existing,
+            force_large_payload,
         } = destination
         else {
             anyhow::bail!("remote registry destination requires DestinationSpec::RemoteRegistry")
         };
 
-        anyhow::bail!(
-            "remote publish destination is not wired yet for {} {}@{}",
-            registry_url,
-            scoped_id,
-            version
-        )
+        let published = crate::publish_artifact::publish_artifact_bytes(
+            crate::publish_artifact::PublishArtifactBytesArgs {
+                artifact_bytes: artifact.bytes.clone(),
+                scoped_id: scoped_id.clone(),
+                registry_url: registry_url.clone(),
+                force_large_payload: *force_large_payload,
+                allow_existing: *allow_existing,
+            },
+        )?;
+
+        Ok(PublishedLocation {
+            destination: destination.clone(),
+            receipt: format!("uploaded {}", published.file_name),
+            locator: published.artifact_url,
+            metadata: Some(PublishReceiptMetadata {
+                file_name: published.file_name,
+                sha256: published.sha256,
+                blake3: published.blake3,
+                size_bytes: published.size_bytes,
+                already_existed: published.already_existed,
+            }),
+        })
     }
 }

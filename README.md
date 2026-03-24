@@ -170,6 +170,13 @@ cargo build -p ato-cli
 - `--legacy-full-publish` (official only) temporarily restores the legacy default behavior, is deprecated, and is scheduled for removal in the next major release.
 - `--ci` / `--dry-run` cannot be combined with phase flags.
 
+Implementation note during migration:
+
+- phase selection, stop-point validation, and phase ordering are already owned by the application producer pipeline
+- the current CLI entry routes through `cli::dispatch::publish`, which hosts the phase runner wiring for publish
+- `application::pipeline::phases::publish` owns the wrapper APIs for private and official publish execution, and private remote uploads now flow through `DestinationPort`
+- build-backed private publish now resolves source vs artifact input in `application::pipeline::phases::publish` before handing off to that same upload boundary
+
 Official registry helpers:
 
 - `ato gen-ci` generates the fixed GitHub Actions workflow for OIDC publish.

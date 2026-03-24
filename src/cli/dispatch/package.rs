@@ -1,7 +1,8 @@
 use anyhow::Result;
 
 use crate::cli::PackageCommands;
-use crate::orchestration::catalog_registry;
+
+use super::registry;
 
 pub(super) fn execute_package_command(command: PackageCommands) -> Result<()> {
     match command {
@@ -15,7 +16,7 @@ pub(super) fn execute_package_command(command: PackageCommands) -> Result<()> {
             json,
             no_tui,
             show_manifest,
-        } => catalog_registry::execute_search_command(catalog_registry::SearchCommandArgs {
+        } => registry::execute_search_command(registry::SearchCommandArgs {
             query,
             category,
             tags,

@@ -762,7 +762,7 @@ pub(crate) async fn resolve_run_target_or_install(
         }
 
         if !yes
-            && !crate::can_prompt_interactively(
+            && !can_prompt_interactively(
                 std::io::stdin().is_terminal(),
                 std::io::stdout().is_terminal(),
             )
@@ -786,7 +786,7 @@ pub(crate) async fn resolve_run_target_or_install(
             install::ProjectionPreference::Skip,
             json_mode,
             !json_mode
-                && crate::can_prompt_interactively(
+                && can_prompt_interactively(
                     std::io::stdin().is_terminal(),
                     std::io::stderr().is_terminal(),
                 ),
@@ -816,8 +816,7 @@ pub(crate) async fn resolve_run_target_or_install(
         }
     };
 
-    let installed_capsule =
-        crate::resolve_installed_capsule_archive(&scoped_ref, registry, None).await?;
+    let installed_capsule = resolve_installed_capsule_archive(&scoped_ref, registry, None).await?;
     let mut registry_detail = None;
     let mut registry_installable_version = None;
 
@@ -832,12 +831,9 @@ pub(crate) async fn resolve_run_target_or_install(
                     .map(str::to_string);
 
                 if let Some(version) = registry_installable_version.as_deref() {
-                    if let Some(installed_capsule) = crate::resolve_installed_capsule_archive(
-                        &scoped_ref,
-                        registry,
-                        Some(version),
-                    )
-                    .await?
+                    if let Some(installed_capsule) =
+                        resolve_installed_capsule_archive(&scoped_ref, registry, Some(version))
+                            .await?
                     {
                         debug!(
                             capsule = %installed_capsule.display(),
@@ -880,7 +876,7 @@ pub(crate) async fn resolve_run_target_or_install(
     }
 
     let json_mode = reporter.is_json();
-    crate::ensure_run_auto_install_allowed(
+    ensure_run_auto_install_allowed(
         yes,
         json_mode,
         std::io::stdin().is_terminal(),
@@ -911,7 +907,7 @@ pub(crate) async fn resolve_run_target_or_install(
     };
 
     if !yes {
-        let approved = crate::prompt_install_confirmation(&detail, &installable_version)?;
+        let approved = prompt_install_confirmation(&detail, &installable_version)?;
         if !approved {
             anyhow::bail!("Installation cancelled by user");
         }
@@ -934,7 +930,7 @@ pub(crate) async fn resolve_run_target_or_install(
         false,
         json_mode,
         !json_mode
-            && crate::can_prompt_interactively(
+            && can_prompt_interactively(
                 std::io::stdin().is_terminal(),
                 std::io::stderr().is_terminal(),
             ),
@@ -997,7 +993,7 @@ pub(crate) fn ensure_local_manifest_ready_for_run(
         LocalRunManifestStatus::Valid => return Ok(LocalRunManifestPreparationOutcome::Ready),
     };
 
-    let can_prompt = crate::can_prompt_interactively(
+    let can_prompt = can_prompt_interactively(
         std::io::stdin().is_terminal(),
         std::io::stderr().is_terminal(),
     );
@@ -1231,8 +1227,8 @@ pub(crate) async fn install_github_repository(
     let install_draft = preview_preparation.install_draft;
     let mut preview_session = preview_preparation.preview_session;
     if install_draft.is_some() {
-        if let Err(error) = crate::show_github_draft_preview(&preview_session, json) {
-            crate::maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
+        if let Err(error) = show_github_draft_preview(&preview_session, json) {
+            maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
             return Err(error);
         }
     }
@@ -1351,8 +1347,8 @@ pub(crate) async fn install_github_repository(
                     eprintln!("⚠️  {warning}");
                 }
             }
-            crate::maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
-            return Err(crate::build_github_manual_intervention_error(
+            maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
+            return Err(build_github_manual_intervention_error(
                 &preview_session.manifest_path,
                 repository,
                 draft,
@@ -1371,7 +1367,7 @@ pub(crate) async fn install_github_repository(
         }
     }
     let mut latest_install_draft = install_draft.clone();
-    let build_result = match crate::build_github_repository_checkout(
+    let build_result = match build_github_repository_checkout(
         checkout.checkout_dir.clone(),
         json,
         injected_manifest.clone(),
@@ -1384,17 +1380,13 @@ pub(crate) async fn install_github_repository(
         Err(error) => {
             let mut last_error = error;
             if let Some(draft) = install_draft.as_ref() {
-                if crate::github_build_error_requires_manual_intervention(&last_error) {
-                    crate::maybe_keep_failed_github_checkout(
-                        &mut checkout,
-                        keep_failed_artifacts,
-                        json,
-                    );
-                    return Err(crate::build_github_manual_intervention_error(
+                if github_build_error_requires_manual_intervention(&last_error) {
+                    maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
+                    return Err(build_github_manual_intervention_error(
                         &preview_session.manifest_path,
                         repository,
                         draft,
-                        &crate::github_build_error_manual_review_reason(&last_error),
+                        &github_build_error_manual_review_reason(&last_error),
                     )?);
                 }
             }
@@ -1432,12 +1424,8 @@ pub(crate) async fn install_github_repository(
                             eprintln!("⚠️  {warning}");
                         }
                     }
-                    crate::maybe_keep_failed_github_checkout(
-                        &mut checkout,
-                        keep_failed_artifacts,
-                        json,
-                    );
-                    return Err(crate::build_github_manual_intervention_error(
+                    maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
+                    return Err(build_github_manual_intervention_error(
                         &preview_session.manifest_path,
                         repository,
                         draft,
@@ -1520,7 +1508,7 @@ pub(crate) async fn install_github_repository(
                         }
                     }
 
-                    match crate::build_github_repository_checkout(
+                    match build_github_repository_checkout(
                         checkout.checkout_dir.clone(),
                         json,
                         current_draft.preview_toml.clone(),
@@ -1574,12 +1562,8 @@ pub(crate) async fn install_github_repository(
                             eprintln!("⚠️  {warning}");
                         }
                     }
-                    crate::maybe_keep_failed_github_checkout(
-                        &mut checkout,
-                        keep_failed_artifacts,
-                        json,
-                    );
-                    return Err(crate::build_github_manual_intervention_error(
+                    maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
+                    return Err(build_github_manual_intervention_error(
                         &preview_session.manifest_path,
                         repository,
                         latest_install_draft.as_ref().unwrap_or(draft),
@@ -1588,7 +1572,7 @@ pub(crate) async fn install_github_repository(
                 } else if can_prompt {
                     let draft_for_manual_fix = latest_install_draft.as_ref().unwrap_or(draft);
                     let manual_manifest_path = preview_session.manifest_path.clone();
-                    if let Some(recovered) = crate::retry_github_build_after_manual_fix(
+                    if let Some(recovered) = retry_github_build_after_manual_fix(
                         &mut preview_session,
                         &manual_manifest_path,
                         &checkout.checkout_dir,
@@ -1602,7 +1586,7 @@ pub(crate) async fn install_github_repository(
                     {
                         recovered
                     } else {
-                        crate::maybe_keep_failed_github_checkout(
+                        maybe_keep_failed_github_checkout(
                             &mut checkout,
                             keep_failed_artifacts,
                             json,
@@ -1610,19 +1594,11 @@ pub(crate) async fn install_github_repository(
                         return Err(last_error);
                     }
                 } else {
-                    crate::maybe_keep_failed_github_checkout(
-                        &mut checkout,
-                        keep_failed_artifacts,
-                        json,
-                    );
+                    maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
                     return Err(last_error);
                 }
             } else {
-                crate::maybe_keep_failed_github_checkout(
-                    &mut checkout,
-                    keep_failed_artifacts,
-                    json,
-                );
+                maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
                 return Err(last_error);
             }
         }
@@ -1694,7 +1670,7 @@ pub(crate) async fn install_github_repository(
     .await;
 
     if result.is_err() {
-        crate::maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
+        maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
     }
 
     result

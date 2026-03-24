@@ -38,6 +38,7 @@ impl DestinationPort for LocalCasDestination {
             destination: destination.clone(),
             receipt: format!("registered {}", path.display()),
             locator: path.display().to_string(),
+            metadata: None,
         })
     }
 }
