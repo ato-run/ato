@@ -4,6 +4,17 @@ use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+use crate::dispatch::publish as publish_command_dispatch;
+use crate::dispatch::registry as catalog_registry_dispatch;
+use crate::install::support as run_install_dispatch;
+use crate::install::support::{
+    build_github_manual_intervention_error, build_github_manual_intervention_message,
+    can_prompt_interactively, compare_semver, enforce_sandbox_mode_flags,
+    ensure_run_auto_install_allowed, github_build_error_manual_review_reason,
+    github_build_error_requires_manual_intervention, resolve_installed_capsule_archive_in_store,
+    run_blocking_github_install_step, select_capsule_file_in_version, ParsedSemver,
+};
+
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -110,7 +121,7 @@ fn resolve_run_target_rejects_noncanonical_github_url_input() {
     let reporter = std::sync::Arc::new(reporters::CliReporter::new(false));
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let error = runtime
-        .block_on(run_install_orchestration::resolve_run_target_or_install(
+        .block_on(run_install_dispatch::resolve_run_target_or_install(
             PathBuf::from("https://github.com/Koh0920/demo-repo"),
             true,
             false,
@@ -154,19 +165,19 @@ async fn github_install_build_step_runs_outside_async_runtime_worker() {
 
 #[test]
 fn search_tui_gate_requires_tty_and_flags_allowing_tui() {
-    assert!(catalog_registry_orchestration::should_use_search_tui(
+    assert!(catalog_registry_dispatch::should_use_search_tui(
         true, true, false, false,
     ));
-    assert!(!catalog_registry_orchestration::should_use_search_tui(
+    assert!(!catalog_registry_dispatch::should_use_search_tui(
         false, true, false, false,
     ));
-    assert!(!catalog_registry_orchestration::should_use_search_tui(
+    assert!(!catalog_registry_dispatch::should_use_search_tui(
         true, false, false, false,
     ));
-    assert!(!catalog_registry_orchestration::should_use_search_tui(
+    assert!(!catalog_registry_dispatch::should_use_search_tui(
         true, true, true, false,
     ));
-    assert!(!catalog_registry_orchestration::should_use_search_tui(
+    assert!(!catalog_registry_dispatch::should_use_search_tui(
         true, true, false, true,
     ));
 }
@@ -329,8 +340,8 @@ fn compatibility_fallback_is_mutually_exclusive_with_dangerous_mode() {
 #[test]
 fn publish_private_status_message_for_build_path() {
     assert_eq!(
-        publish_command_orchestration::publish_private_status_message(
-            publish_command_orchestration::PublishTargetMode::CustomDirect,
+        publish_command_dispatch::publish_private_status_message(
+            publish_command_dispatch::PublishTargetMode::CustomDirect,
             false,
         ),
         "📦 Building capsule artifact for private registry publish..."
@@ -340,8 +351,8 @@ fn publish_private_status_message_for_build_path() {
 #[test]
 fn publish_private_status_message_for_upload_path() {
     assert_eq!(
-        publish_command_orchestration::publish_private_status_message(
-            publish_command_orchestration::PublishTargetMode::CustomDirect,
+        publish_command_dispatch::publish_private_status_message(
+            publish_command_dispatch::PublishTargetMode::CustomDirect,
             true,
         ),
         "📤 Publishing provided artifact to private registry..."
@@ -351,8 +362,8 @@ fn publish_private_status_message_for_upload_path() {
 #[test]
 fn publish_private_status_message_for_personal_dock_build_path() {
     assert_eq!(
-        publish_command_orchestration::publish_private_status_message(
-            publish_command_orchestration::PublishTargetMode::PersonalDockDirect,
+        publish_command_dispatch::publish_private_status_message(
+            publish_command_dispatch::PublishTargetMode::PersonalDockDirect,
             false,
         ),
         "📦 Building capsule artifact for Personal Dock publish..."
@@ -362,8 +373,8 @@ fn publish_private_status_message_for_personal_dock_build_path() {
 #[test]
 fn publish_private_status_message_for_personal_dock_upload_path() {
     assert_eq!(
-        publish_command_orchestration::publish_private_status_message(
-            publish_command_orchestration::PublishTargetMode::PersonalDockDirect,
+        publish_command_dispatch::publish_private_status_message(
+            publish_command_dispatch::PublishTargetMode::PersonalDockDirect,
             true,
         ),
         "📤 Publishing provided artifact to Personal Dock..."
@@ -372,8 +383,8 @@ fn publish_private_status_message_for_personal_dock_upload_path() {
 
 #[test]
 fn publish_private_start_summary_line_build_path() {
-    let line = publish_command_orchestration::publish_private_start_summary_line(
-        publish_command_orchestration::PublishTargetMode::CustomDirect,
+    let line = publish_command_dispatch::publish_private_start_summary_line(
+        publish_command_dispatch::PublishTargetMode::CustomDirect,
         "http://127.0.0.1:8787",
         "build",
         "local/demo-app",
@@ -389,8 +400,8 @@ fn publish_private_start_summary_line_build_path() {
 
 #[test]
 fn publish_private_start_summary_line_artifact_path() {
-    let line = publish_command_orchestration::publish_private_start_summary_line(
-        publish_command_orchestration::PublishTargetMode::CustomDirect,
+    let line = publish_command_dispatch::publish_private_start_summary_line(
+        publish_command_dispatch::PublishTargetMode::CustomDirect,
         "http://127.0.0.1:8787",
         "artifact",
         "team-x/demo-app",
@@ -403,8 +414,8 @@ fn publish_private_start_summary_line_artifact_path() {
 
 #[test]
 fn publish_private_start_summary_line_marks_personal_dock_target() {
-    let line = publish_command_orchestration::publish_private_start_summary_line(
-        publish_command_orchestration::PublishTargetMode::PersonalDockDirect,
+    let line = publish_command_dispatch::publish_private_start_summary_line(
+        publish_command_dispatch::PublishTargetMode::PersonalDockDirect,
         "https://api.ato.run",
         "artifact",
         "koh0920/demo-app",
@@ -414,8 +425,8 @@ fn publish_private_start_summary_line_marks_personal_dock_target() {
     assert!(line.contains("🔎 dock publish target"));
 }
 
-fn test_publish_args() -> publish_command_orchestration::PublishCommandArgs {
-    publish_command_orchestration::PublishCommandArgs {
+fn test_publish_args() -> publish_command_dispatch::PublishCommandArgs {
+    publish_command_dispatch::PublishCommandArgs {
         registry: Some("http://127.0.0.1:8787".to_string()),
         artifact: None,
         scoped_id: None,
@@ -433,16 +444,15 @@ fn test_publish_args() -> publish_command_orchestration::PublishCommandArgs {
 
 #[test]
 fn publish_phase_selection_defaults_to_all_for_private() {
-    let selected = publish_command_orchestration::select_publish_phases(
-        false, false, false, false, false, false,
-    );
+    let selected =
+        publish_command_dispatch::select_publish_phases(false, false, false, false, false, false);
     assert_eq!(
         selected.start,
-        publish_command_orchestration::PublishPhaseBoundary::Prepare
+        publish_command_dispatch::PublishPhaseBoundary::Prepare
     );
     assert_eq!(
         selected.stop,
-        publish_command_orchestration::PublishPhaseBoundary::Publish
+        publish_command_dispatch::PublishPhaseBoundary::Publish
     );
     assert!(!selected.explicit_filter);
 }
@@ -450,62 +460,59 @@ fn publish_phase_selection_defaults_to_all_for_private() {
 #[test]
 fn publish_phase_selection_respects_filter_flags() {
     let selected =
-        publish_command_orchestration::select_publish_phases(true, false, true, true, false, false);
+        publish_command_dispatch::select_publish_phases(true, false, true, true, false, false);
     assert_eq!(
         selected.start,
-        publish_command_orchestration::PublishPhaseBoundary::Prepare
+        publish_command_dispatch::PublishPhaseBoundary::Prepare
     );
     assert_eq!(
         selected.stop,
-        publish_command_orchestration::PublishPhaseBoundary::Publish
+        publish_command_dispatch::PublishPhaseBoundary::Publish
     );
     assert!(selected.explicit_filter);
 }
 
 #[test]
 fn publish_phase_selection_defaults_to_deploy_for_official() {
-    let selected = publish_command_orchestration::select_publish_phases(
-        false, false, false, true, false, false,
-    );
+    let selected =
+        publish_command_dispatch::select_publish_phases(false, false, false, true, false, false);
     assert_eq!(
         selected.start,
-        publish_command_orchestration::PublishPhaseBoundary::Publish
+        publish_command_dispatch::PublishPhaseBoundary::Publish
     );
     assert_eq!(
         selected.stop,
-        publish_command_orchestration::PublishPhaseBoundary::Publish
+        publish_command_dispatch::PublishPhaseBoundary::Publish
     );
     assert!(!selected.explicit_filter);
 }
 
 #[test]
 fn publish_phase_selection_legacy_full_publish_keeps_all_for_official() {
-    let selected = publish_command_orchestration::select_publish_phases(
-        false, false, false, true, true, false,
-    );
+    let selected =
+        publish_command_dispatch::select_publish_phases(false, false, false, true, true, false);
     assert_eq!(
         selected.start,
-        publish_command_orchestration::PublishPhaseBoundary::Prepare
+        publish_command_dispatch::PublishPhaseBoundary::Prepare
     );
     assert_eq!(
         selected.stop,
-        publish_command_orchestration::PublishPhaseBoundary::Publish
+        publish_command_dispatch::PublishPhaseBoundary::Publish
     );
     assert!(!selected.explicit_filter);
 }
 
 #[test]
 fn publish_phase_selection_artifact_build_is_verify_only() {
-    let selected = publish_command_orchestration::select_publish_phases(
-        false, true, false, false, false, true,
-    );
+    let selected =
+        publish_command_dispatch::select_publish_phases(false, true, false, false, false, true);
     assert_eq!(
         selected.start,
-        publish_command_orchestration::PublishPhaseBoundary::Verify
+        publish_command_dispatch::PublishPhaseBoundary::Verify
     );
     assert_eq!(
         selected.stop,
-        publish_command_orchestration::PublishPhaseBoundary::Verify
+        publish_command_dispatch::PublishPhaseBoundary::Verify
     );
     assert!(selected.runs_verify());
     assert!(!selected.runs_install());
@@ -516,14 +523,14 @@ fn publish_phase_selection_artifact_build_is_verify_only() {
 #[test]
 fn publish_phase_selection_official_deploy_only_keeps_publish_only_even_with_artifact() {
     let selected =
-        publish_command_orchestration::select_publish_phases(false, false, true, true, false, true);
+        publish_command_dispatch::select_publish_phases(false, false, true, true, false, true);
     assert_eq!(
         selected.start,
-        publish_command_orchestration::PublishPhaseBoundary::Publish
+        publish_command_dispatch::PublishPhaseBoundary::Publish
     );
     assert_eq!(
         selected.stop,
-        publish_command_orchestration::PublishPhaseBoundary::Publish
+        publish_command_dispatch::PublishPhaseBoundary::Publish
     );
     assert!(!selected.runs_install());
     assert!(!selected.runs_dry_run());
@@ -532,9 +539,8 @@ fn publish_phase_selection_official_deploy_only_keeps_publish_only_even_with_art
 
 #[test]
 fn publish_phase_selection_private_deploy_runs_install_and_dry_run() {
-    let selected = publish_command_orchestration::select_publish_phases(
-        false, false, true, false, false, false,
-    );
+    let selected =
+        publish_command_dispatch::select_publish_phases(false, false, true, false, false, false);
     assert!(selected.runs_prepare());
     assert!(selected.runs_build());
     assert!(selected.runs_verify());
@@ -545,9 +551,8 @@ fn publish_phase_selection_private_deploy_runs_install_and_dry_run() {
 
 #[test]
 fn publish_phase_selection_official_default_skips_install_and_dry_run() {
-    let selected = publish_command_orchestration::select_publish_phases(
-        false, false, false, true, false, false,
-    );
+    let selected =
+        publish_command_dispatch::select_publish_phases(false, false, false, true, false, false);
     assert!(!selected.runs_prepare());
     assert!(!selected.runs_build());
     assert!(!selected.runs_verify());
@@ -558,7 +563,7 @@ fn publish_phase_selection_official_default_skips_install_and_dry_run() {
 
 #[test]
 fn resolve_publish_target_prefers_cli_registry_over_other_sources() {
-    let resolved = publish_command_orchestration::resolve_publish_target_from_sources(
+    let resolved = publish_command_dispatch::resolve_publish_target_from_sources(
         Some("https://api.ato.run"),
         Some("http://127.0.0.1:8787"),
         Some("koh0920"),
@@ -568,13 +573,13 @@ fn resolve_publish_target_prefers_cli_registry_over_other_sources() {
     assert_eq!(resolved.registry_url, "https://api.ato.run");
     assert_eq!(
         resolved.mode,
-        publish_command_orchestration::PublishTargetMode::OfficialCi
+        publish_command_dispatch::PublishTargetMode::OfficialCi
     );
 }
 
 #[test]
 fn resolve_publish_target_uses_manifest_before_logged_in_default() {
-    let resolved = publish_command_orchestration::resolve_publish_target_from_sources(
+    let resolved = publish_command_dispatch::resolve_publish_target_from_sources(
         None,
         Some("http://127.0.0.1:8787"),
         Some("koh0920"),
@@ -584,30 +589,27 @@ fn resolve_publish_target_uses_manifest_before_logged_in_default() {
     assert_eq!(resolved.registry_url, "http://127.0.0.1:8787");
     assert_eq!(
         resolved.mode,
-        publish_command_orchestration::PublishTargetMode::CustomDirect
+        publish_command_dispatch::PublishTargetMode::CustomDirect
     );
 }
 
 #[test]
 fn resolve_publish_target_uses_logged_in_default_when_no_explicit_target_exists() {
-    let resolved = publish_command_orchestration::resolve_publish_target_from_sources(
-        None,
-        None,
-        Some("koh0920"),
-    )
-    .expect("resolve");
+    let resolved =
+        publish_command_dispatch::resolve_publish_target_from_sources(None, None, Some("koh0920"))
+            .expect("resolve");
 
     assert_eq!(resolved.registry_url, "https://api.ato.run");
     assert_eq!(
         resolved.mode,
-        publish_command_orchestration::PublishTargetMode::PersonalDockDirect
+        publish_command_dispatch::PublishTargetMode::PersonalDockDirect
     );
     assert_eq!(resolved.publisher_handle.as_deref(), Some("koh0920"));
 }
 
 #[test]
 fn resolve_publish_target_errors_without_login_or_registry_override() {
-    let err = publish_command_orchestration::resolve_publish_target_from_sources(None, None, None)
+    let err = publish_command_dispatch::resolve_publish_target_from_sources(None, None, None)
         .expect_err("must fail without any publish target");
 
     assert!(err.to_string().contains("Run `ato login`"));
@@ -616,7 +618,7 @@ fn resolve_publish_target_errors_without_login_or_registry_override() {
 
 #[test]
 fn resolve_publish_target_rejects_legacy_dock_registry_urls() {
-    let err = publish_command_orchestration::resolve_publish_target_from_sources(
+    let err = publish_command_dispatch::resolve_publish_target_from_sources(
         Some("https://ato.run/d/koh0920"),
         None,
         Some("koh0920"),
@@ -628,25 +630,24 @@ fn resolve_publish_target_rejects_legacy_dock_registry_urls() {
 
 #[test]
 fn is_legacy_dock_publish_registry_detects_dock_path_prefix() {
-    assert!(
-        publish_command_orchestration::is_legacy_dock_publish_registry("https://ato.run/d/koh0920")
-    );
-    assert!(
-        publish_command_orchestration::is_legacy_dock_publish_registry(
-            "https://ato.run/publish/d/koh0920"
-        )
-    );
-    assert!(!publish_command_orchestration::is_legacy_dock_publish_registry("https://api.ato.run"));
+    assert!(publish_command_dispatch::is_legacy_dock_publish_registry(
+        "https://ato.run/d/koh0920"
+    ));
+    assert!(publish_command_dispatch::is_legacy_dock_publish_registry(
+        "https://ato.run/publish/d/koh0920"
+    ));
+    assert!(!publish_command_dispatch::is_legacy_dock_publish_registry(
+        "https://api.ato.run"
+    ));
 }
 
 #[test]
 fn publish_validate_rejects_allow_existing_without_deploy() {
     let mut args = test_publish_args();
     args.allow_existing = true;
-    let selected = publish_command_orchestration::select_publish_phases(
-        false, true, false, false, false, false,
-    );
-    let err = publish_command_orchestration::validate_publish_phase_options(&args, selected, false)
+    let selected =
+        publish_command_dispatch::select_publish_phases(false, true, false, false, false, false);
+    let err = publish_command_dispatch::validate_publish_phase_options(&args, selected, false)
         .expect_err("must fail closed");
     assert!(err.to_string().contains("--allow-existing"));
 }
@@ -655,10 +656,9 @@ fn publish_validate_rejects_allow_existing_without_deploy() {
 fn publish_validate_rejects_fix_for_private_registry() {
     let mut args = test_publish_args();
     args.fix = true;
-    let selected = publish_command_orchestration::select_publish_phases(
-        false, false, true, false, false, false,
-    );
-    let err = publish_command_orchestration::validate_publish_phase_options(&args, selected, false)
+    let selected =
+        publish_command_dispatch::select_publish_phases(false, false, true, false, false, false);
+    let err = publish_command_dispatch::validate_publish_phase_options(&args, selected, false)
         .expect_err("must fail closed");
     assert!(err.to_string().contains("--fix"));
 }
@@ -666,10 +666,9 @@ fn publish_validate_rejects_fix_for_private_registry() {
 #[test]
 fn publish_validate_allows_private_deploy_from_source() {
     let args = test_publish_args();
-    let selected = publish_command_orchestration::select_publish_phases(
-        false, false, true, false, false, false,
-    );
-    publish_command_orchestration::validate_publish_phase_options(&args, selected, false)
+    let selected =
+        publish_command_dispatch::select_publish_phases(false, false, true, false, false, false);
+    publish_command_dispatch::validate_publish_phase_options(&args, selected, false)
         .expect("source deploy should auto-resolve earlier phases");
 }
 
@@ -678,10 +677,9 @@ fn publish_validate_rejects_artifact_prepare_stop_point() {
     let mut args = test_publish_args();
     args.artifact = Some(std::path::PathBuf::from("demo.capsule"));
     args.prepare = true;
-    let selected = publish_command_orchestration::select_publish_phases(
-        true, false, false, false, false, true,
-    );
-    let err = publish_command_orchestration::validate_publish_phase_options(&args, selected, false)
+    let selected =
+        publish_command_dispatch::select_publish_phases(true, false, false, false, false, true);
+    let err = publish_command_dispatch::validate_publish_phase_options(&args, selected, false)
         .expect_err("artifact + prepare must fail closed");
     assert!(err.to_string().contains("cannot be combined"));
 }

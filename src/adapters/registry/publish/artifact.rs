@@ -1,5 +1,5 @@
 use std::io::{Cursor, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -12,8 +12,8 @@ use crate::artifact_hash::{
 };
 
 #[derive(Debug, Clone)]
-pub struct PublishArtifactArgs {
-    pub artifact_path: PathBuf,
+pub struct PublishArtifactBytesArgs {
+    pub artifact_bytes: Vec<u8>,
     pub scoped_id: String,
     pub registry_url: String,
     pub force_large_payload: bool,
@@ -140,56 +140,15 @@ pub enum PublishArtifactError {
     UploadFailed { status: u16, message: String },
 }
 
-pub fn publish_artifact(args: PublishArtifactArgs) -> Result<PublishArtifactResult> {
+pub fn publish_artifact_bytes(args: PublishArtifactBytesArgs) -> Result<PublishArtifactResult> {
     let base_url = crate::registry::http::normalize_registry_url(&args.registry_url, "--registry")?;
-    crate::payload_guard::ensure_payload_size(
-        &args.artifact_path,
+    crate::payload_guard::ensure_payload_bytes_size(
+        args.artifact_bytes.len() as u64,
         args.force_large_payload,
         "--force-large-payload",
     )?;
-    let payload = load_artifact_payload(&args.artifact_path, &args.scoped_id)?;
-    let v3_sync_payload = payload.v3_sync_payload();
-    let endpoint = build_upload_endpoint(
-        &base_url,
-        &payload.publisher,
-        &payload.slug,
-        &payload.version,
-        if payload.file_name.is_empty() {
-            None
-        } else {
-            Some(payload.file_name.as_str())
-        },
-        args.allow_existing,
-    );
-
-    let request = crate::registry::http::blocking_client_builder(&base_url)
-        .build()
-        .context("Failed to create registry upload client")?
-        .put(&endpoint)
-        .header("content-type", "application/octet-stream")
-        .header("x-ato-sha256", &payload.sha256)
-        .header("x-ato-blake3", &payload.blake3);
-
-    let request = crate::registry::http::with_blocking_ato_token(request);
-
-    let response = request
-        .body(payload.bytes)
-        .send()
-        .map_err(|err| anyhow::anyhow!("Failed to upload artifact to {}: {}", endpoint, err))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().unwrap_or_default();
-        let error = classify_upload_failure(status, &body);
-        return Err(error.into());
-    }
-
-    let result = response
-        .json::<PublishArtifactResult>()
-        .context("Invalid local registry upload response")?;
-    sync_v3_chunks_if_present(&base_url, v3_sync_payload.as_ref())
-        .with_context(|| "Failed to finalize payload v3 metadata for uploaded release")?;
-    Ok(result)
+    let payload = load_artifact_payload_from_bytes(&args.artifact_bytes, &args.scoped_id)?;
+    upload_artifact_payload(&base_url, payload, args.allow_existing)
 }
 
 pub fn inspect_artifact_manifest(path: &Path) -> Result<ArtifactManifestInfo> {
@@ -275,22 +234,57 @@ fn build_upload_endpoint(
     endpoint
 }
 
-fn load_artifact_payload(path: &Path, scoped_id: &str) -> Result<ArtifactPayload> {
-    if !path.exists() {
-        bail!("Artifact not found: {}", path.display());
-    }
-    if path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| !ext.eq_ignore_ascii_case("capsule"))
-        .unwrap_or(true)
-    {
-        bail!("--artifact must point to a .capsule file");
+fn upload_artifact_payload(
+    base_url: &str,
+    payload: ArtifactPayload,
+    allow_existing: bool,
+) -> Result<PublishArtifactResult> {
+    let v3_sync_payload = payload.v3_sync_payload();
+    let endpoint = build_upload_endpoint(
+        base_url,
+        &payload.publisher,
+        &payload.slug,
+        &payload.version,
+        if payload.file_name.is_empty() {
+            None
+        } else {
+            Some(payload.file_name.as_str())
+        },
+        allow_existing,
+    );
+
+    let request = crate::registry::http::blocking_client_builder(base_url)
+        .build()
+        .context("Failed to create registry upload client")?
+        .put(&endpoint)
+        .header("content-type", "application/octet-stream")
+        .header("x-ato-sha256", &payload.sha256)
+        .header("x-ato-blake3", &payload.blake3);
+
+    let request = crate::registry::http::with_blocking_ato_token(request);
+
+    let response = request
+        .body(payload.bytes)
+        .send()
+        .map_err(|err| anyhow::anyhow!("Failed to upload artifact to {}: {}", endpoint, err))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        let error = classify_upload_failure(status, &body);
+        return Err(error.into());
     }
 
+    let result = response
+        .json::<PublishArtifactResult>()
+        .context("Invalid local registry upload response")?;
+    sync_v3_chunks_if_present(base_url, v3_sync_payload.as_ref())
+        .with_context(|| "Failed to finalize payload v3 metadata for uploaded release")?;
+    Ok(result)
+}
+
+fn load_artifact_payload_from_bytes(bytes: &[u8], scoped_id: &str) -> Result<ArtifactPayload> {
     let scoped = crate::install::parse_capsule_ref(scoped_id)?;
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("Failed to read artifact: {}", path.display()))?;
     let manifest = extract_manifest_from_capsule(&bytes)?;
     let v3_manifest = extract_payload_v3_manifest_from_capsule(&bytes)?;
     let parsed = capsule_core::types::CapsuleManifest::from_toml(&manifest)
@@ -322,7 +316,7 @@ fn load_artifact_payload(path: &Path, scoped_id: &str) -> Result<ArtifactPayload
         file_name,
         sha256: compute_sha256(&bytes),
         blake3: compute_blake3(&bytes),
-        bytes,
+        bytes: bytes.to_vec(),
         v3_manifest,
     })
 }
@@ -968,11 +962,9 @@ entrypoint = "main.ts"
 
     #[test]
     fn slug_mismatch_is_rejected() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("sample-capsule.capsule");
-        std::fs::write(&path, test_capsule_bytes("sample-capsule", "1.0.0")).expect("write");
-
-        let err = load_artifact_payload(&path, "koh0920/another-slug").expect_err("must fail");
+        let bytes = test_capsule_bytes("sample-capsule", "1.0.0");
+        let err = load_artifact_payload_from_bytes(&bytes, "koh0920/another-slug")
+            .expect_err("must fail");
         assert!(err
             .to_string()
             .contains("must match artifact manifest.name"));

@@ -5,8 +5,9 @@ use anyhow::Result;
 use crate::cli::{
     ConfigCommands, ConfigEngineCommands, ConfigRegistryCommands, EngineCommands, RegistryCommands,
 };
-use crate::orchestration::{catalog_registry, support_command};
 
+use super::engine;
+use super::registry;
 use super::Reporter;
 
 pub(super) fn execute_config_command(
@@ -17,13 +18,13 @@ pub(super) fn execute_config_command(
     match command {
         ConfigCommands::Engine { command } => match command {
             ConfigEngineCommands::Features => {
-                support_command::execute_engine_command(EngineCommands::Features, nacelle, reporter)
+                engine::execute_engine_command(EngineCommands::Features, nacelle, reporter)
             }
             ConfigEngineCommands::Register {
                 name,
                 path,
                 default,
-            } => support_command::execute_engine_command(
+            } => engine::execute_engine_command(
                 EngineCommands::Register {
                     name,
                     path,
@@ -36,7 +37,7 @@ pub(super) fn execute_config_command(
                 engine,
                 version,
                 skip_verify,
-            } => support_command::execute_setup_command(engine, version, skip_verify, reporter),
+            } => engine::execute_setup_command(engine, version, skip_verify, reporter),
         },
         ConfigCommands::Registry { command } => {
             let mapped = match command {
@@ -46,7 +47,7 @@ pub(super) fn execute_config_command(
                 ConfigRegistryCommands::List { json } => RegistryCommands::List { json },
                 ConfigRegistryCommands::ClearCache => RegistryCommands::ClearCache,
             };
-            catalog_registry::execute_registry_command(mapped)
+            registry::execute_registry_command(mapped)
         }
     }
 }

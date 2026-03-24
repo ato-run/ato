@@ -1,10 +1,10 @@
 use anyhow::Result;
 
-use crate::ingress_proxy;
 use crate::registry::store::{RegistryStore, ServiceBindingRecord};
 
 use super::contract::SERVICE_BINDING_TLS_MODE_EXPLICIT;
 use super::parse_binding_reference;
+use super::proxy as ingress_proxy;
 
 pub fn open_binding_store() -> Result<RegistryStore> {
     let store_dir = capsule_core::config::config_dir()?.join("state");

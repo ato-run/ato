@@ -39,6 +39,38 @@ pub(crate) struct PublishPipelinePlan {
     pub(crate) warn_legacy_full_publish: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublishTargetMode {
+    PersonalDockDirect,
+    OfficialCi,
+    CustomDirect,
+}
+
+impl PublishTargetMode {
+    pub(crate) fn is_official(self) -> bool {
+        matches!(self, Self::OfficialCi)
+    }
+
+    pub(crate) fn is_personal_dock(self) -> bool {
+        matches!(self, Self::PersonalDockDirect)
+    }
+
+    pub(crate) fn route_label(self) -> &'static str {
+        match self {
+            Self::PersonalDockDirect => "personal_dock_direct",
+            Self::OfficialCi => "official",
+            Self::CustomDirect => "private",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedPublishTarget {
+    pub(crate) registry_url: String,
+    pub(crate) mode: PublishTargetMode,
+    pub(crate) publisher_handle: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct PublishInstallResult {
     pub(crate) scoped_id: String,
@@ -270,6 +302,81 @@ pub(crate) fn validate_publish_phase_options(
     }
 
     Ok(())
+}
+
+pub(crate) fn resolve_publish_target_from_sources(
+    cli_registry: Option<&str>,
+    manifest_registry: Option<&str>,
+    publisher_handle: Option<&str>,
+) -> Result<ResolvedPublishTarget> {
+    if let Some(url) = cli_registry {
+        return resolve_explicit_publish_target(url);
+    }
+
+    if let Some(url) = manifest_registry {
+        return resolve_explicit_publish_target(url);
+    }
+
+    if let Some(handle) = publisher_handle {
+        return Ok(ResolvedPublishTarget {
+            registry_url: crate::auth::default_store_registry_url(),
+            mode: PublishTargetMode::PersonalDockDirect,
+            publisher_handle: Some(handle.to_string()),
+        });
+    }
+
+    anyhow::bail!(
+        "No default publish target found. Run `ato login` to publish to your Personal Dock, or pass `--registry https://api.ato.run` / `--ci` for the official Store."
+    );
+}
+
+fn resolve_explicit_publish_target(raw: &str) -> Result<ResolvedPublishTarget> {
+    let normalized = crate::registry::http::normalize_registry_url(raw, "registry")?;
+    if is_legacy_dock_publish_registry(&normalized) {
+        anyhow::bail!(
+            "Registry URL `{}` is no longer supported. Personal Dock publish now uses `https://api.ato.run`; `/d/<handle>` is a UI page, not a registry.",
+            normalized
+        );
+    }
+
+    Ok(ResolvedPublishTarget {
+        registry_url: normalized.clone(),
+        mode: if is_official_publish_registry(&normalized) {
+            PublishTargetMode::OfficialCi
+        } else {
+            PublishTargetMode::CustomDirect
+        },
+        publisher_handle: None,
+    })
+}
+
+fn is_official_publish_registry(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("api.ato.run") || host.eq_ignore_ascii_case("staging.api.ato.run")
+}
+
+pub(crate) fn is_legacy_dock_publish_registry(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(mut segments) = parsed.path_segments() else {
+        return false;
+    };
+    while let Some(segment) = segments.next() {
+        if segment == "d" {
+            return segments
+                .next()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some();
+        }
+    }
+    false
 }
 
 pub(crate) fn should_warn_legacy_full_publish(

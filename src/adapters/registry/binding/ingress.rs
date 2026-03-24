@@ -1,14 +1,13 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::ingress_proxy;
-
 use super::contract::{
     derive_service_upstream_locator, normalize_endpoint_locator, SERVICE_BINDING_KIND_INGRESS,
     SERVICE_BINDING_TLS_MODE_EXPLICIT,
 };
 use super::manifest::load_manifest;
 use super::parse_binding_reference;
+use super::proxy as ingress_proxy;
 use super::store::open_binding_store;
 
 pub fn bootstrap_ingress_tls(

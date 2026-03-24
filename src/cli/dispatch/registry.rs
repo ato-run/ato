@@ -1,5 +1,6 @@
-use anyhow::Result;
 use std::io::IsTerminal;
+
+use anyhow::Result;
 
 pub(crate) struct SearchCommandArgs {
     pub(crate) query: Option<String>,
