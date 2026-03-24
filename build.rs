@@ -76,6 +76,10 @@ fn ui_dist_available(ui_dir: &Path) -> bool {
     ui_dir.join("dist").join("index.html").is_file()
 }
 
+fn shared_packages_available(shared_packages: &[&Path]) -> bool {
+    shared_packages.iter().all(|path| path.exists())
+}
+
 fn warn_skip_ui_build_without_npm(ui_dir: &Path, err: &std::io::Error) {
     println!(
         "cargo:warning=Skipping UI build because npm is unavailable ({err}) and prebuilt assets already exist under {}",
@@ -241,6 +245,14 @@ fn main() {
         println!(
             "cargo:warning=Skipping UI build because {} was not found",
             ui_package.display()
+        );
+        return;
+    }
+
+    if !shared_packages_available(&shared_packages) && ui_dist_available(ui_dir) {
+        println!(
+            "cargo:warning=Skipping UI build because shared workspace packages are unavailable and prebuilt assets already exist under {}",
+            ui_dir.join("dist").display()
         );
         return;
     }
