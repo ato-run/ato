@@ -873,11 +873,7 @@ fn test_finalize_accepts_subcommand_json_flag() {
     );
 }
 
-fn write_native_build_fixture(
-    root: &std::path::Path,
-    executable: bool,
-    include_delivery_sidecar: bool,
-) {
+fn write_native_build_fixture(root: &std::path::Path, executable: bool) {
     fs::create_dir_all(root.join("MyApp.app/Contents/MacOS")).unwrap();
     fs::write(
         root.join("capsule.toml"),
@@ -894,22 +890,6 @@ entrypoint = "MyApp.app"
 "#,
     )
     .unwrap();
-    if include_delivery_sidecar {
-        fs::write(
-            root.join("ato.delivery.toml"),
-            r#"schema_version = "0.1"
-[artifact]
-framework = "tauri"
-stage = "unsigned"
-target = "darwin/arm64"
-input = "MyApp.app"
-[finalize]
-tool = "codesign"
-args = ["--deep", "--force", "--sign", "-", "MyApp.app"]
-"#,
-        )
-        .unwrap();
-    }
     let binary = root.join("MyApp.app/Contents/MacOS/MyApp");
     fs::write(&binary, b"#!/bin/sh\necho native\n").unwrap();
     #[cfg(unix)]
@@ -940,17 +920,13 @@ driver = "native"
 entrypoint = "sh"
 cmd = ["build-app.sh"]
 working_dir = "."
-"#,
-    )
-    .unwrap();
-    fs::write(
-        root.join("ato.delivery.toml"),
-        r#"schema_version = "0.1"
+
 [artifact]
 framework = "tauri"
 stage = "unsigned"
 target = "darwin/arm64"
 input = "dist/MyApp.app"
+
 [finalize]
 tool = "codesign"
 args = ["--deep", "--force", "--sign", "-", "dist/MyApp.app"]
@@ -1024,7 +1000,7 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
 #[test]
 fn test_build_routes_native_delivery_projects() {
     let tmp = tempdir().unwrap();
-    write_native_build_fixture(tmp.path(), true, true);
+    write_native_build_fixture(tmp.path(), true);
     let mut cmd = Command::cargo_bin("ato").unwrap();
     let output = cmd
         .args(["--json", "build", tmp.path().to_str().unwrap()])
@@ -1074,42 +1050,36 @@ fn test_build_routes_native_delivery_projects() {
 }
 
 #[test]
-fn test_build_routes_native_delivery_projects_without_delivery_sidecar() {
+fn test_build_rejects_source_native_delivery_sidecar() {
     let tmp = tempdir().unwrap();
-    write_native_build_fixture(tmp.path(), true, false);
+    write_native_build_fixture(tmp.path(), true);
+    fs::write(
+        tmp.path().join("ato.delivery.toml"),
+        r#"schema_version = "0.1"
+[artifact]
+framework = "tauri"
+stage = "unsigned"
+target = "darwin/arm64"
+input = "MyApp.app"
+[finalize]
+tool = "codesign"
+args = ["--deep", "--force", "--sign", "-", "MyApp.app"]
+"#,
+    )
+    .unwrap();
+
     let output = Command::cargo_bin("ato")
         .unwrap()
-        .args(["--json", "build", tmp.path().to_str().unwrap()])
+        .args(["build", tmp.path().to_str().unwrap()])
         .output()
         .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    if cfg!(target_os = "macos") {
-        assert!(
-            output.status.success(),
-            "stdout:\n{stdout}\nstderr:\n{stderr}"
-        );
-        assert!(
-            stdout.contains("\"build_strategy\": \"native-delivery\""),
-            "stdout:\n{stdout}"
-        );
-        assert!(
-            stdout.contains("\"schema_version\": \"0.1\""),
-            "stdout:\n{stdout}"
-        );
-    } else {
-        assert!(
-            !output.status.success(),
-            "stdout:\n{stdout}\nstderr:\n{stderr}"
-        );
-        let combined = format!("{stdout}\n{stderr}");
-        assert!(
-            combined
-                .contains("native delivery build currently supports macOS and Windows hosts only"),
-            "combined output:\n{combined}"
-        );
-    }
+    assert!(!output.status.success(), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("is no longer accepted in source projects"),
+        "stderr:\n{stderr}"
+    );
 }
 
 #[test]

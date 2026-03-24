@@ -183,10 +183,6 @@ driver = "native"
 entrypoint = "MyApp.app"
 "#,
     )?;
-    fs::write(
-        manifest_dir.join(DELIVERY_CONFIG_FILE),
-        sample_delivery_toml(),
-    )?;
     fs::write(&binary_path, b"unsigned-app")?;
     #[cfg(unix)]
     {
@@ -220,17 +216,13 @@ driver = "native"
 entrypoint = "dist/MyApp.exe"
 "#,
     )?;
-    fs::write(
-        manifest_dir.join(DELIVERY_CONFIG_FILE),
-        sample_file_delivery_toml(),
-    )?;
     fs::write(&source_file_path, sample_windows_executable_bytes())?;
 
     detect_build_strategy(&manifest_dir)?.context("expected native delivery build plan")
 }
 
 #[test]
-fn detect_build_strategy_accepts_command_mode_with_explicit_delivery_sidecar() -> Result<()> {
+fn detect_build_strategy_rejects_command_mode_source_delivery_sidecar() -> Result<()> {
     let tmp = tempdir()?;
     let manifest_dir = tmp.path().join("command-build-project");
     fs::create_dir_all(&manifest_dir)?;
@@ -255,13 +247,10 @@ working_dir = "."
         sample_delivery_toml(),
     )?;
 
-    let plan =
-        detect_build_strategy(&manifest_dir)?.context("expected native delivery build plan")?;
-    let build_command = plan.build_command.context("expected build command")?;
-    assert_eq!(build_command.program, "sh");
-    assert_eq!(build_command.args, vec!["build-app.sh".to_string()]);
-    assert_eq!(build_command.working_dir, manifest_dir);
-    assert_eq!(plan.source_app_path, plan.manifest_dir.join("MyApp.app"));
+    let err = detect_build_strategy(&manifest_dir).expect_err("source sidecar must be rejected");
+    assert!(err
+        .to_string()
+        .contains("is no longer accepted in source projects"));
     Ok(())
 }
 
@@ -307,7 +296,7 @@ entrypoint = "dist/MyApp.exe"
 }
 
 #[test]
-fn detect_build_strategy_ignores_command_mode_without_delivery_sidecar() -> Result<()> {
+fn detect_build_strategy_ignores_command_mode_without_inline_delivery_config() -> Result<()> {
     let tmp = tempdir()?;
     let manifest_dir = tmp.path().join("command-build-project");
     fs::create_dir_all(&manifest_dir)?;
@@ -430,7 +419,7 @@ entrypoint = "MyApp.app"
 }
 
 #[test]
-fn detect_build_strategy_rejects_sidecar_that_conflicts_with_canonical_capsule_manifest() {
+fn detect_build_strategy_rejects_source_delivery_sidecar_for_canonical_app_targets() {
     let tmp = tempdir().expect("tmp dir");
     let manifest_dir = tmp.path().join("native-build-project");
     let source_app_path = manifest_dir.join("MyApp.app");
@@ -475,11 +464,10 @@ args = ["--deep", "--force", "--sign", "-", "Other.app"]
         fs::set_permissions(&binary_path, permissions).expect("set permissions");
     }
 
-    let err = detect_build_strategy(&manifest_dir)
-        .expect_err("conflicting compatibility sidecar must be rejected");
+    let err = detect_build_strategy(&manifest_dir).expect_err("source sidecar must be rejected");
     assert!(err
         .to_string()
-        .contains("native delivery config conflicts with the default target contract"));
+        .contains("is no longer accepted in source projects"));
 }
 
 #[test]
