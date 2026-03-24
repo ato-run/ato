@@ -17,6 +17,9 @@ impl HourglassPipeline {
         R: HourglassPhaseRunner,
     {
         for phase in self.selection.flow.phases() {
+            if !runner.should_continue() {
+                break;
+            }
             if self.selection.runs(*phase) {
                 runner.run_phase(*phase).await?;
             } else {
@@ -31,6 +34,10 @@ impl HourglassPipeline {
 #[async_trait(?Send)]
 pub(crate) trait HourglassPhaseRunner {
     async fn run_phase(&mut self, phase: HourglassPhase) -> Result<()>;
+
+    fn should_continue(&self) -> bool {
+        true
+    }
 
     async fn skip_phase(&mut self, _phase: HourglassPhase) -> Result<()> {
         Ok(())
