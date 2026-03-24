@@ -100,16 +100,48 @@ fn seed_minimal_deno_lockfiles(workspace_root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn ensure_fake_runtime_shims(home_dir: &Path) -> Result<std::ffi::OsString> {
+    let shims_dir = home_dir.join(".test-runtime-shims");
+    std::fs::create_dir_all(&shims_dir)?;
+
+    for binary in ["node", "bun", "python", "python3", "uv"] {
+        #[cfg(windows)]
+        let shim_path = shims_dir.join(format!("{binary}.cmd"));
+        #[cfg(not(windows))]
+        let shim_path = shims_dir.join(binary);
+
+        if !shim_path.exists() {
+            #[cfg(windows)]
+            std::fs::write(&shim_path, "@echo off\r\nexit /B 0\r\n")?;
+            #[cfg(not(windows))]
+            {
+                std::fs::write(&shim_path, "#!/bin/sh\nexit 0\n")?;
+                use std::os::unix::fs::PermissionsExt;
+                let mut permissions = std::fs::metadata(&shim_path)?.permissions();
+                permissions.set_mode(0o755);
+                std::fs::set_permissions(&shim_path, permissions)?;
+            }
+        }
+    }
+
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![shims_dir];
+    paths.extend(std::env::split_paths(&existing));
+    std::env::join_paths(paths).context("join PATH entries for runtime shims")
+}
+
 fn run_ato_with_home(
     ato: &Path,
     args: &[&str],
     cwd: &Path,
     home_dir: &Path,
 ) -> Result<std::process::Output> {
+    let path = ensure_fake_runtime_shims(home_dir)?;
     Command::new(ato)
         .args(args)
         .current_dir(cwd)
         .env("HOME", home_dir)
+        .env("PATH", path)
         .output()
         .with_context(|| format!("failed to run ato {:?}", args))
 }
@@ -320,6 +352,25 @@ prepare = "echo prepare"
         "first publish failed: {}",
         String::from_utf8_lossy(&first_publish.stderr)
     );
+    let first_value: serde_json::Value =
+        serde_json::from_slice(&first_publish.stdout).context("first publish json parse")?;
+    let first_phases = first_value
+        .get("phases")
+        .and_then(|value| value.as_array())
+        .context("missing publish phases")?;
+    assert_eq!(
+        first_phases.len(),
+        6,
+        "unexpected phases payload: {first_value}"
+    );
+    assert!(
+        first_value.get("install").is_some(),
+        "missing install result"
+    );
+    assert!(
+        first_value.get("dry_run").is_some(),
+        "missing dry_run result"
+    );
 
     let second_publish = run_ato_with_home(
         &ato,
@@ -377,6 +428,90 @@ prepare = "echo prepare"
         "expected reused-release message in allow-existing path; stdout={}",
         third_stdout
     );
+
+    Ok(())
+}
+
+#[test]
+#[serial_test::serial]
+fn e2e_publish_dry_run_artifact_reports_install_and_dry_run() -> Result<()> {
+    let ato = assert_cmd::cargo::cargo_bin("ato");
+    let tmp = TempDir::new().context("create temp dir")?;
+    let home_dir = tmp.path().join("home");
+    std::fs::create_dir_all(&home_dir)?;
+    let data_dir = tmp.path().join("registry-data");
+    let build_dir = tmp.path().join("build-project");
+    let publish_cwd = tmp.path().join("publish-cwd");
+    std::fs::create_dir_all(&build_dir)?;
+    std::fs::create_dir_all(&publish_cwd)?;
+
+    std::fs::write(
+        build_dir.join("capsule.toml"),
+        r#"schema_version = "0.2"
+name = "test-dry-run-artifact"
+version = "1.0.0"
+type = "app"
+default_target = "static"
+
+[targets.static]
+runtime = "web"
+driver = "static"
+entrypoint = "dist"
+port = 4173
+"#,
+    )?;
+    std::fs::create_dir_all(build_dir.join("dist"))?;
+    std::fs::write(
+        build_dir.join("dist").join("index.html"),
+        "<!doctype html><title>dry run artifact</title>",
+    )?;
+
+    let artifact_path =
+        build_capsule_artifact(&ato, &build_dir, "test-dry-run-artifact", &home_dir)?;
+    let Some((_guard, base_url)) = start_local_registry_or_skip(
+        &ato,
+        &data_dir,
+        "e2e_publish_dry_run_artifact_reports_install_and_dry_run",
+    )?
+    else {
+        return Ok(());
+    };
+
+    let output = run_ato_with_home(
+        &ato,
+        &[
+            "publish",
+            "--dry-run",
+            "--json",
+            "--registry",
+            &base_url,
+            "--artifact",
+            artifact_path.to_string_lossy().as_ref(),
+            "--scoped-id",
+            "team-x/test-dry-run-artifact",
+        ],
+        &publish_cwd,
+        &home_dir,
+    )?;
+    assert!(
+        output.status.success(),
+        "publish dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("dry-run json parse")?;
+    let phases = value
+        .get("phases")
+        .and_then(|entry| entry.as_array())
+        .context("missing phases payload")?;
+    assert_eq!(phases.len(), 6, "unexpected phases payload: {value}");
+    assert_eq!(phases[2]["status"], "ok");
+    assert_eq!(phases[3]["status"], "ok");
+    assert_eq!(phases[4]["status"], "ok");
+    assert_eq!(phases[5]["status"], "skipped");
+    assert!(value.get("install").is_some(), "missing install result");
+    assert!(value.get("dry_run").is_some(), "missing dry_run result");
 
     Ok(())
 }

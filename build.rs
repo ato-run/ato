@@ -76,6 +76,10 @@ fn ui_dist_available(ui_dir: &Path) -> bool {
     ui_dir.join("dist").join("index.html").is_file()
 }
 
+fn shared_packages_available(shared_packages: &[&Path]) -> bool {
+    shared_packages.iter().all(|path| path.exists())
+}
+
 fn warn_skip_ui_build_without_npm(ui_dir: &Path, err: &std::io::Error) {
     println!(
         "cargo:warning=Skipping UI build because npm is unavailable ({err}) and prebuilt assets already exist under {}",
@@ -199,6 +203,11 @@ fn main() {
     let ui_public = ui_dir.join("public");
     let ui_package = ui_dir.join("package.json");
     let ui_lockfile = ui_dir.join("package-lock.json");
+    let shared_packages = [
+        Path::new("../../packages/dock-domain"),
+        Path::new("../../packages/dock-data"),
+        Path::new("../../packages/dock-react"),
+    ];
     let ui_vite_bin = ui_dir
         .join("node_modules")
         .join(".bin")
@@ -217,6 +226,11 @@ fn main() {
     if ui_public.exists() {
         println!("cargo:rerun-if-changed={}", ui_public.display());
     }
+    for shared_package in shared_packages {
+        if shared_package.exists() {
+            println!("cargo:rerun-if-changed={}", shared_package.display());
+        }
+    }
 
     if env::var("ATO_SKIP_UI_BUILD")
         .ok()
@@ -231,6 +245,14 @@ fn main() {
         println!(
             "cargo:warning=Skipping UI build because {} was not found",
             ui_package.display()
+        );
+        return;
+    }
+
+    if !shared_packages_available(&shared_packages) && ui_dist_available(ui_dir) {
+        println!(
+            "cargo:warning=Skipping UI build because shared workspace packages are unavailable and prebuilt assets already exist under {}",
+            ui_dir.join("dist").display()
         );
         return;
     }

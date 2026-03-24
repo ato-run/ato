@@ -1,14 +1,47 @@
-import { Copy } from "lucide-react";
+import {
+  Eye,
+  Play,
+  Square,
+  Trash2,
+} from "lucide-react";
+import { DockCatalogView, type DockAction } from "../dock/react";
+import {
+  normalizeLocalCatalogItem,
+  type DockCatalogItem,
+} from "../dock/domain";
+
 import type { Capsule, CatalogViewMode, OsFilter, Process } from "../types";
-import { CapsuleIconCard } from "../components/CapsuleIconCard";
-import { CapsuleListCard } from "../components/CapsuleListCard";
-import { CapsuleRow } from "../components/CapsuleRow";
-import { Toolbar } from "../components/Toolbar";
 
 function latestProcessForCapsule(processes: Process[], capsuleId: string): Process | undefined {
   return [...processes]
     .filter((process) => process.capsuleId === capsuleId)
     .sort((left, right) => right.startedAt.localeCompare(left.startedAt))[0];
+}
+
+function toCatalogItem(capsule: Capsule): DockCatalogItem {
+  const [publisher, slug] = capsule.scopedId.split("/", 2);
+  return normalizeLocalCatalogItem({
+    id: capsule.id,
+    slug: slug || capsule.id,
+    scopedId: capsule.scopedId,
+    name: capsule.name,
+    description: capsule.longDescription || capsule.description,
+    publisher: {
+      handle: publisher || capsule.publisher,
+      verified: capsule.trustLevel === "verified" || capsule.trustLevel === "signed",
+    },
+    type: capsule.type === "service" ? "service" : capsule.type,
+    latestVersion: capsule.version,
+    size: capsule.size,
+    storeMetadata: {
+      iconUrl: capsule.storeMetadata?.iconUrl,
+      text: capsule.longDescription || capsule.storeMetadata?.text,
+    },
+  }, {
+    href: `/capsule/${encodeURIComponent(capsule.id)}`,
+    trustBadge: capsule.trustLevel,
+    visibility: "local",
+  });
 }
 
 interface CatalogPageProps {
@@ -44,95 +77,96 @@ export function CatalogPage({
   onStop,
   onOpen,
   isOpenReady,
-  onInspect,
+  onInspect: _onInspect,
   onDelete,
   publishCommand,
   writeAuthRequired,
   onCopyCommand,
 }: CatalogPageProps): JSX.Element {
-  return (
-    <div>
-      <Toolbar
-        filter={filter}
-        onFilterChange={onFilterChange}
-        total={capsules.length}
-        viewMode={viewMode}
-        onViewModeChange={onViewModeChange}
-      />
+  const items = capsules.map(toCatalogItem);
+  const actionsById = new Map(
+    capsules.map((capsule) => {
+      const process = latestProcessForCapsule(processes, capsule.id);
+      const actions: DockAction[] = [
+        process?.active
+          ? {
+              id: `${capsule.id}-stop`,
+              label: "Stop",
+              tone: "danger",
+              icon: <Square size={13} strokeWidth={1.8} />,
+              onAction: () => onStop(capsule),
+            }
+          : {
+              id: `${capsule.id}-run`,
+              label: "Run",
+              tone: "primary",
+              icon: <Play size={13} strokeWidth={1.8} />,
+              onAction: () => onRun(capsule),
+            },
+        {
+          id: `${capsule.id}-detail`,
+          label: "Detail",
+          tone: "ghost",
+          href: `/capsule/${encodeURIComponent(capsule.id)}`,
+          icon: <Eye size={13} strokeWidth={1.8} />,
+        },
+        {
+          id: `${capsule.id}-open`,
+          label: "Open",
+          tone: "secondary",
+          icon: <Eye size={13} strokeWidth={1.8} />,
+          disabled: !isOpenReady(process),
+          onAction: () => onOpen(capsule, process),
+        },
+        {
+          id: `${capsule.id}-delete`,
+          label: "Delete",
+          tone: "ghost",
+          icon: <Trash2 size={13} strokeWidth={1.8} />,
+          onAction: () => onDelete(capsule),
+        },
+      ];
+      return [capsule.id, actions] as const;
+    }),
+  );
 
-      {capsules.length === 0 ? (
-        <div className="empty-state" role="status">
-          <h3>No capsules in this Dock.</h3>
-          <p>To publish your first capsule, run:</p>
-          {writeAuthRequired ? (
-            <p>If this Dock requires write auth, run <code>ato login</code> first. The publish command below will reuse your saved CLI session.</p>
-          ) : null}
-          <pre>{publishCommand}</pre>
-          <button className="btn btn-ghost" type="button" onClick={onCopyCommand}>
-            <Copy size={14} strokeWidth={1.5} /> Copy command
-          </button>
-        </div>
-      ) : viewMode === "list" && isMobile ? (
-        <div className="mobile-list">
-          {capsules.map((capsule) => {
-            const process = latestProcessForCapsule(processes, capsule.id);
-            return (
-              <CapsuleListCard
-                key={capsule.id}
-                capsule={capsule}
-                process={process}
-                openReady={isOpenReady(process)}
-                platform={platform}
-                onRun={onRun}
-                onStop={onStop}
-                onOpen={onOpen}
-                onInspect={onInspect}
-                onDelete={onDelete}
-              />
-            );
-          })}
-        </div>
-      ) : viewMode === "list" ? (
-        <div className="table-card">
-          <table className="catalog-table">
-            <thead>
-              <tr>
-                <th style={{ width: "36px" }} />
-                <th>Capsule</th>
-                <th>Version</th>
-                <th>Platforms</th>
-                <th>Size</th>
-                <th style={{ textAlign: "right" }}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {capsules.map((capsule) => {
-                const process = latestProcessForCapsule(processes, capsule.id);
-                return (
-                  <CapsuleRow
-                    key={capsule.id}
-                    capsule={capsule}
-                    process={process}
-                    openReady={isOpenReady(process)}
-                    platform={platform}
-                    onRun={onRun}
-                    onStop={onStop}
-                    onOpen={onOpen}
-                    onInspect={onInspect}
-                    onDelete={onDelete}
-                  />
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <div className="grid-view">
-          {capsules.map((capsule) => (
-            <CapsuleIconCard key={capsule.id} capsule={capsule} onClick={onInspect} />
-          ))}
-        </div>
-      )}
-    </div>
+  if (capsules.length === 0) {
+    return (
+      <div className="empty-state" role="status">
+        <h3>No capsules in this Dock.</h3>
+        <p>To publish your first capsule, run:</p>
+        {writeAuthRequired ? (
+          <p>If this Dock requires write auth, run <code>ato login</code> first. The publish command below will reuse your saved CLI session.</p>
+        ) : null}
+        <pre>{publishCommand}</pre>
+        <button className="btn btn-ghost" type="button" onClick={onCopyCommand}>
+          Copy command
+        </button>
+      </div>
+    );
+  }
+
+  const subtitle = isMobile
+    ? `Showing ${items.length} capsules on ${platform}.`
+    : `Shared store-web visual layer on top of local runtime actions (${platform}).`;
+
+  return (
+    <DockCatalogView
+      items={items}
+      viewMode={viewMode}
+      onViewModeChange={onViewModeChange}
+      filterLabel="Platform"
+      filterValue={filter}
+      filterOptions={[
+        { value: "all", label: "All" },
+        { value: "macos", label: "macOS" },
+        { value: "linux", label: "Linux" },
+        { value: "windows", label: "Windows" },
+      ]}
+      onFilterChange={(value) => onFilterChange(value as OsFilter)}
+      countLabel={`${items.length} local capsules`}
+      subtitle={subtitle}
+      getActions={(item) => actionsById.get(item.id) ?? []}
+    />
   );
 }
