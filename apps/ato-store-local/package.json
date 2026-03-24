@@ -9,6 +9,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@ato/dock-domain": "file:../../../../packages/dock-domain",
+    "@ato/dock-react": "file:../../../../packages/dock-react",
     "@tailwindcss/vite": "^4.2.1",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",

@@ -26,6 +26,8 @@ clap = { version = "4.5", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_jcs = "0.1"
+adk-core = "0.4.0"
+adk-model = { version = "0.4.0", default-features = false, features = ["openai"] }
 serde_yaml = "0.9"
 toml = "0.8"
 toml_edit = "0.22"
@@ -96,6 +98,9 @@ mslnk = "0.1.8"
 wasmtime = "16.0"
 wasmtime-wasi = "16.0"
 wasi-common = "16.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+openssl-sys = { version = "0.9.112", features = ["vendored"] }
 
 [features]
 default = []

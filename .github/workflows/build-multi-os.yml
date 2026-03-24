@@ -163,6 +163,12 @@ jobs:
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: |
           set -euo pipefail
+          if [[ "${{ matrix.build_target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+            export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
+            export RANLIB_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ranlib
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          fi
           if [[ -n "${{ matrix.build_target }}" ]]; then
             cargo build --release --locked --target "${{ matrix.build_target }}" --bin ato
           else

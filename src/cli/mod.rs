@@ -37,7 +37,9 @@ pub(crate) use project::{ProjectCommands, ScaffoldCommands};
 pub(crate) use registry::RegistryCommands;
 pub(crate) use root::{Cli, Commands};
 #[allow(unused_imports)]
-pub(crate) use shared::{CompatibilityFallbackBackend, EnforcementMode, DEFAULT_RUN_REGISTRY_URL};
+pub(crate) use shared::{
+    CompatibilityFallbackBackend, EnforcementMode, RunAgentMode, DEFAULT_RUN_REGISTRY_URL,
+};
 #[allow(unused_imports)]
 pub(crate) use source::SourceCommands;
 #[allow(unused_imports)]

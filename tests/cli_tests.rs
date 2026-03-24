@@ -3,7 +3,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 
 use assert_cmd::Command;
@@ -24,6 +24,54 @@ fn run_init_in(dir: &std::path::Path) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap()
+}
+
+fn write_static_publish_project(dir: &Path, name: &str, version: &str) {
+    fs::create_dir_all(dir.join("dist")).expect("create dist");
+    fs::write(
+        dir.join("capsule.toml"),
+        format!(
+            r#"schema_version = "0.2"
+name = "{name}"
+version = "{version}"
+type = "app"
+default_target = "site"
+
+[targets.site]
+runtime = "web"
+driver = "static"
+entrypoint = "dist"
+port = 4173
+"#
+        ),
+    )
+    .expect("write manifest");
+    fs::write(
+        dir.join("dist").join("index.html"),
+        format!("<!doctype html><title>{name}</title>"),
+    )
+    .expect("write html");
+}
+
+fn build_capsule_for_test(project_dir: &Path, name: &str) -> PathBuf {
+    let output = Command::cargo_bin("ato")
+        .unwrap()
+        .current_dir(project_dir)
+        .args(["build", "."])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let artifact = project_dir.join(format!("{name}.capsule"));
+    assert!(
+        artifact.exists(),
+        "missing artifact: {}",
+        artifact.display()
+    );
+    artifact
 }
 
 struct MockGitHubArchiveServer {
@@ -161,6 +209,36 @@ fn extract_manifest_from_archive(path: &Path) -> String {
         "capsule.toml not found in installed archive: {}",
         path.display()
     );
+}
+
+fn create_fake_node_dir() -> tempfile::TempDir {
+    let dir = tempdir().expect("fake node tempdir");
+    #[cfg(windows)]
+    let node_path = dir.path().join("node.cmd");
+    #[cfg(not(windows))]
+    let node_path = dir.path().join("node");
+
+    #[cfg(windows)]
+    fs::write(&node_path, "@echo off\r\nexit /B 0\r\n").expect("write fake node");
+    #[cfg(not(windows))]
+    {
+        fs::write(&node_path, "#!/bin/sh\nexit 0\n").expect("write fake node");
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&node_path)
+            .expect("fake node metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&node_path, permissions).expect("chmod fake node");
+    }
+
+    dir
+}
+
+fn prepend_path(dir: &Path) -> std::ffi::OsString {
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![dir.to_path_buf()];
+    paths.extend(std::env::split_paths(&existing));
+    std::env::join_paths(paths).expect("join PATH entries")
 }
 
 #[test]
@@ -326,6 +404,7 @@ fn test_install_from_gh_repo_without_manifest_uses_zero_config_build_fallback() 
     let tmp = tempdir().unwrap();
     let output_dir = tmp.path().join("installed");
     let runtime_root = tmp.path().join("runtime");
+    let fake_node = create_fake_node_dir();
     let archive = build_github_tarball(
         "Koh0920-demo-repo-a1b2c3",
         &[("index.js", "console.log('hello from zero config');\n")],
@@ -337,6 +416,7 @@ fn test_install_from_gh_repo_without_manifest_uses_zero_config_build_fallback() 
         .current_dir(tmp.path())
         .env("ATO_GITHUB_API_BASE_URL", &server.base_url)
         .env("ATO_RUNTIME_ROOT", &runtime_root)
+        .env("PATH", prepend_path(fake_node.path()))
         .args([
             "install",
             "--from-gh-repo",
@@ -376,6 +456,7 @@ fn test_install_from_gh_repo_accepts_host_path_and_metadata_archive() {
     let tmp = tempdir().unwrap();
     let output_dir = tmp.path().join("installed");
     let runtime_root = tmp.path().join("runtime");
+    let fake_node = create_fake_node_dir();
     let archive = build_github_tarball_with_global_pax_header(
         "Koh0920-demo-repo-a1b2c3",
         &[("index.js", "console.log('hello from host path');\n")],
@@ -387,6 +468,7 @@ fn test_install_from_gh_repo_accepts_host_path_and_metadata_archive() {
         .current_dir(tmp.path())
         .env("ATO_GITHUB_API_BASE_URL", &server.base_url)
         .env("ATO_RUNTIME_ROOT", &runtime_root)
+        .env("PATH", prepend_path(fake_node.path()))
         .args([
             "install",
             "--from-gh-repo",
@@ -1262,7 +1344,7 @@ fn test_run_help_shows_yes_flag() {
         .assert()
         .success()
         .stdout(predicate::str::contains("github.com/owner/repo"))
-        .stdout(predicate::str::contains("--skill <SKILL>"))
+        .stdout(predicate::str::contains("--skill <SKILL>").not())
         .stdout(predicate::str::contains("--yes"))
         .stdout(predicate::str::contains("--registry"))
         .stdout(predicate::str::contains("default: https://api.ato.run"));
@@ -1291,12 +1373,44 @@ fn test_run_requires_yes_or_tty_for_github_repo_install() {
 }
 
 #[test]
-fn test_run_skill_conflicts_with_from_skill() {
+fn test_run_rejects_removed_skill_flags() {
     let mut cmd = Command::cargo_bin("ato").unwrap();
-    cmd.args(["run", "--skill", "demo", "--from-skill", "/tmp/SKILL.md"])
+    cmd.args(["run", "--from-skill", "/tmp/SKILL.md"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("cannot be used with"));
+        .stderr(predicate::str::contains("--from-skill"));
+}
+
+#[test]
+fn test_run_json_missing_manifest_requires_yes() {
+    let tmp = tempdir().unwrap();
+
+    let output = Command::cargo_bin("ato")
+        .unwrap()
+        .current_dir(tmp.path())
+        .args(["--json", "run"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(value["schema_version"], "1");
+    assert_eq!(value["status"], "error");
+    assert!(value["error"]["message"]
+        .as_str()
+        .expect("message string")
+        .contains("requires -y/--yes"));
+    assert!(!tmp.path().join("capsule.toml").exists());
+}
+
+#[test]
+fn test_legacy_open_subcommand_is_rejected() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["open", "."])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unrecognized subcommand"));
 }
 
 #[test]
@@ -1348,6 +1462,11 @@ fn test_publish_command_exists() {
         .stdout(predicate::str::contains("--prepare"))
         .stdout(predicate::str::contains("--build"))
         .stdout(predicate::str::contains("--deploy"))
+        .stdout(predicate::str::contains("Select Prepare as the stop point"))
+        .stdout(predicate::str::contains("Select Verify as the stop point"))
+        .stdout(predicate::str::contains(
+            "Start at Verify using an existing .capsule artifact",
+        ))
         .stdout(predicate::str::contains("--ci"))
         .stdout(predicate::str::contains("--dry-run"))
         .stdout(predicate::str::contains("--no-tui"));
@@ -1390,17 +1509,6 @@ fn test_config_engine_install_exists() {
 }
 
 #[test]
-fn test_legacy_open_still_available() {
-    let mut cmd = Command::cargo_bin("ato").unwrap();
-    cmd.args(["open", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Usage: ato run"))
-        .stdout(predicate::str::contains("--yes"))
-        .stdout(predicate::str::contains("--registry"));
-}
-
-#[test]
 fn test_legacy_setup_still_available() {
     let mut cmd = Command::cargo_bin("ato").unwrap();
     cmd.args(["setup", "--help"])
@@ -1435,10 +1543,16 @@ fn test_build_invalid_manifest_outputs_single_json_error() {
 }
 
 #[test]
-fn test_publish_json_error_uses_diagnostic_envelope() {
+fn test_publish_json_invalid_artifact_prepare_range_uses_diagnostic_envelope() {
     let output = Command::cargo_bin("ato")
         .unwrap()
-        .args(["publish", "--json", "--deploy"])
+        .args([
+            "publish",
+            "--json",
+            "--artifact",
+            "demo.capsule",
+            "--prepare",
+        ])
         .output()
         .unwrap();
 
@@ -1451,7 +1565,53 @@ fn test_publish_json_error_uses_diagnostic_envelope() {
     assert!(value["error"]["message"]
         .as_str()
         .expect("message string")
-        .contains("--deploy requires --artifact"));
+        .contains("cannot be combined"));
+}
+
+#[test]
+fn test_publish_json_artifact_build_reports_six_phase_matrix() {
+    let tmp = tempdir().unwrap();
+    let build_dir = tmp.path().join("build-project");
+    let publish_dir = tmp.path().join("publish-cwd");
+    fs::create_dir_all(&build_dir).unwrap();
+    fs::create_dir_all(&publish_dir).unwrap();
+    write_static_publish_project(&build_dir, "phase-matrix-demo", "1.0.0");
+    let artifact = build_capsule_for_test(&build_dir, "phase-matrix-demo");
+
+    let output = Command::cargo_bin("ato")
+        .unwrap()
+        .current_dir(&publish_dir)
+        .args([
+            "publish",
+            "--json",
+            "--artifact",
+            artifact.to_string_lossy().as_ref(),
+            "--build",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "publish failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    let phases = value["phases"].as_array().expect("phases array");
+    assert_eq!(phases.len(), 6, "unexpected phases payload: {value}");
+    let phase_names: Vec<&str> = phases
+        .iter()
+        .map(|phase| phase["name"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        phase_names,
+        vec!["prepare", "build", "verify", "install", "dry_run", "publish"]
+    );
+    assert_eq!(phases[2]["status"], "ok");
+    assert_eq!(phases[3]["status"], "skipped");
+    assert_eq!(phases[4]["status"], "skipped");
+    assert_eq!(phases[5]["status"], "skipped");
 }
 
 #[test]
@@ -1471,7 +1631,7 @@ fn test_publish_json_missing_manifest_uses_diagnostic_envelope() {
     assert!(value["error"]["message"]
         .as_str()
         .expect("message string")
-        .contains("Failed to read"));
+        .contains("capsule.toml not found in current directory"));
 }
 
 #[test]
