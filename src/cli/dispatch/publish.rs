@@ -173,6 +173,7 @@ struct PublishCommandExecution<'a> {
 }
 
 impl<'a> PublishCommandExecution<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         args: &'a PublishCommandArgs,
         reporter: Reporter,

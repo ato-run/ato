@@ -1217,7 +1217,7 @@ async fn try_plan_with_adk(
 
     let raw: AdkPlanResponse =
         serde_json::from_str(&buffer).with_context(|| "failed to parse ADK planner JSON")?;
-    Ok(validate_adk_plan(raw, &model)?)
+    validate_adk_plan(raw, &model)
 }
 
 #[derive(Debug, Deserialize)]

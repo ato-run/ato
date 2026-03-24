@@ -55,6 +55,7 @@ pub(crate) fn publish_test_sandbox_spec(
     TargetSpec::TestSandbox { root_dir }
 }
 
+#[allow(dead_code)]
 pub(crate) fn test_sandbox_root(spec: &TargetSpec) -> PathBuf {
     match spec {
         TargetSpec::TestSandbox { root_dir } => root_dir.clone(),

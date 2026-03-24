@@ -474,6 +474,7 @@ where
     Ok(state)
 }
 
+#[allow(clippy::too_many_arguments)]
 #[async_trait(?Send)]
 pub(crate) trait ConsumerRunExecuteHooks {
     fn preflight_native_sandbox(
@@ -1065,6 +1066,7 @@ pub(crate) async fn reroute_auto_provisioned_execution(
     Ok((rerouted_decision, rerouted_launch_ctx))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn maybe_run_agent_setup(
     request: &ConsumerRunRequest,
     decision: &capsule_core::router::RuntimeDecision,

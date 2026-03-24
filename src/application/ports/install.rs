@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceSpec {
     LocalArtifact { path: PathBuf },
@@ -11,6 +12,7 @@ pub enum SourceSpec {
 }
 
 impl SourceSpec {
+    #[allow(dead_code)]
     pub fn path(&self) -> &Path {
         match self {
             Self::LocalArtifact { path } | Self::RegistryOrCasArtifact { path } => path.as_path(),
@@ -24,6 +26,7 @@ pub struct SourceArtifact {
     pub source: SourceSpec,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetSpec {
     ExecutionSandbox { root_dir: PathBuf },
@@ -31,6 +34,7 @@ pub enum TargetSpec {
 }
 
 impl TargetSpec {
+    #[allow(dead_code)]
     pub fn root_dir(&self) -> &Path {
         match self {
             Self::ExecutionSandbox { root_dir } | Self::TestSandbox { root_dir } => {
