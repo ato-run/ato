@@ -25,6 +25,10 @@ tmp/
 **/build/
 !src/core/engine/build/
 !src/core/engine/build/**
+!src/adapters/install/target/
+!src/adapters/install/target/**
+!src/application/engine/build/
+!src/application/engine/build/**
 
 # Secrets and envs
 .env

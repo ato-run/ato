@@ -109,7 +109,7 @@ open_capsule() {
     ATO_CAS_ROOT="$cas_root" \
     ATO_EXPERIMENTAL_V3_PACK="$flag" \
     CAPSULE_ALLOW_UNSAFE=1 \
-    "$ATO_BIN" open "$local_artifact" --dangerously-skip-permissions --yes >/dev/null
+    "$ATO_BIN" run "$local_artifact" --dangerously-skip-permissions --yes >/dev/null
   )
 }
 
