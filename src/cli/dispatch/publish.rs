@@ -426,7 +426,7 @@ impl<'a> PublishCommandExecution<'a> {
         Ok(())
     }
 
-    fn run_dry_run_phase(&mut self) -> Result<()> {
+    async fn run_dry_run_phase(&mut self) -> Result<()> {
         hourglass::print_phase_line(
             self.args.json,
             PublishPhaseBoundary::DryRun,
@@ -519,16 +519,26 @@ impl<'a> PublishCommandExecution<'a> {
             .state
             .verified_artifact()
             .context("dry-run phase requires verified artifact metadata")?;
-        let dry_run_result = publish_phase::run_direct_publish_dry_run_phase(
-            &publish_phase::DirectPublishDryRunRequest {
-                registry_url: &self.resolved_target.registry_url,
-                scoped_id: &preview.scoped_id,
-                version: &preview.version,
-                artifact_version: &verification.version,
-                allow_existing: self.args.allow_existing,
-                requires_session_token: self.resolved_target.mode.is_personal_dock(),
-            },
-        )?;
+        let registry_url = self.resolved_target.registry_url.clone();
+        let scoped_id = preview.scoped_id.clone();
+        let version = preview.version.clone();
+        let artifact_version = verification.version.clone();
+        let allow_existing = self.args.allow_existing;
+        let requires_session_token = self.resolved_target.mode.is_personal_dock();
+        let dry_run_result = tokio::task::spawn_blocking(move || {
+            publish_phase::run_direct_publish_dry_run_phase(
+                &publish_phase::DirectPublishDryRunRequest {
+                    registry_url: &registry_url,
+                    scoped_id: &scoped_id,
+                    version: &version,
+                    artifact_version: &artifact_version,
+                    allow_existing,
+                    requires_session_token,
+                },
+            )
+        })
+        .await
+        .context("publish dry-run worker panicked")??;
         let dry_run_ok = publish_phase::direct_publish_dry_run_is_ready(
             &dry_run_result,
             self.resolved_target.mode.is_personal_dock(),
@@ -720,7 +730,7 @@ impl HourglassPhaseRunner for PublishCommandExecution<'_> {
             PublishPhaseBoundary::Build => self.run_build_phase(),
             PublishPhaseBoundary::Verify => self.run_verify_phase(),
             PublishPhaseBoundary::Install => self.run_install_phase().await,
-            PublishPhaseBoundary::DryRun => self.run_dry_run_phase(),
+            PublishPhaseBoundary::DryRun => self.run_dry_run_phase().await,
             PublishPhaseBoundary::Publish => self.run_publish_phase().await,
             PublishPhaseBoundary::Execute => {
                 anyhow::bail!("unsupported publish pipeline phase {}", phase.as_str())
