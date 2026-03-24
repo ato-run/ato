@@ -1,5 +1,4 @@
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use capsule_core::CapsuleReporter;
@@ -12,7 +11,7 @@ pub(crate) mod common;
 pub(crate) mod utils;
 
 pub(crate) struct SidecarCleanup {
-    sidecar: Rc<RefCell<Option<common::sidecar::SidecarHandle>>>,
+    sidecar: Arc<Mutex<Option<common::sidecar::SidecarHandle>>>,
     reporter: std::sync::Arc<reporters::CliReporter>,
 }
 
@@ -22,20 +21,25 @@ impl SidecarCleanup {
         reporter: std::sync::Arc<reporters::CliReporter>,
     ) -> Self {
         Self {
-            sidecar: Rc::new(RefCell::new(sidecar)),
+            sidecar: Arc::new(Mutex::new(sidecar)),
             reporter,
         }
     }
 
     pub(crate) fn register_attempt_cleanup(
         &self,
-        scope: &mut application::pipeline::cleanup::CleanupScope<'_>,
+        scope: &mut application::pipeline::cleanup::CleanupScope,
     ) {
-        if self.sidecar.borrow().is_none() {
+        if self
+            .sidecar
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .is_none()
+        {
             return;
         }
 
-        let sidecar = Rc::clone(&self.sidecar);
+        let sidecar = Arc::clone(&self.sidecar);
         scope.register(move || stop_sidecar_cleanup_action(&sidecar));
     }
 
@@ -53,9 +57,13 @@ impl SidecarCleanup {
 }
 
 fn stop_sidecar(
-    sidecar: &Rc<RefCell<Option<common::sidecar::SidecarHandle>>>,
+    sidecar: &Arc<Mutex<Option<common::sidecar::SidecarHandle>>>,
 ) -> anyhow::Result<bool> {
-    let Some(sidecar) = sidecar.borrow_mut().take() else {
+    let sidecar = sidecar
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .take();
+    let Some(sidecar) = sidecar else {
         return Ok(false);
     };
 
@@ -64,7 +72,7 @@ fn stop_sidecar(
 }
 
 fn stop_sidecar_cleanup_action(
-    sidecar: &Rc<RefCell<Option<common::sidecar::SidecarHandle>>>,
+    sidecar: &Arc<Mutex<Option<common::sidecar::SidecarHandle>>>,
 ) -> capsule_core::execution_plan::error::CleanupActionRecord {
     match stop_sidecar(sidecar) {
         Ok(_) => capsule_core::execution_plan::error::CleanupActionRecord {
