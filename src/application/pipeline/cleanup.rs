@@ -3,6 +3,7 @@
 use std::error::Error as StdError;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Error;
 use capsule_core::execution_plan::error::{
@@ -13,13 +14,13 @@ use crate::application::pipeline::hourglass::HourglassPhase;
 
 type CleanupHandle = usize;
 
-trait CleanupAction {
+trait CleanupAction: Send {
     fn run(self: Box<Self>) -> CleanupActionRecord;
 }
 
 impl<F> CleanupAction for F
 where
-    F: FnOnce() -> CleanupActionRecord + 'static,
+    F: FnOnce() -> CleanupActionRecord + Send + 'static,
 {
     fn run(self: Box<Self>) -> CleanupActionRecord {
         (*self)()
@@ -28,7 +29,7 @@ where
 
 struct CleanupEntry {
     id: CleanupHandle,
-    action: Option<Box<dyn CleanupAction>>,
+    action: Option<Box<dyn CleanupAction + Send>>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,7 +73,7 @@ pub(crate) struct CleanupJournal {
 impl CleanupJournal {
     pub(crate) fn register<F>(&mut self, action: F) -> CleanupHandle
     where
-        F: FnOnce() -> CleanupActionRecord + 'static,
+        F: FnOnce() -> CleanupActionRecord + Send + 'static,
     {
         let id = self.next_id;
         self.next_id += 1;
@@ -102,13 +103,47 @@ impl CleanupJournal {
     }
 }
 
-pub(crate) struct CleanupScope<'a> {
-    journal: &'a mut CleanupJournal,
+#[derive(Clone, Default)]
+struct SharedCleanupJournal {
+    inner: Arc<Mutex<CleanupJournal>>,
+}
+
+impl SharedCleanupJournal {
+    fn register<F>(&self, action: F) -> CleanupHandle
+    where
+        F: FnOnce() -> CleanupActionRecord + Send + 'static,
+    {
+        let mut journal = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        journal.register(action)
+    }
+
+    fn commit(&self, handle: CleanupHandle) {
+        let mut journal = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        journal.commit(handle);
+    }
+
+    fn unwind(&self) -> CleanupReport {
+        let mut journal = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        journal.unwind()
+    }
+}
+
+pub(crate) struct CleanupScope {
+    journal: SharedCleanupJournal,
     handles: Vec<CleanupHandle>,
 }
 
-impl<'a> CleanupScope<'a> {
-    pub(crate) fn new(journal: &'a mut CleanupJournal) -> Self {
+impl CleanupScope {
+    fn new(journal: SharedCleanupJournal) -> Self {
         Self {
             journal,
             handles: Vec::new(),
@@ -117,7 +152,7 @@ impl<'a> CleanupScope<'a> {
 
     pub(crate) fn register<F>(&mut self, action: F)
     where
-        F: FnOnce() -> CleanupActionRecord + 'static,
+        F: FnOnce() -> CleanupActionRecord + Send + 'static,
     {
         let handle = self.journal.register(action);
         self.handles.push(handle);
@@ -232,8 +267,8 @@ fn windows_process_exists(pid: u32) -> Result<bool, std::io::Error> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let pid_marker = format!(","{}",", pid);
-    Ok(stdout.contains(&pid_marker) || stdout.contains(&format!(","{}"", pid)))
+    let pid_marker = format!(",\"{}\",", pid);
+    Ok(stdout.contains(&pid_marker) || stdout.contains(&format!(",\"{}\"", pid)))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -243,7 +278,7 @@ fn kill_process_if_exists(_pid: u32) -> Result<(), std::io::Error> {
 
 #[derive(Default)]
 pub(crate) struct PipelineAttemptContext {
-    cleanup: CleanupJournal,
+    cleanup: SharedCleanupJournal,
     current_phase: Option<HourglassPhase>,
     committed_terminal_state: bool,
 }
@@ -253,11 +288,11 @@ impl PipelineAttemptContext {
         self.current_phase = Some(phase);
     }
 
-    pub(crate) fn cleanup_scope(&mut self) -> CleanupScope<'_> {
-        CleanupScope::new(&mut self.cleanup)
+    pub(crate) fn cleanup_scope(&self) -> CleanupScope {
+        CleanupScope::new(self.cleanup.clone())
     }
 
-    pub(crate) fn unwind_cleanup(&mut self) -> CleanupReport {
+    pub(crate) fn unwind_cleanup(&self) -> CleanupReport {
         self.cleanup.unwind()
     }
 
@@ -314,8 +349,7 @@ impl StdError for PipelineAttemptError {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
     use capsule_core::execution_plan::error::{
         CleanupActionRecord, CleanupActionStatus, CleanupStatus,
@@ -335,20 +369,20 @@ mod tests {
 
     #[test]
     fn cleanup_journal_unwinds_in_reverse_order() {
-        let events = Rc::new(RefCell::new(Vec::new()));
+        let events = Arc::new(Mutex::new(Vec::new()));
         let mut journal = CleanupJournal::default();
 
         for action in ["one", "two", "three"] {
-            let events = Rc::clone(&events);
+            let events = Arc::clone(&events);
             journal.register(move || {
-                events.borrow_mut().push(action.to_string());
+                events.lock().unwrap().push(action.to_string());
                 ok_record(action)
             });
         }
 
         let report = journal.unwind();
         assert_eq!(
-            events.borrow().as_slice(),
+            events.lock().unwrap().as_slice(),
             ["three".to_string(), "two".to_string(), "one".to_string()]
         );
         assert_eq!(report.status, CleanupStatus::Complete);
@@ -356,15 +390,15 @@ mod tests {
 
     #[test]
     fn cleanup_scope_can_commit_entries() {
-        let events = Rc::new(RefCell::new(Vec::new()));
+        let events = Arc::new(Mutex::new(Vec::new()));
         let mut attempt = PipelineAttemptContext::default();
         attempt.enter_phase(HourglassPhase::Prepare);
 
         {
-            let events = Rc::clone(&events);
+            let events = Arc::clone(&events);
             let mut scope = attempt.cleanup_scope();
             scope.register(move || {
-                events.borrow_mut().push("committed".to_string());
+                events.lock().unwrap().push("committed".to_string());
                 ok_record("committed")
             });
             scope.commit_all();
@@ -373,7 +407,7 @@ mod tests {
         let CleanupReport { status, actions } = attempt.unwind_cleanup();
         assert!(actions.is_empty());
         assert_eq!(status, CleanupStatus::NotRequired);
-        assert!(events.borrow().is_empty());
+        assert!(events.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -382,7 +416,7 @@ mod tests {
         let nested = dir.path().join("nested");
         std::fs::create_dir_all(nested.join("child")).expect("create nested dir");
 
-        let mut attempt = PipelineAttemptContext::default();
+        let attempt = PipelineAttemptContext::default();
         {
             let mut scope = attempt.cleanup_scope();
             scope.register_remove_dir(nested.clone());
@@ -394,7 +428,7 @@ mod tests {
         assert_eq!(report.actions.len(), 1);
         assert_eq!(report.actions[0].action, "remove_temp_dir");
 
-        let mut retry_attempt = PipelineAttemptContext::default();
+        let retry_attempt = PipelineAttemptContext::default();
         {
             let mut scope = retry_attempt.cleanup_scope();
             scope.register_remove_dir(nested);
@@ -417,7 +451,7 @@ mod tests {
             .expect("spawn sleep");
         let pid = child.id();
 
-        let mut attempt = PipelineAttemptContext::default();
+        let attempt = PipelineAttemptContext::default();
         {
             let mut scope = attempt.cleanup_scope();
             scope.register_kill_child_process(pid, "sleep-fixture");
@@ -430,7 +464,7 @@ mod tests {
         assert_eq!(report.actions[0].action, "kill_child_process");
         assert_eq!(report.actions[0].status, CleanupActionStatus::Succeeded);
 
-        let mut retry_attempt = PipelineAttemptContext::default();
+        let retry_attempt = PipelineAttemptContext::default();
         {
             let mut scope = retry_attempt.cleanup_scope();
             scope.register_kill_child_process(pid, "sleep-fixture");
