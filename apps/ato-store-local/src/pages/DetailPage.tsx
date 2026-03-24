@@ -56,10 +56,24 @@ interface DetailPageProps {
   onDelete: (capsule: Capsule) => void;
   onRollbackRelease: (capsule: Capsule, release: CapsuleRelease) => void;
   onYankRelease: (capsule: Capsule, release: CapsuleRelease) => void;
-  onSaveStoreMetadata: (capsule: Capsule, iconPath: string, text: string) => Promise<void>;
+  onSaveStoreMetadata: (
+    capsule: Capsule,
+    iconPath: string,
+    text: string,
+  ) => Promise<void>;
   onClearLogs: () => void;
-  onEnvChange: (capsuleId: string, target: string, key: string, value: string) => void;
-  onEnvAdd: (capsuleId: string, target: string, key: string, value: string) => void;
+  onEnvChange: (
+    capsuleId: string,
+    target: string,
+    key: string,
+    value: string,
+  ) => void;
+  onEnvAdd: (
+    capsuleId: string,
+    target: string,
+    key: string,
+    value: string,
+  ) => void;
   onEnvRemove: (capsuleId: string, target: string, key: string) => void;
   onTargetChange: (capsuleId: string, target: string) => void;
   onPortChange: (capsuleId: string, target: string, value: string) => void;
@@ -87,7 +101,10 @@ function logTextClass(level: string): string {
   return "terminal-row-text";
 }
 
-function requiresPermissionGrant(capsule: Capsule, targetLabel: string): boolean {
+function requiresPermissionGrant(
+  capsule: Capsule,
+  targetLabel: string,
+): boolean {
   const target = capsule.targets.find((entry) => entry.label === targetLabel);
   if (!target) {
     return false;
@@ -147,7 +164,9 @@ export function DetailPage({
     capsule,
     selectedTarget,
   );
-  const selectedPermissionMessage = getPermissionModeMessage(selectedPermissionMode);
+  const selectedPermissionMessage = getPermissionModeMessage(
+    selectedPermissionMode,
+  );
   const [publisher, slug] = capsule.scopedId.split("/", 2);
   const sharedDetail = useMemo(
     () =>
@@ -177,7 +196,8 @@ export function DetailPage({
           scopedId: capsule.scopedId,
           title: capsule.name,
           verified:
-            capsule.trustLevel === "verified" || capsule.trustLevel === "signed",
+            capsule.trustLevel === "verified" ||
+            capsule.trustLevel === "signed",
           trustBadge: capsule.trustLevel,
           visibility: "local",
           type: capsule.type,
@@ -211,7 +231,9 @@ export function DetailPage({
   }, [baseEnvKeys, envValues, requiredEnvKeys]);
   const [draftEnvKey, setDraftEnvKey] = useState("");
   const [draftEnvValue, setDraftEnvValue] = useState("");
-  const [metadataIconPathInput, setMetadataIconPathInput] = useState(storeMetadataIconPath);
+  const [metadataIconPathInput, setMetadataIconPathInput] = useState(
+    storeMetadataIconPath,
+  );
   const [metadataTextInput, setMetadataTextInput] = useState(storeMetadataText);
   const [metadataSaving, setMetadataSaving] = useState(false);
   const [metadataError, setMetadataError] = useState("");
@@ -240,7 +262,12 @@ export function DetailPage({
 
   return (
     <div className="detail-page">
-      <button className="icon-btn" type="button" onClick={onBack} aria-label="Back to catalog">
+      <button
+        className="icon-btn"
+        type="button"
+        onClick={onBack}
+        aria-label="Back to catalog"
+      >
         <ChevronLeft size={15} strokeWidth={1.5} />
       </button>
 
@@ -328,8 +355,14 @@ export function DetailPage({
       {tab === "logs" ? (
         <div className="terminal" role="tabpanel" aria-label="Log output">
           <div className="terminal-bar">
-            <span className="terminal-bar-title">stdout · {capsule.scopedId}</span>
-            <button className="btn btn-ghost terminal-clear" type="button" onClick={onClearLogs}>
+            <span className="terminal-bar-title">
+              stdout · {capsule.scopedId}
+            </span>
+            <button
+              className="btn btn-ghost terminal-clear"
+              type="button"
+              onClick={onClearLogs}
+            >
               <RotateCcw size={11} strokeWidth={1.5} /> Clear
             </button>
           </div>
@@ -338,7 +371,10 @@ export function DetailPage({
               <div className="term-empty">— no output yet —</div>
             ) : (
               logs.map((line) => (
-                <div key={`${line.index}-${line.timestamp}`} className="terminal-row">
+                <div
+                  key={`${line.index}-${line.timestamp}`}
+                  className="terminal-row"
+                >
                   <span className="terminal-row-number">{line.index}</span>
                   <span className={logTextClass(line.level)}>
                     [{line.timestamp}] {line.level} {line.message}
@@ -396,7 +432,9 @@ export function DetailPage({
                   <select
                     className="input env-input"
                     value={selectedTarget}
-                    onChange={(event) => onTargetChange(capsule.id, event.target.value)}
+                    onChange={(event) =>
+                      onTargetChange(capsule.id, event.target.value)
+                    }
                   >
                     {capsule.targets.map((target) => (
                       <option key={target.label} value={target.label}>
@@ -415,7 +453,11 @@ export function DetailPage({
                     inputMode="numeric"
                     pattern="[0-9]*"
                     onChange={(event) =>
-                      onPortChange(capsule.id, selectedTarget, event.target.value)
+                      onPortChange(
+                        capsule.id,
+                        selectedTarget,
+                        event.target.value,
+                      )
                     }
                   />
                 </label>
@@ -428,7 +470,11 @@ export function DetailPage({
                         name={`detail-permission-mode-${capsule.id}`}
                         value={selectedPermissionMode}
                         onChange={(value) =>
-                          onPermissionModeChange(capsule.id, selectedTarget, value)
+                          onPermissionModeChange(
+                            capsule.id,
+                            selectedTarget,
+                            value,
+                          )
                         }
                       />
                     </div>
@@ -541,7 +587,9 @@ export function DetailPage({
                     className="input env-input"
                     value={metadataIconPathInput}
                     placeholder="~/icons/sample.png"
-                    onChange={(event) => setMetadataIconPathInput(event.target.value)}
+                    onChange={(event) =>
+                      setMetadataIconPathInput(event.target.value)
+                    }
                   />
                 </label>
                 <label className="env-row env-row-multiline">
@@ -550,10 +598,14 @@ export function DetailPage({
                     className="input env-input env-textarea"
                     value={metadataTextInput}
                     placeholder="Store listing description"
-                    onChange={(event) => setMetadataTextInput(event.target.value)}
+                    onChange={(event) =>
+                      setMetadataTextInput(event.target.value)
+                    }
                   />
                 </label>
-                {metadataError ? <p className="env-error">{metadataError}</p> : null}
+                {metadataError ? (
+                  <p className="env-error">{metadataError}</p>
+                ) : null}
                 <button
                   className="btn btn-primary"
                   type="button"
@@ -585,7 +637,11 @@ export function DetailPage({
       ) : null}
 
       {tab === "releases" ? (
-        <div className="docs-pane" role="tabpanel" aria-label="Releases and Security">
+        <div
+          className="docs-pane"
+          role="tabpanel"
+          aria-label="Releases and Security"
+        >
           <DockReleaseTable
             releases={sharedDetail.releases}
             subtitle={`${capsule.releases.length} tracked releases`}

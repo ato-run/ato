@@ -5,5 +5,6 @@ pub(crate) mod pipeline;
 pub(crate) mod ports;
 pub(crate) mod preview;
 pub(crate) mod search;
+pub(crate) mod services;
 pub(crate) mod types;
 pub(crate) mod workspace;

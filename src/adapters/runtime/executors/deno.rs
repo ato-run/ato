@@ -21,6 +21,7 @@ use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::execution_plan::model::{ExecutionPlan, ExecutionRuntime};
 use capsule_core::router::ManifestData;
 
+use crate::application::pipeline::cleanup::PipelineAttemptContext;
 use crate::common::proxy;
 use crate::runtime::manager as runtime_manager;
 use crate::runtime::overrides as runtime_overrides;
@@ -56,10 +57,11 @@ pub fn execute(
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
+    attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<i32> {
     verify_execution_plan_hashes(execution_plan)?;
     if plan.is_web_services_mode() && !plan.is_orchestration_mode() {
-        return super::web_services::execute(plan, launch_ctx);
+        return super::web_services::execute(plan, launch_ctx, attempt);
     }
 
     let deno_bin = runtime_manager::ensure_deno_binary(plan)?;

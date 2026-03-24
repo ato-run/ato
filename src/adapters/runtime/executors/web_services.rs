@@ -12,6 +12,8 @@ use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::router::ManifestData;
 use capsule_core::types::ServiceSpec;
 
+use crate::application::pipeline::cleanup::PipelineAttemptContext;
+use crate::application::services::ServiceGraphPlan;
 use crate::runtime::manager as runtime_manager;
 use crate::runtime::overrides as runtime_overrides;
 
@@ -37,7 +39,11 @@ struct RunningService {
     stderr_thread: Option<JoinHandle<std::io::Result<()>>>,
 }
 
-pub fn execute(plan: &ManifestData, launch_ctx: &RuntimeLaunchContext) -> Result<i32> {
+pub fn execute(
+    plan: &ManifestData,
+    launch_ctx: &RuntimeLaunchContext,
+    attempt: Option<&mut PipelineAttemptContext>,
+) -> Result<i32> {
     if !plan.is_web_services_mode() {
         return Err(AtoExecutionError::policy_violation(
             "web services executor requires runtime=web driver=deno with top-level [services]",
@@ -45,26 +51,15 @@ pub fn execute(plan: &ManifestData, launch_ctx: &RuntimeLaunchContext) -> Result
         .into());
     }
 
-    let services = plan.services();
-    if services.is_empty() {
-        return Err(AtoExecutionError::policy_violation(
-            "top-level [services] must define at least one service",
-        )
-        .into());
-    }
-    if !services.contains_key("main") {
-        return Err(AtoExecutionError::policy_violation(
-            "web/deno services mode requires top-level [services.main]",
-        )
-        .into());
-    }
-
-    let startup_order = service_startup_order(&services)?;
+    let graph = ServiceGraphPlan::from_manifest(plan)?;
+    let services = graph.services();
+    let startup_order = graph.startup_order().to_vec();
     let runtime_bins = resolve_runtime_bins(plan, &services)?;
     let runtime_dir = resolve_runtime_dir(&plan.manifest_dir);
 
     let mut running: HashMap<String, RunningService> = HashMap::new();
     let mut ready: HashSet<String> = HashSet::new();
+    let mut startup_cleanup = attempt.map(|attempt| attempt.cleanup_scope());
 
     for service_name in &startup_order {
         let spec = services.get(service_name).ok_or_else(|| {
@@ -95,10 +90,15 @@ pub fn execute(plan: &ManifestData, launch_ctx: &RuntimeLaunchContext) -> Result
             )
         })?;
 
+        let pid = child.id();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let stdout_thread = spawn_prefixed_stream(stdout, service_name, false);
         let stderr_thread = spawn_prefixed_stream(stderr, service_name, true);
+
+        if let Some(scope) = startup_cleanup.as_mut() {
+            scope.register_kill_child_process(pid, service_name.clone());
+        }
 
         running.insert(
             service_name.clone(),
@@ -114,6 +114,10 @@ pub fn execute(plan: &ManifestData, launch_ctx: &RuntimeLaunchContext) -> Result
 
     for service_name in &startup_order {
         wait_until_ready(service_name, &mut running, &mut ready)?;
+    }
+
+    if let Some(scope) = startup_cleanup.take() {
+        scope.commit_all();
     }
 
     monitor_and_shutdown(running)
@@ -620,73 +624,11 @@ fn send_sigterm(child: &mut Child) -> Result<()> {
     child.kill().map_err(Into::into)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn service_startup_order(services: &HashMap<String, ServiceSpec>) -> Result<Vec<String>> {
-    fn visit(
-        current: &str,
-        services: &HashMap<String, ServiceSpec>,
-        visited: &mut HashSet<String>,
-        visiting: &mut HashSet<String>,
-        stack: &mut Vec<String>,
-        out: &mut Vec<String>,
-    ) -> Result<()> {
-        if visited.contains(current) {
-            return Ok(());
-        }
-        if visiting.contains(current) {
-            stack.push(current.to_string());
-            return Err(AtoExecutionError::policy_violation(format!(
-                "services has circular dependency: {}",
-                stack.join(" -> ")
-            ))
-            .into());
-        }
-
-        let spec = services.get(current).ok_or_else(|| {
-            AtoExecutionError::policy_violation(format!(
-                "unknown service '{}' in dependency graph",
-                current
-            ))
-        })?;
-
-        visiting.insert(current.to_string());
-        stack.push(current.to_string());
-        if let Some(deps) = spec.depends_on.as_ref() {
-            for dep in deps {
-                if !services.contains_key(dep) {
-                    return Err(AtoExecutionError::policy_violation(format!(
-                        "services.{}.depends_on references unknown service '{}'",
-                        current, dep
-                    ))
-                    .into());
-                }
-                visit(dep, services, visited, visiting, stack, out)?;
-            }
-        }
-        stack.pop();
-        visiting.remove(current);
-        visited.insert(current.to_string());
-        out.push(current.to_string());
-        Ok(())
-    }
-
-    let mut names: Vec<&String> = services.keys().collect();
-    names.sort();
-
-    let mut out = Vec::new();
-    let mut visited = HashSet::new();
-    let mut visiting = HashSet::new();
-    for name in names {
-        let mut stack = Vec::new();
-        visit(
-            name,
-            services,
-            &mut visited,
-            &mut visiting,
-            &mut stack,
-            &mut out,
-        )?;
-    }
-    Ok(out)
+    Ok(ServiceGraphPlan::from_services(services)?
+        .startup_order()
+        .to_vec())
 }
 
 #[cfg(test)]
