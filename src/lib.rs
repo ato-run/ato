@@ -64,22 +64,13 @@ pub(crate) use application::search;
 pub(crate) use application::workspace as project;
 pub(crate) use cli::commands;
 pub(crate) use cli::dispatch;
-pub(crate) use cli::orchestration;
-pub(crate) use cli::orchestration::ingress_proxy;
 pub(crate) use cli::scoped_id_prompt;
 pub(crate) use cli::*;
-pub(crate) use install::support::*;
-#[cfg(test)]
-pub(crate) use orchestration::catalog_registry as catalog_registry_orchestration;
-#[cfg(test)]
-pub(crate) use orchestration::publish_command as publish_command_orchestration;
-pub(crate) use orchestration::run_install as run_install_orchestration;
 pub(crate) use publish::artifact as publish_artifact;
 pub(crate) use publish::ci as publish_ci;
 pub(crate) use publish::official as publish_official;
 pub(crate) use publish::preflight as publish_preflight;
 pub(crate) use publish::prepare as publish_prepare;
-pub(crate) use publish::private as publish_private;
 pub(crate) use utils::archive as capsule_archive;
 pub(crate) use utils::env;
 pub(crate) use utils::error as ato_error_jsonl;

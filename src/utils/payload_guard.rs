@@ -8,6 +8,14 @@ pub fn ensure_payload_size(path: &Path, force_large_payload: bool, hint_flag: &s
     let size = std::fs::metadata(path)
         .with_context(|| format!("Failed to stat payload: {}", path.display()))?
         .len();
+    ensure_payload_bytes_size(size, force_large_payload, hint_flag)
+}
+
+pub fn ensure_payload_bytes_size(
+    size: u64,
+    force_large_payload: bool,
+    hint_flag: &str,
+) -> Result<()> {
     if size <= DEFAULT_MAX_PAYLOAD_BYTES {
         return Ok(());
     }

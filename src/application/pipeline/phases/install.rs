@@ -50,7 +50,7 @@ pub async fn install_local_artifact_into_test_sandbox(
 
 pub fn run_publish_install_phase(
     artifact_path: &Path,
-    preview: &crate::publish_private::PublishPrivateSummary,
+    preview: &crate::application::pipeline::phases::publish::PrivatePublishSummary,
     verification: &crate::publish_artifact::VerifiedArtifactInfo,
 ) -> Result<PublishInstallResult> {
     let version = preview.version.trim();
@@ -211,9 +211,10 @@ mod tests {
         .expect("install");
 
         std::env::set_current_dir(original_dir).expect("restore cwd");
-        assert!(env
-            .root_dir
-            .starts_with(dir.path().join(".tmp/ato/publish/install")));
+        let resolved_root = std::fs::canonicalize(&env.root_dir).expect("canonical root");
+        let resolved_prefix = std::fs::canonicalize(dir.path().join(".tmp/ato/publish/install"))
+            .expect("canonical prefix");
+        assert!(resolved_root.starts_with(&resolved_prefix));
         assert_eq!(
             std::fs::read_to_string(Path::new(&env.root_dir).join("source/hello.txt"))
                 .expect("payload file"),

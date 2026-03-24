@@ -14,6 +14,15 @@ pub struct PublishableArtifact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishReceiptMetadata {
+    pub file_name: String,
+    pub sha256: String,
+    pub blake3: String,
+    pub size_bytes: u64,
+    pub already_existed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DestinationSpec {
     LocalCas {
         output_dir: Option<PathBuf>,
@@ -25,6 +34,8 @@ pub enum DestinationSpec {
         registry_url: String,
         scoped_id: String,
         version: String,
+        allow_existing: bool,
+        force_large_payload: bool,
     },
 }
 
@@ -33,6 +44,7 @@ pub struct PublishedLocation {
     pub destination: DestinationSpec,
     pub receipt: String,
     pub locator: String,
+    pub metadata: Option<PublishReceiptMetadata>,
 }
 
 #[async_trait]

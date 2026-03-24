@@ -4,6 +4,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing::debug;
 
+pub(crate) use crate::application::pipeline::hourglass::HourglassPhase as RunPhaseBoundary;
+use crate::install::support::{enforce_sandbox_mode_flags, execute_run_command};
 pub(crate) use crate::install::support::{LocalRunManifestPreparationOutcome, ResolvedRunTarget};
 use crate::reporters;
 use crate::{install, CompatibilityFallbackBackend, EnforcementMode, RunAgentMode};
@@ -31,8 +33,6 @@ pub(crate) struct RunLikeCommandArgs {
     pub(crate) reporter: Arc<reporters::CliReporter>,
 }
 
-pub(crate) use crate::orchestration::hourglass::HourglassPhase as RunPhaseBoundary;
-
 pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
     if let Some(warning) = args.deprecation_warning {
         eprintln!("{warning}");
@@ -54,14 +54,14 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
 
     let sandbox_requested =
         args.sandbox_mode || args.unsafe_mode_legacy || args.unsafe_bypass_sandbox_legacy;
-    let effective_enforcement = crate::enforce_sandbox_mode_flags(
+    let effective_enforcement = enforce_sandbox_mode_flags(
         args.enforcement,
         sandbox_requested,
         args.dangerously_skip_permissions,
         args.compatibility_fallback,
         args.reporter.clone(),
     )?;
-    crate::execute_run_command(
+    execute_run_command(
         install_phase.resolved_target.path,
         args.target,
         args.watch,
@@ -100,7 +100,7 @@ async fn execute_run_install_phase(
         "Running run pipeline phase"
     );
 
-    let resolved_target = resolve_run_target_or_install(
+    let resolved_target = install::support::resolve_run_target_or_install(
         path,
         yes,
         keep_failed_artifacts,
@@ -119,46 +119,6 @@ async fn execute_run_install_phase(
             LocalRunManifestPreparationOutcome::CreatedManualManifest
         ),
     })
-}
-
-pub(crate) async fn resolve_run_target_or_install(
-    path: PathBuf,
-    yes: bool,
-    keep_failed_artifacts: bool,
-    allow_unverified: bool,
-    registry: Option<&str>,
-    reporter: Arc<reporters::CliReporter>,
-) -> Result<ResolvedRunTarget> {
-    install::support::resolve_run_target_or_install(
-        path,
-        yes,
-        keep_failed_artifacts,
-        allow_unverified,
-        registry,
-        reporter,
-    )
-    .await
-}
-
-pub(crate) async fn install_github_repository(
-    repository: &str,
-    output_dir: Option<PathBuf>,
-    yes: bool,
-    projection_preference: install::ProjectionPreference,
-    json: bool,
-    can_prompt: bool,
-    keep_failed_artifacts: bool,
-) -> Result<install::InstallResult> {
-    install::support::install_github_repository(
-        repository,
-        output_dir,
-        yes,
-        projection_preference,
-        json,
-        can_prompt,
-        keep_failed_artifacts,
-    )
-    .await
 }
 
 #[cfg(test)]
@@ -259,9 +219,7 @@ mod tests {
         let backups: Vec<_> = std::fs::read_dir(tmp.path().join(".tmp/ato/run-invalid-manifests"))
             .expect("read dir")
             .filter_map(Result::ok)
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with("capsule.toml.invalid."))
             .collect();
-        assert_eq!(backups.len(), 1, "backups={backups:?}");
+        assert_eq!(backups.len(), 1);
     }
 }

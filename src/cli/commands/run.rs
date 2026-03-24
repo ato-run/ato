@@ -21,10 +21,10 @@ use tracing::debug;
 
 use crate::application::pipeline::consumer::ConsumerRunPipeline;
 use crate::application::pipeline::executor::HourglassPhaseRunner;
+use crate::application::pipeline::hourglass;
+use crate::application::pipeline::hourglass::{HourglassPhase, HourglassPhaseState};
 use crate::application::pipeline::phases::run as run_phase;
 use crate::application::ports::OutputPort;
-use crate::orchestration::hourglass;
-use crate::orchestration::hourglass::{HourglassPhase, HourglassPhaseState};
 use crate::preview;
 #[cfg(test)]
 use crate::registry::store::RegistryStore;

@@ -1,6 +1,7 @@
 mod contract;
 mod ingress;
 mod manifest;
+pub(crate) mod proxy;
 mod register;
 mod store;
 
@@ -12,6 +13,10 @@ pub(crate) use contract::{
     SERVICE_BINDING_TLS_MODE_EXPLICIT,
 };
 pub(crate) use ingress::{bootstrap_ingress_tls, serve_ingress_binding};
+#[allow(unused_imports)]
+pub(crate) use proxy::{
+    bootstrap_tls, load_tls_bootstrap, IngressProxyConfig, IngressTlsBootstrapRecord,
+};
 pub(crate) use register::{
     cleanup_service_bindings_for_process_info, register_ingress_binding,
     register_ingress_binding_from_manifest, register_service_binding,
