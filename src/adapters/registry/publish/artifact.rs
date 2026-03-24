@@ -285,8 +285,8 @@ fn upload_artifact_payload(
 
 fn load_artifact_payload_from_bytes(bytes: &[u8], scoped_id: &str) -> Result<ArtifactPayload> {
     let scoped = crate::install::parse_capsule_ref(scoped_id)?;
-    let manifest = extract_manifest_from_capsule(&bytes)?;
-    let v3_manifest = extract_payload_v3_manifest_from_capsule(&bytes)?;
+    let manifest = extract_manifest_from_capsule(bytes)?;
+    let v3_manifest = extract_payload_v3_manifest_from_capsule(bytes)?;
     let parsed = capsule_core::types::CapsuleManifest::from_toml(&manifest)
         .map_err(|err| anyhow::anyhow!("Failed to parse capsule.toml from artifact: {}", err))?;
 
@@ -314,8 +314,8 @@ fn load_artifact_payload_from_bytes(bytes: &[u8], scoped_id: &str) -> Result<Art
             version.to_string()
         },
         file_name,
-        sha256: compute_sha256(&bytes),
-        blake3: compute_blake3(&bytes),
+        sha256: compute_sha256(bytes),
+        blake3: compute_blake3(bytes),
         bytes: bytes.to_vec(),
         v3_manifest,
     })

@@ -3,6 +3,7 @@ use async_trait::async_trait;
 
 use crate::application::ports::install::{SourceArtifact, SourcePort, SourceSpec};
 
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub(crate) struct RegistryOrCasSource;
 

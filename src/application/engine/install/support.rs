@@ -942,7 +942,7 @@ pub(crate) async fn resolve_run_target_or_install(
     })
 }
 
-pub(crate) fn agent_local_root_for_path(path: &PathBuf) -> Option<PathBuf> {
+pub(crate) fn agent_local_root_for_path(path: &Path) -> Option<PathBuf> {
     if path
         .extension()
         .map(|ext| ext.eq_ignore_ascii_case("capsule"))
@@ -952,7 +952,7 @@ pub(crate) fn agent_local_root_for_path(path: &PathBuf) -> Option<PathBuf> {
     }
 
     if path.is_dir() {
-        return Some(path.clone());
+        return Some(path.to_path_buf());
     }
 
     if path.file_name().and_then(|name| name.to_str()) == Some("capsule.toml") {
@@ -1092,9 +1092,7 @@ pub(crate) fn ensure_local_manifest_ready_for_run(
     }
 }
 
-pub(crate) fn inspect_local_run_manifest(
-    manifest_path: &PathBuf,
-) -> Result<LocalRunManifestStatus> {
+pub(crate) fn inspect_local_run_manifest(manifest_path: &Path) -> Result<LocalRunManifestStatus> {
     if !manifest_path.exists() {
         return Ok(LocalRunManifestStatus::Missing);
     }

@@ -112,14 +112,17 @@ impl HourglassPhaseSelection {
         start_index <= phase_index && phase_index <= stop_index
     }
 
+    #[allow(dead_code)]
     pub(crate) fn runs_prepare(self) -> bool {
         self.runs(HourglassPhase::Prepare)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn runs_build(self) -> bool {
         self.runs(HourglassPhase::Build)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn runs_verify(self) -> bool {
         self.runs(HourglassPhase::Verify)
     }
@@ -132,6 +135,7 @@ impl HourglassPhaseSelection {
         self.runs(HourglassPhase::DryRun)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn runs_execute(self) -> bool {
         self.runs(HourglassPhase::Execute)
     }
