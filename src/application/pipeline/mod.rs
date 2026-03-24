@@ -1,3 +1,4 @@
+pub(crate) mod cleanup;
 pub(crate) mod consumer;
 pub(crate) mod executor;
 pub(crate) mod hourglass;

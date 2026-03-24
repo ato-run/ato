@@ -6,6 +6,10 @@ use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 
+use capsule_core::execution_plan::error::{
+    AtoErrorClassification, CleanupActionRecord, CleanupStatus, ManifestSuggestion,
+};
+
 use super::json::{JsonErrorEnvelopeV1, JsonErrorPayloadV1};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,6 +166,7 @@ pub struct CliDiagnostic {
     pub code: CliDiagnosticCode,
     pub name: &'static str,
     pub phase: &'static str,
+    pub classification: AtoErrorClassification,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
@@ -173,6 +178,12 @@ pub struct CliDiagnostic {
     pub field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_status: Option<CleanupStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cleanup_actions: Vec<CleanupActionRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_suggestion: Option<ManifestSuggestion>,
     #[serde(default)]
     pub causes: Vec<String>,
 }
@@ -194,6 +205,7 @@ impl CliDiagnostic {
             code,
             name: code.name(),
             phase: code.phase(),
+            classification: default_classification(code.phase()),
             message: message.into(),
             hint: hint.map(|v| v.to_string()),
             retryable,
@@ -201,8 +213,34 @@ impl CliDiagnostic {
             path: path.map(|v| v.display().to_string()),
             field: field.map(|v| v.to_string()),
             details,
+            cleanup_status: None,
+            cleanup_actions: Vec::new(),
+            manifest_suggestion: None,
             causes,
         }
+    }
+
+    pub(super) fn with_classification(mut self, classification: AtoErrorClassification) -> Self {
+        self.classification = classification;
+        self
+    }
+
+    pub(super) fn with_cleanup(
+        mut self,
+        cleanup_status: Option<CleanupStatus>,
+        cleanup_actions: Vec<CleanupActionRecord>,
+    ) -> Self {
+        self.cleanup_status = cleanup_status;
+        self.cleanup_actions = cleanup_actions;
+        self
+    }
+
+    pub(super) fn with_manifest_suggestion(
+        mut self,
+        manifest_suggestion: Option<ManifestSuggestion>,
+    ) -> Self {
+        self.manifest_suggestion = manifest_suggestion;
+        self
     }
 
     pub fn to_json_envelope(&self) -> JsonErrorEnvelopeV1 {
@@ -213,6 +251,7 @@ impl CliDiagnostic {
                 code: self.code,
                 name: self.name,
                 phase: self.phase,
+                classification: self.classification,
                 message: self.message.clone(),
                 hint: self.hint.clone(),
                 retryable: self.retryable,
@@ -220,6 +259,9 @@ impl CliDiagnostic {
                 path: self.path.clone(),
                 field: self.field.clone(),
                 details: self.details.clone(),
+                cleanup_status: self.cleanup_status,
+                cleanup_actions: self.cleanup_actions.clone(),
+                manifest_suggestion: self.manifest_suggestion.clone(),
                 causes: self.causes.clone(),
             },
         }
@@ -243,5 +285,15 @@ impl Diagnostic for CliDiagnostic {
             self.code.as_str().to_ascii_lowercase()
         );
         Some(Box::new(url))
+    }
+}
+
+fn default_classification(phase: &str) -> AtoErrorClassification {
+    match phase {
+        "manifest" | "inference" => AtoErrorClassification::Manifest,
+        "source" | "build" => AtoErrorClassification::Source,
+        "provisioning" => AtoErrorClassification::Provisioning,
+        "execution" => AtoErrorClassification::Execution,
+        _ => AtoErrorClassification::Internal,
     }
 }
