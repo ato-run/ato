@@ -27,15 +27,18 @@ impl DestinationPort for RemoteRegistryDestination {
             anyhow::bail!("remote registry destination requires DestinationSpec::RemoteRegistry")
         };
 
-        let published = crate::publish_artifact::publish_artifact_bytes(
-            crate::publish_artifact::PublishArtifactBytesArgs {
+        let published = tokio::task::spawn_blocking({
+            let args = crate::publish_artifact::PublishArtifactBytesArgs {
                 artifact_bytes: artifact.bytes.clone(),
                 scoped_id: scoped_id.clone(),
                 registry_url: registry_url.clone(),
                 force_large_payload: *force_large_payload,
                 allow_existing: *allow_existing,
-            },
-        )?;
+            };
+            move || crate::publish_artifact::publish_artifact_bytes(args)
+        })
+        .await
+        .map_err(anyhow::Error::from)??;
 
         Ok(PublishedLocation {
             destination: destination.clone(),
