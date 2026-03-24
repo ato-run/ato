@@ -1,9 +1,29 @@
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
-use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::execution_plan::error::{
+    AtoErrorClassification, AtoExecutionError, CleanupActionRecord, CleanupActionStatus,
+    CleanupStatus, ManifestSuggestion,
+};
 
 use super::{from_anyhow, CliDiagnosticCode, CommandContext, JsonErrorEnvelopeV1};
+
+fn assert_json_envelope_snapshot(name: &str, envelope: &JsonErrorEnvelopeV1) {
+    let snapshot_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/adapters/output/diagnostics/snapshots")
+        .join(format!("{name}.json"));
+    let expected = fs::read_to_string(&snapshot_path).expect("snapshot fixture should be readable");
+    let actual = serde_json::to_string_pretty(envelope).expect("json envelope should serialize")
+        + "
+";
+    assert_eq!(
+        actual,
+        expected,
+        "snapshot mismatch: {}",
+        snapshot_path.display()
+    );
+}
 
 #[test]
 fn maps_manifest_parse_to_e001() {
@@ -90,7 +110,8 @@ fn maps_security_policy_error_to_e301() {
 #[test]
 fn maps_manual_intervention_execution_error_to_e102() {
     let err = anyhow!(AtoExecutionError::manual_intervention_required(
-        "manual intervention required: DATABASE_URL is required\nGenerated capsule.toml: /repo/.tmp/capsule.toml",
+        "manual intervention required: DATABASE_URL is required
+Generated capsule.toml: /repo/.tmp/capsule.toml",
         Some("/repo/.tmp/capsule.toml"),
         vec![
             "Set DATABASE_URL before rerunning.".to_string(),
@@ -137,6 +158,10 @@ fn json_envelope_has_status_error() {
     assert_eq!(envelope.status, "error");
     assert_eq!(envelope.error.code, CliDiagnosticCode::E303);
     assert_eq!(envelope.error.name, "runtime_not_resolved");
+    assert_eq!(
+        envelope.error.classification,
+        AtoErrorClassification::Execution
+    );
 }
 
 #[test]
@@ -151,4 +176,101 @@ fn maps_ingress_tls_bootstrap_required_to_e209() {
         .as_deref()
         .unwrap_or_default()
         .contains("bootstrap-tls"));
+}
+
+#[test]
+fn preserves_execution_error_cleanup_and_manifest_metadata() {
+    let err = anyhow!(AtoExecutionError::execution_contract_invalid(
+        "services.main is required",
+        Some("services.main"),
+        Some("main"),
+    )
+    .with_classification(AtoErrorClassification::Manifest)
+    .with_cleanup(
+        CleanupStatus::Partial,
+        vec![CleanupActionRecord {
+            action: "remove_temp_dir".to_string(),
+            status: CleanupActionStatus::Failed,
+            detail: Some("permission denied".to_string()),
+        }],
+    )
+    .with_manifest_suggestion(ManifestSuggestion {
+        kind: "create_table".to_string(),
+        path: "services.main".to_string(),
+        operation: "create_table".to_string(),
+        value: None,
+        message: "Add a [services.main] table".to_string(),
+    }));
+
+    let diagnostic = from_anyhow(&err, CommandContext::Run);
+    assert_eq!(diagnostic.classification, AtoErrorClassification::Manifest);
+    assert_eq!(diagnostic.cleanup_status, Some(CleanupStatus::Partial));
+    assert_eq!(diagnostic.cleanup_actions.len(), 1);
+    assert_eq!(
+        diagnostic
+            .manifest_suggestion
+            .as_ref()
+            .map(|value| value.path.as_str()),
+        Some("services.main")
+    );
+}
+
+#[test]
+fn json_envelope_snapshot_execution_runtime_not_resolved() {
+    let err = anyhow!(AtoExecutionError::runtime_not_resolved(
+        "deno runtime is not resolved",
+        Some("deno"),
+    ));
+    let diagnostic = from_anyhow(&err, CommandContext::Run);
+    assert_json_envelope_snapshot(
+        "execution_runtime_not_resolved",
+        &diagnostic.to_json_envelope(),
+    );
+}
+
+#[test]
+fn json_envelope_snapshot_provisioning_engine_missing() {
+    let err = anyhow!(AtoExecutionError::engine_missing(
+        "nacelle engine is not installed",
+        Some("nacelle"),
+    ));
+    let diagnostic = from_anyhow(&err, CommandContext::Run);
+    assert_json_envelope_snapshot(
+        "provisioning_engine_missing",
+        &diagnostic.to_json_envelope(),
+    );
+}
+
+#[test]
+fn json_envelope_snapshot_manifest_cleanup_enriched() {
+    let err = anyhow!(AtoExecutionError::execution_contract_invalid(
+        "services.main is required",
+        Some("services.main"),
+        Some("main"),
+    )
+    .with_classification(AtoErrorClassification::Manifest)
+    .with_cleanup(
+        CleanupStatus::Partial,
+        vec![CleanupActionRecord {
+            action: "remove_temp_dir".to_string(),
+            status: CleanupActionStatus::Failed,
+            detail: Some("permission denied".to_string()),
+        }],
+    )
+    .with_manifest_suggestion(ManifestSuggestion {
+        kind: "create_table".to_string(),
+        path: "services.main".to_string(),
+        operation: "create_table".to_string(),
+        value: None,
+        message: "Add a [services.main] table".to_string(),
+    }));
+    let diagnostic = from_anyhow(&err, CommandContext::Run);
+    assert_json_envelope_snapshot("manifest_cleanup_enriched", &diagnostic.to_json_envelope());
+}
+
+#[test]
+fn json_envelope_snapshot_internal_fallback() {
+    let err = anyhow!("unexpected failure");
+    let diagnostic = from_anyhow(&err, CommandContext::Other);
+    assert_json_envelope_snapshot("internal_fallback", &diagnostic.to_json_envelope());
 }

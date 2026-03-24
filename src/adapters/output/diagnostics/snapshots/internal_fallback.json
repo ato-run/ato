@@ -1,0 +1,15 @@
+{
+  "schema_version": "1",
+  "status": "error",
+  "error": {
+    "code": "E999",
+    "name": "internal_error",
+    "phase": "internal",
+    "classification": "internal",
+    "message": "unexpected failure",
+    "hint": "再実行時に `RUST_BACKTRACE=1` を付けて詳細ログを確認してください。",
+    "retryable": true,
+    "interactive_resolution": false,
+    "causes": []
+  }
+}

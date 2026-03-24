@@ -1,10 +1,13 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
 use crate::adapters::install::source::local::LocalArtifactSource;
 use crate::adapters::install::target::test_temp::{publish_test_sandbox_spec, TestSandboxTarget};
+use crate::application::pipeline::cleanup::PipelineAttemptContext;
 use crate::application::pipeline::producer::PublishInstallResult;
 use crate::application::ports::install::{
     InstalledEnvironment, SharedSourcePort, SharedTargetPort, SourceSpec, TargetSpec,
@@ -32,6 +35,7 @@ impl InstallPhase {
     }
 }
 
+#[cfg(test)]
 pub async fn install_local_artifact_into_test_sandbox(
     artifact_path: PathBuf,
     scoped_id: &str,
@@ -52,18 +56,27 @@ pub async fn run_publish_install_phase_async(
     artifact_path: &Path,
     preview: &crate::application::pipeline::phases::publish::PrivatePublishSummary,
     verification: &crate::publish_artifact::VerifiedArtifactInfo,
+    attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<PublishInstallResult> {
     let version = preview.version.trim();
     if version.is_empty() {
         anyhow::bail!("publish install stage requires a resolved version");
     }
 
-    let env = install_local_artifact_into_test_sandbox(
-        artifact_path.to_path_buf(),
-        &preview.scoped_id,
-        version,
-    )
-    .await?;
+    let cwd = std::env::current_dir().context("failed to resolve current directory")?;
+    let request = InstallPhaseRequest {
+        source_spec: SourceSpec::LocalArtifact {
+            path: artifact_path.to_path_buf(),
+        },
+        target_spec: publish_test_sandbox_spec(&cwd, &preview.scoped_id, version),
+    };
+    if let Some(attempt) = attempt {
+        let mut scope = attempt.cleanup_scope();
+        scope.register_remove_dir(request.target_spec.root_dir().to_path_buf());
+    }
+
+    let phase = InstallPhase::new(Arc::new(LocalArtifactSource), Arc::new(TestSandboxTarget));
+    let env = phase.execute(&request).await?;
 
     Ok(PublishInstallResult {
         scoped_id: preview.scoped_id.clone(),
@@ -84,6 +97,7 @@ pub fn run_publish_install_phase(
         artifact_path,
         preview,
         verification,
+        None,
     ))
 }
 

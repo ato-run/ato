@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
+use crate::application::pipeline::cleanup::{PipelineAttemptContext, PipelineAttemptError};
 use crate::application::pipeline::hourglass::{HourglassPhase, HourglassPhaseSelection};
 
 pub(crate) struct HourglassPipeline {
@@ -16,40 +17,61 @@ impl HourglassPipeline {
     where
         R: HourglassPhaseRunner,
     {
+        let mut attempt = PipelineAttemptContext::default();
+
         for phase in self.selection.flow.phases() {
             if !runner.should_continue() {
                 break;
             }
-            if self.selection.runs(*phase) {
-                runner.run_phase(*phase).await?;
+            attempt.enter_phase(*phase);
+            let result = if self.selection.runs(*phase) {
+                runner.run_phase(*phase, &mut attempt).await
             } else {
-                runner.skip_phase(*phase).await?;
+                runner.skip_phase(*phase, &mut attempt).await
+            };
+
+            if let Err(err) = result {
+                let cleanup_report = attempt.unwind_cleanup();
+                return Err(PipelineAttemptError::new(*phase, err, cleanup_report).into());
             }
         }
 
+        attempt.mark_committed();
         Ok(())
     }
 }
 
 #[async_trait(?Send)]
 pub(crate) trait HourglassPhaseRunner {
-    async fn run_phase(&mut self, phase: HourglassPhase) -> Result<()>;
+    async fn run_phase(
+        &mut self,
+        phase: HourglassPhase,
+        attempt: &mut PipelineAttemptContext,
+    ) -> Result<()>;
 
     fn should_continue(&self) -> bool {
         true
     }
 
-    async fn skip_phase(&mut self, _phase: HourglassPhase) -> Result<()> {
+    async fn skip_phase(
+        &mut self,
+        _phase: HourglassPhase,
+        _attempt: &mut PipelineAttemptContext,
+    ) -> Result<()> {
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use anyhow::Result;
+    use std::sync::{Arc, Mutex};
+
+    use anyhow::{anyhow, Result};
     use async_trait::async_trait;
+    use capsule_core::execution_plan::error::{CleanupActionRecord, CleanupActionStatus};
 
     use super::{HourglassPhaseRunner, HourglassPipeline};
+    use crate::application::pipeline::cleanup::{PipelineAttemptContext, PipelineAttemptError};
     use crate::application::pipeline::hourglass::{
         HourglassFlow, HourglassPhase, HourglassPhaseSelection,
     };
@@ -61,13 +83,49 @@ mod tests {
 
     #[async_trait(?Send)]
     impl HourglassPhaseRunner for Recorder {
-        async fn run_phase(&mut self, phase: HourglassPhase) -> Result<()> {
+        async fn run_phase(
+            &mut self,
+            phase: HourglassPhase,
+            _attempt: &mut PipelineAttemptContext,
+        ) -> Result<()> {
             self.entries.push((phase, "run"));
             Ok(())
         }
 
-        async fn skip_phase(&mut self, phase: HourglassPhase) -> Result<()> {
+        async fn skip_phase(
+            &mut self,
+            phase: HourglassPhase,
+            _attempt: &mut PipelineAttemptContext,
+        ) -> Result<()> {
             self.entries.push((phase, "skip"));
+            Ok(())
+        }
+    }
+
+    struct FailingRunner {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait(?Send)]
+    impl HourglassPhaseRunner for FailingRunner {
+        async fn run_phase(
+            &mut self,
+            phase: HourglassPhase,
+            attempt: &mut PipelineAttemptContext,
+        ) -> Result<()> {
+            if phase == HourglassPhase::Prepare {
+                let events = Arc::clone(&self.events);
+                let mut scope = attempt.cleanup_scope();
+                scope.register(move || CleanupActionRecord {
+                    action: "remove_temp_dir".to_string(),
+                    status: CleanupActionStatus::Succeeded,
+                    detail: Some({
+                        events.lock().unwrap().push("cleanup".to_string());
+                        ".tmp/work".to_string()
+                    }),
+                });
+                return Err(anyhow!("prepare failed"));
+            }
             Ok(())
         }
     }
@@ -120,5 +178,26 @@ mod tests {
                 (HourglassPhase::Publish, "skip"),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn pipeline_unwinds_registered_cleanup_on_failure() {
+        let pipeline = HourglassPipeline::new(HourglassPhaseSelection {
+            flow: HourglassFlow::ConsumerRun,
+            start: HourglassPhase::Prepare,
+            stop: HourglassPhase::Execute,
+            explicit_filter: false,
+        });
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut runner = FailingRunner {
+            events: Arc::clone(&events),
+        };
+
+        let err = pipeline.run(&mut runner).await.unwrap_err();
+        let attempt_err = err.downcast_ref::<PipelineAttemptError>().unwrap();
+
+        assert_eq!(attempt_err.phase(), HourglassPhase::Prepare);
+        assert_eq!(events.lock().unwrap().as_slice(), ["cleanup".to_string()]);
+        assert_eq!(attempt_err.cleanup_report().actions.len(), 1);
     }
 }

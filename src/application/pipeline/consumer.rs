@@ -35,6 +35,7 @@ mod tests {
     use async_trait::async_trait;
 
     use super::ConsumerRunPipeline;
+    use crate::application::pipeline::cleanup::PipelineAttemptContext;
     use crate::application::pipeline::executor::HourglassPhaseRunner;
     use crate::application::pipeline::hourglass::HourglassPhase;
 
@@ -45,7 +46,11 @@ mod tests {
 
     #[async_trait(?Send)]
     impl HourglassPhaseRunner for Recorder {
-        async fn run_phase(&mut self, phase: HourglassPhase) -> Result<()> {
+        async fn run_phase(
+            &mut self,
+            phase: HourglassPhase,
+            _attempt: &mut PipelineAttemptContext,
+        ) -> Result<()> {
             self.entries.push(phase);
             Ok(())
         }

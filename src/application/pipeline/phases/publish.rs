@@ -139,19 +139,19 @@ pub async fn run_private_publish_phase_async(
 
     run_direct_publish_phase_async(
         &DirectPublishRequest {
-        artifact_path: prepared.artifact_path.clone(),
-        registry_url: request.registry_url,
-        scoped_id: prepared.scoped_id.clone(),
-        version: prepared.version,
-        normalized_file_name: prepared
-            .artifact_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| format!("{}.capsule", prepared.scoped_id.replace('/', "-"))),
-        content_hash: crate::artifact_hash::compute_blake3_label(&artifact_bytes),
-        allow_existing: request.allow_existing,
-        force_large_payload: request.force_large_payload,
+            artifact_path: prepared.artifact_path.clone(),
+            registry_url: request.registry_url,
+            scoped_id: prepared.scoped_id.clone(),
+            version: prepared.version,
+            normalized_file_name: prepared
+                .artifact_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| format!("{}.capsule", prepared.scoped_id.replace('/', "-"))),
+            content_hash: crate::artifact_hash::compute_blake3_label(&artifact_bytes),
+            allow_existing: request.allow_existing,
+            force_large_payload: request.force_large_payload,
         },
         artifact_bytes,
     )
@@ -395,20 +395,20 @@ async fn run_direct_publish_phase_async(
     ));
     let published = phase
         .execute(&PublishPhaseRequest {
-        artifact: PublishableArtifact {
-            bytes: artifact_bytes,
-            scoped_id: request.scoped_id.clone(),
-            version: request.version.clone(),
-            normalized_file_name: request.normalized_file_name.clone(),
-            content_hash: request.content_hash.clone(),
-        },
-        destination: DestinationSpec::RemoteRegistry {
-            registry_url: request.registry_url.clone(),
-            scoped_id: request.scoped_id.clone(),
-            version: request.version.clone(),
-            allow_existing: request.allow_existing,
-            force_large_payload: request.force_large_payload,
-        },
+            artifact: PublishableArtifact {
+                bytes: artifact_bytes,
+                scoped_id: request.scoped_id.clone(),
+                version: request.version.clone(),
+                normalized_file_name: request.normalized_file_name.clone(),
+                content_hash: request.content_hash.clone(),
+            },
+            destination: DestinationSpec::RemoteRegistry {
+                registry_url: request.registry_url.clone(),
+                scoped_id: request.scoped_id.clone(),
+                version: request.version.clone(),
+                allow_existing: request.allow_existing,
+                force_large_payload: request.force_large_payload,
+            },
         })
         .await?;
     let metadata = published
