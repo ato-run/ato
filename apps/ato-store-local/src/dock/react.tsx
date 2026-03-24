@@ -37,7 +37,10 @@ type DockCapsuleCardProps = {
   actions?: DockAction[];
 };
 
-function DockCapsuleCard({ item, actions = [] }: DockCapsuleCardProps): JSX.Element {
+function DockCapsuleCard({
+  item,
+  actions = [],
+}: DockCapsuleCardProps): JSX.Element {
   const [coverFailed, setCoverFailed] = useState(false);
   const [iconFailed, setIconFailed] = useState(false);
   const coverImage = item.coverImage?.trim();
@@ -120,7 +123,9 @@ function DockCapsuleCard({ item, actions = [] }: DockCapsuleCardProps): JSX.Elem
               {item.trustBadge}
             </span>
           ) : null}
-          {item.visibility ? <span className="dockr-badge">{item.visibility}</span> : null}
+          {item.visibility ? (
+            <span className="dockr-badge">{item.visibility}</span>
+          ) : null}
           {item.aclCount && item.aclCount > 0 ? (
             <span className="dockr-badge">{item.aclCount} ACL</span>
           ) : null}
@@ -179,26 +184,27 @@ function DockCapsuleCard({ item, actions = [] }: DockCapsuleCardProps): JSX.Elem
   );
 }
 
-export type DockCatalogViewProps<T extends DockCatalogItem = DockCatalogItem> = {
-  items: T[];
-  viewMode?: "grid" | "list";
-  onViewModeChange?: (mode: "grid" | "list") => void;
-  query?: string;
-  onQueryChange?: (value: string) => void;
-  queryPlaceholder?: string;
-  filterLabel?: string;
-  filterValue?: string;
-  filterOptions?: Array<{ value: string; label: string }>;
-  onFilterChange?: (value: string) => void;
-  emptyTitle?: string;
-  emptyDescription?: string;
-  loading?: boolean;
-  error?: string | null;
-  countLabel?: string;
-  subtitle?: string;
-  getActions?: (item: T) => DockAction[];
-  renderItem?: (item: T, viewMode: "grid" | "list") => ReactNode;
-};
+export type DockCatalogViewProps<T extends DockCatalogItem = DockCatalogItem> =
+  {
+    items: T[];
+    viewMode?: "grid" | "list";
+    onViewModeChange?: (mode: "grid" | "list") => void;
+    query?: string;
+    onQueryChange?: (value: string) => void;
+    queryPlaceholder?: string;
+    filterLabel?: string;
+    filterValue?: string;
+    filterOptions?: Array<{ value: string; label: string }>;
+    onFilterChange?: (value: string) => void;
+    emptyTitle?: string;
+    emptyDescription?: string;
+    loading?: boolean;
+    error?: string | null;
+    countLabel?: string;
+    subtitle?: string;
+    getActions?: (item: T) => DockAction[];
+    renderItem?: (item: T, viewMode: "grid" | "list") => ReactNode;
+  };
 
 export function DockCatalogView<T extends DockCatalogItem = DockCatalogItem>({
   items,
@@ -259,7 +265,11 @@ export function DockCatalogView<T extends DockCatalogItem = DockCatalogItem>({
             </label>
           ) : null}
           {onViewModeChange ? (
-            <div className="dockr-view-toggle" role="group" aria-label="View mode">
+            <div
+              className="dockr-view-toggle"
+              role="group"
+              aria-label="View mode"
+            >
               <button
                 type="button"
                 className={`dockr-view-button${viewMode === "grid" ? " is-active" : ""}`}
@@ -321,19 +331,23 @@ export function DockCapsuleDetailSummary({
   actions = [],
   children,
 }: DockCapsuleDetailSummaryProps): JSX.Element {
-  const resolvedMetrics = metrics.length > 0
-    ? metrics
-    : [
-        { label: "Version", value: `v${detail.version}` },
-        {
-          label: detail.downloads > 0 ? "Downloads" : "Type",
-          value: detail.downloads > 0 ? formatDownloads(detail.downloads) : formatTypeLabel(detail.type),
-        },
-        {
-          label: "Updated",
-          value: formatDateLabel(detail.updatedAt || detail.createdAt),
-        },
-      ];
+  const resolvedMetrics =
+    metrics.length > 0
+      ? metrics
+      : [
+          { label: "Version", value: `v${detail.version}` },
+          {
+            label: detail.downloads > 0 ? "Downloads" : "Type",
+            value:
+              detail.downloads > 0
+                ? formatDownloads(detail.downloads)
+                : formatTypeLabel(detail.type),
+          },
+          {
+            label: "Updated",
+            value: formatDateLabel(detail.updatedAt || detail.createdAt),
+          },
+        ];
 
   return (
     <section className="dockr-summary">
@@ -412,14 +426,18 @@ export function DockReadmePanel({
         <div>
           <h2 className="dockr-panel-title">{title}</h2>
           {subtitle || source ? (
-            <p className="dockr-panel-subtitle">{subtitle || `source: ${source}`}</p>
+            <p className="dockr-panel-subtitle">
+              {subtitle || `source: ${source}`}
+            </p>
           ) : null}
         </div>
       </div>
       <div className="dockr-panel-body">
         <div
           className="dockr-readme"
-          dangerouslySetInnerHTML={{ __html: sanitizeRenderedHtml(renderMarkdown(markdown)) }}
+          dangerouslySetInnerHTML={{
+            __html: sanitizeRenderedHtml(renderMarkdown(markdown)),
+          }}
         />
       </div>
     </section>
@@ -462,9 +480,15 @@ export function DockReleaseTable({
                 <div className="dockr-release-head">
                   <div>
                     <div className="dockr-release-title-row">
-                      <h3 className="dockr-release-title">v{release.version}</h3>
-                      {release.isCurrent ? <span className="dockr-badge">Current</span> : null}
-                      {release.yankedAt ? <span className="dockr-badge">Yanked</span> : null}
+                      <h3 className="dockr-release-title">
+                        v{release.version}
+                      </h3>
+                      {release.isCurrent ? (
+                        <span className="dockr-badge">Current</span>
+                      ) : null}
+                      {release.yankedAt ? (
+                        <span className="dockr-badge">Yanked</span>
+                      ) : null}
                     </div>
                     <p className="dockr-release-meta">
                       {release.createdAt
@@ -473,7 +497,11 @@ export function DockReleaseTable({
                     </p>
                   </div>
                   <div className="dockr-release-stat">
-                    <div>{release.sizeBytes ? formatBytesLabel(release.sizeBytes) : "—"}</div>
+                    <div>
+                      {release.sizeBytes
+                        ? formatBytesLabel(release.sizeBytes)
+                        : "—"}
+                    </div>
                     <div>Signature: {release.signatureStatus}</div>
                     <div>Status: {release.status || "unknown"}</div>
                   </div>
@@ -484,7 +512,9 @@ export function DockReleaseTable({
                     <div
                       className="dockr-readme"
                       dangerouslySetInnerHTML={{
-                        __html: sanitizeRenderedHtml(renderMarkdown(release.releaseNotes)),
+                        __html: sanitizeRenderedHtml(
+                          renderMarkdown(release.releaseNotes),
+                        ),
                       }}
                     />
                   </div>
@@ -498,7 +528,9 @@ export function DockReleaseTable({
                     </span>
                   </div>
                   {renderActions ? (
-                    <div className="dockr-release-actions">{renderActions(release)}</div>
+                    <div className="dockr-release-actions">
+                      {renderActions(release)}
+                    </div>
                   ) : null}
                 </div>
               </article>
@@ -683,7 +715,9 @@ function renderMarkdown(markdown: string): string {
 
     if (lineStart.startsWith("```")) {
       if (inCode) {
-        blocks.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+        blocks.push(
+          `<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`,
+        );
         codeLines.length = 0;
         inCode = false;
       } else {
@@ -780,7 +814,10 @@ function sanitizeHtmlFallback(input: string): string {
 }
 
 function sanitizeRenderedHtml(input: string): string {
-  if (typeof window === "undefined" || typeof window.DOMParser === "undefined") {
+  if (
+    typeof window === "undefined" ||
+    typeof window.DOMParser === "undefined"
+  ) {
     return sanitizeHtmlFallback(input);
   }
 

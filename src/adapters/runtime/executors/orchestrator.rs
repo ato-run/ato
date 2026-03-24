@@ -1,13 +1,18 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::Child;
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::{
+    mpsc::{Receiver, TryRecvError},
+    Arc, Mutex as StdMutex,
+};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
+use tokio::sync::Mutex;
 
 use capsule_core::execution_plan::guard::ExecutorKind;
 use capsule_core::lifecycle::LifecycleEvent;
@@ -24,6 +29,10 @@ use capsule_core::CapsuleReporter;
 use super::launch_context::RuntimeLaunchContext;
 use super::source::ExecuteMode;
 use super::target_runner::{self, TargetLaunchOptions};
+use crate::application::pipeline::cleanup::{CleanupScope, PipelineAttemptContext};
+use crate::application::services::{
+    ServiceGraphPlan, ServicePhaseCoordinator, ServicePhaseRuntime,
+};
 use crate::reporters::CliReporter;
 use crate::runtime::overrides as runtime_overrides;
 
@@ -56,24 +65,31 @@ impl OrchestratorOptions {
 
 pub async fn execute(
     plan: &ManifestData,
-    reporter: std::sync::Arc<CliReporter>,
+    reporter: Arc<CliReporter>,
     launch_ctx: &RuntimeLaunchContext,
     options: OrchestratorOptions,
+    attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<i32> {
     let client = BollardOciRuntimeClient::connect_default()
         .context("Failed to connect to OCI engine via Docker-compatible API")?;
-    execute_with_client(plan, reporter, launch_ctx, &options, &client).await
+    execute_with_client(plan, reporter, launch_ctx, &options, attempt, client).await
 }
 
-pub async fn execute_with_client<C: OciRuntimeClient>(
+pub async fn execute_with_client<C>(
     plan: &ManifestData,
-    reporter: std::sync::Arc<CliReporter>,
+    reporter: Arc<CliReporter>,
     launch_ctx: &RuntimeLaunchContext,
     options: &OrchestratorOptions,
-    client: &C,
-) -> Result<i32> {
+    attempt: Option<&mut PipelineAttemptContext>,
+    client: C,
+) -> Result<i32>
+where
+    C: OciRuntimeClient + Clone + Send + Sync + 'static,
+{
     let orchestration = plan.resolve_services()?;
+    let graph = ServiceGraphPlan::from_services(&plan.services())?;
     let session_id = session_id(plan);
+    let client = Arc::new(client);
     let network_name = if orchestration
         .services
         .iter()
@@ -93,65 +109,42 @@ pub async fn execute_with_client<C: OciRuntimeClient>(
             .await?;
     }
 
-    let mut running = HashMap::<String, RunningService>::new();
-    let mut ready = HashMap::<String, bool>::new();
+    let runtime = OrchestratorStartupRuntime::new(
+        plan.clone(),
+        orchestration.clone(),
+        reporter.clone(),
+        launch_ctx.clone(),
+        options.clone(),
+        Arc::clone(&client),
+        session_id,
+        network_name.clone(),
+        attempt.map(|attempt| attempt.cleanup_scope()),
+    );
 
-    let startup_result = async {
-        for service_name in &orchestration.startup_order {
-            let service = orchestration.service(service_name).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "service '{}' is missing from orchestration plan",
-                    service_name
-                )
-            })?;
-
-            for dependency in &service.depends_on {
-                wait_until_ready(dependency, &mut running, &mut ready, client).await?;
-            }
-
-            let env = build_service_env(plan, service, &running, launch_ctx)?;
-            preflight_required_envs(service, &env)?;
-            let running_service = start_service(
-                plan,
-                &orchestration,
-                service,
-                env,
-                &reporter,
-                launch_ctx,
-                client,
-                &session_id,
-                network_name.as_deref(),
-                options,
-            )
-            .await?;
-            running.insert(service.name.clone(), running_service);
-        }
-
-        for service_name in &orchestration.startup_order {
-            wait_until_ready(service_name, &mut running, &mut ready, client).await?;
-        }
-
-        Ok::<(), anyhow::Error>(())
-    }
-    .await;
-
-    if let Err(err) = startup_result {
+    if let Err(err) = ServicePhaseCoordinator::new(&graph)
+        .run(runtime.clone())
+        .await
+    {
+        let mut running = runtime.into_running().await;
         shutdown_all(
             &orchestration,
             &mut running,
-            client,
+            client.as_ref(),
             network_name.as_deref(),
         )
         .await;
         return Err(err);
     }
 
+    runtime.commit_startup_cleanup();
+    let mut running = runtime.into_running().await;
+
     notify_main_endpoint(&orchestration, &running, &reporter).await?;
 
     let exit_code = monitor_until_exit(
         &orchestration,
         &mut running,
-        client,
+        client.as_ref(),
         network_name.as_deref(),
     )
     .await?;
@@ -162,6 +155,15 @@ struct RunningService {
     service: ResolvedService,
     env: HashMap<String, String>,
     handle: RunningHandle,
+}
+
+impl RunningService {
+    fn local_pid(&self) -> Option<u32> {
+        match &self.handle {
+            RunningHandle::Local(local) => Some(local.child.id()),
+            RunningHandle::Oci(_) => None,
+        }
+    }
 }
 
 enum RunningHandle {
@@ -192,8 +194,139 @@ enum LocalReadinessState {
     Exited(i32),
 }
 
+#[derive(Default)]
+struct OrchestratorStartupState {
+    running: HashMap<String, RunningService>,
+    ready: HashSet<String>,
+}
+
+#[derive(Clone)]
+struct OrchestratorStartupRuntime<C>
+where
+    C: OciRuntimeClient + Clone + Send + Sync + 'static,
+{
+    plan: ManifestData,
+    orchestration: OrchestrationPlan,
+    reporter: Arc<CliReporter>,
+    launch_ctx: RuntimeLaunchContext,
+    options: OrchestratorOptions,
+    client: Arc<C>,
+    session_id: String,
+    network_name: Option<String>,
+    state: Arc<Mutex<OrchestratorStartupState>>,
+    startup_cleanup: Arc<StdMutex<Option<CleanupScope>>>,
+}
+
+impl<C> OrchestratorStartupRuntime<C>
+where
+    C: OciRuntimeClient + Clone + Send + Sync + 'static,
+{
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        plan: ManifestData,
+        orchestration: OrchestrationPlan,
+        reporter: Arc<CliReporter>,
+        launch_ctx: RuntimeLaunchContext,
+        options: OrchestratorOptions,
+        client: Arc<C>,
+        session_id: String,
+        network_name: Option<String>,
+        startup_cleanup: Option<CleanupScope>,
+    ) -> Self {
+        Self {
+            plan,
+            orchestration,
+            reporter,
+            launch_ctx,
+            options,
+            client,
+            session_id,
+            network_name,
+            state: Arc::new(Mutex::new(OrchestratorStartupState::default())),
+            startup_cleanup: Arc::new(StdMutex::new(startup_cleanup)),
+        }
+    }
+
+    fn commit_startup_cleanup(&self) {
+        let scope = self
+            .startup_cleanup
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take();
+        if let Some(scope) = scope {
+            scope.commit_all();
+        }
+    }
+
+    async fn into_running(self) -> HashMap<String, RunningService> {
+        let mut state = self.state.lock().await;
+        std::mem::take(&mut state.running)
+    }
+}
+
+#[async_trait]
+impl<C> ServicePhaseRuntime for OrchestratorStartupRuntime<C>
+where
+    C: OciRuntimeClient + Clone + Send + Sync + 'static,
+{
+    async fn start_service(&self, service_name: &str) -> Result<()> {
+        let service = self
+            .orchestration
+            .service(service_name)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "service '{}' is missing from orchestration plan",
+                    service_name
+                )
+            })?;
+
+        let env = {
+            let state = self.state.lock().await;
+            build_service_env(&self.plan, &service, &state.running, &self.launch_ctx)?
+        };
+        preflight_required_envs(&service, &env)?;
+
+        let running_service = launch_service(
+            &self.plan,
+            &self.orchestration,
+            &service,
+            env,
+            &self.reporter,
+            &self.launch_ctx,
+            self.client.as_ref(),
+            &self.session_id,
+            self.network_name.as_deref(),
+            &self.options,
+        )
+        .await?;
+
+        if let Some(pid) = running_service.local_pid() {
+            if let Some(scope) = self
+                .startup_cleanup
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .as_mut()
+            {
+                scope.register_kill_child_process(pid, service.name.clone());
+            }
+        }
+
+        self.state
+            .lock()
+            .await
+            .running
+            .insert(service.name.clone(), running_service);
+        Ok(())
+    }
+
+    async fn await_readiness(&self, service_name: String) -> Result<()> {
+        wait_until_ready_in_state(&service_name, &self.state, self.client.as_ref()).await
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn start_service<C: OciRuntimeClient>(
+async fn launch_service<C: OciRuntimeClient>(
     plan: &ManifestData,
     orchestration: &OrchestrationPlan,
     service: &ResolvedService,
@@ -527,73 +660,83 @@ fn preflight_required_envs(service: &ResolvedService, env: &HashMap<String, Stri
     );
 }
 
-async fn wait_until_ready<C: OciRuntimeClient>(
+async fn wait_until_ready_in_state<C: OciRuntimeClient>(
     service_name: &str,
-    running: &mut HashMap<String, RunningService>,
-    ready: &mut HashMap<String, bool>,
+    state: &Arc<Mutex<OrchestratorStartupState>>,
     client: &C,
 ) -> Result<()> {
-    if ready.get(service_name).copied().unwrap_or(false) {
-        return Ok(());
+    {
+        let state = state.lock().await;
+        if state.ready.contains(service_name) {
+            return Ok(());
+        }
     }
 
-    let service = running.get_mut(service_name).ok_or_else(|| {
-        anyhow::anyhow!(
-            "service '{}' was not started before readiness check",
-            service_name
-        )
-    })?;
-
-    let Some(probe) = service.service.readiness_probe.clone() else {
-        ready.insert(service_name.to_string(), true);
-        return Ok(());
+    let mut service = {
+        let mut state = state.lock().await;
+        state.running.remove(service_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "service '{}' was not started before readiness check",
+                service_name
+            )
+        })?
     };
 
-    let deadline = Instant::now() + READINESS_TIMEOUT;
-    loop {
-        if let RunningHandle::Local(local) = &mut service.handle {
-            match poll_local_readiness_events(local)? {
-                LocalReadinessState::Ready => {
-                    ready.insert(service_name.to_string(), true);
+    let result = async {
+        let Some(probe) = service.service.readiness_probe.clone() else {
+            return Ok(());
+        };
+
+        let deadline = Instant::now() + READINESS_TIMEOUT;
+        loop {
+            if let RunningHandle::Local(local) = &mut service.handle {
+                match poll_local_readiness_events(local)? {
+                    LocalReadinessState::Ready => return Ok(()),
+                    LocalReadinessState::Exited(exit_code) => {
+                        anyhow::bail!(
+                            "service '{}' exited before readiness event was observed (exit code: {})",
+                            service_name,
+                            exit_code
+                        );
+                    }
+                    LocalReadinessState::Pending => {}
+                }
+            }
+
+            if let Some(exit_code) = try_wait(&mut service, client).await? {
+                anyhow::bail!(
+                    "service '{}' exited before readiness check passed (exit code: {})",
+                    service_name,
+                    exit_code
+                );
+            }
+
+            if !uses_event_driven_readiness(&service) {
+                let port = resolve_probe_port(&service, &probe)?;
+                if readiness_probe_ok(&probe, port)? {
                     return Ok(());
                 }
-                LocalReadinessState::Exited(exit_code) => {
-                    anyhow::bail!(
-                        "service '{}' exited before readiness event was observed (exit code: {})",
-                        service_name,
-                        exit_code
-                    );
-                }
-                LocalReadinessState::Pending => {}
             }
-        }
 
-        if let Some(exit_code) = try_wait(service, client).await? {
-            anyhow::bail!(
-                "service '{}' exited before readiness check passed (exit code: {})",
-                service_name,
-                exit_code
-            );
-        }
-
-        if !uses_event_driven_readiness(service) {
-            let port = resolve_probe_port(service, &probe)?;
-            if readiness_probe_ok(&probe, port)? {
-                ready.insert(service_name.to_string(), true);
-                return Ok(());
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "service '{}' readiness check timed out after {}s",
+                    service_name,
+                    READINESS_TIMEOUT.as_secs()
+                );
             }
-        }
 
-        if Instant::now() >= deadline {
-            anyhow::bail!(
-                "service '{}' readiness check timed out after {}s",
-                service_name,
-                READINESS_TIMEOUT.as_secs()
-            );
+            tokio::time::sleep(READINESS_INTERVAL).await;
         }
-
-        tokio::time::sleep(READINESS_INTERVAL).await;
     }
+    .await;
+
+    let mut state = state.lock().await;
+    state.running.insert(service_name.to_string(), service);
+    if result.is_ok() {
+        state.ready.insert(service_name.to_string());
+    }
+    result
 }
 
 async fn monitor_until_exit<C: OciRuntimeClient>(
@@ -1364,9 +1507,10 @@ target = "db"
             nacelle: None,
         };
 
-        let exit = execute_with_client(&plan, reporter, &launch_ctx, &options, &client)
-            .await
-            .expect("orchestrator exit");
+        let exit =
+            execute_with_client(&plan, reporter, &launch_ctx, &options, None, client.clone())
+                .await
+                .expect("orchestrator exit");
         assert_eq!(exit, 0);
 
         let events = client.events.lock().unwrap().clone();

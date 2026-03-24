@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use anyhow::{Context, Result};
 use capsule_core::CapsuleReporter;
 use clap::{CommandFactory, Parser};
@@ -9,7 +11,7 @@ pub(crate) mod common;
 pub(crate) mod utils;
 
 pub(crate) struct SidecarCleanup {
-    sidecar: Option<common::sidecar::SidecarHandle>,
+    sidecar: Arc<Mutex<Option<common::sidecar::SidecarHandle>>>,
     reporter: std::sync::Arc<reporters::CliReporter>,
 }
 
@@ -18,18 +20,71 @@ impl SidecarCleanup {
         sidecar: Option<common::sidecar::SidecarHandle>,
         reporter: std::sync::Arc<reporters::CliReporter>,
     ) -> Self {
-        Self { sidecar, reporter }
+        Self {
+            sidecar: Arc::new(Mutex::new(sidecar)),
+            reporter,
+        }
+    }
+
+    pub(crate) fn register_attempt_cleanup(
+        &self,
+        scope: &mut application::pipeline::cleanup::CleanupScope,
+    ) {
+        if self
+            .sidecar
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .is_none()
+        {
+            return;
+        }
+
+        let sidecar = Arc::clone(&self.sidecar);
+        scope.register(move || stop_sidecar_cleanup_action(&sidecar));
     }
 
     pub(crate) fn stop_now(&mut self) {
-        if let Some(sidecar) = self.sidecar.take() {
-            if let Err(err) = sidecar.stop() {
+        match stop_sidecar(&self.sidecar) {
+            Ok(_) => {}
+            Err(err) => {
                 let _ = futures::executor::block_on(
                     self.reporter
                         .warn(format!("⚠️  Failed to stop sidecar: {}", err)),
                 );
             }
         }
+    }
+}
+
+fn stop_sidecar(
+    sidecar: &Arc<Mutex<Option<common::sidecar::SidecarHandle>>>,
+) -> anyhow::Result<bool> {
+    let sidecar = sidecar
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .take();
+    let Some(sidecar) = sidecar else {
+        return Ok(false);
+    };
+
+    sidecar.stop()?;
+    Ok(true)
+}
+
+fn stop_sidecar_cleanup_action(
+    sidecar: &Arc<Mutex<Option<common::sidecar::SidecarHandle>>>,
+) -> capsule_core::execution_plan::error::CleanupActionRecord {
+    match stop_sidecar(sidecar) {
+        Ok(_) => capsule_core::execution_plan::error::CleanupActionRecord {
+            action: "stop_sidecar".to_string(),
+            status: capsule_core::execution_plan::error::CleanupActionStatus::Succeeded,
+            detail: Some("tsnet sidecar".to_string()),
+        },
+        Err(error) => capsule_core::execution_plan::error::CleanupActionRecord {
+            action: "stop_sidecar".to_string(),
+            status: capsule_core::execution_plan::error::CleanupActionStatus::Failed,
+            detail: Some(format!("tsnet sidecar: {}", error)),
+        },
     }
 }
 

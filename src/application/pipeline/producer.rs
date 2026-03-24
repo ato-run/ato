@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::Serialize;
 
+use crate::application::pipeline::cleanup::{PipelineAttemptContext, PipelineAttemptError};
 use crate::application::pipeline::executor::HourglassPhaseRunner;
 use crate::application::pipeline::hourglass::{
     HourglassFlow, HourglassPhase, HourglassPhaseSelection,
@@ -175,19 +176,25 @@ impl ProducerPipeline {
     where
         R: HourglassPhaseRunner,
     {
-        for phase in PRODUCER_PHASE_SEQUENCE {
-            if *phase > stop_point {
-                runner.skip_phase(*phase).await?;
-                continue;
-            }
+        let mut attempt = PipelineAttemptContext::default();
 
-            if self.selection.runs(*phase) {
-                runner.run_phase(*phase).await?;
+        for phase in PRODUCER_PHASE_SEQUENCE {
+            attempt.enter_phase(*phase);
+            let result = if *phase > stop_point {
+                runner.skip_phase(*phase, &mut attempt).await
+            } else if self.selection.runs(*phase) {
+                runner.run_phase(*phase, &mut attempt).await
             } else {
-                runner.skip_phase(*phase).await?;
+                runner.skip_phase(*phase, &mut attempt).await
+            };
+
+            if let Err(err) = result {
+                let cleanup_report = attempt.unwind_cleanup();
+                return Err(PipelineAttemptError::new(*phase, err, cleanup_report).into());
             }
         }
 
+        attempt.mark_committed();
         Ok(())
     }
 }
@@ -397,6 +404,7 @@ mod tests {
         should_warn_legacy_full_publish, validate_publish_phase_options, ProducerPipeline,
         PublishPhaseOptions, PublishPipelineRequest,
     };
+    use crate::application::pipeline::cleanup::PipelineAttemptContext;
     use crate::application::pipeline::executor::HourglassPhaseRunner;
     use crate::application::pipeline::hourglass::HourglassPhase;
 
@@ -407,12 +415,20 @@ mod tests {
 
     #[async_trait(?Send)]
     impl HourglassPhaseRunner for Recorder {
-        async fn run_phase(&mut self, phase: HourglassPhase) -> Result<()> {
+        async fn run_phase(
+            &mut self,
+            phase: HourglassPhase,
+            _attempt: &mut PipelineAttemptContext,
+        ) -> Result<()> {
             self.entries.push((phase, "run"));
             Ok(())
         }
 
-        async fn skip_phase(&mut self, phase: HourglassPhase) -> Result<()> {
+        async fn skip_phase(
+            &mut self,
+            phase: HourglassPhase,
+            _attempt: &mut PipelineAttemptContext,
+        ) -> Result<()> {
             self.entries.push((phase, "skip"));
             Ok(())
         }

@@ -1,0 +1,34 @@
+{
+  "schema_version": "1",
+  "status": "error",
+  "error": {
+    "code": "E302",
+    "name": "execution_contract_invalid",
+    "phase": "execution",
+    "classification": "manifest",
+    "message": "services.main is required",
+    "hint": "manifest と execution plan の整合性、特に service 設定と readiness_probe を確認してください。",
+    "retryable": false,
+    "interactive_resolution": false,
+    "field": "services.main",
+    "details": {
+      "field": "services.main",
+      "service": "main"
+    },
+    "cleanup_status": "partial",
+    "cleanup_actions": [
+      {
+        "action": "remove_temp_dir",
+        "status": "failed",
+        "detail": "permission denied"
+      }
+    ],
+    "manifest_suggestion": {
+      "kind": "create_table",
+      "path": "services.main",
+      "operation": "create_table",
+      "message": "Add a [services.main] table"
+    },
+    "causes": []
+  }
+}

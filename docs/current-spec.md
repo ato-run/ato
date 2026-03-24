@@ -721,10 +721,10 @@ Service fields currently supported:
 Current repository guidance:
 
 - use a single web/deno target with top-level [services] for dynamic multi-service apps
-- ato uses barrier synchronization for pre-execute phases across all services in a services graph
-- ato does not enter service execution until every service selected for the graph has successfully completed Install, Prepare, Build, Verify, and Dry-run
-- ato starts services in DAG order only after the graph as a whole has crossed the Execute boundary
-- ato waits on readiness probes before releasing dependent services
+- ato validates the services graph up front and materializes a ServiceGraphPlan before service startup
+- ato uses ServicePhaseCoordinator inside the services executors to enforce DAG layers during startup
+- ato starts services in DAG layer order and waits on readiness probes before releasing dependent layers
+- service start within a layer is currently serial; readiness waiting within a layer is parallel and fail-fast
 - ato prefixes logs
 - ato fail-fast stops all services when one exits
 - services.main is required by the documented services-mode recipe
@@ -732,12 +732,12 @@ Current repository guidance:
 Services orchestration rules:
 
 - the services graph is validated as a DAG before execution; dependency cycles are rejected before any service enters Execute
-- pre-execute phases are evaluated per service but synchronized by a graph-wide barrier at each phase boundary
-- if any service fails in Install, Prepare, Build, Verify, or Dry-run, ato aborts the entire graph, cleans up all staged resources for every service in the current attempt, and does not start any remaining services
-- Execute is supervisor-driven: root services start first, then dependent services are released when their depends_on predecessors satisfy readiness_probe requirements
+- the current implementation does not yet run Install, Prepare, Build, Verify, and Dry-run as graph-wide per-service barriers; those phases still belong to the normal run/publish pipelines outside services startup coordination
+- Execute startup is graph-aware: web_services and orchestrator both share ServiceGraphPlan plus ServicePhaseCoordinator for dependency ordering
+- each DAG layer is started in order; after the layer has been spawned, readiness waits run concurrently for the services in that layer
 - readiness failure is treated as a service execution failure and triggers fail-fast shutdown of the whole graph
 - if one running service exits unexpectedly, ato terminates the remaining services, collects exit causes, and reports the graph as failed
-- there is no mixed-phase steady state where one service remains in Build or Verify while another has already been admitted into Execute
+- startup side effects such as child-process registration are committed to the attempt cleanup journal before readiness waiting so fail-fast abort can still unwind safely
 
 ## 5.6 State and Storage
 
@@ -986,7 +986,7 @@ Current envelope shape:
     "hint": null,
     "retryable": true,
     "interactive_resolution": false,
-    "cleanup_status": "completed",
+    "cleanup_status": "not_required",
     "cleanup_actions": [],
     "manifest_suggestion": null,
     "path": null,
@@ -1015,8 +1015,11 @@ Current classification families:
 
 Current cleanup fields:
 
-- cleanup_status reports whether compensating cleanup completed, partially completed, was skipped because no resources were created, or failed while handling the primary error
-- cleanup_actions is an ordered list of attempted cleanup operations such as remove_temp_dir, stop_sidecar, delete_extract_root, revert_projection, or release_reserved_port
+- cleanup_status currently takes one of not_required, complete, or partial
+- not_required means no compensating action was registered for the failed attempt
+- complete means every registered cleanup action succeeded
+- partial means at least one cleanup action failed while another cleanup action had already been attempted
+- cleanup_actions is an ordered list of attempted cleanup operations such as remove_temp_dir, kill_child_process, or stop_sidecar
 - manifest_suggestion carries a machine-readable fix proposal when ato determines the failure is a manifest problem with a concrete remediation
 - interactive_resolution remains the switch for whether ato can offer or apply the suggestion interactively
 
