@@ -19,6 +19,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::debug;
 
+use crate::application::pipeline::cleanup::PipelineAttemptContext;
 use crate::application::pipeline::consumer::ConsumerRunPipeline;
 use crate::application::pipeline::executor::HourglassPhaseRunner;
 use crate::application::pipeline::hourglass;
@@ -93,7 +94,8 @@ async fn execute_watch_mode_with_install(args: RunArgs) -> Result<()> {
         return Ok(());
     }
 
-    let target = normalize_run_target_after_install(&args, &install.resolved_target.path).await?;
+    let target =
+        normalize_run_target_after_install(&args, &install.resolved_target.path, None).await?;
     execute_watch_mode(RunArgs {
         target,
         agent_local_root: install.resolved_target.agent_local_root,
@@ -101,7 +103,11 @@ async fn execute_watch_mode_with_install(args: RunArgs) -> Result<()> {
     })
 }
 
-async fn prepare_capsule_target(args: &RunArgs, capsule_path: &PathBuf) -> Result<PathBuf> {
+async fn prepare_capsule_target(
+    args: &RunArgs,
+    capsule_path: &PathBuf,
+    attempt: Option<&mut PipelineAttemptContext>,
+) -> Result<PathBuf> {
     if let Some(manifest_path) = runtime_tree::prepare_store_runtime_for_capsule(capsule_path)? {
         debug!(
             manifest_path = %manifest_path.display(),
@@ -121,6 +127,11 @@ async fn prepare_capsule_target(args: &RunArgs, capsule_path: &PathBuf) -> Resul
             ))
         })
         .context("Failed to determine extraction directory")?;
+
+    if let Some(attempt) = attempt {
+        let mut scope = attempt.cleanup_scope();
+        scope.register_remove_dir(extract_dir.clone());
+    }
 
     if extract_dir.exists() {
         debug!(
@@ -516,18 +527,26 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
         !self.should_stop_after_install
     }
 
-    async fn run_phase(&mut self, phase: HourglassPhase) -> Result<()> {
+    async fn run_phase(
+        &mut self,
+        phase: HourglassPhase,
+        attempt: &mut PipelineAttemptContext,
+    ) -> Result<()> {
         match phase {
             HourglassPhase::Install => {
                 let install = run_install_phase(self.args).await.inspect_err(|err| {
                     emit_run_phase_failure(self.args, HourglassPhase::Install, err);
                 })?;
                 self.target = Some(
-                    normalize_run_target_after_install(self.args, &install.resolved_target.path)
-                        .await
-                        .inspect_err(|err| {
-                            emit_run_phase_failure(self.args, HourglassPhase::Install, err);
-                        })?,
+                    normalize_run_target_after_install(
+                        self.args,
+                        &install.resolved_target.path,
+                        Some(attempt),
+                    )
+                    .await
+                    .inspect_err(|err| {
+                        emit_run_phase_failure(self.args, HourglassPhase::Install, err);
+                    })?,
                 );
                 self.agent_local_root = install.resolved_target.agent_local_root;
                 self.should_stop_after_install = matches!(
@@ -541,6 +560,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     self.args,
                     self.resolved_target(),
                     self.agent_local_root.clone(),
+                    Some(attempt),
                 )
                 .await
                 .inspect_err(|err| {
@@ -601,6 +621,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     self.resolved_target(),
                     self.agent_local_root.clone(),
                     input,
+                    Some(attempt),
                 )
                 .await
                 .inspect_err(|err| {
@@ -685,13 +706,14 @@ fn emit_run_phase_failure(args: &RunArgs, boundary: HourglassPhase, error: &anyh
 pub(crate) async fn normalize_run_target_after_install(
     args: &RunArgs,
     resolved_target: &Path,
+    attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<PathBuf> {
     if resolved_target
         .extension()
         .map(|value| value.eq_ignore_ascii_case("capsule"))
         .unwrap_or(false)
     {
-        return prepare_capsule_target(args, &resolved_target.to_path_buf()).await;
+        return prepare_capsule_target(args, &resolved_target.to_path_buf(), attempt).await;
     }
 
     Ok(resolved_target.to_path_buf())
@@ -707,10 +729,11 @@ async fn run_prepare_phase(
     args: &RunArgs,
     target: &Path,
     agent_local_root: Option<PathBuf>,
+    attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<RunPipelineState> {
     let request = build_consumer_run_request_with_target(args, target, agent_local_root);
     let progress = RunProgress { args };
-    run_phase::run_prepare_phase(&request, &progress).await
+    run_phase::run_prepare_phase(&request, &progress, attempt).await
 }
 
 async fn run_build_phase(
@@ -751,10 +774,11 @@ async fn run_execute_phase(
     target: &Path,
     agent_local_root: Option<PathBuf>,
     state: RunPipelineState,
+    attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<()> {
     let request = build_consumer_run_request_with_target(args, target, agent_local_root);
     let progress = RunProgress { args };
-    run_phase::run_execute_phase(&request, &progress, state, &RunExecuteHooks).await
+    run_phase::run_execute_phase(&request, &progress, state, attempt, &RunExecuteHooks).await
 }
 
 #[cfg(test)]

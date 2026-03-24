@@ -170,7 +170,10 @@
   border-radius: 18px;
   background: var(--bg-card);
   box-shadow: var(--shadow-sm);
-  transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+  transition:
+    transform 120ms ease,
+    box-shadow 120ms ease,
+    border-color 120ms ease;
   overflow: hidden;
 }
 
@@ -190,7 +193,11 @@
   aspect-ratio: 16 / 9;
   border-bottom: 1px solid var(--border-subtle);
   background:
-    radial-gradient(circle at top right, rgba(0, 102, 255, 0.15), transparent 40%),
+    radial-gradient(
+      circle at top right,
+      rgba(0, 102, 255, 0.15),
+      transparent 40%
+    ),
     linear-gradient(135deg, #ffffff, #f5f7fb);
   overflow: hidden;
 }

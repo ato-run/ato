@@ -273,7 +273,8 @@ export function normalizeLocalCatalogItem(
     category: normalizeString(item.category, "other"),
     tags: CATEGORY_TAGS[normalizeString(item.category, "other")] ?? [],
     trustBadge:
-      options.trustBadge ?? (item.publisher.verified ? "verified" : "unverified"),
+      options.trustBadge ??
+      (item.publisher.verified ? "verified" : "unverified"),
     visibility: options.visibility ?? "local",
     iconImage:
       normalizeString(metadata?.icon_url) ||

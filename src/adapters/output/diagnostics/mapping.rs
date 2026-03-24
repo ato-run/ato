@@ -1,6 +1,8 @@
 use anyhow::Error as AnyhowError;
 use capsule_core::execution_plan::error::AtoExecutionError;
 
+use crate::application::pipeline::cleanup::PipelineAttemptError;
+
 use crate::error_codes;
 
 use super::heuristics::{
@@ -34,6 +36,13 @@ pub fn detect_command_context(args: &[String]) -> CommandContext {
 }
 
 pub fn from_anyhow(err: &AnyhowError, command_context: CommandContext) -> CliDiagnostic {
+    if let Some(attempt_err) = err.downcast_ref::<PipelineAttemptError>() {
+        return from_anyhow(attempt_err.source_error(), command_context).with_cleanup(
+            Some(attempt_err.cleanup_report().status),
+            attempt_err.cleanup_report().actions.clone(),
+        );
+    }
+
     let causes = collect_causes(err);
     if let Some(execution_err) = err.downcast_ref::<AtoExecutionError>() {
         return from_execution_error(execution_err, causes);
@@ -266,6 +275,12 @@ fn from_execution_error(execution_err: &AtoExecutionError, causes: Vec<String>) 
         execution_err.interactive_resolution,
         causes,
     )
+    .with_classification(execution_err.classification)
+    .with_cleanup(
+        execution_err.cleanup_status,
+        execution_err.cleanup_actions.clone(),
+    )
+    .with_manifest_suggestion(execution_err.manifest_suggestion.clone())
 }
 
 fn map_execution_code(code: &str) -> CliDiagnosticCode {
