@@ -99,6 +99,9 @@ wasmtime = "16.0"
 wasmtime-wasi = "16.0"
 wasi-common = "16.0"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+openssl-sys = { version = "0.9.112", features = ["vendored"] }
+
 [features]
 default = []
 provisioning-tests = []
