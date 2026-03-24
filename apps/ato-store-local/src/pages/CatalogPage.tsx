@@ -4,11 +4,11 @@ import {
   Square,
   Trash2,
 } from "lucide-react";
-import { DockCatalogView, type DockAction } from "@ato/dock-react";
+import { DockCatalogView, type DockAction } from "../dock/react";
 import {
   normalizeLocalCatalogItem,
   type DockCatalogItem,
-} from "@ato/dock-domain";
+} from "../dock/domain";
 
 import type { Capsule, CatalogViewMode, OsFilter, Process } from "../types";
 
