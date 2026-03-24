@@ -386,7 +386,7 @@ impl<'a> PublishCommandExecution<'a> {
         Ok(())
     }
 
-    fn run_install_phase(&mut self) -> Result<()> {
+    async fn run_install_phase(&mut self) -> Result<()> {
         hourglass::print_phase_line(
             self.args.json,
             PublishPhaseBoundary::Install,
@@ -407,7 +407,8 @@ impl<'a> PublishCommandExecution<'a> {
             .verified_artifact()
             .context("install phase requires verified artifact metadata")?;
         let install_result =
-            install_phase::run_publish_install_phase(artifact_path, preview, verification)?;
+            install_phase::run_publish_install_phase_async(artifact_path, preview, verification)
+                .await?;
         let message = format!("unpacked {}", install_result.path.display());
         phase_mark_ok(
             phase_mut(&mut self.phases, PublishPhaseBoundary::Install),
@@ -718,7 +719,7 @@ impl HourglassPhaseRunner for PublishCommandExecution<'_> {
             PublishPhaseBoundary::Prepare => self.run_prepare_phase(),
             PublishPhaseBoundary::Build => self.run_build_phase(),
             PublishPhaseBoundary::Verify => self.run_verify_phase(),
-            PublishPhaseBoundary::Install => self.run_install_phase(),
+            PublishPhaseBoundary::Install => self.run_install_phase().await,
             PublishPhaseBoundary::DryRun => self.run_dry_run_phase(),
             PublishPhaseBoundary::Publish => self.run_publish_phase().await,
             PublishPhaseBoundary::Execute => {

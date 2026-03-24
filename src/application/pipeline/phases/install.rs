@@ -48,7 +48,7 @@ pub async fn install_local_artifact_into_test_sandbox(
     phase.execute(&request).await
 }
 
-pub fn run_publish_install_phase(
+pub async fn run_publish_install_phase_async(
     artifact_path: &Path,
     preview: &crate::application::pipeline::phases::publish::PrivatePublishSummary,
     verification: &crate::publish_artifact::VerifiedArtifactInfo,
@@ -58,11 +58,12 @@ pub fn run_publish_install_phase(
         anyhow::bail!("publish install stage requires a resolved version");
     }
 
-    let env = futures::executor::block_on(install_local_artifact_into_test_sandbox(
+    let env = install_local_artifact_into_test_sandbox(
         artifact_path.to_path_buf(),
         &preview.scoped_id,
         version,
-    ))?;
+    )
+    .await?;
 
     Ok(PublishInstallResult {
         scoped_id: preview.scoped_id.clone(),
@@ -71,6 +72,19 @@ pub fn run_publish_install_phase(
         content_hash: verification.blake3.clone(),
         install_kind: "test_sandbox",
     })
+}
+
+#[allow(dead_code)]
+pub fn run_publish_install_phase(
+    artifact_path: &Path,
+    preview: &crate::application::pipeline::phases::publish::PrivatePublishSummary,
+    verification: &crate::publish_artifact::VerifiedArtifactInfo,
+) -> Result<PublishInstallResult> {
+    futures::executor::block_on(run_publish_install_phase_async(
+        artifact_path,
+        preview,
+        verification,
+    ))
 }
 
 #[cfg(test)]
