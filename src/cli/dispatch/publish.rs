@@ -823,8 +823,15 @@ fn execute_publish_pipeline(
         cwd,
         pipeline_preview,
     );
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(pipeline.run_until(selection.stop, &mut execution))?;
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            tokio::task::block_in_place(|| handle.block_on(pipeline.run_until(selection.stop, &mut execution)))?
+        }
+        Err(_) => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(pipeline.run_until(selection.stop, &mut execution))?;
+        }
+    }
 
     let phases = execution.phases;
     let state = execution.state;
