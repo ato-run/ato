@@ -5,6 +5,7 @@ use crate::application::ports::publish::{
     DestinationPort, DestinationSpec, PublishableArtifact, PublishedLocation,
 };
 
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub(crate) struct LocalCasDestination;
 

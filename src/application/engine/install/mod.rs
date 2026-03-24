@@ -143,6 +143,7 @@ pub struct PromotionSourceInfo {
     pub derived_plan: PromotionDerivedPlanSnapshot,
 }
 
+#[allow(dead_code)]
 pub(crate) fn register_verified_artifact_for_publish(
     output_dir: Option<PathBuf>,
     scoped_id: &str,

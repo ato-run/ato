@@ -63,6 +63,7 @@ pub struct LogoSpinner {
 
 enum LogoSpinnerMode {
     Multiline {
+        #[allow(dead_code)]
         status: Arc<Mutex<String>>,
         running: Arc<AtomicBool>,
         worker: Option<JoinHandle<()>>,
@@ -73,6 +74,7 @@ enum LogoSpinnerMode {
 }
 
 impl LogoSpinner {
+    #[allow(dead_code)]
     pub fn set_message(&self, message: impl Into<String>) {
         let message = message.into();
         match &self.mode {
@@ -220,6 +222,7 @@ pub fn print_logo(animated: bool) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn begin_flow() -> Result<()> {
     begin_flow_with_logo(false)
 }
@@ -329,7 +332,7 @@ fn render_logo_spinner_frame(lines: &[&str], frame: u64, seed: u64, status: &str
 
             let state = mix_logo_spinner_seed(seed, frame, row, column);
             let highlight = ((column + row * 3 + frame as usize) % 9) < 2;
-            let glitch = state % 19 == 0;
+            let glitch = state.is_multiple_of(19);
 
             if glitch {
                 let random_char =

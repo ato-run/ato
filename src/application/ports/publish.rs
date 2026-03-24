@@ -22,6 +22,7 @@ pub struct PublishReceiptMetadata {
     pub already_existed: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DestinationSpec {
     LocalCas {
