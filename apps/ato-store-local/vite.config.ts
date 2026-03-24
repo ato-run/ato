@@ -12,32 +12,40 @@ const workspaceRoots = [
   path.resolve(appDir, "../../"),
 ];
 
-function resolveWorkspacePath(...segments: string[]) {
-  for (const root of workspaceRoots) {
-    const candidate = path.join(root, ...segments);
+function resolveFirstExistingPath(candidates: string[]) {
+  for (const candidate of candidates) {
     if (existsSync(candidate)) {
       return candidate;
     }
   }
 
-  return path.join(workspaceRoots[0], ...segments);
+  return candidates[0];
+}
+
+function resolveWorkspacePath(...segments: string[]) {
+  return resolveFirstExistingPath(
+    workspaceRoots.map((root) => path.join(root, ...segments)),
+  );
+}
+
+function resolvePackageEntrypoint(packageName: string, entrypoint: string) {
+  return resolveFirstExistingPath([
+    resolveWorkspacePath("packages", packageName, entrypoint),
+    path.join(appDir, "node_modules", "@ato", packageName, entrypoint),
+  ]);
 }
 
 export default defineConfig({
   plugins: [tailwindcss(), react()],
   resolve: {
     alias: {
-      "@ato/dock-domain": resolveWorkspacePath(
-        "packages",
+      "@ato/dock-domain": resolvePackageEntrypoint(
         "dock-domain",
-        "src",
-        "index.ts",
+        path.join("src", "index.ts"),
       ),
-      "@ato/dock-react": resolveWorkspacePath(
-        "packages",
+      "@ato/dock-react": resolvePackageEntrypoint(
         "dock-react",
-        "src",
-        "index.tsx",
+        path.join("src", "index.tsx"),
       ),
       "lucide-react": path.join(appDir, "node_modules", "lucide-react"),
       react: path.join(appDir, "node_modules", "react"),
