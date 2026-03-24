@@ -18,6 +18,7 @@ use tracing::debug;
 use crate::application::engine::install::support::{
     LocalRunManifestPreparationOutcome, ResolvedRunTarget,
 };
+use crate::application::pipeline::cleanup::PipelineAttemptContext;
 use crate::executors::source::ExecuteMode;
 use crate::executors::target_runner::{self, TargetLaunchOptions};
 use crate::preview;
@@ -131,6 +132,7 @@ where
 pub(crate) async fn run_prepare_phase<P>(
     request: &ConsumerRunRequest,
     progress: &P,
+    attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<RunPipelineState>
 where
     P: ConsumerRunProgress,
@@ -266,6 +268,11 @@ where
         .with_injected_mounts(provisioning_outcome.additional_mounts);
 
     if let Some(shadow_workspace) = provisioning_outcome.shadow_workspace.as_ref() {
+        if let Some(attempt) = attempt {
+            let mut scope = attempt.cleanup_scope();
+            scope.register_remove_dir(shadow_workspace.root_dir.clone());
+        }
+
         debug!(
             issue_count = provisioning_outcome.plan.issues.len(),
             action_count = provisioning_outcome.plan.actions.len(),
@@ -585,6 +592,7 @@ pub(crate) async fn run_execute_phase<P, H>(
     request: &ConsumerRunRequest,
     progress: &P,
     state: RunPipelineState,
+    attempt: Option<&mut PipelineAttemptContext>,
     hooks: &H,
 ) -> Result<()>
 where
@@ -592,6 +600,8 @@ where
     H: ConsumerRunExecuteHooks,
 {
     progress.start(HourglassPhase::Execute);
+
+    let mut attempt = attempt;
 
     let RunPipelineState {
         preview_session: _,
@@ -624,6 +634,7 @@ where
                 assume_yes: request.assume_yes,
                 nacelle: request.nacelle.clone(),
             },
+            attempt.as_mut().map(|attempt| &mut **attempt),
         )
         .await?;
         if exit != 0 {
@@ -690,6 +701,10 @@ where
     };
 
     let mut sidecar_cleanup = crate::SidecarCleanup::new(sidecar, request.reporter.clone());
+    if let Some(attempt) = attempt.as_mut() {
+        let mut scope = (*attempt).cleanup_scope();
+        sidecar_cleanup.register_attempt_cleanup(&mut scope);
+    }
     let mode = if request.background {
         ExecuteMode::Background
     } else {
@@ -1054,6 +1069,7 @@ where
                 &execution_plan,
                 &launch_ctx,
                 request.dangerously_skip_permissions,
+                attempt.as_mut().map(|attempt| &mut **attempt),
             )?;
             sidecar_cleanup.stop_now();
             if exit != 0 {
