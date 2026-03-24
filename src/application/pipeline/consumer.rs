@@ -14,7 +14,7 @@ impl ConsumerRunPipeline {
         Self {
             inner: HourglassPipeline::new(HourglassPhaseSelection {
                 flow: HourglassFlow::ConsumerRun,
-                start: HourglassPhase::Prepare,
+                start: HourglassPhase::Install,
                 stop: HourglassPhase::Execute,
                 explicit_filter: false,
             }),
@@ -52,7 +52,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn standard_consumer_pipeline_runs_prepare_through_execute() {
+    async fn standard_consumer_pipeline_runs_install_through_execute() {
         let pipeline = ConsumerRunPipeline::standard();
         let mut recorder = Recorder::default();
 
@@ -61,6 +61,7 @@ mod tests {
         assert_eq!(
             recorder.entries,
             vec![
+                HourglassPhase::Install,
                 HourglassPhase::Prepare,
                 HourglassPhase::Build,
                 HourglassPhase::Verify,

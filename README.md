@@ -43,7 +43,7 @@ ato registry serve --host 127.0.0.1 --port 18787 [--auth-token <token>]
 
 - Primary product surface stays `ato build`, `ato publish`, and `ato install`.
 - For the current Tauri darwin/arm64 PoC, `capsule.toml` is the canonical project manifest. A default target with `driver = "native"` and a `.app` `entrypoint` is enough for native build detection.
-- `ato.delivery.toml` is still accepted as a compatibility sidecar. When present, it must match the `capsule.toml` native target contract; the build rewrites/stages compatibility metadata into the artifact.
+- Source projects must declare native delivery metadata in `capsule.toml`. `ato.delivery.toml` is no longer accepted as authored input; `ato` stages internal compatibility metadata into the artifact instead.
 - Native install JSON exposes `local_derivation` and `projection` envelopes. For this contract generation, `schema_version = "0.1"` is the stable machine-readable version for fetch/finalize/project/unproject/install metadata.
 - `fetch`, `finalize`, `project`, and `unproject` remain advanced/debug surfaces. Most users should stay on the integrated `build` / `publish` / `install` flow.
 - Local finalize is currently fail-closed and limited to macOS darwin/arm64 with `codesign`.
@@ -75,14 +75,14 @@ For this `.app`-entrypoint form, `ato` derives the current PoC defaults internal
 - `finalize.tool = "codesign"`
 - `finalize.args = ["--deep", "--force", "--sign", "-", <artifact.input>]`
 
-If the native target is command-driven (`entrypoint = "sh"` plus `cmd = [...]`), then the build still needs explicit delivery metadata today. That metadata may live inline in `capsule.toml` as `[artifact]` + `[finalize]`, or in `ato.delivery.toml` as a compatibility sidecar. Partial inline metadata is rejected fail-closed.
+If the native target is command-driven (`entrypoint = "sh"` plus `cmd = [...]`), then the build still needs explicit delivery metadata today. The only supported source location for that metadata is inline in `capsule.toml` as `[artifact]` + `[finalize]`. Source-side `ato.delivery.toml` is rejected fail-closed. Partial inline metadata is also rejected fail-closed.
 
 ### Compatibility sidecar and artifact metadata flow
 
-- `ato.delivery.toml` is **not** the canonical project manifest anymore. It is an accepted compatibility input for command-mode native builds and a compatibility mirror for `.app`-entrypoint projects.
+- `ato.delivery.toml` is **not** a supported source-project manifest. It persists only as staged artifact metadata for local finalize/install/project flows.
 - Build always stages `ato.delivery.toml` into the artifact payload, even when the source project used only canonical `capsule.toml`. This keeps the artifact self-describing for local finalize/install without requiring the original source tree.
 - `ato install`, `ato finalize`, and `ato project` read the staged artifact metadata plus `local-derivation.json`; they do not require the source checkout's sidecar to be present later.
-- Near-term policy: keep accepting `ato.delivery.toml` as backward-compatible input, but treat it as optional compatibility metadata rather than product-surface source of truth.
+- Current policy: source projects must use `capsule.toml`; `ato.delivery.toml` remains only as artifact-internal compatibility metadata.
 
 ### Stable vs experimental machine-readable contract
 
@@ -111,8 +111,8 @@ Still experimental:
 
 ### Migration path
 
-1. **Current**: `capsule.toml` is canonical; `ato.delivery.toml` remains accepted as compatibility input/output metadata.
-2. **Next**: command-mode native builds keep working, but product docs and tooling point users at canonical `capsule.toml` first; sidecar use becomes optional wherever canonical manifest data is sufficient.
+1. **Current**: `capsule.toml` is the only supported authored source manifest for native delivery.
+2. **Current**: `ato` still stages `ato.delivery.toml` into artifacts as internal metadata for local finalize/install/project flows.
 3. **Later**: internal artifact metadata can be abstracted away from the user-facing sidecar name, while preserving the `schema_version = "0.1"` JSON/provenance contract for automation.
 
 ## Quick Start (Local)

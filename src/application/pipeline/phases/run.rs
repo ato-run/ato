@@ -15,6 +15,9 @@ use capsule_core::types::{CapsuleManifest, CapsuleType, StateDurability};
 use capsule_core::CapsuleReporter;
 use tracing::debug;
 
+use crate::application::engine::install::support::{
+    LocalRunManifestPreparationOutcome, ResolvedRunTarget,
+};
 use crate::executors::source::ExecuteMode;
 use crate::executors::target_runner::{self, TargetLaunchOptions};
 use crate::preview;
@@ -52,10 +55,18 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) assume_yes: bool,
     pub(crate) agent_mode: RunAgentMode,
     pub(crate) agent_local_root: Option<PathBuf>,
+    pub(crate) registry: Option<String>,
+    pub(crate) keep_failed_artifacts: bool,
+    pub(crate) allow_unverified: bool,
     pub(crate) state_bindings: Vec<String>,
     pub(crate) inject_bindings: Vec<String>,
     pub(crate) reporter: Arc<CliReporter>,
     pub(crate) preview_mode: bool,
+}
+
+pub(crate) struct RunInstallPhaseResult {
+    pub(crate) resolved_target: ResolvedRunTarget,
+    pub(crate) manifest_outcome: LocalRunManifestPreparationOutcome,
 }
 
 pub(crate) struct RunPipelineState {
@@ -77,6 +88,44 @@ pub(crate) struct RunPipelineState {
 pub(crate) enum CompatibilityHostMode {
     Disabled,
     Enabled,
+}
+
+pub(crate) async fn run_install_phase<P>(
+    request: &ConsumerRunRequest,
+    progress: &P,
+) -> Result<RunInstallPhaseResult>
+where
+    P: ConsumerRunProgress,
+{
+    progress.start(HourglassPhase::Install);
+
+    let resolved_target = crate::install::support::resolve_run_target_or_install(
+        request.target.clone(),
+        request.assume_yes,
+        request.keep_failed_artifacts,
+        request.allow_unverified,
+        request.registry.as_deref(),
+        request.reporter.clone(),
+    )
+    .await?;
+    let manifest_outcome = crate::install::support::ensure_local_manifest_ready_for_run(
+        &resolved_target,
+        request.assume_yes,
+        request.reporter.clone(),
+    )?;
+
+    let detail = match manifest_outcome {
+        LocalRunManifestPreparationOutcome::Ready => "target resolved and manifest ready",
+        LocalRunManifestPreparationOutcome::CreatedManualManifest => {
+            "manifest created; stopping before prepare"
+        }
+    };
+    progress.ok(HourglassPhase::Install, detail);
+
+    Ok(RunInstallPhaseResult {
+        resolved_target,
+        manifest_outcome,
+    })
 }
 
 pub(crate) async fn run_prepare_phase<P>(
