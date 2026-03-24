@@ -378,30 +378,26 @@ pub(crate) fn detect_build_strategy(manifest_dir: &Path) -> Result<Option<Native
         return Ok(None);
     };
 
+    if delivery_config_path.exists() {
+        bail!(
+            "{} is no longer accepted in source projects. Move native delivery metadata into capsule.toml [artifact] and [finalize].",
+            delivery_config_path.display()
+        );
+    }
+
     let canonical_config = detect_native_manifest_contract(target)?;
     let inline_config = load_inline_delivery_config(&manifest_raw, &manifest_path)?;
-    let explicit_config = match (delivery_config_path.exists(), inline_config) {
-        (true, Some(inline)) => {
-            let existing = load_delivery_config(&delivery_config_path)?;
-            ensure_delivery_config_compatible(&existing, &inline, &delivery_config_path)?;
-            existing
-        }
-        (true, None) => load_delivery_config(&delivery_config_path)?,
-        (false, Some(inline)) => inline,
-        (false, None) => match canonical_config.clone() {
+    let has_explicit_delivery_config = inline_config.is_some();
+    let config = match inline_config {
+        Some(inline) => inline,
+        None => match canonical_config.clone() {
             Some(config) => config,
             None => return Ok(None),
         },
     };
     if let Some(canonical) = &canonical_config {
-        ensure_delivery_config_matches_context(&explicit_config, canonical, &manifest_path)?;
+        ensure_delivery_config_matches_context(&config, canonical, &manifest_path)?;
     }
-    let config_path = if delivery_config_path.exists() {
-        Some(delivery_config_path)
-    } else {
-        None
-    };
-    let config = explicit_config;
 
     let input_relative = PathBuf::from(config.artifact.input.trim());
     validate_relative_input_path(&input_relative)?;
@@ -409,7 +405,7 @@ pub(crate) fn detect_build_strategy(manifest_dir: &Path) -> Result<Option<Native
     let build_command = detect_native_build_command(
         target,
         manifest_dir,
-        config_path.is_some() || canonical_config.is_none(),
+        has_explicit_delivery_config || canonical_config.is_none(),
     )?;
     if build_command.is_none() {
         validate_native_bundle_directory(&source_app_path)?;
@@ -418,7 +414,7 @@ pub(crate) fn detect_build_strategy(manifest_dir: &Path) -> Result<Option<Native
     Ok(Some(NativeBuildPlan {
         manifest_path,
         manifest_dir: manifest_dir.to_path_buf(),
-        delivery_config_path: config_path,
+        delivery_config_path: None,
         staged_delivery_config_toml: serialize_delivery_config(&config)?,
         source_app_path,
         input_relative,
@@ -859,26 +855,6 @@ fn detect_native_build_command(
         args: target.cmd.clone(),
         working_dir,
     }))
-}
-
-fn ensure_delivery_config_compatible(
-    actual: &DeliveryConfig,
-    expected: &DeliveryConfig,
-    path: &Path,
-) -> Result<()> {
-    if actual.artifact.framework != expected.artifact.framework
-        || actual.artifact.stage != expected.artifact.stage
-        || actual.artifact.target != expected.artifact.target
-        || actual.artifact.input != expected.artifact.input
-        || actual.finalize.tool != expected.finalize.tool
-        || actual.finalize.args != expected.finalize.args
-    {
-        bail!(
-            "{} conflicts with capsule.toml native target contract. Update capsule.toml or remove the compatibility sidecar.",
-            path.display()
-        );
-    }
-    Ok(())
 }
 
 fn ensure_delivery_config_matches_context(
