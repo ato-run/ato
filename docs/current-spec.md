@@ -82,13 +82,21 @@ Producer flow (publish):
 
 Common phase semantics:
 
-- Install means an artifact is expanded into a concrete directory target so later phases operate on an installed environment; in consumer flow this can mean fetching then unpacking, and in producer flow this means unpacking the verified artifact into a dry-run sandbox, not local CAS registration
+- Install means a clean artifact installation into a concrete directory target so later phases operate on an installed environment; consumer and producer flows share this same semantic contract, and only the destination context differs. In consumer flow the installed environment becomes the execution root, while in producer flow the installed environment becomes the dry-run validation root. Install does not mean local CAS registration.
 - Prepare means source diagnosis, shadow workspace construction, auto-provisioning, and synthetic environment setup needed to continue fail-closed flows
 - Build means JIT or packaging-time build work required before verification or terminal execution/distribution
 - Verify means manifest, signature, hash, lockfile, and policy validation before side effects
 - Dry-run means side-effect-free preflight simulation, permission checks, and registry/runtime readiness checks
 - Execute means launching the sandboxed or policy-approved runtime process
 - Publish means deploy the verified artifact to the selected destination such as Local CAS, Store, or a remote registry
+
+Failure and abortability rules:
+
+- every phase is fail-closed and must either commit a complete result or leave no partial state behind
+- temporary directories, extracted payloads, sidecars, launched helper processes, and synthetic workspaces created by Install, Prepare, Build, Verify, or Dry-run must be registered for cleanup before the phase can report success
+- on phase failure, ato runs compensating cleanup for all uncommitted resources created in the current pipeline attempt and returns to a safe baseline state before surfacing the final error
+- cleanup failure does not mask the primary error; the primary error remains authoritative and cleanup failures are appended as secondary causes or diagnostics
+- failure handling is phase-aware: manifest or inference failures are classified separately from source/build/runtime failures so remediation can be targeted
 
 Public CLI phase-selection rules:
 
@@ -713,11 +721,23 @@ Service fields currently supported:
 Current repository guidance:
 
 - use a single web/deno target with top-level [services] for dynamic multi-service apps
-- ato starts services in DAG order
-- ato waits on readiness probes
+- ato uses barrier synchronization for pre-execute phases across all services in a services graph
+- ato does not enter service execution until every service selected for the graph has successfully completed Install, Prepare, Build, Verify, and Dry-run
+- ato starts services in DAG order only after the graph as a whole has crossed the Execute boundary
+- ato waits on readiness probes before releasing dependent services
 - ato prefixes logs
 - ato fail-fast stops all services when one exits
 - services.main is required by the documented services-mode recipe
+
+Services orchestration rules:
+
+- the services graph is validated as a DAG before execution; dependency cycles are rejected before any service enters Execute
+- pre-execute phases are evaluated per service but synchronized by a graph-wide barrier at each phase boundary
+- if any service fails in Install, Prepare, Build, Verify, or Dry-run, ato aborts the entire graph, cleans up all staged resources for every service in the current attempt, and does not start any remaining services
+- Execute is supervisor-driven: root services start first, then dependent services are released when their depends_on predecessors satisfy readiness_probe requirements
+- readiness failure is treated as a service execution failure and triggers fail-fast shutdown of the whole graph
+- if one running service exits unexpectedly, ato terminates the remaining services, collects exit causes, and reports the graph as failed
+- there is no mixed-phase steady state where one service remains in Build or Verify while another has already been admitted into Execute
 
 ## 5.6 State and Storage
 
@@ -864,8 +884,7 @@ Native delivery is experimental.
 Current product stance:
 
 - primary user surface remains build, publish, and install
-- capsule.toml is canonical
-- ato.delivery.toml is accepted as a compatibility sidecar
+- capsule.toml is the only supported authored source manifest for native delivery; ato.delivery.toml remains artifact-internal metadata
 - local finalize currently targets macOS darwin/arm64 with codesign
 
 Current canonical native target form:
@@ -962,10 +981,14 @@ Current envelope shape:
     "code": "E999",
     "name": "internal_error",
     "phase": "internal",
+    "classification": "internal",
     "message": "...",
     "hint": null,
     "retryable": true,
     "interactive_resolution": false,
+    "cleanup_status": "completed",
+    "cleanup_actions": [],
+    "manifest_suggestion": null,
     "path": null,
     "field": null,
     "details": null,
@@ -982,6 +1005,21 @@ Current diagnostic phase families:
 - execution
 - internal
 
+Current classification families:
+
+- manifest for capsule.toml shape, missing fields, invalid phase inputs, and other declarative contract failures
+- source for build scripts, source tree contents, compiler failures, and runtime entrypoint problems attributable to the user's code or assets
+- provisioning for installation, fetch, staging, registry handoff, or environment preparation failures
+- execution for process launch, readiness, supervisor, and runtime exit failures after admission into Execute
+- internal for unexpected ato failures
+
+Current cleanup fields:
+
+- cleanup_status reports whether compensating cleanup completed, partially completed, was skipped because no resources were created, or failed while handling the primary error
+- cleanup_actions is an ordered list of attempted cleanup operations such as remove_temp_dir, stop_sidecar, delete_extract_root, revert_projection, or release_reserved_port
+- manifest_suggestion carries a machine-readable fix proposal when ato determines the failure is a manifest problem with a concrete remediation
+- interactive_resolution remains the switch for whether ato can offer or apply the suggestion interactively
+
 Current diagnostic code families include:
 
 - E001-E003 for manifest issues
@@ -989,6 +1027,13 @@ Current diagnostic code families include:
 - E201-E211 for provisioning and install issues
 - E301-E305 for execution issues
 - E999 for internal errors
+
+Current remediation contract:
+
+- manifest-classified failures should include hint text whenever ato can point to a concrete field, declaration, or missing value
+- when ato can safely suggest a declarative fix, manifest_suggestion should identify the target path or field plus the proposed edit
+- source-classified failures must not be mislabeled as manifest failures; they can include hints, but ato should not offer automatic manifest edits unless the root cause is declarative
+- the primary error code always describes the root failure; cleanup problems are attached as causes and do not replace the root error code
 
 ## 11.2 install JSON Output
 
@@ -1070,7 +1115,7 @@ Current compatibility and deprecation status:
 - web target public is deprecated and rejected
 - entrypoint = "ato-entry.ts" in web services mode is deprecated and rejected
 - --legacy-full-publish is deprecated and scheduled for removal in the next major release
-- ato.delivery.toml remains accepted as compatibility metadata, not as canonical source of truth
+- source-project ato.delivery.toml is rejected; only artifact-internal ato.delivery.toml metadata remains
 
 (Removed in recent versions: `SKILL.md` execution support.)
 

@@ -2,13 +2,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tracing::debug;
 
+#[cfg(test)]
 pub(crate) use crate::application::pipeline::hourglass::HourglassPhase as RunPhaseBoundary;
 use crate::install::support::{enforce_sandbox_mode_flags, execute_run_command};
+#[cfg(test)]
 pub(crate) use crate::install::support::{LocalRunManifestPreparationOutcome, ResolvedRunTarget};
 use crate::reporters;
-use crate::{install, CompatibilityFallbackBackend, EnforcementMode, RunAgentMode};
+use crate::{CompatibilityFallbackBackend, EnforcementMode, RunAgentMode};
 
 pub(crate) struct RunLikeCommandArgs {
     pub(crate) path: PathBuf,
@@ -38,20 +39,6 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
         eprintln!("{warning}");
     }
 
-    let rt = tokio::runtime::Runtime::new()?;
-
-    let install_phase = rt.block_on(execute_run_install_phase(
-        args.path,
-        args.yes,
-        args.keep_failed_artifacts,
-        args.allow_unverified,
-        args.registry.as_deref(),
-        args.reporter.clone(),
-    ))?;
-    if install_phase.should_stop_after_install {
-        return Ok(());
-    }
-
     let sandbox_requested =
         args.sandbox_mode || args.unsafe_mode_legacy || args.unsafe_bypass_sandbox_legacy;
     let effective_enforcement = enforce_sandbox_mode_flags(
@@ -62,11 +49,12 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
         args.reporter.clone(),
     )?;
     execute_run_command(
-        install_phase.resolved_target.path,
+        args.path,
         args.target,
         args.watch,
         args.background,
         args.nacelle,
+        args.registry,
         effective_enforcement,
         sandbox_requested,
         args.dangerously_skip_permissions,
@@ -75,50 +63,13 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
             .map(str::to_string),
         args.yes,
         args.agent_mode,
-        install_phase.resolved_target.agent_local_root,
+        None,
+        args.keep_failed_artifacts,
+        args.allow_unverified,
         args.state,
         args.inject,
         args.reporter,
     )
-}
-
-struct RunInstallPhaseResult {
-    resolved_target: ResolvedRunTarget,
-    should_stop_after_install: bool,
-}
-
-async fn execute_run_install_phase(
-    path: PathBuf,
-    yes: bool,
-    keep_failed_artifacts: bool,
-    allow_unverified: bool,
-    registry: Option<&str>,
-    reporter: Arc<reporters::CliReporter>,
-) -> Result<RunInstallPhaseResult> {
-    debug!(
-        phase = RunPhaseBoundary::Install.as_str(),
-        "Running run pipeline phase"
-    );
-
-    let resolved_target = install::support::resolve_run_target_or_install(
-        path,
-        yes,
-        keep_failed_artifacts,
-        allow_unverified,
-        registry,
-        reporter.clone(),
-    )
-    .await?;
-    let manifest_outcome =
-        install::support::ensure_local_manifest_ready_for_run(&resolved_target, yes, reporter)?;
-
-    Ok(RunInstallPhaseResult {
-        resolved_target,
-        should_stop_after_install: matches!(
-            manifest_outcome,
-            LocalRunManifestPreparationOutcome::CreatedManualManifest
-        ),
-    })
 }
 
 #[cfg(test)]
