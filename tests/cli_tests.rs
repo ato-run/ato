@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 
 use assert_cmd::Command;
+use capsule_core::ato_lock::{recompute_lock_id, to_pretty_json, AtoLock};
 use predicates::prelude::*;
 use tempfile::tempdir;
 
@@ -51,6 +52,24 @@ port = 4173
         format!("<!doctype html><title>{name}</title>"),
     )
     .expect("write html");
+}
+
+fn write_canonical_ato_lock(dir: &Path) {
+    let mut lock = AtoLock::default();
+    lock.resolution.entries.insert(
+        "runtime".to_string(),
+        serde_json::json!({"kind": "web", "driver": "static"}),
+    );
+    lock.contract.entries.insert(
+        "process".to_string(),
+        serde_json::json!({"driver": "static", "entrypoint": "dist"}),
+    );
+    recompute_lock_id(&mut lock).expect("recompute lock id");
+    fs::write(
+        dir.join("ato.lock.json"),
+        to_pretty_json(&lock).expect("serialize canonical lock"),
+    )
+    .expect("write canonical lock");
 }
 
 fn build_capsule_for_test(project_dir: &Path, name: &str) -> PathBuf {
@@ -257,6 +276,79 @@ fn test_cli_help() {
         .stdout(predicate::str::contains("finalize"))
         .stdout(predicate::str::contains("project"))
         .stdout(predicate::str::contains("unproject"));
+}
+
+#[test]
+fn test_validate_prefers_canonical_lock_over_manifest() {
+    let tmp = tempdir().unwrap();
+    write_static_publish_project(tmp.path(), "validate-demo", "0.1.0");
+    write_canonical_ato_lock(tmp.path());
+
+    let output = Command::cargo_bin("ato")
+        .unwrap()
+        .current_dir(tmp.path())
+        .args(["validate", ".", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let canonical_lock_path = fs::canonicalize(tmp.path().join("ato.lock.json")).unwrap();
+    assert_eq!(value["authoritative_input"], "canonical_lock");
+    assert_eq!(
+        value["canonical_lock_path"],
+        canonical_lock_path.display().to_string()
+    );
+    assert!(value.get("manifest_path").is_none());
+}
+
+#[test]
+fn test_build_rejects_existing_canonical_lock_input() {
+    let tmp = tempdir().unwrap();
+    write_static_publish_project(tmp.path(), "build-demo", "0.1.0");
+    write_canonical_ato_lock(tmp.path());
+
+    let output = Command::cargo_bin("ato")
+        .unwrap()
+        .current_dir(tmp.path())
+        .args(["build", "."])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("ato.lock.json detected at"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_init_rejects_existing_canonical_lock_input() {
+    let tmp = tempdir().unwrap();
+    write_canonical_ato_lock(tmp.path());
+
+    let output = Command::cargo_bin("ato")
+        .unwrap()
+        .current_dir(tmp.path())
+        .arg("init")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("ato.lock.json already exists"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

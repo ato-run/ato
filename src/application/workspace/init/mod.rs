@@ -1,6 +1,9 @@
 //! Project init helpers for prompt generation and interactive manifest creation.
 
 use anyhow::{Context, Result};
+use capsule_core::input_resolver::{
+    resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
+};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -37,18 +40,37 @@ pub fn execute_manifest_init(
         .canonicalize()
         .context("Failed to resolve project directory")?;
 
+    match resolve_authoritative_input(&project_dir, ResolveInputOptions::default()) {
+        Ok(ResolvedInput::CanonicalLock { canonical, .. }) => {
+            anyhow::bail!(
+                "{} already exists at {}. `ato init` durable lock materialization is not implemented yet.",
+                capsule_core::input_resolver::ATO_LOCK_FILE_NAME,
+                canonical.path.display()
+            );
+        }
+        Ok(ResolvedInput::CompatibilityProject { project, .. }) => {
+            anyhow::bail!(
+                "capsule.toml already exists at {}. Use the existing compatibility project input instead of re-initializing.",
+                project.manifest.path.display()
+            );
+        }
+        Ok(ResolvedInput::SourceOnly { .. }) => {}
+        Err(error)
+            if error
+                .to_string()
+                .contains("is not an authoritative command-entry input") =>
+        {
+            return Err(error.into());
+        }
+        Err(_) => {}
+    }
+
     futures::executor::block_on(reporter.notify(format!(
         "🔍 Initializing capsule in: {}\n",
         project_dir.display()
     )))?;
 
     let manifest_path = project_dir.join("capsule.toml");
-    if manifest_path.exists() {
-        anyhow::bail!(
-            "capsule.toml already exists!\n\
-            Use 'ato dev --manifest capsule.toml' to run, or delete the file to re-initialize."
-        );
-    }
 
     let detected = detect::detect_project(&project_dir)?;
     futures::executor::block_on(reporter.notify(format!(
@@ -148,13 +170,32 @@ pub fn write_manual_manifest_stub(
         .canonicalize()
         .context("Failed to resolve project directory")?;
 
-    let manifest_path = project_dir.join("capsule.toml");
-    if manifest_path.exists() {
-        anyhow::bail!(
-            "capsule.toml already exists!\n\
-            Delete or move the file before creating a manual starter manifest."
-        );
+    match resolve_authoritative_input(&project_dir, ResolveInputOptions::default()) {
+        Ok(ResolvedInput::CanonicalLock { canonical, .. }) => {
+            anyhow::bail!(
+                "{} already exists at {}. `ato init` manual starter generation is not available on top of canonical lock input.",
+                capsule_core::input_resolver::ATO_LOCK_FILE_NAME,
+                canonical.path.display()
+            );
+        }
+        Ok(ResolvedInput::CompatibilityProject { project, .. }) => {
+            anyhow::bail!(
+                "capsule.toml already exists at {}. Delete or move the file before creating a manual starter manifest.",
+                project.manifest.path.display()
+            );
+        }
+        Ok(ResolvedInput::SourceOnly { .. }) => {}
+        Err(error)
+            if error
+                .to_string()
+                .contains("is not an authoritative command-entry input") =>
+        {
+            return Err(error.into());
+        }
+        Err(_) => {}
     }
+
+    let manifest_path = project_dir.join("capsule.toml");
 
     let detected = detect::detect_project(&project_dir)?;
     let manifest_content = recipe::generate_manual_manifest_stub(&detected.name);
