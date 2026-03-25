@@ -30,6 +30,7 @@ use super::launch_context::RuntimeLaunchContext;
 use super::source::ExecuteMode;
 use super::target_runner::{self, TargetLaunchOptions};
 use crate::application::pipeline::cleanup::{CleanupScope, PipelineAttemptContext};
+use crate::application::pipeline::phases::run::PreparedRunContext;
 use crate::application::services::{
     ServiceGraphPlan, ServicePhaseCoordinator, ServicePhaseRuntime,
 };
@@ -430,8 +431,19 @@ async fn launch_service<C: OciRuntimeClient>(
                 ..plan.clone()
             };
             let service_launch_ctx = launch_ctx.clone().with_injected_env(env.clone());
+            let service_prepared = PreparedRunContext {
+                raw_manifest: service_plan.manifest.clone(),
+                validation_mode: if options.target_launch_options().preview_mode {
+                    capsule_core::types::ValidationMode::Preview
+                } else {
+                    capsule_core::types::ValidationMode::Strict
+                },
+                engine_override_declared: service_plan.manifest.get("engine").is_some(),
+                compatibility_legacy_lock: None,
+            };
             let prepared = target_runner::prepare_target_execution(
                 &service_plan,
+                &service_prepared,
                 service_launch_ctx,
                 &options.target_launch_options(),
             )?;
@@ -453,6 +465,7 @@ async fn launch_service<C: OciRuntimeClient>(
                         let nacelle = crate::commands::run::preflight_native_sandbox(
                             options.nacelle.clone(),
                             managed_plan,
+                            &service_prepared,
                             reporter,
                         )?;
                         crate::executors::source::execute(

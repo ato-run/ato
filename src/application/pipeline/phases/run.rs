@@ -5,14 +5,17 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use capsule_core::ato_lock::AtoLock;
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::execution_plan::guard::ExecutorKind;
 use capsule_core::lockfile::{
-    manifest_external_capsule_dependencies, parse_lockfile_text, resolve_existing_lockfile_path,
-    verify_lockfile_external_dependencies, CAPSULE_LOCK_FILE_NAME,
+    manifest_external_capsule_dependencies, verify_lockfile_external_dependencies, CapsuleLock,
+    CAPSULE_LOCK_FILE_NAME,
 };
+use capsule_core::manifest::LoadedManifest;
 use capsule_core::types::{CapsuleManifest, CapsuleType, StateDurability};
 use capsule_core::CapsuleReporter;
+use sha2::{Digest, Sha256};
 use tracing::debug;
 
 use crate::application::engine::install::support::{
@@ -43,10 +46,47 @@ pub(crate) trait ConsumerRunProgress {
     fn skip(&self, phase: HourglassPhase, detail: &str);
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunAuthoritativeInputKind {
+    CanonicalLock,
+    CompatibilityCompiledDraft,
+    SourceOnly,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompatibilityLegacyLockContext {
+    pub(crate) manifest_path: PathBuf,
+    pub(crate) path: PathBuf,
+    pub(crate) lock: CapsuleLock,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RunAuthoritativeInput {
+    pub(crate) kind: RunAuthoritativeInputKind,
+    pub(crate) lock: AtoLock,
+    pub(crate) lock_path: PathBuf,
+    pub(crate) sidecar_path: PathBuf,
+    pub(crate) bridge_manifest_path: PathBuf,
+    pub(crate) bridge_manifest_sha256: String,
+    pub(crate) compatibility_legacy_lock: Option<CompatibilityLegacyLockContext>,
+}
+
+// PreparedRunContext carries the already-fixed bridge artifact and compatibility-scoped
+// validation context. Downstream phases may consume this data, but must not reinterpret
+// manifest semantics or discover new authority from disk.
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedRunContext {
+    pub(crate) raw_manifest: toml::Value,
+    pub(crate) validation_mode: capsule_core::types::ValidationMode,
+    pub(crate) engine_override_declared: bool,
+    pub(crate) compatibility_legacy_lock: Option<CompatibilityLegacyLockContext>,
+}
+
 #[derive(Clone)]
 pub(crate) struct ConsumerRunRequest {
     pub(crate) target: PathBuf,
     pub(crate) target_label: Option<String>,
+    pub(crate) authoritative_input: Option<RunAuthoritativeInput>,
     pub(crate) background: bool,
     pub(crate) nacelle: Option<PathBuf>,
     pub(crate) enforcement: String,
@@ -75,6 +115,7 @@ pub(crate) struct RunPipelineState {
     pub(crate) preview_session: Option<preview::PreviewSession>,
     pub(crate) preview_mode: bool,
     pub(crate) use_progressive_ui: bool,
+    pub(crate) prepared: PreparedRunContext,
     pub(crate) decision: capsule_core::router::RuntimeDecision,
     pub(crate) launch_ctx: crate::executors::launch_context::RuntimeLaunchContext,
     pub(crate) external_capsules: Option<crate::external_capsule::ExternalCapsuleGuard>,
@@ -131,6 +172,59 @@ where
     })
 }
 
+fn run_validation_mode(preview_mode: bool) -> capsule_core::types::ValidationMode {
+    if preview_mode {
+        capsule_core::types::ValidationMode::Preview
+    } else {
+        capsule_core::types::ValidationMode::Strict
+    }
+}
+
+fn prepare_run_context(
+    authoritative_input: Option<&RunAuthoritativeInput>,
+    loaded_manifest: &LoadedManifest,
+    validation_mode: capsule_core::types::ValidationMode,
+) -> PreparedRunContext {
+    PreparedRunContext {
+        raw_manifest: loaded_manifest.raw.clone(),
+        validation_mode,
+        engine_override_declared: loaded_manifest.raw.get("engine").is_some(),
+        compatibility_legacy_lock: authoritative_input
+            .and_then(|input| input.compatibility_legacy_lock.clone()),
+    }
+}
+
+fn validate_authoritative_bridge(
+    authoritative_input: Option<&RunAuthoritativeInput>,
+    manifest_path: &Path,
+    loaded_manifest: &LoadedManifest,
+) -> Result<()> {
+    let Some(authoritative_input) = authoritative_input else {
+        return Ok(());
+    };
+
+    if manifest_path != authoritative_input.bridge_manifest_path {
+        return Ok(());
+    }
+
+    let actual_sha256 = sha256_hex(loaded_manifest.raw_text.as_bytes());
+    if actual_sha256 == authoritative_input.bridge_manifest_sha256 {
+        return Ok(());
+    }
+
+    anyhow::bail!(AtoExecutionError::execution_contract_invalid(
+        "generated manifest bridge no longer matches the authoritative lock-derived run request",
+        Some("bridge_manifest"),
+        None,
+    ));
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
 pub(crate) async fn run_prepare_phase<P>(
     request: &ConsumerRunRequest,
     progress: &P,
@@ -159,15 +253,22 @@ where
         crate::progressive_ui::show_run_intro(&source_label)?;
     }
 
-    let manifest = if preview_mode {
-        capsule_core::manifest::load_manifest_with_validation_mode(
-            &manifest_path,
-            capsule_core::types::ValidationMode::Preview,
-        )?
-        .model
-    } else {
-        CapsuleManifest::load_from_file(&manifest_path)?
-    };
+    let validation_mode = run_validation_mode(preview_mode);
+    let loaded_manifest = capsule_core::manifest::load_manifest_with_validation_mode(
+        &manifest_path,
+        validation_mode,
+    )?;
+    validate_authoritative_bridge(
+        request.authoritative_input.as_ref(),
+        &manifest_path,
+        &loaded_manifest,
+    )?;
+    let mut prepared = prepare_run_context(
+        request.authoritative_input.as_ref(),
+        &loaded_manifest,
+        validation_mode,
+    );
+    let manifest = loaded_manifest.model.clone();
     if manifest.schema_version.trim() == "0.3" && manifest.capsule_type == CapsuleType::Library {
         anyhow::bail!("schema_version=0.3 type=library package cannot be started with `ato run`");
     }
@@ -180,11 +281,7 @@ where
             router::ExecutionProfile::Dev,
             request.target_label.as_deref(),
             state_source_overrides,
-            if preview_mode {
-                capsule_core::types::ValidationMode::Preview
-            } else {
-                capsule_core::types::ValidationMode::Strict
-            },
+            validation_mode,
         )?;
     if decision
         .plan
@@ -203,23 +300,21 @@ where
         if request.background {
             anyhow::bail!("external capsule dependencies do not support --background yet");
         }
-        let lockfile_path = manifest_path
-            .parent()
-            .and_then(resolve_existing_lockfile_path)
-            .ok_or_else(|| {
+        let compatibility_legacy_lock =
+            prepared.compatibility_legacy_lock.as_ref().ok_or_else(|| {
                 AtoExecutionError::lock_incomplete(
                     "external capsule dependencies require capsule.lock.json",
                     Some(CAPSULE_LOCK_FILE_NAME),
                 )
             })?;
-        let raw = std::fs::read_to_string(&lockfile_path)
-            .with_context(|| format!("Failed to read {}", lockfile_path.display()))?;
-        let lockfile = parse_lockfile_text(&raw, &lockfile_path)?;
-        verify_lockfile_external_dependencies(&decision.plan.manifest, &lockfile)?;
+        verify_lockfile_external_dependencies(
+            &decision.plan.manifest,
+            &compatibility_legacy_lock.lock,
+        )?;
         external_capsules = Some(
             crate::external_capsule::start_external_capsules(
                 &decision.plan,
-                &lockfile,
+                &compatibility_legacy_lock.lock,
                 &request.inject_bindings,
                 request.reporter.clone(),
                 &crate::external_capsule::ExternalCapsuleOptions {
@@ -239,10 +334,11 @@ where
     if let Some(external_capsules) = external_capsules.as_ref() {
         merged_injected_env.extend(external_capsules.caller_env().clone());
     }
-    let mut launch_ctx = target_runner::resolve_launch_context(&decision.plan, &request.reporter)
-        .await?
-        .with_injected_env(merged_injected_env)
-        .with_injected_mounts(injected_data.mounts);
+    let mut launch_ctx =
+        target_runner::resolve_launch_context(&decision.plan, &prepared, &request.reporter)
+            .await?
+            .with_injected_env(merged_injected_env)
+            .with_injected_mounts(injected_data.mounts);
     let mut agent_attempted = false;
 
     let provisioning_outcome = provisioner::run_auto_provisioning_phase(
@@ -290,7 +386,7 @@ where
                     "Auto-provisioning: rerouting execution through the shadow workspace",
                 )?;
             }
-            (decision, launch_ctx) = reroute_auto_provisioned_execution(
+            (decision, launch_ctx, prepared) = reroute_auto_provisioned_execution(
                 decision,
                 launch_ctx,
                 request.reporter.clone(),
@@ -301,21 +397,23 @@ where
         }
     }
 
-    if let Some((rerouted_decision, rerouted_launch_ctx)) = maybe_run_agent_setup(
-        request,
-        &decision,
-        &launch_ctx,
-        preview_mode,
-        use_progressive_ui,
-        &mut agent_attempted,
-        "force",
-        None,
-        matches!(request.agent_mode, RunAgentMode::Force),
-    )
-    .await?
+    if let Some((rerouted_decision, rerouted_launch_ctx, rerouted_prepared)) =
+        maybe_run_agent_setup(
+            request,
+            &decision,
+            &launch_ctx,
+            preview_mode,
+            use_progressive_ui,
+            &mut agent_attempted,
+            "force",
+            None,
+            matches!(request.agent_mode, RunAgentMode::Force),
+        )
+        .await?
     {
         decision = rerouted_decision;
         launch_ctx = rerouted_launch_ctx;
+        prepared = rerouted_prepared;
     }
 
     progress.ok(
@@ -327,6 +425,7 @@ where
         preview_session,
         preview_mode,
         use_progressive_ui,
+        prepared,
         decision,
         launch_ctx,
         external_capsules,
@@ -356,26 +455,28 @@ where
     )
     .await
     {
-        let Some((rerouted_decision, rerouted_launch_ctx)) = maybe_run_agent_setup(
-            request,
-            &state.decision,
-            &state.launch_ctx,
-            state.preview_mode,
-            state.use_progressive_ui,
-            &mut state.agent_attempted,
-            "run_v03_lifecycle_steps",
-            crate::application::agent::AgentFailureClassifier::classify(
-                &error,
+        let Some((rerouted_decision, rerouted_launch_ctx, rerouted_prepared)) =
+            maybe_run_agent_setup(
+                request,
+                &state.decision,
+                &state.launch_ctx,
+                state.preview_mode,
+                state.use_progressive_ui,
+                &mut state.agent_attempted,
                 "run_v03_lifecycle_steps",
-            ),
-            false,
-        )
-        .await?
+                crate::application::agent::AgentFailureClassifier::classify(
+                    &error,
+                    "run_v03_lifecycle_steps",
+                ),
+                false,
+            )
+            .await?
         else {
             return Err(error);
         };
         state.decision = rerouted_decision;
         state.launch_ctx = rerouted_launch_ctx;
+        state.prepared = rerouted_prepared;
         crate::commands::run::run_v03_lifecycle_steps(
             &state.decision.plan,
             &request.reporter,
@@ -423,33 +524,37 @@ where
 
     let prepared = match target_runner::prepare_target_execution(
         &state.decision.plan,
+        &state.prepared,
         state.launch_ctx.clone(),
         &build_target_launch_options(request, state.preview_mode),
     ) {
         Ok(prepared) => prepared,
         Err(error) => {
-            let Some((rerouted_decision, rerouted_launch_ctx)) = maybe_run_agent_setup(
-                request,
-                &state.decision,
-                &state.launch_ctx,
-                state.preview_mode,
-                state.use_progressive_ui,
-                &mut state.agent_attempted,
-                "prepare_target_execution",
-                crate::application::agent::AgentFailureClassifier::classify(
-                    &error,
+            let Some((rerouted_decision, rerouted_launch_ctx, rerouted_prepared)) =
+                maybe_run_agent_setup(
+                    request,
+                    &state.decision,
+                    &state.launch_ctx,
+                    state.preview_mode,
+                    state.use_progressive_ui,
+                    &mut state.agent_attempted,
                     "prepare_target_execution",
-                ),
-                false,
-            )
-            .await?
+                    crate::application::agent::AgentFailureClassifier::classify(
+                        &error,
+                        "prepare_target_execution",
+                    ),
+                    false,
+                )
+                .await?
             else {
                 return Err(error);
             };
             state.decision = rerouted_decision;
             state.launch_ctx = rerouted_launch_ctx;
+            state.prepared = rerouted_prepared;
             target_runner::prepare_target_execution(
                 &state.decision.plan,
+                &state.prepared,
                 state.launch_ctx.clone(),
                 &build_target_launch_options(request, state.preview_mode),
             )?
@@ -522,6 +627,7 @@ where
         state.native_nacelle = Some(crate::commands::run::preflight_native_sandbox(
             request.nacelle.clone(),
             &state.decision.plan,
+            &state.prepared,
             &request.reporter,
         )?);
     }
@@ -539,6 +645,7 @@ pub(crate) trait ConsumerRunExecuteHooks {
         &self,
         nacelle_override: Option<PathBuf>,
         plan: &capsule_core::router::ManifestData,
+        prepared: &PreparedRunContext,
         reporter: &Arc<CliReporter>,
     ) -> Result<PathBuf>;
 
@@ -609,6 +716,7 @@ where
         preview_session: _,
         preview_mode,
         use_progressive_ui,
+        prepared,
         decision,
         launch_ctx,
         mut external_capsules,
@@ -890,6 +998,7 @@ where
                     None => hooks.preflight_native_sandbox(
                         request.nacelle.clone(),
                         &decision.plan,
+                        &prepared,
                         &request.reporter,
                     )?,
                 };
@@ -1112,25 +1221,37 @@ pub(crate) async fn reroute_auto_provisioned_execution(
 ) -> Result<(
     capsule_core::router::RuntimeDecision,
     crate::executors::launch_context::RuntimeLaunchContext,
+    PreparedRunContext,
 )> {
+    let validation_mode = run_validation_mode(preview_mode);
+    let loaded_manifest = capsule_core::manifest::load_manifest_with_validation_mode(
+        shadow_manifest_path,
+        validation_mode,
+    )?;
     let rerouted_decision =
         capsule_core::router::route_manifest_with_state_overrides_and_validation_mode(
             shadow_manifest_path,
             router::ExecutionProfile::Dev,
             Some(decision.plan.selected_target_label()),
             decision.plan.state_source_overrides.clone(),
-            if preview_mode {
-                capsule_core::types::ValidationMode::Preview
-            } else {
-                capsule_core::types::ValidationMode::Strict
-            },
+            validation_mode,
         )?;
-    let rerouted_launch_ctx =
-        target_runner::resolve_launch_context(&rerouted_decision.plan, &reporter)
-            .await?
-            .with_injected_env(launch_ctx.merged_env())
-            .with_injected_mounts(launch_ctx.injected_mounts().to_vec());
-    Ok((rerouted_decision, rerouted_launch_ctx))
+    let engine_override_declared = loaded_manifest.raw.get("engine").is_some();
+    let rerouted_prepared = PreparedRunContext {
+        raw_manifest: loaded_manifest.raw,
+        validation_mode,
+        engine_override_declared,
+        compatibility_legacy_lock: None,
+    };
+    let rerouted_launch_ctx = target_runner::resolve_launch_context(
+        &rerouted_decision.plan,
+        &rerouted_prepared,
+        &reporter,
+    )
+    .await?
+    .with_injected_env(launch_ctx.merged_env())
+    .with_injected_mounts(launch_ctx.injected_mounts().to_vec());
+    Ok((rerouted_decision, rerouted_launch_ctx, rerouted_prepared))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1148,6 +1269,7 @@ pub(crate) async fn maybe_run_agent_setup(
     Option<(
         capsule_core::router::RuntimeDecision,
         crate::executors::launch_context::RuntimeLaunchContext,
+        PreparedRunContext,
     )>,
 > {
     let agent_enabled = request.agent_local_root.is_some()
@@ -1343,5 +1465,70 @@ fn build_target_launch_options(
         assume_yes: request.assume_yes,
         preview_mode,
         defer_consent: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_authoritative_bridge, RunAuthoritativeInput, RunAuthoritativeInputKind};
+    use capsule_core::ato_lock::AtoLock;
+    use tempfile::tempdir;
+
+    #[test]
+    fn generated_bridge_hash_mismatch_fails_closed() {
+        let dir = tempdir().expect("tempdir");
+        let manifest_path = dir.path().join(".ato.run.generated.capsule.toml");
+        std::fs::write(
+            &manifest_path,
+            r#"schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+entrypoint = "main.ts"
+"#,
+        )
+        .expect("write manifest");
+        let loaded_manifest = capsule_core::manifest::load_manifest_with_validation_mode(
+            &manifest_path,
+            capsule_core::types::ValidationMode::Strict,
+        )
+        .expect("load manifest");
+
+        let authoritative_input = RunAuthoritativeInput {
+            kind: RunAuthoritativeInputKind::SourceOnly,
+            lock: AtoLock::default(),
+            lock_path: dir.path().join("ato.lock.json"),
+            sidecar_path: dir.path().join("provenance.json"),
+            bridge_manifest_path: manifest_path.clone(),
+            bridge_manifest_sha256: "deadbeef".to_string(),
+            compatibility_legacy_lock: None,
+        };
+
+        assert_eq!(
+            authoritative_input.kind,
+            RunAuthoritativeInputKind::SourceOnly
+        );
+        assert_eq!(
+            authoritative_input.lock_path,
+            dir.path().join("ato.lock.json")
+        );
+        assert_eq!(
+            authoritative_input.sidecar_path,
+            dir.path().join("provenance.json")
+        );
+        assert!(authoritative_input.lock.contract.entries.is_empty());
+
+        let error = validate_authoritative_bridge(
+            Some(&authoritative_input),
+            &manifest_path,
+            &loaded_manifest,
+        )
+        .expect_err("bridge mismatch must fail closed");
+
+        assert!(error.to_string().contains("generated manifest bridge"));
     }
 }
