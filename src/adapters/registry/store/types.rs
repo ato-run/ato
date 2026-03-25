@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub struct RegistryReleaseRecord {
     pub version: String,
     pub manifest_hash: String,
+    pub lock_id: Option<String>,
+    pub closure_digest: Option<String>,
     pub file_name: String,
     pub sha256: String,
     pub blake3: String,
@@ -18,6 +20,10 @@ pub struct RegistryVersionResolveRecord {
     pub scoped_id: String,
     pub version: String,
     pub manifest_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closure_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub yanked_at: Option<String>,
 }

@@ -7,6 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use capsule_core::ato_lock::{recompute_lock_id, to_pretty_json, AtoLock};
 use capsule_core::packers::payload::compute_manifest_hash_without_signatures;
 use capsule_core::types::CapsuleManifest;
 use tempfile::TempDir;
@@ -98,6 +99,68 @@ fn seed_minimal_deno_lockfiles(workspace_root: &Path) -> Result<()> {
     )?;
 
     Ok(())
+}
+
+fn write_canonical_static_publish_lock(
+    workspace_root: &Path,
+    name: &str,
+    version: &str,
+) -> Result<(String, String)> {
+    let closure = serde_json::json!({
+        "status": "complete",
+        "inputs": []
+    });
+    let closure_digest = format!(
+        "blake3:{}",
+        blake3::hash(&serde_json::to_vec(&closure)?).to_hex()
+    );
+
+    let mut lock = AtoLock::default();
+    lock.resolution.entries.insert(
+        "runtime".to_string(),
+        serde_json::json!({"kind": "web", "driver": "static"}),
+    );
+    lock.resolution.entries.insert(
+        "resolved_targets".to_string(),
+        serde_json::json!([
+            {
+                "label": "site",
+                "runtime": "web",
+                "driver": "static",
+                "entrypoint": "dist",
+                "port": 4173
+            }
+        ]),
+    );
+    lock.resolution
+        .entries
+        .insert("closure".to_string(), closure);
+    lock.contract.entries.insert(
+        "process".to_string(),
+        serde_json::json!({
+            "driver": "static",
+            "entrypoint": "dist"
+        }),
+    );
+    lock.contract.entries.insert(
+        "metadata".to_string(),
+        serde_json::json!({
+            "name": name,
+            "version": version,
+            "default_target": "site"
+        }),
+    );
+    recompute_lock_id(&mut lock).context("recompute canonical lock id")?;
+    let lock_id = lock
+        .lock_id
+        .as_ref()
+        .map(|value| value.as_str().to_string())
+        .context("canonical lock id missing after recompute")?;
+    std::fs::write(
+        workspace_root.join("ato.lock.json"),
+        to_pretty_json(&lock).context("serialize canonical lock")?,
+    )?;
+    Ok((lock_id, closure_digest))
 }
 
 fn ensure_fake_runtime_shims(home_dir: &Path) -> Result<std::ffi::OsString> {
@@ -627,6 +690,112 @@ prepare = "echo prepare"
         resp.headers().get("location").is_some(),
         "download endpoint should return Location header"
     );
+
+    Ok(())
+}
+
+#[test]
+#[serial_test::serial]
+fn e2e_local_registry_private_publish_prefers_canonical_lock_metadata() -> Result<()> {
+    let ato = assert_cmd::cargo::cargo_bin("ato");
+    let tmp = TempDir::new().context("create temp dir")?;
+    let home_dir = tmp.path().join("home");
+    std::fs::create_dir_all(&home_dir)?;
+    let data_dir = tmp.path().join("registry-data");
+    let project_dir = tmp.path().join("project-canonical-publish");
+    std::fs::create_dir_all(project_dir.join("dist"))?;
+
+    std::fs::write(
+        project_dir.join("capsule.toml"),
+        r#"schema_version = "0.2"
+name = "ignored-manifest"
+version = "9.9.9"
+type = "app"
+default_target = "static"
+
+[targets.static]
+runtime = "web"
+driver = "static"
+entrypoint = "dist"
+port = 4173
+"#,
+    )?;
+    std::fs::write(
+        project_dir.join("dist").join("index.html"),
+        "<!doctype html><title>canonical publish</title>",
+    )?;
+    let (expected_lock_id, expected_closure_digest) =
+        write_canonical_static_publish_lock(&project_dir, "canonical-publish", "0.4.2")?;
+
+    let Some((_guard, base_url)) = start_local_registry_or_skip(
+        &ato,
+        &data_dir,
+        "e2e_local_registry_private_publish_prefers_canonical_lock_metadata",
+    )?
+    else {
+        return Ok(());
+    };
+
+    let publish = run_ato_with_home(
+        &ato,
+        &[
+            "publish",
+            "--build",
+            "--deploy",
+            "--registry",
+            &base_url,
+            "--json",
+        ],
+        &project_dir,
+        &home_dir,
+    )?;
+    assert!(
+        publish.status.success(),
+        "canonical private publish failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&publish.stdout),
+        String::from_utf8_lossy(&publish.stderr)
+    );
+
+    let detail: serde_json::Value = reqwest::blocking::get(format!(
+        "{}/v1/manifest/capsules/by/local/canonical-publish",
+        base_url
+    ))
+    .context("canonical detail endpoint call")?
+    .json()
+    .context("canonical detail json parse")?;
+
+    assert_eq!(
+        detail
+            .get("manifest")
+            .and_then(|value| value.get("name"))
+            .and_then(|value| value.as_str()),
+        Some("canonical-publish")
+    );
+    let releases = detail
+        .get("releases")
+        .and_then(|value| value.as_array())
+        .context("releases array missing for canonical publish")?;
+    let release = releases
+        .iter()
+        .find(|value| value.get("version").and_then(|entry| entry.as_str()) == Some("0.4.2"))
+        .context("canonical publish release missing")?;
+    assert_eq!(
+        release.get("lock_id").and_then(|value| value.as_str()),
+        Some(expected_lock_id.as_str())
+    );
+    assert_eq!(
+        release
+            .get("closure_digest")
+            .and_then(|value| value.as_str()),
+        Some(expected_closure_digest.as_str())
+    );
+
+    let ignored = reqwest::blocking::get(format!(
+        "{}/v1/manifest/capsules/by/local/ignored-manifest",
+        base_url
+    ))
+    .context("ignored manifest detail endpoint call")?;
+    assert_eq!(ignored.status(), reqwest::StatusCode::NOT_FOUND);
 
     Ok(())
 }

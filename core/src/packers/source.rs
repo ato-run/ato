@@ -1,7 +1,7 @@
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
-use std::{future::Future};
 
 use crate::engine;
 use crate::error::{CapsuleError, Result};

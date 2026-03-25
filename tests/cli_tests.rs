@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use std::thread;
 
 use assert_cmd::Command;
-use capsule_core::ato_lock::{recompute_lock_id, to_pretty_json, AtoLock};
+use capsule_core::ato_lock::{
+    recompute_lock_id, to_pretty_json, AtoLock, UnresolvedReason, UnresolvedValue,
+};
 use predicates::prelude::*;
 use tempfile::tempdir;
 
@@ -60,9 +62,36 @@ fn write_canonical_ato_lock(dir: &Path) {
         "runtime".to_string(),
         serde_json::json!({"kind": "web", "driver": "static"}),
     );
+    lock.resolution.entries.insert(
+        "resolved_targets".to_string(),
+        serde_json::json!([
+            {
+                "label": "site",
+                "runtime": "web",
+                "driver": "static",
+                "entrypoint": "dist",
+                "port": 4173
+            }
+        ]),
+    );
+    lock.resolution.entries.insert(
+        "closure".to_string(),
+        serde_json::json!({
+            "status": "complete",
+            "inputs": []
+        }),
+    );
     lock.contract.entries.insert(
         "process".to_string(),
         serde_json::json!({"driver": "static", "entrypoint": "dist"}),
+    );
+    lock.contract.entries.insert(
+        "metadata".to_string(),
+        serde_json::json!({
+            "name": "build-demo",
+            "version": "0.1.0",
+            "default_target": "site"
+        }),
     );
     recompute_lock_id(&mut lock).expect("recompute lock id");
     fs::write(
@@ -70,6 +99,155 @@ fn write_canonical_ato_lock(dir: &Path) {
         to_pretty_json(&lock).expect("serialize canonical lock"),
     )
     .expect("write canonical lock");
+}
+
+fn write_inspect_lock_workspace(dir: &Path) {
+    fs::create_dir_all(dir.join(".ato/source-inference")).expect("create source inference dir");
+    fs::create_dir_all(dir.join(".ato/binding")).expect("create binding dir");
+    fs::write(
+        dir.join("package-lock.json"),
+        r#"{"name":"inspect-demo","lockfileVersion":3}"#,
+    )
+    .expect("write observed lockfile");
+
+    let mut lock = AtoLock::default();
+    lock.contract.entries.insert(
+        "metadata".to_string(),
+        serde_json::json!({
+            "name": "inspect-demo",
+            "version": "0.1.0",
+            "default_target": "site"
+        }),
+    );
+    lock.contract.entries.insert(
+        "process".to_string(),
+        serde_json::json!({
+            "driver": "static",
+            "entrypoint": "dist"
+        }),
+    );
+    lock.resolution.entries.insert(
+        "resolved_targets".to_string(),
+        serde_json::json!([
+            {
+                "label": "site",
+                "runtime": "web",
+                "driver": "static",
+                "entrypoint": "dist"
+            }
+        ]),
+    );
+    lock.resolution.entries.insert(
+        "closure".to_string(),
+        serde_json::json!({
+            "kind": "metadata_only",
+            "observed_lockfiles": ["package-lock.json"]
+        }),
+    );
+    lock.resolution.unresolved.push(UnresolvedValue {
+        reason: UnresolvedReason::InsufficientEvidence,
+        detail: Some("runtime selection remains unresolved".to_string()),
+        candidates: Vec::new(),
+    });
+    recompute_lock_id(&mut lock).expect("recompute inspect lock id");
+    fs::write(
+        dir.join("ato.lock.json"),
+        to_pretty_json(&lock).expect("serialize inspect lock"),
+    )
+    .expect("write inspect lock");
+
+    fs::write(
+        dir.join(".ato/source-inference/provenance.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "mode": "init_workspace",
+            "input_kind": "canonical_lock",
+            "provenance": [
+                {
+                    "field": "contract.process",
+                    "kind": "selection_gate",
+                    "source_field": "site",
+                    "note": "interactive selection resolved equal-ranked process ambiguity"
+                },
+                {
+                    "field": "resolution.closure",
+                    "kind": "metadata_observation",
+                    "source_path": dir.join("package-lock.json"),
+                    "source_field": "package-lock.json",
+                    "note": "metadata-only observed lockfile state"
+                },
+                {
+                    "field": "resolution.runtime",
+                    "kind": "deterministic_heuristic",
+                    "source_path": dir,
+                    "source_field": "project_type",
+                    "note": "runtime inference remained unresolved because the source evidence was incomplete"
+                }
+            ],
+            "diagnostics": [
+                {
+                    "severity": "error",
+                    "field": "resolution.runtime",
+                    "message": "runtime must be selected before execution"
+                }
+            ],
+            "selection_gate": {
+                "field": "contract.process"
+            },
+            "infer": {
+                "unresolved": ["resolution.runtime"]
+            },
+            "resolve": {
+                "unresolved": ["resolution.runtime"]
+            }
+        }))
+        .expect("serialize provenance sidecar"),
+    )
+    .expect("write provenance sidecar");
+
+    fs::write(
+        dir.join(".ato/source-inference/provenance-cache.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": "1",
+            "input_kind": "canonical_lock",
+            "lock_path": dir.join("ato.lock.json"),
+            "provenance_path": dir.join(".ato/source-inference/provenance.json"),
+            "binding_seed_path": dir.join(".ato/binding/seed.json"),
+            "lock_id": lock.lock_id.as_ref().map(|value| value.as_str()),
+            "generated_at": null,
+            "unresolved": [
+                {
+                    "field": "resolution.runtime",
+                    "reason": "insufficient_evidence",
+                    "detail": "runtime selection remains unresolved",
+                    "candidates": []
+                }
+            ],
+            "field_index": [
+                {
+                    "field": "contract.process",
+                    "kinds": ["selection_gate"],
+                    "notes": ["interactive selection resolved equal-ranked process ambiguity"]
+                }
+            ],
+            "diagnostics_count": 1
+        }))
+        .expect("serialize provenance cache"),
+    )
+    .expect("write provenance cache");
+
+    fs::write(
+        dir.join(".ato/binding/seed.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": "1",
+            "lock_path": dir.join("ato.lock.json"),
+            "provenance_cache_path": dir.join(".ato/source-inference/provenance-cache.json"),
+            "lock_id": lock.lock_id.as_ref().map(|value| value.as_str()),
+            "entries": {},
+            "unresolved": []
+        }))
+        .expect("serialize binding seed"),
+    )
+    .expect("write binding seed");
 }
 
 fn build_capsule_for_test(project_dir: &Path, name: &str) -> PathBuf {
@@ -307,11 +485,10 @@ fn test_validate_prefers_canonical_lock_over_manifest() {
 }
 
 #[test]
-fn test_build_rejects_existing_canonical_lock_input() {
+fn test_build_prefers_existing_canonical_lock_input() {
     let tmp = tempdir().unwrap();
     write_static_publish_project(tmp.path(), "build-demo", "0.1.0");
     write_canonical_ato_lock(tmp.path());
-
     let output = Command::cargo_bin("ato")
         .unwrap()
         .current_dir(tmp.path())
@@ -320,15 +497,198 @@ fn test_build_rejects_existing_canonical_lock_input() {
         .unwrap();
 
     assert!(
-        !output.status.success(),
-        "stdout={}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("ato.lock.json detected at"),
+        output.status.success(),
         "stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        tmp.path().join("build-demo.capsule").exists(),
+        "missing artifact: {}",
+        tmp.path().join("build-demo.capsule").display()
+    );
+}
+
+#[test]
+fn test_inspect_lock_surface_reports_field_statuses() {
+    let tmp = tempdir().unwrap();
+    write_inspect_lock_workspace(tmp.path());
+
+    let output = Command::cargo_bin("ato")
+        .unwrap()
+        .current_dir(tmp.path())
+        .args(["inspect", "lock", ".", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let fields = payload
+        .get("fields")
+        .and_then(|value| value.as_array())
+        .expect("fields array");
+    let process = fields
+        .iter()
+        .find(|value| {
+            value.get("lockPath").and_then(|entry| entry.as_str()) == Some("contract.process")
+        })
+        .expect("contract.process field");
+    assert_eq!(
+        process
+            .get("userConfirmed")
+            .and_then(|value| value.as_bool()),
+        Some(true)
+    );
+
+    let closure = fields
+        .iter()
+        .find(|value| {
+            value.get("lockPath").and_then(|entry| entry.as_str()) == Some("resolution.closure")
+        })
+        .expect("resolution.closure field");
+    assert_eq!(
+        closure.get("observed").and_then(|value| value.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        closure.get("fallback").and_then(|value| value.as_bool()),
+        Some(true)
+    );
+
+    let unresolved = payload
+        .get("unresolved")
+        .and_then(|value| value.as_array())
+        .expect("unresolved array");
+    let runtime = unresolved
+        .iter()
+        .find(|value| {
+            value.get("lockPath").and_then(|entry| entry.as_str()) == Some("resolution.runtime")
+        })
+        .expect("resolution.runtime unresolved");
+    assert_eq!(
+        runtime.get("reasonClass").and_then(|value| value.as_str()),
+        Some("insufficient_evidence")
+    );
+}
+
+#[test]
+fn test_inspect_preview_surface_reports_durable_and_ephemeral_paths() {
+    let tmp = tempdir().unwrap();
+    write_inspect_lock_workspace(tmp.path());
+
+    let output = Command::cargo_bin("ato")
+        .unwrap()
+        .current_dir(tmp.path())
+        .args(["inspect", "preview", ".", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        payload
+            .get("preview")
+            .and_then(|value| value.get("durableLockState"))
+            .and_then(|value| value.as_str()),
+        Some("present")
+    );
+    let run_outputs = payload
+        .get("preview")
+        .and_then(|value| value.get("runAttemptMaterialization"))
+        .and_then(|value| value.get("outputs"))
+        .and_then(|value| value.as_array())
+        .expect("run outputs");
+    assert!(run_outputs.iter().any(|value| {
+        value
+            .get("path")
+            .and_then(|entry| entry.as_str())
+            .map(|entry| entry.contains(".tmp/source-inference/<attempt>/ato.lock.json"))
+            .unwrap_or(false)
+    }));
+}
+
+#[test]
+fn test_inspect_diagnostics_surface_links_to_inspect_and_preview() {
+    let tmp = tempdir().unwrap();
+    write_inspect_lock_workspace(tmp.path());
+
+    let output = Command::cargo_bin("ato")
+        .unwrap()
+        .current_dir(tmp.path())
+        .args(["inspect", "diagnostics", ".", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let diagnostics = payload
+        .get("diagnostics")
+        .and_then(|value| value.as_array())
+        .expect("diagnostics array");
+    let runtime = diagnostics
+        .iter()
+        .find(|value| {
+            value.get("lockPath").and_then(|entry| entry.as_str()) == Some("resolution.runtime")
+        })
+        .expect("resolution.runtime diagnostic");
+    assert_eq!(
+        runtime
+            .get("inspectCommand")
+            .and_then(|value| value.as_str()),
+        Some("ato inspect lock .")
+    );
+    assert_eq!(
+        runtime
+            .get("previewCommand")
+            .and_then(|value| value.as_str()),
+        Some("ato inspect preview .")
+    );
+}
+
+#[test]
+fn test_inspect_remediation_surface_prefers_lock_paths() {
+    let tmp = tempdir().unwrap();
+    write_inspect_lock_workspace(tmp.path());
+
+    let output = Command::cargo_bin("ato")
+        .unwrap()
+        .current_dir(tmp.path())
+        .args(["inspect", "remediation", ".", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let suggestions = payload
+        .get("suggestions")
+        .and_then(|value| value.as_array())
+        .expect("suggestions array");
+    let runtime = suggestions
+        .iter()
+        .find(|value| {
+            value.get("lockPath").and_then(|entry| entry.as_str()) == Some("resolution.runtime")
+        })
+        .expect("resolution.runtime suggestion");
+    assert_eq!(
+        runtime.get("reasonClass").and_then(|value| value.as_str()),
+        Some("insufficient_evidence")
+    );
+    assert!(runtime.get("sourceMapping").is_some());
 }
 
 #[test]
