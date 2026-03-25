@@ -1,4 +1,4 @@
-//! Project init helpers for prompt generation and interactive manifest creation.
+//! Project init helpers for lock-first durable materialization and legacy manifest scaffolds.
 
 use anyhow::{Context, Result};
 use capsule_core::input_resolver::{
@@ -13,6 +13,7 @@ use capsule_core::CapsuleReporter;
 use crate::application::source_inference;
 
 pub mod detect;
+pub mod materialize;
 pub mod prompt;
 pub mod recipe;
 
@@ -32,7 +33,7 @@ pub fn execute_prompt(
     prompt::execute(args, reporter)
 }
 
-pub fn execute_manifest_init(
+pub fn execute_durable_init(
     args: InitArgs,
     reporter: std::sync::Arc<crate::reporters::CliReporter>,
 ) -> Result<()> {
@@ -48,7 +49,7 @@ pub fn execute_manifest_init(
     ) {
         Ok(ResolvedInput::CanonicalLock { canonical, .. }) => {
             anyhow::bail!(
-                "{} already exists at {}. `ato init` durable lock materialization is not implemented yet.",
+                "{} already exists at {}. `ato init` only materializes a durable baseline when canonical input is missing.",
                 capsule_core::input_resolver::ATO_LOCK_FILE_NAME,
                 canonical.path.display()
             );
@@ -87,6 +88,14 @@ pub fn execute_manifest_init(
     futures::executor::block_on(reporter.notify(format!(
         "   Source inference provenance: {}",
         materialized.sidecar_path.display()
+    )))?;
+    futures::executor::block_on(reporter.notify(format!(
+        "   Provenance cache: {}",
+        materialized.provenance_cache_path.display()
+    )))?;
+    futures::executor::block_on(reporter.notify(format!(
+        "   Workspace binding seed: {}",
+        materialized.binding_seed_path.display()
     )))?;
     futures::executor::block_on(reporter.notify("\nNext steps:".to_string()))?;
     futures::executor::block_on(
@@ -149,6 +158,61 @@ pub fn write_manual_manifest_stub(
     Ok(manifest_path)
 }
 
+pub fn write_legacy_detected_manifest(
+    path: Option<PathBuf>,
+    reporter: std::sync::Arc<crate::reporters::CliReporter>,
+) -> Result<PathBuf> {
+    let project_dir = path
+        .unwrap_or_else(|| PathBuf::from("."))
+        .canonicalize()
+        .context("Failed to resolve project directory")?;
+
+    match resolve_authoritative_input(&project_dir, ResolveInputOptions::default()) {
+        Ok(ResolvedInput::CanonicalLock { canonical, .. }) => {
+            anyhow::bail!(
+                "{} already exists at {}. Legacy manifest generation is not available on top of canonical lock input.",
+                capsule_core::input_resolver::ATO_LOCK_FILE_NAME,
+                canonical.path.display()
+            );
+        }
+        Ok(ResolvedInput::CompatibilityProject { project, .. }) => {
+            anyhow::bail!(
+                "capsule.toml already exists at {}. Delete or move the file before generating a legacy compatibility manifest.",
+                project.manifest.path.display()
+            );
+        }
+        Ok(ResolvedInput::SourceOnly { .. }) => {}
+        Err(error)
+            if error
+                .to_string()
+                .contains("is not an authoritative command-entry input") =>
+        {
+            return Err(error.into());
+        }
+        Err(_) => {}
+    }
+
+    let manifest_path = project_dir.join("capsule.toml");
+    let detected = detect::detect_project(&project_dir)?;
+    let info = recipe::project_info_from_detection(&detected)?;
+    let manifest_content = recipe::generate_manifest(
+        &info,
+        recipe::ManifestMeta {
+            generated_by: "ato init --legacy prompt",
+            description: "Legacy compatibility manifest inferred from local source detection",
+        },
+    );
+    fs::write(&manifest_path, manifest_content).context("Failed to write capsule.toml")?;
+    maybe_create_capsuleignore(&project_dir, &info, reporter.clone())?;
+
+    futures::executor::block_on(reporter.notify(format!(
+        "📝 Created an inferred compatibility capsule.toml at {}.",
+        manifest_path.display()
+    )))?;
+
+    Ok(manifest_path)
+}
+
 fn prompt_for_details(
     mut info: recipe::ProjectInfo,
     reporter: std::sync::Arc<crate::reporters::CliReporter>,
@@ -204,11 +268,14 @@ fn add_to_gitignore(
         String::new()
     };
 
-    if existing.contains(".capsule/") || existing.contains("*.capsule") {
+    if existing.contains(".ato/")
+        && existing.contains(".capsule/")
+        && existing.contains("*.capsule")
+    {
         return Ok(());
     }
 
-    let addition = "\n# Capsule\n.capsule/\n*.capsule\n*.sig\n";
+    let addition = "\n# Ato\n.ato/\n\n# Capsule\n.capsule/\n*.capsule\n*.sig\n";
     let new_content = format!("{}{}", existing.trim_end(), addition);
 
     fs::write(&gitignore_path, new_content).context("Failed to update .gitignore")?;

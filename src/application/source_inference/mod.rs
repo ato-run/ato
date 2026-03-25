@@ -28,7 +28,6 @@ use crate::project::init::recipe::{project_info_from_detection, ProjectInfo};
 use crate::reporters::CliReporter;
 
 const RUN_GENERATED_MANIFEST_NAME: &str = ".ato.run.generated.capsule.toml";
-const INIT_SOURCE_INFERENCE_DIR: &str = ".ato/source-inference";
 const RUN_SOURCE_INFERENCE_DIR: &str = ".tmp/source-inference";
 
 #[derive(Debug, Clone)]
@@ -177,6 +176,8 @@ pub(crate) struct RunMaterialization {
 pub(crate) struct WorkspaceMaterialization {
     pub(crate) lock_path: PathBuf,
     pub(crate) sidecar_path: PathBuf,
+    pub(crate) provenance_cache_path: PathBuf,
+    pub(crate) binding_seed_path: PathBuf,
     pub(crate) result: SourceInferenceResult,
 }
 
@@ -210,7 +211,7 @@ pub(crate) fn materialize_run_from_source_only(
     });
     let result =
         execute_shared_engine(input, MaterializationMode::RunAttempt, assume_yes, reporter)?;
-    materialize_run_result(&source.project_root, result, scope)
+    materialize_run_result(&source.project_root, result, scope, None)
 }
 
 pub(crate) fn materialize_run_from_canonical_lock(
@@ -226,7 +227,7 @@ pub(crate) fn materialize_run_from_canonical_lock(
     });
     let result =
         execute_shared_engine(input, MaterializationMode::RunAttempt, assume_yes, reporter)?;
-    materialize_run_result(&canonical.project_root, result, scope)
+    materialize_run_result(&canonical.project_root, result, scope, None)
 }
 
 pub(crate) fn materialize_run_from_compatibility(
@@ -248,7 +249,14 @@ pub(crate) fn materialize_run_from_compatibility(
             .iter()
             .map(convert_compatibility_diagnostic),
     );
-    materialize_run_result(&project.project_root, result, scope)
+    let original_manifest =
+        toml::from_str(&project.manifest.raw_text).unwrap_or_else(|_| project.manifest.raw.clone());
+    materialize_run_result(
+        &project.project_root,
+        result,
+        scope,
+        Some(&original_manifest),
+    )
 }
 
 pub(crate) fn execute_init_from_source_only(
@@ -816,6 +824,7 @@ fn materialize_run_result(
     project_root: &Path,
     result: SourceInferenceResult,
     mut scope: Option<&mut CleanupScope>,
+    original_manifest: Option<&toml::Value>,
 ) -> Result<RunMaterialization> {
     let run_state_dir = project_root
         .join(RUN_SOURCE_INFERENCE_DIR)
@@ -833,8 +842,12 @@ fn materialize_run_result(
     write_sidecar(&sidecar_path, &result, MaterializationMode::RunAttempt)?;
 
     let manifest_path = project_root.join(RUN_GENERATED_MANIFEST_NAME);
-    let bridge_manifest_sha256 =
-        write_generated_manifest(&manifest_path, &result.lock, project_root)?;
+    let bridge_manifest_sha256 = write_generated_manifest(
+        &manifest_path,
+        &result.lock,
+        project_root,
+        original_manifest,
+    )?;
     if let Some(scope) = scope.as_mut() {
         scope.register({
             let manifest_path = manifest_path.clone();
@@ -856,26 +869,14 @@ fn materialize_workspace_result(
     project_root: &Path,
     result: SourceInferenceResult,
 ) -> Result<WorkspaceMaterialization> {
-    let lock_path = project_root.join(ATO_LOCK_FILE_NAME);
-    ato_lock::write_pretty_to_path(&result.lock, &lock_path)?;
-
-    let sidecar_dir = project_root.join(INIT_SOURCE_INFERENCE_DIR);
-    fs::create_dir_all(&sidecar_dir)
-        .with_context(|| format!("Failed to create {}", sidecar_dir.display()))?;
-    let sidecar_path = sidecar_dir.join("provenance.json");
-    write_sidecar(&sidecar_path, &result, MaterializationMode::InitWorkspace)?;
-
-    Ok(WorkspaceMaterialization {
-        lock_path,
-        sidecar_path,
-        result,
-    })
+    crate::project::init::materialize::materialize_workspace_result(project_root, result)
 }
 
 fn write_generated_manifest(
     manifest_path: &Path,
     lock: &AtoLock,
     project_root: &Path,
+    original_manifest: Option<&toml::Value>,
 ) -> Result<String> {
     let process = lock.contract.entries.get("process").ok_or_else(|| {
         AtoExecutionError::ambiguous_entrypoint(
@@ -1008,11 +1009,31 @@ fn write_generated_manifest(
         );
         raw.push_str("]\n");
     }
+    if let Some(original_manifest) = original_manifest {
+        append_ipc_section_from_manifest(&mut raw, original_manifest)?;
+    }
     raw.push_str("\n[storage]\n\n[routing]\n");
 
     fs::write(manifest_path, &raw)
         .with_context(|| format!("Failed to write {}", manifest_path.display()))?;
     Ok(sha256_hex(raw.as_bytes()))
+}
+
+fn append_ipc_section_from_manifest(
+    raw: &mut String,
+    original_manifest: &toml::Value,
+) -> Result<()> {
+    let Some(ipc) = original_manifest.get("ipc") else {
+        return Ok(());
+    };
+
+    let mut wrapped = toml::map::Map::new();
+    wrapped.insert("ipc".to_string(), ipc.clone());
+    let ipc_toml = toml::to_string(&toml::Value::Table(wrapped))
+        .context("serialize preserved [ipc] section for run bridge")?;
+    raw.push('\n');
+    raw.push_str(&ipc_toml);
+    Ok(())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1140,7 +1161,7 @@ fn string_array_literal(values: &[String]) -> String {
         .join(", ")
 }
 
-fn write_sidecar(
+pub(crate) fn write_sidecar(
     path: &Path,
     result: &SourceInferenceResult,
     mode: MaterializationMode,
@@ -1722,6 +1743,8 @@ mod tests {
 
         assert!(materialized.lock_path.exists());
         assert!(materialized.sidecar_path.exists());
+        assert!(materialized.provenance_cache_path.exists());
+        assert!(materialized.binding_seed_path.exists());
     }
 
     #[test]
@@ -1919,6 +1942,43 @@ port = 8080
         assert!(generated.contains("driver = \"static\""));
         assert!(generated.contains("entrypoint = \"public/index.html\""));
         assert!(generated.contains("port = 8080"));
+    }
+
+    #[test]
+    fn compatibility_run_materialization_preserves_ipc_section() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("capsule.toml"),
+            r#"schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "deno"
+runtime_version = "1.46.3"
+entrypoint = "main.ts"
+
+[ipc.imports.greeter]
+from = "missing-service"
+"#,
+        )
+        .expect("write manifest");
+
+        let resolved = resolve_authoritative_input(dir.path(), ResolveInputOptions::default())
+            .expect("resolve compatibility input");
+        let ResolvedInput::CompatibilityProject { project, .. } = resolved else {
+            panic!("expected compatibility project");
+        };
+
+        let materialized = materialize_run_from_compatibility(&project, None, reporter(), true)
+            .expect("run materialize");
+        let generated = fs::read_to_string(&materialized.manifest_path).expect("read manifest");
+
+        assert!(generated.contains("[ipc.imports.greeter]"));
+        assert!(generated.contains("from = \"missing-service\""));
     }
 
     #[test]

@@ -76,6 +76,7 @@ pub(crate) struct RunAuthoritativeInput {
 // manifest semantics or discover new authority from disk.
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedRunContext {
+    pub(crate) authoritative_lock: Option<AtoLock>,
     pub(crate) raw_manifest: toml::Value,
     pub(crate) validation_mode: capsule_core::types::ValidationMode,
     pub(crate) engine_override_declared: bool,
@@ -185,8 +186,12 @@ fn prepare_run_context(
     loaded_manifest: &LoadedManifest,
     validation_mode: capsule_core::types::ValidationMode,
 ) -> PreparedRunContext {
+    let raw_manifest =
+        toml::from_str(&loaded_manifest.raw_text).unwrap_or_else(|_| loaded_manifest.raw.clone());
+
     PreparedRunContext {
-        raw_manifest: loaded_manifest.raw.clone(),
+        authoritative_lock: authoritative_input.map(|input| input.lock.clone()),
+        raw_manifest,
         validation_mode,
         engine_override_declared: loaded_manifest.raw.get("engine").is_some(),
         compatibility_legacy_lock: authoritative_input
@@ -1004,6 +1009,7 @@ where
                 };
                 crate::executors::source::execute(
                     &decision.plan,
+                    prepared.authoritative_lock.as_ref(),
                     Some(nacelle),
                     request.reporter.clone(),
                     &request.enforcement,
@@ -1238,7 +1244,9 @@ pub(crate) async fn reroute_auto_provisioned_execution(
         )?;
     let engine_override_declared = loaded_manifest.raw.get("engine").is_some();
     let rerouted_prepared = PreparedRunContext {
-        raw_manifest: loaded_manifest.raw,
+        authoritative_lock: None,
+        raw_manifest: toml::from_str(&loaded_manifest.raw_text)
+            .unwrap_or_else(|_| loaded_manifest.raw.clone()),
         validation_mode,
         engine_override_declared,
         compatibility_legacy_lock: None,

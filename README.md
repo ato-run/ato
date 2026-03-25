@@ -14,6 +14,8 @@ English | [日本語](README_JA.md)
 `ato` is a meta-CLI that interprets `capsule.toml` to execute, distribute, and install capsules.
 It is designed around a Zero-Trust / fail-closed model: normal runs stay quiet, while consent prompts and policy violations are surfaced explicitly.
 
+`ato init` now materializes a durable `ato.lock.json` baseline plus workspace-local `.ato/` inference state. The legacy prompt/manual manifest helpers remain available through `ato init --legacy prompt` and `ato init --legacy manual`.
+
 For a single-file consolidated specification of current behavior, see `docs/current-spec.md`.
 
 ## Key Commands
@@ -29,6 +31,7 @@ ato build [dir] [--strict-v3] [--force-large-payload]
 ato publish [--registry <url>] [--artifact <file.capsule>] [--scoped-id <publisher/slug>] [--allow-existing] [--prepare] [--build] [--deploy] [--legacy-full-publish] [--fix] [--no-tui] [--force-large-payload]
 ato publish --dry-run
 ato publish --ci
+ato init [path] [--yes]
 ato gen-ci
 ato inspect requirements <path|publisher/slug> --json [--registry <url>]
 ato search [query]
