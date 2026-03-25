@@ -27,6 +27,7 @@ use crate::application::pipeline::hourglass::{HourglassPhase, HourglassPhaseStat
 use crate::application::pipeline::phases::run as run_phase;
 use crate::application::ports::OutputPort;
 use crate::application::source_inference;
+use crate::application::workspace::state;
 use crate::preview;
 #[cfg(test)]
 use crate::registry::store::RegistryStore;
@@ -434,17 +435,26 @@ fn authoritative_kind_from_materialization(
 
 fn authoritative_input_from_materialization(
     materialized: source_inference::RunMaterialization,
+    cli_state_bindings: &[String],
     compatibility_legacy_lock: Option<run_phase::CompatibilityLegacyLockContext>,
-) -> run_phase::RunAuthoritativeInput {
-    run_phase::RunAuthoritativeInput {
+) -> Result<run_phase::RunAuthoritativeInput> {
+    let effective_state = state::resolve_effective_lock_state(
+        &materialized.project_root,
+        &materialized.lock,
+        cli_state_bindings,
+    )?;
+
+    Ok(run_phase::RunAuthoritativeInput {
         kind: authoritative_kind_from_materialization(materialized.input_kind),
+        project_root: materialized.project_root,
         lock: materialized.lock,
         lock_path: materialized.lock_path,
         sidecar_path: materialized.sidecar_path,
         bridge_manifest_path: materialized.manifest_path,
         bridge_manifest_sha256: materialized.bridge_manifest_sha256,
+        effective_state,
         compatibility_legacy_lock,
-    }
+    })
 }
 
 struct RunProgress<'a> {
@@ -791,8 +801,9 @@ async fn normalize_run_target_after_install(
                     target,
                     authoritative_input: Some(authoritative_input_from_materialization(
                         materialized,
+                        &args.state_bindings,
                         None,
-                    )),
+                    )?),
                 })
             }
             ResolvedInput::CompatibilityProject { project, .. } => {
@@ -815,8 +826,9 @@ async fn normalize_run_target_after_install(
                     target,
                     authoritative_input: Some(authoritative_input_from_materialization(
                         materialized,
+                        &args.state_bindings,
                         compatibility_legacy_lock,
-                    )),
+                    )?),
                 })
             }
             ResolvedInput::SourceOnly { source, .. } => {
@@ -832,8 +844,9 @@ async fn normalize_run_target_after_install(
                     target,
                     authoritative_input: Some(authoritative_input_from_materialization(
                         materialized,
+                        &args.state_bindings,
                         None,
-                    )),
+                    )?),
                 })
             }
         };
