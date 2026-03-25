@@ -433,6 +433,7 @@ async fn launch_service<C: OciRuntimeClient>(
             let service_launch_ctx = launch_ctx.clone().with_injected_env(env.clone());
             let service_prepared = PreparedRunContext {
                 authoritative_lock: None,
+                effective_state: None,
                 raw_manifest: service_plan.manifest.clone(),
                 validation_mode: if options.target_launch_options().preview_mode {
                     capsule_core::types::ValidationMode::Preview
@@ -472,6 +473,7 @@ async fn launch_service<C: OciRuntimeClient>(
                         crate::executors::source::execute(
                             managed_plan,
                             service_prepared.authoritative_lock.as_ref(),
+                            service_prepared.effective_state.as_ref(),
                             Some(nacelle),
                             reporter.clone(),
                             &options.enforcement,

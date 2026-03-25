@@ -13,6 +13,7 @@ use crate::application::source_inference::{
     materialize_run_from_canonical_lock, materialize_run_from_compatibility,
     materialize_run_from_source_only, RunMaterialization,
 };
+use crate::application::workspace::state;
 use crate::reporters::CliReporter;
 
 pub(crate) struct ProducerAuthoritativeInput {
@@ -74,6 +75,14 @@ impl ProducerAuthoritativeInput {
         materialized: RunMaterialization,
         advisories: Vec<String>,
     ) -> Result<Self> {
+        let sanitized_lock = state::sanitize_lock_for_distribution(&materialized.lock);
+        capsule_core::ato_lock::write_pretty_to_path(&sanitized_lock, &materialized.lock_path)
+            .with_context(|| {
+                format!(
+                    "Failed to rewrite sanitized lock for distribution at {}",
+                    materialized.lock_path.display()
+                )
+            })?;
         let manifest_raw = fs::read_to_string(&materialized.manifest_path)
             .with_context(|| format!("Failed to read {}", materialized.manifest_path.display()))?;
         let manifest = CapsuleManifest::from_toml(&manifest_raw).map_err(|err| {
@@ -88,12 +97,11 @@ impl ProducerAuthoritativeInput {
             .parent()
             .map(Path::to_path_buf)
             .context("generated lock path is missing parent directory")?;
-        let lock_id = compute_lock_id(&materialized.lock)
+        let lock_id = compute_lock_id(&sanitized_lock)
             .ok()
             .map(|value| value.as_str().to_string())
             .or_else(|| {
-                materialized
-                    .lock
+                sanitized_lock
                     .lock_id
                     .as_ref()
                     .map(|value| value.as_str().to_string())
