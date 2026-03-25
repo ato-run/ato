@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 use capsule_core::CapsuleReporter;
 
+use crate::application::source_inference;
+
 pub mod detect;
 pub mod prompt;
 pub mod recipe;
@@ -40,7 +42,10 @@ pub fn execute_manifest_init(
         .canonicalize()
         .context("Failed to resolve project directory")?;
 
-    match resolve_authoritative_input(&project_dir, ResolveInputOptions::default()) {
+    let init_target = match resolve_authoritative_input(
+        &project_dir,
+        ResolveInputOptions::default(),
+    ) {
         Ok(ResolvedInput::CanonicalLock { canonical, .. }) => {
             anyhow::bail!(
                 "{} already exists at {}. `ato init` durable lock materialization is not implemented yet.",
@@ -48,13 +53,8 @@ pub fn execute_manifest_init(
                 canonical.path.display()
             );
         }
-        Ok(ResolvedInput::CompatibilityProject { project, .. }) => {
-            anyhow::bail!(
-                "capsule.toml already exists at {}. Use the existing compatibility project input instead of re-initializing.",
-                project.manifest.path.display()
-            );
-        }
-        Ok(ResolvedInput::SourceOnly { .. }) => {}
+        Ok(ResolvedInput::CompatibilityProject { project, .. }) => Some(project),
+        Ok(ResolvedInput::SourceOnly { .. }) => None,
         Err(error)
             if error
                 .to_string()
@@ -62,101 +62,41 @@ pub fn execute_manifest_init(
         {
             return Err(error.into());
         }
-        Err(_) => {}
-    }
+        Err(_) => None,
+    };
 
     futures::executor::block_on(reporter.notify(format!(
         "🔍 Initializing capsule in: {}\n",
         project_dir.display()
     )))?;
 
-    let manifest_path = project_dir.join("capsule.toml");
-
-    let detected = detect::detect_project(&project_dir)?;
-    futures::executor::block_on(reporter.notify(format!(
-        "   Detected: {} project",
-        detected.project_type.as_str()
-    )))?;
-    if let Some(node) = detected.node.as_ref() {
-        if node.is_bun {
-            futures::executor::block_on(reporter.notify("   Node runtime: bun".to_string()))?;
-        }
-        if node.has_hono {
-            futures::executor::block_on(reporter.notify("   Framework: hono".to_string()))?;
-        }
-    }
-
-    let mut info = recipe::project_info_from_detection(&detected)?;
-    if !info.entrypoint.is_empty() {
-        futures::executor::block_on(
-            reporter.notify(format!("   Entrypoint: {}", info.entrypoint.join(" "))),
-        )?;
-    }
-    if let Some(dev) = info.node_dev_entrypoint.as_ref() {
-        futures::executor::block_on(reporter.notify(format!("   Dev: {}", dev.join(" "))))?;
-    }
-    if let Some(release) = info.node_release_entrypoint.as_ref() {
-        futures::executor::block_on(reporter.notify(format!("   Release: {}", release.join(" "))))?;
-    }
-
-    if !args.yes {
-        info = prompt_for_details(info, reporter.clone())?;
-    }
-
-    let description = format!(
-        "Capsule generated from existing {} project",
-        info.project_type.as_str()
-    );
-    let manifest_content = recipe::generate_manifest(
-        &info,
-        recipe::ManifestMeta {
-            generated_by: "ato build --init",
-            description: &description,
-        },
-    );
-    fs::write(&manifest_path, &manifest_content).context("Failed to write capsule.toml")?;
+    let materialized = if let Some(project) = init_target.as_ref() {
+        source_inference::execute_init_from_compatibility(project, reporter.clone(), args.yes)?
+    } else {
+        source_inference::execute_init_from_source_only(&project_dir, reporter.clone(), args.yes)?
+    };
 
     if project_dir.join(".git").exists() {
         add_to_gitignore(&project_dir, reporter.clone())?;
     }
 
-    // Opt-in packaging control: if this looks like a Node project and node_modules exists,
-    // create a minimal .capsuleignore if it doesn't exist yet.
-    maybe_create_capsuleignore(&project_dir, &info, reporter.clone())?;
-
-    futures::executor::block_on(reporter.notify("\n✨ Created capsule.toml!".to_string()))?;
+    futures::executor::block_on(reporter.notify(format!(
+        "\n✨ Created {}!",
+        materialized.lock_path.display()
+    )))?;
+    futures::executor::block_on(reporter.notify(format!(
+        "   Source inference provenance: {}",
+        materialized.sidecar_path.display()
+    )))?;
     futures::executor::block_on(reporter.notify("\nNext steps:".to_string()))?;
     futures::executor::block_on(
-        reporter.notify("   ato dev           # Run locally (no bundling)".to_string()),
+        reporter
+            .notify("   ato run .         # Run from the inferred canonical baseline".to_string()),
     )?;
     futures::executor::block_on(
-        reporter.notify("   ato pack --bundle # Create self-extracting bundle".to_string()),
+        reporter
+            .notify("   ato inspect       # Inspect unresolved fields and provenance".to_string()),
     )?;
-
-    if matches!(info.project_type, detect::ProjectType::Rust) {
-        futures::executor::block_on(reporter.notify("\nNote:".to_string()))?;
-        futures::executor::block_on(
-            reporter.notify("   For Rust, build a release binary before packing:".to_string()),
-        )?;
-        if let Some(bin) = release_binary_name(&info) {
-            futures::executor::block_on(reporter.notify(format!(
-                "   cargo build --release && cp target/release/{bin} ./{bin}"
-            )))?;
-        } else {
-            futures::executor::block_on(reporter.notify("   cargo build --release".to_string()))?;
-        }
-    }
-    if matches!(info.project_type, detect::ProjectType::Go) {
-        futures::executor::block_on(reporter.notify("\nNote:".to_string()))?;
-        futures::executor::block_on(
-            reporter.notify("   For Go, build a binary before packing:".to_string()),
-        )?;
-        if let Some(bin) = release_binary_name(&info) {
-            futures::executor::block_on(reporter.notify(format!("   go build -o {bin} .")))?;
-        } else {
-            futures::executor::block_on(reporter.notify("   go build -o app .".to_string()))?;
-        }
-    }
 
     Ok(())
 }
