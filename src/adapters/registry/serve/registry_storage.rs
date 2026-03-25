@@ -575,6 +575,8 @@ pub(super) fn load_index(data_dir: &Path) -> Result<RegistryIndex> {
                         size_bytes: release.size_bytes,
                         signature_status: release.signature_status,
                         created_at: release.created_at,
+                        lock_id: release.lock_id,
+                        closure_digest: release.closure_digest,
                         payload_v3: None,
                     })
                     .collect(),

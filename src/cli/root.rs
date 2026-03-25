@@ -45,7 +45,7 @@ Auth:
   whoami   Show current authentication status
 
 Advanced Commands:
-  inspect  Inspect capsule metadata and runtime requirements
+    inspect  Inspect lock-first metadata, preview write-back, diagnostics, and runtime requirements
   fetch    Fetch an artifact into local cache for debugging or manual workflows
   finalize Perform local derivation for a fetched native artifact
   project  Add a finalized app to launcher surfaces
@@ -335,7 +335,7 @@ pub(crate) enum Commands {
 
     #[command(
         next_help_heading = "Advanced Commands",
-        about = "Inspect capsule metadata and runtime requirements"
+        about = "Inspect lock-first metadata, preview write-back, diagnostics, remediation, and runtime requirements"
     )]
     Inspect {
         #[command(subcommand)]
