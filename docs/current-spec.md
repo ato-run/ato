@@ -41,13 +41,14 @@ A capsule is the unit of execution and distribution. It is described by capsule.
 
 capsule.toml is the source of truth for project input.
 
-- Current canonical authoring format: schema_version = "0.2"
+- Current canonical authoring and generation format: schema_version = "1"
+- Deprecated compatibility input: schema_version = "0.2"
 - Compatibility input: schema_version = "0.3"
 - Parser accepts schema versions 0.2, 0.3, and 1
 - Some CHML-like manifests without schema_version are also normalized internally
 - Legacy [execution] is rejected in schema_version=0.2 parsing
 
-When schema_version is empty after load, ato normalizes it to 0.2 for downstream consumers.
+When schema_version is empty after load, ato normalizes it through the compatibility path before downstream consumers use the manifest.
 
 ### 2.3 Security Model
 
@@ -559,6 +560,8 @@ For GitHub sources:
 
 ## 5. Manifest Specification
 
+For the strict generation contract used by automated producers such as Store-side GitHub inference, see docs/capsule-toml-generation-spec.md.
+
 ## 5.1 Top-Level Contract
 
 The canonical current form is a capsule.toml file.
@@ -611,6 +614,7 @@ Current top-level fields in the normalized model:
 Current validation rules include:
 
 - supported schema_version values: 0.2, 0.3, 1
+- schema_version = "1" is canonical; schema_version = "0.2" is deprecated compatibility input
 - name must be kebab-case
 - name length must be between 3 and 64
 - non-empty version must be semver
@@ -636,6 +640,7 @@ Named target fields currently supported in the normalized model:
 - runtime_version
 - runtime_tools
 - entrypoint
+- run
 - image
 - cmd
 - env
@@ -675,7 +680,8 @@ Allowed driver values by current validation path:
 
 Current rules:
 
-- entrypoint or run_command is required
+- entrypoint or run_command is required in canonical normalized output
+- entrypoint, run_command, or run is accepted in compatibility input
 - for driver deno, node, or python in non-preview v0.2 validation, runtime_version is required
 - driver can be inferred from language and entrypoint in some flows
 
@@ -688,6 +694,7 @@ Current rules:
 - port must be between 1 and 65535
 - public is deprecated and rejected for runtime=web
 - entrypoint or run_command is required unless the target is in web services mode
+- compatibility input may provide run, which is normalized before execution
 - entrypoint = "ato-entry.ts" is deprecated and rejected in web services mode
 
 ### oci targets
@@ -868,7 +875,7 @@ Current notable behavior:
 - GitHub install drafts can return schema v0.3 style manifests
 - preview TOML is normalized before installation
 - legacy env.required is collapsed into required_env
-- web/static preview manifests can receive a default port of 8000 if absent
+- GitHub auto-fix can assign an available Ato-managed port to generated web manifests when port correction is requested
 - runtime_version can be inferred for node, python, and deno draft installs
 - inferred Deno apps must preserve run_command and execute via the dedicated Deno executor
 - when deno.json references importMap, the referenced file must be included in pack.include
@@ -890,7 +897,7 @@ Current product stance:
 Current canonical native target form:
 
 ```toml
-schema_version = "0.2"
+schema_version = "1"
 name = "my-app"
 version = "0.1.0"
 type = "app"
