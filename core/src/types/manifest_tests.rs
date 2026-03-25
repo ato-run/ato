@@ -1036,6 +1036,27 @@ port = 8080
 }
 
 #[test]
+fn test_v03_web_static_run_normalizes_to_directory_entrypoint() {
+    let toml = r#"
+schema_version = "0.3"
+name = "hello-capsule"
+version = "0.1.0"
+type = "app"
+runtime = "web/static"
+run = "index.html"
+port = 18080
+"#;
+
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let target = manifest.resolve_default_target().unwrap();
+
+    assert_eq!(target.runtime, "web");
+    assert_eq!(target.driver.as_deref(), Some("static"));
+    assert_eq!(target.entrypoint, ".");
+    assert_eq!(target.port, Some(18080));
+}
+
+#[test]
 fn test_validate_web_dynamic_rejects_shell_style_entrypoint() {
     let toml = r#"
 schema_version = "0.2"

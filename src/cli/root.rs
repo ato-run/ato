@@ -151,6 +151,30 @@ pub(crate) enum Commands {
         #[arg(long, hide = true, default_value_t = false)]
         keep_failed_artifacts: bool,
 
+        /// Auto-fix generated GitHub draft TOML before build/run
+        #[arg(
+            long = "auto-fix:toml",
+            default_value_t = false,
+            conflicts_with_all = ["auto_fix_src", "auto_fix_all"]
+        )]
+        auto_fix_toml: bool,
+
+        /// Auto-fix fetched GitHub source before build/run
+        #[arg(
+            long = "auto-fix:src",
+            default_value_t = false,
+            conflicts_with_all = ["auto_fix_toml", "auto_fix_all"]
+        )]
+        auto_fix_src: bool,
+
+        /// Enable all GitHub auto-fixes before build/run
+        #[arg(
+            long = "auto-fix:all",
+            default_value_t = false,
+            conflicts_with_all = ["auto_fix_toml", "auto_fix_src"]
+        )]
+        auto_fix_all: bool,
+
         /// Allow installing/running unverified signatures in non-production environments
         #[arg(long, default_value_t = false)]
         allow_unverified: bool,
@@ -216,6 +240,33 @@ pub(crate) enum Commands {
         /// Keep failed GitHub checkout artifacts and generated manifests for debugging
         #[arg(long, hide = true, default_value_t = false)]
         keep_failed_artifacts: bool,
+
+        /// Auto-fix generated GitHub draft TOML before build/install
+        #[arg(
+            long = "auto-fix:toml",
+            default_value_t = false,
+            requires = "from_gh_repo",
+            conflicts_with_all = ["auto_fix_src", "auto_fix_all"]
+        )]
+        auto_fix_toml: bool,
+
+        /// Auto-fix fetched GitHub source before build/install
+        #[arg(
+            long = "auto-fix:src",
+            default_value_t = false,
+            requires = "from_gh_repo",
+            conflicts_with_all = ["auto_fix_toml", "auto_fix_all"]
+        )]
+        auto_fix_src: bool,
+
+        /// Enable all GitHub auto-fixes before build/install
+        #[arg(
+            long = "auto-fix:all",
+            default_value_t = false,
+            requires = "from_gh_repo",
+            conflicts_with_all = ["auto_fix_toml", "auto_fix_src"]
+        )]
+        auto_fix_all: bool,
     },
 
     #[command(

@@ -1,6 +1,12 @@
 use super::*;
+use anyhow::bail;
+use rand::Rng;
+use std::net::TcpListener;
 
-const DEFAULT_GITHUB_INSTALL_WEB_STATIC_PORT: i64 = 8000;
+const DEFAULT_GITHUB_AUTO_FIX_PORT_RANGE_START: u16 = 18000;
+const DEFAULT_GITHUB_AUTO_FIX_PORT_RANGE_END: u16 = 18999;
+const ENV_GITHUB_AUTO_FIX_PORT_RANGE_START: &str = "ATO_GITHUB_AUTO_FIX_PORT_RANGE_START";
+const ENV_GITHUB_AUTO_FIX_PORT_RANGE_END: &str = "ATO_GITHUB_AUTO_FIX_PORT_RANGE_END";
 
 fn collapse_legacy_required_env_field(table: &mut toml::value::Table) -> bool {
     let legacy_required = table
@@ -58,28 +64,6 @@ fn collapse_legacy_required_env_field(table: &mut toml::value::Table) -> bool {
     true
 }
 
-fn apply_default_web_static_port(table: &mut toml::value::Table) -> bool {
-    if table.contains_key("port") {
-        return false;
-    }
-
-    let is_web_static = table
-        .get("runtime")
-        .and_then(toml::Value::as_str)
-        .map(str::trim)
-        .map(|value| value.eq_ignore_ascii_case("web/static"))
-        .unwrap_or(false);
-    if !is_web_static {
-        return false;
-    }
-
-    table.insert(
-        "port".to_string(),
-        toml::Value::Integer(DEFAULT_GITHUB_INSTALL_WEB_STATIC_PORT),
-    );
-    true
-}
-
 pub(super) fn normalize_github_install_preview_toml(
     checkout_dir: &Path,
     manifest_text: &str,
@@ -100,7 +84,6 @@ pub(super) fn normalize_github_install_preview_toml(
                 .as_table_mut()
                 .expect("normalized GitHub install draft must stay a table");
             collapse_legacy_required_env_field(table);
-            apply_default_web_static_port(table);
         }
 
         let runtime = parsed
@@ -210,6 +193,137 @@ pub(super) fn normalize_github_install_preview_toml(
     }
 
     toml::to_string(&parsed).context("Failed to serialize normalized GitHub install draft")
+}
+
+pub(super) fn auto_fix_github_install_preview_toml(manifest_text: &str) -> Result<String> {
+    rewrite_github_install_preview_toml_port(manifest_text, false)
+}
+
+pub(super) fn reassign_github_install_preview_toml_port(manifest_text: &str) -> Result<String> {
+    rewrite_github_install_preview_toml_port(manifest_text, true)
+}
+
+fn rewrite_github_install_preview_toml_port(
+    manifest_text: &str,
+    force_port_reassignment: bool,
+) -> Result<String> {
+    let Ok(mut parsed) = toml::from_str::<toml::Value>(manifest_text) else {
+        return Ok(manifest_text.to_string());
+    };
+
+    let changed = if parsed
+        .get("schema_version")
+        .and_then(toml::Value::as_str)
+        .map(|value| value.trim() == "0.3")
+        .unwrap_or(false)
+        && parsed.get("targets").is_none()
+    {
+        let table = parsed
+            .as_table_mut()
+            .expect("normalized GitHub install draft must stay a table");
+        apply_dynamic_web_port_to_table(table, force_port_reassignment)?
+    } else {
+        let Some(targets) = parsed
+            .get_mut("targets")
+            .and_then(toml::Value::as_table_mut)
+        else {
+            return Ok(manifest_text.to_string());
+        };
+
+        let mut changed = false;
+        for (_, target_value) in targets.iter_mut() {
+            let Some(target) = target_value.as_table_mut() else {
+                continue;
+            };
+            changed |= apply_dynamic_web_port_to_table(target, force_port_reassignment)?;
+        }
+        changed
+    };
+
+    if !changed {
+        return Ok(manifest_text.to_string());
+    }
+
+    toml::to_string(&parsed).context("Failed to serialize auto-fixed GitHub install draft")
+}
+
+fn apply_dynamic_web_port_to_table(
+    table: &mut toml::value::Table,
+    force_port_reassignment: bool,
+) -> Result<bool> {
+    if !table_runtime_requires_web_port(table) {
+        return Ok(false);
+    }
+
+    if table.contains_key("port") && !force_port_reassignment {
+        return Ok(false);
+    }
+
+    let port = allocate_github_auto_fix_port()?;
+    table.insert("port".to_string(), toml::Value::Integer(i64::from(port)));
+    Ok(true)
+}
+
+fn table_runtime_requires_web_port(table: &toml::value::Table) -> bool {
+    table
+        .get("runtime")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value.eq_ignore_ascii_case("web") || value.to_ascii_lowercase().starts_with("web/")
+        })
+        .unwrap_or(false)
+}
+
+fn allocate_github_auto_fix_port() -> Result<u16> {
+    let (range_start, range_end) = github_auto_fix_port_range()?;
+    let span = range_end - range_start + 1;
+    let start_offset = rand::thread_rng().gen_range(0..usize::from(span));
+
+    for step in 0..usize::from(span) {
+        let offset = (start_offset + step) % usize::from(span);
+        let port = range_start + offset as u16;
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return Ok(port);
+        }
+    }
+
+    bail!(
+        "No available Ato auto-fix port in range {}-{}",
+        range_start,
+        range_end
+    );
+}
+
+fn github_auto_fix_port_range() -> Result<(u16, u16)> {
+    let range_start = std::env::var(ENV_GITHUB_AUTO_FIX_PORT_RANGE_START)
+        .ok()
+        .map(|value| parse_auto_fix_port_bound(ENV_GITHUB_AUTO_FIX_PORT_RANGE_START, &value))
+        .transpose()?
+        .unwrap_or(DEFAULT_GITHUB_AUTO_FIX_PORT_RANGE_START);
+    let range_end = std::env::var(ENV_GITHUB_AUTO_FIX_PORT_RANGE_END)
+        .ok()
+        .map(|value| parse_auto_fix_port_bound(ENV_GITHUB_AUTO_FIX_PORT_RANGE_END, &value))
+        .transpose()?
+        .unwrap_or(DEFAULT_GITHUB_AUTO_FIX_PORT_RANGE_END);
+
+    if range_start > range_end {
+        bail!(
+            "{} must be less than or equal to {}",
+            ENV_GITHUB_AUTO_FIX_PORT_RANGE_START,
+            ENV_GITHUB_AUTO_FIX_PORT_RANGE_END
+        );
+    }
+
+    Ok((range_start, range_end))
+}
+
+fn parse_auto_fix_port_bound(name: &str, value: &str) -> Result<u16> {
+    value
+        .trim()
+        .parse::<u16>()
+        .with_context(|| format!("Failed to parse {} as a TCP port", name))
 }
 
 fn normalize_v03_source_node_typescript_run(

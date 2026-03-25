@@ -2,6 +2,35 @@ use clap::ValueEnum;
 
 pub(crate) const DEFAULT_RUN_REGISTRY_URL: &str = "https://api.ato.run";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum GitHubAutoFixMode {
+    Toml,
+    Src,
+    All,
+}
+
+impl GitHubAutoFixMode {
+    pub(crate) fn from_cli_flags(
+        auto_fix_toml: bool,
+        auto_fix_src: bool,
+        auto_fix_all: bool,
+    ) -> Option<Self> {
+        if auto_fix_all {
+            Some(Self::All)
+        } else if auto_fix_src {
+            Some(Self::Src)
+        } else if auto_fix_toml {
+            Some(Self::Toml)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn fixes_generated_toml(self) -> bool {
+        matches!(self, Self::Toml | Self::All)
+    }
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub(crate) enum EnforcementMode {
     Strict,
