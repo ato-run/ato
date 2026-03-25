@@ -1279,7 +1279,10 @@ fn sign_if_requested(
 
 #[cfg(test)]
 mod tests {
-    use super::{plan_v03_build_provision_command, run_v03_build_lifecycle_steps};
+    use super::{
+        execute_pack_command_with_injected_manifest, plan_v03_build_provision_command,
+        run_v03_build_lifecycle_steps,
+    };
     use capsule_core::router::{ExecutionProfile, ManifestData};
     use std::ffi::OsString;
     use std::path::PathBuf;
@@ -1395,6 +1398,44 @@ mod tests {
             "cached"
         );
         std::env::remove_var("ATO_BUILD_CACHE_TEST_ENV");
+    }
+
+    #[test]
+    fn injected_v03_web_static_manifest_builds_from_root_index_html() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("index.html"), "<h1>hello</h1>").expect("write index.html");
+        let reporter = std::sync::Arc::new(crate::reporters::CliReporter::new(true));
+        let manifest = r#"
+schema_version = "0.3"
+name = "hello-capsule"
+version = "0.1.0"
+type = "app"
+runtime = "web/static"
+run = "index.html"
+port = 18080
+"#;
+
+        let result = execute_pack_command_with_injected_manifest(
+            tmp.path().to_path_buf(),
+            false,
+            None,
+            false,
+            false,
+            true,
+            false,
+            "strict".to_string(),
+            reporter,
+            false,
+            true,
+            None,
+            Some(manifest),
+            true,
+        )
+        .expect("build inferred web/static manifest");
+
+        assert!(result.ok);
+        assert_eq!(result.build_strategy, "web");
+        assert!(result.artifact.as_ref().is_some_and(|path| path.exists()));
     }
 
     fn manifest_with_schema_and_target(

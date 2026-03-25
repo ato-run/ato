@@ -1,3 +1,6 @@
+use super::github_inference::{
+    auto_fix_github_install_preview_toml, reassign_github_install_preview_toml_port,
+};
 use super::*;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -244,7 +247,7 @@ required = ["REDIS_URL"]
 }
 
 #[test]
-fn normalize_github_install_preview_toml_adds_default_port_to_web_static() {
+fn normalize_github_install_preview_toml_does_not_force_default_port_for_web_static() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let manifest = r#"
 schema_version = "0.3"
@@ -258,7 +261,51 @@ run = "index.html"
     let normalized =
         normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
 
-    assert!(normalized.contains("port = 8000"));
+    assert!(!normalized.contains("port = "));
+}
+
+#[test]
+fn auto_fix_github_install_preview_toml_assigns_ato_port_for_web_static() {
+    let manifest = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+runtime = "web/static"
+run = "index.html"
+"#;
+
+    let fixed = auto_fix_github_install_preview_toml(manifest).expect("auto-fix");
+    let parsed = fixed.parse::<toml::Value>().expect("parse fixed toml");
+    let port = parsed
+        .get("port")
+        .and_then(toml::Value::as_integer)
+        .expect("port");
+
+    assert!((18000..=18999).contains(&port));
+}
+
+#[test]
+fn reassign_github_install_preview_toml_port_replaces_existing_web_port() {
+    let manifest = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+runtime = "web/static"
+run = "index.html"
+port = 3000
+"#;
+
+    let fixed = reassign_github_install_preview_toml_port(manifest).expect("reassign");
+    let parsed = fixed.parse::<toml::Value>().expect("parse fixed toml");
+    let port = parsed
+        .get("port")
+        .and_then(toml::Value::as_integer)
+        .expect("port");
+
+    assert!((18000..=18999).contains(&port));
+    assert_ne!(port, 3000);
 }
 
 #[test]
