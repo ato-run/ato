@@ -843,15 +843,16 @@ entrypoint = "main.ts"
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.3"
+schema_version = "0.2"
 name = "demo-app"
 type = "app"
-default_target = "cli"
+default_target = "web"
 
-[targets.cli]
+[targets.web]
 runtime = "source"
 driver = "deno"
-run = "deno main.ts"
+runtime_version = "2.1.3"
+entrypoint = "main.ts"
 "#,
         )
         .expect("write manifest");
