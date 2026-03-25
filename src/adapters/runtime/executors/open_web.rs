@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::fs;
+use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -54,8 +55,6 @@ fn build_static_server_command(plan: &ManifestData) -> Result<(PathBuf, Vec<Stri
         );
     }
 
-    let deno_bin = runtime_manager::ensure_deno_binary(plan)?;
-
     let entrypoint = plan
         .execution_entrypoint()
         .filter(|v| !v.trim().is_empty())
@@ -68,6 +67,7 @@ fn build_static_server_command(plan: &ManifestData) -> Result<(PathBuf, Vec<Stri
     })?;
 
     let serve_dir = resolve_static_serve_dir(&plan.manifest_dir, &entrypoint)?;
+    let deno_bin = runtime_manager::ensure_deno_binary(plan)?;
     let script_path = ensure_static_server_script()?;
     let args = build_deno_file_server_args(&script_path, &serve_dir, port);
     Ok((deno_bin, args))
@@ -75,6 +75,18 @@ fn build_static_server_command(plan: &ManifestData) -> Result<(PathBuf, Vec<Stri
 
 fn resolve_static_serve_dir(manifest_dir: &Path, entrypoint: &str) -> Result<PathBuf> {
     let path = manifest_dir.join(entrypoint.trim());
+    let root = manifest_dir
+        .canonicalize()
+        .unwrap_or_else(|_| manifest_dir.to_path_buf());
+    let normalized_path = normalize_path(&path);
+
+    if !normalized_path.starts_with(&root) {
+        anyhow::bail!(
+            "runtime=web static entrypoint '{}' resolves outside manifest directory",
+            entrypoint
+        );
+    }
+
     if !path.exists() || !path.is_dir() {
         anyhow::bail!(
             "runtime=web static entrypoint '{}' must be an existing directory",
@@ -82,9 +94,6 @@ fn resolve_static_serve_dir(manifest_dir: &Path, entrypoint: &str) -> Result<Pat
         );
     }
 
-    let root = manifest_dir
-        .canonicalize()
-        .unwrap_or_else(|_| manifest_dir.to_path_buf());
     let canonical_path = path
         .canonicalize()
         .with_context(|| format!("Failed to resolve static entrypoint path '{}'", entrypoint))?;
@@ -97,6 +106,24 @@ fn resolve_static_serve_dir(manifest_dir: &Path, entrypoint: &str) -> Result<Pat
     }
 
     Ok(canonical_path)
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(segment) => normalized.push(segment),
+        }
+    }
+
+    normalized
 }
 
 fn ensure_static_server_script() -> Result<PathBuf> {

@@ -15,7 +15,7 @@ fn run_init_in(dir: &std::path::Path) -> String {
     let output = Command::cargo_bin("ato")
         .unwrap()
         .current_dir(dir)
-        .arg("init")
+        .args(["init", "--legacy", "prompt"])
         .output()
         .unwrap();
 
@@ -586,14 +586,15 @@ fn test_install_from_gh_repo_accepts_host_path_and_metadata_archive() {
 }
 
 #[test]
-fn test_init_help_describes_agent_prompt_output() {
+fn test_init_help_describes_durable_baseline_output() {
     let mut cmd = Command::cargo_bin("ato").unwrap();
     cmd.args(["init", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Analyze the current project and print an agent-ready capsule.toml prompt",
+            "Materialize a durable ato.lock.json baseline for a local workspace",
         ))
+        .stdout(predicate::str::contains("--legacy <LEGACY>"))
         .stdout(predicate::str::contains("Usage: ato init"))
         .stdout(predicate::str::contains("<NAME>").not());
 }
