@@ -1,0 +1,25 @@
+{
+  "metadata": {
+    "generated_by": "ato-cli v0.5.4",
+    "name": "network-exfil-capsule",
+    "source_manifest": "sha256:52a428747887b1d8880da955ae155f61622f3b5b2f4cf4a26ad44ea103f49482",
+    "version": "0.1.0"
+  },
+  "sandbox": {
+    "enabled": true,
+    "network": {
+      "enabled": true,
+      "enforcement": "strict"
+    }
+  },
+  "services": {
+    "main": {
+      "args": [
+        "main.ts"
+      ],
+      "cwd": "source",
+      "executable": "bun"
+    }
+  },
+  "version": "1.0.0"
+}

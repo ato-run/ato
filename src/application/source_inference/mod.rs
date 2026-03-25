@@ -13,6 +13,7 @@ use capsule_core::input_resolver::{
 use capsule_core::CapsuleReporter;
 use serde::Serialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::application::compat_import::{
     compile_compatibility_project, CompatibilityCompileResult, CompatibilityDiagnostic,
@@ -164,7 +165,10 @@ pub(crate) struct SourceInferenceDiagnostic {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RunMaterialization {
+    pub(crate) input_kind: SourceInferenceInputKind,
     pub(crate) manifest_path: PathBuf,
+    pub(crate) bridge_manifest_sha256: String,
+    pub(crate) lock: AtoLock,
     pub(crate) lock_path: PathBuf,
     pub(crate) sidecar_path: PathBuf,
 }
@@ -223,6 +227,28 @@ pub(crate) fn materialize_run_from_canonical_lock(
     let result =
         execute_shared_engine(input, MaterializationMode::RunAttempt, assume_yes, reporter)?;
     materialize_run_result(&canonical.project_root, result, scope)
+}
+
+pub(crate) fn materialize_run_from_compatibility(
+    project: &ResolvedCompatibilityProject,
+    scope: Option<&mut CleanupScope>,
+    reporter: Arc<CliReporter>,
+    assume_yes: bool,
+) -> Result<RunMaterialization> {
+    let (draft_input, compiled) = draft_lock_input_from_compatibility(project)?;
+    let mut result = execute_shared_engine(
+        SourceInferenceInput::DraftLock(draft_input),
+        MaterializationMode::RunAttempt,
+        assume_yes,
+        reporter,
+    )?;
+    result.diagnostics.extend(
+        compiled
+            .diagnostics
+            .iter()
+            .map(convert_compatibility_diagnostic),
+    );
+    materialize_run_result(&project.project_root, result, scope)
 }
 
 pub(crate) fn execute_init_from_source_only(
@@ -440,15 +466,25 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
 }
 
 fn infer_from_draft_lock(input: DraftLockInput) -> Result<SourceInferenceResult> {
+    let mut lock = input.draft_lock;
+    let mut provenance = input.provenance;
+    promote_draft_execution_resolution(&mut lock, &input.project_root, &mut provenance);
+
     let mut infer_unresolved = Vec::new();
-    if input.draft_lock.contract.entries.get("process").is_none() {
+    if lock.contract.entries.get("process").is_none() {
         infer_unresolved.push("contract.process".to_string());
+    }
+    if lock.resolution.entries.get("runtime").is_none() {
+        infer_unresolved.push("resolution.runtime".to_string());
+    }
+    if lock.resolution.entries.get("closure").is_none() {
+        infer_unresolved.push("resolution.closure".to_string());
     }
 
     Ok(SourceInferenceResult {
         input_kind: SourceInferenceInputKind::DraftLock,
-        lock: input.draft_lock,
-        provenance: input.provenance,
+        lock,
+        provenance,
         diagnostics: Vec::new(),
         infer: InferResult {
             candidate_sets: Vec::new(),
@@ -511,6 +547,155 @@ fn infer_from_canonical_lock(input: CanonicalLockInput) -> Result<SourceInferenc
         selection_gate: None,
         approval_gate: None,
     })
+}
+
+fn promote_draft_execution_resolution(
+    lock: &mut AtoLock,
+    project_root: &Path,
+    provenance: &mut Vec<SourceInferenceProvenance>,
+) {
+    if lock.resolution.entries.get("runtime").is_none() {
+        if let Some(runtime) = draft_runtime_from_resolution(lock) {
+            lock.resolution
+                .entries
+                .insert("runtime".to_string(), runtime);
+            provenance.push(SourceInferenceProvenance {
+                field: "resolution.runtime".to_string(),
+                kind: SourceInferenceProvenanceKind::CompatibilityImport,
+                source_path: Some(project_root.to_path_buf()),
+                source_field: Some("resolution.target_selection".to_string()),
+                note: Some(
+                    "draft compatibility target hints promoted into an execution-ready runtime"
+                        .to_string(),
+                ),
+            });
+        }
+    }
+
+    if lock.resolution.entries.get("closure").is_none() {
+        lock.resolution
+            .entries
+            .insert("closure".to_string(), inferred_closure_state(project_root));
+        provenance.push(SourceInferenceProvenance {
+            field: "resolution.closure".to_string(),
+            kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
+            source_path: Some(project_root.to_path_buf()),
+            source_field: Some("project_root".to_string()),
+            note: Some(
+                "dependency closure remained unresolved in the draft lock, so run uses metadata-only observed lockfile state"
+                    .to_string(),
+            ),
+        });
+    }
+}
+
+fn draft_runtime_from_resolution(lock: &AtoLock) -> Option<Value> {
+    let selected_target = selected_draft_target(lock)?;
+    let kind = selected_target
+        .get("driver")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            selected_target
+                .get("runtime")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("source"))
+                .map(str::to_string)
+        })
+        .or_else(|| sole_object_key(lock.resolution.entries.get("runtime_hints")))
+        .or_else(|| sole_object_key(lock.resolution.entries.get("locked_runtimes")))?;
+
+    let version = selected_target
+        .get("runtime_version")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            lock.resolution
+                .entries
+                .get("runtime_hints")
+                .and_then(|value| value.get(&kind))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            lock.resolution
+                .entries
+                .get("locked_runtimes")
+                .and_then(|value| value.get(&kind))
+                .and_then(|value| value.get("version"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        });
+
+    let mut runtime = serde_json::Map::new();
+    runtime.insert("kind".to_string(), Value::String(kind));
+    runtime.insert(
+        "resolved_by".to_string(),
+        Value::String("compatibility_target_selection".to_string()),
+    );
+    if let Some(label) = selected_target.get("label").and_then(Value::as_str) {
+        runtime.insert(
+            "selected_target".to_string(),
+            Value::String(label.to_string()),
+        );
+    }
+    if let Some(version) = version {
+        runtime.insert("version".to_string(), Value::String(version));
+    }
+
+    Some(Value::Object(runtime))
+}
+
+fn selected_draft_target(lock: &AtoLock) -> Option<&Value> {
+    let targets = lock
+        .resolution
+        .entries
+        .get("resolved_targets")
+        .and_then(Value::as_array)?;
+
+    let default_target = lock
+        .resolution
+        .entries
+        .get("target_selection")
+        .and_then(|value| value.get("default_target"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if let Some(default_target) = default_target {
+        if let Some(target) = targets.iter().find(|target| {
+            target
+                .get("label")
+                .and_then(Value::as_str)
+                .map(|label| label == default_target)
+                .unwrap_or(false)
+        }) {
+            return Some(target);
+        }
+    }
+
+    if targets.len() == 1 {
+        return targets.first();
+    }
+
+    None
+}
+
+fn sole_object_key(value: Option<&Value>) -> Option<String> {
+    let object = value?.as_object()?;
+    if object.len() != 1 {
+        return None;
+    }
+    object.keys().next().cloned()
 }
 
 fn resolve(result: &mut SourceInferenceResult) -> Result<()> {
@@ -648,7 +833,8 @@ fn materialize_run_result(
     write_sidecar(&sidecar_path, &result, MaterializationMode::RunAttempt)?;
 
     let manifest_path = project_root.join(RUN_GENERATED_MANIFEST_NAME);
-    write_generated_manifest(&manifest_path, &result.lock, project_root)?;
+    let bridge_manifest_sha256 =
+        write_generated_manifest(&manifest_path, &result.lock, project_root)?;
     if let Some(scope) = scope.as_mut() {
         scope.register({
             let manifest_path = manifest_path.clone();
@@ -657,7 +843,10 @@ fn materialize_run_result(
     }
 
     Ok(RunMaterialization {
+        input_kind: result.input_kind,
         manifest_path,
+        bridge_manifest_sha256,
+        lock: result.lock,
         lock_path,
         sidecar_path,
     })
@@ -687,7 +876,7 @@ fn write_generated_manifest(
     manifest_path: &Path,
     lock: &AtoLock,
     project_root: &Path,
-) -> Result<()> {
+) -> Result<String> {
     let process = lock.contract.entries.get("process").ok_or_else(|| {
         AtoExecutionError::ambiguous_entrypoint(
             "shared source inference could not produce a deterministic process manifest adapter",
@@ -738,6 +927,7 @@ fn write_generated_manifest(
         .and_then(|value| value.get("version"))
         .and_then(Value::as_str)
         .unwrap_or("0.1.0");
+    let target = bridge_target_from_lock(lock, process)?;
     let description = metadata
         .and_then(|value| value.get("capsule_type"))
         .and_then(Value::as_str)
@@ -745,12 +935,72 @@ fn write_generated_manifest(
         .unwrap_or_else(|| "Generated from shared source inference".to_string());
 
     let mut raw = format!(
-        "schema_version = \"0.2\"\nname = {name:?}\nversion = {version:?}\ntype = \"app\"\ndefault_target = \"cli\"\n\n[metadata]\ndescription = {description:?}\n\n[requirements]\n\n[targets.cli]\nruntime = \"source\"\nentrypoint = {entrypoint:?}\n",
+        "schema_version = \"0.2\"\nname = {name:?}\nversion = {version:?}\ntype = \"app\"\ndefault_target = {default_target:?}\n\n[metadata]\ndescription = {description:?}\n\n[requirements]\n",
+        default_target = target.label,
     );
-    if !cmd_values.is_empty() {
+    if let Some(network) = manifest_network_from_lock(lock) {
+        raw.push_str("\n[network]\n");
+        if !network.egress_allow.is_empty() {
+            raw.push_str("egress_allow = [");
+            raw.push_str(&string_array_literal(&network.egress_allow));
+            raw.push_str("]\n");
+        }
+        if !network.egress_id_allow.is_empty() {
+            raw.push_str("egress_id_allow = [");
+            raw.push_str(
+                &network
+                    .egress_id_allow
+                    .iter()
+                    .map(|rule| {
+                        format!(
+                            "{{ type = {:?}, value = {:?} }}",
+                            match rule.rule_type {
+                                capsule_core::types::EgressIdType::Ip => "ip",
+                                capsule_core::types::EgressIdType::Cidr => "cidr",
+                                capsule_core::types::EgressIdType::Spiffe => "spiffe",
+                            },
+                            rule.value
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            raw.push_str("]\n");
+        }
+    }
+    raw.push_str("\n");
+    raw.push_str(&format!(
+        "[targets.{label}]\nruntime = {runtime:?}\nentrypoint = {entrypoint:?}\n",
+        label = target.label,
+        runtime = target.runtime,
+        entrypoint = entrypoint,
+    ));
+    if let Some(driver) = target.driver.as_deref() {
+        raw.push_str(&format!("driver = {driver:?}\n"));
+    }
+    if let Some(runtime_version) = target.runtime_version.as_deref() {
+        raw.push_str(&format!("runtime_version = {runtime_version:?}\n"));
+    }
+    if let Some(port) = target.port {
+        raw.push_str(&format!("port = {port}\n"));
+    }
+    if let Some(working_dir) = target.working_dir.as_deref() {
+        raw.push_str(&format!("working_dir = {working_dir:?}\n"));
+    }
+    if !target.required_env.is_empty() {
+        raw.push_str("required_env = [");
+        raw.push_str(&string_array_literal(&target.required_env));
+        raw.push_str("]\n");
+    }
+    let effective_cmd = if cmd_values.is_empty() {
+        target.cmd.clone()
+    } else {
+        cmd_values
+    };
+    if !effective_cmd.is_empty() {
         raw.push_str("cmd = [");
         raw.push_str(
-            &cmd_values
+            &effective_cmd
                 .iter()
                 .map(|value| format!("{value:?}"))
                 .collect::<Vec<_>>()
@@ -760,8 +1010,134 @@ fn write_generated_manifest(
     }
     raw.push_str("\n[storage]\n\n[routing]\n");
 
-    fs::write(manifest_path, raw)
-        .with_context(|| format!("Failed to write {}", manifest_path.display()))
+    fs::write(manifest_path, &raw)
+        .with_context(|| format!("Failed to write {}", manifest_path.display()))?;
+    Ok(sha256_hex(raw.as_bytes()))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+#[derive(Debug, Clone)]
+struct BridgeTarget {
+    label: String,
+    runtime: String,
+    driver: Option<String>,
+    runtime_version: Option<String>,
+    cmd: Vec<String>,
+    required_env: Vec<String>,
+    port: Option<u64>,
+    working_dir: Option<String>,
+}
+
+fn bridge_target_from_lock(lock: &AtoLock, process: &Value) -> Result<BridgeTarget> {
+    let selected_target = selected_draft_target(lock);
+    let label = selected_target
+        .and_then(|value| value.get("label"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            lock.contract
+                .entries
+                .get("metadata")
+                .and_then(|value| value.get("default_target"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "cli".to_string());
+    let runtime = selected_target
+        .and_then(|value| value.get("runtime"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "source".to_string());
+    let driver = selected_target
+        .and_then(|value| value.get("driver"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            lock.resolution
+                .entries
+                .get("runtime")
+                .and_then(|value| value.get("kind"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && *value != "source" && *value != runtime)
+                .map(str::to_string)
+        });
+    let runtime_version = selected_target
+        .and_then(|value| value.get("runtime_version"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let cmd = selected_target
+        .and_then(|value| value.get("cmd"))
+        .and_then(json_string_array)
+        .or_else(|| process.get("cmd").and_then(json_string_array))
+        .or_else(|| process.get("args").and_then(json_string_array))
+        .unwrap_or_default();
+    let required_env = selected_target
+        .and_then(|value| value.get("required_env"))
+        .and_then(json_string_array)
+        .unwrap_or_default();
+    let port = selected_target
+        .and_then(|value| value.get("port"))
+        .and_then(Value::as_u64);
+    let working_dir = selected_target
+        .and_then(|value| value.get("working_dir"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    Ok(BridgeTarget {
+        label,
+        runtime,
+        driver,
+        runtime_version,
+        cmd,
+        required_env,
+        port,
+        working_dir,
+    })
+}
+
+fn manifest_network_from_lock(lock: &AtoLock) -> Option<capsule_core::types::NetworkConfig> {
+    lock.contract
+        .entries
+        .get("network")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn json_string_array(value: &Value) -> Option<Vec<String>> {
+    let values = value.as_array()?;
+    Some(
+        values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+fn string_array_literal(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|value| format!("{value:?}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn write_sidecar(
@@ -1458,5 +1834,247 @@ driver = "node"
             result.lock.contract.entries.get("process"),
             compiled.draft_lock.contract.entries.get("process")
         );
+    }
+
+    #[test]
+    fn compatibility_run_materialization_writes_lock_and_bridge() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("capsule.toml"),
+            r#"schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "source"
+driver = "deno"
+runtime_version = "2.1.3"
+entrypoint = "main.ts"
+
+[services.main]
+target = "web"
+"#,
+        )
+        .expect("write manifest");
+
+        let resolved = resolve_authoritative_input(dir.path(), ResolveInputOptions::default())
+            .expect("resolve compatibility input");
+        let ResolvedInput::CompatibilityProject { project, .. } = resolved else {
+            panic!("expected compatibility project");
+        };
+
+        let materialized = materialize_run_from_compatibility(&project, None, reporter(), true)
+            .expect("run materialize");
+
+        assert_eq!(materialized.input_kind, SourceInferenceInputKind::DraftLock);
+        assert!(materialized.manifest_path.exists());
+        assert!(materialized.lock_path.exists());
+        assert!(materialized.sidecar_path.exists());
+        assert!(!materialized.bridge_manifest_sha256.is_empty());
+        assert!(materialized.lock.contract.entries.contains_key("process"));
+        assert!(materialized.lock.resolution.entries.contains_key("runtime"));
+        assert!(materialized.lock.resolution.entries.contains_key("closure"));
+    }
+
+    #[test]
+    fn compatibility_run_materialization_preserves_selected_target_and_network_policy() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("capsule.toml"),
+            r#"schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[network]
+egress_allow = ["api.github.com"]
+
+[targets.web]
+runtime = "web"
+driver = "static"
+entrypoint = "public/index.html"
+port = 8080
+"#,
+        )
+        .expect("write manifest");
+
+        let resolved = resolve_authoritative_input(dir.path(), ResolveInputOptions::default())
+            .expect("resolve compatibility input");
+        let ResolvedInput::CompatibilityProject { project, .. } = resolved else {
+            panic!("expected compatibility project");
+        };
+
+        let materialized = materialize_run_from_compatibility(&project, None, reporter(), true)
+            .expect("run materialize");
+        let generated = fs::read_to_string(&materialized.manifest_path).expect("read manifest");
+
+        assert!(generated.contains("default_target = \"web\""));
+        assert!(generated.contains("[network]"));
+        assert!(generated.contains("egress_allow = [\"api.github.com\"]"));
+        assert!(generated.contains("[targets.web]"));
+        assert!(generated.contains("runtime = \"web\""));
+        assert!(generated.contains("driver = \"static\""));
+        assert!(generated.contains("entrypoint = \"public/index.html\""));
+        assert!(generated.contains("port = 8080"));
+    }
+
+    #[test]
+    fn compatibility_run_materialization_fails_closed_when_process_unresolved() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("capsule.toml"),
+            r#"schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "main"
+
+[targets.main]
+runtime = "source"
+driver = "deno"
+runtime_version = "2.1.3"
+entrypoint = "main.ts"
+
+[targets.worker]
+runtime = "source"
+driver = "deno"
+runtime_version = "2.1.3"
+entrypoint = "worker.ts"
+
+[services.main]
+target = "main"
+
+[services.worker]
+target = "worker"
+"#,
+        )
+        .expect("write manifest");
+
+        let resolved = resolve_authoritative_input(dir.path(), ResolveInputOptions::default())
+            .expect("resolve compatibility input");
+        let ResolvedInput::CompatibilityProject { project, .. } = resolved else {
+            panic!("expected compatibility project");
+        };
+
+        let error = materialize_run_from_compatibility(&project, None, reporter(), true)
+            .expect_err("compatibility run must fail closed when process is unresolved");
+
+        assert!(error.to_string().contains("ATO_ERR_AMBIGUOUS_ENTRYPOINT"));
+    }
+
+    #[test]
+    fn draft_lock_run_fails_closed_when_runtime_promotion_cannot_resolve() {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "main.ts", "cmd": []}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([{"name": "main", "process": {"entrypoint": "main.ts", "cmd": []}}]),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([
+                {"label": "web", "runtime": "source", "driver": "deno", "entrypoint": "main.ts"},
+                {"label": "worker", "runtime": "source", "driver": "deno", "entrypoint": "worker.ts"}
+            ]),
+        );
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"kind": "metadata_only", "observed_lockfiles": []}),
+        );
+
+        let error = execute_shared_engine(
+            SourceInferenceInput::DraftLock(DraftLockInput {
+                project_root: PathBuf::from("."),
+                draft_lock: lock,
+                provenance: Vec::new(),
+            }),
+            MaterializationMode::RunAttempt,
+            true,
+            reporter(),
+        )
+        .expect_err("draft lock without a resolvable target/runtime must fail closed");
+
+        assert!(error.to_string().contains("ATO_ERR_RUNTIME_NOT_RESOLVED"));
+    }
+
+    #[test]
+    fn canonical_run_fails_closed_when_resolved_targets_missing() {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "main.ts", "cmd": []}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([{"name": "main", "process": {"entrypoint": "main.ts", "cmd": []}}]),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "deno", "version": "2.1.3"}),
+        );
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"kind": "metadata_only", "observed_lockfiles": []}),
+        );
+
+        let error = execute_shared_engine(
+            SourceInferenceInput::CanonicalLock(CanonicalLockInput {
+                project_root: PathBuf::from("."),
+                canonical_path: PathBuf::from("ato.lock.json"),
+                lock,
+            }),
+            MaterializationMode::RunAttempt,
+            true,
+            reporter(),
+        )
+        .expect_err("canonical lock without resolved targets must fail closed");
+
+        assert!(error
+            .to_string()
+            .contains("ATO_ERR_EXECUTION_CONTRACT_INVALID"));
+        assert!(error.to_string().contains("resolved target-compatible"));
+    }
+
+    #[test]
+    fn canonical_run_fails_closed_when_closure_missing() {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "main.ts", "cmd": []}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([{"name": "main", "process": {"entrypoint": "main.ts", "cmd": []}}]),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "deno", "version": "2.1.3"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([
+                {"label": "web", "runtime": "source", "driver": "deno", "entrypoint": "main.ts"}
+            ]),
+        );
+
+        let error = execute_shared_engine(
+            SourceInferenceInput::CanonicalLock(CanonicalLockInput {
+                project_root: PathBuf::from("."),
+                canonical_path: PathBuf::from("ato.lock.json"),
+                lock,
+            }),
+            MaterializationMode::RunAttempt,
+            true,
+            reporter(),
+        )
+        .expect_err("canonical lock without closure must fail closed");
+
+        assert!(error.to_string().contains("dependency closure state"));
     }
 }

@@ -146,10 +146,12 @@ mod tests {
             crate::install::support::ensure_local_manifest_ready_for_run(&resolved, true, reporter)
                 .expect("run");
         assert_eq!(outcome, LocalRunManifestPreparationOutcome::Ready);
-
-        let manifest = std::fs::read_to_string(tmp.path().join("capsule.toml")).expect("manifest");
-        assert!(manifest.contains("schema_version = \"0.2\""));
-        assert!(manifest.contains("name = "));
+        assert!(tmp.path().join("ato.lock.json").exists());
+        assert!(tmp
+            .path()
+            .join(".ato/source-inference/provenance.json")
+            .exists());
+        assert!(!tmp.path().join("capsule.toml").exists());
     }
 
     #[test]
@@ -167,7 +169,12 @@ mod tests {
             crate::install::support::ensure_local_manifest_ready_for_run(&resolved, true, reporter)
                 .expect("run");
         assert_eq!(outcome, LocalRunManifestPreparationOutcome::Ready);
-        assert!(manifest_path.exists());
+        assert!(!manifest_path.exists());
+        assert!(tmp.path().join("ato.lock.json").exists());
+        assert!(tmp
+            .path()
+            .join(".ato/source-inference/provenance.json")
+            .exists());
 
         let backups: Vec<_> = std::fs::read_dir(tmp.path().join(".tmp/ato/run-invalid-manifests"))
             .expect("read dir")

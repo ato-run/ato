@@ -260,6 +260,10 @@ fn import_target_hints(
             "entrypoint": target.entrypoint,
             "run_command": target.run_command,
             "runtime_tools": target.runtime_tools,
+            "cmd": target.cmd,
+            "required_env": target.required_env,
+            "port": target.port,
+            "working_dir": target.working_dir,
         }));
 
         if let Some(driver) = target.driver.as_deref() {

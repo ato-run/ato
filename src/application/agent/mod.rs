@@ -992,7 +992,7 @@ fn plan_deno_actions(
     if !inspection.deno_lock_exists {
         actions.push(PlannedAction::RunCommand {
             reason: "generate deno.lock inside the shadow workspace".to_string(),
-            command: format!("deno cache --lock=deno.lock --lock-write {}", entrypoint),
+            command: format!("deno cache --lock=deno.lock --frozen=false {}", entrypoint),
             working_dir: working_dir.clone(),
         });
         if !force_reroute && matches!(failure_kind, SetupFailureKind::MissingLockfile) {
