@@ -52,7 +52,7 @@ fn seed_minimal_deno_lockfiles(workspace_root: &std::path::Path) {
 
     fs::write(
         workspace_root.join("deno.lock"),
-        r#"{"version":"4","specifiers":{},"packages":{}}"#,
+        r#"{"version":"3","remote":{}}"#,
     )
     .expect("write deno.lock");
 

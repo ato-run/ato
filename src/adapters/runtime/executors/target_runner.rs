@@ -3,9 +3,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use capsule_core::execution_plan::derive::{self, PlatformSnapshot};
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::execution_plan::guard::{self, RuntimeGuardMode, RuntimeGuardResult};
 use capsule_core::execution_plan::model::{ExecutionPlan, ExecutionTier};
+use capsule_core::lock_runtime::{self, LockCompilerOverlay};
 use capsule_core::lockfile;
 use capsule_core::router::{ManifestData, RuntimeDecision};
 use capsule_core::CapsuleReporter;
@@ -102,17 +104,59 @@ pub fn prepare_target_execution(
         RuntimeGuardMode::Strict
     };
 
-    let compiled =
-        capsule_core::execution_plan::derive::compile_execution_plan_with_validation_mode(
-            &plan.manifest_path,
-            plan.profile,
-            Some(plan.selected_target_label()),
-            validation_mode,
-        )?;
+    let (execution_plan, runtime_decision, tier) =
+        if let Some(lock) = prepared.authoritative_lock.as_ref() {
+            let resolved =
+                lock_runtime::resolve_lock_runtime_model(lock, Some(plan.selected_target_label()))?;
+            let execution_plan = derive::compile_execution_plan_from_lock(
+                lock,
+                &resolved,
+                &LockCompilerOverlay::default(),
+                &PlatformSnapshot::current(),
+            )?;
+            let tier =
+                derive::derive_tier(execution_plan.target.runtime, execution_plan.target.driver)?;
+            let kind = match execution_plan.target.runtime {
+                capsule_core::execution_plan::model::ExecutionRuntime::Oci => {
+                    capsule_core::router::RuntimeKind::Oci
+                }
+                capsule_core::execution_plan::model::ExecutionRuntime::Wasm => {
+                    capsule_core::router::RuntimeKind::Wasm
+                }
+                capsule_core::execution_plan::model::ExecutionRuntime::Web => {
+                    capsule_core::router::RuntimeKind::Web
+                }
+                capsule_core::execution_plan::model::ExecutionRuntime::Source => {
+                    capsule_core::router::RuntimeKind::Source
+                }
+            };
+            (
+                execution_plan,
+                RuntimeDecision {
+                    kind,
+                    reason: format!("lock-derived target {}", plan.selected_target_label()),
+                    plan: plan.clone(),
+                },
+                tier,
+            )
+        } else {
+            let compiled =
+                capsule_core::execution_plan::derive::compile_execution_plan_with_validation_mode(
+                    &plan.manifest_path,
+                    plan.profile,
+                    Some(plan.selected_target_label()),
+                    validation_mode,
+                )?;
+            (
+                compiled.execution_plan,
+                compiled.runtime_decision,
+                compiled.tier,
+            )
+        };
 
     let guard_result = guard::evaluate_for_mode(
-        &compiled.execution_plan,
-        &compiled.runtime_decision.plan.manifest_dir,
+        &execution_plan,
+        &runtime_decision.plan.manifest_dir,
         &options.enforcement,
         options.sandbox_mode,
         options.dangerously_skip_permissions,
@@ -120,13 +164,13 @@ pub fn prepare_target_execution(
     )?;
 
     if !options.defer_consent {
-        crate::consent_store::require_consent(&compiled.execution_plan, options.assume_yes)?;
+        crate::consent_store::require_consent(&execution_plan, options.assume_yes)?;
     }
 
     Ok(PreparedTargetExecution {
-        execution_plan: compiled.execution_plan,
-        runtime_decision: compiled.runtime_decision,
-        tier: compiled.tier,
+        execution_plan,
+        runtime_decision,
+        tier,
         guard_result,
         launch_ctx,
     })
@@ -324,6 +368,7 @@ entrypoint = "index.js"
             state_source_overrides: HashMap::new(),
         };
         let prepared = PreparedRunContext {
+            authoritative_lock: None,
             raw_manifest,
             validation_mode: capsule_core::types::ValidationMode::Strict,
             engine_override_declared: false,
