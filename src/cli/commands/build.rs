@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
 use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::input_resolver::{
+    resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
+};
 use capsule_core::types::ValidationMode;
 use capsule_core::CapsuleReporter;
 use serde::Serialize;
@@ -108,7 +111,36 @@ pub fn execute_pack_command_with_injected_manifest(
         anyhow::bail!("Target is not a directory: {}", dir.display());
     }
 
-    let manifest = dir.join("capsule.toml");
+    let mut manifest = dir.join("capsule.toml");
+    match resolve_authoritative_input(&dir, ResolveInputOptions::default()) {
+        Ok(ResolvedInput::CanonicalLock { canonical, .. }) => {
+            anyhow::bail!(
+                "{} detected at {}. `ato build` still requires a compatibility manifest path in this migration stage, and will not fall back automatically.",
+                capsule_core::input_resolver::ATO_LOCK_FILE_NAME,
+                canonical.path.display()
+            );
+        }
+        Ok(ResolvedInput::CompatibilityProject {
+            project,
+            advisories,
+            ..
+        }) => {
+            manifest = project.manifest.path;
+            for advisory in advisories {
+                futures::executor::block_on(reporter.warn(advisory.message))?;
+            }
+        }
+        Ok(ResolvedInput::SourceOnly { .. }) => {}
+        Err(error)
+            if error
+                .to_string()
+                .contains("is not an authoritative command-entry input") =>
+        {
+            return Err(error.into());
+        }
+        Err(_) => {}
+    }
+
     let mut temporary_manifest: Option<TemporaryManifestGuard> = None;
     if !manifest.exists() {
         let stdin_is_tty = std::io::stdin().is_terminal();

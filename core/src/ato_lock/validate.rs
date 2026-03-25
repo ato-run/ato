@@ -27,11 +27,11 @@ pub enum AtoLockValidationError {
     LockIdMismatch { expected: String, actual: String },
     #[error("declared feature '{0}' is unknown")]
     UnknownDeclaredFeature(String),
-    #[error("declared feature '{0}' is not supported yet")]
+    #[error("declared feature '{0}' is recognized by schema but not implemented by this runtime")]
     UnsupportedDeclaredFeature(String),
     #[error("required feature '{0}' is unknown")]
     UnknownRequiredFeature(String),
-    #[error("required feature '{0}' is not supported yet")]
+    #[error("required feature '{0}' is recognized by schema but not implemented by this runtime")]
     UnsupportedRequiredFeature(String),
     #[error("unresolved reason '{0}' is unknown")]
     UnknownUnresolvedReason(String),
@@ -43,6 +43,12 @@ pub enum AtoLockValidationError {
     EmptySignatureKind,
 }
 
+/// Structural validation accepts draft locks without requiring lock_id.
+///
+/// This validates schema version, generated_at formatting, feature encoding,
+/// unresolved marker shape, and signature placeholders. It does not require a
+/// persisted artifact boundary and therefore does not require lock_id to exist
+/// or match the canonical projection.
 pub fn validate_structural(
     lock: &AtoLock,
     mode: ValidationMode,
@@ -90,6 +96,11 @@ pub fn validate_structural(
     }
 }
 
+/// Persisted validation applies structural validation and then enforces lock_id.
+///
+/// Call this only when validating a durable ato.lock artifact or when preparing
+/// to serialize one. Draft lock values produced by later resolver/importer
+/// stages should use structural validation until lock_id has been recomputed.
 pub fn validate_persisted(
     lock: &AtoLock,
     mode: ValidationMode,
@@ -169,6 +180,9 @@ fn validate_required_features(
 }
 
 fn validate_unresolved(unresolved: &UnresolvedValue, errors: &mut Vec<AtoLockValidationError>) {
+    // Unknown unresolved reasons and malformed ambiguity markers are treated as
+    // structural invalidity even in non-strict mode. non-strict is intended to
+    // relax forward-compatible feature handling, not to accept malformed state.
     if let UnresolvedReason::Unknown(value) = &unresolved.reason {
         errors.push(AtoLockValidationError::UnknownUnresolvedReason(
             value.clone(),

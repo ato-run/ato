@@ -36,6 +36,9 @@ use crate::runtime::tree as runtime_tree;
 use capsule_core::execution_plan::error::AtoExecutionError;
 #[cfg(test)]
 use capsule_core::execution_plan::guard::ExecutorKind;
+use capsule_core::input_resolver::{
+    resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
+};
 use capsule_core::lifecycle::LifecycleEvent;
 use capsule_core::lockfile::{CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME};
 use capsule_core::types::CapsuleManifest;
@@ -716,6 +719,20 @@ pub(crate) async fn normalize_run_target_after_install(
         .unwrap_or(false)
     {
         return prepare_capsule_target(args, &resolved_target.to_path_buf(), attempt).await;
+    }
+
+    if resolved_target.is_dir()
+        || resolved_target.file_name().and_then(|value| value.to_str()) == Some("capsule.toml")
+    {
+        return match resolve_authoritative_input(resolved_target, ResolveInputOptions::default())? {
+            ResolvedInput::CanonicalLock { canonical, .. } => Err(anyhow::anyhow!(
+                "{} detected at {}. `ato run` lock-first execution is not implemented yet, and compatibility inputs will not be used as fallback.",
+                capsule_core::input_resolver::ATO_LOCK_FILE_NAME,
+                canonical.path.display()
+            )),
+            ResolvedInput::CompatibilityProject { project, .. } => Ok(project.manifest.path),
+            ResolvedInput::SourceOnly { source, .. } => Ok(source.project_root),
+        };
     }
 
     Ok(resolved_target.to_path_buf())
