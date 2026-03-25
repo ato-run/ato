@@ -25,6 +25,37 @@
 10. [10-inspect-preview-remediation-surface.md](./10-inspect-preview-remediation-surface.md)
 11. [11-binding-policy-attestations-state-management.md](./11-binding-policy-attestations-state-management.md)
 
+## 現在の実装状況
+
+- 完了: 01: ato.lock モデルと canonicalization
+- 完了: 02: input resolver と dual-path 境界
+- 次の推奨着手: 03: manifest / legacy lock から lock-shaped IR への compiler
+- その次: 05: run の lock-first 化
+
+Ticket 01 では `core/src/ato_lock/` を追加し、少なくとも次を実装済み。
+
+- `ato.lock.json` v1 の基礎スキーマ
+- canonical projection と `lock_id` の deterministic hash
+- draft 向け structural validation と persisted artifact 向け validation の分離
+- unresolved marker / feature / signature placeholder の基礎モデル
+- focused unit tests による canonicalization / validation / draft-to-persisted path の検証
+
+Ticket 02 では authoritative input の境界を `core/src/input_resolver.rs` に集約し、少なくとも次を実装済み。
+
+- `ResolvedInput` を file kind ではなく project state として定義
+- discovery / classification / materialization / advisories の責務分離
+- `ato.lock.json` 優先、invalid canonical lock は fail-closed、`capsule.lock.json` 単独も fail-closed
+- `validate` / `run` / `build` / `publish` / `init` 入口で resolver を呼ぶ共通境界の導入
+- provenance と advisory の返却、および focused unit test / CLI test による precedence 検証
+
+### Ticket 02 実装報告
+
+- 完了日: 2026-03-25
+- 追加した境界: `ato.lock.json` / compatibility project / source-only を共通解決する resolver
+- 固定したポリシー: invalid `ato.lock.json` が存在する場合は compatibility input へ暗黙 fallback しない
+- 入口反映: `validate` は authoritative input を直接解決し、`run` / `build` / `publish` / `init` は canonical input 検出時に fail-closed で止まる入口へ変更
+- 既知の残作業: canonical lock を実際の実行・build・publish 入力として消費する downstream 実装は Ticket 03 / 05 / 06 / 08 / 09 で継続
+
 ## 推奨実装順
 
 ### Wave 1
