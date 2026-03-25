@@ -67,6 +67,9 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             yes,
             agent,
             keep_failed_artifacts,
+            auto_fix_toml,
+            auto_fix_src,
+            auto_fix_all,
             allow_unverified,
         } => run::execute_run_like_command(run::RunLikeCommandArgs {
             path,
@@ -86,6 +89,11 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             yes,
             agent_mode: agent,
             keep_failed_artifacts,
+            auto_fix_mode: crate::GitHubAutoFixMode::from_cli_flags(
+                auto_fix_toml,
+                auto_fix_src,
+                auto_fix_all,
+            ),
             allow_unverified,
             deprecation_warning: None,
             reporter: reporter.clone(),
@@ -223,6 +231,9 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             no_project,
             json,
             keep_failed_artifacts,
+            auto_fix_toml,
+            auto_fix_src,
+            auto_fix_all,
         } => install::execute_install_command(install::InstallCommandArgs {
             slug,
             from_gh_repo,
@@ -237,6 +248,11 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             no_project,
             json,
             keep_failed_artifacts,
+            auto_fix_mode: crate::GitHubAutoFixMode::from_cli_flags(
+                auto_fix_toml,
+                auto_fix_src,
+                auto_fix_all,
+            ),
         }),
 
         Commands::Search {

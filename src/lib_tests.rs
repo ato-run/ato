@@ -125,6 +125,7 @@ fn resolve_run_target_rejects_noncanonical_github_url_input() {
             PathBuf::from("https://github.com/Koh0920/demo-repo"),
             true,
             false,
+            None,
             false,
             None,
             reporter,
