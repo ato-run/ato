@@ -985,17 +985,15 @@ pub(crate) fn ensure_local_manifest_ready_for_run(
         local_root.join("capsule.toml")
     };
     match resolve_authoritative_input(&manifest_path, ResolveInputOptions::default()) {
-        Ok(ResolvedInput::CanonicalLock { canonical, .. }) => {
-            anyhow::bail!(
-                "{} detected at {}. `ato run` lock-first execution is not implemented yet, and compatibility inputs will not be used as fallback.",
-                capsule_core::input_resolver::ATO_LOCK_FILE_NAME,
-                canonical.path.display()
-            );
+        Ok(ResolvedInput::CanonicalLock { .. }) => {
+            return Ok(LocalRunManifestPreparationOutcome::Ready);
         }
         Ok(ResolvedInput::CompatibilityProject { .. }) => {
             return Ok(LocalRunManifestPreparationOutcome::Ready);
         }
-        Ok(ResolvedInput::SourceOnly { .. }) => {}
+        Ok(ResolvedInput::SourceOnly { .. }) => {
+            return Ok(LocalRunManifestPreparationOutcome::Ready);
+        }
         Err(error)
             if error
                 .to_string()

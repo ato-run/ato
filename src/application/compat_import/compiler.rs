@@ -222,7 +222,8 @@ target = "web"
         let result = compile_from_dir(dir.path());
         assert!(result.draft_lock.contract.entries.contains_key("process"));
         assert!(result.provenance.iter().any(|record| {
-            record.field == crate::application::compat_import::CompilerOwnedField::new("contract", "process")
+            record.field
+                == crate::application::compat_import::CompilerOwnedField::new("contract", "process")
                 && record.source_field.as_deref() == Some("services.<single>.entrypoint")
         }));
         let workloads = result
@@ -270,7 +271,11 @@ target = "worker"
         assert!(!result.draft_lock.contract.entries.contains_key("process"));
         assert_eq!(result.unresolved_summary.contract, 1);
         assert!(result.provenance.iter().any(|record| {
-            record.field == crate::application::compat_import::CompilerOwnedField::new("contract", "workloads")
+            record.field
+                == crate::application::compat_import::CompilerOwnedField::new(
+                    "contract",
+                    "workloads",
+                )
                 && record.source_field.as_deref() == Some("services")
         }));
         assert!(result
@@ -334,8 +339,15 @@ entrypoint = "main.ts"
             .entries
             .contains_key("locked_injected_data"));
         assert!(result.provenance.iter().any(|record| {
-            record.field == crate::application::compat_import::CompilerOwnedField::new("resolution", "locked_injected_data")
-                && record.note.as_deref().is_some_and(|note| note.contains("resolution-scoped"))
+            record.field
+                == crate::application::compat_import::CompilerOwnedField::new(
+                    "resolution",
+                    "locked_injected_data",
+                )
+                && record
+                    .note
+                    .as_deref()
+                    .is_some_and(|note| note.contains("resolution-scoped"))
         }));
     }
 
@@ -511,7 +523,10 @@ target = "main"
             left.draft_lock.contract.entries.get("workloads"),
             right.draft_lock.contract.entries.get("workloads")
         );
-        assert_eq!(left.draft_lock.contract.unresolved, right.draft_lock.contract.unresolved);
+        assert_eq!(
+            left.draft_lock.contract.unresolved,
+            right.draft_lock.contract.unresolved
+        );
     }
 
     #[test]
@@ -552,11 +567,15 @@ entrypoint = "main.ts"
 
         let conflicted = compile_from_dir(base.path());
         assert_eq!(baseline.draft_lock.contract, conflicted.draft_lock.contract);
-        assert_eq!(baseline.unresolved_summary.contract, conflicted.unresolved_summary.contract);
+        assert_eq!(
+            baseline.unresolved_summary.contract,
+            conflicted.unresolved_summary.contract
+        );
         assert!(conflicted
             .diagnostics
             .iter()
-            .all(|diagnostic| diagnostic.lock_path.starts_with("contract.") || diagnostic.lock_path.starts_with("resolution.")));
+            .all(|diagnostic| diagnostic.lock_path.starts_with("contract.")
+                || diagnostic.lock_path.starts_with("resolution.")));
         assert!(conflicted
             .diagnostics
             .iter()

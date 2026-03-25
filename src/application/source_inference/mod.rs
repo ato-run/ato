@@ -1,0 +1,1462 @@
+use std::fs;
+use std::io::{self, IsTerminal, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result};
+use capsule_core::ato_lock::{self, AtoLock, UnresolvedReason, UnresolvedValue};
+use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::input_resolver::{
+    ResolvedCanonicalLock, ResolvedCompatibilityProject, ResolvedSourceOnly, ATO_LOCK_FILE_NAME,
+};
+use capsule_core::CapsuleReporter;
+use serde::Serialize;
+use serde_json::{json, Value};
+
+use crate::application::compat_import::{
+    compile_compatibility_project, CompatibilityCompileResult, CompatibilityDiagnostic,
+    CompatibilityDiagnosticSeverity, ProvenanceRecord as CompatibilityProvenanceRecord,
+};
+use crate::application::pipeline::cleanup::CleanupScope;
+use crate::application::ports::OutputPort;
+use crate::project::init::detect::{
+    detect_project, DetectedProject, NodePackageManager, ProjectType,
+};
+use crate::project::init::recipe::{project_info_from_detection, ProjectInfo};
+use crate::reporters::CliReporter;
+
+const RUN_GENERATED_MANIFEST_NAME: &str = ".ato.run.generated.capsule.toml";
+const INIT_SOURCE_INFERENCE_DIR: &str = ".ato/source-inference";
+const RUN_SOURCE_INFERENCE_DIR: &str = ".tmp/source-inference";
+
+#[derive(Debug, Clone)]
+pub(crate) enum SourceInferenceInput {
+    SourceEvidence(SourceEvidenceInput),
+    DraftLock(DraftLockInput),
+    CanonicalLock(CanonicalLockInput),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SourceEvidenceInput {
+    pub(crate) project_root: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DraftLockInput {
+    pub(crate) project_root: PathBuf,
+    pub(crate) draft_lock: AtoLock,
+    pub(crate) provenance: Vec<SourceInferenceProvenance>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CanonicalLockInput {
+    pub(crate) project_root: PathBuf,
+    pub(crate) canonical_path: PathBuf,
+    pub(crate) lock: AtoLock,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MaterializationMode {
+    RunAttempt,
+    InitWorkspace,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SourceInferenceResult {
+    pub(crate) input_kind: SourceInferenceInputKind,
+    pub(crate) lock: AtoLock,
+    pub(crate) provenance: Vec<SourceInferenceProvenance>,
+    pub(crate) diagnostics: Vec<SourceInferenceDiagnostic>,
+    pub(crate) infer: InferResult,
+    pub(crate) resolve: ResolveResult,
+    pub(crate) selection_gate: Option<SelectionGate>,
+    pub(crate) approval_gate: Option<ApprovalGate>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SourceInferenceInputKind {
+    SourceEvidence,
+    DraftLock,
+    CanonicalLock,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct InferResult {
+    pub(crate) candidate_sets: Vec<CandidateSet>,
+    pub(crate) unresolved: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ResolveResult {
+    pub(crate) resolved_process: bool,
+    pub(crate) resolved_runtime: bool,
+    pub(crate) resolved_target_compatibility: bool,
+    pub(crate) resolved_dependency_closure: bool,
+    pub(crate) unresolved: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CandidateSet {
+    pub(crate) field: String,
+    pub(crate) ranked: Vec<RankedCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct RankedCandidate {
+    pub(crate) label: String,
+    pub(crate) score: u16,
+    pub(crate) entrypoint: Vec<String>,
+    pub(crate) rationale: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SelectionGate {
+    pub(crate) field: String,
+    pub(crate) candidates: Vec<RankedCandidate>,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ApprovalGate {
+    pub(crate) capability: String,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SourceInferenceProvenanceKind {
+    ExplicitArtifact,
+    CompatibilityImport,
+    CanonicalInput,
+    DeterministicHeuristic,
+    MetadataObservation,
+    SelectionGate,
+    ApprovalGate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct SourceInferenceProvenance {
+    pub(crate) field: String,
+    pub(crate) kind: SourceInferenceProvenanceKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_field: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) note: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SourceInferenceDiagnosticSeverity {
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SourceInferenceDiagnostic {
+    pub(crate) severity: SourceInferenceDiagnosticSeverity,
+    pub(crate) field: String,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RunMaterialization {
+    pub(crate) manifest_path: PathBuf,
+    pub(crate) lock_path: PathBuf,
+    pub(crate) sidecar_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorkspaceMaterialization {
+    pub(crate) lock_path: PathBuf,
+    pub(crate) sidecar_path: PathBuf,
+    pub(crate) result: SourceInferenceResult,
+}
+
+#[derive(Debug, Serialize)]
+struct SourceInferenceSidecar {
+    mode: MaterializationModeSerde,
+    input_kind: SourceInferenceInputKind,
+    provenance: Vec<SourceInferenceProvenance>,
+    diagnostics: Vec<SourceInferenceDiagnostic>,
+    selection_gate: Option<SelectionGate>,
+    approval_gate: Option<ApprovalGate>,
+    infer: InferResult,
+    resolve: ResolveResult,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum MaterializationModeSerde {
+    RunAttempt,
+    InitWorkspace,
+}
+
+pub(crate) fn materialize_run_from_source_only(
+    source: &ResolvedSourceOnly,
+    scope: Option<&mut CleanupScope>,
+    reporter: Arc<CliReporter>,
+    assume_yes: bool,
+) -> Result<RunMaterialization> {
+    let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
+        project_root: source.project_root.clone(),
+    });
+    let result =
+        execute_shared_engine(input, MaterializationMode::RunAttempt, assume_yes, reporter)?;
+    materialize_run_result(&source.project_root, result, scope)
+}
+
+pub(crate) fn materialize_run_from_canonical_lock(
+    canonical: &ResolvedCanonicalLock,
+    scope: Option<&mut CleanupScope>,
+    reporter: Arc<CliReporter>,
+    assume_yes: bool,
+) -> Result<RunMaterialization> {
+    let input = SourceInferenceInput::CanonicalLock(CanonicalLockInput {
+        project_root: canonical.project_root.clone(),
+        canonical_path: canonical.path.clone(),
+        lock: canonical.lock.clone(),
+    });
+    let result =
+        execute_shared_engine(input, MaterializationMode::RunAttempt, assume_yes, reporter)?;
+    materialize_run_result(&canonical.project_root, result, scope)
+}
+
+pub(crate) fn execute_init_from_source_only(
+    project_root: &Path,
+    reporter: Arc<CliReporter>,
+    assume_yes: bool,
+) -> Result<WorkspaceMaterialization> {
+    let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
+        project_root: project_root.to_path_buf(),
+    });
+    let result = execute_shared_engine(
+        input,
+        MaterializationMode::InitWorkspace,
+        assume_yes,
+        reporter,
+    )?;
+    materialize_workspace_result(project_root, result)
+}
+
+pub(crate) fn execute_init_from_compatibility(
+    project: &ResolvedCompatibilityProject,
+    reporter: Arc<CliReporter>,
+    assume_yes: bool,
+) -> Result<WorkspaceMaterialization> {
+    let (draft_input, compiled) = draft_lock_input_from_compatibility(project)?;
+    let mut result = execute_shared_engine(
+        SourceInferenceInput::DraftLock(draft_input),
+        MaterializationMode::InitWorkspace,
+        assume_yes,
+        reporter,
+    )?;
+    result.diagnostics.extend(
+        compiled
+            .diagnostics
+            .iter()
+            .map(convert_compatibility_diagnostic),
+    );
+    materialize_workspace_result(&project.project_root, result)
+}
+
+pub(crate) fn execute_shared_engine(
+    input: SourceInferenceInput,
+    mode: MaterializationMode,
+    assume_yes: bool,
+    reporter: Arc<CliReporter>,
+) -> Result<SourceInferenceResult> {
+    let mut result = infer(input)?;
+    resolve(&mut result)?;
+    enforce_mode_preconditions(&mut result, mode, assume_yes, reporter)?;
+    Ok(result)
+}
+
+pub(crate) fn draft_lock_input_from_compatibility(
+    project: &ResolvedCompatibilityProject,
+) -> Result<(DraftLockInput, CompatibilityCompileResult)> {
+    let compiled = compile_compatibility_project(project)?;
+    let input = DraftLockInput {
+        project_root: project.project_root.clone(),
+        draft_lock: compiled.draft_lock.clone(),
+        provenance: compiled
+            .provenance
+            .iter()
+            .map(convert_compatibility_provenance)
+            .collect(),
+    };
+    Ok((input, compiled))
+}
+
+fn infer(input: SourceInferenceInput) -> Result<SourceInferenceResult> {
+    match input {
+        SourceInferenceInput::SourceEvidence(input) => infer_from_source_evidence(input),
+        SourceInferenceInput::DraftLock(input) => infer_from_draft_lock(input),
+        SourceInferenceInput::CanonicalLock(input) => infer_from_canonical_lock(input),
+    }
+}
+
+fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInferenceResult> {
+    let detected = detect_project(&input.project_root)?;
+    let info = project_info_from_detection(&detected)?;
+    let metadata = source_metadata(&detected, &input.project_root);
+    let runtime_kind = runtime_kind_from_project(&detected);
+    let process_candidates = process_candidates_for_source(&detected, &info);
+    let mut lock = AtoLock::default();
+    let mut provenance = vec![SourceInferenceProvenance {
+        field: "contract.metadata".to_string(),
+        kind: SourceInferenceProvenanceKind::ExplicitArtifact,
+        source_path: Some(input.project_root.clone()),
+        source_field: Some("project_root".to_string()),
+        note: Some("source-only workspace analyzed for shared inference".to_string()),
+    }];
+    let mut diagnostics = Vec::new();
+    let mut unresolved = Vec::new();
+    let candidate_set = CandidateSet {
+        field: "contract.process".to_string(),
+        ranked: process_candidates.clone(),
+    };
+
+    lock.contract
+        .entries
+        .insert("metadata".to_string(), metadata);
+    lock.contract
+        .entries
+        .insert("network".to_string(), inferred_network_contract(&detected));
+    lock.contract.entries.insert(
+        "env_contract".to_string(),
+        inferred_env_contract(&input.project_root),
+    );
+    lock.contract.entries.insert(
+        "filesystem".to_string(),
+        inferred_filesystem_contract(&detected),
+    );
+    lock.resolution.entries.insert(
+        "runtime".to_string(),
+        json!({
+            "kind": runtime_kind,
+            "resolved_by": "shared_source_inference",
+        }),
+    );
+    lock.resolution.entries.insert(
+        "resolved_targets".to_string(),
+        Value::Array(vec![json!({
+            "label": "default",
+            "runtime": "source",
+            "driver": runtime_kind,
+            "compatible": true,
+        })]),
+    );
+    lock.resolution.entries.insert(
+        "closure".to_string(),
+        inferred_closure_state(&input.project_root),
+    );
+
+    provenance.push(SourceInferenceProvenance {
+        field: "resolution.runtime".to_string(),
+        kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
+        source_path: Some(input.project_root.clone()),
+        source_field: Some("project_type".to_string()),
+        note: Some("runtime resolved from deterministic project-type inference".to_string()),
+    });
+
+    if process_candidates.is_empty() {
+        lock.contract
+            .entries
+            .insert("workloads".to_string(), Value::Array(Vec::new()));
+        lock.contract.unresolved.push(UnresolvedValue {
+            reason: UnresolvedReason::InsufficientEvidence,
+            detail: Some("could not infer a primary process from source evidence".to_string()),
+            candidates: Vec::new(),
+        });
+        diagnostics.push(SourceInferenceDiagnostic {
+            severity: SourceInferenceDiagnosticSeverity::Error,
+            field: "contract.process".to_string(),
+            message: "source inference could not determine a runnable process".to_string(),
+        });
+        unresolved.push("contract.process".to_string());
+    } else if is_equal_ranked(&process_candidates) {
+        lock.contract
+            .entries
+            .insert("workloads".to_string(), Value::Array(Vec::new()));
+        lock.contract.unresolved.push(UnresolvedValue {
+            reason: UnresolvedReason::ExplicitSelectionRequired,
+            detail: Some("multiple equal-ranked process candidates remain".to_string()),
+            candidates: process_candidates
+                .iter()
+                .map(|candidate| candidate.label.clone())
+                .collect(),
+        });
+        diagnostics.push(SourceInferenceDiagnostic {
+            severity: SourceInferenceDiagnosticSeverity::Warning,
+            field: "contract.process".to_string(),
+            message: "multiple equal-ranked process candidates require explicit selection"
+                .to_string(),
+        });
+        unresolved.push("contract.process".to_string());
+    } else if let Some(candidate) = process_candidates.first() {
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            Value::Array(vec![json!({
+                "name": "main",
+                "process": process_value_from_candidate(Some(candidate)),
+            })]),
+        );
+        lock.contract.entries.insert(
+            "process".to_string(),
+            process_value_from_candidate(Some(candidate)),
+        );
+        provenance.push(SourceInferenceProvenance {
+            field: "contract.process".to_string(),
+            kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
+            source_path: Some(input.project_root.clone()),
+            source_field: Some(candidate.label.clone()),
+            note: Some(candidate.rationale.clone()),
+        });
+    }
+
+    Ok(SourceInferenceResult {
+        input_kind: SourceInferenceInputKind::SourceEvidence,
+        lock,
+        provenance,
+        diagnostics,
+        infer: InferResult {
+            candidate_sets: vec![candidate_set],
+            unresolved,
+        },
+        resolve: ResolveResult {
+            resolved_process: false,
+            resolved_runtime: false,
+            resolved_target_compatibility: false,
+            resolved_dependency_closure: false,
+            unresolved: Vec::new(),
+        },
+        selection_gate: None,
+        approval_gate: None,
+    })
+}
+
+fn infer_from_draft_lock(input: DraftLockInput) -> Result<SourceInferenceResult> {
+    let mut infer_unresolved = Vec::new();
+    if input.draft_lock.contract.entries.get("process").is_none() {
+        infer_unresolved.push("contract.process".to_string());
+    }
+
+    Ok(SourceInferenceResult {
+        input_kind: SourceInferenceInputKind::DraftLock,
+        lock: input.draft_lock,
+        provenance: input.provenance,
+        diagnostics: Vec::new(),
+        infer: InferResult {
+            candidate_sets: Vec::new(),
+            unresolved: infer_unresolved,
+        },
+        resolve: ResolveResult {
+            resolved_process: false,
+            resolved_runtime: false,
+            resolved_target_compatibility: false,
+            resolved_dependency_closure: false,
+            unresolved: Vec::new(),
+        },
+        selection_gate: None,
+        approval_gate: None,
+    })
+}
+
+fn infer_from_canonical_lock(input: CanonicalLockInput) -> Result<SourceInferenceResult> {
+    let mut provenance = vec![SourceInferenceProvenance {
+        field: "root".to_string(),
+        kind: SourceInferenceProvenanceKind::CanonicalInput,
+        source_path: Some(input.canonical_path),
+        source_field: Some(ATO_LOCK_FILE_NAME.to_string()),
+        note: Some("persisted canonical lock reused as shared source inference input".to_string()),
+    }];
+    let mut infer_unresolved = Vec::new();
+    if input.lock.contract.entries.get("process").is_none() {
+        infer_unresolved.push("contract.process".to_string());
+    }
+    if input.lock.resolution.entries.get("runtime").is_none() {
+        infer_unresolved.push("resolution.runtime".to_string());
+    }
+    provenance.push(SourceInferenceProvenance {
+        field: "contract.process".to_string(),
+        kind: SourceInferenceProvenanceKind::CanonicalInput,
+        source_path: Some(input.project_root),
+        source_field: Some("ato.lock.json".to_string()),
+        note: Some(
+            "canonical lock drives run/init materialization without re-inferring semantics"
+                .to_string(),
+        ),
+    });
+
+    Ok(SourceInferenceResult {
+        input_kind: SourceInferenceInputKind::CanonicalLock,
+        lock: input.lock,
+        provenance,
+        diagnostics: Vec::new(),
+        infer: InferResult {
+            candidate_sets: Vec::new(),
+            unresolved: infer_unresolved,
+        },
+        resolve: ResolveResult {
+            resolved_process: false,
+            resolved_runtime: false,
+            resolved_target_compatibility: false,
+            resolved_dependency_closure: false,
+            unresolved: Vec::new(),
+        },
+        selection_gate: None,
+        approval_gate: None,
+    })
+}
+
+fn resolve(result: &mut SourceInferenceResult) -> Result<()> {
+    let process_resolved = result.lock.contract.entries.get("process").is_some();
+    let runtime_resolved = result.lock.resolution.entries.get("runtime").is_some();
+    let target_resolved = result
+        .lock
+        .resolution
+        .entries
+        .get("resolved_targets")
+        .and_then(Value::as_array)
+        .map(|targets| !targets.is_empty())
+        .unwrap_or(false);
+    let closure_resolved = result.lock.resolution.entries.get("closure").is_some();
+
+    let unresolved = collect_unresolved_paths(&result.lock);
+    result.resolve = ResolveResult {
+        resolved_process: process_resolved,
+        resolved_runtime: runtime_resolved,
+        resolved_target_compatibility: target_resolved,
+        resolved_dependency_closure: closure_resolved,
+        unresolved: unresolved.clone(),
+    };
+
+    if !process_resolved {
+        if let Some(gate) = selection_gate_from_lock(&result.lock, &result.infer.candidate_sets) {
+            result.selection_gate = Some(gate);
+        }
+    }
+
+    Ok(())
+}
+
+fn enforce_mode_preconditions(
+    result: &mut SourceInferenceResult,
+    mode: MaterializationMode,
+    assume_yes: bool,
+    reporter: Arc<CliReporter>,
+) -> Result<()> {
+    if result.approval_gate.is_some() {
+        anyhow::bail!(AtoExecutionError::manual_intervention_required(
+            "script-capable resolution requires an explicit approval mode",
+            None,
+            vec![
+                "re-run with an explicit source inference approval mode once implemented"
+                    .to_string()
+            ],
+        ));
+    }
+
+    if let Some(selection_gate) = result.selection_gate.clone() {
+        match mode {
+            MaterializationMode::RunAttempt => {
+                let selection = prompt_selection_if_allowed(&selection_gate, assume_yes, reporter)?;
+                if let Some(selection) = selection {
+                    apply_selection(result, &selection_gate.field, &selection)?;
+                } else {
+                    anyhow::bail!(AtoExecutionError::ambiguous_entrypoint(
+                        selection_gate.message,
+                        selection_gate
+                            .candidates
+                            .iter()
+                            .map(|candidate| candidate.label.clone())
+                            .collect(),
+                    ));
+                }
+            }
+            MaterializationMode::InitWorkspace => {
+                if let Some(selection) =
+                    prompt_selection_if_allowed(&selection_gate, assume_yes, reporter)?
+                {
+                    apply_selection(result, &selection_gate.field, &selection)?;
+                }
+            }
+        }
+    }
+
+    if matches!(mode, MaterializationMode::RunAttempt) {
+        if result.lock.contract.entries.get("process").is_none() {
+            anyhow::bail!(AtoExecutionError::ambiguous_entrypoint(
+                "run requires a selected process before execution",
+                explicit_candidates(&result.lock),
+            ));
+        }
+        if result.lock.resolution.entries.get("runtime").is_none() {
+            anyhow::bail!(AtoExecutionError::runtime_not_resolved(
+                "run requires a resolved runtime before execution",
+                None,
+            ));
+        }
+        if result
+            .lock
+            .resolution
+            .entries
+            .get("resolved_targets")
+            .and_then(Value::as_array)
+            .map(|targets| targets.is_empty())
+            .unwrap_or(true)
+        {
+            anyhow::bail!(AtoExecutionError::execution_contract_invalid(
+                "run requires at least one resolved target-compatible execution candidate",
+                Some("resolution.resolved_targets"),
+                None,
+            ));
+        }
+        if result.lock.resolution.entries.get("closure").is_none() {
+            anyhow::bail!(AtoExecutionError::lock_incomplete(
+                "run requires dependency closure state before execution",
+                Some("resolution.closure"),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn materialize_run_result(
+    project_root: &Path,
+    result: SourceInferenceResult,
+    mut scope: Option<&mut CleanupScope>,
+) -> Result<RunMaterialization> {
+    let run_state_dir = project_root
+        .join(RUN_SOURCE_INFERENCE_DIR)
+        .join(unique_attempt_token());
+    fs::create_dir_all(&run_state_dir)
+        .with_context(|| format!("Failed to create {}", run_state_dir.display()))?;
+    if let Some(scope) = scope.as_mut() {
+        scope.register_remove_dir(run_state_dir.clone());
+    }
+
+    let lock_path = run_state_dir.join(ATO_LOCK_FILE_NAME);
+    ato_lock::write_pretty_to_path(&result.lock, &lock_path)?;
+
+    let sidecar_path = run_state_dir.join("provenance.json");
+    write_sidecar(&sidecar_path, &result, MaterializationMode::RunAttempt)?;
+
+    let manifest_path = project_root.join(RUN_GENERATED_MANIFEST_NAME);
+    write_generated_manifest(&manifest_path, &result.lock, project_root)?;
+    if let Some(scope) = scope.as_mut() {
+        scope.register({
+            let manifest_path = manifest_path.clone();
+            move || remove_file_action(manifest_path)
+        });
+    }
+
+    Ok(RunMaterialization {
+        manifest_path,
+        lock_path,
+        sidecar_path,
+    })
+}
+
+fn materialize_workspace_result(
+    project_root: &Path,
+    result: SourceInferenceResult,
+) -> Result<WorkspaceMaterialization> {
+    let lock_path = project_root.join(ATO_LOCK_FILE_NAME);
+    ato_lock::write_pretty_to_path(&result.lock, &lock_path)?;
+
+    let sidecar_dir = project_root.join(INIT_SOURCE_INFERENCE_DIR);
+    fs::create_dir_all(&sidecar_dir)
+        .with_context(|| format!("Failed to create {}", sidecar_dir.display()))?;
+    let sidecar_path = sidecar_dir.join("provenance.json");
+    write_sidecar(&sidecar_path, &result, MaterializationMode::InitWorkspace)?;
+
+    Ok(WorkspaceMaterialization {
+        lock_path,
+        sidecar_path,
+        result,
+    })
+}
+
+fn write_generated_manifest(
+    manifest_path: &Path,
+    lock: &AtoLock,
+    project_root: &Path,
+) -> Result<()> {
+    let process = lock.contract.entries.get("process").ok_or_else(|| {
+        AtoExecutionError::ambiguous_entrypoint(
+            "shared source inference could not produce a deterministic process manifest adapter",
+            explicit_candidates(lock),
+        )
+    })?;
+    let entrypoint = process
+        .get("entrypoint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            AtoExecutionError::execution_contract_invalid(
+                "contract.process.entrypoint is required for run materialization",
+                Some("contract.process.entrypoint"),
+                None,
+            )
+        })?;
+    let cmd_values = process
+        .get("cmd")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .or_else(|| {
+            process.get("args").and_then(Value::as_array).map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+        })
+        .unwrap_or_default();
+    let metadata = lock.contract.entries.get("metadata");
+    let name = metadata
+        .and_then(|value| value.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            project_root
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("source-app")
+        });
+    let version = metadata
+        .and_then(|value| value.get("version"))
+        .and_then(Value::as_str)
+        .unwrap_or("0.1.0");
+    let description = metadata
+        .and_then(|value| value.get("capsule_type"))
+        .and_then(Value::as_str)
+        .map(|capsule_type| format!("Generated from shared source inference ({capsule_type})"))
+        .unwrap_or_else(|| "Generated from shared source inference".to_string());
+
+    let mut raw = format!(
+        "schema_version = \"0.2\"\nname = {name:?}\nversion = {version:?}\ntype = \"app\"\ndefault_target = \"cli\"\n\n[metadata]\ndescription = {description:?}\n\n[requirements]\n\n[targets.cli]\nruntime = \"source\"\nentrypoint = {entrypoint:?}\n",
+    );
+    if !cmd_values.is_empty() {
+        raw.push_str("cmd = [");
+        raw.push_str(
+            &cmd_values
+                .iter()
+                .map(|value| format!("{value:?}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        raw.push_str("]\n");
+    }
+    raw.push_str("\n[storage]\n\n[routing]\n");
+
+    fs::write(manifest_path, raw)
+        .with_context(|| format!("Failed to write {}", manifest_path.display()))
+}
+
+fn write_sidecar(
+    path: &Path,
+    result: &SourceInferenceResult,
+    mode: MaterializationMode,
+) -> Result<()> {
+    let sidecar = SourceInferenceSidecar {
+        mode: match mode {
+            MaterializationMode::RunAttempt => MaterializationModeSerde::RunAttempt,
+            MaterializationMode::InitWorkspace => MaterializationModeSerde::InitWorkspace,
+        },
+        input_kind: result.input_kind,
+        provenance: result.provenance.clone(),
+        diagnostics: result.diagnostics.clone(),
+        selection_gate: result.selection_gate.clone(),
+        approval_gate: result.approval_gate.clone(),
+        infer: result.infer.clone(),
+        resolve: result.resolve.clone(),
+    };
+    let raw = serde_json::to_string_pretty(&sidecar)
+        .context("Failed to serialize source inference sidecar")?;
+    fs::write(path, raw).with_context(|| format!("Failed to write {}", path.display()))
+}
+
+fn prompt_selection_if_allowed(
+    gate: &SelectionGate,
+    assume_yes: bool,
+    reporter: Arc<CliReporter>,
+) -> Result<Option<RankedCandidate>> {
+    if assume_yes || reporter.is_json() || !io::stdin().is_terminal() || !io::stderr().is_terminal()
+    {
+        return Ok(None);
+    }
+
+    futures::executor::block_on(reporter.warn(gate.message.clone()))?;
+    for (index, candidate) in gate.candidates.iter().enumerate() {
+        futures::executor::block_on(reporter.notify(format!(
+            "  {}. {} -> {}",
+            index + 1,
+            candidate.label,
+            candidate.entrypoint.join(" ")
+        )))?;
+    }
+    eprint!(
+        "Select candidate [1-{}] or press Enter to abort: ",
+        gate.candidates.len()
+    );
+    io::stderr()
+        .flush()
+        .context("failed to flush source inference selection prompt")?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let index = trimmed
+        .parse::<usize>()
+        .ok()
+        .and_then(|value| value.checked_sub(1))
+        .filter(|value| *value < gate.candidates.len())
+        .ok_or_else(|| anyhow::anyhow!("invalid source inference selection: {trimmed}"))?;
+    Ok(Some(gate.candidates[index].clone()))
+}
+
+fn apply_selection(
+    result: &mut SourceInferenceResult,
+    field: &str,
+    selection: &RankedCandidate,
+) -> Result<()> {
+    if field == "contract.process" {
+        result.lock.contract.entries.insert(
+            "process".to_string(),
+            process_value_from_candidate(Some(selection)),
+        );
+        result.lock.contract.unresolved.retain(|value| {
+            !(value.reason == UnresolvedReason::ExplicitSelectionRequired
+                && value
+                    .detail
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("process candidates"))
+        });
+        result.provenance.push(SourceInferenceProvenance {
+            field: field.to_string(),
+            kind: SourceInferenceProvenanceKind::SelectionGate,
+            source_path: None,
+            source_field: Some(selection.label.clone()),
+            note: Some("interactive selection resolved equal-ranked process ambiguity".to_string()),
+        });
+        result.selection_gate = None;
+        resolve(result)?;
+    }
+    Ok(())
+}
+
+fn selection_gate_from_lock(
+    lock: &AtoLock,
+    candidate_sets: &[CandidateSet],
+) -> Option<SelectionGate> {
+    let unresolved = lock.contract.unresolved.iter().find(|value| {
+        value.reason == UnresolvedReason::ExplicitSelectionRequired && value.candidates.len() > 1
+    })?;
+    let candidates = candidate_sets
+        .iter()
+        .find(|set| set.field == "contract.process")
+        .map(|set| set.ranked.clone())
+        .unwrap_or_else(|| {
+            unresolved
+                .candidates
+                .iter()
+                .map(|candidate| RankedCandidate {
+                    label: candidate.clone(),
+                    score: 0,
+                    entrypoint: Vec::new(),
+                    rationale: "selection required".to_string(),
+                })
+                .collect()
+        });
+    Some(SelectionGate {
+        field: "contract.process".to_string(),
+        candidates,
+        message: unresolved
+            .detail
+            .clone()
+            .unwrap_or_else(|| "explicit process selection is required".to_string()),
+    })
+}
+
+fn process_candidates_for_source(
+    detected: &DetectedProject,
+    info: &ProjectInfo,
+) -> Vec<RankedCandidate> {
+    let mut candidates = Vec::new();
+    match detected.project_type {
+        ProjectType::NodeJs => {
+            if let Some(node) = detected.node.as_ref() {
+                if node.scripts.has_start {
+                    candidates.push(RankedCandidate {
+                        label: "package.json:scripts.start".to_string(),
+                        score: 100,
+                        entrypoint: info.entrypoint.clone(),
+                        rationale:
+                            "explicit package.json start script outranks other Node candidates"
+                                .to_string(),
+                    });
+                }
+                if node.scripts.has_dev {
+                    let dev_entry = info.node_dev_entrypoint.clone().unwrap_or_else(|| {
+                        vec!["npm".to_string(), "run".to_string(), "dev".to_string()]
+                    });
+                    candidates.push(RankedCandidate {
+                        label: "package.json:scripts.dev".to_string(),
+                        score: if node.scripts.has_start { 90 } else { 100 },
+                        entrypoint: dev_entry,
+                        rationale: "package.json dev script is an explicit execution candidate"
+                            .to_string(),
+                    });
+                }
+                if !node.scripts.has_start && !node.scripts.has_dev {
+                    candidates.extend(existing_candidates(
+                        &detected.dir,
+                        &[
+                            "src/index.ts",
+                            "src/main.ts",
+                            "index.ts",
+                            "main.ts",
+                            "index.js",
+                            "main.js",
+                            "app.js",
+                            "server.js",
+                        ],
+                        70,
+                        if node.is_bun {
+                            "bun:file_layout"
+                        } else {
+                            "node:file_layout"
+                        },
+                        if node.is_bun { "bun" } else { "node" },
+                        "well-known Node file layout used as deterministic fallback",
+                    ));
+                }
+            }
+        }
+        ProjectType::Python => {
+            candidates.extend(existing_candidates(
+                &detected.dir,
+                &["main.py", "app.py", "run.py", "server.py"],
+                90,
+                "python:file",
+                "python",
+                "explicit Python entry file outranks convention-only fallbacks",
+            ));
+            if candidates.is_empty() && !info.entrypoint.is_empty() {
+                candidates.push(RankedCandidate {
+                    label: "python:project_info".to_string(),
+                    score: 80,
+                    entrypoint: info.entrypoint.clone(),
+                    rationale:
+                        "project-info fallback used when no explicit Python entry file exists"
+                            .to_string(),
+                });
+            }
+        }
+        ProjectType::Rust | ProjectType::Go | ProjectType::Ruby => {
+            if !info.entrypoint.is_empty() {
+                candidates.push(RankedCandidate {
+                    label: format!(
+                        "{}:entrypoint",
+                        detected.project_type.as_str().to_ascii_lowercase()
+                    ),
+                    score: 90,
+                    entrypoint: info.entrypoint.clone(),
+                    rationale:
+                        "deterministic language-specific entrypoint inferred from project metadata"
+                            .to_string(),
+                });
+            }
+        }
+        ProjectType::Unknown => {
+            candidates.extend(existing_candidates(
+                &detected.dir,
+                &["main.py", "index.js", "main.sh", "run.sh"],
+                60,
+                "generic:file_layout",
+                "",
+                "generic file-layout fallback used due to insufficient explicit metadata",
+            ));
+            if candidates.is_empty() && !info.entrypoint.is_empty() {
+                candidates.push(RankedCandidate {
+                    label: "generic:project_info".to_string(),
+                    score: 50,
+                    entrypoint: info.entrypoint.clone(),
+                    rationale: "generic project-info fallback used after deterministic file scan"
+                        .to_string(),
+                });
+            }
+        }
+    }
+
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    candidates
+}
+
+fn existing_candidates(
+    dir: &Path,
+    files: &[&str],
+    score: u16,
+    label_prefix: &str,
+    program: &str,
+    rationale: &str,
+) -> Vec<RankedCandidate> {
+    files
+        .iter()
+        .filter(|candidate| dir.join(candidate).exists())
+        .map(|candidate| RankedCandidate {
+            label: format!("{label_prefix}:{candidate}"),
+            score,
+            entrypoint: if program.is_empty() {
+                vec![(*candidate).to_string()]
+            } else {
+                vec![program.to_string(), (*candidate).to_string()]
+            },
+            rationale: rationale.to_string(),
+        })
+        .collect()
+}
+
+fn runtime_kind_from_project(detected: &DetectedProject) -> &'static str {
+    match detected.project_type {
+        ProjectType::NodeJs => detected
+            .node
+            .as_ref()
+            .map(|node| match node.package_manager {
+                NodePackageManager::Bun => "bun",
+                _ => "node",
+            })
+            .unwrap_or("node"),
+        ProjectType::Python => "python",
+        ProjectType::Rust => "rust",
+        ProjectType::Go => "go",
+        ProjectType::Ruby => "ruby",
+        ProjectType::Unknown => "source",
+    }
+}
+
+fn inferred_network_contract(detected: &DetectedProject) -> Value {
+    let expected_port = match detected.project_type {
+        ProjectType::NodeJs => detected
+            .node
+            .as_ref()
+            .and_then(|node| {
+                if node.has_hono {
+                    Some(3000)
+                } else if node.scripts.has_dev {
+                    Some(5173)
+                } else {
+                    Some(3000)
+                }
+            })
+            .unwrap_or(3000),
+        ProjectType::Python => 8000,
+        _ => 0,
+    };
+    json!({
+        "ingress": if expected_port > 0 {
+            vec![json!({"port": expected_port, "protocol": "http"})]
+        } else {
+            Vec::<Value>::new()
+        },
+    })
+}
+
+fn inferred_env_contract(project_root: &Path) -> Value {
+    let explicit = [".env.example", ".env.template"]
+        .iter()
+        .filter_map(|name| {
+            let path = project_root.join(name);
+            if path.exists() {
+                Some(json!({"source": name, "classification": "explicit_example"}))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "required": Vec::<Value>::new(),
+        "optional_hints": explicit,
+    })
+}
+
+fn inferred_filesystem_contract(detected: &DetectedProject) -> Value {
+    let cache = match detected.project_type {
+        ProjectType::NodeJs => vec![json!("node_modules")],
+        ProjectType::Python => vec![json!("__pycache__")],
+        ProjectType::Rust => vec![json!("target")],
+        _ => Vec::new(),
+    };
+    json!({
+        "cache_hints": cache,
+        "persistent_hints": Vec::<Value>::new(),
+    })
+}
+
+fn inferred_closure_state(project_root: &Path) -> Value {
+    let explicit_locks = [
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lockb",
+        "Cargo.lock",
+        "poetry.lock",
+        "requirements.txt",
+        "go.sum",
+        "Gemfile.lock",
+    ]
+    .iter()
+    .filter(|name| project_root.join(name).exists())
+    .map(|name| json!(name))
+    .collect::<Vec<_>>();
+
+    json!({
+        "kind": "metadata_only",
+        "observed_lockfiles": explicit_locks,
+    })
+}
+
+fn source_metadata(detected: &DetectedProject, project_root: &Path) -> Value {
+    json!({
+        "name": detected.name,
+        "capsule_type": "app",
+        "source_root": project_root,
+        "project_type": detected.project_type.as_str(),
+    })
+}
+
+fn process_value_from_candidate(candidate: Option<&RankedCandidate>) -> Value {
+    if let Some(candidate) = candidate {
+        let entrypoint = candidate.entrypoint.first().cloned().unwrap_or_default();
+        let args = if candidate.entrypoint.len() > 1 {
+            candidate.entrypoint[1..]
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        json!({
+            "entrypoint": entrypoint,
+            "cmd": args,
+        })
+    } else {
+        json!({})
+    }
+}
+
+fn collect_unresolved_paths(lock: &AtoLock) -> Vec<String> {
+    let mut paths = Vec::new();
+    if !lock.contract.unresolved.is_empty() {
+        paths.push("contract".to_string());
+    }
+    if !lock.resolution.unresolved.is_empty() {
+        paths.push("resolution".to_string());
+    }
+    if !lock.binding.unresolved.is_empty() {
+        paths.push("binding".to_string());
+    }
+    paths
+}
+
+fn explicit_candidates(lock: &AtoLock) -> Vec<String> {
+    lock.contract
+        .unresolved
+        .iter()
+        .flat_map(|value| value.candidates.clone())
+        .collect()
+}
+
+fn convert_compatibility_provenance(
+    record: &CompatibilityProvenanceRecord,
+) -> SourceInferenceProvenance {
+    SourceInferenceProvenance {
+        field: record.field.lock_path(),
+        kind: match record.kind {
+            crate::application::compat_import::ProvenanceKind::ManifestExplicit => {
+                SourceInferenceProvenanceKind::CompatibilityImport
+            }
+            crate::application::compat_import::ProvenanceKind::LegacyLockResolved => {
+                SourceInferenceProvenanceKind::CompatibilityImport
+            }
+            crate::application::compat_import::ProvenanceKind::NormalizedDefault => {
+                SourceInferenceProvenanceKind::DeterministicHeuristic
+            }
+            crate::application::compat_import::ProvenanceKind::CompilerInferred => {
+                SourceInferenceProvenanceKind::CompatibilityImport
+            }
+        },
+        source_path: record.source_path.clone(),
+        source_field: record.source_field.clone(),
+        note: record.note.clone(),
+    }
+}
+
+fn convert_compatibility_diagnostic(
+    diagnostic: &CompatibilityDiagnostic,
+) -> SourceInferenceDiagnostic {
+    SourceInferenceDiagnostic {
+        severity: match diagnostic.severity {
+            CompatibilityDiagnosticSeverity::Warning => SourceInferenceDiagnosticSeverity::Warning,
+            CompatibilityDiagnosticSeverity::Error => SourceInferenceDiagnosticSeverity::Error,
+        },
+        field: diagnostic.lock_path.clone(),
+        message: diagnostic.message.clone(),
+    }
+}
+
+fn remove_file_action(path: PathBuf) -> capsule_core::execution_plan::error::CleanupActionRecord {
+    let detail = path.display().to_string();
+    match fs::remove_file(&path) {
+        Ok(()) => capsule_core::execution_plan::error::CleanupActionRecord {
+            action: "remove_generated_manifest".to_string(),
+            status: capsule_core::execution_plan::error::CleanupActionStatus::Succeeded,
+            detail: Some(detail),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            capsule_core::execution_plan::error::CleanupActionRecord {
+                action: "remove_generated_manifest".to_string(),
+                status: capsule_core::execution_plan::error::CleanupActionStatus::Succeeded,
+                detail: Some(detail),
+            }
+        }
+        Err(error) => capsule_core::execution_plan::error::CleanupActionRecord {
+            action: "remove_generated_manifest".to_string(),
+            status: capsule_core::execution_plan::error::CleanupActionStatus::Failed,
+            detail: Some(format!("{}: {}", detail, error)),
+        },
+    }
+}
+
+fn unique_attempt_token() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("attempt-{nanos}")
+}
+
+fn is_equal_ranked(candidates: &[RankedCandidate]) -> bool {
+    candidates.len() > 1 && candidates[0].score == candidates[1].score
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use capsule_core::input_resolver::{
+        resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
+    };
+    use tempfile::tempdir;
+
+    use super::*;
+
+    fn reporter() -> Arc<CliReporter> {
+        Arc::new(CliReporter::new(false))
+    }
+
+    #[test]
+    fn source_only_node_project_infers_process_runtime_and_closure() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"demo","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("write package json");
+        fs::write(dir.path().join("index.js"), "console.log('ok')").expect("write index");
+
+        let result = execute_shared_engine(
+            SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
+                project_root: dir.path().to_path_buf(),
+            }),
+            MaterializationMode::RunAttempt,
+            true,
+            reporter(),
+        )
+        .expect("run engine");
+
+        assert!(result.lock.contract.entries.contains_key("process"));
+        assert!(result.lock.resolution.entries.contains_key("runtime"));
+        assert!(result.lock.resolution.entries.contains_key("closure"));
+        assert!(result.selection_gate.is_none());
+    }
+
+    #[test]
+    fn draft_lock_input_preserves_existing_process_without_reinference() {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "custom", "cmd": ["serve"]}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([{"name": "main", "process": {"entrypoint": "custom", "cmd": ["serve"]}}]),
+        );
+        let result = execute_shared_engine(
+            SourceInferenceInput::DraftLock(DraftLockInput {
+                project_root: PathBuf::from("."),
+                draft_lock: lock.clone(),
+                provenance: Vec::new(),
+            }),
+            MaterializationMode::InitWorkspace,
+            true,
+            reporter(),
+        )
+        .expect("run engine");
+
+        assert_eq!(
+            result.lock.contract.entries.get("process"),
+            lock.contract.entries.get("process")
+        );
+    }
+
+    #[test]
+    fn materialize_workspace_writes_lock_and_sidecar() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"demo","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("write package json");
+        fs::write(dir.path().join("index.js"), "console.log('ok')").expect("write index");
+
+        let materialized = execute_init_from_source_only(dir.path(), reporter(), true)
+            .expect("materialize workspace");
+
+        assert!(materialized.lock_path.exists());
+        assert!(materialized.sidecar_path.exists());
+    }
+
+    #[test]
+    fn run_materialization_writes_generated_manifest() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"demo","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("write package json");
+        fs::write(dir.path().join("index.js"), "console.log('ok')").expect("write index");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+        };
+        let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
+            .expect("materialize run");
+
+        assert!(materialized.manifest_path.exists());
+        assert!(materialized.lock_path.exists());
+        assert!(materialized.sidecar_path.exists());
+    }
+
+    #[test]
+    fn init_persists_unresolved_when_equal_rank_candidates_remain() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("package.json"), r#"{"name":"demo"}"#)
+            .expect("write package json");
+        fs::write(dir.path().join("index.js"), "console.log('a')").expect("write index");
+        fs::write(dir.path().join("main.js"), "console.log('b')").expect("write main");
+
+        let materialized = execute_init_from_source_only(dir.path(), reporter(), true)
+            .expect("materialize workspace");
+
+        assert!(materialized
+            .result
+            .lock
+            .contract
+            .entries
+            .get("process")
+            .is_none());
+        assert!(materialized
+            .result
+            .lock
+            .contract
+            .unresolved
+            .iter()
+            .any(|value| value.reason == UnresolvedReason::ExplicitSelectionRequired));
+    }
+
+    #[test]
+    fn run_fails_when_equal_rank_candidates_remain_without_selection() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("package.json"), r#"{"name":"demo"}"#)
+            .expect("write package json");
+        fs::write(dir.path().join("index.js"), "console.log('a')").expect("write index");
+        fs::write(dir.path().join("main.js"), "console.log('b')").expect("write main");
+
+        let error = execute_shared_engine(
+            SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
+                project_root: dir.path().to_path_buf(),
+            }),
+            MaterializationMode::RunAttempt,
+            true,
+            reporter(),
+        )
+        .expect_err("run should fail without explicit selection");
+
+        assert!(error.to_string().contains("ATO_ERR_AMBIGUOUS_ENTRYPOINT"));
+    }
+
+    #[test]
+    fn compatibility_draft_handoff_does_not_reinfer_process() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("capsule.toml"),
+            r#"schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+entrypoint = "npm"
+cmd = ["start"]
+driver = "node"
+    runtime_version = "20"
+"#,
+        )
+        .expect("write manifest");
+
+        let resolved = resolve_authoritative_input(dir.path(), ResolveInputOptions::default())
+            .expect("resolve compatibility input");
+        let ResolvedInput::CompatibilityProject { project, .. } = resolved else {
+            panic!("expected compatibility project");
+        };
+        let (draft_input, compiled) =
+            draft_lock_input_from_compatibility(&project).expect("compile compatibility draft");
+
+        let result = execute_shared_engine(
+            SourceInferenceInput::DraftLock(draft_input),
+            MaterializationMode::InitWorkspace,
+            true,
+            reporter(),
+        )
+        .expect("run shared engine");
+
+        assert_eq!(
+            result.lock.contract.entries.get("process"),
+            compiled.draft_lock.contract.entries.get("process")
+        );
+    }
+}
