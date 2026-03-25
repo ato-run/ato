@@ -97,6 +97,14 @@ pub fn execute_durable_init(
         "   Workspace binding seed: {}",
         materialized.binding_seed_path.display()
     )))?;
+    futures::executor::block_on(reporter.notify(format!(
+        "   Workspace policy bundle: {}",
+        materialized.policy_bundle_path.display()
+    )))?;
+    futures::executor::block_on(reporter.notify(format!(
+        "   Workspace attestation store: {}",
+        materialized.attestation_store_path.display()
+    )))?;
     futures::executor::block_on(reporter.notify("\nNext steps:".to_string()))?;
     futures::executor::block_on(
         reporter

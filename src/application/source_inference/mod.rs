@@ -165,6 +165,7 @@ pub(crate) struct SourceInferenceDiagnostic {
 #[derive(Debug, Clone)]
 pub(crate) struct RunMaterialization {
     pub(crate) input_kind: SourceInferenceInputKind,
+    pub(crate) project_root: PathBuf,
     pub(crate) manifest_path: PathBuf,
     pub(crate) bridge_manifest_sha256: String,
     pub(crate) lock: AtoLock,
@@ -178,6 +179,8 @@ pub(crate) struct WorkspaceMaterialization {
     pub(crate) sidecar_path: PathBuf,
     pub(crate) provenance_cache_path: PathBuf,
     pub(crate) binding_seed_path: PathBuf,
+    pub(crate) policy_bundle_path: PathBuf,
+    pub(crate) attestation_store_path: PathBuf,
     pub(crate) result: SourceInferenceResult,
 }
 
@@ -857,6 +860,7 @@ fn materialize_run_result(
 
     Ok(RunMaterialization {
         input_kind: result.input_kind,
+        project_root: project_root.to_path_buf(),
         manifest_path,
         bridge_manifest_sha256,
         lock: result.lock,

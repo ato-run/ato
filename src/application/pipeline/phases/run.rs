@@ -22,6 +22,7 @@ use crate::application::engine::install::support::{
     LocalRunManifestPreparationOutcome, ResolvedRunTarget,
 };
 use crate::application::pipeline::cleanup::PipelineAttemptContext;
+use crate::application::workspace::state::EffectiveLockState;
 use crate::executors::source::ExecuteMode;
 use crate::executors::target_runner::{self, TargetLaunchOptions};
 use crate::preview;
@@ -63,11 +64,13 @@ pub(crate) struct CompatibilityLegacyLockContext {
 #[derive(Debug, Clone)]
 pub(crate) struct RunAuthoritativeInput {
     pub(crate) kind: RunAuthoritativeInputKind,
+    pub(crate) project_root: PathBuf,
     pub(crate) lock: AtoLock,
     pub(crate) lock_path: PathBuf,
     pub(crate) sidecar_path: PathBuf,
     pub(crate) bridge_manifest_path: PathBuf,
     pub(crate) bridge_manifest_sha256: String,
+    pub(crate) effective_state: EffectiveLockState,
     pub(crate) compatibility_legacy_lock: Option<CompatibilityLegacyLockContext>,
 }
 
@@ -77,6 +80,7 @@ pub(crate) struct RunAuthoritativeInput {
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedRunContext {
     pub(crate) authoritative_lock: Option<AtoLock>,
+    pub(crate) effective_state: Option<EffectiveLockState>,
     pub(crate) raw_manifest: toml::Value,
     pub(crate) validation_mode: capsule_core::types::ValidationMode,
     pub(crate) engine_override_declared: bool,
@@ -191,6 +195,7 @@ fn prepare_run_context(
 
     PreparedRunContext {
         authoritative_lock: authoritative_input.map(|input| input.lock.clone()),
+        effective_state: authoritative_input.map(|input| input.effective_state.clone()),
         raw_manifest,
         validation_mode,
         engine_override_declared: loaded_manifest.raw.get("engine").is_some(),
@@ -279,7 +284,14 @@ where
     }
 
     let state_source_overrides =
-        resolve_state_source_overrides(&manifest, &request.state_bindings)?;
+        if let Some(authoritative_input) = request.authoritative_input.as_ref() {
+            resolve_state_source_overrides_from_map(
+                &manifest,
+                &authoritative_input.effective_state.state_source_overrides,
+            )?
+        } else {
+            resolve_state_source_overrides(&manifest, &request.state_bindings)?
+        };
     let mut decision =
         capsule_core::router::route_manifest_with_state_overrides_and_validation_mode(
             &manifest_path,
@@ -1010,6 +1022,7 @@ where
                 crate::executors::source::execute(
                     &decision.plan,
                     prepared.authoritative_lock.as_ref(),
+                    prepared.effective_state.as_ref(),
                     Some(nacelle),
                     request.reporter.clone(),
                     &request.enforcement,
@@ -1245,6 +1258,7 @@ pub(crate) async fn reroute_auto_provisioned_execution(
     let engine_override_declared = loaded_manifest.raw.get("engine").is_some();
     let rerouted_prepared = PreparedRunContext {
         authoritative_lock: None,
+        effective_state: None,
         raw_manifest: toml::from_str(&loaded_manifest.raw_text)
             .unwrap_or_else(|_| loaded_manifest.raw.clone()),
         validation_mode,
@@ -1351,6 +1365,13 @@ pub(crate) fn resolve_state_source_overrides(
     resolve_state_source_overrides_with_store(manifest, raw_bindings, None)
 }
 
+pub(crate) fn resolve_state_source_overrides_from_map(
+    manifest: &CapsuleManifest,
+    requested: &HashMap<String, String>,
+) -> Result<HashMap<String, String>> {
+    resolve_state_source_overrides_from_requested(manifest, requested, None)
+}
+
 pub(crate) fn resolve_state_source_overrides_with_store(
     manifest: &CapsuleManifest,
     raw_bindings: &[String],
@@ -1383,6 +1404,14 @@ pub(crate) fn resolve_state_source_overrides_with_store(
         }
     }
 
+    resolve_state_source_overrides_from_requested(manifest, &requested, store)
+}
+
+fn resolve_state_source_overrides_from_requested(
+    manifest: &CapsuleManifest,
+    requested: &HashMap<String, String>,
+    store: Option<&RegistryStore>,
+) -> Result<HashMap<String, String>> {
     for state_name in requested.keys() {
         let requirement = manifest.state.get(state_name).ok_or_else(|| {
             anyhow::anyhow!(
@@ -1508,11 +1537,13 @@ entrypoint = "main.ts"
 
         let authoritative_input = RunAuthoritativeInput {
             kind: RunAuthoritativeInputKind::SourceOnly,
+            project_root: dir.path().to_path_buf(),
             lock: AtoLock::default(),
             lock_path: dir.path().join("ato.lock.json"),
             sidecar_path: dir.path().join("provenance.json"),
             bridge_manifest_path: manifest_path.clone(),
             bridge_manifest_sha256: "deadbeef".to_string(),
+            effective_state: crate::application::workspace::state::EffectiveLockState::default(),
             compatibility_legacy_lock: None,
         };
 

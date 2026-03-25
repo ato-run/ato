@@ -15,6 +15,7 @@ use capsule_core::runtime::native::NativeHandle;
 use capsule_core::{RuntimeMetadata, SessionRunner, SessionRunnerConfig};
 
 use super::launch_context::RuntimeLaunchContext;
+use crate::application::workspace::state::EffectiveLockState;
 use crate::common::proxy;
 use crate::reporters::CliReporter;
 use crate::runtime::manager as runtime_manager;
@@ -24,7 +25,7 @@ use capsule_core::engine;
 use capsule_core::isolation::HostIsolationContext;
 use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::lifecycle::LifecycleEvent;
-use capsule_core::lock_runtime::{self, LockCompilerOverlay};
+use capsule_core::lock_runtime;
 use capsule_core::r3_config;
 use capsule_core::router::ManifestData;
 
@@ -46,6 +47,7 @@ pub enum ExecuteMode {
 pub fn execute(
     plan: &ManifestData,
     authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    effective_state: Option<&EffectiveLockState>,
     nacelle_override: Option<PathBuf>,
     _reporter: std::sync::Arc<CliReporter>,
     enforcement: &str,
@@ -60,13 +62,22 @@ pub fn execute(
     if let Some(lock) = authoritative_lock {
         let resolved =
             lock_runtime::resolve_lock_runtime_model(lock, Some(plan.selected_target_label()))?;
+        let overlay = effective_state
+            .map(|state| state.compiler_overlay.clone())
+            .unwrap_or_default();
         let config = r3_config::generate_config_from_lock(
             lock,
             &resolved,
-            &LockCompilerOverlay::default(),
+            &overlay,
             Some(enforcement.to_string()),
             false,
         )?;
+        if let Some(effective_state) = effective_state {
+            crate::application::workspace::state::validate_config_against_policy(
+                &config,
+                &effective_state.policy,
+            )?;
+        }
         r3_config::write_config(&plan.manifest_path, &config)?;
     } else {
         r3_config::generate_and_write_config(
