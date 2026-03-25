@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::application::pipeline::phases::run::PreparedRunContext;
 #[cfg(test)]
 use crate::executors::target_runner;
 use capsule_core::lockfile::{
@@ -9,6 +10,7 @@ use capsule_core::lockfile::{
 pub(crate) fn preflight_native_sandbox(
     nacelle_override: Option<PathBuf>,
     plan: &capsule_core::router::ManifestData,
+    prepared: &PreparedRunContext,
     reporter: &Arc<CliReporter>,
 ) -> Result<PathBuf> {
     preflight_python_uv_lock_for_source_driver(plan)?;
@@ -16,7 +18,7 @@ pub(crate) fn preflight_native_sandbox(
     preflight_glibc_compat(plan)?;
     preflight_macos_compat(plan)?;
 
-    let nacelle = resolve_nacelle_for_tier2(nacelle_override, plan, reporter)?;
+    let nacelle = resolve_nacelle_for_tier2(nacelle_override, plan, prepared, reporter)?;
     let response = capsule_core::engine::run_internal(
         &nacelle,
         "features",
@@ -47,6 +49,7 @@ pub(crate) fn preflight_native_sandbox(
 fn resolve_nacelle_for_tier2(
     nacelle_override: Option<PathBuf>,
     plan: &capsule_core::router::ManifestData,
+    prepared: &PreparedRunContext,
     reporter: &Arc<CliReporter>,
 ) -> Result<PathBuf> {
     let request = capsule_core::engine::EngineRequest {
@@ -57,10 +60,7 @@ fn resolve_nacelle_for_tier2(
     match capsule_core::engine::discover_nacelle(request) {
         Ok(path) => Ok(path),
         Err(err) => {
-            if !should_attempt_nacelle_auto_bootstrap(
-                nacelle_override.as_deref(),
-                &plan.manifest_path,
-            )? {
+            if !should_attempt_nacelle_auto_bootstrap(nacelle_override.as_deref(), prepared)? {
                 return Err(AtoExecutionError::engine_missing(
                     format!(
                         "Tier 2 execution requires 'nacelle', but the configured engine is not usable: {err}"
@@ -87,7 +87,7 @@ fn resolve_nacelle_for_tier2(
 
 fn should_attempt_nacelle_auto_bootstrap(
     nacelle_override: Option<&Path>,
-    manifest_path: &Path,
+    prepared: &PreparedRunContext,
 ) -> Result<bool> {
     if nacelle_override.is_some() {
         return Ok(false);
@@ -99,23 +99,15 @@ fn should_attempt_nacelle_auto_bootstrap(
     {
         return Ok(false);
     }
-    if manifest_declares_engine_override(manifest_path)? {
+    if manifest_declares_engine_override(prepared) {
         return Ok(false);
     }
 
     Ok(true)
 }
 
-fn manifest_declares_engine_override(manifest_path: &Path) -> Result<bool> {
-    if !manifest_path.exists() {
-        return Ok(false);
-    }
-
-    let raw = fs::read_to_string(manifest_path)
-        .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
-    let parsed = toml::from_str::<toml::Value>(&raw)
-        .with_context(|| format!("Failed to parse manifest TOML: {}", manifest_path.display()))?;
-    Ok(parsed.get("engine").is_some())
+fn manifest_declares_engine_override(prepared: &PreparedRunContext) -> bool {
+    prepared.engine_override_declared
 }
 
 #[cfg(test)]
