@@ -24,6 +24,7 @@ use capsule_core::engine;
 use capsule_core::isolation::HostIsolationContext;
 use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::lifecycle::LifecycleEvent;
+use capsule_core::lock_runtime::{self, LockCompilerOverlay};
 use capsule_core::r3_config;
 use capsule_core::router::ManifestData;
 
@@ -44,6 +45,7 @@ pub enum ExecuteMode {
 
 pub fn execute(
     plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
     nacelle_override: Option<PathBuf>,
     _reporter: std::sync::Arc<CliReporter>,
     enforcement: &str,
@@ -55,11 +57,24 @@ pub fn execute(
         manifest_path: Some(plan.manifest_path.clone()),
     })?;
 
-    r3_config::generate_and_write_config(
-        &plan.manifest_path,
-        Some(enforcement.to_string()),
-        false,
-    )?;
+    if let Some(lock) = authoritative_lock {
+        let resolved =
+            lock_runtime::resolve_lock_runtime_model(lock, Some(plan.selected_target_label()))?;
+        let config = r3_config::generate_config_from_lock(
+            lock,
+            &resolved,
+            &LockCompilerOverlay::default(),
+            Some(enforcement.to_string()),
+            false,
+        )?;
+        r3_config::write_config(&plan.manifest_path, &config)?;
+    } else {
+        r3_config::generate_and_write_config(
+            &plan.manifest_path,
+            Some(enforcement.to_string()),
+            false,
+        )?;
+    }
 
     let adapter = NacelleExecAdapter::for_plan(plan, mode, launch_ctx)?;
     let (child, event_rx, exec_meta) =

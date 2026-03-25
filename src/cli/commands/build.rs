@@ -151,13 +151,7 @@ pub fn execute_pack_command_with_injected_manifest(
             if cli_json {
                 anyhow::bail!("--init cannot be used with --json output");
             }
-            init::execute_manifest_init(
-                init::InitArgs {
-                    path: Some(dir.clone()),
-                    yes: false,
-                },
-                reporter.clone(),
-            )?;
+            init::write_legacy_detected_manifest(Some(dir.clone()), reporter.clone())?;
         } else if let Some(manifest_text) = injected_manifest {
             if !suppress_injected_manifest_warning
                 && crate::progressive_ui::can_use_progressive_ui(cli_json)
@@ -179,7 +173,7 @@ pub fn execute_pack_command_with_injected_manifest(
             ));
         } else {
             futures::executor::block_on(reporter.warn(
-                "No `capsule.toml` found. Using defaults. Run `ato init` to generate an agent prompt, or `ato build --init` to create `capsule.toml` interactively.".to_string(),
+                "No `capsule.toml` found. Using defaults. Run `ato init` to materialize `ato.lock.json`, `ato init --legacy prompt` for the old prompt flow, or `ato build --init` to create an inferred `capsule.toml`.".to_string(),
             ))?;
             let inferred = infer_zero_config_manifest(&dir)?;
             std::fs::write(&manifest, inferred).with_context(|| {

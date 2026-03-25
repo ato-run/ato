@@ -187,7 +187,16 @@ Important flags:
 
 ### init
 
-Analyzes the current project and prints an agent-ready capsule.toml prompt.
+Materializes a durable workspace baseline.
+
+Current contract:
+
+- writes `ato.lock.json` as the primary durable output
+- initializes workspace-local `.ato/source-inference/provenance.json`
+- initializes workspace-local `.ato/source-inference/provenance-cache.json`
+- initializes workspace-local `.ato/binding/seed.json`
+- may persist partially resolved output, but unresolved state must remain inspectable through first-class markers and provenance metadata
+- legacy manifest-first helpers remain available through `ato init --legacy prompt` and `ato init --legacy manual`
 
 ### build
 

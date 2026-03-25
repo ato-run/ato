@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 use super::binding::BindingCommands;
 use super::config::{ConfigCommands, EngineCommands};
+use super::init::InitLegacyMode;
 use super::inspect::InspectCommands;
 use super::ipc::IpcCommands;
 use super::key::KeyCommands;
@@ -29,7 +30,7 @@ Primary Commands:
   publish  Publish capsule artifacts to a registry
   install  Install a verified package from the registry
   search   Search the registry for agent skills and packages
-  init     Analyze the current project and print an agent-ready capsule.toml prompt
+    init     Materialize a durable ato.lock.json baseline for the current project
 
 Management:
   ps       List running capsules
@@ -271,9 +272,21 @@ pub(crate) enum Commands {
 
     #[command(
         next_help_heading = "Primary Commands",
-        about = "Analyze the current project and print an agent-ready capsule.toml prompt"
+        about = "Materialize a durable ato.lock.json baseline for a local workspace"
     )]
-    Init,
+    Init {
+        /// Local workspace path to initialize
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Skip prompts when source inference requires explicit confirmation
+        #[arg(short = 'y', long = "yes", default_value_t = false)]
+        yes: bool,
+
+        /// Use a legacy manifest-first init surface instead of durable lock materialization
+        #[arg(long, value_enum)]
+        legacy: Option<InitLegacyMode>,
+    },
 
     #[command(
         next_help_heading = "Primary Commands",

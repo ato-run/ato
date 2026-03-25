@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
+use crate::ato_lock::AtoLock;
 use crate::execution_plan::canonical::{
-    canonicalize_policy_paths, compute_policy_segment_hash, compute_provisioning_policy_hash,
-    normalize_unordered_set,
+    compute_policy_segment_hash, compute_provisioning_policy_hash, normalize_unordered_set,
 };
 use crate::execution_plan::error::AtoExecutionError;
 use crate::execution_plan::model::{
@@ -14,6 +14,7 @@ use crate::execution_plan::model::{
     RuntimeSecretsPolicy, SecretDelivery, TargetRef, EXECUTION_PLAN_SCHEMA_VERSION,
     MOUNT_SET_ALGO_ID, MOUNT_SET_ALGO_VERSION,
 };
+use crate::lock_runtime::{LockCompilerOverlay, ResolvedLockRuntimeModel};
 use crate::manifest;
 use crate::router::{self, ExecutionProfile, RuntimeDecision};
 use crate::types::ValidationMode;
@@ -23,6 +24,23 @@ pub struct CompiledExecutionPlan {
     pub execution_plan: ExecutionPlan,
     pub runtime_decision: RuntimeDecision,
     pub tier: ExecutionTier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformSnapshot {
+    pub os: String,
+    pub arch: String,
+    pub libc: String,
+}
+
+impl PlatformSnapshot {
+    pub fn current() -> Self {
+        Self {
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            libc: detect_libc().to_string(),
+        }
+    }
 }
 
 pub fn compile_execution_plan(
@@ -93,89 +111,27 @@ pub fn compile_execution_plan_with_validation_mode(
     )?;
     let tier = derive_tier(runtime, driver)?;
 
-    let mut allow_hosts = loaded
-        .model
-        .network
-        .as_ref()
-        .map(|network| network.egress_allow.clone())
-        .unwrap_or_default();
+    let scoped_id = loaded.model.name.clone();
+    let version = loaded.model.version.clone();
 
-    if matches!(runtime, ExecutionRuntime::Web) {
-        let port = decision.plan.execution_port().ok_or_else(|| {
-            AtoExecutionError::policy_violation(format!(
-                "targets.{}.port is required for runtime=web",
-                selected_target_label
-            ))
-        })?;
-        allow_hosts.push(format!("127.0.0.1:{port}"));
-        allow_hosts.push(format!("localhost:{port}"));
-        allow_hosts.push(format!("0.0.0.0:{port}"));
-    } else if matches!(
-        (runtime, driver),
-        (ExecutionRuntime::Source, ExecutionDriver::Deno)
-    ) {
-        if let Some(port) = decision.plan.execution_port() {
-            allow_hosts.push(format!("127.0.0.1:{port}"));
-            allow_hosts.push(format!("localhost:{port}"));
-            allow_hosts.push(format!("0.0.0.0:{port}"));
-        }
-    }
-    allow_hosts = normalize_unordered_set(&allow_hosts);
-
-    let read_only_raw = if matches!(
-        (runtime, driver),
-        (ExecutionRuntime::Web, ExecutionDriver::Static)
-    ) {
-        vec![named_target.entrypoint.clone()]
-    } else {
-        Vec::new()
-    };
-    let read_only = canonicalize_policy_paths(&decision.plan.manifest_dir, &read_only_raw)?;
-
-    let runtime_policy = RuntimePolicy {
-        network: RuntimeNetworkPolicy {
-            allow_hosts: allow_hosts.clone(),
-        },
-        filesystem: RuntimeFilesystemPolicy {
-            read_only,
-            read_write: Vec::new(),
-        },
-        secrets: RuntimeSecretsPolicy {
-            allow_secret_ids: Vec::new(),
-            delivery: SecretDelivery::Fd,
-        },
-        args: named_target.cmd.clone(),
-    };
-
-    let runtime_section = Runtime {
-        policy: runtime_policy,
-        fail_closed: true,
-        non_interactive_behavior: NonInteractiveBehavior::DenyIfUnconsented,
-    };
-
-    let provisioning = Provisioning {
-        network: ProvisioningNetwork {
-            allow_registry_hosts: allow_hosts.clone(),
-        },
-        lock_required: matches!(
-            (runtime, driver),
-            (ExecutionRuntime::Source, ExecutionDriver::Deno)
-                | (ExecutionRuntime::Source, ExecutionDriver::Node)
-                | (ExecutionRuntime::Source, ExecutionDriver::Python)
-                | (ExecutionRuntime::Web, ExecutionDriver::Deno)
-                | (ExecutionRuntime::Web, ExecutionDriver::Node)
-                | (ExecutionRuntime::Web, ExecutionDriver::Python)
-        ),
-        integrity_required: matches!(tier, ExecutionTier::Tier1),
-        allowed_registries: allow_hosts,
-    };
-
+    let runtime_section = build_runtime_section(
+        runtime,
+        driver,
+        loaded
+            .model
+            .network
+            .as_ref()
+            .map(|network| network.egress_allow.clone())
+            .unwrap_or_default(),
+        named_target.entrypoint.clone(),
+        named_target.cmd.clone(),
+        decision.plan.execution_port(),
+        &LockCompilerOverlay::default(),
+    )?;
+    let provisioning = build_provisioning(runtime, driver, &runtime_section.policy, tier);
     let policy_segment_hash =
         compute_policy_segment_hash(&runtime_section, MOUNT_SET_ALGO_ID, MOUNT_SET_ALGO_VERSION)?;
     let provisioning_policy_hash = compute_provisioning_policy_hash(&provisioning)?;
-
-    let scoped_id = loaded.model.name.clone();
-    let version = loaded.model.version.clone();
 
     let execution_plan = ExecutionPlan {
         schema_version: EXECUTION_PLAN_SCHEMA_VERSION.to_string(),
@@ -203,11 +159,7 @@ pub fn compile_execution_plan_with_validation_mode(
             mount_set_algo_version: MOUNT_SET_ALGO_VERSION,
         },
         reproducibility: Reproducibility {
-            platform: Platform {
-                os: std::env::consts::OS.to_string(),
-                arch: std::env::consts::ARCH.to_string(),
-                libc: detect_libc().to_string(),
-            },
+            platform: platform_from_snapshot(&PlatformSnapshot::current()),
         },
     };
 
@@ -216,6 +168,194 @@ pub fn compile_execution_plan_with_validation_mode(
         runtime_decision: decision,
         tier,
     })
+}
+
+pub fn compile_execution_plan_from_lock(
+    _lock: &AtoLock,
+    resolved: &ResolvedLockRuntimeModel,
+    overlay: &LockCompilerOverlay,
+    platform: &PlatformSnapshot,
+) -> Result<ExecutionPlan, AtoExecutionError> {
+    let selected = &resolved.selected;
+    let runtime = ExecutionRuntime::from_manifest(&selected.runtime.runtime).ok_or_else(|| {
+        AtoExecutionError::policy_violation(format!(
+            "unsupported runtime '{}' in lock-derived target '{}'",
+            selected.runtime.runtime, selected.target_label
+        ))
+    })?;
+
+    if matches!(runtime, ExecutionRuntime::Oci) {
+        return Err(AtoExecutionError::policy_violation(
+            "runtime=oci is not supported by the ExecutionPlan isolation model",
+        ));
+    }
+
+    let driver = resolve_driver(
+        runtime,
+        selected.runtime.driver.as_deref(),
+        None,
+        &selected.runtime.cmd,
+    )?;
+    let tier = derive_tier(runtime, driver)?;
+    let runtime_section = build_runtime_section(
+        runtime,
+        driver,
+        resolved
+            .network
+            .as_ref()
+            .map(|network| network.egress_allow.clone())
+            .unwrap_or_default(),
+        selected.runtime.entrypoint.clone(),
+        selected.runtime.cmd.clone(),
+        selected.runtime.port,
+        overlay,
+    )?;
+    let provisioning = build_provisioning(runtime, driver, &runtime_section.policy, tier);
+    let policy_segment_hash =
+        compute_policy_segment_hash(&runtime_section, MOUNT_SET_ALGO_ID, MOUNT_SET_ALGO_VERSION)?;
+    let provisioning_policy_hash = compute_provisioning_policy_hash(&provisioning)?;
+
+    Ok(ExecutionPlan {
+        schema_version: EXECUTION_PLAN_SCHEMA_VERSION.to_string(),
+        capsule: CapsuleRef {
+            scoped_id: resolved
+                .metadata
+                .name
+                .clone()
+                .unwrap_or_else(|| "lock-derived-app".to_string()),
+            version: resolved
+                .metadata
+                .version
+                .clone()
+                .unwrap_or_else(|| "0.1.0".to_string()),
+        },
+        target: TargetRef {
+            label: selected.target_label.clone(),
+            runtime,
+            driver,
+            language: None,
+        },
+        provisioning,
+        runtime: runtime_section,
+        consent: Consent {
+            key: ConsentKey {
+                scoped_id: resolved
+                    .metadata
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| "lock-derived-app".to_string()),
+                version: resolved
+                    .metadata
+                    .version
+                    .clone()
+                    .unwrap_or_else(|| "0.1.0".to_string()),
+                target_label: selected.target_label.clone(),
+            },
+            policy_segment_hash,
+            provisioning_policy_hash,
+            mount_set_algo_id: MOUNT_SET_ALGO_ID.to_string(),
+            mount_set_algo_version: MOUNT_SET_ALGO_VERSION,
+        },
+        reproducibility: Reproducibility {
+            platform: platform_from_snapshot(platform),
+        },
+    })
+}
+
+fn build_runtime_section(
+    runtime: ExecutionRuntime,
+    driver: ExecutionDriver,
+    network_allow: Vec<String>,
+    entrypoint: String,
+    args: Vec<String>,
+    port: Option<u16>,
+    overlay: &LockCompilerOverlay,
+) -> Result<Runtime, AtoExecutionError> {
+    let mut allow_hosts = overlay.network_allow_hosts.clone().unwrap_or(network_allow);
+
+    if matches!(runtime, ExecutionRuntime::Web) {
+        let port = port.ok_or_else(|| {
+            AtoExecutionError::policy_violation("runtime=web requires an execution port")
+        })?;
+        allow_hosts.push(format!("127.0.0.1:{port}"));
+        allow_hosts.push(format!("localhost:{port}"));
+        allow_hosts.push(format!("0.0.0.0:{port}"));
+    } else if matches!(
+        (runtime, driver),
+        (ExecutionRuntime::Source, ExecutionDriver::Deno)
+    ) {
+        if let Some(port) = port {
+            allow_hosts.push(format!("127.0.0.1:{port}"));
+            allow_hosts.push(format!("localhost:{port}"));
+            allow_hosts.push(format!("0.0.0.0:{port}"));
+        }
+    }
+
+    let read_only = overlay.filesystem_read_only.clone().unwrap_or_else(|| {
+        if matches!(
+            (runtime, driver),
+            (ExecutionRuntime::Web, ExecutionDriver::Static)
+        ) {
+            vec![entrypoint]
+        } else {
+            Vec::new()
+        }
+    });
+
+    Ok(Runtime {
+        policy: RuntimePolicy {
+            network: RuntimeNetworkPolicy {
+                allow_hosts: normalize_unordered_set(&allow_hosts),
+            },
+            filesystem: RuntimeFilesystemPolicy {
+                read_only: normalize_unordered_set(&read_only),
+                read_write: normalize_unordered_set(
+                    &overlay.filesystem_read_write.clone().unwrap_or_default(),
+                ),
+            },
+            secrets: RuntimeSecretsPolicy {
+                allow_secret_ids: normalize_unordered_set(
+                    &overlay.secret_ids.clone().unwrap_or_default(),
+                ),
+                delivery: SecretDelivery::Fd,
+            },
+            args,
+        },
+        fail_closed: true,
+        non_interactive_behavior: NonInteractiveBehavior::DenyIfUnconsented,
+    })
+}
+
+fn build_provisioning(
+    runtime: ExecutionRuntime,
+    driver: ExecutionDriver,
+    policy: &RuntimePolicy,
+    tier: ExecutionTier,
+) -> Provisioning {
+    Provisioning {
+        network: ProvisioningNetwork {
+            allow_registry_hosts: policy.network.allow_hosts.clone(),
+        },
+        lock_required: matches!(
+            (runtime, driver),
+            (ExecutionRuntime::Source, ExecutionDriver::Deno)
+                | (ExecutionRuntime::Source, ExecutionDriver::Node)
+                | (ExecutionRuntime::Source, ExecutionDriver::Python)
+                | (ExecutionRuntime::Web, ExecutionDriver::Deno)
+                | (ExecutionRuntime::Web, ExecutionDriver::Node)
+                | (ExecutionRuntime::Web, ExecutionDriver::Python)
+        ),
+        integrity_required: matches!(tier, ExecutionTier::Tier1),
+        allowed_registries: policy.network.allow_hosts.clone(),
+    }
+}
+
+fn platform_from_snapshot(snapshot: &PlatformSnapshot) -> Platform {
+    Platform {
+        os: snapshot.os.clone(),
+        arch: snapshot.arch.clone(),
+        libc: snapshot.libc.clone(),
+    }
 }
 
 fn resolve_driver(
@@ -344,7 +484,57 @@ fn detect_libc() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ato_lock::AtoLock;
+    use crate::lock_runtime::{resolve_lock_runtime_model, LockCompilerOverlay};
+    use serde_json::json;
     use std::fs;
+
+    fn sample_lock() -> AtoLock {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "metadata".to_string(),
+            json!({"name": "demo", "version": "0.1.0", "default_target": "main"}),
+        );
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "main.ts", "cmd": ["deno", "run", "main.ts"]}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([
+                {
+                    "name": "main",
+                    "target": "main",
+                    "process": {"entrypoint": "main.ts", "cmd": ["deno", "run", "main.ts"]}
+                }
+            ]),
+        );
+        lock.contract.entries.insert(
+            "network".to_string(),
+            json!({"egress_allow": ["registry.npmjs.org"]}),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "deno", "selected_target": "main"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([
+                {
+                    "label": "main",
+                    "runtime": "source",
+                    "driver": "deno",
+                    "entrypoint": "main.ts",
+                    "cmd": ["deno", "run", "main.ts"],
+                    "port": 3000
+                }
+            ]),
+        );
+        lock.resolution
+            .entries
+            .insert("closure".to_string(), json!({"kind": "metadata_only"}));
+        lock
+    }
 
     #[test]
     fn tier_derivation_accepts_supported_pairs() {
@@ -460,5 +650,36 @@ entrypoint = "ghcr.io/example/app:latest"
 
         let err = compile_execution_plan(&manifest_path, ExecutionProfile::Dev, None).unwrap_err();
         assert_eq!(err.code, "ATO_ERR_POLICY_VIOLATION");
+    }
+
+    #[test]
+    fn compile_from_lock_preserves_selected_target_and_hash_inputs() {
+        let lock = sample_lock();
+        let resolved = resolve_lock_runtime_model(&lock, Some("main")).expect("resolved");
+        let plan = compile_execution_plan_from_lock(
+            &lock,
+            &resolved,
+            &LockCompilerOverlay::default(),
+            &PlatformSnapshot {
+                os: "macos".to_string(),
+                arch: "aarch64".to_string(),
+                libc: "unknown".to_string(),
+            },
+        )
+        .expect("plan");
+
+        assert_eq!(plan.target.label, "main");
+        assert_eq!(plan.capsule.scoped_id, "demo");
+        assert_eq!(plan.consent.key.target_label, "main");
+        assert!(!plan.consent.policy_segment_hash.is_empty());
+    }
+
+    #[test]
+    fn compile_from_lock_rejects_incomplete_draft_without_closure() {
+        let mut lock = sample_lock();
+        lock.resolution.entries.remove("closure");
+
+        let error = resolve_lock_runtime_model(&lock, Some("main")).expect_err("must fail");
+        assert_eq!(error.code, "ATO_ERR_PROVISIONING_LOCK_INCOMPLETE");
     }
 }

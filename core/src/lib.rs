@@ -13,6 +13,7 @@ pub mod input_resolver;
 pub mod isolation;
 pub mod launch_spec;
 pub mod lifecycle;
+pub mod lock_runtime;
 pub mod lockfile;
 pub mod mag_uri;
 pub mod manifest;

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::ato_lock::AtoLock;
+use crate::lock_runtime::{LockCompilerOverlay, LockServiceUnit, ResolvedLockRuntimeModel};
 use crate::manifest;
 use crate::policy::egress_resolver::{resolve_egress_policy, EgressRule};
 use crate::router::{self, ExecutionProfile};
@@ -199,6 +201,60 @@ pub fn generate_config(
         enforcement_override,
         standalone,
     )?;
+    validate_config_json(&config)?;
+    Ok(config)
+}
+
+pub fn generate_config_from_lock(
+    lock: &AtoLock,
+    resolved: &ResolvedLockRuntimeModel,
+    overlay: &LockCompilerOverlay,
+    enforcement_override: Option<String>,
+    standalone: bool,
+) -> Result<ConfigJson> {
+    let mut services = HashMap::new();
+    for service in &resolved.services {
+        services.insert(
+            service.name.clone(),
+            build_lock_service_spec(service, standalone)?,
+        );
+    }
+
+    validate_services_dag(&services)?;
+
+    let (egress, allow_domains) = build_lock_egress(
+        resolved.network.as_ref(),
+        overlay.network_allow_hosts.as_ref(),
+    )?;
+    let sandbox = SandboxConfig {
+        enabled: true,
+        filesystem: build_lock_filesystem(overlay),
+        network: NetworkConfig {
+            enabled: true,
+            enforcement: enforcement_override.unwrap_or_else(|| "best_effort".to_string()),
+            egress,
+        },
+        development_mode: None,
+    };
+    let metadata = MetadataConfig {
+        name: resolved.metadata.name.clone(),
+        version: resolved.metadata.version.clone(),
+        generated_at: None,
+        generated_by: Some(format!("ato-cli v{}", env!("CARGO_PKG_VERSION"))),
+        source_manifest: lock
+            .lock_id
+            .as_ref()
+            .map(|value| format!("lock_id:{}", value.as_str())),
+    };
+
+    let config = ConfigJson {
+        version: CONFIG_VERSION.to_string(),
+        services,
+        sandbox,
+        metadata: Some(metadata),
+        annotations: None,
+        sidecar: build_lock_sidecar_config(resolved.network.as_ref(), &allow_domains),
+    };
     validate_config_json(&config)?;
     Ok(config)
 }
@@ -448,6 +504,128 @@ fn build_target_service_spec(service: &ResolvedService, standalone: bool) -> Res
         }),
         ports: None,
     })
+}
+
+fn build_lock_service_spec(service: &LockServiceUnit, standalone: bool) -> Result<ServiceSpec> {
+    let (executable, args, env) = resolve_target_command(&service.runtime, standalone);
+    Ok(ServiceSpec {
+        executable,
+        args,
+        cwd: Some(source_cwd(service.runtime.working_dir.as_deref())),
+        env,
+        user: None,
+        signals: None,
+        depends_on: if service.depends_on.is_empty() {
+            None
+        } else {
+            Some(service.depends_on.clone())
+        },
+        health_check: service.readiness_probe.as_ref().map(|probe| HealthCheck {
+            http_get: probe.http_get.clone(),
+            tcp_connect: probe.tcp_connect.clone(),
+            port: probe.port.clone(),
+            interval_secs: None,
+            timeout_secs: None,
+        }),
+        ports: None,
+    })
+}
+
+fn build_lock_filesystem(overlay: &LockCompilerOverlay) -> Option<FilesystemConfig> {
+    if overlay.filesystem_read_only.is_none() && overlay.filesystem_read_write.is_none() {
+        return None;
+    }
+
+    Some(FilesystemConfig {
+        read_only: overlay.filesystem_read_only.clone(),
+        read_write: overlay.filesystem_read_write.clone(),
+    })
+}
+
+fn build_lock_egress(
+    network: Option<&crate::types::NetworkConfig>,
+    overlay_allow_hosts: Option<&Vec<String>>,
+) -> Result<(Option<EgressConfig>, Vec<String>)> {
+    let mut allow_domains = overlay_allow_hosts
+        .cloned()
+        .or_else(|| network.map(|value| value.egress_allow.clone()))
+        .unwrap_or_default();
+    allow_domains.sort();
+    allow_domains.dedup();
+
+    let resolved = if allow_domains.is_empty() {
+        None
+    } else {
+        Some(resolve_egress_policy(&allow_domains)?)
+    };
+
+    let mut rules = Vec::new();
+    let mut seen_ips: HashSet<String> = HashSet::new();
+    let mut seen_cidrs: HashSet<String> = HashSet::new();
+
+    if let Some(resolved) = resolved {
+        for ip in resolved.resolved_ips {
+            if seen_ips.insert(ip.clone()) {
+                rules.push(EgressRuleEntry {
+                    rule_type: "ip".to_string(),
+                    value: ip,
+                });
+            }
+        }
+        for rule in resolved.rules {
+            if let EgressRule::Cidr { value } = rule {
+                if seen_cidrs.insert(value.clone()) {
+                    rules.push(EgressRuleEntry {
+                        rule_type: "cidr".to_string(),
+                        value,
+                    });
+                }
+            }
+        }
+    }
+
+    if let Some(network) = network {
+        for rule in &network.egress_id_allow {
+            match rule.rule_type {
+                crate::types::EgressIdType::Ip => {
+                    if seen_ips.insert(rule.value.clone()) {
+                        rules.push(EgressRuleEntry {
+                            rule_type: "ip".to_string(),
+                            value: rule.value.clone(),
+                        });
+                    }
+                }
+                crate::types::EgressIdType::Cidr => {
+                    if seen_cidrs.insert(rule.value.clone()) {
+                        rules.push(EgressRuleEntry {
+                            rule_type: "cidr".to_string(),
+                            value: rule.value.clone(),
+                        });
+                    }
+                }
+                crate::types::EgressIdType::Spiffe => {}
+            }
+        }
+    }
+
+    if rules.is_empty() && allow_domains.is_empty() {
+        return Ok((None, allow_domains));
+    }
+
+    Ok((
+        Some(EgressConfig {
+            mode: "allowlist".to_string(),
+            rules: if rules.is_empty() { None } else { Some(rules) },
+        }),
+        allow_domains,
+    ))
+}
+
+fn build_lock_sidecar_config(
+    _network: Option<&crate::types::NetworkConfig>,
+    _allow_domains: &[String],
+) -> Option<SidecarConfig> {
+    None
 }
 
 fn command_tokens(entrypoint: &str, command: Option<&str>) -> (String, Vec<String>) {
@@ -1233,8 +1411,72 @@ fn sha256_hex(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ato_lock::AtoLock;
+    use crate::lock_runtime::{resolve_lock_runtime_model, LockCompilerOverlay};
+    use serde_json::json;
     use std::collections::HashMap;
     use tempfile::tempdir;
+
+    fn sample_lock() -> AtoLock {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "metadata".to_string(),
+            json!({"name": "svc-demo", "version": "0.1.0", "default_target": "api"}),
+        );
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "api.ts", "cmd": ["deno", "run", "api.ts"]}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([
+                {
+                    "name": "main",
+                    "target": "api",
+                    "process": {"entrypoint": "api.ts", "cmd": ["deno", "run", "api.ts"]},
+                    "depends_on": ["worker"],
+                    "readiness_probe": {"http_get": "/healthz", "port": "8080"}
+                },
+                {
+                    "name": "worker",
+                    "target": "worker",
+                    "process": {"entrypoint": "worker.ts", "cmd": ["deno", "run", "worker.ts"]}
+                }
+            ]),
+        );
+        lock.contract.entries.insert(
+            "network".to_string(),
+            json!({"egress_allow": ["registry.npmjs.org"]}),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "deno", "selected_target": "api"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([
+                {
+                    "label": "api",
+                    "runtime": "source",
+                    "driver": "deno",
+                    "entrypoint": "api.ts",
+                    "cmd": ["deno", "run", "api.ts"],
+                    "port": 8080
+                },
+                {
+                    "label": "worker",
+                    "runtime": "source",
+                    "driver": "deno",
+                    "entrypoint": "worker.ts",
+                    "cmd": ["deno", "run", "worker.ts"]
+                }
+            ]),
+        );
+        lock.resolution
+            .entries
+            .insert("closure".to_string(), json!({"kind": "metadata_only"}));
+        lock
+    }
 
     #[test]
     fn generates_valid_config_json() {
@@ -1742,7 +1984,6 @@ port = 3000
                 ports: None,
             },
         );
-
         let left_config = ConfigJson {
             version: CONFIG_VERSION.to_string(),
             services: left_services,
@@ -1795,5 +2036,58 @@ port = 3000
         let right_json = to_stable_json_pretty(&right_config).expect("right json");
 
         assert_eq!(left_json, right_json);
+    }
+
+    #[test]
+    fn generate_config_from_lock_preserves_service_coherence() {
+        let lock = sample_lock();
+        let resolved = resolve_lock_runtime_model(&lock, Some("api")).expect("resolved");
+        let config = generate_config_from_lock(
+            &lock,
+            &resolved,
+            &LockCompilerOverlay::default(),
+            None,
+            false,
+        )
+        .expect("config");
+
+        assert_eq!(config.services["main"].executable, "deno");
+        assert_eq!(
+            config.services["main"].depends_on.as_ref().unwrap(),
+            &vec!["worker".to_string()]
+        );
+        assert_eq!(config.services["worker"].executable, "deno");
+        assert_eq!(
+            config
+                .metadata
+                .as_ref()
+                .and_then(|value| value.name.as_deref()),
+            Some("svc-demo")
+        );
+    }
+
+    #[test]
+    fn explicit_overlay_changes_lock_config_egress_without_manifest_inputs() {
+        let lock = sample_lock();
+        let resolved = resolve_lock_runtime_model(&lock, Some("api")).expect("resolved");
+        let config = generate_config_from_lock(
+            &lock,
+            &resolved,
+            &LockCompilerOverlay {
+                network_allow_hosts: Some(vec!["example.com".to_string()]),
+                ..LockCompilerOverlay::default()
+            },
+            None,
+            false,
+        )
+        .expect("config");
+
+        let rules = config
+            .sandbox
+            .network
+            .egress
+            .and_then(|value| value.rules)
+            .unwrap_or_default();
+        assert!(!rules.is_empty());
     }
 }

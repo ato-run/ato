@@ -5,6 +5,8 @@
 `ato` は `capsule.toml` を解釈して、実行・配布・インストールを行うメタCLIです。  
 Zero-Trust / fail-closed を前提に、通常実行時は静かに動作し、同意や違反時のみ明示的に出力します。
 
+`ato init` は durable な `ato.lock.json` baseline と workspace-local の `.ato/` inference state を materialize します。旧 prompt/manual manifest helper は `ato init --legacy prompt` と `ato init --legacy manual` で引き続き利用できます。
+
 ## 主要コマンド
 
 ```bash
@@ -18,6 +20,7 @@ ato build [dir] [--strict-v3] [--force-large-payload]
 ato publish [--registry <url>] [--artifact <file.capsule>] [--scoped-id <publisher/slug>] [--allow-existing] [--prepare] [--build] [--deploy] [--legacy-full-publish] [--fix] [--no-tui] [--force-large-payload]
 ato publish --dry-run
 ato publish --ci
+ato init [path] [--yes]
 ato gen-ci
 ato search [query]
 ato source sync-status --source-id <id> --sync-run-id <id> [--registry <url>]

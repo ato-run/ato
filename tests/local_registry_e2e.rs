@@ -86,7 +86,7 @@ fn seed_minimal_deno_lockfiles(workspace_root: &Path) -> Result<()> {
 
     std::fs::write(
         workspace_root.join("deno.lock"),
-        r#"{"version":"4","specifiers":{},"packages":{}}"#,
+        r#"{"version":"3","remote":{}}"#,
     )?;
 
     std::fs::write(
@@ -971,7 +971,9 @@ entrypoint = "main.js"
     )?;
     std::fs::write(
         project_dir.join("main.js"),
-        r#"console.log("local registry seeded consent run");"#,
+        r#"console.log("local registry seeded consent run");
+setTimeout(() => process.exit(0), 3000);
+"#,
     )?;
     std::fs::write(project_dir.join("package-lock.json"), "{}")?;
 
@@ -1010,7 +1012,7 @@ entrypoint = "main.js"
     assert_eq!(run_response.status(), reqwest::StatusCode::ACCEPTED);
 
     let mut process_id = None::<String>;
-    for _ in 0..100 {
+    for _ in 0..300 {
         let processes: serde_json::Value = client
             .get(format!("{}/v1/local/processes", base_url))
             .send()

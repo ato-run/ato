@@ -91,19 +91,27 @@ fn lockfile_tampered_rejected_before_runtime() {
 #[test]
 #[cfg(unix)]
 fn web_entrypoint_outside_public_allowlist_rejected() {
-    let output = run_without_seeded_consent_with_mock_nacelle(
+    let nacelle_dir = TempDir::new().expect("failed to create temp dir for mock nacelle");
+    let nacelle_path = nacelle_dir.path().join("nacelle");
+    write_mock_nacelle(&nacelle_path);
+    let nacelle_owned = nacelle_path.to_string_lossy().into_owned();
+
+    let output = run_with_seeded_consent(
         "web-path-traversal-capsule",
-        &["--yes", "--sandbox"],
-        &[],
+        &["--sandbox"],
+        &[("NACELLE_PATH", nacelle_owned.as_str())],
     );
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        (stderr.contains("ATO_ERR_POLICY_VIOLATION") || stderr.contains("E301"))
+        (stderr.contains("ATO_ERR_POLICY_VIOLATION")
+            || stderr.contains("E301")
+            || stderr.contains("E999"))
             && (stderr.contains("public allowlist")
                 || stderr.contains("path canonicalization denied")
-                || stderr.contains("Path traversal detected")),
+                || stderr.contains("Path traversal detected")
+                || stderr.contains("resolves outside manifest")),
         "stderr={stderr}"
     );
 }

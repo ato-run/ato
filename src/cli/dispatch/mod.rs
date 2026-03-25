@@ -111,10 +111,23 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             skip_verify,
         } => engine::execute_setup_command(engine, version, skip_verify, reporter.clone()),
 
-        Commands::Init => crate_project::init::execute_prompt(
-            crate_project::init::PromptArgs { path: None },
-            reporter.clone(),
-        ),
+        Commands::Init { path, yes, legacy } => match legacy {
+            Some(crate::cli::InitLegacyMode::Prompt) => crate_project::init::execute_prompt(
+                crate_project::init::PromptArgs { path: Some(path) },
+                reporter.clone(),
+            ),
+            Some(crate::cli::InitLegacyMode::Manual) => {
+                crate_project::init::write_manual_manifest_stub(Some(path), reporter.clone())
+                    .map(|_| ())
+            }
+            None => crate_project::init::execute_durable_init(
+                crate_project::init::InitArgs {
+                    path: Some(path),
+                    yes,
+                },
+                reporter.clone(),
+            ),
+        },
 
         Commands::New { name, template } => {
             let result = crate_project::new::execute(

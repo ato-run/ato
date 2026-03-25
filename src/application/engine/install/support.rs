@@ -1101,11 +1101,8 @@ pub(crate) fn ensure_local_manifest_ready_for_run(
                     reporter.notify("Attempting regeneration with inferred defaults.".to_string()),
                 )?;
             }
-            crate::project::init::execute_manifest_init(
-                crate::project::init::InitArgs {
-                    path: Some(local_root.clone()),
-                    yes: true,
-                },
+            crate::project::init::write_legacy_detected_manifest(
+                Some(local_root.clone()),
                 reporter,
             )?;
             Ok(LocalRunManifestPreparationOutcome::Ready)
