@@ -6,6 +6,13 @@ mod validate;
 use std::fs;
 use std::path::Path;
 
+/// ato.lock v1 foundation module.
+///
+/// v1 intentionally uses one Rust model for both serde and in-memory draft
+/// handling, while keeping canonical lock identity in a separate projection.
+/// Load, validation, lock_id computation, and serialization are split so later
+/// input-resolver and import flows can work with draft locks without being
+/// forced through persisted artifact validation too early.
 pub use canonicalize::{canonical_projection, CanonicalLockProjection};
 pub use hash::{
     canonical_document_bytes, canonical_projection_bytes, compute_lock_id, recompute_lock_id,
@@ -21,41 +28,52 @@ pub use validate::{
 
 use crate::error::{CapsuleError, Result};
 
+/// Parses ato.lock JSON without applying any validation.
 pub fn load_unvalidated_from_str(raw: &str) -> Result<AtoLock> {
     serde_json::from_str(raw)
         .map_err(|err| CapsuleError::Config(format!("Failed to parse ato.lock.json: {err}")))
 }
 
+/// Reads ato.lock JSON from disk without applying any validation.
 pub fn load_unvalidated_from_path(path: &Path) -> Result<AtoLock> {
     let raw = fs::read_to_string(path)
         .map_err(|err| CapsuleError::Config(format!("Failed to read {}: {err}", path.display())))?;
     load_unvalidated_from_str(&raw)
 }
 
+/// Validates a persisted lock under strict mode.
 pub fn validate_persisted_strict(
     lock: &AtoLock,
 ) -> std::result::Result<(), Vec<AtoLockValidationError>> {
     validate_persisted(lock, ValidationMode::Strict)
 }
 
+/// Validates a persisted lock under non-strict mode.
 pub fn validate_persisted_non_strict(
     lock: &AtoLock,
 ) -> std::result::Result<(), Vec<AtoLockValidationError>> {
     validate_persisted(lock, ValidationMode::NonStrict)
 }
 
+/// Validates a draft or persisted lock structurally under strict mode.
 pub fn validate_structural_strict(
     lock: &AtoLock,
 ) -> std::result::Result<(), Vec<AtoLockValidationError>> {
     validate_structural(lock, ValidationMode::Strict)
 }
 
+/// Validates a draft or persisted lock structurally under non-strict mode.
 pub fn validate_structural_non_strict(
     lock: &AtoLock,
 ) -> std::result::Result<(), Vec<AtoLockValidationError>> {
     validate_structural(lock, ValidationMode::NonStrict)
 }
 
+/// Pretty-serializes a durable ato.lock artifact.
+///
+/// This preserves generated_at as stored on the model and does not normalize
+/// its textual representation beyond RFC3339 validation. lock_id is recomputed
+/// before serialization and persisted validation must pass.
 pub fn to_pretty_json(lock: &AtoLock) -> Result<String> {
     let mut persisted = lock.clone();
     recompute_lock_id(&mut persisted)?;
@@ -64,12 +82,14 @@ pub fn to_pretty_json(lock: &AtoLock) -> Result<String> {
         .map_err(|err| CapsuleError::Config(format!("Failed to serialize ato.lock.json: {err}")))
 }
 
+/// Writes a durable pretty ato.lock artifact after recomputing lock_id.
 pub fn write_pretty_to_path(lock: &AtoLock, path: &Path) -> Result<()> {
     let raw = to_pretty_json(lock)?;
     fs::write(path, raw)
         .map_err(|err| CapsuleError::Config(format!("Failed to write {}: {err}", path.display())))
 }
 
+/// Returns canonical persisted bytes for a durable ato.lock artifact.
 pub fn write_canonical_to_vec(lock: &AtoLock) -> Result<Vec<u8>> {
     let mut persisted = lock.clone();
     recompute_lock_id(&mut persisted)?;
@@ -78,6 +98,7 @@ pub fn write_canonical_to_vec(lock: &AtoLock) -> Result<Vec<u8>> {
         .map_err(|err| CapsuleError::Config(format!("Failed to canonicalize ato.lock JSON: {err}")))
 }
 
+/// Verifies that an existing persisted lock_id matches the canonical projection.
 pub fn verify_lock_id(lock: &AtoLock) -> Result<()> {
     validate_persisted_strict(lock).map_err(validation_errors_to_capsule_error)?;
     Ok(())
@@ -275,6 +296,15 @@ mod tests {
             matches!(error, AtoLockValidationError::UnknownDeclaredFeature(value) if value == "preview_only")
         }));
         assert!(validate_structural_non_strict(&unknown_declared).is_ok());
+
+        let mut recognized_but_unimplemented = persisted_sample_lock();
+        recognized_but_unimplemented.features.required_for_execution =
+            vec![FeatureName::Known(KnownFeature::Identity)];
+        let unsupported_errors = validate_persisted_strict(&recognized_but_unimplemented)
+            .expect_err("recognized but unsupported required feature must fail");
+        assert!(unsupported_errors.iter().any(|error| {
+            matches!(error, AtoLockValidationError::UnsupportedRequiredFeature(value) if value == "identity")
+        }));
     }
 
     #[test]
@@ -302,6 +332,12 @@ mod tests {
         assert!(ambiguity_errors
             .iter()
             .any(|error| matches!(error, AtoLockValidationError::AmbiguityRequiresCandidates)));
+
+        let non_strict_unknown = validate_structural_non_strict(&lock)
+            .expect_err("unknown unresolved reason remains structurally invalid");
+        assert!(non_strict_unknown.iter().any(|error| {
+            matches!(error, AtoLockValidationError::UnknownUnresolvedReason(value) if value == "future_reason")
+        }));
     }
 
     #[test]
@@ -311,5 +347,16 @@ mod tests {
         write_pretty_to_path(&lock, file.path()).expect("write pretty lock");
         let parsed = load_unvalidated_from_path(file.path()).expect("read pretty lock");
         assert!(validate_persisted_strict(&parsed).is_ok());
+    }
+
+    #[test]
+    fn recompute_then_persisted_validation_is_the_intended_draft_path() {
+        let mut draft = sample_lock();
+        assert!(validate_structural_strict(&draft).is_ok());
+        assert!(validate_persisted_strict(&draft).is_err());
+
+        recompute_lock_id(&mut draft).expect("recompute lock_id");
+
+        assert!(validate_persisted_strict(&draft).is_ok());
     }
 }

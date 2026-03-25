@@ -1,8 +1,10 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use capsule_core::input_resolver::{
+    resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
+};
 use serde::Serialize;
 
 use crate::application::pipeline::producer::PublishDryRunStageResult;
@@ -211,11 +213,27 @@ fn resolve_private_publish_input(
     }
 
     let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
-    let manifest_path = cwd.join("capsule.toml");
-    let manifest_raw = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
-    let manifest = capsule_core::types::CapsuleManifest::from_toml(&manifest_raw)
-        .map_err(|err| anyhow::anyhow!("Failed to parse capsule.toml: {}", err))?;
+    let resolved = resolve_authoritative_input(&cwd, ResolveInputOptions::default())?;
+    let (manifest_path, manifest_raw, manifest) = match resolved {
+        ResolvedInput::CanonicalLock { canonical, .. } => {
+            anyhow::bail!(
+                "{} detected at {}. `ato publish` build-path migration to canonical lock input is not implemented yet, and compatibility inputs will not be used as fallback.",
+                capsule_core::input_resolver::ATO_LOCK_FILE_NAME,
+                canonical.path.display()
+            );
+        }
+        ResolvedInput::CompatibilityProject { project, .. } => (
+            project.manifest.path,
+            project.manifest.raw_text,
+            project.manifest.model,
+        ),
+        ResolvedInput::SourceOnly { source, .. } => {
+            anyhow::bail!(
+                "No authoritative publish input was found in {}. Source-only publish bootstrap is not implemented yet.",
+                source.project_root.display()
+            );
+        }
+    };
 
     let slug = manifest_slug(&manifest.name)?;
     let publisher = resolve_private_publisher(request.publisher_hint.as_deref(), &manifest_raw);

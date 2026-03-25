@@ -5,6 +5,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::input_resolver::{
+    resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
+};
 use capsule_core::smoke::SmokeFailureClass;
 use capsule_core::CapsuleReporter;
 use tracing::debug;
@@ -981,6 +984,28 @@ pub(crate) fn ensure_local_manifest_ready_for_run(
     } else {
         local_root.join("capsule.toml")
     };
+    match resolve_authoritative_input(&manifest_path, ResolveInputOptions::default()) {
+        Ok(ResolvedInput::CanonicalLock { canonical, .. }) => {
+            anyhow::bail!(
+                "{} detected at {}. `ato run` lock-first execution is not implemented yet, and compatibility inputs will not be used as fallback.",
+                capsule_core::input_resolver::ATO_LOCK_FILE_NAME,
+                canonical.path.display()
+            );
+        }
+        Ok(ResolvedInput::CompatibilityProject { .. }) => {
+            return Ok(LocalRunManifestPreparationOutcome::Ready);
+        }
+        Ok(ResolvedInput::SourceOnly { .. }) => {}
+        Err(error)
+            if error
+                .to_string()
+                .contains("is not an authoritative command-entry input") =>
+        {
+            return Err(error.into());
+        }
+        Err(_) => {}
+    }
+
     let status = inspect_local_run_manifest(&manifest_path)?;
     if matches!(status, LocalRunManifestStatus::Valid) {
         return Ok(LocalRunManifestPreparationOutcome::Ready);
