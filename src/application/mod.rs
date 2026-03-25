@@ -7,5 +7,6 @@ pub(crate) mod ports;
 pub(crate) mod preview;
 pub(crate) mod search;
 pub(crate) mod services;
+pub(crate) mod source_inference;
 pub(crate) mod types;
 pub(crate) mod workspace;

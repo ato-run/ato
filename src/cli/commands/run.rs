@@ -26,6 +26,7 @@ use crate::application::pipeline::hourglass;
 use crate::application::pipeline::hourglass::{HourglassPhase, HourglassPhaseState};
 use crate::application::pipeline::phases::run as run_phase;
 use crate::application::ports::OutputPort;
+use crate::application::source_inference;
 use crate::preview;
 #[cfg(test)]
 use crate::registry::store::RegistryStore;
@@ -725,13 +726,27 @@ pub(crate) async fn normalize_run_target_after_install(
         || resolved_target.file_name().and_then(|value| value.to_str()) == Some("capsule.toml")
     {
         return match resolve_authoritative_input(resolved_target, ResolveInputOptions::default())? {
-            ResolvedInput::CanonicalLock { canonical, .. } => Err(anyhow::anyhow!(
-                "{} detected at {}. `ato run` lock-first execution is not implemented yet, and compatibility inputs will not be used as fallback.",
-                capsule_core::input_resolver::ATO_LOCK_FILE_NAME,
-                canonical.path.display()
-            )),
+            ResolvedInput::CanonicalLock { canonical, .. } => {
+                let mut cleanup_scope = attempt.map(|attempt| attempt.cleanup_scope());
+                let materialized = source_inference::materialize_run_from_canonical_lock(
+                    &canonical,
+                    cleanup_scope.as_mut(),
+                    args.reporter.clone(),
+                    args.assume_yes,
+                )?;
+                Ok(materialized.manifest_path)
+            }
             ResolvedInput::CompatibilityProject { project, .. } => Ok(project.manifest.path),
-            ResolvedInput::SourceOnly { source, .. } => Ok(source.project_root),
+            ResolvedInput::SourceOnly { source, .. } => {
+                let mut cleanup_scope = attempt.map(|attempt| attempt.cleanup_scope());
+                let materialized = source_inference::materialize_run_from_source_only(
+                    &source,
+                    cleanup_scope.as_mut(),
+                    args.reporter.clone(),
+                    args.assume_yes,
+                )?;
+                Ok(materialized.manifest_path)
+            }
         };
     }
 
