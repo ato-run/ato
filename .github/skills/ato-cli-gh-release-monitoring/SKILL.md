@@ -1,7 +1,7 @@
 ---
 name: ato-cli-gh-release-monitoring
-description: 'Deploy and release ato-cli using gh and sleep across dev, main, and tagged GitHub Releases. Use when pushing release-related changes, creating dev-to-main PRs, monitoring required GitHub checks, merging after green, handling release-plz PRs, creating patch bump PRs after version collisions, tagging a release version, and verifying the published GitHub Release assets.'
-argument-hint: 'Describe the ato-cli change or release target to ship'
+description: "Deploy and release ato-cli using gh and sleep across dev, main, and tagged GitHub Releases. Use when pushing release-related changes, creating dev-to-main PRs, monitoring required GitHub checks, merging after green, handling release-plz PRs, creating patch bump PRs after version collisions, tagging a release version, and verifying the published GitHub Release assets."
+argument-hint: "Describe the ato-cli change or release target to ship"
 user-invocable: true
 ---
 
