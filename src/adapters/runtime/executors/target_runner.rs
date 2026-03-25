@@ -7,7 +7,7 @@ use capsule_core::execution_plan::derive::{self, PlatformSnapshot};
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::execution_plan::guard::{self, RuntimeGuardMode, RuntimeGuardResult};
 use capsule_core::execution_plan::model::{ExecutionPlan, ExecutionTier};
-use capsule_core::lock_runtime::{self, LockCompilerOverlay};
+use capsule_core::lock_runtime;
 use capsule_core::lockfile;
 use capsule_core::router::{ManifestData, RuntimeDecision};
 use capsule_core::CapsuleReporter;
@@ -17,6 +17,7 @@ use super::launch_context::RuntimeLaunchContext;
 use crate::application::pipeline::phases::run::{
     CompatibilityLegacyLockContext, PreparedRunContext,
 };
+use crate::application::workspace::state;
 use crate::ipc::inject::IpcContext;
 use crate::reporters::CliReporter;
 use crate::runtime::overrides as runtime_overrides;
@@ -108,12 +109,23 @@ pub fn prepare_target_execution(
         if let Some(lock) = prepared.authoritative_lock.as_ref() {
             let resolved =
                 lock_runtime::resolve_lock_runtime_model(lock, Some(plan.selected_target_label()))?;
+            let overlay = prepared
+                .effective_state
+                .as_ref()
+                .map(|effective| effective.compiler_overlay.clone())
+                .unwrap_or_default();
             let execution_plan = derive::compile_execution_plan_from_lock(
                 lock,
                 &resolved,
-                &LockCompilerOverlay::default(),
+                &overlay,
                 &PlatformSnapshot::current(),
             )?;
+            if let Some(effective_state) = prepared.effective_state.as_ref() {
+                state::validate_execution_plan_against_policy(
+                    &execution_plan,
+                    &effective_state.policy,
+                )?;
+            }
             let tier =
                 derive::derive_tier(execution_plan.target.runtime, execution_plan.target.driver)?;
             let kind = match execution_plan.target.runtime {
@@ -369,6 +381,7 @@ entrypoint = "index.js"
         };
         let prepared = PreparedRunContext {
             authoritative_lock: None,
+            effective_state: None,
             raw_manifest,
             validation_mode: capsule_core::types::ValidationMode::Strict,
             engine_override_declared: false,

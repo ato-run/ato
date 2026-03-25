@@ -12,12 +12,11 @@ use crate::application::source_inference::{
     write_sidecar, MaterializationMode, SourceInferenceInputKind, SourceInferenceProvenance,
     SourceInferenceProvenanceKind, SourceInferenceResult, WorkspaceMaterialization,
 };
+use crate::application::workspace::state;
 
-const INIT_SOURCE_INFERENCE_DIR: &str = ".ato/source-inference";
-const BINDING_STATE_DIR: &str = ".ato/binding";
+const INIT_SOURCE_INFERENCE_DIR: &str = state::WORKSPACE_SOURCE_INFERENCE_DIR;
 const PROVENANCE_FILE: &str = "provenance.json";
 const PROVENANCE_CACHE_FILE: &str = "provenance-cache.json";
-const BINDING_SEED_FILE: &str = "seed.json";
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ProvenanceCache {
@@ -84,8 +83,9 @@ pub(crate) fn materialize_workspace_result(
     let sidecar_path = sidecar_dir.join(PROVENANCE_FILE);
     write_sidecar(&sidecar_path, &result, MaterializationMode::InitWorkspace)?;
 
+    let workspace_paths = state::workspace_state_paths(project_root);
     let provenance_cache_path = sidecar_dir.join(PROVENANCE_CACHE_FILE);
-    let binding_seed_path = project_root.join(BINDING_STATE_DIR).join(BINDING_SEED_FILE);
+    let binding_seed_path = workspace_paths.binding_seed_path.clone();
     write_provenance_cache(
         &provenance_cache_path,
         &lock_path,
@@ -99,12 +99,20 @@ pub(crate) fn materialize_workspace_result(
         &provenance_cache_path,
         &result.lock,
     )?;
+    state::write_default_policy_bundle(&workspace_paths.policy_bundle_path)?;
+    state::write_default_attestation_store(
+        &workspace_paths.attestation_store_path,
+        &lock_path,
+        &result.lock,
+    )?;
 
     Ok(WorkspaceMaterialization {
         lock_path,
         sidecar_path,
         provenance_cache_path,
         binding_seed_path,
+        policy_bundle_path: workspace_paths.policy_bundle_path,
+        attestation_store_path: workspace_paths.attestation_store_path,
         result,
     })
 }
