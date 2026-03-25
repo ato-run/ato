@@ -935,10 +935,26 @@ fn write_generated_manifest(
         .map(|capsule_type| format!("Generated from shared source inference ({capsule_type})"))
         .unwrap_or_else(|| "Generated from shared source inference".to_string());
 
+    let top_level_repository = original_manifest
+        .and_then(|manifest| manifest.get("repository"))
+        .and_then(toml_value_as_non_empty_string);
+    let metadata_repository = original_manifest
+        .and_then(|manifest| manifest.get("metadata"))
+        .and_then(|metadata| metadata.get("repository"))
+        .and_then(toml_value_as_non_empty_string);
+
     let mut raw = format!(
-        "schema_version = \"0.2\"\nname = {name:?}\nversion = {version:?}\ntype = \"app\"\ndefault_target = {default_target:?}\n\n[metadata]\ndescription = {description:?}\n\n[requirements]\n",
+        "schema_version = \"0.2\"\nname = {name:?}\nversion = {version:?}\ntype = \"app\"\ndefault_target = {default_target:?}\n",
         default_target = target.label,
     );
+    if let Some(repository) = top_level_repository.as_deref() {
+        raw.push_str(&format!("repository = {repository:?}\n"));
+    }
+    raw.push_str(&format!("\n[metadata]\ndescription = {description:?}\n",));
+    if let Some(repository) = metadata_repository.as_deref() {
+        raw.push_str(&format!("repository = {repository:?}\n"));
+    }
+    raw.push_str("\n[requirements]\n");
     if let Some(network) = manifest_network_from_lock(lock) {
         raw.push_str("\n[network]\n");
         if !network.egress_allow.is_empty() {
@@ -1010,7 +1026,9 @@ fn write_generated_manifest(
         raw.push_str("]\n");
     }
     if let Some(original_manifest) = original_manifest {
-        append_ipc_section_from_manifest(&mut raw, original_manifest)?;
+        append_table_section_from_manifest(&mut raw, original_manifest, "build")?;
+        append_table_section_from_manifest(&mut raw, original_manifest, "store")?;
+        append_table_section_from_manifest(&mut raw, original_manifest, "ipc")?;
     }
     raw.push_str("\n[storage]\n\n[routing]\n");
 
@@ -1019,21 +1037,33 @@ fn write_generated_manifest(
     Ok(sha256_hex(raw.as_bytes()))
 }
 
-fn append_ipc_section_from_manifest(
+fn append_table_section_from_manifest(
     raw: &mut String,
     original_manifest: &toml::Value,
+    table_name: &str,
 ) -> Result<()> {
-    let Some(ipc) = original_manifest.get("ipc") else {
+    let Some(table) = original_manifest.get(table_name) else {
         return Ok(());
     };
 
     let mut wrapped = toml::map::Map::new();
-    wrapped.insert("ipc".to_string(), ipc.clone());
-    let ipc_toml = toml::to_string(&toml::Value::Table(wrapped))
-        .context("serialize preserved [ipc] section for run bridge")?;
+    wrapped.insert(table_name.to_string(), table.clone());
+    let table_toml = toml::to_string(&toml::Value::Table(wrapped)).with_context(|| {
+        format!(
+            "serialize preserved [{}] section for run bridge",
+            table_name
+        )
+    })?;
     raw.push('\n');
-    raw.push_str(&ipc_toml);
+    raw.push_str(&table_toml);
     Ok(())
+}
+
+fn toml_value_as_non_empty_string(value: &toml::Value) -> Option<&str> {
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

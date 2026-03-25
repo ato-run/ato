@@ -1,8 +1,5 @@
 use anyhow::{Context, Result};
 use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::input_resolver::{
-    resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
-};
 use capsule_core::types::ValidationMode;
 use capsule_core::CapsuleReporter;
 use serde::Serialize;
@@ -15,6 +12,7 @@ use std::time::{Duration, Instant};
 use tracing::debug;
 use walkdir::WalkDir;
 
+use crate::application::producer_input::resolve_producer_authoritative_input;
 use crate::build::native_delivery;
 use crate::project::init;
 use crate::reporters;
@@ -112,34 +110,16 @@ pub fn execute_pack_command_with_injected_manifest(
     }
 
     let mut manifest = dir.join("capsule.toml");
-    match resolve_authoritative_input(&dir, ResolveInputOptions::default()) {
-        Ok(ResolvedInput::CanonicalLock { canonical, .. }) => {
-            anyhow::bail!(
-                "{} detected at {}. `ato build` still requires a compatibility manifest path in this migration stage, and will not fall back automatically.",
-                capsule_core::input_resolver::ATO_LOCK_FILE_NAME,
-                canonical.path.display()
-            );
+    let authoritative_input = if injected_manifest.is_none() {
+        let resolved = resolve_producer_authoritative_input(&dir, reporter.clone(), false)?;
+        for advisory in &resolved.advisories {
+            futures::executor::block_on(reporter.warn(advisory.clone()))?;
         }
-        Ok(ResolvedInput::CompatibilityProject {
-            project,
-            advisories,
-            ..
-        }) => {
-            manifest = project.manifest.path;
-            for advisory in advisories {
-                futures::executor::block_on(reporter.warn(advisory.message))?;
-            }
-        }
-        Ok(ResolvedInput::SourceOnly { .. }) => {}
-        Err(error)
-            if error
-                .to_string()
-                .contains("is not an authoritative command-entry input") =>
-        {
-            return Err(error.into());
-        }
-        Err(_) => {}
-    }
+        manifest = resolved.manifest_path.clone();
+        Some(resolved)
+    } else {
+        None
+    };
 
     let mut temporary_manifest: Option<TemporaryManifestGuard> = None;
     if !manifest.exists() {
@@ -191,6 +171,7 @@ pub fn execute_pack_command_with_injected_manifest(
     }
 
     let _temporary_manifest_guard = temporary_manifest;
+    let _authoritative_input_guard = authoritative_input;
     let validation_mode = if injected_manifest.is_some() {
         ValidationMode::Preview
     } else {

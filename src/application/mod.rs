@@ -5,6 +5,7 @@ pub(crate) mod engine;
 pub(crate) mod pipeline;
 pub(crate) mod ports;
 pub(crate) mod preview;
+pub(crate) mod producer_input;
 pub(crate) mod search;
 pub(crate) mod services;
 pub(crate) mod source_inference;

@@ -18,6 +18,8 @@ pub struct PublishArtifactBytesArgs {
     pub registry_url: String,
     pub force_large_payload: bool,
     pub allow_existing: bool,
+    pub lock_id: Option<String>,
+    pub closure_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +33,10 @@ pub struct PublishArtifactResult {
     pub size_bytes: u64,
     #[serde(default)]
     pub already_existed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closure_digest: Option<String>,
 }
 
 #[derive(Debug)]
@@ -148,7 +154,13 @@ pub fn publish_artifact_bytes(args: PublishArtifactBytesArgs) -> Result<PublishA
         "--force-large-payload",
     )?;
     let payload = load_artifact_payload_from_bytes(&args.artifact_bytes, &args.scoped_id)?;
-    upload_artifact_payload(&base_url, payload, args.allow_existing)
+    upload_artifact_payload(
+        &base_url,
+        payload,
+        args.allow_existing,
+        args.lock_id.as_deref(),
+        args.closure_digest.as_deref(),
+    )
 }
 
 pub fn inspect_artifact_manifest(path: &Path) -> Result<ArtifactManifestInfo> {
@@ -238,6 +250,8 @@ fn upload_artifact_payload(
     base_url: &str,
     payload: ArtifactPayload,
     allow_existing: bool,
+    lock_id: Option<&str>,
+    closure_digest: Option<&str>,
 ) -> Result<PublishArtifactResult> {
     let v3_sync_payload = payload.v3_sync_payload();
     let endpoint = build_upload_endpoint(
@@ -260,6 +274,18 @@ fn upload_artifact_payload(
         .header("content-type", "application/octet-stream")
         .header("x-ato-sha256", &payload.sha256)
         .header("x-ato-blake3", &payload.blake3);
+
+    let request = if let Some(lock_id) = lock_id.filter(|value| !value.trim().is_empty()) {
+        request.header("x-ato-lock-id", lock_id)
+    } else {
+        request
+    };
+    let request =
+        if let Some(closure_digest) = closure_digest.filter(|value| !value.trim().is_empty()) {
+            request.header("x-ato-closure-digest", closure_digest)
+        } else {
+            request
+        };
 
     let request = crate::registry::http::with_blocking_ato_token(request);
 

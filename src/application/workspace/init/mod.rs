@@ -104,7 +104,7 @@ pub fn execute_durable_init(
     )?;
     futures::executor::block_on(
         reporter
-            .notify("   ato inspect       # Inspect unresolved fields and provenance".to_string()),
+            .notify("   ato inspect lock . # Inspect unresolved fields and provenance".to_string()),
     )?;
 
     Ok(())

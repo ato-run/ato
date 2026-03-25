@@ -294,6 +294,57 @@ fn state_command_parses_register_and_inspect_forms() {
 }
 
 #[test]
+fn inspect_command_parses_lock_preview_diagnostics_and_remediation() {
+    let lock =
+        Cli::try_parse_from(["ato", "inspect", "lock", "./demo"]).expect("parse inspect lock");
+    match lock.command {
+        Commands::Inspect {
+            command: InspectCommands::Lock { path, json },
+        } => {
+            assert_eq!(path, PathBuf::from("./demo"));
+            assert!(!json);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+
+    let preview = Cli::try_parse_from(["ato", "inspect", "preview", "--json"])
+        .expect("parse inspect preview");
+    match preview.command {
+        Commands::Inspect {
+            command: InspectCommands::Preview { path, json },
+        } => {
+            assert_eq!(path, PathBuf::from("."));
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+
+    let diagnostics =
+        Cli::try_parse_from(["ato", "inspect", "diagnostics"]).expect("parse inspect diagnostics");
+    match diagnostics.command {
+        Commands::Inspect {
+            command: InspectCommands::Diagnostics { path, json },
+        } => {
+            assert_eq!(path, PathBuf::from("."));
+            assert!(!json);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+
+    let remediation = Cli::try_parse_from(["ato", "inspect", "remediation", "./capsule.toml"])
+        .expect("parse inspect remediation");
+    match remediation.command {
+        Commands::Inspect {
+            command: InspectCommands::Remediation { path, json },
+        } => {
+            assert_eq!(path, PathBuf::from("./capsule.toml"));
+            assert!(!json);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
 fn parse_sha256_for_artifact_supports_sha256sums_format() {
     let body = "\
 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  nacelle-v1.2.3-darwin-arm64

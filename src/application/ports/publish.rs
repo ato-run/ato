@@ -11,6 +11,8 @@ pub struct PublishableArtifact {
     pub version: String,
     pub normalized_file_name: String,
     pub content_hash: String,
+    pub lock_id: Option<String>,
+    pub closure_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
