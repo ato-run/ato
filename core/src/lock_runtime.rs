@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 use std::collections::HashMap;
 
 use serde_json::Value;
@@ -47,7 +48,7 @@ pub fn resolve_lock_runtime_model(
     let metadata = metadata_from_lock(lock);
     let target_label = selected_target_label(lock, explicit_target_label, &metadata)?;
     let targets = resolved_targets(lock)?;
-    let services = build_services(lock, &targets, &target_label)?;
+    let services = build_services(lock, targets, target_label.as_str())?;
     let selected = services
         .iter()
         .find(|service| service.target_label == target_label)
@@ -72,21 +73,21 @@ pub fn resolve_lock_runtime_model(
 }
 
 fn ensure_execution_ready(lock: &AtoLock) -> Result<(), AtoExecutionError> {
-    if lock.contract.entries.get("process").is_none() {
+    if !lock.contract.entries.contains_key("process") {
         return Err(AtoExecutionError::ambiguous_entrypoint(
             "lock-derived execution requires contract.process to be resolved",
             explicit_candidates(lock),
         ));
     }
 
-    if lock.resolution.entries.get("runtime").is_none() {
+    if !lock.resolution.entries.contains_key("runtime") {
         return Err(AtoExecutionError::runtime_not_resolved(
             "lock-derived execution requires resolution.runtime",
             None,
         ));
     }
 
-    if lock.resolution.entries.get("closure").is_none() {
+    if !lock.resolution.entries.contains_key("closure") {
         return Err(AtoExecutionError::lock_incomplete(
             "lock-derived execution requires resolution.closure",
             Some("resolution.closure"),
