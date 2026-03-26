@@ -39,7 +39,7 @@ use capsule_core::execution_plan::error::AtoExecutionError;
 #[cfg(test)]
 use capsule_core::execution_plan::guard::ExecutorKind;
 use capsule_core::input_resolver::{
-    resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
+    resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ATO_LOCK_FILE_NAME,
 };
 use capsule_core::lifecycle::LifecycleEvent;
 use capsule_core::lockfile::{CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME};
@@ -766,6 +766,7 @@ async fn normalize_run_target_after_install(
 
     if resolved_target.is_dir()
         || resolved_target.file_name().and_then(|value| value.to_str()) == Some("capsule.toml")
+        || resolved_target.file_name().and_then(|value| value.to_str()) == Some(ATO_LOCK_FILE_NAME)
     {
         return match resolve_authoritative_input(resolved_target, ResolveInputOptions::default())? {
             ResolvedInput::CanonicalLock { canonical, .. } => {
@@ -1050,19 +1051,21 @@ fn execute_watch_mode(args: RunArgs) -> Result<()> {
 mod tests {
     use super::{
         background_ready_message, foreground_native_event_messages,
-        initial_foreground_native_messages, plan_v03_provision_command,
-        preflight_required_environment_variables, process_runtime_label,
-        reroute_auto_provisioned_execution, resolve_compatibility_host_mode,
+        initial_foreground_native_messages, normalize_run_target_after_install,
+        plan_v03_provision_command, preflight_required_environment_variables,
+        process_runtime_label, reroute_auto_provisioned_execution, resolve_compatibility_host_mode,
         resolve_python_dependency_lock_path, resolve_state_source_overrides_with_store,
-        run_phase_detail, CompatibilityHostMode, ForegroundEventMessage,
+        run_phase_detail, CompatibilityHostMode, ForegroundEventMessage, RunArgs,
     };
     use crate::executors::launch_context::{InjectedMount, RuntimeLaunchContext};
     use crate::registry::store::RegistryStore;
     use crate::reporters::CliReporter;
+    use capsule_core::ato_lock::{self, AtoLock};
     use capsule_core::execution_plan::guard::ExecutorKind;
     use capsule_core::lifecycle::LifecycleEvent;
     use capsule_core::router::{self, ExecutionProfile, ManifestData};
     use capsule_core::types::CapsuleManifest;
+    use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -1097,6 +1100,29 @@ mod tests {
 
         let command = plan_v03_provision_command(&plan).expect("plan provision");
         assert_eq!(command.as_deref(), Some("pnpm install --frozen-lockfile"));
+    }
+
+    #[test]
+    fn v03_node_provision_supports_yarn_lockfile() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("yarn.lock"), "# yarn lockfile v1\n")
+            .expect("write yarn lock");
+
+        let plan = manifest_with_schema_and_target(
+            "0.3",
+            tmp.path().to_path_buf(),
+            vec![
+                ("runtime", toml::Value::String("source".to_string())),
+                ("driver", toml::Value::String("node".to_string())),
+                (
+                    "run_command",
+                    toml::Value::String("yarn dev -- --port $PORT".to_string()),
+                ),
+            ],
+        );
+
+        let command = plan_v03_provision_command(&plan).expect("plan provision");
+        assert_eq!(command.as_deref(), Some("yarn install --frozen-lockfile"));
     }
 
     #[test]
@@ -1363,6 +1389,73 @@ run_command = "node server.js"
             );
             assert_eq!(rerouted_ctx.injected_mounts(), std::slice::from_ref(&mount));
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn normalize_run_target_accepts_direct_canonical_lock_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let lock_path = tmp.path().join("ato.lock.json");
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "node", "cmd": ["index.js"]}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([{"name": "main", "process": {"entrypoint": "node", "cmd": ["index.js"]}}]),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "node", "version": "20.11.0"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([
+                {"label": "default", "runtime": "source", "driver": "node", "entrypoint": "node", "cmd": ["index.js"], "compatible": true}
+            ]),
+        );
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"kind": "metadata_only", "observed_lockfiles": []}),
+        );
+        ato_lock::write_pretty_to_path(&lock, &lock_path).expect("write lock");
+
+        let args = RunArgs {
+            target: lock_path.clone(),
+            target_label: None,
+            watch: false,
+            background: false,
+            nacelle: None,
+            registry: None,
+            enforcement: "best_effort".to_string(),
+            sandbox_mode: false,
+            dangerously_skip_permissions: false,
+            compatibility_fallback: None,
+            assume_yes: true,
+            agent_mode: crate::RunAgentMode::Off,
+            agent_local_root: Some(tmp.path().to_path_buf()),
+            keep_failed_artifacts: false,
+            auto_fix_mode: None,
+            allow_unverified: false,
+            state_bindings: Vec::new(),
+            inject_bindings: Vec::new(),
+            reporter: Arc::new(CliReporter::new(true)),
+            preview_mode: false,
+        };
+
+        let normalized = normalize_run_target_after_install(&args, &lock_path, None)
+            .await
+            .expect("normalize target");
+
+        assert!(normalized.authoritative_input.is_some());
+        assert_eq!(
+            normalized
+                .target
+                .file_name()
+                .and_then(|value| value.to_str()),
+            Some(".ato.run.generated.capsule.toml")
+        );
+        assert!(normalized.target.exists());
     }
 
     #[test]

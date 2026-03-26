@@ -1871,7 +1871,7 @@ fn test_run_rejects_removed_skill_flags() {
 }
 
 #[test]
-fn test_run_json_missing_manifest_requires_yes() {
+fn test_run_json_missing_manifest_fails_closed_without_generating_manifest() {
     let tmp = tempdir().unwrap();
 
     let output = Command::cargo_bin("ato")
@@ -1883,13 +1883,18 @@ fn test_run_json_missing_manifest_requires_yes() {
 
     assert!(!output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    assert_eq!(value["schema_version"], "1");
-    assert_eq!(value["status"], "error");
-    assert!(value["error"]["message"]
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let payload = if stdout.trim().is_empty() {
+        stderr.trim()
+    } else {
+        stdout.trim()
+    };
+    let value: serde_json::Value = serde_json::from_str(payload).unwrap();
+    assert_eq!(value["code"], "ATO_ERR_AMBIGUOUS_ENTRYPOINT");
+    assert!(value["message"]
         .as_str()
         .expect("message string")
-        .contains("requires -y/--yes"));
+        .contains("selected process"));
     assert!(!tmp.path().join("capsule.toml").exists());
 }
 

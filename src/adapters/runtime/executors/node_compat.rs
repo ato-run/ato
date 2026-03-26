@@ -35,11 +35,12 @@ struct PreparedCommand {
 
 pub fn execute(
     plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
 ) -> Result<i32> {
-    let deno_bin = runtime_manager::ensure_deno_binary(plan)?;
+    let deno_bin = runtime_manager::ensure_deno_binary_with_authority(plan, authoritative_lock)?;
 
     verify_execution_plan_hashes(execution_plan)?;
 
@@ -47,7 +48,7 @@ pub fn execute(
     let Some(_) = launch_spec.required_lockfile.as_ref() else {
         return Err(AtoExecutionError::lock_incomplete(
             "source/node Tier1 execution requires a Node lockfile",
-            Some("package-lock.json|pnpm-lock.yaml|bun.lock"),
+            Some("package-lock.json|yarn.lock|pnpm-lock.yaml|bun.lock|bun.lockb"),
         )
         .into());
     };
@@ -67,6 +68,7 @@ pub fn execute(
     } = build_runtime_command(
         &deno_bin,
         plan,
+        authoritative_lock,
         execution_plan,
         &launch_spec.working_dir,
         &launch_spec.command,
@@ -87,11 +89,12 @@ pub fn execute(
 
 pub fn spawn(
     plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
 ) -> Result<Child> {
-    let deno_bin = runtime_manager::ensure_deno_binary(plan)?;
+    let deno_bin = runtime_manager::ensure_deno_binary_with_authority(plan, authoritative_lock)?;
 
     verify_execution_plan_hashes(execution_plan)?;
 
@@ -99,7 +102,7 @@ pub fn spawn(
     let Some(_) = launch_spec.required_lockfile.as_ref() else {
         return Err(AtoExecutionError::lock_incomplete(
             "source/node Tier1 execution requires a Node lockfile",
-            Some("package-lock.json|pnpm-lock.yaml|bun.lock"),
+            Some("package-lock.json|yarn.lock|pnpm-lock.yaml|bun.lock|bun.lockb"),
         )
         .into());
     };
@@ -119,6 +122,7 @@ pub fn spawn(
     } = build_runtime_command(
         &deno_bin,
         plan,
+        authoritative_lock,
         execution_plan,
         &launch_spec.working_dir,
         &launch_spec.command,
@@ -165,7 +169,7 @@ fn run_provisioning(
                 "deno cache for source/node Tier1 failed with exit code {}",
                 status.code().unwrap_or(1)
             ),
-            Some("package-lock.json"),
+            Some("package-lock.json|yarn.lock|pnpm-lock.yaml|bun.lock|bun.lockb"),
         )
         .into())
     }
@@ -175,6 +179,7 @@ fn run_provisioning(
 fn build_runtime_command(
     deno_bin: &Path,
     plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     entrypoint: &str,
@@ -183,6 +188,17 @@ fn build_runtime_command(
     use_compat_flag: bool,
     dangerously_skip_permissions: bool,
 ) -> Result<PreparedCommand> {
+    if let Some(package_bin) = entrypoint.strip_prefix("npm:") {
+        return build_host_node_package_command(
+            plan,
+            authoritative_lock,
+            runtime_dir,
+            package_bin,
+            explicit_script_args,
+            launch_ctx,
+        );
+    }
+
     let mut cmd = Command::new(deno_bin);
     cmd.current_dir(runtime_dir)
         .arg("run")
@@ -200,6 +216,9 @@ fn build_runtime_command(
     if dangerously_skip_permissions {
         cmd.arg("-A");
     } else {
+        cmd.arg("--allow-env");
+        cmd.arg("--allow-sys");
+
         if !execution_plan.runtime.policy.network.allow_hosts.is_empty() {
             cmd.arg(format!(
                 "--allow-net={}",
@@ -239,6 +258,8 @@ fn build_runtime_command(
             cmd.arg("--allow-sys");
             cmd.arg(format!("--allow-ffi={runtime_dir_allow}"));
         }
+    } else if !dangerously_skip_permissions {
+        cmd.arg(format!("--allow-ffi={runtime_dir_allow}"));
     }
 
     #[cfg(unix)]
@@ -274,6 +295,75 @@ fn build_runtime_command(
         #[cfg(unix)]
         _secret_fd_guard: secret_fd_guard,
     })
+}
+
+fn build_host_node_package_command(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    runtime_dir: &Path,
+    package_bin: &str,
+    explicit_script_args: &[String],
+    launch_ctx: &RuntimeLaunchContext,
+) -> Result<PreparedCommand> {
+    let node_bin = runtime_manager::ensure_node_binary_with_authority(plan, authoritative_lock)?;
+    let bin_path = resolve_node_package_bin(runtime_dir, package_bin)?;
+
+    let mut cmd = Command::new(node_bin);
+    cmd.current_dir(runtime_dir).arg(&bin_path);
+
+    for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
+        cmd.env(key, value);
+    }
+    if let Some(port) = runtime_overrides::override_port(plan.execution_port()) {
+        cmd.env("PORT", port.to_string());
+    }
+
+    launch_ctx.apply_allowlisted_env(&mut cmd)?;
+    if let Some(proxy_env) = proxy::proxy_env_from_env(&[])? {
+        proxy::apply_proxy_env(&mut cmd, &proxy_env);
+    }
+
+    let args = if explicit_script_args.is_empty() {
+        plan.targets_oci_cmd()
+    } else {
+        explicit_script_args.to_vec()
+    };
+    if !args.is_empty() {
+        cmd.args(args);
+    }
+
+    Ok(PreparedCommand {
+        cmd,
+        #[cfg(unix)]
+        _secret_fd_guard: None,
+    })
+}
+
+fn resolve_node_package_bin(runtime_dir: &Path, package_bin: &str) -> Result<std::path::PathBuf> {
+    let candidates = [
+        runtime_dir
+            .join("node_modules")
+            .join(".bin")
+            .join(package_bin),
+        runtime_dir
+            .join("node_modules")
+            .join(".bin")
+            .join(format!("{package_bin}.cmd")),
+    ];
+
+    candidates
+        .into_iter()
+        .find(|path| path.exists())
+        .ok_or_else(|| {
+            AtoExecutionError::lock_incomplete(
+                format!(
+                    "node package binary '{}' was not materialized under node_modules/.bin",
+                    package_bin
+                ),
+                Some("node_modules/.bin"),
+            )
+            .into()
+        })
 }
 
 fn deno_supports_compat_flag(deno_bin: &Path) -> Result<bool> {
@@ -533,6 +623,33 @@ entrypoint = "main.js"
         assert_eq!(
             spec.required_lockfile,
             Some(tmp.path().join("source").join("pnpm-lock.yaml"))
+        );
+    }
+
+    #[test]
+    fn node_lock_path_accepts_yarn_lock_in_source_dir() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        std::fs::create_dir_all(tmp.path().join("source")).expect("create source dir");
+        std::fs::write(
+            tmp.path().join("source").join("yarn.lock"),
+            "# yarn lockfile v1\n",
+        )
+        .expect("write source yarn lock");
+
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+[targets.app]
+runtime = "source"
+driver = "node"
+entrypoint = "main.js"
+"#,
+        );
+        let spec = derive_launch_spec(&plan).expect("derive launch spec");
+
+        assert_eq!(
+            spec.required_lockfile,
+            Some(tmp.path().join("source").join("yarn.lock"))
         );
     }
 

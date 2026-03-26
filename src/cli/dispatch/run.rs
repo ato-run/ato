@@ -76,6 +76,9 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use capsule_core::ato_lock::{self, AtoLock};
+    use serde_json::json;
+
     use super::{LocalRunManifestPreparationOutcome, ResolvedRunTarget, RunPhaseBoundary};
     use crate::install::support::LocalRunManifestStatus;
     use std::sync::Arc;
@@ -136,6 +139,11 @@ mod tests {
     #[test]
     fn missing_manifest_is_generated_with_yes() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"demo","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("package.json");
         let resolved = ResolvedRunTarget {
             path: tmp.path().to_path_buf(),
             agent_local_root: Some(tmp.path().to_path_buf()),
@@ -146,17 +154,39 @@ mod tests {
             crate::install::support::ensure_local_manifest_ready_for_run(&resolved, true, reporter)
                 .expect("run");
         assert_eq!(outcome, LocalRunManifestPreparationOutcome::Ready);
-        assert!(tmp.path().join("capsule.toml").exists());
+        assert!(!tmp.path().join("capsule.toml").exists());
         assert!(!tmp.path().join("ato.lock.json").exists());
     }
 
     #[test]
-    fn invalid_manifest_is_regenerated_with_yes() {
+    fn canonical_lock_input_skips_legacy_manifest_generation() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let manifest_path = tmp.path().join("capsule.toml");
-        std::fs::write(&manifest_path, "not = [valid").expect("manifest");
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "node", "cmd": ["index.js"]}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([{"name": "main", "process": {"entrypoint": "node", "cmd": ["index.js"]}}]),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "node", "version": "20.11.0"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([
+                {"label": "default", "runtime": "source", "driver": "node", "entrypoint": "node", "cmd": ["index.js"], "compatible": true}
+            ]),
+        );
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"kind": "metadata_only", "observed_lockfiles": []}),
+        );
+        ato_lock::write_pretty_to_path(&lock, &tmp.path().join("ato.lock.json")).expect("lock");
         let resolved = ResolvedRunTarget {
-            path: tmp.path().to_path_buf(),
+            path: tmp.path().join("ato.lock.json"),
             agent_local_root: Some(tmp.path().to_path_buf()),
         };
         let reporter = Arc::new(crate::reporters::CliReporter::new(true));
@@ -165,13 +195,6 @@ mod tests {
             crate::install::support::ensure_local_manifest_ready_for_run(&resolved, true, reporter)
                 .expect("run");
         assert_eq!(outcome, LocalRunManifestPreparationOutcome::Ready);
-        assert!(manifest_path.exists());
-        assert!(!tmp.path().join("ato.lock.json").exists());
-
-        let backups: Vec<_> = std::fs::read_dir(tmp.path().join(".tmp/ato/run-invalid-manifests"))
-            .expect("read dir")
-            .filter_map(Result::ok)
-            .collect();
-        assert_eq!(backups.len(), 1);
+        assert!(!tmp.path().join("capsule.toml").exists());
     }
 }
