@@ -5,6 +5,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::input_resolver::{
+    resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ATO_LOCK_FILE_NAME,
+};
+use capsule_core::smoke::SmokeFailureClass;
 use capsule_core::CapsuleReporter;
 use tracing::debug;
 
@@ -16,7 +20,9 @@ use crate::preview;
 use crate::progressive_ui;
 use crate::reporters;
 use crate::tui;
-use crate::{CompatibilityFallbackBackend, EnforcementMode, DEFAULT_RUN_REGISTRY_URL};
+use crate::{
+    CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, DEFAULT_RUN_REGISTRY_URL,
+};
 
 pub(crate) async fn resolve_installed_capsule_archive(
     scoped_ref: &install::ScopedCapsuleRef,
@@ -262,11 +268,13 @@ pub(crate) fn github_build_error_requires_manual_intervention(error: &anyhow::Er
     combined.contains("uv.lock is missing")
         || combined.contains("uv.lock is required")
         || combined.contains("requires uv.lock")
+        || combined.contains("yarn.lock")
         || combined.contains("pnpm-lock.yaml is missing")
         || combined.contains("package-lock.json")
         || combined.contains("requires one of package-lock.json")
         || combined.contains("multiple node lockfiles detected")
         || combined.contains("fail-closed provisioning")
+        || combined.contains("yarn install --frozen-lockfile")
         || combined.contains("bun install --frozen-lockfile")
         || combined.contains("lockfile had changes, but lockfile is frozen")
         || combined.contains("lockfile is frozen")
@@ -327,6 +335,8 @@ pub(crate) fn build_github_manual_intervention_error(
 
     let lockfile_target = if lowered.contains("uv.lock") {
         Some("uv.lock")
+    } else if lowered.contains("yarn.lock") {
+        Some("yarn.lock")
     } else if lowered.contains("pnpm-lock.yaml") {
         Some("pnpm-lock.yaml")
     } else if lowered.contains("package-lock.json") {
@@ -737,6 +747,7 @@ pub(crate) async fn resolve_run_target_or_install(
     path: PathBuf,
     yes: bool,
     keep_failed_artifacts: bool,
+    auto_fix_mode: Option<GitHubAutoFixMode>,
     allow_unverified: bool,
     registry: Option<&str>,
     reporter: Arc<reporters::CliReporter>,
@@ -791,6 +802,7 @@ pub(crate) async fn resolve_run_target_or_install(
                     std::io::stderr().is_terminal(),
                 ),
             keep_failed_artifacts,
+            auto_fix_mode,
         )
         .await?;
         return Ok(ResolvedRunTarget {
@@ -959,6 +971,10 @@ pub(crate) fn agent_local_root_for_path(path: &Path) -> Option<PathBuf> {
         return path.parent().map(PathBuf::from);
     }
 
+    if path.file_name().and_then(|name| name.to_str()) == Some(ATO_LOCK_FILE_NAME) {
+        return path.parent().map(PathBuf::from);
+    }
+
     None
 }
 
@@ -971,11 +987,28 @@ pub(crate) fn ensure_local_manifest_ready_for_run(
         return Ok(LocalRunManifestPreparationOutcome::Ready);
     };
 
-    let manifest_path = if resolved.path.is_file() {
-        resolved.path.clone()
-    } else {
-        local_root.join("capsule.toml")
-    };
+    match resolve_authoritative_input(local_root, ResolveInputOptions::default()) {
+        Ok(ResolvedInput::CanonicalLock { .. }) => {
+            return Ok(LocalRunManifestPreparationOutcome::Ready);
+        }
+        Ok(ResolvedInput::CompatibilityProject { .. }) => {
+            return Ok(LocalRunManifestPreparationOutcome::Ready);
+        }
+        Ok(ResolvedInput::SourceOnly { .. }) => {
+            return Ok(LocalRunManifestPreparationOutcome::Ready);
+        }
+        Err(error)
+            if error
+                .to_string()
+                .contains("is not an authoritative command-entry input") =>
+        {
+            return Err(error.into());
+        }
+        Err(_) => {}
+    }
+
+    let manifest_path = local_root.join("capsule.toml");
+
     let status = inspect_local_run_manifest(&manifest_path)?;
     if matches!(status, LocalRunManifestStatus::Valid) {
         return Ok(LocalRunManifestPreparationOutcome::Ready);
@@ -1073,11 +1106,8 @@ pub(crate) fn ensure_local_manifest_ready_for_run(
                     reporter.notify("Attempting regeneration with inferred defaults.".to_string()),
                 )?;
             }
-            crate::project::init::execute_manifest_init(
-                crate::project::init::InitArgs {
-                    path: Some(local_root.clone()),
-                    yes: true,
-                },
+            crate::project::init::write_legacy_detected_manifest(
+                Some(local_root.clone()),
                 reporter,
             )?;
             Ok(LocalRunManifestPreparationOutcome::Ready)
@@ -1183,8 +1213,10 @@ pub(crate) async fn install_github_repository(
     json: bool,
     can_prompt: bool,
     keep_failed_artifacts: bool,
+    auto_fix_mode: Option<GitHubAutoFixMode>,
 ) -> Result<install::InstallResult> {
     const MAX_GITHUB_DRAFT_RETRIES: u8 = 3;
+    ensure_supported_github_auto_fix_mode(auto_fix_mode)?;
     let invocation_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let use_progressive_ui = !json && crate::progressive_ui::can_use_progressive_ui(false);
 
@@ -1222,17 +1254,18 @@ pub(crate) async fn install_github_repository(
         }
     }
     let mut checkout = preview_preparation.checkout;
-    let install_draft = preview_preparation.install_draft;
+    let mut install_draft = preview_preparation.install_draft;
     let mut preview_session = preview_preparation.preview_session;
+    if let Some(draft) = install_draft.as_mut() {
+        apply_github_auto_fix_to_draft(draft, &checkout.checkout_dir, auto_fix_mode, false, json)?;
+        preview_session.update_from_install_draft(draft);
+    }
     if install_draft.is_some() {
         if let Err(error) = show_github_draft_preview(&preview_session, json) {
             maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
             return Err(error);
         }
     }
-    let injected_manifest = install_draft
-        .as_ref()
-        .and_then(|draft| draft.preview_toml.clone());
     let inference_attempt = if let Some(draft) = install_draft.as_ref() {
         crate::inference_feedback::submit_attempt(repository, draft)
             .await
@@ -1368,7 +1401,9 @@ pub(crate) async fn install_github_repository(
     let build_result = match build_github_repository_checkout(
         checkout.checkout_dir.clone(),
         json,
-        injected_manifest.clone(),
+        latest_install_draft
+            .as_ref()
+            .and_then(|draft| draft.preview_toml.clone()),
         keep_failed_artifacts,
         true,
     )
@@ -1432,8 +1467,58 @@ pub(crate) async fn install_github_repository(
                 }
 
                 let mut recovered_build = None;
-                let mut current_draft = draft.clone();
+                if should_retry_github_auto_fix_port(auto_fix_mode, report) {
+                    let mut port_retry_draft = latest_install_draft
+                        .clone()
+                        .unwrap_or_else(|| draft.clone());
+                    apply_github_auto_fix_to_draft(
+                        &mut port_retry_draft,
+                        &checkout.checkout_dir,
+                        auto_fix_mode,
+                        true,
+                        json,
+                    )?;
+                    latest_install_draft = Some(port_retry_draft.clone());
+                    preview_session.update_from_install_draft(&port_retry_draft);
+                    if let Some(warning) =
+                        crate::preview::persist_session_with_warning(&preview_session)
+                    {
+                        if !json {
+                            eprintln!("⚠️  {warning}");
+                        }
+                    }
+
+                    if !json {
+                        eprintln!("🔁 Retrying build with reassigned Ato web port...");
+                    }
+
+                    recovered_build = match build_github_repository_checkout(
+                        checkout.checkout_dir.clone(),
+                        json,
+                        port_retry_draft.preview_toml.clone(),
+                        keep_failed_artifacts,
+                        true,
+                    )
+                    .await
+                    {
+                        Ok(result) => Some(result),
+                        Err(retry_error) => {
+                            last_error = retry_error;
+                            None
+                        }
+                    };
+                }
+
+                let mut current_draft = latest_install_draft
+                    .clone()
+                    .unwrap_or_else(|| draft.clone());
                 let mut current_report = report.clone();
+                if let Some(retry_report) = last_error
+                    .downcast_ref::<crate::commands::build::InferredManifestSmokeFailure>()
+                    .map(|failure| failure.report.clone())
+                {
+                    current_report = retry_report;
+                }
                 for retry_ordinal in 1..=MAX_GITHUB_DRAFT_RETRIES {
                     let previous_toml = current_draft.preview_toml.clone().unwrap_or_default();
                     if previous_toml.trim().is_empty() {
@@ -1461,6 +1546,14 @@ pub(crate) async fn install_github_repository(
                     };
                     let next_draft =
                         next_draft.normalize_preview_toml_for_checkout(&checkout.checkout_dir)?;
+                    let mut next_draft = next_draft;
+                    apply_github_auto_fix_to_draft(
+                        &mut next_draft,
+                        &checkout.checkout_dir,
+                        auto_fix_mode,
+                        false,
+                        json,
+                    )?;
                     let next_toml = next_draft.preview_toml.clone().unwrap_or_default();
                     let draft_changed = next_toml.trim() != previous_toml.trim();
                     latest_install_draft = Some(next_draft.clone());
@@ -1690,6 +1783,7 @@ pub(crate) fn execute_run_command(
     agent_mode: crate::RunAgentMode,
     agent_local_root: Option<PathBuf>,
     keep_failed_artifacts: bool,
+    auto_fix_mode: Option<GitHubAutoFixMode>,
     allow_unverified: bool,
     state: Vec<String>,
     inject: Vec<String>,
@@ -1713,10 +1807,68 @@ pub(crate) fn execute_run_command(
         agent_mode,
         agent_local_root,
         keep_failed_artifacts,
+        auto_fix_mode,
         allow_unverified,
         state_bindings: state,
         inject_bindings: inject,
         reporter,
         preview_mode: false,
     }))
+}
+
+fn apply_github_auto_fix_to_draft(
+    draft: &mut install::GitHubInstallDraftResponse,
+    _checkout_dir: &Path,
+    auto_fix_mode: Option<GitHubAutoFixMode>,
+    force_port_reassignment: bool,
+    json: bool,
+) -> Result<()> {
+    if !auto_fix_mode
+        .map(GitHubAutoFixMode::fixes_generated_toml)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    let Some(preview_toml) = draft.preview_toml.as_deref() else {
+        return Ok(());
+    };
+
+    let fixed = if force_port_reassignment {
+        super::github_inference::reassign_github_install_preview_toml_port(preview_toml)?
+    } else {
+        super::github_inference::auto_fix_github_install_preview_toml(preview_toml)?
+    };
+
+    if fixed.trim() != preview_toml.trim() {
+        if !json {
+            if force_port_reassignment {
+                eprintln!("ℹ️  Reassigned generated GitHub draft to an available Ato web port.");
+            } else {
+                eprintln!("ℹ️  Auto-fixed generated GitHub draft TOML before build/install.");
+            }
+        }
+        draft.preview_toml = Some(fixed);
+    }
+
+    Ok(())
+}
+
+fn should_retry_github_auto_fix_port(
+    auto_fix_mode: Option<GitHubAutoFixMode>,
+    report: &capsule_core::smoke::SmokeFailureReport,
+) -> bool {
+    auto_fix_mode
+        .map(GitHubAutoFixMode::fixes_generated_toml)
+        .unwrap_or(false)
+        && matches!(report.class, SmokeFailureClass::RequiredPortUnavailable)
+}
+
+fn ensure_supported_github_auto_fix_mode(auto_fix_mode: Option<GitHubAutoFixMode>) -> Result<()> {
+    if matches!(auto_fix_mode, Some(GitHubAutoFixMode::Src)) {
+        anyhow::bail!(
+            "--auto-fix:src is not implemented yet. Use --auto-fix:toml or --auto-fix:all."
+        );
+    }
+    Ok(())
 }

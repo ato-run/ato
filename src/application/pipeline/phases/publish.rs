@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -8,6 +7,9 @@ use serde::Serialize;
 use crate::application::pipeline::producer::PublishDryRunStageResult;
 use crate::application::ports::publish::{
     DestinationSpec, PublishableArtifact, PublishedLocation, SharedDestinationPort,
+};
+use crate::application::producer_input::{
+    resolve_producer_authoritative_input, ProducerAuthoritativeInput,
 };
 
 use crate::publish_artifact::ArtifactManifestInfo;
@@ -39,12 +41,18 @@ struct PreparedPrivatePublishArtifact {
     artifact_path: PathBuf,
     scoped_id: String,
     version: String,
+    lock_id: Option<String>,
+    closure_digest: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 enum ResolvedPrivatePublishInput {
     Build {
+        authoritative_input: ProducerAuthoritativeInput,
         manifest_path: PathBuf,
+        lock_id: Option<String>,
+        closure_digest: Option<String>,
         name: String,
         version: String,
         scoped_id: String,
@@ -64,6 +72,8 @@ pub struct PrivatePublishRequest {
     pub force_large_payload: bool,
     pub scoped_id: Option<String>,
     pub allow_existing: bool,
+    pub lock_id: Option<String>,
+    pub closure_digest: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -152,6 +162,8 @@ pub async fn run_private_publish_phase_async(
             content_hash: crate::artifact_hash::compute_blake3_label(&artifact_bytes),
             allow_existing: request.allow_existing,
             force_large_payload: request.force_large_payload,
+            lock_id: prepared.lock_id,
+            closure_digest: prepared.closure_digest,
         },
         artifact_bytes,
     )
@@ -163,19 +175,28 @@ fn prepare_private_publish_artifact(
 ) -> Result<PreparedPrivatePublishArtifact> {
     match resolve_private_publish_input(request)? {
         ResolvedPrivatePublishInput::Build {
+            authoritative_input,
             manifest_path,
             name,
             version,
             scoped_id,
+            lock_id,
+            closure_digest,
         } => {
-            let artifact_path =
-                crate::publish_ci::build_capsule_artifact(&manifest_path, &name, &version)
-                    .with_context(|| "Failed to build artifact for private registry publish")?;
+            let artifact_path = crate::publish_ci::build_capsule_artifact(
+                &manifest_path,
+                &name,
+                &version,
+                Some(&authoritative_input),
+            )
+            .with_context(|| "Failed to build artifact for private registry publish")?;
 
             Ok(PreparedPrivatePublishArtifact {
                 artifact_path,
                 scoped_id,
                 version,
+                lock_id,
+                closure_digest,
             })
         }
         ResolvedPrivatePublishInput::Artifact {
@@ -186,6 +207,8 @@ fn prepare_private_publish_artifact(
             artifact_path,
             scoped_id,
             version,
+            lock_id: request.lock_id.clone(),
+            closure_digest: request.closure_digest.clone(),
         }),
     }
 }
@@ -211,11 +234,16 @@ fn resolve_private_publish_input(
     }
 
     let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
-    let manifest_path = cwd.join("capsule.toml");
-    let manifest_raw = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
-    let manifest = capsule_core::types::CapsuleManifest::from_toml(&manifest_raw)
-        .map_err(|err| anyhow::anyhow!("Failed to parse capsule.toml: {}", err))?;
+    let resolved = resolve_producer_authoritative_input(
+        &cwd,
+        Arc::new(crate::reporters::CliReporter::new(false)),
+        false,
+    )?;
+    let manifest_path = resolved.manifest_path.clone();
+    let manifest_raw = resolved.manifest_raw.clone();
+    let manifest = resolved.manifest.clone();
+    let lock_id = resolved.lock_id.clone();
+    let closure_digest = resolved.closure_digest.clone();
 
     let slug = manifest_slug(&manifest.name)?;
     let publisher = resolve_private_publisher(request.publisher_hint.as_deref(), &manifest_raw);
@@ -223,7 +251,10 @@ fn resolve_private_publish_input(
     let version = resolve_manifest_publish_version(&manifest.version);
 
     Ok(ResolvedPrivatePublishInput::Build {
+        authoritative_input: resolved,
         manifest_path,
+        lock_id,
+        closure_digest,
         name: manifest.name,
         version,
         scoped_id,
@@ -366,6 +397,8 @@ pub struct DirectPublishRequest {
     pub content_hash: String,
     pub allow_existing: bool,
     pub force_large_payload: bool,
+    pub lock_id: Option<String>,
+    pub closure_digest: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -401,6 +434,8 @@ async fn run_direct_publish_phase_async(
                 version: request.version.clone(),
                 normalized_file_name: request.normalized_file_name.clone(),
                 content_hash: request.content_hash.clone(),
+                lock_id: request.lock_id.clone(),
+                closure_digest: request.closure_digest.clone(),
             },
             destination: DestinationSpec::RemoteRegistry {
                 registry_url: request.registry_url.clone(),
@@ -712,6 +747,8 @@ entrypoint = "main.ts"
                 version: "0.1.0".to_string(),
                 normalized_file_name: "demo-0.1.0.capsule".to_string(),
                 content_hash: "blake3:demo".to_string(),
+                lock_id: None,
+                closure_digest: None,
             },
             destination: DestinationSpec::RemoteRegistry {
                 registry_url: "https://example.invalid".to_string(),
@@ -746,6 +783,8 @@ entrypoint = "main.ts"
             force_large_payload: false,
             scoped_id: None,
             allow_existing: true,
+            lock_id: None,
+            closure_digest: None,
         })
         .expect("summarize");
 
@@ -768,6 +807,8 @@ entrypoint = "main.ts"
             force_large_payload: false,
             scoped_id: Some("team-x/demo-app".to_string()),
             allow_existing: false,
+            lock_id: None,
+            closure_digest: None,
         })
         .expect("summarize");
 
@@ -792,6 +833,8 @@ entrypoint = "main.ts"
             force_large_payload: false,
             scoped_id: None,
             allow_existing: false,
+            lock_id: None,
+            closure_digest: None,
         })
         .expect("summarize");
 
@@ -811,6 +854,8 @@ entrypoint = "main.ts"
             force_large_payload: false,
             scoped_id: Some("other-team/demo-app".to_string()),
             allow_existing: false,
+            lock_id: None,
+            closure_digest: None,
         })
         .expect_err("must reject mismatched publisher hint");
 
@@ -825,15 +870,16 @@ entrypoint = "main.ts"
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.3"
+schema_version = "0.2"
 name = "demo-app"
 type = "app"
-default_target = "cli"
+default_target = "web"
 
-[targets.cli]
+[targets.web]
 runtime = "source"
 driver = "deno"
-run = "deno main.ts"
+runtime_version = "2.1.3"
+entrypoint = "main.ts"
 "#,
         )
         .expect("write manifest");
@@ -846,6 +892,8 @@ run = "deno main.ts"
             force_large_payload: false,
             scoped_id: None,
             allow_existing: false,
+            lock_id: None,
+            closure_digest: None,
         })
         .expect("summarize");
 

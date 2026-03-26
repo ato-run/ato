@@ -5,6 +5,7 @@ use anyhow::Result;
 
 use crate::install;
 use crate::install::support::can_prompt_interactively;
+use crate::GitHubAutoFixMode;
 
 pub(crate) struct InstallCommandArgs {
     pub(crate) slug: Option<String>,
@@ -20,6 +21,7 @@ pub(crate) struct InstallCommandArgs {
     pub(crate) no_project: bool,
     pub(crate) json: bool,
     pub(crate) keep_failed_artifacts: bool,
+    pub(crate) auto_fix_mode: Option<GitHubAutoFixMode>,
 }
 
 pub(crate) fn execute_install_command(args: InstallCommandArgs) -> Result<()> {
@@ -53,6 +55,7 @@ pub(crate) fn execute_install_command(args: InstallCommandArgs) -> Result<()> {
             args.json,
             can_prompt,
             args.keep_failed_artifacts,
+            args.auto_fix_mode,
         ))?;
         render_install_result(&result, args.json, args.no_project)?;
         return Ok(());

@@ -8,6 +8,8 @@ use ed25519_dalek::Signer;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
+use crate::application::producer_input::resolve_producer_authoritative_input;
+
 use crate::artifact_hash::{compute_blake3_label, compute_sha256_hex};
 
 const DEFAULT_STORE_API_URL: &str = "https://api.ato.run";
@@ -94,11 +96,10 @@ pub async fn execute(
     let oidc_token = acquire_oidc_token().await?;
 
     let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
-    let manifest_path = cwd.join("capsule.toml");
-    let manifest_raw = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
-    let manifest = capsule_core::types::CapsuleManifest::from_toml(&manifest_raw)
-        .map_err(|err| anyhow::anyhow!("Failed to parse capsule.toml: {}", err))?;
+    let authoritative_input = resolve_producer_authoritative_input(&cwd, reporter.clone(), false)?;
+    let manifest_path = authoritative_input.manifest_path.clone();
+    let manifest_raw = authoritative_input.manifest_raw.clone();
+    let manifest = authoritative_input.manifest.clone();
 
     let tag = github.r#ref.strip_prefix("refs/tags/").unwrap_or_default();
     let resolved_version = normalize_tag_version(tag)?;
@@ -129,7 +130,12 @@ pub async fn execute(
             )
             .await?;
     }
-    let artifact_path = build_capsule_artifact(&manifest_path, &manifest.name, &resolved_version);
+    let artifact_path = build_capsule_artifact(
+        &manifest_path,
+        &manifest.name,
+        &resolved_version,
+        Some(&authoritative_input),
+    );
     if !args.json_output {
         reporter.progress_finish(None).await?;
     }
@@ -366,7 +372,12 @@ pub(crate) fn build_capsule_artifact(
     manifest_path: &Path,
     name: &str,
     version: &str,
+    authoritative_input: Option<&crate::application::producer_input::ProducerAuthoritativeInput>,
 ) -> Result<PathBuf> {
+    if let Some(authoritative_input) = authoritative_input {
+        authoritative_input.validate_bridge_manifest()?;
+    }
+
     let manifest_dir = manifest_path.parent().ok_or_else(|| {
         anyhow::anyhow!("Manifest path has no parent: {}", manifest_path.display())
     })?;

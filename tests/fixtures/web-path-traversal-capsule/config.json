@@ -1,0 +1,23 @@
+{
+  "metadata": {
+    "generated_by": "ato-cli v0.5.4",
+    "name": "web-path-traversal-capsule",
+    "source_manifest": "sha256:c7371e2f6d55c6d35f7510cd869471e20992466b36fb5ffad82b4ecb2a1ab50e",
+    "version": "0.1.0"
+  },
+  "sandbox": {
+    "enabled": true,
+    "network": {
+      "enabled": true,
+      "enforcement": "strict"
+    }
+  },
+  "services": {
+    "main": {
+      "args": [],
+      "cwd": "source",
+      "executable": "../secret"
+    }
+  },
+  "version": "1.0.0"
+}

@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use tracing::debug;
 use walkdir::WalkDir;
 
+use crate::application::producer_input::resolve_producer_authoritative_input;
 use crate::build::native_delivery;
 use crate::project::init;
 use crate::reporters;
@@ -108,7 +109,18 @@ pub fn execute_pack_command_with_injected_manifest(
         anyhow::bail!("Target is not a directory: {}", dir.display());
     }
 
-    let manifest = dir.join("capsule.toml");
+    let mut manifest = dir.join("capsule.toml");
+    let authoritative_input = if injected_manifest.is_none() {
+        let resolved = resolve_producer_authoritative_input(&dir, reporter.clone(), false)?;
+        for advisory in &resolved.advisories {
+            futures::executor::block_on(reporter.warn(advisory.clone()))?;
+        }
+        manifest = resolved.manifest_path.clone();
+        Some(resolved)
+    } else {
+        None
+    };
+
     let mut temporary_manifest: Option<TemporaryManifestGuard> = None;
     if !manifest.exists() {
         let stdin_is_tty = std::io::stdin().is_terminal();
@@ -119,13 +131,7 @@ pub fn execute_pack_command_with_injected_manifest(
             if cli_json {
                 anyhow::bail!("--init cannot be used with --json output");
             }
-            init::execute_manifest_init(
-                init::InitArgs {
-                    path: Some(dir.clone()),
-                    yes: false,
-                },
-                reporter.clone(),
-            )?;
+            init::write_legacy_detected_manifest(Some(dir.clone()), reporter.clone())?;
         } else if let Some(manifest_text) = injected_manifest {
             if !suppress_injected_manifest_warning
                 && crate::progressive_ui::can_use_progressive_ui(cli_json)
@@ -147,7 +153,7 @@ pub fn execute_pack_command_with_injected_manifest(
             ));
         } else {
             futures::executor::block_on(reporter.warn(
-                "No `capsule.toml` found. Using defaults. Run `ato init` to generate an agent prompt, or `ato build --init` to create `capsule.toml` interactively.".to_string(),
+                "No `capsule.toml` found. Using defaults. Run `ato init` to materialize `ato.lock.json`, `ato init --legacy prompt` for the old prompt flow, or `ato build --init` to create an inferred `capsule.toml`.".to_string(),
             ))?;
             let inferred = infer_zero_config_manifest(&dir)?;
             std::fs::write(&manifest, inferred).with_context(|| {
@@ -165,6 +171,10 @@ pub fn execute_pack_command_with_injected_manifest(
     }
 
     let _temporary_manifest_guard = temporary_manifest;
+    if let Some(authoritative_input) = authoritative_input.as_ref() {
+        authoritative_input.validate_bridge_manifest()?;
+    }
+    let _authoritative_input_guard = authoritative_input;
     let validation_mode = if injected_manifest.is_some() {
         ValidationMode::Preview
     } else {
@@ -804,6 +814,7 @@ fn plan_v03_build_provision_command(
 
     if matches!(driver.as_str(), "node") {
         let package_lock = execution_working_directory.join("package-lock.json");
+        let yarn_lock = execution_working_directory.join("yarn.lock");
         let pnpm_lock = execution_working_directory.join("pnpm-lock.yaml");
         let bun_lock = execution_working_directory.join("bun.lock");
         let bun_lockb = execution_working_directory.join("bun.lockb");
@@ -813,6 +824,7 @@ fn plan_v03_build_provision_command(
                 package_lock.clone(),
                 package_lock.exists(),
             ),
+            ("yarn.lock", yarn_lock.clone(), yarn_lock.exists()),
             ("pnpm-lock.yaml", pnpm_lock.clone(), pnpm_lock.exists()),
             ("bun.lock", bun_lock.clone(), bun_lock.exists()),
             ("bun.lockb", bun_lockb.clone(), bun_lockb.exists()),
@@ -830,6 +842,9 @@ fn plan_v03_build_provision_command(
         if package_lock.exists() {
             matches.push("npm ci");
         }
+        if yarn_lock.exists() {
+            matches.push("yarn install --frozen-lockfile");
+        }
         if pnpm_lock.exists() {
             matches.push("pnpm install --frozen-lockfile");
         }
@@ -838,13 +853,13 @@ fn plan_v03_build_provision_command(
         }
         return match matches.as_slice() {
             [] => Err(AtoExecutionError::lock_incomplete(
-                "source/node target requires one of package-lock.json, pnpm-lock.yaml, bun.lock, or bun.lockb",
+                "source/node target requires one of package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lock, or bun.lockb",
                 Some("package-lock.json"),
             )
             .into()),
             [command] => Ok(Some((*command).to_string())),
             _ => Err(AtoExecutionError::lock_incomplete(
-                "multiple node lockfiles detected; keep only one of package-lock.json, pnpm-lock.yaml, bun.lock, or bun.lockb",
+                "multiple node lockfiles detected; keep only one of package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lock, or bun.lockb",
                 Some("package-lock.json"),
             )
             .into()),
@@ -1279,7 +1294,10 @@ fn sign_if_requested(
 
 #[cfg(test)]
 mod tests {
-    use super::{plan_v03_build_provision_command, run_v03_build_lifecycle_steps};
+    use super::{
+        execute_pack_command_with_injected_manifest, plan_v03_build_provision_command,
+        run_v03_build_lifecycle_steps,
+    };
     use capsule_core::router::{ExecutionProfile, ManifestData};
     use std::ffi::OsString;
     use std::path::PathBuf;
@@ -1331,6 +1349,26 @@ mod tests {
 
         let command = plan_v03_build_provision_command(&plan).expect("plan provision");
         assert_eq!(command.as_deref(), Some("pnpm install --frozen-lockfile"));
+    }
+
+    #[test]
+    fn v03_build_provision_supports_yarn_lockfile() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("yarn.lock"), "# yarn lockfile v1\n")
+            .expect("write yarn lock");
+
+        let plan = manifest_with_schema_and_target(
+            "0.3",
+            tmp.path().to_path_buf(),
+            vec![
+                ("runtime", toml::Value::String("source".to_string())),
+                ("driver", toml::Value::String("node".to_string())),
+                ("run_command", toml::Value::String("yarn build".to_string())),
+            ],
+        );
+
+        let command = plan_v03_build_provision_command(&plan).expect("plan provision");
+        assert_eq!(command.as_deref(), Some("yarn install --frozen-lockfile"));
     }
 
     #[test]
@@ -1395,6 +1433,44 @@ mod tests {
             "cached"
         );
         std::env::remove_var("ATO_BUILD_CACHE_TEST_ENV");
+    }
+
+    #[test]
+    fn injected_v03_web_static_manifest_builds_from_root_index_html() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("index.html"), "<h1>hello</h1>").expect("write index.html");
+        let reporter = std::sync::Arc::new(crate::reporters::CliReporter::new(true));
+        let manifest = r#"
+schema_version = "0.3"
+name = "hello-capsule"
+version = "0.1.0"
+type = "app"
+runtime = "web/static"
+run = "index.html"
+port = 18080
+"#;
+
+        let result = execute_pack_command_with_injected_manifest(
+            tmp.path().to_path_buf(),
+            false,
+            None,
+            false,
+            false,
+            true,
+            false,
+            "strict".to_string(),
+            reporter,
+            false,
+            true,
+            None,
+            Some(manifest),
+            true,
+        )
+        .expect("build inferred web/static manifest");
+
+        assert!(result.ok);
+        assert_eq!(result.build_strategy, "web");
+        assert!(result.artifact.as_ref().is_some_and(|path| path.exists()));
     }
 
     fn manifest_with_schema_and_target(

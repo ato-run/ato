@@ -66,12 +66,33 @@ pub fn evaluate_for_mode(
     dangerously_skip_permissions: bool,
     mode: RuntimeGuardMode,
 ) -> Result<RuntimeGuardResult, AtoExecutionError> {
+    evaluate_for_mode_with_authority(
+        plan,
+        manifest_dir,
+        enforcement,
+        sandbox_mode,
+        dangerously_skip_permissions,
+        mode,
+        false,
+    )
+}
+
+pub fn evaluate_for_mode_with_authority(
+    plan: &ExecutionPlan,
+    manifest_dir: &Path,
+    enforcement: &str,
+    sandbox_mode: bool,
+    dangerously_skip_permissions: bool,
+    mode: RuntimeGuardMode,
+    has_authoritative_lock: bool,
+) -> Result<RuntimeGuardResult, AtoExecutionError> {
     let runtime = plan.target.runtime;
     let driver = plan.target.driver;
 
     let tier = derive_tier(runtime, driver)?;
     if requires_capsule_lock(runtime, driver)
         && matches!(tier, ExecutionTier::Tier1)
+        && !has_authoritative_lock
         && !resolve_capsule_lock_path(manifest_dir).exists()
         && !matches!(mode, RuntimeGuardMode::Preview)
     {
@@ -98,7 +119,7 @@ pub fn evaluate_for_mode(
                 && !matches!(mode, RuntimeGuardMode::Preview)
             {
                 return Err(AtoExecutionError::lock_incomplete(
-                    "package-lock.json, pnpm-lock.yaml, bun.lock, or bun.lockb is required for source/node Tier1 execution",
+                    "package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lock, or bun.lockb is required for source/node Tier1 execution",
                     Some("package-lock.json"),
                 ));
             }
@@ -235,6 +256,14 @@ fn resolve_pnpm_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.exists())
 }
 
+fn resolve_yarn_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
+    let candidates = [
+        manifest_dir.join("yarn.lock"),
+        manifest_dir.join("source").join("yarn.lock"),
+    ];
+    candidates.into_iter().find(|path| path.exists())
+}
+
 fn resolve_bun_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
     let candidates = [
         manifest_dir.join("bun.lock"),
@@ -251,6 +280,7 @@ fn resolve_deno_dependency_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
 
 fn resolve_node_dependency_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
     resolve_package_lock_path(manifest_dir)
+        .or_else(|| resolve_yarn_lock_path(manifest_dir))
         .or_else(|| resolve_pnpm_lock_path(manifest_dir))
         .or_else(|| resolve_bun_lock_path(manifest_dir))
 }
@@ -385,6 +415,28 @@ mod tests {
     }
 
     #[test]
+    fn node_accepts_yarn_lock_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("capsule.lock"), "").expect("write capsule.lock");
+        std::fs::write(
+            tmp.path().join("source").join("yarn.lock"),
+            "# yarn lockfile v1\n",
+        )
+        .unwrap_or_else(|_| {
+            std::fs::create_dir_all(tmp.path().join("source")).expect("create source");
+            std::fs::write(
+                tmp.path().join("source").join("yarn.lock"),
+                "# yarn lockfile v1\n",
+            )
+            .expect("write yarn lock in source");
+        });
+
+        let plan = sample_plan(ExecutionRuntime::Source, ExecutionDriver::Node);
+        let result = evaluate(&plan, tmp.path(), "strict", false, false).expect("guard pass");
+        assert_eq!(result.required_lock, Some(RequiredLock::NodeDependencyLock));
+    }
+
+    #[test]
     fn tier1_requires_capsule_lock() {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(tmp.path().join("package-lock.json"), "{}").expect("write package-lock");
@@ -393,6 +445,27 @@ mod tests {
         let err = evaluate(&plan, tmp.path(), "strict", false, false).expect_err("must reject");
         assert_eq!(err.code, "ATO_ERR_PROVISIONING_LOCK_INCOMPLETE");
         assert!(err.message.contains("capsule.lock"));
+    }
+
+    #[test]
+    fn authoritative_lock_bypasses_capsule_lock_requirement() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("package-lock.json"), "{}").expect("write package-lock");
+
+        let plan = sample_plan(ExecutionRuntime::Source, ExecutionDriver::Node);
+        let result = evaluate_for_mode_with_authority(
+            &plan,
+            tmp.path(),
+            "strict",
+            false,
+            false,
+            RuntimeGuardMode::Strict,
+            true,
+        )
+        .expect("guard pass");
+
+        assert_eq!(result.required_lock, Some(RequiredLock::NodeDependencyLock));
+        assert_eq!(result.executor_kind, ExecutorKind::NodeCompat);
     }
 
     #[test]
