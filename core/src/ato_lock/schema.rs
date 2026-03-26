@@ -158,6 +158,7 @@ pub enum KnownFeature {
     EnforcedNetwork,
 }
 
+#[allow(clippy::should_implement_trait)]
 impl KnownFeature {
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
@@ -239,8 +240,9 @@ pub struct UnresolvedValue {
     pub candidates: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum UnresolvedReason {
+    #[default]
     InsufficientEvidence,
     Ambiguity,
     DeferredHostLocalBinding,
@@ -249,6 +251,7 @@ pub enum UnresolvedReason {
     Unknown(String),
 }
 
+#[allow(clippy::should_implement_trait)]
 impl UnresolvedReason {
     pub fn from_str(value: &str) -> Self {
         match value {
@@ -274,12 +277,6 @@ impl UnresolvedReason {
 
     pub fn is_known(&self) -> bool {
         !matches!(self, Self::Unknown(_))
-    }
-}
-
-impl Default for UnresolvedReason {
-    fn default() -> Self {
-        Self::InsufficientEvidence
     }
 }
 

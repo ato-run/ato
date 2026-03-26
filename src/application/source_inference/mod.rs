@@ -488,13 +488,13 @@ fn infer_from_draft_lock(input: DraftLockInput) -> Result<SourceInferenceResult>
     promote_draft_execution_resolution(&mut lock, &input.project_root, &mut provenance);
 
     let mut infer_unresolved = Vec::new();
-    if lock.contract.entries.get("process").is_none() {
+    if !lock.contract.entries.contains_key("process") {
         infer_unresolved.push("contract.process".to_string());
     }
-    if lock.resolution.entries.get("runtime").is_none() {
+    if !lock.resolution.entries.contains_key("runtime") {
         infer_unresolved.push("resolution.runtime".to_string());
     }
-    if lock.resolution.entries.get("closure").is_none() {
+    if !lock.resolution.entries.contains_key("closure") {
         infer_unresolved.push("resolution.closure".to_string());
     }
 
@@ -528,10 +528,10 @@ fn infer_from_canonical_lock(input: CanonicalLockInput) -> Result<SourceInferenc
         note: Some("persisted canonical lock reused as shared source inference input".to_string()),
     }];
     let mut infer_unresolved = Vec::new();
-    if input.lock.contract.entries.get("process").is_none() {
+    if !input.lock.contract.entries.contains_key("process") {
         infer_unresolved.push("contract.process".to_string());
     }
-    if input.lock.resolution.entries.get("runtime").is_none() {
+    if !input.lock.resolution.entries.contains_key("runtime") {
         infer_unresolved.push("resolution.runtime".to_string());
     }
     provenance.push(SourceInferenceProvenance {
@@ -571,7 +571,7 @@ fn promote_draft_execution_resolution(
     project_root: &Path,
     provenance: &mut Vec<SourceInferenceProvenance>,
 ) {
-    if lock.resolution.entries.get("runtime").is_none() {
+    if !lock.resolution.entries.contains_key("runtime") {
         if let Some(runtime) = draft_runtime_from_resolution(lock) {
             lock.resolution
                 .entries
@@ -589,7 +589,7 @@ fn promote_draft_execution_resolution(
         }
     }
 
-    if lock.resolution.entries.get("closure").is_none() {
+    if !lock.resolution.entries.contains_key("closure") {
         lock.resolution
             .entries
             .insert("closure".to_string(), inferred_closure_state(project_root));
@@ -619,7 +619,7 @@ fn draft_runtime_from_resolution(lock: &AtoLock) -> Option<Value> {
                 .get("runtime")
                 .and_then(Value::as_str)
                 .map(str::trim)
-                .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("source"))
+                .filter(|value| !value.is_empty())
                 .map(str::to_string)
         })
         .or_else(|| sole_object_key(lock.resolution.entries.get("runtime_hints")))
@@ -716,8 +716,8 @@ fn sole_object_key(value: Option<&Value>) -> Option<String> {
 }
 
 fn resolve(result: &mut SourceInferenceResult) -> Result<()> {
-    let process_resolved = result.lock.contract.entries.get("process").is_some();
-    let runtime_resolved = result.lock.resolution.entries.get("runtime").is_some();
+    let process_resolved = result.lock.contract.entries.contains_key("process");
+    let runtime_resolved = result.lock.resolution.entries.contains_key("runtime");
     let target_resolved = result
         .lock
         .resolution
@@ -726,7 +726,7 @@ fn resolve(result: &mut SourceInferenceResult) -> Result<()> {
         .and_then(Value::as_array)
         .map(|targets| !targets.is_empty())
         .unwrap_or(false);
-    let closure_resolved = result.lock.resolution.entries.get("closure").is_some();
+    let closure_resolved = result.lock.resolution.entries.contains_key("closure");
 
     let unresolved = collect_unresolved_paths(&result.lock);
     result.resolve = ResolveResult {
@@ -791,13 +791,13 @@ fn enforce_mode_preconditions(
     }
 
     if matches!(mode, MaterializationMode::RunAttempt) {
-        if result.lock.contract.entries.get("process").is_none() {
+        if !result.lock.contract.entries.contains_key("process") {
             anyhow::bail!(AtoExecutionError::ambiguous_entrypoint(
                 "run requires a selected process before execution",
                 explicit_candidates(&result.lock),
             ));
         }
-        if result.lock.resolution.entries.get("runtime").is_none() {
+        if !result.lock.resolution.entries.contains_key("runtime") {
             anyhow::bail!(AtoExecutionError::runtime_not_resolved(
                 "run requires a resolved runtime before execution",
                 None,
@@ -818,7 +818,7 @@ fn enforce_mode_preconditions(
                 None,
             ));
         }
-        if result.lock.resolution.entries.get("closure").is_none() {
+        if !result.lock.resolution.entries.contains_key("closure") {
             anyhow::bail!(AtoExecutionError::lock_incomplete(
                 "run requires dependency closure state before execution",
                 Some("resolution.closure"),
@@ -956,11 +956,11 @@ fn write_generated_manifest(
         "schema_version = \"0.2\"\nname = {name:?}\nversion = {version:?}\ntype = \"app\"\ndefault_target = {default_target:?}\n",
         default_target = target.label,
     );
-    if let Some(repository) = top_level_repository.as_deref() {
+    if let Some(repository) = top_level_repository {
         raw.push_str(&format!("repository = {repository:?}\n"));
     }
     raw.push_str(&format!("\n[metadata]\ndescription = {description:?}\n",));
-    if let Some(repository) = metadata_repository.as_deref() {
+    if let Some(repository) = metadata_repository {
         raw.push_str(&format!("repository = {repository:?}\n"));
     }
     raw.push_str("\n[requirements]\n");
@@ -994,7 +994,7 @@ fn write_generated_manifest(
             raw.push_str("]\n");
         }
     }
-    raw.push_str("\n");
+    raw.push('\n');
     raw.push_str(&format!(
         "[targets.{label}]\nruntime = {runtime:?}\nentrypoint = {entrypoint:?}\n",
         label = target.label,
@@ -1495,13 +1495,13 @@ fn inferred_network_contract(detected: &DetectedProject) -> Value {
         ProjectType::NodeJs => detected
             .node
             .as_ref()
-            .and_then(|node| {
+            .map(|node| {
                 if node.has_hono {
-                    Some(3000)
+                    3000
                 } else if node.scripts.has_dev {
-                    Some(5173)
+                    5173
                 } else {
-                    Some(3000)
+                    3000
                 }
             })
             .unwrap_or(3000),
@@ -1844,7 +1844,7 @@ mod tests {
         let lock = capsule_core::ato_lock::load_unvalidated_from_path(&materialized.lock_path)
             .expect("read materialized lock");
 
-        assert!(lock.contract.entries.get("process").is_none());
+        assert!(!lock.contract.entries.contains_key("process"));
         assert!(lock
             .contract
             .unresolved

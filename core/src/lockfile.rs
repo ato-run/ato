@@ -339,6 +339,7 @@ pub fn render_lockfile_for_manifest(
     manifest: &CapsuleManifest,
 ) -> Result<Vec<u8>> {
     let mut lockfile = read_lockfile(lockfile_path)?;
+    lockfile.meta.created_at = reproducible_packaged_lock_created_at();
     lockfile.meta.manifest_hash = semantic_manifest_hash(manifest)?;
     serde_jcs::to_vec(&lockfile).map_err(|e| {
         CapsuleError::Pack(format!(
@@ -346,6 +347,16 @@ pub fn render_lockfile_for_manifest(
             CAPSULE_LOCK_FILE_NAME, e
         ))
     })
+}
+
+fn reproducible_packaged_lock_created_at() -> String {
+    let epoch = std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    chrono::DateTime::<Utc>::from_timestamp(epoch, 0)
+        .unwrap_or_else(|| chrono::DateTime::<Utc>::from_timestamp(0, 0).expect("unix epoch"))
+        .to_rfc3339()
 }
 
 fn verify_lockfile_manifest_with_open_manifest(
