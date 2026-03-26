@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -582,10 +583,12 @@ mod tests {
     use super::*;
 
     fn sample_lock() -> AtoLock {
-        let mut lock = AtoLock::default();
-        lock.lock_id = Some(capsule_core::ato_lock::LockId::new(
-            "blake3:1111111111111111111111111111111111111111111111111111111111111111",
-        ));
+        let mut lock = AtoLock {
+            lock_id: Some(capsule_core::ato_lock::LockId::new(
+                "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+            )),
+            ..AtoLock::default()
+        };
         lock.binding.entries.insert(
             "state_overrides".to_string(),
             json!({"data": "state-embedded"}),
@@ -755,12 +758,14 @@ mod tests {
 
     #[test]
     fn policy_deny_wins_over_allow() {
-        let mut policy = WorkspacePolicyBundle {
+        let policy = WorkspacePolicyBundle {
             schema_version: "1".to_string(),
+            network: WorkspaceNetworkPolicy {
+                allow_hosts: vec!["example.com".to_string()],
+                deny_hosts: vec!["example.com".to_string()],
+            },
             ..WorkspacePolicyBundle::default()
         };
-        policy.network.allow_hosts = vec!["example.com".to_string()];
-        policy.network.deny_hosts = vec!["example.com".to_string()];
 
         let plan = capsule_core::execution_plan::model::ExecutionPlan {
             schema_version: "1".to_string(),
