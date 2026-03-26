@@ -368,13 +368,10 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         "filesystem".to_string(),
         inferred_filesystem_contract(&detected),
     );
-    lock.resolution.entries.insert(
-        "runtime".to_string(),
-        json!({
-            "kind": runtime_kind,
-            "resolved_by": "shared_source_inference",
-        }),
-    );
+    let runtime_resolution = inferred_runtime_resolution(&detected, &input.project_root);
+    lock.resolution
+        .entries
+        .insert("runtime".to_string(), runtime_resolution.clone());
     lock.resolution.entries.insert(
         "resolved_targets".to_string(),
         Value::Array(vec![{
@@ -401,7 +398,14 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
         source_path: Some(input.project_root.clone()),
         source_field: Some("project_type".to_string()),
-        note: Some("runtime resolved from deterministic project-type inference".to_string()),
+        note: Some(format!(
+            "runtime resolved from deterministic project-type inference{}",
+            runtime_resolution
+                .get("version")
+                .and_then(Value::as_str)
+                .map(|version| format!(" with version {version}"))
+                .unwrap_or_default()
+        )),
     });
 
     if process_candidates.is_empty() {
@@ -445,12 +449,12 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
             "workloads".to_string(),
             Value::Array(vec![json!({
                 "name": "main",
-                "process": process_value_from_candidate(Some(candidate)),
+                "process": process_value_from_candidate(Some(input.project_root.as_path()), Some(candidate)),
             })]),
         );
         lock.contract.entries.insert(
             "process".to_string(),
-            process_value_from_candidate(Some(candidate)),
+            process_value_from_candidate(Some(input.project_root.as_path()), Some(candidate)),
         );
         provenance.push(SourceInferenceProvenance {
             field: "contract.process".to_string(),
@@ -895,13 +899,21 @@ fn write_generated_manifest(
     let entrypoint = process
         .get("entrypoint")
         .and_then(Value::as_str)
-        .ok_or_else(|| {
-            AtoExecutionError::execution_contract_invalid(
-                "contract.process.entrypoint is required for run materialization",
-                Some("contract.process.entrypoint"),
-                None,
-            )
-        })?;
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let run_command = process
+        .get("run_command")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if entrypoint.is_none() && run_command.is_none() {
+        return Err(AtoExecutionError::execution_contract_invalid(
+            "contract.process.entrypoint or contract.process.run_command is required for run materialization",
+            Some("contract.process"),
+            None,
+        )
+        .into());
+    }
     let cmd_values = process
         .get("cmd")
         .and_then(Value::as_array)
@@ -996,11 +1008,15 @@ fn write_generated_manifest(
     }
     raw.push('\n');
     raw.push_str(&format!(
-        "[targets.{label}]\nruntime = {runtime:?}\nentrypoint = {entrypoint:?}\n",
+        "[targets.{label}]\nruntime = {runtime:?}\n",
         label = target.label,
         runtime = target.runtime,
-        entrypoint = entrypoint,
     ));
+    if let Some(run_command) = target.run_command.as_deref().or(run_command) {
+        raw.push_str(&format!("run_command = {run_command:?}\n"));
+    } else if let Some(entrypoint) = target.entrypoint.as_deref().or(entrypoint) {
+        raw.push_str(&format!("entrypoint = {entrypoint:?}\n"));
+    }
     if let Some(driver) = target.driver.as_deref() {
         raw.push_str(&format!("driver = {driver:?}\n"));
     }
@@ -1087,6 +1103,8 @@ struct BridgeTarget {
     runtime: String,
     driver: Option<String>,
     runtime_version: Option<String>,
+    entrypoint: Option<String>,
+    run_command: Option<String>,
     cmd: Vec<String>,
     required_env: Vec<String>,
     port: Option<u64>,
@@ -1140,7 +1158,45 @@ fn bridge_target_from_lock(lock: &AtoLock, process: &Value) -> Result<BridgeTarg
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_string);
+        .map(str::to_string)
+        .or_else(|| {
+            lock.resolution
+                .entries
+                .get("runtime")
+                .and_then(|value| value.get("version"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        });
+    let entrypoint = selected_target
+        .and_then(|value| value.get("entrypoint"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            process
+                .get("entrypoint")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        });
+    let run_command = selected_target
+        .and_then(|value| value.get("run_command"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            process
+                .get("run_command")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        });
     let cmd = selected_target
         .and_then(|value| value.get("cmd"))
         .and_then(json_string_array)
@@ -1166,6 +1222,8 @@ fn bridge_target_from_lock(lock: &AtoLock, process: &Value) -> Result<BridgeTarg
         runtime,
         driver,
         runtime_version,
+        entrypoint,
+        run_command,
         cmd,
         required_env,
         port,
@@ -1270,9 +1328,17 @@ fn apply_selection(
     selection: &RankedCandidate,
 ) -> Result<()> {
     if field == "contract.process" {
+        let project_root = result
+            .lock
+            .contract
+            .entries
+            .get("metadata")
+            .and_then(|value| value.get("source_root"))
+            .and_then(Value::as_str)
+            .map(PathBuf::from);
         result.lock.contract.entries.insert(
             "process".to_string(),
-            process_value_from_candidate(Some(selection)),
+            process_value_from_candidate(project_root.as_deref(), Some(selection)),
         );
         result.lock.contract.unresolved.retain(|value| {
             !(value.reason == UnresolvedReason::ExplicitSelectionRequired
@@ -1490,6 +1556,97 @@ fn runtime_kind_from_project(detected: &DetectedProject) -> &'static str {
     }
 }
 
+fn inferred_runtime_resolution(detected: &DetectedProject, project_root: &Path) -> Value {
+    let runtime_kind = runtime_kind_from_project(detected);
+    let mut runtime = serde_json::Map::new();
+    runtime.insert("kind".to_string(), Value::String(runtime_kind.to_string()));
+    runtime.insert(
+        "resolved_by".to_string(),
+        Value::String("shared_source_inference".to_string()),
+    );
+    if let Some(version) = inferred_runtime_version(detected, project_root, runtime_kind) {
+        runtime.insert("version".to_string(), Value::String(version));
+    }
+    Value::Object(runtime)
+}
+
+fn inferred_runtime_version(
+    detected: &DetectedProject,
+    project_root: &Path,
+    runtime_kind: &str,
+) -> Option<String> {
+    match detected.project_type {
+        ProjectType::NodeJs => infer_node_runtime_version(project_root, runtime_kind),
+        ProjectType::Python => infer_first_existing_trimmed(project_root, &[".python-version"])
+            .or_else(|| Some("3.12".to_string())),
+        ProjectType::Rust => {
+            infer_rust_runtime_version(project_root).or_else(|| Some("stable".to_string()))
+        }
+        ProjectType::Go => infer_first_existing_trimmed(project_root, &[".go-version"])
+            .or_else(|| Some("1.22".to_string())),
+        ProjectType::Ruby => infer_first_existing_trimmed(project_root, &[".ruby-version"])
+            .or_else(|| Some("3.3".to_string())),
+        ProjectType::Unknown => None,
+    }
+}
+
+fn infer_node_runtime_version(project_root: &Path, runtime_kind: &str) -> Option<String> {
+    if runtime_kind.eq_ignore_ascii_case("bun") {
+        return infer_first_existing_trimmed(project_root, &[".bun-version"])
+            .or_else(|| Some("1.1".to_string()));
+    }
+
+    infer_first_existing_trimmed(project_root, &[".nvmrc", ".node-version"])
+        .or_else(|| infer_node_engine_version(project_root))
+        .or_else(|| Some("20".to_string()))
+}
+
+fn infer_node_engine_version(project_root: &Path) -> Option<String> {
+    let package_json_path = project_root.join("package.json");
+    let raw = fs::read_to_string(package_json_path).ok()?;
+    let package_json = serde_json::from_str::<Value>(&raw).ok()?;
+    package_json
+        .get("engines")
+        .and_then(|value| value.get("node"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .trim_start_matches('^')
+                .trim_start_matches('~')
+                .to_string()
+        })
+}
+
+fn infer_rust_runtime_version(project_root: &Path) -> Option<String> {
+    let toolchain = project_root.join("rust-toolchain.toml");
+    if let Ok(raw) = fs::read_to_string(toolchain) {
+        if let Ok(value) = toml::from_str::<toml::Value>(&raw) {
+            if let Some(channel) = value
+                .get("toolchain")
+                .and_then(|value| value.get("channel"))
+                .and_then(toml::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                return Some(channel.to_string());
+            }
+        }
+    }
+
+    infer_first_existing_trimmed(project_root, &["rust-toolchain"])
+}
+
+fn infer_first_existing_trimmed(project_root: &Path, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        fs::read_to_string(project_root.join(name))
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
 fn inferred_network_contract(detected: &DetectedProject) -> Value {
     let expected_port = match detected.project_type {
         ProjectType::NodeJs => detected
@@ -1575,14 +1732,72 @@ fn inferred_closure_state(project_root: &Path) -> Value {
 fn source_metadata(detected: &DetectedProject, project_root: &Path) -> Value {
     json!({
         "name": detected.name,
+        "version": infer_project_version(detected, project_root).unwrap_or_else(|| "0.1.0".to_string()),
         "capsule_type": "app",
         "source_root": project_root,
         "project_type": detected.project_type.as_str(),
     })
 }
 
-fn process_value_from_candidate(candidate: Option<&RankedCandidate>) -> Value {
+fn infer_project_version(detected: &DetectedProject, project_root: &Path) -> Option<String> {
+    match detected.project_type {
+        ProjectType::NodeJs => infer_package_json_string_field(project_root, "version"),
+        ProjectType::Python => infer_pyproject_version(project_root),
+        ProjectType::Rust => infer_cargo_package_field(project_root, "version"),
+        ProjectType::Go | ProjectType::Ruby | ProjectType::Unknown => None,
+    }
+}
+
+fn infer_package_json_string_field(project_root: &Path, field: &str) -> Option<String> {
+    let raw = fs::read_to_string(project_root.join("package.json")).ok()?;
+    let package_json = serde_json::from_str::<Value>(&raw).ok()?;
+    package_json
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn infer_pyproject_version(project_root: &Path) -> Option<String> {
+    let raw = fs::read_to_string(project_root.join("pyproject.toml")).ok()?;
+    let value = toml::from_str::<toml::Value>(&raw).ok()?;
+    value
+        .get("project")
+        .and_then(|value| value.get("version"))
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn infer_cargo_package_field(project_root: &Path, field: &str) -> Option<String> {
+    let raw = fs::read_to_string(project_root.join("Cargo.toml")).ok()?;
+    let value = toml::from_str::<toml::Value>(&raw).ok()?;
+    value
+        .get("package")
+        .and_then(|value| value.get(field))
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn process_value_from_candidate(
+    project_root: Option<&Path>,
+    candidate: Option<&RankedCandidate>,
+) -> Value {
     if let Some(candidate) = candidate {
+        if let Some((entrypoint, args, run_command)) =
+            project_root.and_then(|root| resolve_node_script_process(root, &candidate.entrypoint))
+        {
+            return json!({
+                "entrypoint": entrypoint,
+                "cmd": args,
+                "run_command": run_command,
+            });
+        }
+
         let entrypoint = candidate.entrypoint.first().cloned().unwrap_or_default();
         let args = if candidate.entrypoint.len() > 1 {
             candidate.entrypoint[1..]
@@ -1600,6 +1815,90 @@ fn process_value_from_candidate(candidate: Option<&RankedCandidate>) -> Value {
     } else {
         json!({})
     }
+}
+
+fn resolve_node_script_process(
+    project_root: &Path,
+    candidate_entrypoint: &[String],
+) -> Option<(String, Vec<String>, String)> {
+    let script_name = package_manager_script_name(candidate_entrypoint)?;
+    let script = package_json_script(project_root, script_name)?;
+    if contains_shell_control_operators(&script) {
+        return None;
+    }
+
+    let tokens = shell_words::split(&script).ok()?;
+    let first = tokens.first()?.trim();
+    if first.is_empty() {
+        return None;
+    }
+
+    if first == "node" {
+        let entrypoint = tokens.get(1)?.trim();
+        if entrypoint.is_empty() {
+            return None;
+        }
+        let args = tokens.iter().skip(2).cloned().collect::<Vec<_>>();
+        return Some((entrypoint.to_string(), args, join_shell_tokens(&tokens)));
+    }
+
+    if is_package_binary_command(first) {
+        let mut args = tokens.iter().skip(1).cloned().collect::<Vec<_>>();
+        let entrypoint = format!("npm:{first}");
+        let mut run_tokens = vec![entrypoint.clone()];
+        run_tokens.extend(args.iter().cloned());
+        return Some((
+            entrypoint,
+            std::mem::take(&mut args),
+            join_shell_tokens(&run_tokens),
+        ));
+    }
+
+    None
+}
+
+fn package_manager_script_name(candidate_entrypoint: &[String]) -> Option<&str> {
+    match candidate_entrypoint {
+        [first, second, third, ..] if first == "npm" && second == "run" => Some(third.as_str()),
+        [first, second, ..] if matches!(first.as_str(), "npm" | "pnpm" | "yarn") => {
+            Some(second.as_str())
+        }
+        [first, second, third, ..] if first == "bun" && second == "run" => Some(third.as_str()),
+        [first, second, ..] if first == "bun" => Some(second.as_str()),
+        _ => None,
+    }
+}
+
+fn package_json_script(project_root: &Path, script_name: &str) -> Option<String> {
+    let raw = fs::read_to_string(project_root.join("package.json")).ok()?;
+    let package_json = serde_json::from_str::<Value>(&raw).ok()?;
+    package_json
+        .get("scripts")
+        .and_then(|value| value.get(script_name))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn contains_shell_control_operators(script: &str) -> bool {
+    ["&&", "||", ";", "|", ">", "<", "$(", "`"]
+        .iter()
+        .any(|token| script.contains(token))
+}
+
+fn is_package_binary_command(command: &str) -> bool {
+    !command.is_empty()
+        && !matches!(
+            command,
+            "npm" | "pnpm" | "yarn" | "bun" | "npx" | "node" | "deno"
+        )
+        && !command.starts_with('.')
+        && !command.starts_with('/')
+}
+
+fn join_shell_tokens(tokens: &[String]) -> String {
+    tokens.join(" ")
 }
 
 fn collect_unresolved_paths(lock: &AtoLock) -> Vec<String> {
@@ -1739,6 +2038,35 @@ mod tests {
     }
 
     #[test]
+    fn source_only_node_project_resolves_package_script_to_npm_specifier() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"demo","scripts":{"dev":"vite --host 127.0.0.1 --port 5175"},"devDependencies":{"vite":"5.4.2"}}"#,
+        )
+        .expect("write package json");
+
+        let result = execute_shared_engine(
+            SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
+                project_root: dir.path().to_path_buf(),
+            }),
+            MaterializationMode::RunAttempt,
+            true,
+            reporter(),
+        )
+        .expect("run engine");
+
+        assert_eq!(
+            result.lock.contract.entries.get("process"),
+            Some(&json!({
+                "entrypoint": "npm:vite",
+                "cmd": ["--host", "127.0.0.1", "--port", "5175"],
+                "run_command": "npm:vite --host 127.0.0.1 --port 5175",
+            }))
+        );
+    }
+
+    #[test]
     fn draft_lock_input_preserves_existing_process_without_reinference() {
         let mut lock = AtoLock::default();
         lock.contract.entries.insert(
@@ -1810,6 +2138,31 @@ mod tests {
         assert!(materialized.manifest_path.exists());
         assert!(materialized.lock_path.exists());
         assert!(sidecar_path.exists());
+    }
+
+    #[test]
+    fn run_materialization_writes_run_command_for_resolved_package_script() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"demo","scripts":{"dev":"vite --host 127.0.0.1 --port 5175"},"devDependencies":{"vite":"5.4.2"}}"#,
+        )
+        .expect("write package json");
+        fs::write(
+            dir.path().join("package-lock.json"),
+            r#"{"name":"demo","lockfileVersion":3}"#,
+        )
+        .expect("write lock");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+        };
+        let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
+            .expect("materialize run");
+        let generated = fs::read_to_string(&materialized.manifest_path).expect("read manifest");
+
+        assert!(generated.contains("run_command = \"npm:vite --host 127.0.0.1 --port 5175\""));
+        assert!(!generated.contains("entrypoint = \"npm\""));
     }
 
     #[test]
@@ -1932,9 +2285,6 @@ runtime = "source"
 driver = "deno"
 runtime_version = "2.1.3"
 entrypoint = "main.ts"
-
-[services.main]
-target = "web"
 "#,
         )
         .expect("write manifest");

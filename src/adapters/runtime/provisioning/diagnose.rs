@@ -39,6 +39,7 @@ fn detect_missing_lockfile(plan: &ManifestData) -> Option<ProvisioningIssue> {
                 .unwrap_or_else(|| plan.execution_working_directory());
             let candidates = vec![
                 working_dir.join("package-lock.json"),
+                working_dir.join("yarn.lock"),
                 working_dir.join("pnpm-lock.yaml"),
                 working_dir.join("bun.lock"),
                 working_dir.join("bun.lockb"),
@@ -232,6 +233,38 @@ mod tests {
         assert!(issues.iter().any(|issue| matches!(
             issue,
             ProvisioningIssue::RuntimeSelectionRequired { driver, .. } if driver == "node"
+        )));
+    }
+
+    #[test]
+    fn ignores_missing_node_lockfile_when_yarn_lock_exists() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("yarn.lock"), "# yarn lockfile v1\n")
+            .expect("write yarn lock");
+
+        let mut target = toml::map::Map::new();
+        target.insert(
+            "runtime".to_string(),
+            toml::Value::String("source".to_string()),
+        );
+        target.insert(
+            "driver".to_string(),
+            toml::Value::String("node".to_string()),
+        );
+        target.insert(
+            "run_command".to_string(),
+            toml::Value::String("npm:vite --host 127.0.0.1 --port 5175".to_string()),
+        );
+
+        let mut manifest = manifest_data(target);
+        manifest.manifest_dir = temp.path().to_path_buf();
+        manifest.manifest_path = temp.path().join("capsule.toml");
+
+        let issues =
+            collect_issues(&manifest, &RuntimeLaunchContext::empty()).expect("issues must resolve");
+        assert!(!issues.iter().any(|issue| matches!(
+            issue,
+            ProvisioningIssue::MissingLockfile { driver, .. } if driver == "node"
         )));
     }
 }

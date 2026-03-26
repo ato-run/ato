@@ -105,6 +105,7 @@ fn warning_requires_manual_review(warning: &str) -> bool {
     lowered.contains("frozen-lockfile")
         || lowered.contains("uv.lock")
         || lowered.contains("package-lock.json")
+        || lowered.contains("yarn.lock")
         || lowered.contains("pnpm-lock.yaml")
         || lowered.contains("bun.lock")
         || lowered.contains("multiple node lockfiles")

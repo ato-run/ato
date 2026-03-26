@@ -96,16 +96,22 @@ fn derive_run_command_launch_spec(
 
     let (command, args) = match resolved_driver {
         value if value.eq_ignore_ascii_case("node") => {
-            if first != "node" {
+            if first == "node" {
+                let command = tokens.get(1).cloned().ok_or_else(|| {
+                    anyhow!("source/node run_command must include a script entrypoint")
+                })?;
+                (command, tokens.into_iter().skip(2).collect::<Vec<_>>())
+            } else if first.starts_with("npm:") {
+                (
+                    tokens[0].clone(),
+                    tokens.into_iter().skip(1).collect::<Vec<_>>(),
+                )
+            } else {
                 return Err(anyhow!(
-                    "source/node run_command must start with 'node', got '{}'",
+                    "source/node run_command must start with 'node' or 'npm:<package>', got '{}'",
                     first
                 ));
             }
-            let command = tokens.get(1).cloned().ok_or_else(|| {
-                anyhow!("source/node run_command must include a script entrypoint")
-            })?;
-            (command, tokens.into_iter().skip(2).collect::<Vec<_>>())
         }
         value if value.eq_ignore_ascii_case("python") => {
             if !matches!(first, "python" | "python3" | "uv") {
@@ -228,14 +234,17 @@ fn resolve_required_lockfile(
     if resolved.eq_ignore_ascii_case("node") {
         return first_existing_path([
             working_dir.join("package-lock.json"),
+            working_dir.join("yarn.lock"),
             working_dir.join("pnpm-lock.yaml"),
             working_dir.join("bun.lock"),
             working_dir.join("bun.lockb"),
             plan.manifest_dir.join("package-lock.json"),
+            plan.manifest_dir.join("yarn.lock"),
             plan.manifest_dir.join("pnpm-lock.yaml"),
             plan.manifest_dir.join("bun.lock"),
             plan.manifest_dir.join("bun.lockb"),
             plan.manifest_dir.join("source").join("package-lock.json"),
+            plan.manifest_dir.join("source").join("yarn.lock"),
             plan.manifest_dir.join("source").join("pnpm-lock.yaml"),
             plan.manifest_dir.join("source").join("bun.lock"),
             plan.manifest_dir.join("source").join("bun.lockb"),
@@ -298,7 +307,7 @@ entrypoint = "main.js"
 
         let spec = derive_launch_spec(&plan).expect("derive launch spec");
 
-        assert_eq!(spec.working_dir, tmp.path().join("source"));
+        assert_eq!(spec.working_dir, tmp.path());
         assert_eq!(spec.command, "main.js");
         assert_eq!(spec.source, LaunchSpecSource::Entrypoint);
     }
@@ -329,7 +338,7 @@ run_command = "node lib.js fixtures/db.json --port 3000"
 
         let spec = derive_launch_spec(&plan).expect("derive launch spec");
 
-        assert_eq!(spec.working_dir, tmp.path().join("source"));
+        assert_eq!(spec.working_dir, tmp.path());
         assert_eq!(spec.command, "lib.js");
         assert_eq!(spec.args, vec!["fixtures/db.json", "--port", "3000"]);
         assert_eq!(
@@ -337,6 +346,64 @@ run_command = "node lib.js fixtures/db.json --port 3000"
             Some(tmp.path().join("source").join("pnpm-lock.yaml"))
         );
         assert_eq!(spec.source, LaunchSpecSource::RunCommand);
+    }
+
+    #[test]
+    fn derive_launch_spec_accepts_node_npm_specifier_run_command() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("source")).expect("mkdir source");
+        std::fs::write(
+            tmp.path().join("source").join("package-lock.json"),
+            "{\"lockfileVersion\":3}",
+        )
+        .expect("write lock");
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+[targets.app]
+runtime = "source"
+driver = "node"
+run_command = "npm:vite --host 127.0.0.1 --port 5175"
+"#,
+        );
+
+        let spec = derive_launch_spec(&plan).expect("derive launch spec");
+
+        assert_eq!(spec.working_dir, tmp.path());
+        assert_eq!(spec.command, "npm:vite");
+        assert_eq!(spec.args, vec!["--host", "127.0.0.1", "--port", "5175"]);
+        assert_eq!(
+            spec.required_lockfile,
+            Some(tmp.path().join("source").join("package-lock.json"))
+        );
+        assert_eq!(spec.source, LaunchSpecSource::RunCommand);
+    }
+
+    #[test]
+    fn derive_launch_spec_accepts_yarn_lock_for_node_run_command() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("source")).expect("mkdir source");
+        std::fs::write(
+            tmp.path().join("source").join("yarn.lock"),
+            "# yarn lockfile v1\n",
+        )
+        .expect("write lock");
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+[targets.app]
+runtime = "source"
+driver = "node"
+run_command = "npm:vite --host 127.0.0.1 --port 5175"
+"#,
+        );
+
+        let spec = derive_launch_spec(&plan).expect("derive launch spec");
+
+        assert_eq!(
+            spec.required_lockfile,
+            Some(tmp.path().join("source").join("yarn.lock"))
+        );
     }
 
     #[test]
