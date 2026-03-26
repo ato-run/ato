@@ -814,6 +814,7 @@ fn plan_v03_build_provision_command(
 
     if matches!(driver.as_str(), "node") {
         let package_lock = execution_working_directory.join("package-lock.json");
+        let yarn_lock = execution_working_directory.join("yarn.lock");
         let pnpm_lock = execution_working_directory.join("pnpm-lock.yaml");
         let bun_lock = execution_working_directory.join("bun.lock");
         let bun_lockb = execution_working_directory.join("bun.lockb");
@@ -823,6 +824,7 @@ fn plan_v03_build_provision_command(
                 package_lock.clone(),
                 package_lock.exists(),
             ),
+            ("yarn.lock", yarn_lock.clone(), yarn_lock.exists()),
             ("pnpm-lock.yaml", pnpm_lock.clone(), pnpm_lock.exists()),
             ("bun.lock", bun_lock.clone(), bun_lock.exists()),
             ("bun.lockb", bun_lockb.clone(), bun_lockb.exists()),
@@ -840,6 +842,9 @@ fn plan_v03_build_provision_command(
         if package_lock.exists() {
             matches.push("npm ci");
         }
+        if yarn_lock.exists() {
+            matches.push("yarn install --frozen-lockfile");
+        }
         if pnpm_lock.exists() {
             matches.push("pnpm install --frozen-lockfile");
         }
@@ -848,13 +853,13 @@ fn plan_v03_build_provision_command(
         }
         return match matches.as_slice() {
             [] => Err(AtoExecutionError::lock_incomplete(
-                "source/node target requires one of package-lock.json, pnpm-lock.yaml, bun.lock, or bun.lockb",
+                "source/node target requires one of package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lock, or bun.lockb",
                 Some("package-lock.json"),
             )
             .into()),
             [command] => Ok(Some((*command).to_string())),
             _ => Err(AtoExecutionError::lock_incomplete(
-                "multiple node lockfiles detected; keep only one of package-lock.json, pnpm-lock.yaml, bun.lock, or bun.lockb",
+                "multiple node lockfiles detected; keep only one of package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lock, or bun.lockb",
                 Some("package-lock.json"),
             )
             .into()),
@@ -1344,6 +1349,26 @@ mod tests {
 
         let command = plan_v03_build_provision_command(&plan).expect("plan provision");
         assert_eq!(command.as_deref(), Some("pnpm install --frozen-lockfile"));
+    }
+
+    #[test]
+    fn v03_build_provision_supports_yarn_lockfile() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("yarn.lock"), "# yarn lockfile v1\n")
+            .expect("write yarn lock");
+
+        let plan = manifest_with_schema_and_target(
+            "0.3",
+            tmp.path().to_path_buf(),
+            vec![
+                ("runtime", toml::Value::String("source".to_string())),
+                ("driver", toml::Value::String("node".to_string())),
+                ("run_command", toml::Value::String("yarn build".to_string())),
+            ],
+        );
+
+        let command = plan_v03_build_provision_command(&plan).expect("plan provision");
+        assert_eq!(command.as_deref(), Some("yarn install --frozen-lockfile"));
     }
 
     #[test]
