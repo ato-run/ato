@@ -166,18 +166,36 @@ pub fn prepare_target_execution(
             )
         };
 
-    let guard_result = guard::evaluate_for_mode(
+    if !options.defer_consent {
+        let guard_result = guard::evaluate_for_mode_with_authority(
+            &execution_plan,
+            &runtime_decision.plan.manifest_dir,
+            &options.enforcement,
+            options.sandbox_mode,
+            options.dangerously_skip_permissions,
+            guard_mode,
+            prepared.authoritative_lock.is_some(),
+        )?;
+        crate::consent_store::require_consent(&execution_plan, options.assume_yes)?;
+
+        return Ok(PreparedTargetExecution {
+            execution_plan,
+            runtime_decision,
+            tier,
+            guard_result,
+            launch_ctx,
+        });
+    }
+
+    let guard_result = guard::evaluate_for_mode_with_authority(
         &execution_plan,
         &runtime_decision.plan.manifest_dir,
         &options.enforcement,
         options.sandbox_mode,
         options.dangerously_skip_permissions,
         guard_mode,
+        prepared.authoritative_lock.is_some(),
     )?;
-
-    if !options.defer_consent {
-        crate::consent_store::require_consent(&execution_plan, options.assume_yes)?;
-    }
 
     Ok(PreparedTargetExecution {
         execution_plan,

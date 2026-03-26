@@ -1024,6 +1024,7 @@ where
             let process = if host_execution {
                 crate::executors::source::execute_host(
                     &decision.plan,
+                    prepared.authoritative_lock.as_ref(),
                     request.reporter.clone(),
                     mode,
                     &launch_ctx,
@@ -1100,6 +1101,7 @@ where
         ExecutorKind::NodeCompat if host_fallback_requested => {
             let process = crate::executors::source::execute_host(
                 &decision.plan,
+                prepared.authoritative_lock.as_ref(),
                 request.reporter.clone(),
                 mode,
                 &launch_ctx,
@@ -1215,6 +1217,7 @@ where
         ExecutorKind::Deno => {
             let exit = crate::executors::deno::execute(
                 &decision.plan,
+                prepared.authoritative_lock.as_ref(),
                 &execution_plan,
                 &launch_ctx,
                 request.dangerously_skip_permissions,
@@ -1231,6 +1234,7 @@ where
         ExecutorKind::NodeCompat => {
             let exit = crate::executors::node_compat::execute(
                 &decision.plan,
+                prepared.authoritative_lock.as_ref(),
                 &execution_plan,
                 &launch_ctx,
                 request.dangerously_skip_permissions,
