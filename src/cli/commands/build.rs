@@ -171,6 +171,9 @@ pub fn execute_pack_command_with_injected_manifest(
     }
 
     let _temporary_manifest_guard = temporary_manifest;
+    if let Some(authoritative_input) = authoritative_input.as_ref() {
+        authoritative_input.validate_bridge_manifest()?;
+    }
     let _authoritative_input_guard = authoritative_input;
     let validation_mode = if injected_manifest.is_some() {
         ValidationMode::Preview

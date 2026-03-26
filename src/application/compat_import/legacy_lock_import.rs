@@ -169,6 +169,7 @@ fn compare_runtime_hints(
         };
         if hinted_version != locked_version {
             unresolved.push(UnresolvedValue {
+                field: Some("resolution.locked_runtimes".to_string()),
                 reason: UnresolvedReason::Ambiguity,
                 detail: Some(format!(
                     "runtime version conflict for {runtime}: manifest hinted {hinted_version}, legacy lock resolved {locked_version}"
@@ -230,6 +231,7 @@ fn compare_dependency_bindings(
                 .unwrap_or(false)
         }) {
             unresolved.push(UnresolvedValue {
+                field: Some("resolution.locked_dependencies".to_string()),
                 reason: UnresolvedReason::Ambiguity,
                 detail: Some(format!(
                     "legacy dependency '{}' overlaps with manifest runtime tooling names",

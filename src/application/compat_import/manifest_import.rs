@@ -159,6 +159,7 @@ fn import_workloads(
             ));
         } else {
             draft_lock.contract.unresolved.push(UnresolvedValue {
+                field: Some("contract.process".to_string()),
                 reason: UnresolvedReason::ExplicitSelectionRequired,
                 detail: Some(
                     "multiple imported workloads exist; contract.process is intentionally unresolved"
@@ -230,6 +231,7 @@ fn import_target_hints(
     let manifest = input.manifest;
     let Some(targets) = manifest.model.targets.as_ref() else {
         draft_lock.resolution.unresolved.push(UnresolvedValue {
+            field: Some("resolution.resolved_targets".to_string()),
             reason: UnresolvedReason::InsufficientEvidence,
             detail: Some("manifest has no targets to lift into resolution hints".to_string()),
             candidates: Vec::new(),

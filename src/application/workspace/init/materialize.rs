@@ -113,7 +113,6 @@ pub(crate) fn materialize_workspace_result(
         binding_seed_path,
         policy_bundle_path: workspace_paths.policy_bundle_path,
         attestation_store_path: workspace_paths.attestation_store_path,
-        result,
     })
 }
 
@@ -230,12 +229,19 @@ fn ensure_field_or_unresolved(
     if has_field {
         return Ok(());
     }
-    if unresolved.iter().any(is_reasoned_unresolved) {
+    if unresolved
+        .iter()
+        .any(|entry| unresolved_matches_field(entry, field) && is_reasoned_unresolved(entry))
+    {
         return Ok(());
     }
     anyhow::bail!(
         "durable workspace output must either resolve {field} or emit an inspectable unresolved marker"
     );
+}
+
+fn unresolved_matches_field(unresolved: &UnresolvedValue, field: &str) -> bool {
+    unresolved.field.as_deref() == Some(field)
 }
 
 fn is_reasoned_unresolved(unresolved: &UnresolvedValue) -> bool {
@@ -265,34 +271,34 @@ fn has_non_empty_array(value: Option<&Value>) -> bool {
 
 fn collect_unresolved_fields(lock: &AtoLock) -> Vec<CachedUnresolvedField> {
     let mut fields = Vec::new();
-    fields.extend(
-        lock.contract
-            .unresolved
-            .iter()
-            .map(|value| CachedUnresolvedField {
-                field: "contract".to_string(),
-                reason: value.reason.as_str().into_owned(),
-                detail: value.detail.clone(),
-                candidates: value.candidates.clone(),
-            }),
-    );
-    fields.extend(
-        lock.resolution
-            .unresolved
-            .iter()
-            .map(|value| CachedUnresolvedField {
-                field: "resolution".to_string(),
-                reason: value.reason.as_str().into_owned(),
-                detail: value.detail.clone(),
-                candidates: value.candidates.clone(),
-            }),
-    );
+    fields.extend(lock.contract.unresolved.iter().map(|value| {
+        CachedUnresolvedField {
+            field: value
+                .field
+                .clone()
+                .unwrap_or_else(|| "contract".to_string()),
+            reason: value.reason.as_str().into_owned(),
+            detail: value.detail.clone(),
+            candidates: value.candidates.clone(),
+        }
+    }));
+    fields.extend(lock.resolution.unresolved.iter().map(|value| {
+        CachedUnresolvedField {
+            field: value
+                .field
+                .clone()
+                .unwrap_or_else(|| "resolution".to_string()),
+            reason: value.reason.as_str().into_owned(),
+            detail: value.detail.clone(),
+            candidates: value.candidates.clone(),
+        }
+    }));
     fields.extend(
         lock.binding
             .unresolved
             .iter()
             .map(|value| CachedUnresolvedField {
-                field: "binding".to_string(),
+                field: value.field.clone().unwrap_or_else(|| "binding".to_string()),
                 reason: value.reason.as_str().into_owned(),
                 detail: value.detail.clone(),
                 candidates: value.candidates.clone(),
@@ -303,23 +309,23 @@ fn collect_unresolved_fields(lock: &AtoLock) -> Vec<CachedUnresolvedField> {
             .unresolved
             .iter()
             .map(|value| CachedUnresolvedField {
-                field: "policy".to_string(),
+                field: value.field.clone().unwrap_or_else(|| "policy".to_string()),
                 reason: value.reason.as_str().into_owned(),
                 detail: value.detail.clone(),
                 candidates: value.candidates.clone(),
             }),
     );
-    fields.extend(
-        lock.attestations
-            .unresolved
-            .iter()
-            .map(|value| CachedUnresolvedField {
-                field: "attestations".to_string(),
-                reason: value.reason.as_str().into_owned(),
-                detail: value.detail.clone(),
-                candidates: value.candidates.clone(),
-            }),
-    );
+    fields.extend(lock.attestations.unresolved.iter().map(|value| {
+        CachedUnresolvedField {
+            field: value
+                .field
+                .clone()
+                .unwrap_or_else(|| "attestations".to_string()),
+            reason: value.reason.as_str().into_owned(),
+            detail: value.detail.clone(),
+            candidates: value.candidates.clone(),
+        }
+    }));
     fields
 }
 
@@ -435,11 +441,13 @@ mod tests {
             .entries
             .insert("host_port".to_string(), json!(3000));
         lock.contract.unresolved.push(UnresolvedValue {
+            field: Some("contract.process".to_string()),
             reason: UnresolvedReason::InsufficientEvidence,
             detail: Some("process not chosen".to_string()),
             candidates: Vec::new(),
         });
         lock.resolution.unresolved.push(UnresolvedValue {
+            field: Some("resolution.runtime".to_string()),
             reason: UnresolvedReason::InsufficientEvidence,
             detail: Some("runtime not chosen".to_string()),
             candidates: Vec::new(),
@@ -469,5 +477,30 @@ mod tests {
         assert!(error
             .to_string()
             .contains("either resolve contract.process or emit an inspectable unresolved marker"));
+    }
+
+    #[test]
+    fn durable_workspace_lock_rejects_unrelated_unresolved_marker_for_missing_required_field() {
+        let mut lock = AtoLock::default();
+        lock.contract.unresolved.push(UnresolvedValue {
+            field: Some("contract.process".to_string()),
+            reason: UnresolvedReason::InsufficientEvidence,
+            detail: Some("process unresolved".to_string()),
+            candidates: Vec::new(),
+        });
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "deno", "resolved_by": "test"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([{"label": "default"}]),
+        );
+
+        let error = validate_durable_workspace_lock(&lock)
+            .expect_err("missing closure must not accept unrelated unresolved marker");
+        assert!(error.to_string().contains(
+            "either resolve resolution.closure or emit an inspectable unresolved marker"
+        ));
     }
 }

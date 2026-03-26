@@ -107,6 +107,7 @@ pub(crate) fn compile_compatibility_input(
                 .contract
                 .unresolved
                 .push(UnresolvedValue {
+                field: Some("contract.process".to_string()),
                 reason: UnresolvedReason::InsufficientEvidence,
                 detail: Some(
                     "legacy lock data cannot reconstruct authored contract without capsule.toml"

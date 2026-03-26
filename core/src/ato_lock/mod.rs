@@ -311,6 +311,7 @@ mod tests {
     fn unresolved_marker_validation_is_fail_closed() {
         let mut lock = persisted_sample_lock();
         lock.contract.unresolved = vec![UnresolvedValue {
+            field: Some("contract.process".to_string()),
             reason: UnresolvedReason::Unknown("future_reason".to_string()),
             detail: None,
             candidates: Vec::new(),
@@ -323,6 +324,7 @@ mod tests {
 
         let mut ambiguity = persisted_sample_lock();
         ambiguity.resolution.unresolved = vec![UnresolvedValue {
+            field: Some("resolution.runtime".to_string()),
             reason: UnresolvedReason::Ambiguity,
             detail: Some("multiple candidates".to_string()),
             candidates: Vec::new(),
