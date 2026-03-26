@@ -43,6 +43,7 @@ const SCHEMA_MIGRATION_0006: &str = "2026-03-10-0006-persistent-state-registry";
 const SCHEMA_MIGRATION_0007: &str = "2026-03-10-0007-persistent-state-kind-columns";
 const SCHEMA_MIGRATION_0008: &str = "2026-03-10-0008-service-binding-registry";
 const SCHEMA_MIGRATION_0009: &str = "2026-03-10-0009-service-binding-allowed-callers";
+const SCHEMA_MIGRATION_0010: &str = "2026-03-25-0010-registry-release-lock-metadata";
 
 fn manifest_distribution(
     manifest: &CapsuleManifest,
@@ -176,7 +177,7 @@ impl RegistryStore {
         let scoped_id = format!("{}/{}", publisher, slug);
         let conn = self.connect()?;
         conn.query_row(
-            "SELECT version, manifest_hash, file_name, sha256, blake3, size_bytes, signature_status, created_at
+            "SELECT version, manifest_hash, lock_id, closure_digest, file_name, sha256, blake3, size_bytes, signature_status, created_at
              FROM registry_releases
              WHERE scoped_id=?1 AND version=?2",
             params![scoped_id, version],
@@ -194,7 +195,7 @@ impl RegistryStore {
     ) -> Result<Option<RegistryVersionResolveRecord>> {
         let conn = self.connect()?;
         conn.query_row(
-            "SELECT p.scoped_id, r.version, r.manifest_hash, m.yanked_at
+            "SELECT p.scoped_id, r.version, r.manifest_hash, r.lock_id, r.closure_digest, m.yanked_at
              FROM registry_packages p
              JOIN registry_releases r ON r.scoped_id = p.scoped_id
              JOIN manifests m ON m.manifest_hash = r.manifest_hash
@@ -205,7 +206,9 @@ impl RegistryStore {
                     scoped_id: row.get(0)?,
                     version: row.get(1)?,
                     manifest_hash: row.get(2)?,
-                    yanked_at: row.get(3)?,
+                    lock_id: row.get(3)?,
+                    closure_digest: row.get(4)?,
+                    yanked_at: row.get(5)?,
                 })
             },
         )
@@ -225,6 +228,8 @@ impl RegistryStore {
         sha256: &str,
         blake3: &str,
         size_bytes: u64,
+        lock_id: Option<&str>,
+        closure_digest: Option<&str>,
         capsule_bytes: &[u8],
         issued_at: &str,
     ) -> Result<EpochResolveResponse> {
@@ -254,6 +259,8 @@ impl RegistryStore {
             description,
             version,
             &manifest_hash,
+            lock_id,
+            closure_digest,
             file_name,
             sha256,
             blake3,
@@ -415,12 +422,14 @@ impl RegistryStore {
         Ok(RegistryReleaseRecord {
             version: row.get(0)?,
             manifest_hash: row.get(1)?,
-            file_name: row.get(2)?,
-            sha256: row.get(3)?,
-            blake3: row.get(4)?,
-            size_bytes: row.get::<_, i64>(5)? as u64,
-            signature_status: row.get(6)?,
-            created_at: row.get(7)?,
+            lock_id: row.get(2)?,
+            closure_digest: row.get(3)?,
+            file_name: row.get(4)?,
+            sha256: row.get(5)?,
+            blake3: row.get(6)?,
+            size_bytes: row.get::<_, i64>(7)? as u64,
+            signature_status: row.get(8)?,
+            created_at: row.get(9)?,
         })
     }
 
@@ -430,7 +439,7 @@ impl RegistryStore {
         scoped_id: &str,
     ) -> Result<Vec<RegistryReleaseRecord>> {
         let mut stmt = conn.prepare(
-            "SELECT version, manifest_hash, file_name, sha256, blake3, size_bytes, signature_status, created_at
+            "SELECT version, manifest_hash, lock_id, closure_digest, file_name, sha256, blake3, size_bytes, signature_status, created_at
              FROM registry_releases
              WHERE scoped_id=?1",
         )?;
@@ -449,7 +458,7 @@ impl RegistryStore {
         scoped_id: &str,
     ) -> Result<Vec<RegistryReleaseRecord>> {
         let mut stmt = tx.prepare(
-            "SELECT version, manifest_hash, file_name, sha256, blake3, size_bytes, signature_status, created_at
+            "SELECT version, manifest_hash, lock_id, closure_digest, file_name, sha256, blake3, size_bytes, signature_status, created_at
              FROM registry_releases
              WHERE scoped_id=?1",
         )?;
@@ -473,6 +482,8 @@ impl RegistryStore {
         description: &str,
         version: &str,
         manifest_hash: &str,
+        lock_id: Option<&str>,
+        closure_digest: Option<&str>,
         file_name: &str,
         sha256: &str,
         blake3: &str,
@@ -532,12 +543,14 @@ impl RegistryStore {
         )?;
         tx.execute(
             "INSERT INTO registry_releases(
-                scoped_id, version, manifest_hash, file_name, sha256, blake3, size_bytes, signature_status, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'verified', ?8)",
+                scoped_id, version, manifest_hash, lock_id, closure_digest, file_name, sha256, blake3, size_bytes, signature_status, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'verified', ?10)",
             params![
                 scoped_id,
                 version,
                 manifest_hash,
+                lock_id,
+                closure_digest,
                 file_name,
                 normalize_hash(sha256),
                 normalize_hash(blake3),
@@ -1375,6 +1388,8 @@ impl RegistryStore {
               scoped_id TEXT NOT NULL,
               version TEXT NOT NULL,
               manifest_hash TEXT NOT NULL,
+                            lock_id TEXT,
+                            closure_digest TEXT,
               file_name TEXT NOT NULL,
               sha256 TEXT NOT NULL,
               blake3 TEXT NOT NULL,
@@ -1432,6 +1447,7 @@ impl RegistryStore {
             CREATE INDEX IF NOT EXISTS idx_chunks_tombstoned ON chunks(tombstoned_at);
             CREATE INDEX IF NOT EXISTS idx_registry_packages_publisher_slug ON registry_packages(publisher, slug);
             CREATE INDEX IF NOT EXISTS idx_registry_releases_manifest_hash ON registry_releases(manifest_hash);
+            CREATE INDEX IF NOT EXISTS idx_registry_releases_lock_id ON registry_releases(lock_id);
             CREATE INDEX IF NOT EXISTS idx_registry_store_metadata_updated_at ON registry_store_metadata(updated_at);
             CREATE INDEX IF NOT EXISTS idx_persistent_states_owner_scope ON persistent_states(owner_scope, state_name);
             CREATE INDEX IF NOT EXISTS idx_service_bindings_owner_scope ON service_bindings(owner_scope, service_name, binding_kind);
@@ -1594,6 +1610,23 @@ impl RegistryStore {
                 )?;
             }
             self.mark_migration_applied(conn, SCHEMA_MIGRATION_0009)?;
+        }
+
+        if !self.is_migration_applied(conn, SCHEMA_MIGRATION_0010)? {
+            if !self.column_exists(conn, "registry_releases", "lock_id")? {
+                conn.execute("ALTER TABLE registry_releases ADD COLUMN lock_id TEXT", [])?;
+            }
+            if !self.column_exists(conn, "registry_releases", "closure_digest")? {
+                conn.execute(
+                    "ALTER TABLE registry_releases ADD COLUMN closure_digest TEXT",
+                    [],
+                )?;
+            }
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_registry_releases_lock_id ON registry_releases(lock_id)",
+                [],
+            )?;
+            self.mark_migration_applied(conn, SCHEMA_MIGRATION_0010)?;
         }
 
         Ok(())

@@ -30,6 +30,7 @@ use super::launch_context::RuntimeLaunchContext;
 use super::source::ExecuteMode;
 use super::target_runner::{self, TargetLaunchOptions};
 use crate::application::pipeline::cleanup::{CleanupScope, PipelineAttemptContext};
+use crate::application::pipeline::phases::run::PreparedRunContext;
 use crate::application::services::{
     ServiceGraphPlan, ServicePhaseCoordinator, ServicePhaseRuntime,
 };
@@ -65,6 +66,7 @@ impl OrchestratorOptions {
 
 pub async fn execute(
     plan: &ManifestData,
+    prepared: &PreparedRunContext,
     reporter: Arc<CliReporter>,
     launch_ctx: &RuntimeLaunchContext,
     options: OrchestratorOptions,
@@ -72,11 +74,15 @@ pub async fn execute(
 ) -> Result<i32> {
     let client = BollardOciRuntimeClient::connect_default()
         .context("Failed to connect to OCI engine via Docker-compatible API")?;
-    execute_with_client(plan, reporter, launch_ctx, &options, attempt, client).await
+    execute_with_client(
+        plan, prepared, reporter, launch_ctx, &options, attempt, client,
+    )
+    .await
 }
 
 pub async fn execute_with_client<C>(
     plan: &ManifestData,
+    prepared: &PreparedRunContext,
     reporter: Arc<CliReporter>,
     launch_ctx: &RuntimeLaunchContext,
     options: &OrchestratorOptions,
@@ -111,6 +117,7 @@ where
 
     let runtime = OrchestratorStartupRuntime::new(
         plan.clone(),
+        prepared.clone(),
         orchestration.clone(),
         reporter.clone(),
         launch_ctx.clone(),
@@ -206,6 +213,7 @@ where
     C: OciRuntimeClient + Clone + Send + Sync + 'static,
 {
     plan: ManifestData,
+    prepared: PreparedRunContext,
     orchestration: OrchestrationPlan,
     reporter: Arc<CliReporter>,
     launch_ctx: RuntimeLaunchContext,
@@ -224,6 +232,7 @@ where
     #[allow(clippy::too_many_arguments)]
     fn new(
         plan: ManifestData,
+        prepared: PreparedRunContext,
         orchestration: OrchestrationPlan,
         reporter: Arc<CliReporter>,
         launch_ctx: RuntimeLaunchContext,
@@ -235,6 +244,7 @@ where
     ) -> Self {
         Self {
             plan,
+            prepared,
             orchestration,
             reporter,
             launch_ctx,
@@ -289,6 +299,7 @@ where
 
         let running_service = launch_service(
             &self.plan,
+            &self.prepared,
             &self.orchestration,
             &service,
             env,
@@ -328,6 +339,7 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn launch_service<C: OciRuntimeClient>(
     plan: &ManifestData,
+    prepared: &PreparedRunContext,
     orchestration: &OrchestrationPlan,
     service: &ResolvedService,
     env: HashMap<String, String>,
@@ -430,8 +442,18 @@ async fn launch_service<C: OciRuntimeClient>(
                 ..plan.clone()
             };
             let service_launch_ctx = launch_ctx.clone().with_injected_env(env.clone());
+            let service_prepared = prepared.with_raw_manifest(
+                service_plan.manifest.clone(),
+                if options.target_launch_options().preview_mode {
+                    capsule_core::types::ValidationMode::Preview
+                } else {
+                    capsule_core::types::ValidationMode::Strict
+                },
+                service_plan.manifest.get("engine").is_some(),
+            );
             let prepared = target_runner::prepare_target_execution(
                 &service_plan,
+                &service_prepared,
                 service_launch_ctx,
                 &options.target_launch_options(),
             )?;
@@ -445,6 +467,7 @@ async fn launch_service<C: OciRuntimeClient>(
                     let process = if options.dangerously_skip_permissions {
                         crate::executors::source::execute_host(
                             managed_plan,
+                            service_prepared.authoritative_lock.as_ref(),
                             reporter.clone(),
                             ExecuteMode::Piped,
                             &prepared.launch_ctx,
@@ -453,10 +476,13 @@ async fn launch_service<C: OciRuntimeClient>(
                         let nacelle = crate::commands::run::preflight_native_sandbox(
                             options.nacelle.clone(),
                             managed_plan,
+                            &service_prepared,
                             reporter,
                         )?;
                         crate::executors::source::execute(
                             managed_plan,
+                            service_prepared.authoritative_lock.as_ref(),
+                            service_prepared.effective_state.as_ref(),
                             Some(nacelle),
                             reporter.clone(),
                             &options.enforcement,
@@ -482,6 +508,7 @@ async fn launch_service<C: OciRuntimeClient>(
                 ExecutorKind::Deno => (
                     crate::executors::deno::spawn(
                         managed_plan,
+                        service_prepared.authoritative_lock.as_ref(),
                         &prepared.execution_plan,
                         &prepared.launch_ctx,
                         options.dangerously_skip_permissions,
@@ -493,6 +520,7 @@ async fn launch_service<C: OciRuntimeClient>(
                 ExecutorKind::NodeCompat => (
                     crate::executors::node_compat::spawn(
                         managed_plan,
+                        service_prepared.authoritative_lock.as_ref(),
                         &prepared.execution_plan,
                         &prepared.launch_ctx,
                         options.dangerously_skip_permissions,
@@ -1507,10 +1535,24 @@ target = "db"
             nacelle: None,
         };
 
-        let exit =
-            execute_with_client(&plan, reporter, &launch_ctx, &options, None, client.clone())
-                .await
-                .expect("orchestrator exit");
+        let exit = execute_with_client(
+            &plan,
+            &PreparedRunContext {
+                authoritative_lock: None,
+                effective_state: None,
+                raw_manifest: plan.manifest.clone(),
+                validation_mode: capsule_core::types::ValidationMode::Strict,
+                engine_override_declared: false,
+                compatibility_legacy_lock: None,
+            },
+            reporter,
+            &launch_ctx,
+            &options,
+            None,
+            client.clone(),
+        )
+        .await
+        .expect("orchestrator exit");
         assert_eq!(exit, 0);
 
         let events = client.events.lock().unwrap().clone();

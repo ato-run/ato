@@ -14,6 +14,8 @@ English | [日本語](README_JA.md)
 `ato` is a meta-CLI that interprets `capsule.toml` to execute, distribute, and install capsules.
 It is designed around a Zero-Trust / fail-closed model: normal runs stay quiet, while consent prompts and policy violations are surfaced explicitly.
 
+`ato init` now materializes a durable `ato.lock.json` baseline plus workspace-local `.ato/` inference state. The legacy prompt/manual manifest helpers remain available through `ato init --legacy prompt` and `ato init --legacy manual`.
+
 For a single-file consolidated specification of current behavior, see `docs/current-spec.md`.
 
 ## Key Commands
@@ -29,8 +31,13 @@ ato build [dir] [--strict-v3] [--force-large-payload]
 ato publish [--registry <url>] [--artifact <file.capsule>] [--scoped-id <publisher/slug>] [--allow-existing] [--prepare] [--build] [--deploy] [--legacy-full-publish] [--fix] [--no-tui] [--force-large-payload]
 ato publish --dry-run
 ato publish --ci
+ato init [path] [--yes]
 ato gen-ci
 ato inspect requirements <path|publisher/slug> --json [--registry <url>]
+ato inspect lock [path] [--json]
+ato inspect preview [path] [--json]
+ato inspect diagnostics [path] [--json]
+ato inspect remediation [path] [--json]
 ato search [query]
 ato source sync-status --source-id <id> --sync-run-id <id> [--registry <url>]
 ato source rebuild --source-id <id> [--ref <branch|tag|sha>] [--wait] [--registry <url>]
@@ -310,6 +317,13 @@ If missing or empty, execution stops fail-closed.
 
 `ato inspect requirements <path|publisher/slug> --json` returns a stable machine-readable
 requirements contract derived from `capsule.toml`.
+
+The same `ato inspect` family now covers lock-first troubleshooting:
+
+- `ato inspect lock [path] [--json]` shows field-level lock paths, provenance, unresolved markers, fallback use, and approval or selection gate involvement
+- `ato inspect preview [path] [--json]` previews durable workspace write-back and run-attempt ephemeral materialization paths without mutating files
+- `ato inspect diagnostics [path] [--json]` emits lock-path diagnostics and includes follow-up `inspect` / `preview` commands
+- `ato inspect remediation [path] [--json]` suggests lock-path-first remediation steps and attaches source mapping when provenance can identify it
 
 - `capsule.toml` is the only source of truth for requirement discovery
 - local paths and remote `publisher/slug` refs return the same top-level JSON shape

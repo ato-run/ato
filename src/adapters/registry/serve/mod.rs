@@ -122,6 +122,10 @@ struct StoredRelease {
     signature_status: String,
     created_at: String,
     #[serde(default)]
+    lock_id: Option<String>,
+    #[serde(default)]
+    closure_digest: Option<String>,
+    #[serde(default)]
     payload_v3: Option<StoredPayloadV3>,
 }
 
@@ -281,6 +285,10 @@ struct UploadResponse {
     blake3: String,
     size_bytes: u64,
     already_existed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lock_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    closure_digest: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -464,6 +472,10 @@ struct CapsuleReleaseRow {
     version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     manifest_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lock_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    closure_digest: Option<String>,
     content_hash: String,
     signature_status: String,
     is_current: bool,
@@ -728,6 +740,8 @@ async fn handle_get_capsule(
                 CapsuleReleaseRow {
                     version: release.version.clone(),
                     manifest_hash,
+                    lock_id: release.lock_id.clone(),
+                    closure_digest: release.closure_digest.clone(),
                     content_hash: release.blake3.clone(),
                     signature_status: release.signature_status.clone(),
                     is_current,
@@ -1682,6 +1696,8 @@ async fn handle_put_local_capsule(
         Ok(v) => v,
         Err(err) => return json_error(StatusCode::BAD_REQUEST, "missing_header", &err.to_string()),
     };
+    let lock_id = get_optional_header(&headers, "x-ato-lock-id");
+    let closure_digest = get_optional_header(&headers, "x-ato-closure-digest");
 
     let actual_sha = compute_sha256(&body);
     if !equals_hash(&expected_sha, &actual_sha) {
@@ -1765,6 +1781,8 @@ async fn handle_put_local_capsule(
                         blake3: format!("blake3:{}", existing_release.blake3),
                         size_bytes: existing_release.size_bytes,
                         already_existed: true,
+                        lock_id: existing_release.lock_id.clone(),
+                        closure_digest: existing_release.closure_digest.clone(),
                     }),
                 )
                     .into_response();
@@ -1804,6 +1822,8 @@ async fn handle_put_local_capsule(
         &actual_sha,
         &actual_blake3,
         body.len() as u64,
+        lock_id.as_deref(),
+        closure_digest.as_deref(),
         &body,
         &now,
     ) {
@@ -1841,6 +1861,8 @@ async fn handle_put_local_capsule(
             blake3: actual_blake3,
             size_bytes: body.len() as u64,
             already_existed: false,
+            lock_id,
+            closure_digest,
         }),
     )
         .into_response()

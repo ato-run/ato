@@ -125,6 +125,7 @@ fn resolve_run_target_rejects_noncanonical_github_url_input() {
             PathBuf::from("https://github.com/Koh0920/demo-repo"),
             true,
             false,
+            None,
             false,
             None,
             reporter,
@@ -218,6 +219,35 @@ fn run_command_parses_agent_mode() {
 }
 
 #[test]
+fn init_command_defaults_to_durable_workspace_materialization() {
+    let cli = Cli::try_parse_from(["ato", "init"]).expect("parse");
+
+    match cli.command {
+        Commands::Init { path, yes, legacy } => {
+            assert_eq!(path, PathBuf::from("."));
+            assert!(!yes);
+            assert!(legacy.is_none());
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn init_command_parses_legacy_modes() {
+    let cli = Cli::try_parse_from(["ato", "init", "./demo", "--yes", "--legacy", "prompt"])
+        .expect("parse");
+
+    match cli.command {
+        Commands::Init { path, yes, legacy } => {
+            assert_eq!(path, PathBuf::from("./demo"));
+            assert!(yes);
+            assert_eq!(legacy, Some(InitLegacyMode::Prompt));
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
 fn state_command_parses_register_and_inspect_forms() {
     let register = Cli::try_parse_from([
         "ato",
@@ -257,6 +287,57 @@ fn state_command_parses_register_and_inspect_forms() {
             command: StateCommands::Inspect { state_ref, json },
         } => {
             assert_eq!(state_ref, "state-demo");
+            assert!(!json);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn inspect_command_parses_lock_preview_diagnostics_and_remediation() {
+    let lock =
+        Cli::try_parse_from(["ato", "inspect", "lock", "./demo"]).expect("parse inspect lock");
+    match lock.command {
+        Commands::Inspect {
+            command: InspectCommands::Lock { path, json },
+        } => {
+            assert_eq!(path, PathBuf::from("./demo"));
+            assert!(!json);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+
+    let preview = Cli::try_parse_from(["ato", "inspect", "preview", "--json"])
+        .expect("parse inspect preview");
+    match preview.command {
+        Commands::Inspect {
+            command: InspectCommands::Preview { path, json },
+        } => {
+            assert_eq!(path, PathBuf::from("."));
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+
+    let diagnostics =
+        Cli::try_parse_from(["ato", "inspect", "diagnostics"]).expect("parse inspect diagnostics");
+    match diagnostics.command {
+        Commands::Inspect {
+            command: InspectCommands::Diagnostics { path, json },
+        } => {
+            assert_eq!(path, PathBuf::from("."));
+            assert!(!json);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+
+    let remediation = Cli::try_parse_from(["ato", "inspect", "remediation", "./capsule.toml"])
+        .expect("parse inspect remediation");
+    match remediation.command {
+        Commands::Inspect {
+            command: InspectCommands::Remediation { path, json },
+        } => {
+            assert_eq!(path, PathBuf::from("./capsule.toml"));
             assert!(!json);
         }
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),

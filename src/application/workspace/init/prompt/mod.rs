@@ -1,4 +1,7 @@
 use anyhow::{Context, Result};
+use capsule_core::input_resolver::{
+    resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -17,6 +20,31 @@ pub fn execute(
         .unwrap_or_else(|| PathBuf::from("."))
         .canonicalize()
         .context("Failed to resolve project directory")?;
+
+    match resolve_authoritative_input(&project_dir, ResolveInputOptions::default()) {
+        Ok(ResolvedInput::CanonicalLock { canonical, .. }) => {
+            anyhow::bail!(
+                "{} already exists at {}. `ato init` prompt generation applies to source-only projects in this migration stage.",
+                capsule_core::input_resolver::ATO_LOCK_FILE_NAME,
+                canonical.path.display()
+            );
+        }
+        Ok(ResolvedInput::CompatibilityProject { project, .. }) => {
+            anyhow::bail!(
+                "capsule.toml already exists at {}. Prompt generation is intended for source-only projects.",
+                project.manifest.path.display()
+            );
+        }
+        Ok(ResolvedInput::SourceOnly { .. }) => {}
+        Err(error)
+            if error
+                .to_string()
+                .contains("is not an authoritative command-entry input") =>
+        {
+            return Err(error.into());
+        }
+        Err(_) => {}
+    }
 
     let detected = detect::detect_project(&project_dir)?;
     let info = recipe::project_info_from_detection(&detected)?;
