@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use rand::Rng;
 use serde::Deserialize;
 use serde_json::json;
+use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -103,6 +104,7 @@ pub fn execute(
 
 pub fn execute_host(
     plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
     _reporter: std::sync::Arc<CliReporter>,
     mode: ExecuteMode,
     launch_ctx: &RuntimeLaunchContext,
@@ -117,12 +119,20 @@ pub fn execute_host(
     let readiness_port = runtime_overrides::override_port(launch_spec.port);
 
     let mut cmd = if force_python_no_bytecode {
-        let python_bin = runtime_manager::ensure_python_binary(plan)?;
+        let python_bin = resolve_host_managed_runtime_binary(
+            plan,
+            authoritative_lock,
+            ManagedRuntimeKind::Python,
+        )?;
         let mut python = Command::new(python_bin);
         python.arg(&launch_spec.command);
         python
     } else if force_node_runtime {
-        let node_bin = runtime_manager::ensure_node_binary(plan)?;
+        let node_bin = resolve_host_managed_runtime_binary(
+            plan,
+            authoritative_lock,
+            ManagedRuntimeKind::Node,
+        )?;
         let mut node = Command::new(node_bin);
         node.arg(&launch_spec.command);
         node
@@ -245,6 +255,90 @@ fn validated_launch_context_env(
     }
 
     Ok(launch_ctx.merged_env().into_iter().collect())
+}
+
+#[derive(Clone, Copy)]
+enum ManagedRuntimeKind {
+    Node,
+    Python,
+}
+
+fn resolve_host_managed_runtime_binary(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    runtime: ManagedRuntimeKind,
+) -> Result<PathBuf> {
+    if authoritative_lock.is_none() {
+        return match runtime {
+            ManagedRuntimeKind::Node => runtime_manager::ensure_node_binary(plan),
+            ManagedRuntimeKind::Python => runtime_manager::ensure_python_binary(plan),
+        };
+    }
+
+    let candidates: &[&str] = match runtime {
+        ManagedRuntimeKind::Node => {
+            if cfg!(windows) {
+                &["node.exe", "node"]
+            } else {
+                &["node"]
+            }
+        }
+        ManagedRuntimeKind::Python => {
+            if cfg!(windows) {
+                &["python.exe", "python"]
+            } else {
+                &["python3", "python"]
+            }
+        }
+    };
+
+    find_command_on_path(candidates).ok_or_else(|| {
+        let runtime_name = match runtime {
+            ManagedRuntimeKind::Node => "node",
+            ManagedRuntimeKind::Python => "python",
+        };
+        anyhow::anyhow!(
+            "lock-derived source execution requires a host-local '{}' runtime on PATH",
+            runtime_name
+        )
+    })
+}
+
+fn find_command_on_path(candidates: &[&str]) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    let path_exts = executable_extensions();
+
+    for directory in env::split_paths(&path) {
+        for candidate in candidates {
+            let direct = directory.join(candidate);
+            if direct.is_file() {
+                return Some(direct);
+            }
+            for extension in &path_exts {
+                let with_extension = directory.join(format!("{}{}", candidate, extension));
+                if with_extension.is_file() {
+                    return Some(with_extension);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn executable_extensions() -> Vec<String> {
+    if cfg!(windows) {
+        env::var_os("PATHEXT")
+            .map(|value| {
+                env::split_paths(&value)
+                    .map(|path| path.to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| vec![".exe".to_string(), ".cmd".to_string(), ".bat".to_string()])
+    } else {
+        Vec::new()
+    }
 }
 
 fn resolve_host_command_path(working_dir: &Path, command: &str) -> PathBuf {

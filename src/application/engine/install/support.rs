@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::input_resolver::{
-    resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
+    resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ATO_LOCK_FILE_NAME,
 };
 use capsule_core::smoke::SmokeFailureClass;
 use capsule_core::CapsuleReporter;
@@ -268,11 +268,13 @@ pub(crate) fn github_build_error_requires_manual_intervention(error: &anyhow::Er
     combined.contains("uv.lock is missing")
         || combined.contains("uv.lock is required")
         || combined.contains("requires uv.lock")
+        || combined.contains("yarn.lock")
         || combined.contains("pnpm-lock.yaml is missing")
         || combined.contains("package-lock.json")
         || combined.contains("requires one of package-lock.json")
         || combined.contains("multiple node lockfiles detected")
         || combined.contains("fail-closed provisioning")
+        || combined.contains("yarn install --frozen-lockfile")
         || combined.contains("bun install --frozen-lockfile")
         || combined.contains("lockfile had changes, but lockfile is frozen")
         || combined.contains("lockfile is frozen")
@@ -333,6 +335,8 @@ pub(crate) fn build_github_manual_intervention_error(
 
     let lockfile_target = if lowered.contains("uv.lock") {
         Some("uv.lock")
+    } else if lowered.contains("yarn.lock") {
+        Some("yarn.lock")
     } else if lowered.contains("pnpm-lock.yaml") {
         Some("pnpm-lock.yaml")
     } else if lowered.contains("package-lock.json") {
@@ -967,6 +971,10 @@ pub(crate) fn agent_local_root_for_path(path: &Path) -> Option<PathBuf> {
         return path.parent().map(PathBuf::from);
     }
 
+    if path.file_name().and_then(|name| name.to_str()) == Some(ATO_LOCK_FILE_NAME) {
+        return path.parent().map(PathBuf::from);
+    }
+
     None
 }
 
@@ -979,12 +987,7 @@ pub(crate) fn ensure_local_manifest_ready_for_run(
         return Ok(LocalRunManifestPreparationOutcome::Ready);
     };
 
-    let manifest_path = if resolved.path.is_file() {
-        resolved.path.clone()
-    } else {
-        local_root.join("capsule.toml")
-    };
-    match resolve_authoritative_input(&manifest_path, ResolveInputOptions::default()) {
+    match resolve_authoritative_input(local_root, ResolveInputOptions::default()) {
         Ok(ResolvedInput::CanonicalLock { .. }) => {
             return Ok(LocalRunManifestPreparationOutcome::Ready);
         }
@@ -1003,6 +1006,8 @@ pub(crate) fn ensure_local_manifest_ready_for_run(
         }
         Err(_) => {}
     }
+
+    let manifest_path = local_root.join("capsule.toml");
 
     let status = inspect_local_run_manifest(&manifest_path)?;
     if matches!(status, LocalRunManifestStatus::Valid) {
