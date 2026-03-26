@@ -189,6 +189,7 @@ pub(super) fn plan_v03_provision_command(
 
     if matches!(driver.as_str(), "node") {
         let package_lock = execution_working_directory.join("package-lock.json");
+        let yarn_lock = execution_working_directory.join("yarn.lock");
         let pnpm_lock = execution_working_directory.join("pnpm-lock.yaml");
         let bun_lock = execution_working_directory.join("bun.lock");
         let bun_lockb = execution_working_directory.join("bun.lockb");
@@ -198,6 +199,7 @@ pub(super) fn plan_v03_provision_command(
                 package_lock.clone(),
                 package_lock.exists(),
             ),
+            ("yarn.lock", yarn_lock.clone(), yarn_lock.exists()),
             ("pnpm-lock.yaml", pnpm_lock.clone(), pnpm_lock.exists()),
             ("bun.lock", bun_lock.clone(), bun_lock.exists()),
             ("bun.lockb", bun_lockb.clone(), bun_lockb.exists()),
@@ -215,6 +217,9 @@ pub(super) fn plan_v03_provision_command(
         if package_lock.exists() {
             matches.push("npm ci");
         }
+        if yarn_lock.exists() {
+            matches.push("yarn install --frozen-lockfile");
+        }
         if pnpm_lock.exists() {
             matches.push("pnpm install --frozen-lockfile");
         }
@@ -223,13 +228,13 @@ pub(super) fn plan_v03_provision_command(
         }
         return match matches.as_slice() {
             [] => Err(AtoExecutionError::lock_incomplete(
-                "source/node target requires one of package-lock.json, pnpm-lock.yaml, bun.lock, or bun.lockb",
+                "source/node target requires one of package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lock, or bun.lockb",
                 Some("package-lock.json"),
             )
             .into()),
             [command] => Ok(Some((*command).to_string())),
             _ => Err(AtoExecutionError::lock_incomplete(
-                "multiple node lockfiles detected; keep only one of package-lock.json, pnpm-lock.yaml, bun.lock, or bun.lockb",
+                "multiple node lockfiles detected; keep only one of package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lock, or bun.lockb",
                 Some("package-lock.json"),
             )
             .into()),

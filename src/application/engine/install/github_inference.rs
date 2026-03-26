@@ -682,6 +682,7 @@ fn github_install_lockfile_checks(
     match driver.trim().to_ascii_lowercase().as_str() {
         "node" => {
             let package_lock = execution_working_directory.join("package-lock.json");
+            let yarn_lock = execution_working_directory.join("yarn.lock");
             let pnpm_lock = execution_working_directory.join("pnpm-lock.yaml");
             let bun_lock = execution_working_directory.join("bun.lock");
             let bun_lockb = execution_working_directory.join("bun.lockb");
@@ -691,6 +692,7 @@ fn github_install_lockfile_checks(
                     package_lock.clone(),
                     package_lock.exists(),
                 ),
+                ("yarn.lock", yarn_lock.clone(), yarn_lock.exists()),
                 ("pnpm-lock.yaml", pnpm_lock.clone(), pnpm_lock.exists()),
                 ("bun.lock", bun_lock.clone(), bun_lock.exists()),
                 ("bun.lockb", bun_lockb.clone(), bun_lockb.exists()),

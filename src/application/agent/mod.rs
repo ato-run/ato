@@ -436,6 +436,7 @@ impl AgentToolExecutor {
         };
         let node_lockfiles = [
             "package-lock.json",
+            "yarn.lock",
             "pnpm-lock.yaml",
             "bun.lock",
             "bun.lockb",
@@ -920,6 +921,7 @@ fn plan_node_actions(
         .first()
         .and_then(|lock| match lock.as_str() {
             "package-lock.json" if which::which("npm").is_ok() => Some("npm ci"),
+            "yarn.lock" if which::which("yarn").is_ok() => Some("yarn install --frozen-lockfile"),
             "pnpm-lock.yaml" if which::which("pnpm").is_ok() => {
                 Some("pnpm install --frozen-lockfile")
             }
@@ -1508,7 +1510,7 @@ mod tests {
     #[test]
     fn classifier_accepts_lock_incomplete() {
         let err = anyhow::anyhow!(AtoExecutionError::lock_incomplete(
-            "source/node target requires one of package-lock.json, pnpm-lock.yaml, bun.lock, or bun.lockb",
+            "source/node target requires one of package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lock, or bun.lockb",
             Some("package-lock.json"),
         ));
         let classified = AgentFailureClassifier::classify(&err, "prepare").expect("classified");
