@@ -417,22 +417,6 @@ struct NormalizedRunTarget {
     authoritative_input: Option<run_phase::RunAuthoritativeInput>,
 }
 
-fn authoritative_kind_from_materialization(
-    input_kind: source_inference::SourceInferenceInputKind,
-) -> run_phase::RunAuthoritativeInputKind {
-    match input_kind {
-        source_inference::SourceInferenceInputKind::CanonicalLock => {
-            run_phase::RunAuthoritativeInputKind::CanonicalLock
-        }
-        source_inference::SourceInferenceInputKind::DraftLock => {
-            run_phase::RunAuthoritativeInputKind::CompatibilityCompiledDraft
-        }
-        source_inference::SourceInferenceInputKind::SourceEvidence => {
-            run_phase::RunAuthoritativeInputKind::SourceOnly
-        }
-    }
-}
-
 fn authoritative_input_from_materialization(
     materialized: source_inference::RunMaterialization,
     cli_state_bindings: &[String],
@@ -445,11 +429,7 @@ fn authoritative_input_from_materialization(
     )?;
 
     Ok(run_phase::RunAuthoritativeInput {
-        kind: authoritative_kind_from_materialization(materialized.input_kind),
-        project_root: materialized.project_root,
         lock: materialized.lock,
-        lock_path: materialized.lock_path,
-        sidecar_path: materialized.sidecar_path,
         bridge_manifest_path: materialized.manifest_path,
         bridge_manifest_sha256: materialized.bridge_manifest_sha256,
         effective_state,
@@ -934,6 +914,7 @@ async fn run_execute_phase(
 async fn reroute_auto_provisioned_execution(
     decision: capsule_core::router::RuntimeDecision,
     launch_ctx: crate::executors::launch_context::RuntimeLaunchContext,
+    prepared: &run_phase::PreparedRunContext,
     reporter: Arc<CliReporter>,
     preview_mode: bool,
     shadow_manifest_path: &Path,
@@ -945,6 +926,7 @@ async fn reroute_auto_provisioned_execution(
     run_phase::reroute_auto_provisioned_execution(
         decision,
         launch_ctx,
+        prepared,
         reporter,
         preview_mode,
         shadow_manifest_path,
@@ -1342,6 +1324,14 @@ run_command = "node server.js"
             target: "/var/run/ato/injected/db".to_string(),
             readonly: true,
         };
+        let prepared = crate::commands::run::run_phase::PreparedRunContext {
+            authoritative_lock: None,
+            effective_state: None,
+            raw_manifest: toml::Value::Table(toml::map::Map::new()),
+            validation_mode: capsule_core::types::ValidationMode::Strict,
+            engine_override_declared: false,
+            compatibility_legacy_lock: None,
+        };
         for preview_mode in [false, true] {
             let launch_ctx = RuntimeLaunchContext::empty()
                 .with_injected_env(
@@ -1354,6 +1344,7 @@ run_command = "node server.js"
             let (rerouted, rerouted_ctx, _rerouted_prepared) = reroute_auto_provisioned_execution(
                 decision.clone(),
                 launch_ctx,
+                &prepared,
                 Arc::new(CliReporter::new(false)),
                 preview_mode,
                 &shadow_manifest_path,

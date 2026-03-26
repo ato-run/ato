@@ -130,7 +130,12 @@ pub async fn execute(
             )
             .await?;
     }
-    let artifact_path = build_capsule_artifact(&manifest_path, &manifest.name, &resolved_version);
+    let artifact_path = build_capsule_artifact(
+        &manifest_path,
+        &manifest.name,
+        &resolved_version,
+        Some(&authoritative_input),
+    );
     if !args.json_output {
         reporter.progress_finish(None).await?;
     }
@@ -367,7 +372,12 @@ pub(crate) fn build_capsule_artifact(
     manifest_path: &Path,
     name: &str,
     version: &str,
+    authoritative_input: Option<&crate::application::producer_input::ProducerAuthoritativeInput>,
 ) -> Result<PathBuf> {
+    if let Some(authoritative_input) = authoritative_input {
+        authoritative_input.validate_bridge_manifest()?;
+    }
+
     let manifest_dir = manifest_path.parent().ok_or_else(|| {
         anyhow::anyhow!("Manifest path has no parent: {}", manifest_path.display())
     })?;

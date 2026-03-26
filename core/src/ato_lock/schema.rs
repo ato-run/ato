@@ -230,6 +230,8 @@ pub struct LockSignature {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct UnresolvedValue {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
     pub reason: UnresolvedReason,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,

@@ -8,7 +8,9 @@ use crate::application::pipeline::producer::PublishDryRunStageResult;
 use crate::application::ports::publish::{
     DestinationSpec, PublishableArtifact, PublishedLocation, SharedDestinationPort,
 };
-use crate::application::producer_input::resolve_producer_authoritative_input;
+use crate::application::producer_input::{
+    resolve_producer_authoritative_input, ProducerAuthoritativeInput,
+};
 
 use crate::publish_artifact::ArtifactManifestInfo;
 
@@ -43,9 +45,10 @@ struct PreparedPrivatePublishArtifact {
     closure_digest: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum ResolvedPrivatePublishInput {
     Build {
+        authoritative_input: ProducerAuthoritativeInput,
         manifest_path: PathBuf,
         lock_id: Option<String>,
         closure_digest: Option<String>,
@@ -171,6 +174,7 @@ fn prepare_private_publish_artifact(
 ) -> Result<PreparedPrivatePublishArtifact> {
     match resolve_private_publish_input(request)? {
         ResolvedPrivatePublishInput::Build {
+            authoritative_input,
             manifest_path,
             name,
             version,
@@ -178,9 +182,13 @@ fn prepare_private_publish_artifact(
             lock_id,
             closure_digest,
         } => {
-            let artifact_path =
-                crate::publish_ci::build_capsule_artifact(&manifest_path, &name, &version)
-                    .with_context(|| "Failed to build artifact for private registry publish")?;
+            let artifact_path = crate::publish_ci::build_capsule_artifact(
+                &manifest_path,
+                &name,
+                &version,
+                Some(&authoritative_input),
+            )
+            .with_context(|| "Failed to build artifact for private registry publish")?;
 
             Ok(PreparedPrivatePublishArtifact {
                 artifact_path,
@@ -233,6 +241,8 @@ fn resolve_private_publish_input(
     let manifest_path = resolved.manifest_path.clone();
     let manifest_raw = resolved.manifest_raw.clone();
     let manifest = resolved.manifest.clone();
+    let lock_id = resolved.lock_id.clone();
+    let closure_digest = resolved.closure_digest.clone();
 
     let slug = manifest_slug(&manifest.name)?;
     let publisher = resolve_private_publisher(request.publisher_hint.as_deref(), &manifest_raw);
@@ -240,9 +250,10 @@ fn resolve_private_publish_input(
     let version = resolve_manifest_publish_version(&manifest.version);
 
     Ok(ResolvedPrivatePublishInput::Build {
+        authoritative_input: resolved,
         manifest_path,
-        lock_id: resolved.lock_id,
-        closure_digest: resolved.closure_digest,
+        lock_id,
+        closure_digest,
         name: manifest.name,
         version,
         scoped_id,

@@ -145,6 +145,7 @@ fn write_inspect_lock_workspace(dir: &Path) {
         }),
     );
     lock.resolution.unresolved.push(UnresolvedValue {
+        field: Some("resolution.runtime".to_string()),
         reason: UnresolvedReason::InsufficientEvidence,
         detail: Some("runtime selection remains unresolved".to_string()),
         candidates: Vec::new(),
@@ -709,6 +710,71 @@ fn test_init_rejects_existing_canonical_lock_input() {
         "stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn test_init_materializes_durable_workspace_state_from_cli() {
+    let tmp = tempdir().unwrap();
+    fs::write(
+        tmp.path().join("package.json"),
+        r#"{
+  "name": "demo-init",
+  "scripts": {
+    "start": "node index.js"
+  }
+}"#,
+    )
+    .unwrap();
+    fs::write(tmp.path().join("index.js"), "console.log('hello');\n").unwrap();
+    fs::create_dir_all(tmp.path().join(".git")).unwrap();
+
+    let output = Command::cargo_bin("ato")
+        .unwrap()
+        .current_dir(tmp.path())
+        .args(["init", "--yes"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(tmp.path().join("ato.lock.json").exists());
+    assert!(tmp
+        .path()
+        .join(".ato/source-inference/provenance.json")
+        .exists());
+    assert!(tmp
+        .path()
+        .join(".ato/source-inference/provenance-cache.json")
+        .exists());
+    assert!(tmp.path().join(".ato/binding/seed.json").exists());
+    assert!(tmp.path().join(".ato/policy/bundle.json").exists());
+    assert!(tmp.path().join(".ato/attestations/store.json").exists());
+
+    let lock: AtoLock =
+        serde_json::from_str(&fs::read_to_string(tmp.path().join("ato.lock.json")).unwrap())
+            .unwrap();
+    assert!(lock.binding.entries.is_empty());
+    assert!(lock.attestations.entries.is_empty());
+
+    let binding_seed: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(tmp.path().join(".ato/binding/seed.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(binding_seed.get("entries").is_none());
+
+    let attestation_store: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(tmp.path().join(".ato/attestations/store.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(attestation_store.get("approvals").is_none());
+    assert!(attestation_store.get("observations").is_none());
+
+    let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+    assert!(gitignore.contains(".ato/"));
+    assert!(gitignore.contains("*.capsule"));
 }
 
 #[test]
@@ -2050,11 +2116,11 @@ fn test_publish_json_missing_manifest_uses_diagnostic_envelope() {
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(value["schema_version"], "1");
     assert_eq!(value["status"], "error");
-    assert_eq!(value["error"]["code"], "E999");
+    assert_eq!(value["error"]["code"], "E002");
     assert!(value["error"]["message"]
         .as_str()
         .expect("message string")
-        .contains("capsule.toml not found in current directory"));
+        .contains("unsupported driver 'rust'"));
 }
 
 #[test]

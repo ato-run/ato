@@ -1021,14 +1021,19 @@ fn build_capsule_artifact_for_publish(cwd: &Path) -> Result<PathBuf> {
         false,
     )?;
     let manifest_path = authoritative_input.manifest_path.clone();
-    let manifest = authoritative_input.manifest;
+    let manifest = authoritative_input.manifest.clone();
     let version = if manifest.version.trim().is_empty() {
         "auto"
     } else {
         manifest.version.trim()
     };
-    crate::publish_ci::build_capsule_artifact(&manifest_path, &manifest.name, version)
-        .with_context(|| "Failed to build artifact for publish")
+    crate::publish_ci::build_capsule_artifact(
+        &manifest_path,
+        &manifest.name,
+        version,
+        Some(&authoritative_input),
+    )
+    .with_context(|| "Failed to build artifact for publish")
 }
 
 fn emit_publish_json_output(

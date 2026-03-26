@@ -99,16 +99,6 @@ pub(crate) struct EffectiveLockState {
     pub(crate) state_source_overrides: HashMap<String, String>,
     pub(crate) compiler_overlay: LockCompilerOverlay,
     pub(crate) policy: WorkspacePolicyBundle,
-    pub(crate) policy_source: EffectivePolicySource,
-    pub(crate) paths: WorkspaceStatePaths,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum EffectivePolicySource {
-    WorkspaceLocal,
-    Embedded,
-    #[default]
-    DefaultAllow,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -170,6 +160,8 @@ pub(crate) fn resolve_effective_lock_state(
     let paths = workspace_state_paths(project_root);
     let embedded_binding = parse_binding_entries(&lock.binding.entries)?;
     let workspace_binding = load_workspace_binding_seed(&paths.binding_seed_path)?
+        .map(|seed| validate_workspace_binding_seed_affinity(&paths.binding_seed_path, &seed, lock))
+        .transpose()?
         .map(|seed| parse_binding_entries(&seed.entries))
         .transpose()?
         .unwrap_or_default();
@@ -181,27 +173,31 @@ pub(crate) fn resolve_effective_lock_state(
 
     let compiler_overlay = merge_overlays(&embedded_binding.overlay, &workspace_binding.overlay);
 
-    let (policy, policy_source) =
-        if let Some(bundle) = load_workspace_policy_bundle(&paths.policy_bundle_path)? {
-            (bundle, EffectivePolicySource::WorkspaceLocal)
-        } else if let Some(bundle) = parse_embedded_policy_bundle(&lock.policy.entries)? {
-            (bundle, EffectivePolicySource::Embedded)
-        } else {
-            (
-                WorkspacePolicyBundle {
-                    schema_version: "1".to_string(),
-                    ..WorkspacePolicyBundle::default()
-                },
-                EffectivePolicySource::DefaultAllow,
+    let workspace_policy = load_workspace_policy_bundle(&paths.policy_bundle_path)?;
+    let policy = if let Some(bundle) = workspace_policy {
+        bundle
+    } else if let Some(bundle) = parse_embedded_policy_bundle(&lock.policy.entries)? {
+        bundle
+    } else {
+        WorkspacePolicyBundle {
+            schema_version: "1".to_string(),
+            ..WorkspacePolicyBundle::default()
+        }
+    };
+    load_workspace_attestation_store(&paths.attestation_store_path)?
+        .map(|store| {
+            validate_workspace_attestation_store_affinity(
+                &paths.attestation_store_path,
+                &store,
+                lock,
             )
-        };
+        })
+        .transpose()?;
 
     Ok(EffectiveLockState {
         state_source_overrides,
         compiler_overlay,
         policy,
-        policy_source,
-        paths,
     })
 }
 
@@ -337,6 +333,105 @@ fn load_workspace_policy_bundle(path: &Path) -> Result<Option<WorkspacePolicyBun
     let bundle = serde_json::from_str(&raw)
         .with_context(|| format!("Failed to parse {}", path.display()))?;
     Ok(Some(bundle))
+}
+
+fn load_workspace_attestation_store(path: &Path) -> Result<Option<WorkspaceAttestationStore>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let store = serde_json::from_str(&raw)
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    Ok(Some(store))
+}
+
+fn validate_workspace_binding_seed_affinity(
+    path: &Path,
+    seed: &WorkspaceBindingSeed,
+    lock: &AtoLock,
+) -> Result<WorkspaceBindingSeed> {
+    if seed.entries.is_empty() && seed.unresolved.is_empty() {
+        return Ok(seed.clone());
+    }
+
+    let current_lock_id = lock
+        .lock_id
+        .as_ref()
+        .map(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "workspace binding seed at {} requires lock.lock_id to be present before local bindings can be applied fail-closed",
+                path.display()
+            )
+        })?;
+    let seed_lock_id = seed
+        .lock_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "workspace binding seed at {} is missing lock_id; regenerate the workspace state before applying local bindings",
+                path.display()
+            )
+        })?;
+
+    if seed_lock_id != current_lock_id {
+        anyhow::bail!(
+            "workspace binding seed at {} targets lock_id '{}' but the authoritative lock resolved to '{}'; refusing to apply stale workspace bindings",
+            path.display(),
+            seed_lock_id,
+            current_lock_id,
+        );
+    }
+
+    Ok(seed.clone())
+}
+
+fn validate_workspace_attestation_store_affinity(
+    path: &Path,
+    store: &WorkspaceAttestationStore,
+    lock: &AtoLock,
+) -> Result<WorkspaceAttestationStore> {
+    if store.approvals.is_empty() && store.observations.is_empty() {
+        return Ok(store.clone());
+    }
+
+    let current_lock_id = lock
+        .lock_id
+        .as_ref()
+        .map(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "workspace attestation store at {} requires lock.lock_id to be present before host-local attestations can be consumed",
+                path.display()
+            )
+        })?;
+    let store_lock_id = store
+        .lock_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "workspace attestation store at {} is missing lock_id; regenerate the workspace state before consuming attestations",
+                path.display()
+            )
+        })?;
+
+    if store_lock_id != current_lock_id {
+        anyhow::bail!(
+            "workspace attestation store at {} targets lock_id '{}' but the authoritative lock resolved to '{}'; refusing to consume stale attestations",
+            path.display(),
+            store_lock_id,
+            current_lock_id,
+        );
+    }
+
+    Ok(store.clone())
 }
 
 fn parse_cli_state_overrides(raw_bindings: &[String]) -> Result<HashMap<String, String>> {
@@ -488,6 +583,9 @@ mod tests {
 
     fn sample_lock() -> AtoLock {
         let mut lock = AtoLock::default();
+        lock.lock_id = Some(capsule_core::ato_lock::LockId::new(
+            "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+        ));
         lock.binding.entries.insert(
             "state_overrides".to_string(),
             json!({"data": "state-embedded"}),
@@ -513,7 +611,10 @@ mod tests {
             provenance_cache_path: dir
                 .path()
                 .join(".ato/source-inference/provenance-cache.json"),
-            lock_id: None,
+            lock_id: Some(
+                "blake3:1111111111111111111111111111111111111111111111111111111111111111"
+                    .to_string(),
+            ),
             entries: BTreeMap::from([
                 (
                     "state_overrides".to_string(),
@@ -563,15 +664,93 @@ mod tests {
     fn workspace_policy_bundle_overrides_embedded_policy_source() {
         let dir = tempdir().expect("tempdir");
         let paths = workspace_state_paths(dir.path());
-        write_default_policy_bundle(&paths.policy_bundle_path).expect("write policy");
+        let bundle = WorkspacePolicyBundle {
+            schema_version: "1".to_string(),
+            network: WorkspaceNetworkPolicy {
+                deny_hosts: vec!["workspace.example.com".to_string()],
+                ..WorkspaceNetworkPolicy::default()
+            },
+            ..WorkspacePolicyBundle::default()
+        };
+        write_json_file(
+            &paths.policy_bundle_path,
+            &bundle,
+            "workspace policy bundle",
+        )
+        .expect("write policy");
 
         let effective =
             resolve_effective_lock_state(dir.path(), &sample_lock(), &[]).expect("effective");
         assert_eq!(
-            effective.policy_source,
-            EffectivePolicySource::WorkspaceLocal
+            effective.policy.network.deny_hosts,
+            vec!["workspace.example.com"]
         );
+    }
+
+    #[test]
+    fn empty_workspace_policy_bundle_is_explicit_default_allow_override() {
+        let dir = tempdir().expect("tempdir");
+        let paths = workspace_state_paths(dir.path());
+        write_default_policy_bundle(&paths.policy_bundle_path).expect("write policy");
+
+        let effective =
+            resolve_effective_lock_state(dir.path(), &sample_lock(), &[]).expect("effective");
+
         assert!(effective.policy.network.allow_hosts.is_empty());
+        assert!(effective.policy.network.deny_hosts.is_empty());
+    }
+
+    #[test]
+    fn workspace_binding_seed_fails_closed_on_lock_id_mismatch() {
+        let dir = tempdir().expect("tempdir");
+        let paths = workspace_state_paths(dir.path());
+        let seed = WorkspaceBindingSeed {
+            schema_version: "1".to_string(),
+            lock_path: dir.path().join("ato.lock.json"),
+            provenance_cache_path: dir
+                .path()
+                .join(".ato/source-inference/provenance-cache.json"),
+            lock_id: Some(
+                "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+            entries: BTreeMap::from([(
+                "state_overrides".to_string(),
+                json!({"data": "state-workspace"}),
+            )]),
+            unresolved: Vec::new(),
+        };
+        write_json_file(&paths.binding_seed_path, &seed, "binding seed").expect("write seed");
+
+        let error =
+            resolve_effective_lock_state(dir.path(), &sample_lock(), &[]).expect_err("mismatch");
+        assert!(error
+            .to_string()
+            .contains("refusing to apply stale workspace bindings"));
+    }
+
+    #[test]
+    fn workspace_attestation_store_fails_closed_on_lock_id_mismatch() {
+        let dir = tempdir().expect("tempdir");
+        let paths = workspace_state_paths(dir.path());
+        let store = WorkspaceAttestationStore {
+            schema_version: "1".to_string(),
+            lock_path: Some(dir.path().join("ato.lock.json")),
+            lock_id: Some(
+                "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_string(),
+            ),
+            approvals: vec![json!({"kind": "approval"})],
+            observations: Vec::new(),
+        };
+        write_json_file(&paths.attestation_store_path, &store, "attestation store")
+            .expect("write store");
+
+        let error =
+            resolve_effective_lock_state(dir.path(), &sample_lock(), &[]).expect_err("mismatch");
+        assert!(error
+            .to_string()
+            .contains("refusing to consume stale attestations"));
     }
 
     #[test]
