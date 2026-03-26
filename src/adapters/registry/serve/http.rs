@@ -52,6 +52,15 @@ pub(super) fn get_required_header(headers: &HeaderMap, key: &str) -> Result<Stri
         .ok_or_else(|| anyhow::anyhow!("required header '{}' is missing", key))
 }
 
+pub(super) fn get_optional_header(headers: &HeaderMap, key: &str) -> Option<String> {
+    headers
+        .get(key)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 pub(super) fn parse_required_u32_header(headers: &HeaderMap, key: &str) -> Result<u32> {
     let value = get_required_header(headers, key)?;
     value

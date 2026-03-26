@@ -5,6 +5,8 @@
 `ato` は `capsule.toml` を解釈して、実行・配布・インストールを行うメタCLIです。  
 Zero-Trust / fail-closed を前提に、通常実行時は静かに動作し、同意や違反時のみ明示的に出力します。
 
+`ato init` は durable な `ato.lock.json` baseline と workspace-local の `.ato/` inference state を materialize します。旧 prompt/manual manifest helper は `ato init --legacy prompt` と `ato init --legacy manual` で引き続き利用できます。
+
 ## 主要コマンド
 
 ```bash
@@ -18,7 +20,12 @@ ato build [dir] [--strict-v3] [--force-large-payload]
 ato publish [--registry <url>] [--artifact <file.capsule>] [--scoped-id <publisher/slug>] [--allow-existing] [--prepare] [--build] [--deploy] [--legacy-full-publish] [--fix] [--no-tui] [--force-large-payload]
 ato publish --dry-run
 ato publish --ci
+ato init [path] [--yes]
 ato gen-ci
+ato inspect lock [path] [--json]
+ato inspect preview [path] [--json]
+ato inspect diagnostics [path] [--json]
+ato inspect remediation [path] [--json]
 ato search [query]
 ato source sync-status --source-id <id> --sync-run-id <id> [--registry <url>]
 ato source rebuild --source-id <id> [--ref <branch|tag|sha>] [--wait] [--registry <url>]
@@ -26,6 +33,13 @@ ato config engine install --engine nacelle [--version <ver>]
 ato setup --engine nacelle [--version <ver>] # 互換コマンド（非推奨）
 ato registry serve --host 127.0.0.1 --port 18787 [--auth-token <token>]
 ```
+
+`ato inspect` には lock-first 向けの surface もあります。
+
+- `ato inspect lock [path] [--json]`: field ごとの lock path / provenance / unresolved / fallback / gate 関与を表示
+- `ato inspect preview [path] [--json]`: durable workspace write-back と run attempt の ephemeral materialization path を変更なしで preview
+- `ato inspect diagnostics [path] [--json]`: diagnostics を lock path 主体で返し、`inspect` / `preview` への導線を付ける
+- `ato inspect remediation [path] [--json]`: remediation suggestion を lock path 主体で返し、可能なら source mapping も返す
 
 ## Native Delivery（実験的）
 

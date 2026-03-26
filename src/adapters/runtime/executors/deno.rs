@@ -54,6 +54,7 @@ struct PreparedCommand {
 
 pub fn execute(
     plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -64,7 +65,7 @@ pub fn execute(
         return super::web_services::execute(plan, launch_ctx, attempt);
     }
 
-    let deno_bin = runtime_manager::ensure_deno_binary(plan)?;
+    let deno_bin = runtime_manager::ensure_deno_binary_with_authority(plan, authoritative_lock)?;
     let launch_spec = resolve_deno_launch_spec(plan)?;
     let skip_lock = launch_spec
         .explicit_deno_flags
@@ -97,6 +98,7 @@ pub fn execute(
     let prepared = build_runtime_command(
         &deno_bin,
         plan,
+        authoritative_lock,
         execution_plan,
         &launch_spec.runtime_dir,
         &launch_spec.entrypoint,
@@ -120,6 +122,7 @@ pub fn execute(
 
 pub fn spawn(
     plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -129,7 +132,7 @@ pub fn spawn(
         anyhow::bail!("legacy inline web services mode is not supported by deno::spawn");
     }
 
-    let deno_bin = runtime_manager::ensure_deno_binary(plan)?;
+    let deno_bin = runtime_manager::ensure_deno_binary_with_authority(plan, authoritative_lock)?;
     let launch_spec = resolve_deno_launch_spec(plan)?;
     let skip_lock = launch_spec
         .explicit_deno_flags
@@ -163,6 +166,7 @@ pub fn spawn(
     let mut prepared = build_runtime_command(
         &deno_bin,
         plan,
+        authoritative_lock,
         execution_plan,
         &launch_spec.runtime_dir,
         &launch_spec.entrypoint,
@@ -245,6 +249,7 @@ fn run_provisioning(
 fn build_runtime_command(
     deno_bin: &Path,
     plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     entrypoint: &str,
@@ -358,11 +363,13 @@ fn build_runtime_command(
         let needs_uv_runtime = has_runtime_tool(plan, &["uv"]) || needs_python_runtime;
 
         if needs_node_runtime {
-            let node_bin = runtime_manager::ensure_node_binary(plan)?;
+            let node_bin =
+                runtime_manager::ensure_node_binary_with_authority(plan, authoritative_lock)?;
             cmd.env("ATO_RUNTIME_NODE_BIN", node_bin);
         }
         if needs_python_runtime {
-            let python_bin = runtime_manager::ensure_python_binary(plan)?;
+            let python_bin =
+                runtime_manager::ensure_python_binary_with_authority(plan, authoritative_lock)?;
             cmd.env("ATO_RUNTIME_PYTHON_BIN", python_bin);
         }
         if needs_uv_runtime {

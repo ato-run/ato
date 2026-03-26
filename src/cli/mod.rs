@@ -2,6 +2,7 @@ mod binding;
 pub(crate) mod commands;
 mod config;
 pub(crate) mod dispatch;
+mod init;
 mod inspect;
 mod ipc;
 mod key;
@@ -22,6 +23,8 @@ pub(crate) use config::{
     ConfigCommands, ConfigEngineCommands, ConfigRegistryCommands, EngineCommands,
 };
 #[allow(unused_imports)]
+pub(crate) use init::InitLegacyMode;
+#[allow(unused_imports)]
 pub(crate) use inspect::InspectCommands;
 #[allow(unused_imports)]
 pub(crate) use ipc::IpcCommands;
@@ -38,7 +41,8 @@ pub(crate) use registry::RegistryCommands;
 pub(crate) use root::{Cli, Commands};
 #[allow(unused_imports)]
 pub(crate) use shared::{
-    CompatibilityFallbackBackend, EnforcementMode, RunAgentMode, DEFAULT_RUN_REGISTRY_URL,
+    CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, RunAgentMode,
+    DEFAULT_RUN_REGISTRY_URL,
 };
 #[allow(unused_imports)]
 pub(crate) use source::SourceCommands;

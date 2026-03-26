@@ -593,6 +593,8 @@ fn prepare_smoke_working_directory(
 
     let install = if cwd_path.join("pnpm-lock.yaml").exists() {
         Some(("pnpm", vec!["install", "--frozen-lockfile"]))
+    } else if cwd_path.join("yarn.lock").exists() {
+        Some(("yarn", vec!["install", "--frozen-lockfile"]))
     } else if cwd_path.join("package-lock.json").exists() {
         Some(("npm", vec!["ci"]))
     } else if cwd_path.join("bun.lock").exists() || cwd_path.join("bun.lockb").exists() {
@@ -1097,6 +1099,44 @@ startup_timeout_ms = 0
         assert!(!captured.contains("do-not-leak"));
 
         std::env::remove_var("SECRET_HOST_TOKEN");
+    }
+
+    #[test]
+    fn prepare_smoke_working_directory_installs_yarn_dependencies_when_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_dir = temp.path().join("source");
+        fs::create_dir_all(&source_dir).expect("mkdir source");
+        fs::write(source_dir.join("package.json"), "{}\n").expect("write package.json");
+        fs::write(source_dir.join("yarn.lock"), "# yarn lockfile v1\n").expect("write yarn lock");
+
+        let bin_dir = temp.path().join("bin");
+        fs::create_dir_all(&bin_dir).expect("mkdir bin");
+        let yarn_path = bin_dir.join("yarn");
+        fs::write(&yarn_path, "#!/bin/sh\nmkdir -p node_modules\nexit 0\n")
+            .expect("write fake yarn");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&yarn_path).expect("stat yarn").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&yarn_path, perms).expect("chmod yarn");
+        }
+
+        let _path_guard = PathGuard::prepend(&bin_dir);
+        let service = MainService {
+            executable: "sh".to_string(),
+            args: vec!["-c".to_string(), "echo ok".to_string()],
+            cwd: "source".to_string(),
+            env: HashMap::new(),
+            ports: HashMap::new(),
+            health_port: None,
+        };
+        let isolated_env = prepare_isolated_host_environment(temp.path()).expect("isolated env");
+
+        prepare_smoke_working_directory(temp.path(), &service, &isolated_env)
+            .expect("prepare deps");
+
+        assert!(source_dir.join("node_modules").is_dir());
     }
 
     #[cfg(unix)]

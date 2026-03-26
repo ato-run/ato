@@ -26,6 +26,8 @@ use crate::application::pipeline::hourglass;
 use crate::application::pipeline::hourglass::{HourglassPhase, HourglassPhaseState};
 use crate::application::pipeline::phases::run as run_phase;
 use crate::application::ports::OutputPort;
+use crate::application::source_inference;
+use crate::application::workspace::state;
 use crate::preview;
 #[cfg(test)]
 use crate::registry::store::RegistryStore;
@@ -36,6 +38,9 @@ use crate::runtime::tree as runtime_tree;
 use capsule_core::execution_plan::error::AtoExecutionError;
 #[cfg(test)]
 use capsule_core::execution_plan::guard::ExecutorKind;
+use capsule_core::input_resolver::{
+    resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ATO_LOCK_FILE_NAME,
+};
 use capsule_core::lifecycle::LifecycleEvent;
 use capsule_core::lockfile::{CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME};
 use capsule_core::types::CapsuleManifest;
@@ -70,6 +75,7 @@ pub struct RunArgs {
     pub agent_mode: crate::RunAgentMode,
     pub agent_local_root: Option<PathBuf>,
     pub keep_failed_artifacts: bool,
+    pub auto_fix_mode: Option<crate::GitHubAutoFixMode>,
     pub allow_unverified: bool,
     pub state_bindings: Vec<String>,
     pub inject_bindings: Vec<String>,
@@ -94,10 +100,10 @@ async fn execute_watch_mode_with_install(args: RunArgs) -> Result<()> {
         return Ok(());
     }
 
-    let target =
+    let normalized =
         normalize_run_target_after_install(&args, &install.resolved_target.path, None).await?;
     execute_watch_mode(RunArgs {
-        target,
+        target: normalized.target,
         agent_local_root: install.resolved_target.agent_local_root,
         ..args
     })
@@ -371,6 +377,7 @@ fn build_consumer_run_request(args: &RunArgs) -> run_phase::ConsumerRunRequest {
     run_phase::ConsumerRunRequest {
         target: args.target.clone(),
         target_label: args.target_label.clone(),
+        authoritative_input: None,
         background: args.background,
         nacelle: args.nacelle.clone(),
         enforcement: args.enforcement.clone(),
@@ -382,6 +389,7 @@ fn build_consumer_run_request(args: &RunArgs) -> run_phase::ConsumerRunRequest {
         agent_local_root: args.agent_local_root.clone(),
         registry: args.registry.clone(),
         keep_failed_artifacts: args.keep_failed_artifacts,
+        auto_fix_mode: args.auto_fix_mode,
         allow_unverified: args.allow_unverified,
         state_bindings: args.state_bindings.clone(),
         inject_bindings: args.inject_bindings.clone(),
@@ -394,11 +402,39 @@ fn build_consumer_run_request_with_target(
     args: &RunArgs,
     target: &Path,
     agent_local_root: Option<PathBuf>,
+    authoritative_input: Option<run_phase::RunAuthoritativeInput>,
 ) -> run_phase::ConsumerRunRequest {
     let mut request = build_consumer_run_request(args);
     request.target = target.to_path_buf();
     request.agent_local_root = agent_local_root;
+    request.authoritative_input = authoritative_input;
     request
+}
+
+#[derive(Debug, Clone)]
+struct NormalizedRunTarget {
+    target: PathBuf,
+    authoritative_input: Option<run_phase::RunAuthoritativeInput>,
+}
+
+fn authoritative_input_from_materialization(
+    materialized: source_inference::RunMaterialization,
+    cli_state_bindings: &[String],
+    compatibility_legacy_lock: Option<run_phase::CompatibilityLegacyLockContext>,
+) -> Result<run_phase::RunAuthoritativeInput> {
+    let effective_state = state::resolve_effective_lock_state(
+        &materialized.project_root,
+        &materialized.lock,
+        cli_state_bindings,
+    )?;
+
+    Ok(run_phase::RunAuthoritativeInput {
+        lock: materialized.lock,
+        bridge_manifest_path: materialized.manifest_path,
+        bridge_manifest_sha256: materialized.bridge_manifest_sha256,
+        effective_state,
+        compatibility_legacy_lock,
+    })
 }
 
 struct RunProgress<'a> {
@@ -414,9 +450,10 @@ impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
         &self,
         nacelle_override: Option<PathBuf>,
         plan: &capsule_core::router::ManifestData,
+        prepared: &run_phase::PreparedRunContext,
         reporter: &Arc<CliReporter>,
     ) -> Result<PathBuf> {
-        preflight_native_sandbox(nacelle_override, plan, reporter)
+        preflight_native_sandbox(nacelle_override, plan, prepared, reporter)
     }
 
     async fn complete_background_source_process(
@@ -502,6 +539,7 @@ struct ConsumerRunPhaseRunner<'a> {
     args: &'a RunArgs,
     state: Option<RunPipelineState>,
     target: Option<PathBuf>,
+    authoritative_input: Option<run_phase::RunAuthoritativeInput>,
     agent_local_root: Option<PathBuf>,
     should_stop_after_install: bool,
 }
@@ -537,17 +575,17 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                 let install = run_install_phase(self.args).await.inspect_err(|err| {
                     emit_run_phase_failure(self.args, HourglassPhase::Install, err);
                 })?;
-                self.target = Some(
-                    normalize_run_target_after_install(
-                        self.args,
-                        &install.resolved_target.path,
-                        Some(attempt),
-                    )
-                    .await
-                    .inspect_err(|err| {
-                        emit_run_phase_failure(self.args, HourglassPhase::Install, err);
-                    })?,
-                );
+                let normalized = normalize_run_target_after_install(
+                    self.args,
+                    &install.resolved_target.path,
+                    Some(attempt),
+                )
+                .await
+                .inspect_err(|err| {
+                    emit_run_phase_failure(self.args, HourglassPhase::Install, err);
+                })?;
+                self.target = Some(normalized.target);
+                self.authoritative_input = normalized.authoritative_input;
                 self.agent_local_root = install.resolved_target.agent_local_root;
                 self.should_stop_after_install = matches!(
                     install.manifest_outcome,
@@ -560,6 +598,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     self.args,
                     self.resolved_target(),
                     self.agent_local_root.clone(),
+                    self.authoritative_input.clone(),
                     Some(attempt),
                 )
                 .await
@@ -575,6 +614,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     self.args,
                     self.resolved_target(),
                     self.agent_local_root.clone(),
+                    self.authoritative_input.clone(),
                     input,
                 )
                 .await
@@ -590,6 +630,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     self.args,
                     self.resolved_target(),
                     self.agent_local_root.clone(),
+                    self.authoritative_input.clone(),
                     input,
                 )
                 .await
@@ -605,6 +646,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     self.args,
                     self.resolved_target(),
                     self.agent_local_root.clone(),
+                    self.authoritative_input.clone(),
                     input,
                 )
                 .await
@@ -620,6 +662,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     self.args,
                     self.resolved_target(),
                     self.agent_local_root.clone(),
+                    self.authoritative_input.clone(),
                     input,
                     Some(attempt),
                 )
@@ -642,6 +685,7 @@ async fn execute_normal_mode(args: RunArgs) -> Result<()> {
         args: &args,
         state: None,
         target: None,
+        authoritative_input: None,
         agent_local_root: args.agent_local_root.clone(),
         should_stop_after_install: false,
     };
@@ -703,20 +747,96 @@ fn emit_run_phase_failure(args: &RunArgs, boundary: HourglassPhase, error: &anyh
     );
 }
 
-pub(crate) async fn normalize_run_target_after_install(
+async fn normalize_run_target_after_install(
     args: &RunArgs,
     resolved_target: &Path,
     attempt: Option<&mut PipelineAttemptContext>,
-) -> Result<PathBuf> {
+) -> Result<NormalizedRunTarget> {
     if resolved_target
         .extension()
         .map(|value| value.eq_ignore_ascii_case("capsule"))
         .unwrap_or(false)
     {
-        return prepare_capsule_target(args, &resolved_target.to_path_buf(), attempt).await;
+        let target = prepare_capsule_target(args, &resolved_target.to_path_buf(), attempt).await?;
+        return Ok(NormalizedRunTarget {
+            target,
+            authoritative_input: None,
+        });
     }
 
-    Ok(resolved_target.to_path_buf())
+    if resolved_target.is_dir()
+        || resolved_target.file_name().and_then(|value| value.to_str()) == Some("capsule.toml")
+        || resolved_target.file_name().and_then(|value| value.to_str()) == Some(ATO_LOCK_FILE_NAME)
+    {
+        return match resolve_authoritative_input(resolved_target, ResolveInputOptions::default())? {
+            ResolvedInput::CanonicalLock { canonical, .. } => {
+                let mut cleanup_scope = attempt.map(|attempt| attempt.cleanup_scope());
+                let materialized = source_inference::materialize_run_from_canonical_lock(
+                    &canonical,
+                    cleanup_scope.as_mut(),
+                    args.reporter.clone(),
+                    args.assume_yes,
+                )?;
+                let target = materialized.manifest_path.clone();
+                Ok(NormalizedRunTarget {
+                    target,
+                    authoritative_input: Some(authoritative_input_from_materialization(
+                        materialized,
+                        &args.state_bindings,
+                        None,
+                    )?),
+                })
+            }
+            ResolvedInput::CompatibilityProject { project, .. } => {
+                let mut cleanup_scope = attempt.map(|attempt| attempt.cleanup_scope());
+                let materialized = source_inference::materialize_run_from_compatibility(
+                    &project,
+                    cleanup_scope.as_mut(),
+                    args.reporter.clone(),
+                    args.assume_yes,
+                )?;
+                let target = materialized.manifest_path.clone();
+                let compatibility_legacy_lock = project.legacy_lock.clone().map(|legacy_lock| {
+                    run_phase::CompatibilityLegacyLockContext {
+                        manifest_path: project.manifest.path.clone(),
+                        path: legacy_lock.path,
+                        lock: legacy_lock.lock,
+                    }
+                });
+                Ok(NormalizedRunTarget {
+                    target,
+                    authoritative_input: Some(authoritative_input_from_materialization(
+                        materialized,
+                        &args.state_bindings,
+                        compatibility_legacy_lock,
+                    )?),
+                })
+            }
+            ResolvedInput::SourceOnly { source, .. } => {
+                let mut cleanup_scope = attempt.map(|attempt| attempt.cleanup_scope());
+                let materialized = source_inference::materialize_run_from_source_only(
+                    &source,
+                    cleanup_scope.as_mut(),
+                    args.reporter.clone(),
+                    args.assume_yes,
+                )?;
+                let target = materialized.manifest_path.clone();
+                Ok(NormalizedRunTarget {
+                    target,
+                    authoritative_input: Some(authoritative_input_from_materialization(
+                        materialized,
+                        &args.state_bindings,
+                        None,
+                    )?),
+                })
+            }
+        };
+    }
+
+    Ok(NormalizedRunTarget {
+        target: resolved_target.to_path_buf(),
+        authoritative_input: None,
+    })
 }
 
 async fn run_install_phase(args: &RunArgs) -> Result<run_phase::RunInstallPhaseResult> {
@@ -729,9 +849,11 @@ async fn run_prepare_phase(
     args: &RunArgs,
     target: &Path,
     agent_local_root: Option<PathBuf>,
+    authoritative_input: Option<run_phase::RunAuthoritativeInput>,
     attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<RunPipelineState> {
-    let request = build_consumer_run_request_with_target(args, target, agent_local_root);
+    let request =
+        build_consumer_run_request_with_target(args, target, agent_local_root, authoritative_input);
     let progress = RunProgress { args };
     run_phase::run_prepare_phase(&request, &progress, attempt).await
 }
@@ -740,9 +862,11 @@ async fn run_build_phase(
     args: &RunArgs,
     target: &Path,
     agent_local_root: Option<PathBuf>,
+    authoritative_input: Option<run_phase::RunAuthoritativeInput>,
     state: RunPipelineState,
 ) -> Result<RunPipelineState> {
-    let request = build_consumer_run_request_with_target(args, target, agent_local_root);
+    let request =
+        build_consumer_run_request_with_target(args, target, agent_local_root, authoritative_input);
     let progress = RunProgress { args };
     run_phase::run_build_phase(&request, &progress, state).await
 }
@@ -751,9 +875,11 @@ async fn run_verify_phase(
     args: &RunArgs,
     target: &Path,
     agent_local_root: Option<PathBuf>,
+    authoritative_input: Option<run_phase::RunAuthoritativeInput>,
     state: RunPipelineState,
 ) -> Result<RunPipelineState> {
-    let request = build_consumer_run_request_with_target(args, target, agent_local_root);
+    let request =
+        build_consumer_run_request_with_target(args, target, agent_local_root, authoritative_input);
     let progress = RunProgress { args };
     run_phase::run_verify_phase(&request, &progress, state).await
 }
@@ -762,9 +888,11 @@ async fn run_dry_run_phase(
     args: &RunArgs,
     target: &Path,
     agent_local_root: Option<PathBuf>,
+    authoritative_input: Option<run_phase::RunAuthoritativeInput>,
     state: RunPipelineState,
 ) -> Result<RunPipelineState> {
-    let request = build_consumer_run_request_with_target(args, target, agent_local_root);
+    let request =
+        build_consumer_run_request_with_target(args, target, agent_local_root, authoritative_input);
     let progress = RunProgress { args };
     run_phase::run_dry_run_phase(&request, &progress, state).await
 }
@@ -773,10 +901,12 @@ async fn run_execute_phase(
     args: &RunArgs,
     target: &Path,
     agent_local_root: Option<PathBuf>,
+    authoritative_input: Option<run_phase::RunAuthoritativeInput>,
     state: RunPipelineState,
     attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<()> {
-    let request = build_consumer_run_request_with_target(args, target, agent_local_root);
+    let request =
+        build_consumer_run_request_with_target(args, target, agent_local_root, authoritative_input);
     let progress = RunProgress { args };
     run_phase::run_execute_phase(&request, &progress, state, attempt, &RunExecuteHooks).await
 }
@@ -785,16 +915,19 @@ async fn run_execute_phase(
 async fn reroute_auto_provisioned_execution(
     decision: capsule_core::router::RuntimeDecision,
     launch_ctx: crate::executors::launch_context::RuntimeLaunchContext,
+    prepared: &run_phase::PreparedRunContext,
     reporter: Arc<CliReporter>,
     preview_mode: bool,
     shadow_manifest_path: &Path,
 ) -> Result<(
     capsule_core::router::RuntimeDecision,
     crate::executors::launch_context::RuntimeLaunchContext,
+    run_phase::PreparedRunContext,
 )> {
     run_phase::reroute_auto_provisioned_execution(
         decision,
         launch_ctx,
+        prepared,
         reporter,
         preview_mode,
         shadow_manifest_path,
@@ -918,19 +1051,21 @@ fn execute_watch_mode(args: RunArgs) -> Result<()> {
 mod tests {
     use super::{
         background_ready_message, foreground_native_event_messages,
-        initial_foreground_native_messages, plan_v03_provision_command,
-        preflight_required_environment_variables, process_runtime_label,
-        reroute_auto_provisioned_execution, resolve_compatibility_host_mode,
+        initial_foreground_native_messages, normalize_run_target_after_install,
+        plan_v03_provision_command, preflight_required_environment_variables,
+        process_runtime_label, reroute_auto_provisioned_execution, resolve_compatibility_host_mode,
         resolve_python_dependency_lock_path, resolve_state_source_overrides_with_store,
-        run_phase_detail, CompatibilityHostMode, ForegroundEventMessage,
+        run_phase_detail, CompatibilityHostMode, ForegroundEventMessage, RunArgs,
     };
     use crate::executors::launch_context::{InjectedMount, RuntimeLaunchContext};
     use crate::registry::store::RegistryStore;
     use crate::reporters::CliReporter;
+    use capsule_core::ato_lock::{self, AtoLock};
     use capsule_core::execution_plan::guard::ExecutorKind;
     use capsule_core::lifecycle::LifecycleEvent;
     use capsule_core::router::{self, ExecutionProfile, ManifestData};
     use capsule_core::types::CapsuleManifest;
+    use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -965,6 +1100,29 @@ mod tests {
 
         let command = plan_v03_provision_command(&plan).expect("plan provision");
         assert_eq!(command.as_deref(), Some("pnpm install --frozen-lockfile"));
+    }
+
+    #[test]
+    fn v03_node_provision_supports_yarn_lockfile() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("yarn.lock"), "# yarn lockfile v1\n")
+            .expect("write yarn lock");
+
+        let plan = manifest_with_schema_and_target(
+            "0.3",
+            tmp.path().to_path_buf(),
+            vec![
+                ("runtime", toml::Value::String("source".to_string())),
+                ("driver", toml::Value::String("node".to_string())),
+                (
+                    "run_command",
+                    toml::Value::String("yarn dev -- --port $PORT".to_string()),
+                ),
+            ],
+        );
+
+        let command = plan_v03_provision_command(&plan).expect("plan provision");
+        assert_eq!(command.as_deref(), Some("yarn install --frozen-lockfile"));
     }
 
     #[test]
@@ -1192,6 +1350,14 @@ run_command = "node server.js"
             target: "/var/run/ato/injected/db".to_string(),
             readonly: true,
         };
+        let prepared = crate::commands::run::run_phase::PreparedRunContext {
+            authoritative_lock: None,
+            effective_state: None,
+            raw_manifest: toml::Value::Table(toml::map::Map::new()),
+            validation_mode: capsule_core::types::ValidationMode::Strict,
+            engine_override_declared: false,
+            compatibility_legacy_lock: None,
+        };
         for preview_mode in [false, true] {
             let launch_ctx = RuntimeLaunchContext::empty()
                 .with_injected_env(
@@ -1201,9 +1367,10 @@ run_command = "node server.js"
                 )
                 .with_injected_mounts(vec![mount.clone()]);
 
-            let (rerouted, rerouted_ctx) = reroute_auto_provisioned_execution(
+            let (rerouted, rerouted_ctx, _rerouted_prepared) = reroute_auto_provisioned_execution(
                 decision.clone(),
                 launch_ctx,
+                &prepared,
                 Arc::new(CliReporter::new(false)),
                 preview_mode,
                 &shadow_manifest_path,
@@ -1222,6 +1389,73 @@ run_command = "node server.js"
             );
             assert_eq!(rerouted_ctx.injected_mounts(), std::slice::from_ref(&mount));
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn normalize_run_target_accepts_direct_canonical_lock_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let lock_path = tmp.path().join("ato.lock.json");
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "node", "cmd": ["index.js"]}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([{"name": "main", "process": {"entrypoint": "node", "cmd": ["index.js"]}}]),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "node", "version": "20.11.0"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([
+                {"label": "default", "runtime": "source", "driver": "node", "entrypoint": "node", "cmd": ["index.js"], "compatible": true}
+            ]),
+        );
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"kind": "metadata_only", "observed_lockfiles": []}),
+        );
+        ato_lock::write_pretty_to_path(&lock, &lock_path).expect("write lock");
+
+        let args = RunArgs {
+            target: lock_path.clone(),
+            target_label: None,
+            watch: false,
+            background: false,
+            nacelle: None,
+            registry: None,
+            enforcement: "best_effort".to_string(),
+            sandbox_mode: false,
+            dangerously_skip_permissions: false,
+            compatibility_fallback: None,
+            assume_yes: true,
+            agent_mode: crate::RunAgentMode::Off,
+            agent_local_root: Some(tmp.path().to_path_buf()),
+            keep_failed_artifacts: false,
+            auto_fix_mode: None,
+            allow_unverified: false,
+            state_bindings: Vec::new(),
+            inject_bindings: Vec::new(),
+            reporter: Arc::new(CliReporter::new(true)),
+            preview_mode: false,
+        };
+
+        let normalized = normalize_run_target_after_install(&args, &lock_path, None)
+            .await
+            .expect("normalize target");
+
+        assert!(normalized.authoritative_input.is_some());
+        assert_eq!(
+            normalized
+                .target
+                .file_name()
+                .and_then(|value| value.to_str()),
+            Some(".ato.run.generated.capsule.toml")
+        );
+        assert!(normalized.target.exists());
     }
 
     #[test]

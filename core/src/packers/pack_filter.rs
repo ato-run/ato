@@ -30,6 +30,14 @@ const SMART_DEFAULT_EXCLUDES: &[&str] = &[
     "**/Thumbs.db",
     "**/*.capsule",
     "**/*.sig",
+    ".ato/**",
+    "**/.ato/**",
+    ".tmp/**",
+    "**/.tmp/**",
+    ".ato.run.generated.capsule.toml",
+    "ato.lock.json",
+    ".capsule.lock.inputs.json",
+    "**/.capsule.lock.inputs.json",
     "capsule.toml",
     "config.json",
     "capsule.lock.json",
@@ -155,6 +163,44 @@ fn is_next_standalone_node_modules(rel: &str) -> bool {
 mod tests {
     use super::*;
     use crate::types::PackConfig;
+
+    #[test]
+    fn defaults_exclude_workspace_local_and_ephemeral_outputs() {
+        let filter = PackFilter::from_manifest(&CapsuleManifest {
+            schema_version: "0.2".to_string(),
+            name: "test".to_string(),
+            version: "0.1.0".to_string(),
+            capsule_type: crate::types::CapsuleType::App,
+            default_target: "cli".to_string(),
+            metadata: Default::default(),
+            capabilities: None,
+            requirements: Default::default(),
+            execution: Default::default(),
+            storage: Default::default(),
+            state: Default::default(),
+            state_owner_scope: None,
+            service_binding_scope: None,
+            routing: Default::default(),
+            network: None,
+            model: None,
+            transparency: None,
+            pool: None,
+            build: None,
+            pack: None,
+            isolation: None,
+            polymorphism: None,
+            targets: None,
+            services: None,
+            distribution: None,
+        })
+        .expect("filter");
+        assert!(!filter.should_include_file(Path::new(".ato/source-inference/provenance.json")));
+        assert!(
+            !filter.should_include_file(Path::new(".tmp/source-inference/attempt/ato.lock.json"))
+        );
+        assert!(!filter.should_include_file(Path::new(".ato.run.generated.capsule.toml")));
+        assert!(!filter.should_include_file(Path::new("ato.lock.json")));
+    }
 
     #[test]
     fn defaults_exclude_node_modules_when_include_absent() {

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{CapsuleError, Result};
 use crate::types::{CapsuleManifest, TargetsConfig, ValidationMode};
 
+#[derive(Debug, Clone)]
 pub struct LoadedManifest {
     pub raw: toml::Value,
     pub model: CapsuleManifest,

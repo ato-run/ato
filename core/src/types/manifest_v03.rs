@@ -214,6 +214,31 @@ fn infer_v03_language_from_driver(driver: Option<&str>) -> Option<String> {
     }
 }
 
+fn normalize_v03_web_static_entrypoint(run: &str) -> String {
+    let trimmed = run.trim();
+    let raw = Path::new(trimmed);
+    let entrypoint = match raw.file_name() {
+        Some(_) => raw.parent().unwrap_or_else(|| Path::new(".")),
+        None => raw,
+    };
+
+    let normalized = entrypoint
+        .components()
+        .filter_map(|component| match component {
+            Component::CurDir => None,
+            Component::Normal(part) => Some(part.to_string_lossy().to_string()),
+            _ => Some(component.as_os_str().to_string_lossy().to_string()),
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+
+    if normalized.is_empty() {
+        ".".to_string()
+    } else {
+        normalized
+    }
+}
+
 fn apply_v03_readiness_probe(target_table: &mut Table, readiness_probe: toml::Value) {
     match readiness_probe {
         toml::Value::String(value) => {
@@ -360,14 +385,33 @@ fn normalize_v03_target_table(package_name: &str, table: &Table) -> Result<Table
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        target_table.insert(
-            "run_command".to_string(),
-            toml::Value::String(run_command.to_string()),
-        );
-        if let Some(language) = infer_v03_language_from_driver(normalized_driver.as_deref()) {
-            target_table
-                .entry("language".to_string())
-                .or_insert_with(|| toml::Value::String(language));
+        let runtime = target_table
+            .get("runtime")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .map(|value| value.to_ascii_lowercase());
+        let driver = target_table
+            .get("driver")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .map(|value| value.to_ascii_lowercase());
+
+        if matches!(runtime.as_deref(), Some("web")) && matches!(driver.as_deref(), Some("static"))
+        {
+            target_table.insert(
+                "entrypoint".to_string(),
+                toml::Value::String(normalize_v03_web_static_entrypoint(run_command)),
+            );
+        } else {
+            target_table.insert(
+                "run_command".to_string(),
+                toml::Value::String(run_command.to_string()),
+            );
+            if let Some(language) = infer_v03_language_from_driver(normalized_driver.as_deref()) {
+                target_table
+                    .entry("language".to_string())
+                    .or_insert_with(|| toml::Value::String(language));
+            }
         }
     }
 

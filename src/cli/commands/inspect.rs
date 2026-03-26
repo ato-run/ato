@@ -1,14 +1,29 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use anyhow::Error as AnyhowError;
+use anyhow::{Context, Error as AnyhowError, Result};
+use capsule_core::ato_lock::{AtoLock, UnresolvedValue};
+use capsule_core::input_resolver::{
+    resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ATO_LOCK_FILE_NAME,
+};
 use capsule_core::manifest;
 use capsule_core::types::{
     CapsuleManifest, EgressIdType, ServiceSpec, StateAttach, StateDurability, StateKind,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
+
+use crate::application::compat_import::{
+    CompatibilityCompileResult, CompatibilityDiagnosticSeverity,
+};
+use crate::application::source_inference::{
+    self, CanonicalLockInput, MaterializationMode, SourceEvidenceInput, SourceInferenceDiagnostic,
+    SourceInferenceDiagnosticSeverity, SourceInferenceInput, SourceInferenceInputKind,
+    SourceInferenceProvenance, SourceInferenceProvenanceKind, SourceInferenceResult,
+};
+use crate::reporters::CliReporter;
 
 const REQUIREMENTS_SCHEMA_VERSION: &str = "1";
 const NETWORK_REQUIREMENT_KEY: &str = "external-network";
@@ -190,6 +205,1361 @@ pub fn try_emit_json_error(err: &AnyhowError) -> bool {
 
     inspect_err.emit_json();
     true
+}
+
+const INSPECT_SCHEMA_VERSION: &str = "1";
+const RUN_GENERATED_MANIFEST_NAME: &str = ".ato.run.generated.capsule.toml";
+const RUN_SOURCE_INFERENCE_DIR: &str = ".tmp/source-inference";
+const WORKSPACE_SOURCE_INFERENCE_DIR: &str = ".ato/source-inference";
+const WORKSPACE_BINDING_SEED_PATH: &str = ".ato/binding/seed.json";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectLockView {
+    pub schema_version: &'static str,
+    pub target: LockSurfaceTarget,
+    pub summary: InspectLockSummary,
+    pub fields: Vec<InspectFieldView>,
+    pub unresolved: Vec<InspectUnresolvedView>,
+    pub diagnostics: Vec<InspectDiagnosticView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advisories: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewLockView {
+    pub schema_version: &'static str,
+    pub target: LockSurfaceTarget,
+    pub preview: PreviewSurfaceSummary,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advisories: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsLockView {
+    pub schema_version: &'static str,
+    pub target: LockSurfaceTarget,
+    pub diagnostics: Vec<InspectDiagnosticView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advisories: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemediationLockView {
+    pub schema_version: &'static str,
+    pub target: LockSurfaceTarget,
+    pub suggestions: Vec<RemediationSuggestionView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advisories: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LockSurfaceTarget {
+    pub input: String,
+    pub authoritative_kind: String,
+    pub project_root: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authoritative_path: Option<String>,
+    pub lock_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance_cache_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binding_seed_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectLockSummary {
+    pub input_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lock_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generated_at: Option<String>,
+    pub total_fields: usize,
+    pub resolved_fields: usize,
+    pub unresolved_fields: usize,
+    pub diagnostics_count: usize,
+    pub fallback_fields: usize,
+    pub observed_fields: usize,
+    pub user_confirmed_fields: usize,
+    pub selection_gate_involved: bool,
+    pub approval_gate_involved: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectFieldView {
+    pub lock_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+    pub resolved: bool,
+    pub explicit: bool,
+    pub inferred: bool,
+    pub observed: bool,
+    pub user_confirmed: bool,
+    pub fallback: bool,
+    pub selection_gate_involved: bool,
+    pub approval_gate_involved: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provenance: Vec<InspectProvenanceView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectProvenanceView {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_field: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectUnresolvedView {
+    pub lock_path: String,
+    pub reason_class: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectDiagnosticView {
+    pub severity: String,
+    pub lock_path: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_class: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_mapping: Option<SourceMappingView>,
+    pub inspect_command: String,
+    pub preview_command: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemediationSuggestionView {
+    pub lock_path: String,
+    pub reason_class: String,
+    pub message: String,
+    pub recommended_action: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_mapping: Option<SourceMappingView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceMappingView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_field: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewSurfaceSummary {
+    pub input_kind: String,
+    pub durable_lock_state: String,
+    pub durable_materialization: PreviewMaterializationView,
+    pub run_attempt_materialization: PreviewMaterializationView,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved: Vec<InspectUnresolvedView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<InspectDiagnosticView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewMaterializationView {
+    pub kind: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<PreviewOutputPathView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewOutputPathView {
+    pub label: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone)]
+struct InspectionSnapshot {
+    requested_input: String,
+    authoritative_kind: String,
+    project_root: PathBuf,
+    authoritative_path: Option<PathBuf>,
+    lock_path: PathBuf,
+    provenance_path: Option<PathBuf>,
+    provenance_cache_path: Option<PathBuf>,
+    binding_seed_path: Option<PathBuf>,
+    input_kind: String,
+    lock: AtoLock,
+    provenance: Vec<StoredProvenanceRecord>,
+    diagnostics: Vec<StoredDiagnosticRecord>,
+    infer_unresolved: Vec<String>,
+    resolve_unresolved: Vec<String>,
+    selection_gate: Option<StoredSelectionGate>,
+    approval_gate: Option<StoredApprovalGate>,
+    advisories: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct StoredProvenanceRecord {
+    field: String,
+    kind: String,
+    source_path: Option<PathBuf>,
+    source_field: Option<String>,
+    note: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct StoredDiagnosticRecord {
+    severity: String,
+    field: String,
+    message: String,
+}
+
+#[derive(Debug, Clone)]
+struct StoredSelectionGate {
+    field: String,
+}
+
+#[derive(Debug, Clone)]
+struct StoredApprovalGate {
+    capability: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StoredSidecar {
+    input_kind: String,
+    #[serde(default)]
+    provenance: Vec<StoredSidecarProvenance>,
+    #[serde(default)]
+    diagnostics: Vec<StoredSidecarDiagnostic>,
+    selection_gate: Option<StoredSidecarSelectionGate>,
+    approval_gate: Option<StoredSidecarApprovalGate>,
+    #[serde(default)]
+    infer: StoredSidecarResolve,
+    #[serde(default)]
+    resolve: StoredSidecarResolve,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct StoredSidecarResolve {
+    #[serde(default)]
+    unresolved: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StoredSidecarProvenance {
+    field: String,
+    kind: String,
+    source_path: Option<PathBuf>,
+    source_field: Option<String>,
+    note: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StoredSidecarDiagnostic {
+    severity: String,
+    field: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StoredSidecarSelectionGate {
+    field: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StoredSidecarApprovalGate {
+    capability: String,
+    message: String,
+}
+
+pub fn execute_lock_view(path: PathBuf, json_output: bool) -> Result<InspectLockView> {
+    let snapshot = load_inspection_snapshot(&path)?;
+    let view = build_lock_view(&snapshot);
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&view)?);
+    } else {
+        print_lock_view(&view);
+    }
+    Ok(view)
+}
+
+pub fn execute_preview_view(path: PathBuf, json_output: bool) -> Result<PreviewLockView> {
+    let snapshot = load_inspection_snapshot(&path)?;
+    let view = build_preview_view(&snapshot);
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&view)?);
+    } else {
+        print_preview_view(&view);
+    }
+    Ok(view)
+}
+
+pub fn execute_diagnostics_view(path: PathBuf, json_output: bool) -> Result<DiagnosticsLockView> {
+    let snapshot = load_inspection_snapshot(&path)?;
+    let view = build_diagnostics_view(&snapshot);
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&view)?);
+    } else {
+        print_diagnostics_view(&view);
+    }
+    Ok(view)
+}
+
+pub fn execute_remediation_view(path: PathBuf, json_output: bool) -> Result<RemediationLockView> {
+    let snapshot = load_inspection_snapshot(&path)?;
+    let view = build_remediation_view(&snapshot);
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&view)?);
+    } else {
+        print_remediation_view(&view);
+    }
+    Ok(view)
+}
+
+fn load_inspection_snapshot(path: &Path) -> Result<InspectionSnapshot> {
+    let reporter = Arc::new(CliReporter::new(true));
+    let resolved = resolve_authoritative_input(path, ResolveInputOptions::default())?;
+    match resolved {
+        ResolvedInput::CanonicalLock {
+            canonical,
+            provenance,
+            advisories,
+        } => {
+            let mut result = source_inference::execute_shared_engine(
+                SourceInferenceInput::CanonicalLock(CanonicalLockInput {
+                    project_root: canonical.project_root.clone(),
+                    canonical_path: canonical.path.clone(),
+                    lock: canonical.lock.clone(),
+                }),
+                MaterializationMode::InitWorkspace,
+                true,
+                reporter,
+            )?;
+            let sidecar_paths = workspace_sidecar_paths(&canonical.project_root);
+            if let Some(sidecar) = load_stored_sidecar(&sidecar_paths.provenance_path)? {
+                apply_stored_sidecar(&mut result, sidecar);
+            }
+
+            Ok(snapshot_from_result(
+                path.display().to_string(),
+                provenance.selected_kind.as_str().to_string(),
+                canonical.project_root,
+                Some(canonical.path.clone()),
+                canonical.path,
+                Some(sidecar_paths.provenance_path),
+                Some(sidecar_paths.cache_path),
+                Some(sidecar_paths.binding_seed_path),
+                advisories.into_iter().map(|value| value.message).collect(),
+                result,
+            ))
+        }
+        ResolvedInput::CompatibilityProject {
+            project,
+            provenance,
+            advisories,
+        } => {
+            let (draft_input, compiled) =
+                source_inference::draft_lock_input_from_compatibility(&project)?;
+            let mut result = source_inference::execute_shared_engine(
+                SourceInferenceInput::DraftLock(draft_input),
+                MaterializationMode::InitWorkspace,
+                true,
+                reporter,
+            )?;
+            append_compatibility_diagnostics(&mut result, &compiled);
+            Ok(snapshot_from_result(
+                path.display().to_string(),
+                provenance.selected_kind.as_str().to_string(),
+                project.project_root.clone(),
+                Some(project.manifest.path.clone()),
+                project.project_root.join(ATO_LOCK_FILE_NAME),
+                Some(
+                    project
+                        .project_root
+                        .join(WORKSPACE_SOURCE_INFERENCE_DIR)
+                        .join("provenance.json"),
+                ),
+                Some(
+                    project
+                        .project_root
+                        .join(WORKSPACE_SOURCE_INFERENCE_DIR)
+                        .join("provenance-cache.json"),
+                ),
+                Some(project.project_root.join(WORKSPACE_BINDING_SEED_PATH)),
+                advisories.into_iter().map(|value| value.message).collect(),
+                result,
+            ))
+        }
+        ResolvedInput::SourceOnly {
+            source,
+            provenance,
+            advisories,
+        } => {
+            let result = source_inference::execute_shared_engine(
+                SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
+                    project_root: source.project_root.clone(),
+                }),
+                MaterializationMode::InitWorkspace,
+                true,
+                reporter,
+            )?;
+            Ok(snapshot_from_result(
+                path.display().to_string(),
+                provenance.selected_kind.as_str().to_string(),
+                source.project_root.clone(),
+                None,
+                source.project_root.join(ATO_LOCK_FILE_NAME),
+                Some(
+                    source
+                        .project_root
+                        .join(WORKSPACE_SOURCE_INFERENCE_DIR)
+                        .join("provenance.json"),
+                ),
+                Some(
+                    source
+                        .project_root
+                        .join(WORKSPACE_SOURCE_INFERENCE_DIR)
+                        .join("provenance-cache.json"),
+                ),
+                Some(source.project_root.join(WORKSPACE_BINDING_SEED_PATH)),
+                advisories.into_iter().map(|value| value.message).collect(),
+                result,
+            ))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn snapshot_from_result(
+    requested_input: String,
+    authoritative_kind: String,
+    project_root: PathBuf,
+    authoritative_path: Option<PathBuf>,
+    lock_path: PathBuf,
+    provenance_path: Option<PathBuf>,
+    provenance_cache_path: Option<PathBuf>,
+    binding_seed_path: Option<PathBuf>,
+    advisories: Vec<String>,
+    result: SourceInferenceResult,
+) -> InspectionSnapshot {
+    InspectionSnapshot {
+        requested_input,
+        authoritative_kind,
+        project_root,
+        authoritative_path,
+        lock_path,
+        provenance_path,
+        provenance_cache_path,
+        binding_seed_path,
+        input_kind: input_kind_label(result.input_kind).to_string(),
+        lock: result.lock,
+        provenance: result
+            .provenance
+            .iter()
+            .map(convert_provenance_record)
+            .collect(),
+        diagnostics: result
+            .diagnostics
+            .iter()
+            .map(convert_diagnostic_record)
+            .collect(),
+        infer_unresolved: result.infer.unresolved,
+        resolve_unresolved: result.resolve.unresolved,
+        selection_gate: result
+            .selection_gate
+            .map(|gate| StoredSelectionGate { field: gate.field }),
+        approval_gate: result.approval_gate.map(|gate| StoredApprovalGate {
+            capability: gate.capability,
+            message: gate.message,
+        }),
+        advisories,
+    }
+}
+
+fn build_lock_view(snapshot: &InspectionSnapshot) -> InspectLockView {
+    let unresolved = collect_unresolved_views(snapshot);
+    let diagnostics = collect_diagnostic_views(snapshot);
+    let fields = collect_field_views(snapshot, &unresolved);
+    let summary = InspectLockSummary {
+        input_kind: snapshot.input_kind.clone(),
+        lock_id: snapshot
+            .lock
+            .lock_id
+            .as_ref()
+            .map(|value| value.as_str().to_string()),
+        generated_at: snapshot.lock.generated_at.clone(),
+        total_fields: fields.len(),
+        resolved_fields: fields.iter().filter(|field| field.resolved).count(),
+        unresolved_fields: unresolved.len(),
+        diagnostics_count: diagnostics.len(),
+        fallback_fields: fields.iter().filter(|field| field.fallback).count(),
+        observed_fields: fields.iter().filter(|field| field.observed).count(),
+        user_confirmed_fields: fields.iter().filter(|field| field.user_confirmed).count(),
+        selection_gate_involved: fields.iter().any(|field| field.selection_gate_involved),
+        approval_gate_involved: fields.iter().any(|field| field.approval_gate_involved),
+    };
+
+    InspectLockView {
+        schema_version: INSPECT_SCHEMA_VERSION,
+        target: snapshot_target(snapshot),
+        summary,
+        fields,
+        unresolved,
+        diagnostics,
+        advisories: snapshot.advisories.clone(),
+    }
+}
+
+fn build_preview_view(snapshot: &InspectionSnapshot) -> PreviewLockView {
+    let diagnostics = collect_diagnostic_views(snapshot);
+    let unresolved = collect_unresolved_views(snapshot);
+    let durable_state = if snapshot.lock_path.exists() {
+        "present"
+    } else {
+        "would_write"
+    };
+
+    PreviewLockView {
+        schema_version: INSPECT_SCHEMA_VERSION,
+        target: snapshot_target(snapshot),
+        preview: PreviewSurfaceSummary {
+            input_kind: snapshot.input_kind.clone(),
+            durable_lock_state: durable_state.to_string(),
+            durable_materialization: PreviewMaterializationView {
+                kind: "init_workspace".to_string(),
+                state: durable_state.to_string(),
+                outputs: vec![
+                    PreviewOutputPathView {
+                        label: "lock".to_string(),
+                        path: snapshot.lock_path.display().to_string(),
+                    },
+                    PreviewOutputPathView {
+                        label: "provenance".to_string(),
+                        path: snapshot
+                            .provenance_path
+                            .as_ref()
+                            .map(|value| value.display().to_string())
+                            .unwrap_or_else(|| {
+                                snapshot
+                                    .project_root
+                                    .join(WORKSPACE_SOURCE_INFERENCE_DIR)
+                                    .join("provenance.json")
+                                    .display()
+                                    .to_string()
+                            }),
+                    },
+                    PreviewOutputPathView {
+                        label: "provenance_cache".to_string(),
+                        path: snapshot
+                            .provenance_cache_path
+                            .as_ref()
+                            .map(|value| value.display().to_string())
+                            .unwrap_or_else(|| {
+                                snapshot
+                                    .project_root
+                                    .join(WORKSPACE_SOURCE_INFERENCE_DIR)
+                                    .join("provenance-cache.json")
+                                    .display()
+                                    .to_string()
+                            }),
+                    },
+                    PreviewOutputPathView {
+                        label: "binding_seed".to_string(),
+                        path: snapshot
+                            .binding_seed_path
+                            .as_ref()
+                            .map(|value| value.display().to_string())
+                            .unwrap_or_else(|| {
+                                snapshot
+                                    .project_root
+                                    .join(WORKSPACE_BINDING_SEED_PATH)
+                                    .display()
+                                    .to_string()
+                            }),
+                    },
+                ],
+            },
+            run_attempt_materialization: PreviewMaterializationView {
+                kind: "run_attempt".to_string(),
+                state: "ephemeral".to_string(),
+                outputs: vec![
+                    PreviewOutputPathView {
+                        label: "attempt_lock".to_string(),
+                        path: snapshot
+                            .project_root
+                            .join(RUN_SOURCE_INFERENCE_DIR)
+                            .join("<attempt>")
+                            .join(ATO_LOCK_FILE_NAME)
+                            .display()
+                            .to_string(),
+                    },
+                    PreviewOutputPathView {
+                        label: "attempt_provenance".to_string(),
+                        path: snapshot
+                            .project_root
+                            .join(RUN_SOURCE_INFERENCE_DIR)
+                            .join("<attempt>")
+                            .join("provenance.json")
+                            .display()
+                            .to_string(),
+                    },
+                    PreviewOutputPathView {
+                        label: "generated_manifest".to_string(),
+                        path: snapshot
+                            .project_root
+                            .join(RUN_GENERATED_MANIFEST_NAME)
+                            .display()
+                            .to_string(),
+                    },
+                ],
+            },
+            unresolved,
+            diagnostics,
+        },
+        advisories: snapshot.advisories.clone(),
+    }
+}
+
+fn build_diagnostics_view(snapshot: &InspectionSnapshot) -> DiagnosticsLockView {
+    DiagnosticsLockView {
+        schema_version: INSPECT_SCHEMA_VERSION,
+        target: snapshot_target(snapshot),
+        diagnostics: collect_diagnostic_views(snapshot),
+        advisories: snapshot.advisories.clone(),
+    }
+}
+
+fn build_remediation_view(snapshot: &InspectionSnapshot) -> RemediationLockView {
+    let diagnostics = collect_diagnostic_views(snapshot);
+    let unresolved = collect_unresolved_views(snapshot);
+    let mut suggestions = Vec::new();
+
+    for unresolved_item in &unresolved {
+        let mapping = source_mapping_for_field(snapshot, &unresolved_item.lock_path);
+        suggestions.push(RemediationSuggestionView {
+            lock_path: unresolved_item.lock_path.clone(),
+            reason_class: unresolved_item.reason_class.clone(),
+            message: unresolved_item
+                .detail
+                .clone()
+                .unwrap_or_else(|| unresolved_message(unresolved_item)),
+            recommended_action: remediation_action(
+                &unresolved_item.lock_path,
+                &unresolved_item.reason_class,
+            ),
+            commands: remediation_commands(&snapshot.requested_input),
+            source_mapping: mapping,
+        });
+    }
+
+    for diagnostic in diagnostics {
+        if suggestions
+            .iter()
+            .any(|value| value.lock_path == diagnostic.lock_path)
+        {
+            continue;
+        }
+        suggestions.push(RemediationSuggestionView {
+            lock_path: diagnostic.lock_path.clone(),
+            reason_class: diagnostic
+                .reason_class
+                .clone()
+                .unwrap_or_else(|| diagnostic.severity.clone()),
+            message: diagnostic.message.clone(),
+            recommended_action: remediation_action(
+                &diagnostic.lock_path,
+                diagnostic
+                    .reason_class
+                    .as_deref()
+                    .unwrap_or(diagnostic.severity.as_str()),
+            ),
+            commands: remediation_commands(&snapshot.requested_input),
+            source_mapping: diagnostic.source_mapping.clone(),
+        });
+    }
+
+    suggestions.sort_by(|left, right| {
+        left.lock_path
+            .cmp(&right.lock_path)
+            .then(left.reason_class.cmp(&right.reason_class))
+    });
+
+    RemediationLockView {
+        schema_version: INSPECT_SCHEMA_VERSION,
+        target: snapshot_target(snapshot),
+        suggestions,
+        advisories: snapshot.advisories.clone(),
+    }
+}
+
+fn snapshot_target(snapshot: &InspectionSnapshot) -> LockSurfaceTarget {
+    LockSurfaceTarget {
+        input: snapshot.requested_input.clone(),
+        authoritative_kind: snapshot.authoritative_kind.clone(),
+        project_root: snapshot.project_root.display().to_string(),
+        authoritative_path: snapshot
+            .authoritative_path
+            .as_ref()
+            .map(|value| value.display().to_string()),
+        lock_path: snapshot.lock_path.display().to_string(),
+        provenance_path: snapshot
+            .provenance_path
+            .as_ref()
+            .map(|value| value.display().to_string()),
+        provenance_cache_path: snapshot
+            .provenance_cache_path
+            .as_ref()
+            .map(|value| value.display().to_string()),
+        binding_seed_path: snapshot
+            .binding_seed_path
+            .as_ref()
+            .map(|value| value.display().to_string()),
+    }
+}
+
+fn collect_field_views(
+    snapshot: &InspectionSnapshot,
+    unresolved: &[InspectUnresolvedView],
+) -> Vec<InspectFieldView> {
+    let mut entries = lock_field_entries(&snapshot.lock);
+    let unresolved_fields = unresolved
+        .iter()
+        .map(|value| value.lock_path.clone())
+        .collect::<BTreeSet<_>>();
+    for field in unresolved_fields {
+        entries.entry(field).or_insert(None);
+    }
+
+    let mut fields = entries
+        .into_iter()
+        .map(|(lock_path, value)| {
+            let mut provenance = provenance_for_field(snapshot, &lock_path);
+            if provenance.is_empty() {
+                provenance = default_provenance(snapshot, &lock_path);
+            }
+            let selection_gate_involved = snapshot
+                .selection_gate
+                .as_ref()
+                .map(|value| value.field == lock_path)
+                .unwrap_or(false)
+                || provenance
+                    .iter()
+                    .any(|value| value.kind == "selection_gate");
+            let approval_gate_involved =
+                provenance.iter().any(|value| value.kind == "approval_gate")
+                    || snapshot
+                        .approval_gate
+                        .as_ref()
+                        .map(|gate| !gate.capability.is_empty() || !gate.message.is_empty())
+                        .unwrap_or(false);
+            InspectFieldView {
+                resolved: value.is_some(),
+                explicit: provenance.iter().any(provenance_is_explicit),
+                inferred: provenance.iter().any(provenance_is_inferred),
+                observed: provenance.iter().any(provenance_is_observed),
+                user_confirmed: provenance.iter().any(provenance_is_user_confirmed),
+                fallback: provenance.iter().any(provenance_uses_fallback),
+                selection_gate_involved,
+                approval_gate_involved,
+                lock_path,
+                value,
+                provenance: provenance
+                    .into_iter()
+                    .map(|record| InspectProvenanceView {
+                        kind: record.kind,
+                        source_path: record.source_path.map(|value| value.display().to_string()),
+                        source_field: record.source_field,
+                        note: record.note,
+                    })
+                    .collect(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    fields.sort_by(|left, right| left.lock_path.cmp(&right.lock_path));
+    fields
+}
+
+fn collect_unresolved_views(snapshot: &InspectionSnapshot) -> Vec<InspectUnresolvedView> {
+    let unresolved_paths = if snapshot.resolve_unresolved.is_empty() {
+        snapshot.infer_unresolved.clone()
+    } else {
+        snapshot.resolve_unresolved.clone()
+    };
+
+    let mut contract_markers = snapshot.lock.contract.unresolved.iter();
+    let mut resolution_markers = snapshot.lock.resolution.unresolved.iter();
+    let mut binding_markers = snapshot.lock.binding.unresolved.iter();
+    let mut policy_markers = snapshot.lock.policy.unresolved.iter();
+    let mut attestation_markers = snapshot.lock.attestations.unresolved.iter();
+    let mut records = Vec::new();
+
+    for path in unresolved_paths {
+        let marker = match path.split('.').next().unwrap_or_default() {
+            "contract" => contract_markers.next(),
+            "resolution" => resolution_markers.next(),
+            "binding" => binding_markers.next(),
+            "policy" => policy_markers.next(),
+            "attestations" => attestation_markers.next(),
+            _ => None,
+        };
+        records.push(build_unresolved_view(&path, marker));
+    }
+
+    for marker in contract_markers {
+        records.push(build_unresolved_view("contract", Some(marker)));
+    }
+    for marker in resolution_markers {
+        records.push(build_unresolved_view("resolution", Some(marker)));
+    }
+    for marker in binding_markers {
+        records.push(build_unresolved_view("binding", Some(marker)));
+    }
+    for marker in policy_markers {
+        records.push(build_unresolved_view("policy", Some(marker)));
+    }
+    for marker in attestation_markers {
+        records.push(build_unresolved_view("attestations", Some(marker)));
+    }
+
+    records.sort_by(|left, right| {
+        left.lock_path
+            .cmp(&right.lock_path)
+            .then(left.reason_class.cmp(&right.reason_class))
+    });
+    records.dedup_by(|left, right| {
+        left.lock_path == right.lock_path
+            && left.reason_class == right.reason_class
+            && left.detail == right.detail
+    });
+    records
+}
+
+fn collect_diagnostic_views(snapshot: &InspectionSnapshot) -> Vec<InspectDiagnosticView> {
+    let inspect_command = format!("ato inspect lock {}", snapshot.requested_input);
+    let preview_command = format!("ato inspect preview {}", snapshot.requested_input);
+    let mut diagnostics = snapshot
+        .diagnostics
+        .iter()
+        .map(|record| InspectDiagnosticView {
+            severity: record.severity.clone(),
+            lock_path: record.field.clone(),
+            message: record.message.clone(),
+            reason_class: None,
+            source_mapping: source_mapping_for_field(snapshot, &record.field),
+            inspect_command: inspect_command.clone(),
+            preview_command: preview_command.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    for unresolved in collect_unresolved_views(snapshot) {
+        if diagnostics
+            .iter()
+            .any(|value| value.lock_path == unresolved.lock_path)
+        {
+            continue;
+        }
+        diagnostics.push(InspectDiagnosticView {
+            severity: diagnostic_severity_for_reason(&unresolved.reason_class).to_string(),
+            lock_path: unresolved.lock_path.clone(),
+            message: unresolved_message(&unresolved),
+            reason_class: Some(unresolved.reason_class.clone()),
+            source_mapping: source_mapping_for_field(snapshot, &unresolved.lock_path),
+            inspect_command: inspect_command.clone(),
+            preview_command: preview_command.clone(),
+        });
+    }
+
+    diagnostics.sort_by(|left, right| {
+        left.lock_path
+            .cmp(&right.lock_path)
+            .then(left.message.cmp(&right.message))
+    });
+    diagnostics
+}
+
+fn build_unresolved_view(
+    lock_path: &str,
+    marker: Option<&UnresolvedValue>,
+) -> InspectUnresolvedView {
+    InspectUnresolvedView {
+        lock_path: lock_path.to_string(),
+        reason_class: marker
+            .map(|value| value.reason.as_str().into_owned())
+            .unwrap_or_else(|| "unresolved".to_string()),
+        detail: marker.and_then(|value| value.detail.clone()),
+        candidates: marker
+            .map(|value| value.candidates.clone())
+            .unwrap_or_default(),
+    }
+}
+
+fn unresolved_message(unresolved: &InspectUnresolvedView) -> String {
+    unresolved.detail.clone().unwrap_or_else(|| {
+        format!(
+            "{} remains unresolved ({})",
+            unresolved.lock_path, unresolved.reason_class
+        )
+    })
+}
+
+fn remediation_action(lock_path: &str, reason_class: &str) -> String {
+    match (lock_path, reason_class) {
+        ("contract.process", "explicit_selection_required") => {
+            "select a concrete process and persist it through ato init or an explicit compatibility source field".to_string()
+        }
+        ("contract.process", _) => {
+            "declare a runnable process entrypoint so contract.process can be resolved".to_string()
+        }
+        ("resolution.runtime", _) => {
+            "declare runtime-target metadata explicitly and regenerate the lock-first baseline".to_string()
+        }
+        ("resolution.closure", _) => {
+            "materialize dependency closure state such as package lockfiles before regenerating ato.lock.json".to_string()
+        }
+        _ if lock_path.starts_with("binding.") => {
+            "populate workspace-local binding seed entries or accept the host-local binding prompt".to_string()
+        }
+        _ => "update the source field mapped by provenance, then rerun ato inspect preview to verify the lock path".to_string(),
+    }
+}
+
+fn remediation_commands(input: &str) -> Vec<String> {
+    vec![
+        format!("ato inspect lock {}", input),
+        format!("ato inspect preview {}", input),
+    ]
+}
+
+fn source_mapping_for_field(
+    snapshot: &InspectionSnapshot,
+    field: &str,
+) -> Option<SourceMappingView> {
+    provenance_for_field(snapshot, field)
+        .into_iter()
+        .find(|record| {
+            record.source_path.is_some() || record.source_field.is_some() || record.note.is_some()
+        })
+        .map(|record| SourceMappingView {
+            source_path: record.source_path.map(|value| value.display().to_string()),
+            source_field: record.source_field,
+            note: record.note,
+        })
+}
+
+fn provenance_for_field(snapshot: &InspectionSnapshot, field: &str) -> Vec<StoredProvenanceRecord> {
+    snapshot
+        .provenance
+        .iter()
+        .filter(|record| record.field == field || record.field == "root")
+        .cloned()
+        .collect()
+}
+
+fn default_provenance(snapshot: &InspectionSnapshot, field: &str) -> Vec<StoredProvenanceRecord> {
+    snapshot
+        .authoritative_path
+        .as_ref()
+        .map(|path| StoredProvenanceRecord {
+            field: field.to_string(),
+            kind: if snapshot.authoritative_kind == "canonical_lock" {
+                "canonical_input".to_string()
+            } else {
+                "explicit_artifact".to_string()
+            },
+            source_path: Some(path.clone()),
+            source_field: Some(field.to_string()),
+            note: Some("no persisted provenance sidecar was present, so authoritative input ownership was used".to_string()),
+        })
+        .into_iter()
+        .collect()
+}
+
+fn lock_field_entries(lock: &AtoLock) -> BTreeMap<String, Option<Value>> {
+    let mut fields = BTreeMap::new();
+    if !lock.features.declared.is_empty() {
+        fields.insert(
+            "features.declared".to_string(),
+            Some(json!(lock
+                .features
+                .declared
+                .iter()
+                .map(|value| value.as_str())
+                .collect::<Vec<_>>())),
+        );
+    }
+    if !lock.features.required_for_execution.is_empty() {
+        fields.insert(
+            "features.required_for_execution".to_string(),
+            Some(json!(lock
+                .features
+                .required_for_execution
+                .iter()
+                .map(|value| value.as_str())
+                .collect::<Vec<_>>())),
+        );
+    }
+    if !lock.features.implementation_phase.is_empty() {
+        fields.insert(
+            "features.implementation_phase".to_string(),
+            Some(json!(lock.features.implementation_phase)),
+        );
+    }
+    append_section_fields(&mut fields, "resolution", &lock.resolution.entries);
+    append_section_fields(&mut fields, "contract", &lock.contract.entries);
+    append_section_fields(&mut fields, "binding", &lock.binding.entries);
+    append_section_fields(&mut fields, "policy", &lock.policy.entries);
+    append_section_fields(&mut fields, "attestations", &lock.attestations.entries);
+    fields
+}
+
+fn append_section_fields(
+    fields: &mut BTreeMap<String, Option<Value>>,
+    section: &str,
+    entries: &BTreeMap<String, Value>,
+) {
+    for (key, value) in entries {
+        fields.insert(format!("{}.{}", section, key), Some(value.clone()));
+    }
+}
+
+fn append_compatibility_diagnostics(
+    result: &mut SourceInferenceResult,
+    compiled: &CompatibilityCompileResult,
+) {
+    result
+        .diagnostics
+        .extend(
+            compiled
+                .diagnostics
+                .iter()
+                .map(|diagnostic| SourceInferenceDiagnostic {
+                    severity: match diagnostic.severity {
+                        CompatibilityDiagnosticSeverity::Warning => {
+                            SourceInferenceDiagnosticSeverity::Warning
+                        }
+                        CompatibilityDiagnosticSeverity::Error => {
+                            SourceInferenceDiagnosticSeverity::Error
+                        }
+                    },
+                    field: diagnostic.lock_path.clone(),
+                    message: diagnostic.message.clone(),
+                }),
+        );
+}
+
+fn load_stored_sidecar(path: &Path) -> Result<Option<StoredSidecar>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let sidecar = serde_json::from_str(&raw)
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    Ok(Some(sidecar))
+}
+
+fn apply_stored_sidecar(result: &mut SourceInferenceResult, sidecar: StoredSidecar) {
+    result.provenance = sidecar
+        .provenance
+        .into_iter()
+        .map(|record| SourceInferenceProvenance {
+            field: record.field,
+            kind: provenance_kind_from_str(&record.kind),
+            source_path: record.source_path,
+            source_field: record.source_field,
+            note: record.note,
+        })
+        .collect();
+    result.diagnostics = sidecar
+        .diagnostics
+        .into_iter()
+        .map(|record| SourceInferenceDiagnostic {
+            severity: if record.severity == "error" {
+                SourceInferenceDiagnosticSeverity::Error
+            } else {
+                SourceInferenceDiagnosticSeverity::Warning
+            },
+            field: record.field,
+            message: record.message,
+        })
+        .collect();
+    result.infer.unresolved = sidecar.infer.unresolved;
+    result.resolve.unresolved = sidecar.resolve.unresolved;
+    result.selection_gate = sidecar
+        .selection_gate
+        .map(|gate| source_inference::SelectionGate {
+            field: gate.field,
+            candidates: Vec::new(),
+            message: "persisted selection gate".to_string(),
+        });
+    result.approval_gate = sidecar
+        .approval_gate
+        .map(|gate| source_inference::ApprovalGate {
+            capability: gate.capability,
+            message: gate.message,
+        });
+    result.input_kind = input_kind_from_str(&sidecar.input_kind);
+}
+
+fn convert_provenance_record(record: &SourceInferenceProvenance) -> StoredProvenanceRecord {
+    StoredProvenanceRecord {
+        field: record.field.clone(),
+        kind: provenance_kind_label(record.kind).to_string(),
+        source_path: record.source_path.clone(),
+        source_field: record.source_field.clone(),
+        note: record.note.clone(),
+    }
+}
+
+fn convert_diagnostic_record(record: &SourceInferenceDiagnostic) -> StoredDiagnosticRecord {
+    StoredDiagnosticRecord {
+        severity: diagnostic_severity_label(record.severity).to_string(),
+        field: record.field.clone(),
+        message: record.message.clone(),
+    }
+}
+
+fn workspace_sidecar_paths(project_root: &Path) -> WorkspaceSidecarPaths {
+    WorkspaceSidecarPaths {
+        provenance_path: project_root
+            .join(WORKSPACE_SOURCE_INFERENCE_DIR)
+            .join("provenance.json"),
+        cache_path: project_root
+            .join(WORKSPACE_SOURCE_INFERENCE_DIR)
+            .join("provenance-cache.json"),
+        binding_seed_path: project_root.join(WORKSPACE_BINDING_SEED_PATH),
+    }
+}
+
+struct WorkspaceSidecarPaths {
+    provenance_path: PathBuf,
+    cache_path: PathBuf,
+    binding_seed_path: PathBuf,
+}
+
+fn input_kind_label(kind: SourceInferenceInputKind) -> &'static str {
+    match kind {
+        SourceInferenceInputKind::SourceEvidence => "source_evidence",
+        SourceInferenceInputKind::DraftLock => "draft_lock",
+        SourceInferenceInputKind::CanonicalLock => "canonical_lock",
+    }
+}
+
+fn input_kind_from_str(value: &str) -> SourceInferenceInputKind {
+    match value {
+        "source_evidence" => SourceInferenceInputKind::SourceEvidence,
+        "draft_lock" => SourceInferenceInputKind::DraftLock,
+        _ => SourceInferenceInputKind::CanonicalLock,
+    }
+}
+
+fn provenance_kind_label(kind: SourceInferenceProvenanceKind) -> &'static str {
+    match kind {
+        SourceInferenceProvenanceKind::ExplicitArtifact => "explicit_artifact",
+        SourceInferenceProvenanceKind::CompatibilityImport => "compatibility_import",
+        SourceInferenceProvenanceKind::CanonicalInput => "canonical_input",
+        SourceInferenceProvenanceKind::DeterministicHeuristic => "deterministic_heuristic",
+        SourceInferenceProvenanceKind::MetadataObservation => "metadata_observation",
+        SourceInferenceProvenanceKind::SelectionGate => "selection_gate",
+        SourceInferenceProvenanceKind::ApprovalGate => "approval_gate",
+    }
+}
+
+fn provenance_kind_from_str(value: &str) -> SourceInferenceProvenanceKind {
+    match value {
+        "explicit_artifact" => SourceInferenceProvenanceKind::ExplicitArtifact,
+        "compatibility_import" => SourceInferenceProvenanceKind::CompatibilityImport,
+        "canonical_input" => SourceInferenceProvenanceKind::CanonicalInput,
+        "metadata_observation" => SourceInferenceProvenanceKind::MetadataObservation,
+        "selection_gate" => SourceInferenceProvenanceKind::SelectionGate,
+        "approval_gate" => SourceInferenceProvenanceKind::ApprovalGate,
+        _ => SourceInferenceProvenanceKind::DeterministicHeuristic,
+    }
+}
+
+fn diagnostic_severity_label(severity: SourceInferenceDiagnosticSeverity) -> &'static str {
+    match severity {
+        SourceInferenceDiagnosticSeverity::Warning => "warning",
+        SourceInferenceDiagnosticSeverity::Error => "error",
+    }
+}
+
+fn diagnostic_severity_for_reason(reason: &str) -> &'static str {
+    match reason {
+        "ambiguity" | "explicit_selection_required" => "warning",
+        _ => "error",
+    }
+}
+
+fn provenance_is_explicit(record: &StoredProvenanceRecord) -> bool {
+    matches!(
+        record.kind.as_str(),
+        "explicit_artifact" | "canonical_input"
+    )
+}
+
+fn provenance_is_inferred(record: &StoredProvenanceRecord) -> bool {
+    matches!(
+        record.kind.as_str(),
+        "compatibility_import" | "deterministic_heuristic"
+    )
+}
+
+fn provenance_is_observed(record: &StoredProvenanceRecord) -> bool {
+    record.kind == "metadata_observation"
+        || record
+            .note
+            .as_deref()
+            .map(|value| value.contains("observed"))
+            .unwrap_or(false)
+}
+
+fn provenance_is_user_confirmed(record: &StoredProvenanceRecord) -> bool {
+    record.kind == "selection_gate"
+}
+
+fn provenance_uses_fallback(record: &StoredProvenanceRecord) -> bool {
+    matches!(record.kind.as_str(), "compatibility_import")
+        || record
+            .note
+            .as_deref()
+            .map(|value| {
+                value.contains("fallback")
+                    || value.contains("metadata-only")
+                    || value.contains("promoted")
+            })
+            .unwrap_or(false)
+}
+
+fn print_lock_view(view: &InspectLockView) {
+    println!("Lock target: {}", view.target.input);
+    println!("  Authoritative input: {}", view.target.authoritative_kind);
+    println!("  Lock path: {}", view.target.lock_path);
+    if let Some(path) = view.target.provenance_path.as_ref() {
+        println!("  Provenance: {}", path);
+    }
+    println!(
+        "  Fields: {} total, {} unresolved, {} diagnostics",
+        view.summary.total_fields, view.summary.unresolved_fields, view.summary.diagnostics_count
+    );
+    println!("Fields:");
+    for field in &view.fields {
+        let mut labels = Vec::new();
+        if field.explicit {
+            labels.push("explicit");
+        }
+        if field.inferred {
+            labels.push("inferred");
+        }
+        if field.observed {
+            labels.push("observed");
+        }
+        if field.user_confirmed {
+            labels.push("user_confirmed");
+        }
+        if field.fallback {
+            labels.push("fallback");
+        }
+        let status = if field.resolved {
+            "resolved"
+        } else {
+            "unresolved"
+        };
+        if labels.is_empty() {
+            println!("  - {} [{}]", field.lock_path, status);
+        } else {
+            println!(
+                "  - {} [{}; {}]",
+                field.lock_path,
+                status,
+                labels.join(", ")
+            );
+        }
+    }
+    if !view.unresolved.is_empty() {
+        println!("Unresolved:");
+        for unresolved in &view.unresolved {
+            println!(
+                "  - {} ({}){}",
+                unresolved.lock_path,
+                unresolved.reason_class,
+                unresolved
+                    .detail
+                    .as_deref()
+                    .map(|value| format!(": {}", value))
+                    .unwrap_or_default()
+            );
+        }
+    }
+}
+
+fn print_preview_view(view: &PreviewLockView) {
+    println!("Preview target: {}", view.target.input);
+    println!("  Durable lock state: {}", view.preview.durable_lock_state);
+    println!("  Init workspace outputs:");
+    for output in &view.preview.durable_materialization.outputs {
+        println!("    - {}: {}", output.label, output.path);
+    }
+    println!("  Run attempt outputs:");
+    for output in &view.preview.run_attempt_materialization.outputs {
+        println!("    - {}: {}", output.label, output.path);
+    }
+    if !view.preview.unresolved.is_empty() {
+        println!("  Unresolved: {}", view.preview.unresolved.len());
+    }
+    if !view.preview.diagnostics.is_empty() {
+        println!("  Diagnostics: {}", view.preview.diagnostics.len());
+    }
+}
+
+fn print_diagnostics_view(view: &DiagnosticsLockView) {
+    println!("Diagnostics target: {}", view.target.input);
+    for diagnostic in &view.diagnostics {
+        println!(
+            "  - [{}] {}: {}",
+            diagnostic.severity, diagnostic.lock_path, diagnostic.message
+        );
+        println!("    inspect: {}", diagnostic.inspect_command);
+        println!("    preview: {}", diagnostic.preview_command);
+    }
+}
+
+fn print_remediation_view(view: &RemediationLockView) {
+    println!("Remediation target: {}", view.target.input);
+    for suggestion in &view.suggestions {
+        println!("  - {} ({})", suggestion.lock_path, suggestion.reason_class);
+        println!("    {}", suggestion.recommended_action);
+        if let Some(mapping) = suggestion.source_mapping.as_ref() {
+            if let Some(path) = mapping.source_path.as_ref() {
+                println!("    source: {}", path);
+            }
+        }
+    }
 }
 
 impl InspectRequirementsError {

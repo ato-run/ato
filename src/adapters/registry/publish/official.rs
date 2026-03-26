@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::fs;
 use std::path::Path;
 
 use anyhow::Result;
@@ -7,6 +6,7 @@ use capsule_core::execution_plan::{derive, guard};
 use capsule_core::router::ExecutionProfile;
 use serde::Serialize;
 
+use crate::application::producer_input::resolve_producer_authoritative_input;
 use crate::publish_preflight::{self, find_manifest_repository, CI_WORKFLOW_REL_PATH};
 
 const MAIN_BRANCH: &str = "main";
@@ -95,84 +95,61 @@ pub fn diagnose_official(cwd: &Path, registry_url: &str) -> OfficialPublishDiagn
     let mut stages = Vec::new();
     let mut issues = Vec::new();
 
-    let manifest_path = cwd.join("capsule.toml");
     let mut capsule_name: Option<String> = None;
     let mut version: Option<String> = None;
     let mut manifest_repo: Option<String> = None;
 
-    let preflight_ok = if !manifest_path.exists() {
-        issues.push(DiagnoseIssue {
-            stage: "preflight",
-            message: format!("capsule.toml not found: {}", manifest_path.display()),
-            action: Some("プロジェクトルートで `ato publish` を実行".to_string()),
-        });
-        false
-    } else {
-        let manifest_raw = match fs::read_to_string(&manifest_path) {
-            Ok(v) => v,
-            Err(err) => {
-                issues.push(DiagnoseIssue {
-                    stage: "preflight",
-                    message: format!("failed to read {}: {}", manifest_path.display(), err),
-                    action: Some("capsule.toml の読み取り権限を確認".to_string()),
-                });
-                String::new()
-            }
-        };
-        if manifest_raw.is_empty() {
-            false
-        } else {
-            match capsule_core::types::CapsuleManifest::from_toml(&manifest_raw) {
-                Ok(manifest) => {
-                    capsule_name = Some(manifest.name.clone());
-                    version = Some(manifest.version.clone());
-                    manifest_repo = find_manifest_repository(&manifest_raw);
+    let preflight_ok = match resolve_producer_authoritative_input(
+        cwd,
+        std::sync::Arc::new(crate::reporters::CliReporter::new(false)),
+        false,
+    ) {
+        Ok(authoritative_input) => {
+            let manifest_path = authoritative_input.manifest_path.clone();
+            let manifest_raw = authoritative_input.manifest_raw.clone();
+            let manifest = authoritative_input.manifest.clone();
+            capsule_name = Some(manifest.name.clone());
+            version = Some(manifest.version.clone());
+            manifest_repo = find_manifest_repository(&manifest_raw);
 
-                    let compiled = derive::compile_execution_plan(
-                        &manifest_path,
-                        ExecutionProfile::Release,
-                        None,
-                    );
-                    match compiled {
-                        Ok(compiled) => {
-                            if let Err(err) = guard::evaluate(
-                                &compiled.execution_plan,
-                                &compiled.runtime_decision.plan.manifest_dir,
-                                "strict",
-                                true,
-                                false,
-                            ) {
-                                issues.push(DiagnoseIssue {
-                                    stage: "preflight",
-                                    message: err.to_string(),
-                                    action: Some("ato build .".to_string()),
-                                });
-                                false
-                            } else {
-                                true
-                            }
-                        }
-                        Err(err) => {
-                            issues.push(DiagnoseIssue {
-                                stage: "preflight",
-                                message: err.to_string(),
-                                action: Some(
-                                    "capsule.toml の target/runtime 設定を修正".to_string(),
-                                ),
-                            });
-                            false
-                        }
+            let compiled =
+                derive::compile_execution_plan(&manifest_path, ExecutionProfile::Release, None);
+            match compiled {
+                Ok(compiled) => {
+                    if let Err(err) = guard::evaluate(
+                        &compiled.execution_plan,
+                        &compiled.runtime_decision.plan.manifest_dir,
+                        "strict",
+                        true,
+                        false,
+                    ) {
+                        issues.push(DiagnoseIssue {
+                            stage: "preflight",
+                            message: err.to_string(),
+                            action: Some("ato build .".to_string()),
+                        });
+                        false
+                    } else {
+                        true
                     }
                 }
                 Err(err) => {
                     issues.push(DiagnoseIssue {
                         stage: "preflight",
                         message: err.to_string(),
-                        action: Some("capsule.toml の構文と必須項目を修正".to_string()),
+                        action: Some("authoritative build metadata を修正".to_string()),
                     });
                     false
                 }
             }
+        }
+        Err(err) => {
+            issues.push(DiagnoseIssue {
+                stage: "preflight",
+                message: err.to_string(),
+                action: Some("プロジェクトルートで authoritative input を解決できる状態にして `ato publish` を再実行".to_string()),
+            });
+            false
         }
     };
     stages.push(StageResult {

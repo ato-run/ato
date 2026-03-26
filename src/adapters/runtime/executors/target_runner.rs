@@ -3,16 +3,21 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use capsule_core::execution_plan::derive::{self, PlatformSnapshot};
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::execution_plan::guard::{self, RuntimeGuardMode, RuntimeGuardResult};
 use capsule_core::execution_plan::model::{ExecutionPlan, ExecutionTier};
+use capsule_core::lock_runtime;
 use capsule_core::lockfile;
 use capsule_core::router::{ManifestData, RuntimeDecision};
-use capsule_core::types::ValidationMode;
 use capsule_core::CapsuleReporter;
 use tracing::debug;
 
 use super::launch_context::RuntimeLaunchContext;
+use crate::application::pipeline::phases::run::{
+    CompatibilityLegacyLockContext, PreparedRunContext,
+};
+use crate::application::workspace::state;
 use crate::ipc::inject::IpcContext;
 use crate::reporters::CliReporter;
 use crate::runtime::overrides as runtime_overrides;
@@ -38,30 +43,18 @@ pub struct PreparedTargetExecution {
 
 pub async fn resolve_launch_context(
     plan: &ManifestData,
+    prepared: &PreparedRunContext,
     reporter: &Arc<CliReporter>,
 ) -> Result<RuntimeLaunchContext> {
-    let raw_manifest_text = std::fs::read_to_string(&plan.manifest_path).map_err(|err| {
-        AtoExecutionError::execution_contract_invalid(
-            format!("Failed to read manifest for IPC validation: {err}"),
-            Some("manifest"),
-            None,
-        )
-    })?;
-    let raw_manifest: toml::Value = toml::from_str(&raw_manifest_text).map_err(|err| {
-        AtoExecutionError::execution_contract_invalid(
-            format!("Failed to parse manifest for IPC validation: {err}"),
-            Some("manifest"),
-            None,
-        )
-    })?;
-    let diagnostics = crate::ipc::validate::validate_manifest(&raw_manifest, &plan.manifest_dir)
-        .map_err(|err| {
-            AtoExecutionError::execution_contract_invalid(
-                format!("IPC validation failed: {err}"),
-                None,
-                None,
-            )
-        })?;
+    let diagnostics =
+        crate::ipc::validate::validate_manifest(&prepared.raw_manifest, &plan.manifest_dir)
+            .map_err(|err| {
+                AtoExecutionError::execution_contract_invalid(
+                    format!("IPC validation failed: {err}"),
+                    None,
+                    None,
+                )
+            })?;
 
     if crate::ipc::validate::has_errors(&diagnostics) {
         return Err(AtoExecutionError::execution_contract_invalid(
@@ -94,49 +87,120 @@ pub async fn resolve_launch_context(
 
 pub fn prepare_target_execution(
     plan: &ManifestData,
+    prepared: &PreparedRunContext,
     launch_ctx: RuntimeLaunchContext,
     options: &TargetLaunchOptions,
 ) -> Result<PreparedTargetExecution> {
     preflight_required_environment_variables(plan, &launch_ctx)?;
     preflight_web_services_requirements(plan)?;
-    verify_lockfile_integrity(&plan.manifest_path)?;
+    verify_lockfile_integrity(
+        &plan.manifest_path,
+        prepared.compatibility_legacy_lock.as_ref(),
+    )?;
 
-    let validation_mode = if options.preview_mode {
-        ValidationMode::Preview
-    } else {
-        ValidationMode::Strict
-    };
+    let validation_mode = prepared.validation_mode;
     let guard_mode = if options.preview_mode {
         RuntimeGuardMode::Preview
     } else {
         RuntimeGuardMode::Strict
     };
 
-    let compiled =
-        capsule_core::execution_plan::derive::compile_execution_plan_with_validation_mode(
-            &plan.manifest_path,
-            plan.profile,
-            Some(plan.selected_target_label()),
-            validation_mode,
-        )?;
+    let (execution_plan, runtime_decision, tier) =
+        if let Some(lock) = prepared.authoritative_lock.as_ref() {
+            let resolved =
+                lock_runtime::resolve_lock_runtime_model(lock, Some(plan.selected_target_label()))?;
+            let overlay = prepared
+                .effective_state
+                .as_ref()
+                .map(|effective| effective.compiler_overlay.clone())
+                .unwrap_or_default();
+            let execution_plan = derive::compile_execution_plan_from_lock(
+                lock,
+                &resolved,
+                &overlay,
+                &PlatformSnapshot::current(),
+            )?;
+            if let Some(effective_state) = prepared.effective_state.as_ref() {
+                state::validate_execution_plan_against_policy(
+                    &execution_plan,
+                    &effective_state.policy,
+                )?;
+            }
+            let tier =
+                derive::derive_tier(execution_plan.target.runtime, execution_plan.target.driver)?;
+            let kind = match execution_plan.target.runtime {
+                capsule_core::execution_plan::model::ExecutionRuntime::Oci => {
+                    capsule_core::router::RuntimeKind::Oci
+                }
+                capsule_core::execution_plan::model::ExecutionRuntime::Wasm => {
+                    capsule_core::router::RuntimeKind::Wasm
+                }
+                capsule_core::execution_plan::model::ExecutionRuntime::Web => {
+                    capsule_core::router::RuntimeKind::Web
+                }
+                capsule_core::execution_plan::model::ExecutionRuntime::Source => {
+                    capsule_core::router::RuntimeKind::Source
+                }
+            };
+            (
+                execution_plan,
+                RuntimeDecision {
+                    kind,
+                    reason: format!("lock-derived target {}", plan.selected_target_label()),
+                    plan: plan.clone(),
+                },
+                tier,
+            )
+        } else {
+            let compiled =
+                capsule_core::execution_plan::derive::compile_execution_plan_with_validation_mode(
+                    &plan.manifest_path,
+                    plan.profile,
+                    Some(plan.selected_target_label()),
+                    validation_mode,
+                )?;
+            (
+                compiled.execution_plan,
+                compiled.runtime_decision,
+                compiled.tier,
+            )
+        };
 
-    let guard_result = guard::evaluate_for_mode(
-        &compiled.execution_plan,
-        &compiled.runtime_decision.plan.manifest_dir,
+    if !options.defer_consent {
+        let guard_result = guard::evaluate_for_mode_with_authority(
+            &execution_plan,
+            &runtime_decision.plan.manifest_dir,
+            &options.enforcement,
+            options.sandbox_mode,
+            options.dangerously_skip_permissions,
+            guard_mode,
+            prepared.authoritative_lock.is_some(),
+        )?;
+        crate::consent_store::require_consent(&execution_plan, options.assume_yes)?;
+
+        return Ok(PreparedTargetExecution {
+            execution_plan,
+            runtime_decision,
+            tier,
+            guard_result,
+            launch_ctx,
+        });
+    }
+
+    let guard_result = guard::evaluate_for_mode_with_authority(
+        &execution_plan,
+        &runtime_decision.plan.manifest_dir,
         &options.enforcement,
         options.sandbox_mode,
         options.dangerously_skip_permissions,
         guard_mode,
+        prepared.authoritative_lock.is_some(),
     )?;
 
-    if !options.defer_consent {
-        crate::consent_store::require_consent(&compiled.execution_plan, options.assume_yes)?;
-    }
-
     Ok(PreparedTargetExecution {
-        execution_plan: compiled.execution_plan,
-        runtime_decision: compiled.runtime_decision,
-        tier: compiled.tier,
+        execution_plan,
+        runtime_decision,
+        tier,
         guard_result,
         launch_ctx,
     })
@@ -210,17 +274,22 @@ fn preflight_web_services_requirements(plan: &ManifestData) -> Result<()> {
     Ok(())
 }
 
-fn verify_lockfile_integrity(manifest_path: &Path) -> Result<()> {
-    let lock_path = manifest_path
-        .parent()
-        .map(|parent| parent.join("capsule.lock"))
-        .filter(|path| path.exists());
-
-    let Some(lock_path) = lock_path else {
+fn verify_lockfile_integrity(
+    manifest_path: &Path,
+    compatibility_legacy_lock: Option<&CompatibilityLegacyLockContext>,
+) -> Result<()> {
+    let Some(compatibility_legacy_lock) = compatibility_legacy_lock else {
         return Ok(());
     };
 
-    lockfile::verify_lockfile_manifest(manifest_path, &lock_path).map_err(|err| {
+    let validation_manifest_path = if manifest_path == compatibility_legacy_lock.manifest_path {
+        manifest_path
+    } else {
+        &compatibility_legacy_lock.manifest_path
+    };
+
+    lockfile::verify_lockfile_manifest(validation_manifest_path, &compatibility_legacy_lock.path)
+        .map_err(|err| {
         if err.to_string().contains("manifest hash mismatch") {
             AtoExecutionError::lockfile_tampered(err.to_string(), Some("capsule.lock"))
         } else {
@@ -233,11 +302,21 @@ fn verify_lockfile_integrity(manifest_path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::preflight_required_environment_variables;
+    use std::sync::Arc;
+
+    use super::{
+        preflight_required_environment_variables, resolve_launch_context, verify_lockfile_integrity,
+    };
+    use crate::application::pipeline::phases::run::{
+        CompatibilityLegacyLockContext, PreparedRunContext,
+    };
     use crate::executors::launch_context::RuntimeLaunchContext;
+    use crate::reporters::CliReporter;
+    use capsule_core::lockfile::{CapsuleLock, LockMeta};
     use capsule_core::router::{ExecutionProfile, ManifestData};
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use tempfile::tempdir;
 
     #[test]
     fn injected_env_satisfies_required_env() {
@@ -289,5 +368,102 @@ mod tests {
         );
 
         assert!(preflight_required_environment_variables(&plan, &launch_ctx).is_ok());
+    }
+
+    #[tokio::test]
+    async fn resolve_launch_context_uses_prepared_manifest_without_file_read() {
+        let temp_dir = tempdir().expect("tempdir");
+        let manifest_path = temp_dir.path().join("missing-capsule.toml");
+        let manifest_dir = temp_dir.path().to_path_buf();
+
+        let raw_manifest = toml::from_str::<toml::Value>(
+            r#"
+name = "demo"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "node"
+entrypoint = "index.js"
+"#,
+        )
+        .expect("parse manifest");
+
+        let plan = ManifestData {
+            manifest: raw_manifest.clone(),
+            manifest_path,
+            manifest_dir,
+            profile: ExecutionProfile::Dev,
+            selected_target: "default".to_string(),
+            state_source_overrides: HashMap::new(),
+        };
+        let prepared = PreparedRunContext {
+            authoritative_lock: None,
+            effective_state: None,
+            raw_manifest,
+            validation_mode: capsule_core::types::ValidationMode::Strict,
+            engine_override_declared: false,
+            compatibility_legacy_lock: None,
+        };
+
+        let launch_ctx =
+            resolve_launch_context(&plan, &prepared, &Arc::new(CliReporter::new(false)))
+                .await
+                .expect("resolve launch context without reading manifest file");
+
+        assert!(launch_ctx.ipc().is_none());
+    }
+
+    #[test]
+    fn verify_lockfile_integrity_ignores_stray_lock_without_compatibility_context() {
+        let temp_dir = tempdir().expect("tempdir");
+        let manifest_path = temp_dir.path().join("capsule.toml");
+        std::fs::write(
+            &manifest_path,
+            r#"schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "node"
+entrypoint = "index.js"
+"#,
+        )
+        .expect("write manifest");
+        let legacy_lock_path = temp_dir.path().join("capsule.lock.json");
+        let lock = CapsuleLock {
+            version: "1".to_string(),
+            meta: LockMeta {
+                created_at: "2026-03-25T00:00:00Z".to_string(),
+                manifest_hash: "sha256:not-the-real-manifest".to_string(),
+            },
+            allowlist: None,
+            capsule_dependencies: Vec::new(),
+            injected_data: HashMap::new(),
+            tools: None,
+            runtimes: None,
+            targets: HashMap::new(),
+        };
+        std::fs::write(
+            &legacy_lock_path,
+            serde_json::to_string_pretty(&lock).expect("serialize lock"),
+        )
+        .expect("write legacy lock");
+
+        verify_lockfile_integrity(&manifest_path, None)
+            .expect("stray legacy lock must not affect non-compatibility contexts");
+
+        let compatibility_legacy_lock = CompatibilityLegacyLockContext {
+            manifest_path: manifest_path.clone(),
+            path: legacy_lock_path,
+            lock,
+        };
+        let error = verify_lockfile_integrity(&manifest_path, Some(&compatibility_legacy_lock))
+            .expect_err("compatibility legacy lock must be validated when explicitly provided");
+
+        assert!(error.to_string().contains("ATO_ERR_LOCKFILE_TAMPERED"));
     }
 }

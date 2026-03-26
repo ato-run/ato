@@ -456,6 +456,8 @@ fn gc_tick_keeps_retention_pinned_release_chunks() {
                 "sha256:abc",
                 &format!("blake3:{:064x}", idx + 1),
                 capsule.len() as u64,
+                None,
+                None,
                 &capsule,
                 &format!("2026-03-05T00:00:0{}Z", idx),
             )
@@ -492,6 +494,47 @@ fn gc_tick_keeps_retention_pinned_release_chunks() {
         .load_chunk_bytes(&chunk_hash)
         .expect("load chunk")
         .is_some());
+}
+
+#[test]
+fn publish_registry_release_persists_lock_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = RegistryStore::open(temp.path()).expect("open store");
+    let capsule = build_capsule_bytes(&manifest("1.2.3"));
+    let lock_id = "blake3:1111111111111111111111111111111111111111111111111111111111111111";
+    let closure_digest = "blake3:2222222222222222222222222222222222222222222222222222222222222222";
+
+    store
+        .publish_registry_release(
+            "koh0920",
+            "sample",
+            "sample",
+            "sample app",
+            "1.2.3",
+            "sample-1.2.3.capsule",
+            "sha256:abc",
+            "blake3:def",
+            capsule.len() as u64,
+            Some(lock_id),
+            Some(closure_digest),
+            &capsule,
+            "2026-03-25T00:00:00Z",
+        )
+        .expect("publish release");
+
+    let release = store
+        .find_registry_release("koh0920", "sample", "1.2.3")
+        .expect("find release")
+        .expect("stored release");
+    assert_eq!(release.lock_id.as_deref(), Some(lock_id));
+    assert_eq!(release.closure_digest.as_deref(), Some(closure_digest));
+
+    let resolved = store
+        .resolve_release_version("koh0920", "sample", "1.2.3")
+        .expect("resolve version")
+        .expect("resolved release");
+    assert_eq!(resolved.lock_id.as_deref(), Some(lock_id));
+    assert_eq!(resolved.closure_digest.as_deref(), Some(closure_digest));
 }
 
 #[test]
