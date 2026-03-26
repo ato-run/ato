@@ -16,6 +16,7 @@ use crate::application::pipeline::producer::{
     self, ProducerPipeline, PublishDryRunStageResult, PublishInstallResult, PublishPhaseOptions,
     PublishPipelineRequest, PublishPipelineState,
 };
+use crate::application::producer_input::resolve_producer_authoritative_input;
 
 use super::Reporter;
 
@@ -693,6 +694,13 @@ impl<'a> PublishCommandExecution<'a> {
         } else {
             Some(preview.scoped_id.clone())
         };
+        let source_lock_metadata = if source_is_artifact {
+            (None, None)
+        } else {
+            let resolved =
+                resolve_producer_authoritative_input(&self.cwd, self.reporter.clone(), false)?;
+            (resolved.lock_id, resolved.closure_digest)
+        };
         let upload_result =
             publish_phase::run_private_publish_phase_async(publish_phase::PrivatePublishRequest {
                 registry_url: self.resolved_target.registry_url.clone(),
@@ -701,6 +709,8 @@ impl<'a> PublishCommandExecution<'a> {
                 force_large_payload: self.args.force_large_payload,
                 scoped_id,
                 allow_existing: self.args.allow_existing,
+                lock_id: source_lock_metadata.0,
+                closure_digest: source_lock_metadata.1,
             })
             .await;
         if !self.args.json {
@@ -829,6 +839,8 @@ fn execute_publish_pipeline(
                 force_large_payload: args.force_large_payload,
                 scoped_id: args.scoped_id.clone(),
                 allow_existing: args.allow_existing,
+                lock_id: None,
+                closure_digest: None,
             },
         )?)
     } else {
@@ -1003,18 +1015,25 @@ fn maybe_warn_legacy_full_publish(should_warn: bool) {
 }
 
 fn build_capsule_artifact_for_publish(cwd: &Path) -> Result<PathBuf> {
-    let manifest_path = cwd.join("capsule.toml");
-    let manifest_raw = std::fs::read_to_string(&manifest_path)
-        .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
-    let manifest = capsule_core::types::CapsuleManifest::from_toml(&manifest_raw)
-        .map_err(|err| anyhow::anyhow!("Failed to parse capsule.toml: {}", err))?;
+    let authoritative_input = resolve_producer_authoritative_input(
+        cwd,
+        std::sync::Arc::new(crate::reporters::CliReporter::new(false)),
+        false,
+    )?;
+    let manifest_path = authoritative_input.manifest_path.clone();
+    let manifest = authoritative_input.manifest.clone();
     let version = if manifest.version.trim().is_empty() {
         "auto"
     } else {
         manifest.version.trim()
     };
-    crate::publish_ci::build_capsule_artifact(&manifest_path, &manifest.name, version)
-        .with_context(|| "Failed to build artifact for publish")
+    crate::publish_ci::build_capsule_artifact(
+        &manifest_path,
+        &manifest.name,
+        version,
+        Some(&authoritative_input),
+    )
+    .with_context(|| "Failed to build artifact for publish")
 }
 
 fn emit_publish_json_output(
@@ -1119,28 +1138,31 @@ fn ensure_publish_source_manifest_ready(args: &PublishCommandArgs) -> Result<()>
     }
 
     let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
-    let manifest_path = cwd.join("capsule.toml");
-    if !manifest_path.exists() {
-        anyhow::bail!(
-            "capsule.toml not found in current directory: {}",
-            manifest_path.display()
-        );
-    }
-
-    Ok(())
+    resolve_producer_authoritative_input(
+        &cwd,
+        std::sync::Arc::new(crate::reporters::CliReporter::new(false)),
+        false,
+    )
+    .map(|_| ())
 }
 
 fn discover_manifest_publish_registry() -> Result<Option<String>> {
     let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
-    let manifest_path = cwd.join("capsule.toml");
-    if !manifest_path.exists() {
-        return Ok(None);
-    }
-
-    let raw = std::fs::read_to_string(&manifest_path)
-        .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
-    let parsed: toml::Value = toml::from_str(&raw)
-        .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
+    let authoritative_input = match resolve_producer_authoritative_input(
+        &cwd,
+        std::sync::Arc::new(crate::reporters::CliReporter::new(false)),
+        false,
+    ) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let parsed: toml::Value =
+        toml::from_str(&authoritative_input.manifest_raw).with_context(|| {
+            format!(
+                "Failed to parse {}",
+                authoritative_input.manifest_path.display()
+            )
+        })?;
 
     Ok(parsed
         .get("store")

@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -59,7 +60,6 @@ pub fn pack(
     opts: SourcePackOptions,
     reporter: std::sync::Arc<dyn crate::reporter::CapsuleReporter + 'static>,
 ) -> Result<PathBuf> {
-    let rt = tokio::runtime::Runtime::new()?;
     let strict_manifest = opts.strict_manifest || strict_manifest_from_env()?;
 
     let loaded = manifest::load_manifest(&opts.manifest_path)?;
@@ -71,7 +71,7 @@ pub fn pack(
     if let Some(digest) = source_digest {
         debug!("Phase 0: checking CAS for source_digest");
         let cas = create_cas_client_from_env()?;
-        let exists = rt.block_on(cas.exists(digest))?;
+        let exists = block_on_runtime(cas.exists(digest))?;
         if !exists {
             if strict_manifest {
                 return Err(CapsuleError::StrictManifestFallbackNotAllowed(format!(
@@ -140,7 +140,7 @@ pub fn pack(
     debug!("config.json ready: {}", opts.config_path.display());
 
     let lockfile_started = Instant::now();
-    let lockfile_path = rt.block_on(lockfile::ensure_lockfile(
+    let lockfile_path = block_on_runtime(lockfile::ensure_lockfile(
         &opts.manifest_path,
         &loaded.raw,
         &loaded.raw_text,
@@ -164,7 +164,7 @@ pub fn pack(
         })?;
 
         let bundle_started = Instant::now();
-        let bundle_path = rt.block_on(build_bundle(
+        let bundle_path = block_on_runtime(build_bundle(
             PackBundleArgs {
                 manifest_path: opts.manifest_path.clone(),
                 runtime_path: opts.runtime.clone(),
@@ -186,7 +186,7 @@ pub fn pack(
         debug!("Phase 3: creating capsule archive");
 
         let archive_started = Instant::now();
-        let artifact_path = rt.block_on(capsule_packer::pack(
+        let artifact_path = block_on_runtime(capsule_packer::pack(
             plan,
             capsule_packer::CapsulePackOptions {
                 manifest_path: opts.manifest_path.clone(),
@@ -207,6 +207,18 @@ pub fn pack(
 
         debug!("Capsule archive created: {}", artifact_path.display());
         Ok(artifact_path)
+    }
+}
+
+fn block_on_runtime<F, T>(future: F) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(future))
+    } else {
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(future)
     }
 }
 

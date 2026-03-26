@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 use super::binding::BindingCommands;
 use super::config::{ConfigCommands, EngineCommands};
+use super::init::InitLegacyMode;
 use super::inspect::InspectCommands;
 use super::ipc::IpcCommands;
 use super::key::KeyCommands;
@@ -29,7 +30,7 @@ Primary Commands:
   publish  Publish capsule artifacts to a registry
   install  Install a verified package from the registry
   search   Search the registry for agent skills and packages
-  init     Analyze the current project and print an agent-ready capsule.toml prompt
+    init     Materialize a durable ato.lock.json baseline for the current project
 
 Management:
   ps       List running capsules
@@ -44,7 +45,7 @@ Auth:
   whoami   Show current authentication status
 
 Advanced Commands:
-  inspect  Inspect capsule metadata and runtime requirements
+    inspect  Inspect lock-first metadata, preview write-back, diagnostics, and runtime requirements
   fetch    Fetch an artifact into local cache for debugging or manual workflows
   finalize Perform local derivation for a fetched native artifact
   project  Add a finalized app to launcher surfaces
@@ -151,6 +152,30 @@ pub(crate) enum Commands {
         #[arg(long, hide = true, default_value_t = false)]
         keep_failed_artifacts: bool,
 
+        /// Auto-fix generated GitHub draft TOML before build/run
+        #[arg(
+            long = "auto-fix:toml",
+            default_value_t = false,
+            conflicts_with_all = ["auto_fix_src", "auto_fix_all"]
+        )]
+        auto_fix_toml: bool,
+
+        /// Auto-fix fetched GitHub source before build/run
+        #[arg(
+            long = "auto-fix:src",
+            default_value_t = false,
+            conflicts_with_all = ["auto_fix_toml", "auto_fix_all"]
+        )]
+        auto_fix_src: bool,
+
+        /// Enable all GitHub auto-fixes before build/run
+        #[arg(
+            long = "auto-fix:all",
+            default_value_t = false,
+            conflicts_with_all = ["auto_fix_toml", "auto_fix_src"]
+        )]
+        auto_fix_all: bool,
+
         /// Allow installing/running unverified signatures in non-production environments
         #[arg(long, default_value_t = false)]
         allow_unverified: bool,
@@ -216,13 +241,52 @@ pub(crate) enum Commands {
         /// Keep failed GitHub checkout artifacts and generated manifests for debugging
         #[arg(long, hide = true, default_value_t = false)]
         keep_failed_artifacts: bool,
+
+        /// Auto-fix generated GitHub draft TOML before build/install
+        #[arg(
+            long = "auto-fix:toml",
+            default_value_t = false,
+            requires = "from_gh_repo",
+            conflicts_with_all = ["auto_fix_src", "auto_fix_all"]
+        )]
+        auto_fix_toml: bool,
+
+        /// Auto-fix fetched GitHub source before build/install
+        #[arg(
+            long = "auto-fix:src",
+            default_value_t = false,
+            requires = "from_gh_repo",
+            conflicts_with_all = ["auto_fix_toml", "auto_fix_all"]
+        )]
+        auto_fix_src: bool,
+
+        /// Enable all GitHub auto-fixes before build/install
+        #[arg(
+            long = "auto-fix:all",
+            default_value_t = false,
+            requires = "from_gh_repo",
+            conflicts_with_all = ["auto_fix_toml", "auto_fix_src"]
+        )]
+        auto_fix_all: bool,
     },
 
     #[command(
         next_help_heading = "Primary Commands",
-        about = "Analyze the current project and print an agent-ready capsule.toml prompt"
+        about = "Materialize a durable ato.lock.json baseline for a local workspace"
     )]
-    Init,
+    Init {
+        /// Local workspace path to initialize
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Skip prompts when source inference requires explicit confirmation
+        #[arg(short = 'y', long = "yes", default_value_t = false)]
+        yes: bool,
+
+        /// Use a legacy manifest-first init surface instead of durable lock materialization
+        #[arg(long, value_enum)]
+        legacy: Option<InitLegacyMode>,
+    },
 
     #[command(
         next_help_heading = "Primary Commands",
@@ -271,7 +335,7 @@ pub(crate) enum Commands {
 
     #[command(
         next_help_heading = "Advanced Commands",
-        about = "Inspect capsule metadata and runtime requirements"
+        about = "Inspect lock-first metadata, preview write-back, diagnostics, remediation, and runtime requirements"
     )]
     Inspect {
         #[command(subcommand)]
