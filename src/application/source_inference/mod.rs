@@ -164,13 +164,11 @@ pub(crate) struct SourceInferenceDiagnostic {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RunMaterialization {
-    pub(crate) input_kind: SourceInferenceInputKind,
     pub(crate) project_root: PathBuf,
     pub(crate) manifest_path: PathBuf,
     pub(crate) bridge_manifest_sha256: String,
     pub(crate) lock: AtoLock,
     pub(crate) lock_path: PathBuf,
-    pub(crate) sidecar_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -181,7 +179,6 @@ pub(crate) struct WorkspaceMaterialization {
     pub(crate) binding_seed_path: PathBuf,
     pub(crate) policy_bundle_path: PathBuf,
     pub(crate) attestation_store_path: PathBuf,
-    pub(crate) result: SourceInferenceResult,
 }
 
 #[derive(Debug, Serialize)]
@@ -380,12 +377,19 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
     );
     lock.resolution.entries.insert(
         "resolved_targets".to_string(),
-        Value::Array(vec![json!({
-            "label": "default",
-            "runtime": "source",
-            "driver": runtime_kind,
-            "compatible": true,
-        })]),
+        Value::Array(vec![{
+            let mut target = serde_json::Map::new();
+            target.insert("label".to_string(), Value::String("default".to_string()));
+            target.insert("runtime".to_string(), Value::String("source".to_string()));
+            if runtime_kind != "source" {
+                target.insert(
+                    "driver".to_string(),
+                    Value::String(runtime_kind.to_string()),
+                );
+            }
+            target.insert("compatible".to_string(), Value::Bool(true));
+            Value::Object(target)
+        }]),
     );
     lock.resolution.entries.insert(
         "closure".to_string(),
@@ -405,6 +409,7 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
             .entries
             .insert("workloads".to_string(), Value::Array(Vec::new()));
         lock.contract.unresolved.push(UnresolvedValue {
+            field: Some("contract.process".to_string()),
             reason: UnresolvedReason::InsufficientEvidence,
             detail: Some("could not infer a primary process from source evidence".to_string()),
             candidates: Vec::new(),
@@ -420,6 +425,7 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
             .entries
             .insert("workloads".to_string(), Value::Array(Vec::new()));
         lock.contract.unresolved.push(UnresolvedValue {
+            field: Some("contract.process".to_string()),
             reason: UnresolvedReason::ExplicitSelectionRequired,
             detail: Some("multiple equal-ranked process candidates remain".to_string()),
             candidates: process_candidates
@@ -859,13 +865,11 @@ fn materialize_run_result(
     }
 
     Ok(RunMaterialization {
-        input_kind: result.input_kind,
         project_root: project_root.to_path_buf(),
         manifest_path,
         bridge_manifest_sha256,
         lock: result.lock,
         lock_path,
-        sidecar_path,
     })
 }
 
@@ -933,11 +937,12 @@ fn write_generated_manifest(
         .and_then(Value::as_str)
         .unwrap_or("0.1.0");
     let target = bridge_target_from_lock(lock, process)?;
-    let description = metadata
-        .and_then(|value| value.get("capsule_type"))
-        .and_then(Value::as_str)
-        .map(|capsule_type| format!("Generated from shared source inference ({capsule_type})"))
-        .unwrap_or_else(|| "Generated from shared source inference".to_string());
+    let description = original_manifest
+        .and_then(|manifest| manifest.get("metadata"))
+        .and_then(|metadata| metadata.get("description"))
+        .and_then(toml_value_as_non_empty_string)
+        .unwrap_or("")
+        .to_string();
 
     let top_level_repository = original_manifest
         .and_then(|manifest| manifest.get("repository"))
@@ -1796,10 +1801,34 @@ mod tests {
         };
         let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
             .expect("materialize run");
+        let sidecar_path = materialized
+            .lock_path
+            .parent()
+            .expect("run state dir")
+            .join("provenance.json");
 
         assert!(materialized.manifest_path.exists());
         assert!(materialized.lock_path.exists());
-        assert!(materialized.sidecar_path.exists());
+        assert!(sidecar_path.exists());
+    }
+
+    #[test]
+    fn run_materialization_omits_invalid_source_driver_for_generic_source_only_project() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("index.js"), "console.log('ok')").expect("write index");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+        };
+        let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
+            .expect("materialize run");
+        let generated = fs::read_to_string(&materialized.manifest_path).expect("read manifest");
+
+        assert!(generated.contains("[targets.default]"));
+        assert!(generated.contains("description = \"\""));
+        assert!(generated.contains("runtime = \"source\""));
+        assert!(generated.contains("entrypoint = \"index.js\""));
+        assert!(!generated.contains("driver = \"source\""));
     }
 
     #[test]
@@ -1812,17 +1841,11 @@ mod tests {
 
         let materialized = execute_init_from_source_only(dir.path(), reporter(), true)
             .expect("materialize workspace");
+        let lock = capsule_core::ato_lock::load_unvalidated_from_path(&materialized.lock_path)
+            .expect("read materialized lock");
 
-        assert!(materialized
-            .result
-            .lock
-            .contract
-            .entries
-            .get("process")
-            .is_none());
-        assert!(materialized
-            .result
-            .lock
+        assert!(lock.contract.entries.get("process").is_none());
+        assert!(lock
             .contract
             .unresolved
             .iter()
@@ -1924,11 +1947,19 @@ target = "web"
 
         let materialized = materialize_run_from_compatibility(&project, None, reporter(), true)
             .expect("run materialize");
+        let sidecar_path = materialized
+            .lock_path
+            .parent()
+            .expect("run state dir")
+            .join("provenance.json");
+        let sidecar: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&sidecar_path).expect("read sidecar"))
+                .expect("parse sidecar");
 
-        assert_eq!(materialized.input_kind, SourceInferenceInputKind::DraftLock);
+        assert_eq!(sidecar["input_kind"], "draft_lock");
         assert!(materialized.manifest_path.exists());
         assert!(materialized.lock_path.exists());
-        assert!(materialized.sidecar_path.exists());
+        assert!(sidecar_path.exists());
         assert!(!materialized.bridge_manifest_sha256.is_empty());
         assert!(materialized.lock.contract.entries.contains_key("process"));
         assert!(materialized.lock.resolution.entries.contains_key("runtime"));

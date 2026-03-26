@@ -5,7 +5,6 @@ use capsule_core::input_resolver::{
     resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
 };
 use std::fs;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use capsule_core::CapsuleReporter;
@@ -221,49 +220,6 @@ pub fn write_legacy_detected_manifest(
     Ok(manifest_path)
 }
 
-fn prompt_for_details(
-    mut info: recipe::ProjectInfo,
-    reporter: std::sync::Arc<crate::reporters::CliReporter>,
-) -> Result<recipe::ProjectInfo> {
-    futures::executor::block_on(reporter.notify(format!("\n? Package name: ({}) ", info.name)))?;
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let input = input.trim();
-    if !input.is_empty() {
-        info.name = input.to_string();
-    }
-
-    let default_cmd = if info.entrypoint.is_empty() {
-        String::new()
-    } else {
-        info.entrypoint.join(" ")
-    };
-
-    if default_cmd.is_empty() {
-        futures::executor::block_on(reporter.notify("? Entry command: ".to_string()))?;
-    } else {
-        futures::executor::block_on(
-            reporter.notify(format!("? Entry command: ({}) ", default_cmd)),
-        )?;
-    }
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let input = input.trim();
-    if !input.is_empty() {
-        info.entrypoint = input.split_whitespace().map(|s| s.to_string()).collect();
-        if matches!(info.project_type, detect::ProjectType::NodeJs) {
-            info.node_dev_entrypoint = Some(info.entrypoint.clone());
-            info.node_release_entrypoint = Some(info.entrypoint.clone());
-        }
-    }
-
-    Ok(info)
-}
-
 fn add_to_gitignore(
     dir: &Path,
     reporter: std::sync::Arc<crate::reporters::CliReporter>,
@@ -327,25 +283,4 @@ fn maybe_create_capsuleignore(
         _ => {}
     }
     Ok(())
-}
-
-fn release_binary_name(info: &recipe::ProjectInfo) -> Option<String> {
-    let release = info
-        .node_release_entrypoint
-        .as_ref()
-        .and_then(|v| v.first())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())?;
-
-    // We only try to infer a single-file entrypoint like "./my-app".
-    if release.contains(' ') || release.contains('\t') {
-        return None;
-    }
-
-    let release = release.strip_prefix("./").unwrap_or(release);
-    if release.contains('/') {
-        return None;
-    }
-
-    Some(release.to_string())
 }
