@@ -467,6 +467,7 @@ async fn launch_service<C: OciRuntimeClient>(
                     let process = if options.dangerously_skip_permissions {
                         crate::executors::source::execute_host(
                             managed_plan,
+                            service_prepared.authoritative_lock.as_ref(),
                             reporter.clone(),
                             ExecuteMode::Piped,
                             &prepared.launch_ctx,
@@ -507,6 +508,7 @@ async fn launch_service<C: OciRuntimeClient>(
                 ExecutorKind::Deno => (
                     crate::executors::deno::spawn(
                         managed_plan,
+                        service_prepared.authoritative_lock.as_ref(),
                         &prepared.execution_plan,
                         &prepared.launch_ctx,
                         options.dangerously_skip_permissions,
@@ -518,6 +520,7 @@ async fn launch_service<C: OciRuntimeClient>(
                 ExecutorKind::NodeCompat => (
                     crate::executors::node_compat::spawn(
                         managed_plan,
+                        service_prepared.authoritative_lock.as_ref(),
                         &prepared.execution_plan,
                         &prepared.launch_ctx,
                         options.dangerously_skip_permissions,

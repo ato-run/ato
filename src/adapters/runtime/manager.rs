@@ -1,6 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::{env, ffi::OsString};
 
 use anyhow::{bail, Context, Result};
 use capsule_core::lockfile::{
@@ -255,16 +256,111 @@ pub fn ensure_deno_binary(plan: &ManifestData) -> Result<PathBuf> {
     RuntimeManager::for_plan(plan)?.ensure_deno_binary_for_plan(plan)
 }
 
+pub fn ensure_deno_binary_with_authority(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+) -> Result<PathBuf> {
+    if authoritative_lock.is_some() {
+        return find_runtime_on_path(&["deno"]).ok_or_else(|| {
+            anyhow::anyhow!(
+                "lock-derived source execution requires a host-local 'deno' runtime on PATH"
+            )
+        });
+    }
+    ensure_deno_binary(plan)
+}
+
 pub fn ensure_python_binary(plan: &ManifestData) -> Result<PathBuf> {
     RuntimeManager::for_plan(plan)?.ensure_python_binary_for_plan(plan)
+}
+
+pub fn ensure_python_binary_with_authority(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+) -> Result<PathBuf> {
+    if authoritative_lock.is_some() {
+        let candidates: &[&str] = if cfg!(windows) {
+            &["python.exe", "python"]
+        } else {
+            &["python3", "python"]
+        };
+        return find_runtime_on_path(candidates).ok_or_else(|| {
+            anyhow::anyhow!(
+                "lock-derived source execution requires a host-local 'python' runtime on PATH"
+            )
+        });
+    }
+    ensure_python_binary(plan)
 }
 
 pub fn ensure_node_binary(plan: &ManifestData) -> Result<PathBuf> {
     RuntimeManager::for_plan(plan)?.ensure_node_binary_for_plan(plan)
 }
 
+pub fn ensure_node_binary_with_authority(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+) -> Result<PathBuf> {
+    if authoritative_lock.is_some() {
+        let candidates: &[&str] = if cfg!(windows) {
+            &["node.exe", "node"]
+        } else {
+            &["node"]
+        };
+        return find_runtime_on_path(candidates).ok_or_else(|| {
+            anyhow::anyhow!(
+                "lock-derived source execution requires a host-local 'node' runtime on PATH"
+            )
+        });
+    }
+    ensure_node_binary(plan)
+}
+
 pub fn ensure_uv_binary(plan: &ManifestData) -> Result<PathBuf> {
     RuntimeManager::for_plan(plan)?.ensure_uv_binary_for_plan(plan)
+}
+
+fn find_runtime_on_path(candidates: &[&str]) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    let path_exts = executable_extensions();
+
+    for directory in env::split_paths(&path) {
+        for candidate in candidates {
+            let direct = directory.join(candidate);
+            if direct.is_file() {
+                return Some(direct);
+            }
+            for extension in &path_exts {
+                let with_extension = directory.join(format!("{}{}", candidate, extension));
+                if with_extension.is_file() {
+                    return Some(with_extension);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn executable_extensions() -> Vec<String> {
+    if cfg!(windows) {
+        env::var_os("PATHEXT")
+            .map(split_windows_path_exts)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| vec![".exe".to_string(), ".cmd".to_string(), ".bat".to_string()])
+    } else {
+        Vec::new()
+    }
+}
+
+fn split_windows_path_exts(value: OsString) -> Vec<String> {
+    value
+        .to_string_lossy()
+        .split(';')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn required_runtime_version(plan: &ManifestData, drivers: &[&str]) -> Result<Option<String>> {
