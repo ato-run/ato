@@ -47,13 +47,6 @@ pub(crate) trait ConsumerRunProgress {
     fn skip(&self, phase: HourglassPhase, detail: &str);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RunAuthoritativeInputKind {
-    CanonicalLock,
-    CompatibilityCompiledDraft,
-    SourceOnly,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct CompatibilityLegacyLockContext {
     pub(crate) manifest_path: PathBuf,
@@ -63,11 +56,7 @@ pub(crate) struct CompatibilityLegacyLockContext {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RunAuthoritativeInput {
-    pub(crate) kind: RunAuthoritativeInputKind,
-    pub(crate) project_root: PathBuf,
     pub(crate) lock: AtoLock,
-    pub(crate) lock_path: PathBuf,
-    pub(crate) sidecar_path: PathBuf,
     pub(crate) bridge_manifest_path: PathBuf,
     pub(crate) bridge_manifest_sha256: String,
     pub(crate) effective_state: EffectiveLockState,
@@ -85,6 +74,42 @@ pub(crate) struct PreparedRunContext {
     pub(crate) validation_mode: capsule_core::types::ValidationMode,
     pub(crate) engine_override_declared: bool,
     pub(crate) compatibility_legacy_lock: Option<CompatibilityLegacyLockContext>,
+}
+
+impl PreparedRunContext {
+    pub(crate) fn from_loaded_manifest(
+        authoritative_input: Option<&RunAuthoritativeInput>,
+        loaded_manifest: &LoadedManifest,
+        validation_mode: capsule_core::types::ValidationMode,
+    ) -> Self {
+        let raw_manifest = toml::from_str(&loaded_manifest.raw_text)
+            .unwrap_or_else(|_| loaded_manifest.raw.clone());
+        Self {
+            authoritative_lock: authoritative_input.map(|input| input.lock.clone()),
+            effective_state: authoritative_input.map(|input| input.effective_state.clone()),
+            raw_manifest,
+            validation_mode,
+            engine_override_declared: loaded_manifest.raw.get("engine").is_some(),
+            compatibility_legacy_lock: authoritative_input
+                .and_then(|input| input.compatibility_legacy_lock.clone()),
+        }
+    }
+
+    pub(crate) fn with_raw_manifest(
+        &self,
+        raw_manifest: toml::Value,
+        validation_mode: capsule_core::types::ValidationMode,
+        engine_override_declared: bool,
+    ) -> Self {
+        Self {
+            authoritative_lock: self.authoritative_lock.clone(),
+            effective_state: self.effective_state.clone(),
+            raw_manifest,
+            validation_mode,
+            engine_override_declared,
+            compatibility_legacy_lock: self.compatibility_legacy_lock.clone(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -190,18 +215,7 @@ fn prepare_run_context(
     loaded_manifest: &LoadedManifest,
     validation_mode: capsule_core::types::ValidationMode,
 ) -> PreparedRunContext {
-    let raw_manifest =
-        toml::from_str(&loaded_manifest.raw_text).unwrap_or_else(|_| loaded_manifest.raw.clone());
-
-    PreparedRunContext {
-        authoritative_lock: authoritative_input.map(|input| input.lock.clone()),
-        effective_state: authoritative_input.map(|input| input.effective_state.clone()),
-        raw_manifest,
-        validation_mode,
-        engine_override_declared: loaded_manifest.raw.get("engine").is_some(),
-        compatibility_legacy_lock: authoritative_input
-            .and_then(|input| input.compatibility_legacy_lock.clone()),
-    }
+    PreparedRunContext::from_loaded_manifest(authoritative_input, loaded_manifest, validation_mode)
 }
 
 fn validate_authoritative_bridge(
@@ -406,6 +420,7 @@ where
             (decision, launch_ctx, prepared) = reroute_auto_provisioned_execution(
                 decision,
                 launch_ctx,
+                &prepared,
                 request.reporter.clone(),
                 preview_mode,
                 shadow_manifest_path,
@@ -419,6 +434,7 @@ where
             request,
             &decision,
             &launch_ctx,
+            &prepared,
             preview_mode,
             use_progressive_ui,
             &mut agent_attempted,
@@ -477,6 +493,7 @@ where
                 request,
                 &state.decision,
                 &state.launch_ctx,
+                &state.prepared,
                 state.preview_mode,
                 state.use_progressive_ui,
                 &mut state.agent_attempted,
@@ -552,6 +569,7 @@ where
                     request,
                     &state.decision,
                     &state.launch_ctx,
+                    &state.prepared,
                     state.preview_mode,
                     state.use_progressive_ui,
                     &mut state.agent_attempted,
@@ -752,6 +770,7 @@ where
 
         let exit = crate::executors::orchestrator::execute(
             &decision.plan,
+            &prepared,
             request.reporter.clone(),
             &launch_ctx,
             crate::executors::orchestrator::OrchestratorOptions {
@@ -1234,6 +1253,7 @@ where
 pub(crate) async fn reroute_auto_provisioned_execution(
     decision: capsule_core::router::RuntimeDecision,
     launch_ctx: crate::executors::launch_context::RuntimeLaunchContext,
+    prepared: &PreparedRunContext,
     reporter: Arc<CliReporter>,
     preview_mode: bool,
     shadow_manifest_path: &Path,
@@ -1256,15 +1276,11 @@ pub(crate) async fn reroute_auto_provisioned_execution(
             validation_mode,
         )?;
     let engine_override_declared = loaded_manifest.raw.get("engine").is_some();
-    let rerouted_prepared = PreparedRunContext {
-        authoritative_lock: None,
-        effective_state: None,
-        raw_manifest: toml::from_str(&loaded_manifest.raw_text)
-            .unwrap_or_else(|_| loaded_manifest.raw.clone()),
+    let rerouted_prepared = prepared.with_raw_manifest(
+        toml::from_str(&loaded_manifest.raw_text).unwrap_or_else(|_| loaded_manifest.raw.clone()),
         validation_mode,
         engine_override_declared,
-        compatibility_legacy_lock: None,
-    };
+    );
     let rerouted_launch_ctx = target_runner::resolve_launch_context(
         &rerouted_decision.plan,
         &rerouted_prepared,
@@ -1281,6 +1297,7 @@ pub(crate) async fn maybe_run_agent_setup(
     request: &ConsumerRunRequest,
     decision: &capsule_core::router::RuntimeDecision,
     launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
+    prepared: &PreparedRunContext,
     preview_mode: bool,
     use_progressive_ui: bool,
     agent_attempted: &mut bool,
@@ -1350,6 +1367,7 @@ pub(crate) async fn maybe_run_agent_setup(
     let rerouted = reroute_auto_provisioned_execution(
         decision.clone(),
         launch_ctx.clone(),
+        prepared,
         request.reporter.clone(),
         preview_mode,
         &outcome.shadow_manifest_path,
@@ -1507,7 +1525,7 @@ fn build_target_launch_options(
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_authoritative_bridge, RunAuthoritativeInput, RunAuthoritativeInputKind};
+    use super::{validate_authoritative_bridge, PreparedRunContext, RunAuthoritativeInput};
     use capsule_core::ato_lock::AtoLock;
     use tempfile::tempdir;
 
@@ -1536,29 +1554,13 @@ entrypoint = "main.ts"
         .expect("load manifest");
 
         let authoritative_input = RunAuthoritativeInput {
-            kind: RunAuthoritativeInputKind::SourceOnly,
-            project_root: dir.path().to_path_buf(),
             lock: AtoLock::default(),
-            lock_path: dir.path().join("ato.lock.json"),
-            sidecar_path: dir.path().join("provenance.json"),
             bridge_manifest_path: manifest_path.clone(),
             bridge_manifest_sha256: "deadbeef".to_string(),
             effective_state: crate::application::workspace::state::EffectiveLockState::default(),
             compatibility_legacy_lock: None,
         };
 
-        assert_eq!(
-            authoritative_input.kind,
-            RunAuthoritativeInputKind::SourceOnly
-        );
-        assert_eq!(
-            authoritative_input.lock_path,
-            dir.path().join("ato.lock.json")
-        );
-        assert_eq!(
-            authoritative_input.sidecar_path,
-            dir.path().join("provenance.json")
-        );
         assert!(authoritative_input.lock.contract.entries.is_empty());
 
         let error = validate_authoritative_bridge(
@@ -1569,5 +1571,37 @@ entrypoint = "main.ts"
         .expect_err("bridge mismatch must fail closed");
 
         assert!(error.to_string().contains("generated manifest bridge"));
+    }
+
+    #[test]
+    fn prepared_run_context_with_raw_manifest_retains_authority() {
+        let prepared = PreparedRunContext {
+            authoritative_lock: Some(AtoLock::default()),
+            effective_state: Some(
+                crate::application::workspace::state::EffectiveLockState::default(),
+            ),
+            raw_manifest: toml::Value::String("old".to_string()),
+            validation_mode: capsule_core::types::ValidationMode::Strict,
+            engine_override_declared: false,
+            compatibility_legacy_lock: None,
+        };
+
+        let rerouted = prepared.with_raw_manifest(
+            toml::Value::String("new".to_string()),
+            capsule_core::types::ValidationMode::Preview,
+            true,
+        );
+
+        assert!(rerouted.authoritative_lock.is_some());
+        assert!(rerouted.effective_state.is_some());
+        assert_eq!(
+            rerouted.raw_manifest,
+            toml::Value::String("new".to_string())
+        );
+        assert_eq!(
+            rerouted.validation_mode,
+            capsule_core::types::ValidationMode::Preview
+        );
+        assert!(rerouted.engine_override_declared);
     }
 }

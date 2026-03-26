@@ -176,6 +176,20 @@ pub fn compile_execution_plan_from_lock(
     overlay: &LockCompilerOverlay,
     platform: &PlatformSnapshot,
 ) -> Result<ExecutionPlan, AtoExecutionError> {
+    let scoped_id = resolved.metadata.name.clone().ok_or_else(|| {
+        AtoExecutionError::execution_contract_invalid(
+            "lock-derived execution requires contract.metadata.name so consent identity does not fall back to placeholders",
+            Some("contract.metadata.name"),
+            None,
+        )
+    })?;
+    let version = resolved.metadata.version.clone().ok_or_else(|| {
+        AtoExecutionError::execution_contract_invalid(
+            "lock-derived execution requires contract.metadata.version so consent identity does not fall back to placeholders",
+            Some("contract.metadata.version"),
+            None,
+        )
+    })?;
     let selected = &resolved.selected;
     let runtime = ExecutionRuntime::from_manifest(&selected.runtime.runtime).ok_or_else(|| {
         AtoExecutionError::policy_violation(format!(
@@ -218,16 +232,8 @@ pub fn compile_execution_plan_from_lock(
     Ok(ExecutionPlan {
         schema_version: EXECUTION_PLAN_SCHEMA_VERSION.to_string(),
         capsule: CapsuleRef {
-            scoped_id: resolved
-                .metadata
-                .name
-                .clone()
-                .unwrap_or_else(|| "lock-derived-app".to_string()),
-            version: resolved
-                .metadata
-                .version
-                .clone()
-                .unwrap_or_else(|| "0.1.0".to_string()),
+            scoped_id: scoped_id.clone(),
+            version: version.clone(),
         },
         target: TargetRef {
             label: selected.target_label.clone(),
@@ -239,16 +245,8 @@ pub fn compile_execution_plan_from_lock(
         runtime: runtime_section,
         consent: Consent {
             key: ConsentKey {
-                scoped_id: resolved
-                    .metadata
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| "lock-derived-app".to_string()),
-                version: resolved
-                    .metadata
-                    .version
-                    .clone()
-                    .unwrap_or_else(|| "0.1.0".to_string()),
+                scoped_id,
+                version,
                 target_label: selected.target_label.clone(),
             },
             policy_segment_hash,
@@ -672,6 +670,34 @@ entrypoint = "ghcr.io/example/app:latest"
         assert_eq!(plan.capsule.scoped_id, "demo");
         assert_eq!(plan.consent.key.target_label, "main");
         assert!(!plan.consent.policy_segment_hash.is_empty());
+    }
+
+    #[test]
+    fn compile_from_lock_rejects_missing_metadata_identity() {
+        let mut lock = sample_lock();
+        let metadata = lock
+            .contract
+            .entries
+            .get_mut("metadata")
+            .and_then(|value| value.as_object_mut())
+            .expect("metadata");
+        metadata.remove("version");
+
+        let resolved = resolve_lock_runtime_model(&lock, Some("main")).expect("resolved");
+        let error = compile_execution_plan_from_lock(
+            &lock,
+            &resolved,
+            &LockCompilerOverlay::default(),
+            &PlatformSnapshot {
+                os: "macos".to_string(),
+                arch: "aarch64".to_string(),
+                libc: "unknown".to_string(),
+            },
+        )
+        .expect_err("missing metadata version must fail");
+
+        assert_eq!(error.code, "ATO_ERR_EXECUTION_CONTRACT_INVALID");
+        assert!(error.to_string().contains("contract.metadata.version"));
     }
 
     #[test]

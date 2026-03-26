@@ -66,6 +66,7 @@ impl OrchestratorOptions {
 
 pub async fn execute(
     plan: &ManifestData,
+    prepared: &PreparedRunContext,
     reporter: Arc<CliReporter>,
     launch_ctx: &RuntimeLaunchContext,
     options: OrchestratorOptions,
@@ -73,11 +74,15 @@ pub async fn execute(
 ) -> Result<i32> {
     let client = BollardOciRuntimeClient::connect_default()
         .context("Failed to connect to OCI engine via Docker-compatible API")?;
-    execute_with_client(plan, reporter, launch_ctx, &options, attempt, client).await
+    execute_with_client(
+        plan, prepared, reporter, launch_ctx, &options, attempt, client,
+    )
+    .await
 }
 
 pub async fn execute_with_client<C>(
     plan: &ManifestData,
+    prepared: &PreparedRunContext,
     reporter: Arc<CliReporter>,
     launch_ctx: &RuntimeLaunchContext,
     options: &OrchestratorOptions,
@@ -112,6 +117,7 @@ where
 
     let runtime = OrchestratorStartupRuntime::new(
         plan.clone(),
+        prepared.clone(),
         orchestration.clone(),
         reporter.clone(),
         launch_ctx.clone(),
@@ -207,6 +213,7 @@ where
     C: OciRuntimeClient + Clone + Send + Sync + 'static,
 {
     plan: ManifestData,
+    prepared: PreparedRunContext,
     orchestration: OrchestrationPlan,
     reporter: Arc<CliReporter>,
     launch_ctx: RuntimeLaunchContext,
@@ -225,6 +232,7 @@ where
     #[allow(clippy::too_many_arguments)]
     fn new(
         plan: ManifestData,
+        prepared: PreparedRunContext,
         orchestration: OrchestrationPlan,
         reporter: Arc<CliReporter>,
         launch_ctx: RuntimeLaunchContext,
@@ -236,6 +244,7 @@ where
     ) -> Self {
         Self {
             plan,
+            prepared,
             orchestration,
             reporter,
             launch_ctx,
@@ -290,6 +299,7 @@ where
 
         let running_service = launch_service(
             &self.plan,
+            &self.prepared,
             &self.orchestration,
             &service,
             env,
@@ -329,6 +339,7 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn launch_service<C: OciRuntimeClient>(
     plan: &ManifestData,
+    prepared: &PreparedRunContext,
     orchestration: &OrchestrationPlan,
     service: &ResolvedService,
     env: HashMap<String, String>,
@@ -431,18 +442,15 @@ async fn launch_service<C: OciRuntimeClient>(
                 ..plan.clone()
             };
             let service_launch_ctx = launch_ctx.clone().with_injected_env(env.clone());
-            let service_prepared = PreparedRunContext {
-                authoritative_lock: None,
-                effective_state: None,
-                raw_manifest: service_plan.manifest.clone(),
-                validation_mode: if options.target_launch_options().preview_mode {
+            let service_prepared = prepared.with_raw_manifest(
+                service_plan.manifest.clone(),
+                if options.target_launch_options().preview_mode {
                     capsule_core::types::ValidationMode::Preview
                 } else {
                     capsule_core::types::ValidationMode::Strict
                 },
-                engine_override_declared: service_plan.manifest.get("engine").is_some(),
-                compatibility_legacy_lock: None,
-            };
+                service_plan.manifest.get("engine").is_some(),
+            );
             let prepared = target_runner::prepare_target_execution(
                 &service_plan,
                 &service_prepared,
@@ -1524,10 +1532,24 @@ target = "db"
             nacelle: None,
         };
 
-        let exit =
-            execute_with_client(&plan, reporter, &launch_ctx, &options, None, client.clone())
-                .await
-                .expect("orchestrator exit");
+        let exit = execute_with_client(
+            &plan,
+            &PreparedRunContext {
+                authoritative_lock: None,
+                effective_state: None,
+                raw_manifest: plan.manifest.clone(),
+                validation_mode: capsule_core::types::ValidationMode::Strict,
+                engine_override_declared: false,
+                compatibility_legacy_lock: None,
+            },
+            reporter,
+            &launch_ctx,
+            &options,
+            None,
+            client.clone(),
+        )
+        .await
+        .expect("orchestrator exit");
         assert_eq!(exit, 0);
 
         let events = client.events.lock().unwrap().clone();
