@@ -123,8 +123,10 @@ mod tests {
     use super::*;
 
     fn sample_lock() -> AtoLock {
-        let mut lock = AtoLock::default();
-        lock.generated_at = Some("2026-03-25T00:00:00Z".to_string());
+        let mut lock = AtoLock {
+            generated_at: Some("2026-03-25T00:00:00Z".to_string()),
+            ..AtoLock::default()
+        };
         lock.features.declared = vec![FeatureName::Known(KnownFeature::Identity)];
         lock.resolution.entries.insert(
             "runtime".to_string(),

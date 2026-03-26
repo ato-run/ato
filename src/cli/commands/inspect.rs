@@ -653,6 +653,7 @@ fn load_inspection_snapshot(path: &Path) -> Result<InspectionSnapshot> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn snapshot_from_result(
     requested_input: String,
     authoritative_kind: String,
@@ -1029,19 +1030,19 @@ fn collect_unresolved_views(snapshot: &InspectionSnapshot) -> Vec<InspectUnresol
         records.push(build_unresolved_view(&path, marker));
     }
 
-    while let Some(marker) = contract_markers.next() {
+    for marker in contract_markers {
         records.push(build_unresolved_view("contract", Some(marker)));
     }
-    while let Some(marker) = resolution_markers.next() {
+    for marker in resolution_markers {
         records.push(build_unresolved_view("resolution", Some(marker)));
     }
-    while let Some(marker) = binding_markers.next() {
+    for marker in binding_markers {
         records.push(build_unresolved_view("binding", Some(marker)));
     }
-    while let Some(marker) = policy_markers.next() {
+    for marker in policy_markers {
         records.push(build_unresolved_view("policy", Some(marker)));
     }
-    while let Some(marker) = attestation_markers.next() {
+    for marker in attestation_markers {
         records.push(build_unresolved_view("attestations", Some(marker)));
     }
 

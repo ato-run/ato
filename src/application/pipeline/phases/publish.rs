@@ -46,6 +46,7 @@ struct PreparedPrivatePublishArtifact {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 enum ResolvedPrivatePublishInput {
     Build {
         authoritative_input: ProducerAuthoritativeInput,

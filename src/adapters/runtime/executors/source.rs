@@ -44,6 +44,7 @@ pub enum ExecuteMode {
     Piped,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute(
     plan: &ManifestData,
     authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
