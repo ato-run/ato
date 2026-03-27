@@ -14,7 +14,7 @@ pub(crate) fn preflight_native_sandbox(
     reporter: &Arc<CliReporter>,
 ) -> Result<PathBuf> {
     preflight_python_uv_lock_for_source_driver(plan)?;
-    preflight_python_uv_binary_for_source_driver(plan)?;
+    preflight_python_uv_binary_for_source_driver(plan, prepared.authoritative_lock.as_ref())?;
     preflight_glibc_compat(plan)?;
     preflight_macos_compat(plan)?;
 
@@ -398,12 +398,13 @@ fn preflight_python_uv_lock_for_source_driver(
 
 fn preflight_python_uv_binary_for_source_driver(
     plan: &capsule_core::router::ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
 ) -> Result<()> {
     if !is_python_source_target(plan) {
         return Ok(());
     }
 
-    runtime_manager::ensure_uv_binary(plan)
+    runtime_manager::ensure_uv_binary_with_authority(plan, authoritative_lock)
         .map(|_| ())
         .map_err(|_| {
             AtoExecutionError::lock_incomplete(

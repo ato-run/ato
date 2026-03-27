@@ -374,10 +374,6 @@ pub(crate) fn build_capsule_artifact(
     version: &str,
     authoritative_input: Option<&crate::application::producer_input::ProducerAuthoritativeInput>,
 ) -> Result<PathBuf> {
-    if let Some(authoritative_input) = authoritative_input {
-        authoritative_input.validate_bridge_manifest()?;
-    }
-
     let manifest_dir = manifest_path.parent().ok_or_else(|| {
         anyhow::anyhow!("Manifest path has no parent: {}", manifest_path.display())
     })?;
@@ -392,11 +388,21 @@ pub(crate) fn build_capsule_artifact(
         return Ok(result.artifact_path);
     }
 
-    let decision = capsule_core::router::route_manifest(
-        manifest_path,
-        capsule_core::router::ExecutionProfile::Release,
-        None,
-    )?;
+    let decision = if let Some(authoritative_input) = authoritative_input {
+        capsule_core::router::route_lock(
+            &authoritative_input.lock_path,
+            &authoritative_input.lock,
+            &authoritative_input.workspace_root,
+            capsule_core::router::ExecutionProfile::Release,
+            None,
+        )?
+    } else {
+        capsule_core::router::route_manifest(
+            manifest_path,
+            capsule_core::router::ExecutionProfile::Release,
+            None,
+        )?
+    };
 
     let reporter: std::sync::Arc<dyn capsule_core::reporter::CapsuleReporter + 'static> =
         std::sync::Arc::new(capsule_core::reporter::NoOpReporter);

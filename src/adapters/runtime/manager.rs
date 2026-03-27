@@ -320,6 +320,25 @@ pub fn ensure_uv_binary(plan: &ManifestData) -> Result<PathBuf> {
     RuntimeManager::for_plan(plan)?.ensure_uv_binary_for_plan(plan)
 }
 
+pub fn ensure_uv_binary_with_authority(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+) -> Result<PathBuf> {
+    if authoritative_lock.is_some() {
+        let candidates: &[&str] = if cfg!(windows) {
+            &["uv.exe", "uv"]
+        } else {
+            &["uv"]
+        };
+        return find_runtime_on_path(candidates).ok_or_else(|| {
+            anyhow::anyhow!(
+                "lock-derived source execution requires a host-local 'uv' runtime on PATH"
+            )
+        });
+    }
+    ensure_uv_binary(plan)
+}
+
 fn find_runtime_on_path(candidates: &[&str]) -> Option<PathBuf> {
     let path = env::var_os("PATH")?;
     let path_exts = executable_extensions();
