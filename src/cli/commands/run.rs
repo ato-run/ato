@@ -775,6 +775,8 @@ async fn normalize_run_target_after_install(
                 value.eq_ignore_ascii_case("py")
                     || value.eq_ignore_ascii_case("ts")
                     || value.eq_ignore_ascii_case("tsx")
+                    || value.eq_ignore_ascii_case("js")
+                    || value.eq_ignore_ascii_case("jsx")
             })
             .unwrap_or(false)
     {

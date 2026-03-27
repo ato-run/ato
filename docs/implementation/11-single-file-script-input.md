@@ -15,7 +15,7 @@
 
 ## Rules
 
-- authoritative input として受けるのは、当面 `*.py`, `*.ts`, `*.tsx`
+- authoritative input として受けるのは、当面 `*.py`, `*.ts`, `*.tsx`, `*.js`, `*.jsx`
 - resolver は `ExplicitInputKind::SingleScript` として受理する
 - resolver の出力は `ResolvedSourceOnly` を維持しつつ、script metadata を付与する
 - run materialization は script を language-specific な `.tmp/ato-single-*` virtual workspace へコピーする
@@ -23,7 +23,10 @@
 - `uv lock` を virtual workspace で実行し、既存の `source/python + uv.lock` 実行モデルに接続する
 - TypeScript script は `main.ts` または `main.tsx` として正規化し、最小 `deno.json` と `deno.lock` を生成して既存の `source/deno` 実行モデルに接続する
 - `.tsx` は `compilerOptions.jsx = "react-jsx"` を生成し、`@jsxImportSource ...` pragma があれば `jsxImportSource` に反映する
+- JavaScript script は `main.js` または `main.jsx` として正規化し、最小 `deno.json` と `deno.lock` を生成して既存の `source/deno` 実行モデルに接続する
+- `.jsx` は `compilerOptions.jsx = "react-jsx"` を生成し、`@jsxImportSource ...` pragma があれば `jsxImportSource` に反映する
 - `ato init foo.ts` / `foo.tsx` は workspace root に `main.ts` または `main.tsx` と `deno.json` と `deno.lock` を durable materialization してから canonical lock を生成する
+- `ato init foo.js` / `foo.jsx` は workspace root に `main.js` または `main.jsx` と `deno.json` と `deno.lock` を durable materialization してから canonical lock を生成する
 - `ato init foo.py` は workspace root に `main.py` と `pyproject.toml` と `uv.lock` を durable materialization してから canonical lock を生成する
 - cleanup は attempt cleanup scope に委譲する
 
