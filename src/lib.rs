@@ -1,3 +1,8 @@
+//! Shared CLI entrypoints and crate-wide wiring for the `ato` binary.
+//!
+//! The binary target stays intentionally small so startup, error rendering, and
+//! command dispatch can be exercised through this library from tests.
+
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -10,12 +15,16 @@ pub(crate) mod cli;
 pub(crate) mod common;
 pub(crate) mod utils;
 
+/// Ensures the optional sidecar is stopped exactly once across normal exit,
+/// explicit cleanup scopes, and panic-driven unwinding.
 pub(crate) struct SidecarCleanup {
     sidecar: Arc<Mutex<Option<common::sidecar::SidecarHandle>>>,
     reporter: std::sync::Arc<reporters::CliReporter>,
 }
 
 impl SidecarCleanup {
+    /// Wraps the sidecar handle in shared state so multiple shutdown paths can
+    /// race safely without double-stopping the process.
     pub(crate) fn new(
         sidecar: Option<common::sidecar::SidecarHandle>,
         reporter: std::sync::Arc<reporters::CliReporter>,
@@ -30,6 +39,8 @@ impl SidecarCleanup {
         &self,
         scope: &mut application::pipeline::cleanup::CleanupScope,
     ) {
+        // Skip registration when no sidecar was started so the cleanup report
+        // stays focused on actions that can actually run.
         if self
             .sidecar
             .lock()
@@ -43,6 +54,8 @@ impl SidecarCleanup {
         scope.register(move || stop_sidecar_cleanup_action(&sidecar));
     }
 
+    /// Performs best-effort shutdown during teardown paths that cannot bubble
+    /// errors back to the caller, such as `Drop`.
     pub(crate) fn stop_now(&mut self) {
         match stop_sidecar(&self.sidecar) {
             Ok(_) => {}
@@ -59,6 +72,8 @@ impl SidecarCleanup {
 fn stop_sidecar(
     sidecar: &Arc<Mutex<Option<common::sidecar::SidecarHandle>>>,
 ) -> anyhow::Result<bool> {
+    // Cleanup must remain resilient after partial panics, so we recover the
+    // inner state instead of skipping shutdown on a poisoned mutex.
     let sidecar = sidecar
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
@@ -135,8 +150,12 @@ pub(crate) use utils::hash as artifact_hash;
 pub(crate) use utils::local_input;
 pub(crate) use utils::payload_guard;
 
+/// Runs the CLI entry flow and converts failures into the user-facing output
+/// format selected by the original raw arguments.
 pub fn main_entry() {
     let args: Vec<String> = std::env::args().collect();
+    // Detect JSON mode before Clap parsing so even parse-time failures can be
+    // rendered as machine-readable diagnostics.
     let json_mode = args.iter().any(|arg| arg == "--json");
     let command_context = diagnostics::detect_command_context(&args);
 
@@ -156,6 +175,8 @@ pub fn main_entry() {
             if let Ok(payload) = serde_json::to_string(&diagnostic.to_json_envelope()) {
                 println!("{}", payload);
             } else {
+                // Fall back to a static payload because serialization failure is
+                // itself an internal error and should not suppress JSON output.
                 let fallback_payload = r#"{"schema_version":"1","status":"error","error":{"code":"E999","name":"internal_error","phase":"internal","message":"failed to serialize error payload","retryable":true,"interactive_resolution":false,"causes":[]}}"#;
                 println!("{fallback_payload}");
             }
@@ -167,6 +188,10 @@ pub fn main_entry() {
     }
 }
 
+/// Parses arguments and dispatches the requested command.
+///
+/// When the binary is invoked without subcommands, this preserves the friendly
+/// help-first UX instead of letting Clap exit through its default error path.
 pub fn run() -> Result<()> {
     let is_no_args = std::env::args_os().count() == 1;
 

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Error as AnyhowError, Result};
-use capsule_core::ato_lock::{AtoLock, UnresolvedValue};
+use capsule_core::ato_lock::{closure_info, AtoLock, UnresolvedValue};
 use capsule_core::input_resolver::{
     resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ATO_LOCK_FILE_NAME,
 };
@@ -305,6 +305,14 @@ pub struct InspectFieldView {
     pub fallback: bool,
     pub selection_gate_involved: bool,
     pub approval_gate_involved: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closure_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closure_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closure_digestable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closure_provenance_limited: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provenance: Vec<InspectProvenanceView>,
 }
@@ -967,6 +975,7 @@ fn collect_field_views(
                         .as_ref()
                         .map(|gate| !gate.capability.is_empty() || !gate.message.is_empty())
                         .unwrap_or(false);
+            let closure_surface = closure_surface_for_field(&lock_path, value.as_ref());
             InspectFieldView {
                 resolved: value.is_some(),
                 explicit: provenance.iter().any(provenance_is_explicit),
@@ -976,6 +985,12 @@ fn collect_field_views(
                 fallback: provenance.iter().any(provenance_uses_fallback),
                 selection_gate_involved,
                 approval_gate_involved,
+                closure_kind: closure_surface.as_ref().map(|value| value.kind.clone()),
+                closure_status: closure_surface.as_ref().map(|value| value.status.clone()),
+                closure_digestable: closure_surface.as_ref().map(|value| value.digestable),
+                closure_provenance_limited: closure_surface
+                    .as_ref()
+                    .map(|value| value.provenance_limited),
                 lock_path,
                 value,
                 provenance: provenance
@@ -1083,6 +1098,26 @@ fn collect_diagnostic_views(snapshot: &InspectionSnapshot) -> Vec<InspectDiagnos
             inspect_command: inspect_command.clone(),
             preview_command: preview_command.clone(),
         });
+    }
+
+    if let Some(closure) = snapshot.lock.resolution.entries.get("closure") {
+        if let Ok(info) = closure_info(closure) {
+            if info.status == "incomplete"
+                && !diagnostics
+                    .iter()
+                    .any(|value| value.lock_path == "resolution.closure")
+            {
+                diagnostics.push(InspectDiagnosticView {
+                    severity: "warning".to_string(),
+                    lock_path: "resolution.closure".to_string(),
+                    message: format!("resolution.closure remains incomplete ({})", info.kind),
+                    reason_class: Some("incomplete_closure".to_string()),
+                    source_mapping: source_mapping_for_field(snapshot, "resolution.closure"),
+                    inspect_command: inspect_command.clone(),
+                    preview_command: preview_command.clone(),
+                });
+            }
+        }
     }
 
     diagnostics.sort_by(|left, right| {
@@ -1236,6 +1271,27 @@ fn append_section_fields(
     for (key, value) in entries {
         fields.insert(format!("{}.{}", section, key), Some(value.clone()));
     }
+}
+
+struct ClosureSurfaceView {
+    kind: String,
+    status: String,
+    digestable: bool,
+    provenance_limited: bool,
+}
+
+fn closure_surface_for_field(lock_path: &str, value: Option<&Value>) -> Option<ClosureSurfaceView> {
+    if lock_path != "resolution.closure" {
+        return None;
+    }
+
+    let info = closure_info(value?).ok()?;
+    Some(ClosureSurfaceView {
+        kind: info.kind,
+        status: info.status,
+        digestable: info.digestable,
+        provenance_limited: info.provenance_limited,
+    })
 }
 
 fn append_compatibility_diagnostics(
@@ -1482,15 +1538,25 @@ fn print_lock_view(view: &InspectLockView) {
             "unresolved"
         };
         if labels.is_empty() {
-            println!("  - {} [{}]", field.lock_path, status);
+            print!("  - {} [{}]", field.lock_path, status);
         } else {
-            println!(
+            print!(
                 "  - {} [{}; {}]",
                 field.lock_path,
                 status,
                 labels.join(", ")
             );
         }
+        if let Some(kind) = field.closure_kind.as_ref() {
+            print!(
+                " kind={}, status={}, digestable={}, provenance_limited={}",
+                kind,
+                field.closure_status.as_deref().unwrap_or("unknown"),
+                field.closure_digestable.unwrap_or(false),
+                field.closure_provenance_limited.unwrap_or(false)
+            );
+        }
+        println!();
     }
     if !view.unresolved.is_empty() {
         println!("Unresolved:");

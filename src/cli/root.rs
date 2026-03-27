@@ -4,7 +4,6 @@ use clap::{Parser, Subcommand};
 
 use super::binding::BindingCommands;
 use super::config::{ConfigCommands, EngineCommands};
-use super::init::InitLegacyMode;
 use super::inspect::InspectCommands;
 use super::ipc::IpcCommands;
 use super::key::KeyCommands;
@@ -25,19 +24,18 @@ use super::state::StateCommands;
 Usage: {usage}
 
 Primary Commands:
-  run      Execute a capsule or local project in a strict Zero-Trust sandbox
+  run      Execute a .capsule archive or local project in a sandbox
   build    Pack a project into an immutable .capsule archive
   publish  Publish capsule artifacts to a registry
   install  Install a verified package from the registry
-  search   Search the registry for agent skills and packages
-    init     Materialize a durable ato.lock.json baseline for the current project
+  init     Materialize a durable ato.lock.json baseline for the current project
 
 Management:
   ps       List running capsules
   stop     Stop a running capsule
   logs     Show logs of a running capsule
-    state    Inspect or register persistent state bindings
-    binding  Inspect or register host-side service bindings
+  state    Inspect or register persistent state bindings
+  binding  Inspect or register host-side service bindings
 
 Auth:
   login    Login to Ato registry
@@ -45,7 +43,9 @@ Auth:
   whoami   Show current authentication status
 
 Advanced Commands:
-    inspect  Inspect lock-first metadata, preview write-back, diagnostics, and runtime requirements
+  search   Search the registry for agent skills and packages
+  update   Update ato CLI to the latest version
+  inspect  Inspect lock-first metadata, preview write-back, diagnostics, and runtime requirements
   fetch    Fetch an artifact into local cache for debugging or manual workflows
   finalize Perform local derivation for a fetched native artifact
   project  Add a finalized app to launcher surfaces
@@ -282,10 +282,6 @@ pub(crate) enum Commands {
         /// Skip prompts when source inference requires explicit confirmation
         #[arg(short = 'y', long = "yes", default_value_t = false)]
         yes: bool,
-
-        /// Use a legacy manifest-first init surface instead of durable lock materialization
-        #[arg(long, value_enum)]
-        legacy: Option<InitLegacyMode>,
     },
 
     #[command(
