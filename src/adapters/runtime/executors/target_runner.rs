@@ -47,7 +47,7 @@ pub async fn resolve_launch_context(
     reporter: &Arc<CliReporter>,
 ) -> Result<RuntimeLaunchContext> {
     let diagnostics =
-        crate::ipc::validate::validate_manifest(&prepared.raw_manifest, &plan.manifest_dir)
+        crate::ipc::validate::validate_manifest(&prepared.bridge_manifest, &plan.manifest_dir)
             .map_err(|err| {
                 AtoExecutionError::execution_contract_invalid(
                     format!("IPC validation failed: {err}"),
@@ -69,7 +69,7 @@ pub async fn resolve_launch_context(
         reporter.warn(diagnostic.to_string()).await?;
     }
 
-    let ipc_ctx = IpcContext::from_manifest(&prepared.raw_manifest)?;
+    let ipc_ctx = IpcContext::from_manifest(&prepared.bridge_manifest)?;
     if ipc_ctx.has_ipc() {
         debug!(
             resolved_services = ipc_ctx.resolved_count,
@@ -405,7 +405,7 @@ entrypoint = "index.js"
             lock_path: None,
             workspace_root: manifest_dir,
             effective_state: None,
-            raw_manifest,
+            bridge_manifest: raw_manifest,
             validation_mode: capsule_core::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,

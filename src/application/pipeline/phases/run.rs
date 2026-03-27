@@ -57,7 +57,6 @@ pub(crate) struct RunAuthoritativeInput {
     pub(crate) lock: AtoLock,
     pub(crate) lock_path: PathBuf,
     pub(crate) workspace_root: PathBuf,
-    pub(crate) raw_manifest: Option<toml::Value>,
     pub(crate) effective_state: EffectiveLockState,
     pub(crate) compatibility_legacy_lock: Option<CompatibilityLegacyLockContext>,
 }
@@ -71,7 +70,7 @@ pub(crate) struct PreparedRunContext {
     pub(crate) lock_path: Option<PathBuf>,
     pub(crate) workspace_root: PathBuf,
     pub(crate) effective_state: Option<EffectiveLockState>,
-    pub(crate) raw_manifest: toml::Value,
+    pub(crate) bridge_manifest: toml::Value,
     pub(crate) validation_mode: capsule_core::types::ValidationMode,
     pub(crate) engine_override_declared: bool,
     pub(crate) compatibility_legacy_lock: Option<CompatibilityLegacyLockContext>,
@@ -82,30 +81,42 @@ impl PreparedRunContext {
         authoritative_input: Option<&RunAuthoritativeInput>,
         workspace_root: &Path,
         validation_mode: capsule_core::types::ValidationMode,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let routed_manifest = authoritative_input
+            .map(|input| {
+                router::route_lock(
+                    &input.lock_path,
+                    &input.lock,
+                    &input.workspace_root,
+                    router::ExecutionProfile::Dev,
+                    None,
+                )
+            })
+            .transpose()?;
+        let bridge_manifest = routed_manifest
+            .as_ref()
+            .map(|decision| decision.plan.manifest.clone())
+            .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+        Ok(Self {
             authoritative_lock: authoritative_input.map(|input| input.lock.clone()),
             lock_path: authoritative_input.map(|input| input.lock_path.clone()),
             workspace_root: authoritative_input
                 .map(|input| input.workspace_root.clone())
                 .unwrap_or_else(|| workspace_root.to_path_buf()),
             effective_state: authoritative_input.map(|input| input.effective_state.clone()),
-            raw_manifest: authoritative_input
-                .and_then(|input| input.raw_manifest.clone())
-                .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new())),
+            bridge_manifest,
             validation_mode,
-            engine_override_declared: authoritative_input
-                .and_then(|input| input.raw_manifest.as_ref())
-                .and_then(|manifest| manifest.get("engine"))
-                .is_some(),
+            engine_override_declared: routed_manifest
+                .as_ref()
+                .is_some_and(|decision| decision.plan.manifest.get("engine").is_some()),
             compatibility_legacy_lock: authoritative_input
                 .and_then(|input| input.compatibility_legacy_lock.clone()),
-        }
+        })
     }
 
-    pub(crate) fn with_raw_manifest(
+    pub(crate) fn with_bridge_manifest(
         &self,
-        raw_manifest: toml::Value,
+        bridge_manifest: toml::Value,
         validation_mode: capsule_core::types::ValidationMode,
         engine_override_declared: bool,
     ) -> Self {
@@ -114,7 +125,7 @@ impl PreparedRunContext {
             lock_path: self.lock_path.clone(),
             workspace_root: self.workspace_root.clone(),
             effective_state: self.effective_state.clone(),
-            raw_manifest,
+            bridge_manifest,
             validation_mode,
             engine_override_declared,
             compatibility_legacy_lock: self.compatibility_legacy_lock.clone(),
@@ -264,7 +275,7 @@ where
         request.authoritative_input.as_ref(),
         &workspace_root,
         validation_mode,
-    );
+    )?;
     let state_source_overrides =
         if let Some(authoritative_input) = request.authoritative_input.as_ref() {
             authoritative_input
@@ -288,7 +299,7 @@ where
             &manifest_path,
             validation_mode,
         )?;
-        prepared.raw_manifest = toml::from_str(&loaded_manifest.raw_text)
+        prepared.bridge_manifest = toml::from_str(&loaded_manifest.raw_text)
             .unwrap_or_else(|_| loaded_manifest.raw.clone());
         prepared.engine_override_declared = loaded_manifest.raw.get("engine").is_some();
         let manifest = loaded_manifest.model.clone();
@@ -320,12 +331,12 @@ where
     }
 
     let external_dependencies = if prepared
-        .raw_manifest
+        .bridge_manifest
         .get("targets")
         .and_then(|value| value.as_table())
         .is_some()
     {
-        manifest_external_capsule_dependencies(&prepared.raw_manifest)?
+        manifest_external_capsule_dependencies(&prepared.bridge_manifest)?
     } else {
         Vec::new()
     };
@@ -1283,7 +1294,7 @@ pub(crate) async fn reroute_auto_provisioned_execution(
             validation_mode,
         )?;
     let engine_override_declared = loaded_manifest.raw.get("engine").is_some();
-    let rerouted_prepared = prepared.with_raw_manifest(
+    let rerouted_prepared = prepared.with_bridge_manifest(
         toml::from_str(&loaded_manifest.raw_text).unwrap_or_else(|_| loaded_manifest.raw.clone()),
         validation_mode,
         engine_override_declared,
@@ -1530,7 +1541,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn prepared_run_context_with_raw_manifest_retains_authority() {
+    fn prepared_run_context_with_bridge_manifest_retains_authority() {
         let prepared = PreparedRunContext {
             authoritative_lock: Some(AtoLock::default()),
             lock_path: None,
@@ -1538,13 +1549,13 @@ mod tests {
             effective_state: Some(
                 crate::application::workspace::state::EffectiveLockState::default(),
             ),
-            raw_manifest: toml::Value::String("old".to_string()),
+            bridge_manifest: toml::Value::String("old".to_string()),
             validation_mode: capsule_core::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
         };
 
-        let rerouted = prepared.with_raw_manifest(
+        let rerouted = prepared.with_bridge_manifest(
             toml::Value::String("new".to_string()),
             capsule_core::types::ValidationMode::Preview,
             true,
@@ -1555,7 +1566,7 @@ mod tests {
         assert_eq!(rerouted.workspace_root, PathBuf::from("."));
         assert!(rerouted.effective_state.is_some());
         assert_eq!(
-            rerouted.raw_manifest,
+            rerouted.bridge_manifest,
             toml::Value::String("new".to_string())
         );
         assert_eq!(
