@@ -9,6 +9,9 @@ use crate::application::compat_import::{
     compile_compatibility_project, CompatibilityCompileResult, CompatibilityDiagnostic,
     CompatibilityDiagnosticSeverity, ProvenanceRecord as CompatibilityProvenanceRecord,
 };
+use crate::application::engine::build::native_delivery::{
+    detect_build_strategy, native_delivery_build_environment_skeleton,
+};
 use crate::application::pipeline::cleanup::CleanupScope;
 use crate::application::ports::OutputPort;
 use crate::project::init::detect::{
@@ -31,6 +34,18 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 const RUN_SOURCE_INFERENCE_DIR: &str = ".tmp/source-inference";
+const OBSERVED_CLOSURE_LOCKFILES: &[&str] = &[
+    "package-lock.json",
+    "deno.lock",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lockb",
+    "Cargo.lock",
+    "poetry.lock",
+    "requirements.txt",
+    "go.sum",
+    "Gemfile.lock",
+];
 
 #[derive(Debug, Clone)]
 pub(crate) enum SourceInferenceInput {
@@ -1185,6 +1200,7 @@ fn sole_object_key(value: Option<&Value>) -> Option<String> {
 }
 
 fn resolve(result: &mut SourceInferenceResult) -> Result<()> {
+    maybe_promote_native_build_closure(result)?;
     normalize_lock_closure(&mut result.lock)?;
     ensure_incomplete_closure_unresolved_marker(&mut result.lock)?;
 
@@ -1218,12 +1234,93 @@ fn resolve(result: &mut SourceInferenceResult) -> Result<()> {
     Ok(())
 }
 
+fn maybe_promote_native_build_closure(result: &mut SourceInferenceResult) -> Result<()> {
+    if matches!(result.input_kind, SourceInferenceInputKind::CanonicalLock) {
+        return Ok(());
+    }
+
+    let should_promote = match result.lock.resolution.entries.get("closure") {
+        None => true,
+        Some(closure) => {
+            let info = closure_info(closure)?;
+            info.status == "incomplete"
+        }
+    };
+    if !should_promote {
+        return Ok(());
+    }
+
+    let Some(project_root) = result_project_root(result) else {
+        return Ok(());
+    };
+    let Ok(Some(plan)) = detect_build_strategy(&project_root) else {
+        return Ok(());
+    };
+
+    let inputs = observed_closure_lockfiles(&plan.manifest_dir)
+        .into_iter()
+        .map(|name| {
+            Ok(json!({
+                "kind": "lockfile",
+                "name": name,
+                "digest": digest_observed_lockfile(&plan.manifest_dir, &name)?,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    result.lock.resolution.entries.insert(
+        "closure".to_string(),
+        json!({
+            "kind": "build_closure",
+            "status": "complete",
+            "inputs": inputs,
+            "build_environment": native_delivery_build_environment_skeleton(&plan),
+        }),
+    );
+    result
+        .lock
+        .resolution
+        .unresolved
+        .retain(|value| value.field.as_deref() != Some("resolution.closure"));
+    result.provenance.push(SourceInferenceProvenance {
+        field: "resolution.closure".to_string(),
+        kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
+        source_path: Some(plan.manifest_path),
+        source_field: Some("[artifact]/[finalize]".to_string()),
+        note: Some(
+            "native delivery build plan resolved into build_closure using observed lockfiles and build-environment skeleton"
+                .to_string(),
+        ),
+    });
+
+    Ok(())
+}
+
+fn result_project_root(result: &SourceInferenceResult) -> Option<PathBuf> {
+    let path = result
+        .provenance
+        .iter()
+        .find_map(|record| record.source_path.clone())?;
+
+    if path.is_dir() {
+        return Some(path);
+    }
+
+    Some(path.parent().map(Path::to_path_buf).unwrap_or(path))
+}
+
 fn ensure_incomplete_closure_unresolved_marker(lock: &mut AtoLock) -> Result<()> {
     let Some(closure) = lock.resolution.entries.get("closure") else {
         return Ok(());
     };
 
     let info = closure_info(closure)?;
+    if info.status == "complete" {
+        lock.resolution
+            .unresolved
+            .retain(|value| value.field.as_deref() != Some("resolution.closure"));
+        return Ok(());
+    }
     if info.kind != "metadata_only" && info.status != "incomplete" {
         return Ok(());
     }
@@ -1850,28 +1947,31 @@ fn inferred_filesystem_contract(detected: &DetectedProject) -> Value {
 }
 
 fn inferred_closure_state(project_root: &Path) -> Value {
-    let explicit_locks = [
-        "package-lock.json",
-        "deno.lock",
-        "pnpm-lock.yaml",
-        "yarn.lock",
-        "bun.lockb",
-        "Cargo.lock",
-        "poetry.lock",
-        "requirements.txt",
-        "go.sum",
-        "Gemfile.lock",
-    ]
-    .iter()
-    .filter(|name| project_root.join(name).exists())
-    .map(|name| json!(name))
-    .collect::<Vec<_>>();
+    let explicit_locks = observed_closure_lockfiles(project_root)
+        .into_iter()
+        .map(|name| json!(name))
+        .collect::<Vec<_>>();
 
     json!({
         "kind": "metadata_only",
         "status": "incomplete",
         "observed_lockfiles": explicit_locks,
     })
+}
+
+fn observed_closure_lockfiles(project_root: &Path) -> Vec<String> {
+    OBSERVED_CLOSURE_LOCKFILES
+        .iter()
+        .filter(|name| project_root.join(name).exists())
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
+fn digest_observed_lockfile(project_root: &Path, relative: &str) -> Result<String> {
+    let path = project_root.join(relative);
+    let bytes = fs::read(&path)
+        .with_context(|| format!("failed to read observed lockfile {}", path.display()))?;
+    Ok(format!("blake3:{}", blake3::hash(&bytes).to_hex()))
 }
 
 fn source_metadata(detected: &DetectedProject, project_root: &Path) -> Value {
@@ -2879,6 +2979,123 @@ from = "missing-service"
                 .and_then(toml::Value::as_str),
             Some("missing-service")
         );
+    }
+
+    #[test]
+    fn compatibility_native_delivery_promotes_build_closure() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("capsule.toml"),
+            r#"schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source"
+driver = "native"
+entrypoint = "pnpm"
+cmd = ["build"]
+working_dir = "."
+
+[artifact]
+framework = "tauri"
+stage = "unsigned"
+target = "darwin/arm64"
+input = "src-tauri/target/release/bundle/macos/MyApp.app"
+
+[finalize]
+tool = "codesign"
+args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/macos/MyApp.app"]
+"#,
+        )
+        .expect("write manifest");
+        fs::write(dir.path().join("Cargo.lock"), "version = 3\n").expect("write cargo lock");
+        fs::write(dir.path().join("package-lock.json"), "{}").expect("write package lock");
+
+        let resolved = resolve_authoritative_input(dir.path(), ResolveInputOptions::default())
+            .expect("resolve compatibility input");
+        let ResolvedInput::CompatibilityProject { project, .. } = resolved else {
+            panic!("expected compatibility project");
+        };
+        let (draft_input, _) =
+            draft_lock_input_from_compatibility(&project).expect("compile compatibility draft");
+
+        let result = execute_shared_engine(
+            SourceInferenceInput::DraftLock(draft_input),
+            MaterializationMode::InitWorkspace,
+            true,
+            reporter(),
+        )
+        .expect("run shared engine");
+
+        let closure = result
+            .lock
+            .resolution
+            .entries
+            .get("closure")
+            .expect("resolution.closure");
+        assert_eq!(
+            closure.get("kind").and_then(Value::as_str),
+            Some("build_closure")
+        );
+        assert_eq!(
+            closure.get("status").and_then(Value::as_str),
+            Some("complete")
+        );
+        let inputs = closure
+            .get("inputs")
+            .and_then(Value::as_array)
+            .expect("closure inputs");
+        assert_eq!(inputs.len(), 2);
+        assert!(inputs.iter().any(|value| {
+            value.get("name").and_then(Value::as_str) == Some("Cargo.lock")
+                && value
+                    .get("digest")
+                    .and_then(Value::as_str)
+                    .is_some_and(|digest| digest.starts_with("blake3:"))
+        }));
+        assert!(inputs.iter().any(|value| {
+            value.get("name").and_then(Value::as_str) == Some("package-lock.json")
+                && value
+                    .get("digest")
+                    .and_then(Value::as_str)
+                    .is_some_and(|digest| digest.starts_with("blake3:"))
+        }));
+
+        let environment = closure
+            .get("build_environment")
+            .and_then(Value::as_object)
+            .expect("build_environment");
+        assert!(environment
+            .get("toolchains")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("rust"))));
+        assert!(environment
+            .get("package_managers")
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                values.iter().any(|value| value.as_str() == Some("cargo"))
+                    && values.iter().any(|value| value.as_str() == Some("npm"))
+            }));
+        assert!(environment
+            .get("helper_tools")
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                values
+                    .iter()
+                    .any(|value| value.as_str() == Some("tauri-cli"))
+                    && values
+                        .iter()
+                        .any(|value| value.as_str() == Some("codesign"))
+            }));
+        assert!(result
+            .lock
+            .resolution
+            .unresolved
+            .iter()
+            .all(|value| value.field.as_deref() != Some("resolution.closure")));
     }
 
     #[test]

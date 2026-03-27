@@ -231,7 +231,6 @@ fn init_command_defaults_to_durable_workspace_materialization() {
     }
 }
 
-
 #[test]
 fn state_command_parses_register_and_inspect_forms() {
     let register = Cli::try_parse_from([
