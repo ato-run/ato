@@ -15,6 +15,18 @@ pub enum ExplicitInputKind {
     Directory,
     CanonicalLock,
     CompatibilityManifest,
+    SingleScript,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SingleScriptLanguage {
+    Python,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSingleScript {
+    pub path: PathBuf,
+    pub language: SingleScriptLanguage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +100,7 @@ pub struct ResolvedCompatibilityLock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSourceOnly {
     pub project_root: PathBuf,
+    pub single_script: Option<ResolvedSingleScript>,
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +228,9 @@ fn discover_input(path: &Path) -> Result<InputDiscovery> {
                 project_root.to_path_buf(),
                 ExplicitInputKind::CompatibilityManifest,
             ),
+            _ if resolve_single_script_language(&requested_path).is_some() => {
+                (project_root.to_path_buf(), ExplicitInputKind::SingleScript)
+            }
             lockfile::CAPSULE_LOCK_FILE_NAME | lockfile::LEGACY_CAPSULE_LOCK_FILE_NAME => {
                 return Err(legacy_lock_without_manifest_error(&requested_path));
             }
@@ -383,6 +399,7 @@ fn materialize_resolution(
             })
         }
         ResolutionSelection::SourceOnly => {
+            let single_script = single_script_from_discovery(&discovery);
             let provenance = InputProvenance {
                 requested_path: discovery.requested_path,
                 explicit_input_kind: discovery.explicit_input_kind,
@@ -395,6 +412,7 @@ fn materialize_resolution(
             Ok(ResolvedInput::SourceOnly {
                 source: ResolvedSourceOnly {
                     project_root: discovery.project_root,
+                    single_script,
                 },
                 provenance,
                 advisories,
@@ -411,6 +429,30 @@ fn legacy_lock_without_manifest_error(path: &Path) -> CapsuleError {
             .unwrap_or(lockfile::CAPSULE_LOCK_FILE_NAME),
         path.display()
     ))
+}
+
+fn resolve_single_script_language(path: &Path) -> Option<SingleScriptLanguage> {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("py") => Some(SingleScriptLanguage::Python),
+        _ => None,
+    }
+}
+
+fn single_script_from_discovery(discovery: &InputDiscovery) -> Option<ResolvedSingleScript> {
+    if discovery.explicit_input_kind != ExplicitInputKind::SingleScript {
+        return None;
+    }
+
+    Some(ResolvedSingleScript {
+        path: discovery.requested_path.clone(),
+        language: resolve_single_script_language(&discovery.requested_path)
+            .expect("single script language must be known"),
+    })
 }
 
 fn format_ato_lock_validation_errors(errors: &[AtoLockValidationError]) -> String {
@@ -430,7 +472,7 @@ mod tests {
 
     use super::{
         resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ResolvedInputKind,
-        ResolverAdvisoryCode, ATO_LOCK_FILE_NAME,
+        ResolverAdvisoryCode, SingleScriptLanguage, ATO_LOCK_FILE_NAME,
     };
     use crate::ato_lock::{recompute_lock_id, AtoLock};
 
@@ -598,5 +640,30 @@ port = 4173
         assert!(err
             .to_string()
             .contains("is not an authoritative command-entry input without capsule.toml"));
+    }
+
+    #[test]
+    fn single_python_script_resolves_as_source_only() {
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("hello.py");
+        fs::write(&script_path, "print('hello')\n").expect("write script");
+
+        let resolved = resolve_authoritative_input(&script_path, ResolveInputOptions::default())
+            .expect("resolve single script");
+
+        match resolved {
+            ResolvedInput::SourceOnly {
+                source, provenance, ..
+            } => {
+                assert_eq!(
+                    provenance.explicit_input_kind,
+                    super::ExplicitInputKind::SingleScript
+                );
+                let script = source.single_script.expect("single script metadata");
+                assert_eq!(script.path, script_path.canonicalize().expect("canonical"));
+                assert_eq!(script.language, SingleScriptLanguage::Python);
+            }
+            other => panic!("unexpected resolved input: {other:?}"),
+        }
     }
 }
