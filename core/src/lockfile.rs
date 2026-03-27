@@ -10,6 +10,11 @@ use std::time::{Instant, UNIX_EPOCH};
 use chrono::Utc;
 use fs2::FileExt;
 use futures::future::try_join_all;
+use lock_draft_engine::{
+    evaluate_lock_draft, LockDraft, LockDraftInput, LockDraftReadiness,
+    LockDraftRuntimePlatform as DraftRuntimePlatform, ManifestSource as DraftManifestSource,
+    RepoFileEntry as DraftRepoFileEntry, RepoFileKind as DraftRepoFileKind,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -255,6 +260,7 @@ pub async fn generate_and_write_lockfile(
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
     let lockfile = generate_lockfile(
+        manifest_path,
         manifest_raw,
         manifest_text,
         &manifest_dir,
@@ -667,47 +673,136 @@ fn collect_lockfile_input_paths(
     paths
 }
 
-pub fn manifest_external_capsule_dependencies(
+fn build_lock_draft_input(
     manifest_raw: &toml::Value,
-) -> Result<Vec<ExternalCapsuleDependency>> {
-    let Some(targets) = manifest_raw.get("targets").and_then(toml::Value::as_table) else {
-        return Ok(Vec::new());
-    };
+    manifest_text: &str,
+    manifest_dir: Option<&Path>,
+    manifest_path: Option<&Path>,
+) -> Result<LockDraftInput> {
+    let mut repo_file_index = Vec::new();
+    let mut file_text_map = std::collections::BTreeMap::new();
 
-    let mut collected = Vec::new();
-    let mut seen = HashMap::<String, String>::new();
-    for (target_label, raw_target) in targets {
-        let Some(external_dependencies) = raw_target
-            .get("external_dependencies")
-            .and_then(toml::Value::as_array)
-        else {
-            continue;
-        };
-
-        for raw_dependency in external_dependencies {
-            let dependency: ExternalCapsuleDependency =
-                raw_dependency.clone().try_into().map_err(|err| {
-                    CapsuleError::Pack(format!(
-                        "Failed to parse targets.{}.external_dependencies entry: {}",
-                        target_label, err
-                    ))
-                })?;
-            if let Some(existing_source) = seen.get(&dependency.alias) {
-                if existing_source != &dependency.source {
-                    return Err(CapsuleError::Pack(format!(
-                        "External capsule dependency alias '{}' maps to multiple sources ('{}' and '{}')",
-                        dependency.alias, existing_source, dependency.source
-                    )));
-                }
+    if let (Some(manifest_dir), Some(manifest_path)) = (manifest_dir, manifest_path) {
+        for path in collect_lockfile_input_paths(manifest_path, manifest_dir, manifest_raw) {
+            if !path.exists() || !path.is_file() {
                 continue;
             }
-            seen.insert(dependency.alias.clone(), dependency.source.clone());
-            collected.push(dependency);
+            let relative_path = path
+                .strip_prefix(manifest_dir)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let size = path.metadata().ok().map(|metadata| metadata.len());
+            repo_file_index.push(DraftRepoFileEntry {
+                path: relative_path.clone(),
+                kind: DraftRepoFileKind::File,
+                size,
+            });
+
+            if let Ok(text) = fs::read_to_string(&path) {
+                file_text_map.insert(relative_path, text);
+            }
         }
     }
 
-    collected.sort_by(|a, b| a.alias.cmp(&b.alias));
-    Ok(collected)
+    Ok(LockDraftInput {
+        selected_target: None,
+        repo_file_index,
+        file_text_map,
+        manifest_source: Some(DraftManifestSource {
+            text: manifest_text.to_string(),
+            selected_target_label: selected_target_label(manifest_raw),
+        }),
+        existing_ato_lock_summary: None,
+        external_dependency_hints: Vec::new(),
+    })
+}
+
+fn evaluate_lock_draft_for_manifest(
+    manifest_raw: &toml::Value,
+    manifest_text: &str,
+    manifest_dir: &Path,
+    manifest_path: &Path,
+) -> Result<LockDraft> {
+    let input = build_lock_draft_input(
+        manifest_raw,
+        manifest_text,
+        Some(manifest_dir),
+        Some(manifest_path),
+    )?;
+    evaluate_lock_draft(&input)
+        .map_err(|err| CapsuleError::Config(format!("Failed to evaluate LockDraft: {}", err)))
+}
+
+fn evaluate_lock_draft_with_minimal_host(manifest_raw: &toml::Value) -> Result<LockDraft> {
+    let manifest_text = toml::to_string(manifest_raw)
+        .map_err(|err| CapsuleError::Config(format!("Failed to serialize manifest: {}", err)))?;
+    let input = build_lock_draft_input(manifest_raw, &manifest_text, None, None)?;
+    evaluate_lock_draft(&input)
+        .map_err(|err| CapsuleError::Config(format!("Failed to evaluate LockDraft: {}", err)))
+}
+
+fn detect_language_from_draft(draft: &LockDraft) -> Option<String> {
+    match (draft.runtime.as_deref(), draft.driver.as_deref()) {
+        (Some("web"), Some("static")) => Some("deno".to_string()),
+        (_, Some("node")) => Some("node".to_string()),
+        (_, Some("python")) => Some("python".to_string()),
+        (_, Some("deno")) => Some("deno".to_string()),
+        _ => None,
+    }
+}
+
+fn required_runtime_version_from_draft(draft: &LockDraft) -> Result<Option<String>> {
+    if draft
+        .blocking_issues
+        .iter()
+        .any(|issue| issue.contains("runtime_version is required"))
+    {
+        return Err(CapsuleError::Config(
+            "targets.<default_target>.runtime_version is required for source driver deno/node/python and web driver deno".to_string(),
+        ));
+    }
+    Ok(draft.required_runtime_version.clone())
+}
+
+fn runtime_platforms_from_draft(draft: &LockDraft) -> Result<Vec<RuntimePlatform>> {
+    if draft.runtime_platforms.is_empty() {
+        return Ok(vec![current_runtime_platform()?]);
+    }
+
+    draft
+        .runtime_platforms
+        .iter()
+        .map(runtime_platform_from_draft)
+        .collect()
+}
+
+fn runtime_platform_from_draft(platform: &DraftRuntimePlatform) -> Result<RuntimePlatform> {
+    runtime_platform(&platform.os, &platform.arch)
+}
+
+fn runtime_tools_from_draft(draft: &LockDraft) -> HashMap<String, String> {
+    draft
+        .runtime_tools
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+pub fn manifest_external_capsule_dependencies(
+    manifest_raw: &toml::Value,
+) -> Result<Vec<ExternalCapsuleDependency>> {
+    let draft = evaluate_lock_draft_with_minimal_host(manifest_raw)?;
+    Ok(draft
+        .external_capsule_dependencies
+        .into_iter()
+        .map(|dependency| ExternalCapsuleDependency {
+            alias: dependency.name,
+            source: dependency.source,
+            source_type: dependency.source_type,
+            injection_bindings: dependency.injection_bindings,
+        })
+        .collect())
 }
 
 #[derive(Debug, Clone)]
@@ -913,17 +1008,43 @@ fn metadata_inode(_: &fs::Metadata) -> Option<u64> {
 }
 
 async fn generate_lockfile(
+    manifest_path: &Path,
     manifest_raw: &toml::Value,
     manifest_text: &str,
     manifest_dir: &Path,
     reporter: Arc<dyn CapsuleReporter + 'static>,
     timings: bool,
 ) -> Result<CapsuleLock> {
+    let draft =
+        evaluate_lock_draft_for_manifest(manifest_raw, manifest_text, manifest_dir, manifest_path)?;
+    if draft.readiness != LockDraftReadiness::ReadyToFinalize {
+        let mut reasons = draft.blocking_issues.clone();
+        if !draft.missing_native_lockfiles.is_empty() {
+            reasons.push(format!(
+                "Missing native lockfile(s): {}",
+                draft.missing_native_lockfiles.join(", ")
+            ));
+        }
+        let mut message = if reasons.is_empty() {
+            "LockDraft is not ready to finalize locally.".to_string()
+        } else {
+            format!(
+                "LockDraft is not ready to finalize locally: {}",
+                reasons.join(" ")
+            )
+        };
+        if !draft.suggested_commands.is_empty() {
+            message.push_str(" Suggested remediation: ");
+            message.push_str(&draft.suggested_commands.join(" ; "));
+        }
+        return Err(CapsuleError::Pack(message));
+    }
+
     let allowlist = read_allowlist(manifest_raw);
     let target_key = platform_target_key()?;
-    let runtime_platforms = lockfile_runtime_platforms(manifest_raw)?;
-    let required_runtime_version = required_runtime_version(manifest_raw)?;
-    let runtime_tools = read_runtime_tools(manifest_raw);
+    let runtime_platforms = runtime_platforms_from_draft(&draft)?;
+    let required_runtime_version = required_runtime_version_from_draft(&draft)?;
+    let runtime_tools = runtime_tools_from_draft(&draft);
     let capsule_dependencies = resolve_external_capsule_dependencies(manifest_raw).await?;
 
     let mut targets: HashMap<String, TargetEntry> = HashMap::new();
@@ -939,7 +1060,7 @@ async fn generate_lockfile(
         dotnet: None,
     };
 
-    let language = detect_language(manifest_raw);
+    let language = detect_language_from_draft(&draft);
     if let Some(lang) = language.as_deref() {
         if lang == "python" {
             configure_python_lockfile(
@@ -1471,65 +1592,6 @@ fn read_dependencies_path(
     None
 }
 
-fn detect_language(manifest: &toml::Value) -> Option<String> {
-    if let Some(driver) = selected_target_driver(manifest) {
-        if matches!(driver.as_str(), "python" | "node" | "deno") {
-            return Some(driver);
-        }
-    }
-
-    if selected_target_runtime(manifest)
-        .map(|r| r == "web")
-        .unwrap_or(false)
-        && selected_target_driver(manifest)
-            .map(|d| d == "static")
-            .unwrap_or(false)
-    {
-        return Some("deno".to_string());
-    }
-
-    if manifest
-        .get("language")
-        .and_then(|v| v.get("python"))
-        .is_some()
-    {
-        return Some("python".to_string());
-    }
-    if manifest
-        .get("language")
-        .and_then(|v| v.get("node"))
-        .is_some()
-    {
-        return Some("node".to_string());
-    }
-
-    let target_lang = selected_target_table(manifest)
-        .and_then(|t| t.get("language"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    if target_lang.is_some() {
-        return target_lang;
-    }
-
-    let entrypoint = manifest
-        .get("execution")
-        .and_then(|e| e.get("entrypoint"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let ext = Path::new(entrypoint)
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if ext == "py" {
-        return Some("python".to_string());
-    }
-    if matches!(ext.as_str(), "js" | "mjs" | "cjs" | "ts") {
-        return Some("node".to_string());
-    }
-    None
-}
-
 fn read_language_version(manifest: &toml::Value, language: &str, fallback: &str) -> String {
     let version = manifest
         .get("language")
@@ -1554,9 +1616,10 @@ fn read_runtime_version(manifest: &toml::Value) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+#[cfg(test)]
 fn read_runtime_tools(manifest: &toml::Value) -> HashMap<String, String> {
-    selected_target_table(manifest)
-        .map(read_runtime_tools_from_target)
+    evaluate_lock_draft_with_minimal_host(manifest)
+        .map(|draft| runtime_tools_from_draft(&draft))
         .unwrap_or_default()
 }
 
@@ -1673,25 +1736,10 @@ fn selected_target_cmd_driver(manifest: &toml::Value) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn required_runtime_version(manifest: &toml::Value) -> Result<Option<String>> {
-    let runtime = selected_target_runtime(manifest);
-    let driver = selected_target_driver(manifest);
-    let requires_source = runtime.as_deref() == Some("source")
-        && matches!(
-            driver.as_deref(),
-            Some("python") | Some("node") | Some("deno")
-        );
-    let requires_web_deno = runtime.as_deref() == Some("web") && driver.as_deref() == Some("deno");
-    let requires = requires_source || requires_web_deno;
-    if !requires {
-        return Ok(None);
-    }
-
-    read_runtime_version(manifest).map(Some).ok_or_else(|| {
-        CapsuleError::Config(
-            "targets.<default_target>.runtime_version is required for source driver deno/node/python and web driver deno".to_string(),
-        )
-    })
+    let draft = evaluate_lock_draft_with_minimal_host(manifest)?;
+    required_runtime_version_from_draft(&draft)
 }
 
 fn selected_target_table(manifest: &toml::Value) -> Option<&toml::Value> {
@@ -1707,20 +1755,8 @@ fn selected_target_table(manifest: &toml::Value) -> Option<&toml::Value> {
 }
 
 fn lockfile_runtime_platforms(manifest: &toml::Value) -> Result<Vec<RuntimePlatform>> {
-    let runtime = selected_target_runtime(manifest);
-    let driver = selected_target_driver(manifest).or_else(|| detect_language(manifest));
-    let runtime_tools = read_runtime_tools(manifest);
-    let needs_universal_lock = runtime.as_deref() == Some("web")
-        || (runtime.as_deref() == Some("source")
-            && (matches!(
-                driver.as_deref(),
-                Some("python") | Some("node") | Some("deno")
-            ) || !runtime_tools.is_empty()));
-
-    if needs_universal_lock {
-        return Ok(SUPPORTED_RUNTIME_PLATFORMS.to_vec());
-    }
-    Ok(vec![current_runtime_platform()?])
+    let draft = evaluate_lock_draft_with_minimal_host(manifest)?;
+    runtime_platforms_from_draft(&draft)
 }
 
 fn current_runtime_platform() -> Result<RuntimePlatform> {

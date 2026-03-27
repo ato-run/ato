@@ -430,8 +430,9 @@ fn authoritative_input_from_materialization(
 
     Ok(run_phase::RunAuthoritativeInput {
         lock: materialized.lock,
-        bridge_manifest_path: materialized.manifest_path,
-        bridge_manifest_sha256: materialized.bridge_manifest_sha256,
+        lock_path: materialized.lock_path,
+        workspace_root: materialized.project_root,
+        raw_manifest: materialized.raw_manifest,
         effective_state,
         compatibility_legacy_lock,
     })
@@ -767,6 +768,17 @@ async fn normalize_run_target_after_install(
     if resolved_target.is_dir()
         || resolved_target.file_name().and_then(|value| value.to_str()) == Some("capsule.toml")
         || resolved_target.file_name().and_then(|value| value.to_str()) == Some(ATO_LOCK_FILE_NAME)
+        || resolved_target
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| {
+                value.eq_ignore_ascii_case("py")
+                    || value.eq_ignore_ascii_case("ts")
+                    || value.eq_ignore_ascii_case("tsx")
+                    || value.eq_ignore_ascii_case("js")
+                    || value.eq_ignore_ascii_case("jsx")
+            })
+            .unwrap_or(false)
     {
         return match resolve_authoritative_input(resolved_target, ResolveInputOptions::default())? {
             ResolvedInput::CanonicalLock { canonical, .. } => {
@@ -777,7 +789,7 @@ async fn normalize_run_target_after_install(
                     args.reporter.clone(),
                     args.assume_yes,
                 )?;
-                let target = materialized.manifest_path.clone();
+                let target = materialized.project_root.clone();
                 Ok(NormalizedRunTarget {
                     target,
                     authoritative_input: Some(authoritative_input_from_materialization(
@@ -795,7 +807,7 @@ async fn normalize_run_target_after_install(
                     args.reporter.clone(),
                     args.assume_yes,
                 )?;
-                let target = materialized.manifest_path.clone();
+                let target = materialized.project_root.clone();
                 let compatibility_legacy_lock = project.legacy_lock.clone().map(|legacy_lock| {
                     run_phase::CompatibilityLegacyLockContext {
                         manifest_path: project.manifest.path.clone(),
@@ -820,7 +832,7 @@ async fn normalize_run_target_after_install(
                     args.reporter.clone(),
                     args.assume_yes,
                 )?;
-                let target = materialized.manifest_path.clone();
+                let target = materialized.project_root.clone();
                 Ok(NormalizedRunTarget {
                     target,
                     authoritative_input: Some(authoritative_input_from_materialization(
@@ -980,29 +992,50 @@ fn execute_watch_mode(args: RunArgs) -> Result<()> {
     } else {
         args.target.clone()
     };
-    let preview_mode =
-        args.preview_mode || preview::load_preview_session_for_manifest(&manifest_path)?.is_some();
-    let manifest = if preview_mode {
-        capsule_core::manifest::load_manifest_with_validation_mode(
-            &manifest_path,
-            capsule_core::types::ValidationMode::Preview,
+    let preview_mode = args.preview_mode
+        || (manifest_path.exists()
+            && preview::load_preview_session_for_manifest(&manifest_path)?.is_some());
+    let normalized = futures::executor::block_on(normalize_run_target_after_install(
+        &args,
+        &args.target,
+        None,
+    ))?;
+    let decision = if let Some(authoritative_input) = normalized.authoritative_input.as_ref() {
+        capsule_core::router::route_lock_with_state_overrides(
+            &authoritative_input.lock_path,
+            &authoritative_input.lock,
+            &authoritative_input.workspace_root,
+            router::ExecutionProfile::Dev,
+            args.target_label.as_deref(),
+            authoritative_input
+                .effective_state
+                .state_source_overrides
+                .clone(),
         )?
-        .model
     } else {
-        CapsuleManifest::load_from_file(&manifest_path)?
-    };
-    let state_source_overrides = resolve_state_source_overrides(&manifest, &args.state_bindings)?;
-    let decision = capsule_core::router::route_manifest_with_state_overrides_and_validation_mode(
-        &manifest_path,
-        router::ExecutionProfile::Dev,
-        args.target_label.as_deref(),
-        state_source_overrides,
-        if preview_mode {
-            capsule_core::types::ValidationMode::Preview
+        let manifest = if preview_mode {
+            capsule_core::manifest::load_manifest_with_validation_mode(
+                &manifest_path,
+                capsule_core::types::ValidationMode::Preview,
+            )?
+            .model
         } else {
-            capsule_core::types::ValidationMode::Strict
-        },
-    )?;
+            CapsuleManifest::load_from_file(&manifest_path)?
+        };
+        let state_source_overrides =
+            resolve_state_source_overrides(&manifest, &args.state_bindings)?;
+        capsule_core::router::route_manifest_with_state_overrides_and_validation_mode(
+            &manifest_path,
+            router::ExecutionProfile::Dev,
+            args.target_label.as_deref(),
+            state_source_overrides,
+            if preview_mode {
+                capsule_core::types::ValidationMode::Preview
+            } else {
+                capsule_core::types::ValidationMode::Strict
+            },
+        )?
+    };
     if decision.plan.is_orchestration_mode() {
         anyhow::bail!("--watch is not supported for orchestration mode");
     }
@@ -1352,6 +1385,8 @@ run_command = "node server.js"
         };
         let prepared = crate::commands::run::run_phase::PreparedRunContext {
             authoritative_lock: None,
+            lock_path: None,
+            workspace_root: tmp.path().to_path_buf(),
             effective_state: None,
             raw_manifest: toml::Value::Table(toml::map::Map::new()),
             validation_mode: capsule_core::types::ValidationMode::Strict,
@@ -1448,13 +1483,7 @@ run_command = "node server.js"
             .expect("normalize target");
 
         assert!(normalized.authoritative_input.is_some());
-        assert_eq!(
-            normalized
-                .target
-                .file_name()
-                .and_then(|value| value.to_str()),
-            Some(".ato.run.generated.capsule.toml")
-        );
+        assert_eq!(normalized.target, tmp.path());
         assert!(normalized.target.exists());
     }
 
@@ -1485,8 +1514,8 @@ run_command = "node server.js"
     #[test]
     fn process_runtime_label_preserves_runtime_under_host_fallback() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let plan = ManifestData {
-            manifest: toml::from_str(
+        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+            toml::from_str(
                 r#"
                 [targets.app]
                 runtime = "source"
@@ -1495,12 +1524,13 @@ run_command = "node server.js"
                 "#,
             )
             .expect("manifest"),
-            manifest_path: tmp.path().join("capsule.toml"),
-            manifest_dir: tmp.path().to_path_buf(),
-            profile: ExecutionProfile::Dev,
-            selected_target: "app".to_string(),
-            state_source_overrides: std::collections::HashMap::new(),
-        };
+            tmp.path().join("capsule.toml"),
+            tmp.path().to_path_buf(),
+            ExecutionProfile::Dev,
+            Some("app"),
+            std::collections::HashMap::new(),
+        )
+        .expect("execution descriptor");
 
         let label = process_runtime_label(&plan, false, CompatibilityHostMode::Enabled);
         assert_eq!(label, "source/node [host-fallback]");
@@ -1743,13 +1773,14 @@ target = "/var/lib/app"
         targets.insert("default".to_string(), toml::Value::Table(target));
         manifest.insert("targets".to_string(), toml::Value::Table(targets));
 
-        ManifestData {
-            manifest: toml::Value::Table(manifest),
-            manifest_path: manifest_dir.join("capsule.toml"),
+        capsule_core::router::execution_descriptor_from_manifest_parts(
+            toml::Value::Table(manifest),
+            manifest_dir.join("capsule.toml"),
             manifest_dir,
-            profile: ExecutionProfile::Dev,
-            selected_target: "default".to_string(),
-            state_source_overrides: std::collections::HashMap::new(),
-        }
+            ExecutionProfile::Dev,
+            Some("default"),
+            std::collections::HashMap::new(),
+        )
+        .expect("execution descriptor")
     }
 }

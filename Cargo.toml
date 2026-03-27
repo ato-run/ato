@@ -2,6 +2,7 @@
 members = [
     ".",
     "core",
+    "lock-draft-engine",
 ]
 resolver = "2"
 

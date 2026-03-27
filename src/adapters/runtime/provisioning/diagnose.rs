@@ -169,14 +169,15 @@ mod tests {
         targets.insert("default".to_string(), toml::Value::Table(target));
         manifest.insert("targets".to_string(), toml::Value::Table(targets));
 
-        ManifestData {
-            manifest: toml::Value::Table(manifest),
-            manifest_path: PathBuf::from("/tmp/capsule.toml"),
-            manifest_dir: PathBuf::from("/tmp"),
-            profile: ExecutionProfile::Dev,
-            selected_target: "default".to_string(),
-            state_source_overrides: HashMap::new(),
-        }
+        capsule_core::router::execution_descriptor_from_manifest_parts(
+            toml::Value::Table(manifest),
+            PathBuf::from("/tmp/capsule.toml"),
+            PathBuf::from("/tmp"),
+            ExecutionProfile::Dev,
+            Some("default"),
+            HashMap::new(),
+        )
+        .expect("execution descriptor")
     }
 
     #[test]

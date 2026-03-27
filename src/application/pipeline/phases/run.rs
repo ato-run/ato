@@ -12,10 +12,8 @@ use capsule_core::lockfile::{
     manifest_external_capsule_dependencies, verify_lockfile_external_dependencies, CapsuleLock,
     CAPSULE_LOCK_FILE_NAME,
 };
-use capsule_core::manifest::LoadedManifest;
 use capsule_core::types::{CapsuleManifest, CapsuleType, StateDurability};
 use capsule_core::CapsuleReporter;
-use sha2::{Digest, Sha256};
 use tracing::debug;
 
 use crate::application::engine::install::support::{
@@ -57,8 +55,9 @@ pub(crate) struct CompatibilityLegacyLockContext {
 #[derive(Debug, Clone)]
 pub(crate) struct RunAuthoritativeInput {
     pub(crate) lock: AtoLock,
-    pub(crate) bridge_manifest_path: PathBuf,
-    pub(crate) bridge_manifest_sha256: String,
+    pub(crate) lock_path: PathBuf,
+    pub(crate) workspace_root: PathBuf,
+    pub(crate) raw_manifest: Option<toml::Value>,
     pub(crate) effective_state: EffectiveLockState,
     pub(crate) compatibility_legacy_lock: Option<CompatibilityLegacyLockContext>,
 }
@@ -69,6 +68,8 @@ pub(crate) struct RunAuthoritativeInput {
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedRunContext {
     pub(crate) authoritative_lock: Option<AtoLock>,
+    pub(crate) lock_path: Option<PathBuf>,
+    pub(crate) workspace_root: PathBuf,
     pub(crate) effective_state: Option<EffectiveLockState>,
     pub(crate) raw_manifest: toml::Value,
     pub(crate) validation_mode: capsule_core::types::ValidationMode,
@@ -77,19 +78,26 @@ pub(crate) struct PreparedRunContext {
 }
 
 impl PreparedRunContext {
-    pub(crate) fn from_loaded_manifest(
+    pub(crate) fn from_authoritative_input(
         authoritative_input: Option<&RunAuthoritativeInput>,
-        loaded_manifest: &LoadedManifest,
+        workspace_root: &Path,
         validation_mode: capsule_core::types::ValidationMode,
     ) -> Self {
-        let raw_manifest = toml::from_str(&loaded_manifest.raw_text)
-            .unwrap_or_else(|_| loaded_manifest.raw.clone());
         Self {
             authoritative_lock: authoritative_input.map(|input| input.lock.clone()),
+            lock_path: authoritative_input.map(|input| input.lock_path.clone()),
+            workspace_root: authoritative_input
+                .map(|input| input.workspace_root.clone())
+                .unwrap_or_else(|| workspace_root.to_path_buf()),
             effective_state: authoritative_input.map(|input| input.effective_state.clone()),
-            raw_manifest,
+            raw_manifest: authoritative_input
+                .and_then(|input| input.raw_manifest.clone())
+                .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new())),
             validation_mode,
-            engine_override_declared: loaded_manifest.raw.get("engine").is_some(),
+            engine_override_declared: authoritative_input
+                .and_then(|input| input.raw_manifest.as_ref())
+                .and_then(|manifest| manifest.get("engine"))
+                .is_some(),
             compatibility_legacy_lock: authoritative_input
                 .and_then(|input| input.compatibility_legacy_lock.clone()),
         }
@@ -103,6 +111,8 @@ impl PreparedRunContext {
     ) -> Self {
         Self {
             authoritative_lock: self.authoritative_lock.clone(),
+            lock_path: self.lock_path.clone(),
+            workspace_root: self.workspace_root.clone(),
             effective_state: self.effective_state.clone(),
             raw_manifest,
             validation_mode,
@@ -210,45 +220,6 @@ fn run_validation_mode(preview_mode: bool) -> capsule_core::types::ValidationMod
     }
 }
 
-fn prepare_run_context(
-    authoritative_input: Option<&RunAuthoritativeInput>,
-    loaded_manifest: &LoadedManifest,
-    validation_mode: capsule_core::types::ValidationMode,
-) -> PreparedRunContext {
-    PreparedRunContext::from_loaded_manifest(authoritative_input, loaded_manifest, validation_mode)
-}
-
-fn validate_authoritative_bridge(
-    authoritative_input: Option<&RunAuthoritativeInput>,
-    manifest_path: &Path,
-    loaded_manifest: &LoadedManifest,
-) -> Result<()> {
-    let Some(authoritative_input) = authoritative_input else {
-        return Ok(());
-    };
-
-    if manifest_path != authoritative_input.bridge_manifest_path {
-        return Ok(());
-    }
-
-    let actual_sha256 = sha256_hex(loaded_manifest.raw_text.as_bytes());
-    if actual_sha256 == authoritative_input.bridge_manifest_sha256 {
-        return Ok(());
-    }
-
-    anyhow::bail!(AtoExecutionError::execution_contract_invalid(
-        "generated manifest bridge no longer matches the authoritative lock-derived run request",
-        Some("bridge_manifest"),
-        None,
-    ));
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
-}
-
 pub(crate) async fn run_prepare_phase<P>(
     request: &ConsumerRunRequest,
     progress: &P,
@@ -259,61 +230,84 @@ where
 {
     progress.start(HourglassPhase::Prepare);
 
-    let manifest_path = if request.target.is_dir() {
-        request.target.join("capsule.toml")
-    } else {
+    let workspace_root = if let Some(authoritative_input) = request.authoritative_input.as_ref() {
+        authoritative_input.workspace_root.clone()
+    } else if request.target.is_dir() {
         request.target.clone()
+    } else {
+        request
+            .target
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| request.target.clone())
     };
-    let preview_session = preview::load_preview_session_for_manifest(&manifest_path)?;
+    let manifest_path = workspace_root.join("capsule.toml");
+    let preview_session = if manifest_path.exists() {
+        preview::load_preview_session_for_manifest(&manifest_path)?
+    } else {
+        None
+    };
     let preview_mode = request.preview_mode || preview_session.is_some();
     let use_progressive_ui =
         crate::progressive_ui::can_use_progressive_ui(false) && !request.background;
     let source_label = preview_session
         .as_ref()
         .map(|session| session.target_reference.clone())
-        .unwrap_or_else(|| manifest_path.display().to_string());
+        .unwrap_or_else(|| workspace_root.display().to_string());
 
     if use_progressive_ui {
         crate::progressive_ui::show_run_intro(&source_label)?;
     }
 
     let validation_mode = run_validation_mode(preview_mode);
-    let loaded_manifest = capsule_core::manifest::load_manifest_with_validation_mode(
-        &manifest_path,
-        validation_mode,
-    )?;
-    validate_authoritative_bridge(
+    let mut prepared = PreparedRunContext::from_authoritative_input(
         request.authoritative_input.as_ref(),
-        &manifest_path,
-        &loaded_manifest,
-    )?;
-    let mut prepared = prepare_run_context(
-        request.authoritative_input.as_ref(),
-        &loaded_manifest,
+        &workspace_root,
         validation_mode,
     );
-    let manifest = loaded_manifest.model.clone();
-    if manifest.schema_version.trim() == "0.3" && manifest.capsule_type == CapsuleType::Library {
-        anyhow::bail!("schema_version=0.3 type=library package cannot be started with `ato run`");
-    }
-
     let state_source_overrides =
         if let Some(authoritative_input) = request.authoritative_input.as_ref() {
-            resolve_state_source_overrides_from_map(
-                &manifest,
-                &authoritative_input.effective_state.state_source_overrides,
-            )?
+            authoritative_input
+                .effective_state
+                .state_source_overrides
+                .clone()
         } else {
-            resolve_state_source_overrides(&manifest, &request.state_bindings)?
+            HashMap::new()
         };
-    let mut decision =
+    let mut decision = if let Some(authoritative_input) = request.authoritative_input.as_ref() {
+        capsule_core::router::route_lock_with_state_overrides(
+            &authoritative_input.lock_path,
+            &authoritative_input.lock,
+            &authoritative_input.workspace_root,
+            router::ExecutionProfile::Dev,
+            request.target_label.as_deref(),
+            state_source_overrides,
+        )?
+    } else {
+        let loaded_manifest = capsule_core::manifest::load_manifest_with_validation_mode(
+            &manifest_path,
+            validation_mode,
+        )?;
+        prepared.raw_manifest = toml::from_str(&loaded_manifest.raw_text)
+            .unwrap_or_else(|_| loaded_manifest.raw.clone());
+        prepared.engine_override_declared = loaded_manifest.raw.get("engine").is_some();
+        let manifest = loaded_manifest.model.clone();
+        if manifest.schema_version.trim() == "0.3" && manifest.capsule_type == CapsuleType::Library
+        {
+            anyhow::bail!(
+                "schema_version=0.3 type=library package cannot be started with `ato run`"
+            );
+        }
+        let state_source_overrides =
+            resolve_state_source_overrides(&manifest, &request.state_bindings)?;
         capsule_core::router::route_manifest_with_state_overrides_and_validation_mode(
             &manifest_path,
             router::ExecutionProfile::Dev,
             request.target_label.as_deref(),
             state_source_overrides,
             validation_mode,
-        )?;
+        )?
+    };
     if decision
         .plan
         .execution_package_type()
@@ -325,7 +319,16 @@ where
         );
     }
 
-    let external_dependencies = manifest_external_capsule_dependencies(&decision.plan.manifest)?;
+    let external_dependencies = if prepared
+        .raw_manifest
+        .get("targets")
+        .and_then(|value| value.as_table())
+        .is_some()
+    {
+        manifest_external_capsule_dependencies(&prepared.raw_manifest)?
+    } else {
+        Vec::new()
+    };
     let mut external_capsules = None;
     if !external_dependencies.is_empty() {
         if request.background {
@@ -1387,13 +1390,6 @@ pub(crate) fn resolve_state_source_overrides(
     resolve_state_source_overrides_with_store(manifest, raw_bindings, None)
 }
 
-pub(crate) fn resolve_state_source_overrides_from_map(
-    manifest: &CapsuleManifest,
-    requested: &HashMap<String, String>,
-) -> Result<HashMap<String, String>> {
-    resolve_state_source_overrides_from_requested(manifest, requested, None)
-}
-
 pub(crate) fn resolve_state_source_overrides_with_store(
     manifest: &CapsuleManifest,
     raw_bindings: &[String],
@@ -1529,58 +1525,16 @@ fn build_target_launch_options(
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_authoritative_bridge, PreparedRunContext, RunAuthoritativeInput};
+    use super::PreparedRunContext;
     use capsule_core::ato_lock::AtoLock;
-    use tempfile::tempdir;
-
-    #[test]
-    fn generated_bridge_hash_mismatch_fails_closed() {
-        let dir = tempdir().expect("tempdir");
-        let manifest_path = dir.path().join(".ato.run.generated.capsule.toml");
-        std::fs::write(
-            &manifest_path,
-            r#"schema_version = "0.2"
-name = "demo"
-version = "0.1.0"
-type = "app"
-default_target = "cli"
-
-[targets.cli]
-runtime = "source"
-entrypoint = "main.ts"
-"#,
-        )
-        .expect("write manifest");
-        let loaded_manifest = capsule_core::manifest::load_manifest_with_validation_mode(
-            &manifest_path,
-            capsule_core::types::ValidationMode::Strict,
-        )
-        .expect("load manifest");
-
-        let authoritative_input = RunAuthoritativeInput {
-            lock: AtoLock::default(),
-            bridge_manifest_path: manifest_path.clone(),
-            bridge_manifest_sha256: "deadbeef".to_string(),
-            effective_state: crate::application::workspace::state::EffectiveLockState::default(),
-            compatibility_legacy_lock: None,
-        };
-
-        assert!(authoritative_input.lock.contract.entries.is_empty());
-
-        let error = validate_authoritative_bridge(
-            Some(&authoritative_input),
-            &manifest_path,
-            &loaded_manifest,
-        )
-        .expect_err("bridge mismatch must fail closed");
-
-        assert!(error.to_string().contains("generated manifest bridge"));
-    }
+    use std::path::PathBuf;
 
     #[test]
     fn prepared_run_context_with_raw_manifest_retains_authority() {
         let prepared = PreparedRunContext {
             authoritative_lock: Some(AtoLock::default()),
+            lock_path: None,
+            workspace_root: PathBuf::from("."),
             effective_state: Some(
                 crate::application::workspace::state::EffectiveLockState::default(),
             ),
@@ -1597,6 +1551,8 @@ entrypoint = "main.ts"
         );
 
         assert!(rerouted.authoritative_lock.is_some());
+        assert!(rerouted.lock_path.is_none());
+        assert_eq!(rerouted.workspace_root, PathBuf::from("."));
         assert!(rerouted.effective_state.is_some());
         assert_eq!(
             rerouted.raw_manifest,

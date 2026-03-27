@@ -506,7 +506,35 @@ fn write_normalized_manifest(plan: &ManifestData) -> Result<PathBuf> {
             )
         })?;
     let cmd_args = plan.targets_oci_cmd();
-    let command = (!cmd_args.is_empty()).then(|| cmd_args.join(" "));
+    let language_name = plan
+        .execution_language()
+        .or_else(|| plan.execution_driver())
+        .or_else(|| plan.execution_runtime());
+    let is_python = language_name
+        .as_deref()
+        .map(|value| value.eq_ignore_ascii_case("python"))
+        .unwrap_or(false);
+
+    let (normalized_entrypoint, command) = if is_python {
+        let mut tokens = vec!["run".to_string()];
+        if has_local_uv_cache(plan) {
+            tokens.push("--offline".to_string());
+        }
+        if let Some(requirements) = resolve_python_requirements_argument(plan) {
+            tokens.push("--with-requirements".to_string());
+            tokens.push(requirements);
+        }
+        tokens.push("python3".to_string());
+        tokens.push(entrypoint.clone());
+        tokens.extend(cmd_args.iter().cloned());
+        (
+            "uv".to_string(),
+            Some(shell_words::join(tokens.iter().map(String::as_str))),
+        )
+    } else {
+        let command = (!cmd_args.is_empty()).then(|| cmd_args.join(" "));
+        (entrypoint.clone(), command)
+    };
 
     let mut manifest = toml::map::Map::new();
     manifest.insert(
@@ -525,7 +553,10 @@ fn write_normalized_manifest(plan: &ManifestData) -> Result<PathBuf> {
     );
 
     let mut execution = toml::map::Map::new();
-    execution.insert("entrypoint".to_string(), toml::Value::String(entrypoint));
+    execution.insert(
+        "entrypoint".to_string(),
+        toml::Value::String(normalized_entrypoint),
+    );
     if let Some(command) = command {
         execution.insert("command".to_string(), toml::Value::String(command));
     }
@@ -535,10 +566,6 @@ fn write_normalized_manifest(plan: &ManifestData) -> Result<PathBuf> {
         manifest.insert("isolation".to_string(), isolation);
     }
 
-    let language_name = plan
-        .execution_language()
-        .or_else(|| plan.execution_driver())
-        .or_else(|| plan.execution_runtime());
     let language_version = plan.execution_runtime_version();
     if language_name.is_some() || language_version.is_some() {
         let mut language = toml::map::Map::new();
@@ -558,6 +585,40 @@ fn write_normalized_manifest(plan: &ManifestData) -> Result<PathBuf> {
     fs::write(&path, toml::to_string(&toml::Value::Table(manifest))?)
         .with_context(|| format!("Failed to write normalized manifest: {}", path.display()))?;
     Ok(path)
+}
+
+fn resolve_python_requirements_argument(plan: &ManifestData) -> Option<String> {
+    let working_dir = plan.execution_working_directory();
+    let candidates = [
+        working_dir.join("requirements.txt"),
+        plan.manifest_dir.join("requirements.txt"),
+        plan.manifest_dir.join("source").join("requirements.txt"),
+    ];
+    candidates
+        .into_iter()
+        .find(|path| path.exists())
+        .map(|path| {
+            pathdiff::diff_paths(&path, &plan.manifest_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string()
+        })
+}
+
+fn has_local_uv_cache(plan: &ManifestData) -> bool {
+    let roots = [
+        plan.execution_working_directory(),
+        plan.manifest_dir.clone(),
+        plan.manifest_dir.join("source"),
+    ];
+    roots.into_iter().any(|root| {
+        let artifacts_dir = root.join("artifacts");
+        fs::read_dir(&artifacts_dir)
+            .ok()
+            .into_iter()
+            .flat_map(|entries| entries.filter_map(Result::ok))
+            .any(|entry| entry.path().join("uv-cache").is_dir())
+    })
 }
 
 fn spawn_internal_exec(
@@ -722,30 +783,38 @@ mod tests {
     use std::collections::HashMap;
     use tempfile::tempdir;
 
+    fn plan_from_manifest(dir: &tempfile::TempDir, manifest: &str, target: &str) -> ManifestData {
+        let manifest_path = dir.path().join("capsule.toml");
+        let parsed = toml::from_str(manifest).expect("manifest");
+        capsule_core::router::execution_descriptor_from_manifest_parts(
+            parsed,
+            manifest_path,
+            dir.path().to_path_buf(),
+            capsule_core::router::ExecutionProfile::Dev,
+            Some(target),
+            HashMap::new(),
+        )
+        .expect("execution descriptor")
+    }
+
     #[test]
     fn apply_host_isolation_keeps_home_isolated() {
         let dir = tempdir().expect("tempdir");
-        let plan = ManifestData {
-            manifest: toml::from_str(
-                r#"
-                [targets.dev]
-                runtime = "source"
-                language = "python"
-                driver = "python"
-                entrypoint = "main.py"
+        let plan = plan_from_manifest(
+            &dir,
+            r#"
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            driver = "python"
+            entrypoint = "main.py"
 
-                [targets.dev.env]
-                HOME = "/unsafe-home"
-                APP_MODE = "dev"
-                "#,
-            )
-            .expect("manifest"),
-            manifest_path: dir.path().join("capsule.toml"),
-            manifest_dir: dir.path().to_path_buf(),
-            profile: capsule_core::router::ExecutionProfile::Dev,
-            selected_target: "dev".to_string(),
-            state_source_overrides: HashMap::new(),
-        };
+            [targets.dev.env]
+            HOME = "/unsafe-home"
+            APP_MODE = "dev"
+            "#,
+            "dev",
+        );
         let launch_ctx = RuntimeLaunchContext::empty().with_injected_env(
             [
                 ("HOME".to_string(), "/still-unsafe".to_string()),
@@ -828,37 +897,30 @@ mod tests {
     #[test]
     fn test_write_normalized_manifest_uses_selected_target() {
         let dir = tempdir().unwrap();
-        let manifest_path = dir.path().join("capsule.toml");
-        let plan = ManifestData {
-            manifest: toml::from_str(
-                r#"
-                name = "demo"
-                version = "1.2.3"
+        let plan = plan_from_manifest(
+            &dir,
+            r#"
+            name = "demo"
+            version = "1.2.3"
 
-                [targets.dev]
-                runtime = "source"
-                language = "python"
-                runtime_version = "3.12"
-                entrypoint = "main.py"
-                cmd = ["--flag", "value"]
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            runtime_version = "3.12"
+            entrypoint = "main.py"
+            cmd = ["--flag", "value"]
 
-                [isolation]
-                sandbox = true
-                "#,
-            )
-            .unwrap(),
-            manifest_path,
-            manifest_dir: dir.path().to_path_buf(),
-            profile: capsule_core::router::ExecutionProfile::Dev,
-            selected_target: "dev".to_string(),
-            state_source_overrides: HashMap::new(),
-        };
+            [isolation]
+            sandbox = true
+            "#,
+            "dev",
+        );
 
         let normalized_path = write_normalized_manifest(&plan).unwrap();
         let normalized = fs::read_to_string(&normalized_path).unwrap();
 
-        assert!(normalized.contains("entrypoint = \"main.py\""));
-        assert!(normalized.contains("command = \"--flag value\""));
+        assert!(normalized.contains("entrypoint = \"uv\""));
+        assert!(normalized.contains("command = \"run --offline python3 main.py --flag value\""));
         assert!(normalized.contains("language = \"python\""));
         assert!(normalized.contains("version = \"3.12\""));
     }
@@ -866,25 +928,18 @@ mod tests {
     #[test]
     fn test_adapter_includes_ipc_socket_paths() {
         let dir = tempdir().unwrap();
-        let manifest_path = dir.path().join("capsule.toml");
-        let plan = ManifestData {
-            manifest: toml::from_str(
-                r#"
-                name = "demo"
-                version = "1.2.3"
+        let plan = plan_from_manifest(
+            &dir,
+            r#"
+            name = "demo"
+            version = "1.2.3"
 
-                [targets.dev]
-                runtime = "source"
-                entrypoint = "main.py"
-                "#,
-            )
-            .unwrap(),
-            manifest_path,
-            manifest_dir: dir.path().to_path_buf(),
-            profile: capsule_core::router::ExecutionProfile::Dev,
-            selected_target: "dev".to_string(),
-            state_source_overrides: HashMap::new(),
-        };
+            [targets.dev]
+            runtime = "source"
+            entrypoint = "main.py"
+            "#,
+            "dev",
+        );
         let launch_ctx = RuntimeLaunchContext::from_ipc(IpcContext {
             env_vars: std::collections::HashMap::from([(
                 "CAPSULE_IPC_GREETER_SOCKET".to_string(),

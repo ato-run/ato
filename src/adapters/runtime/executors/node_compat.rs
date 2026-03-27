@@ -582,21 +582,24 @@ mod tests {
     use super::{map_deno_permission_error, map_node_compat_error};
 
     use capsule_core::launch_spec::{derive_launch_spec, LaunchSpecSource};
-    use capsule_core::router::{ExecutionProfile, ManifestData};
+    use capsule_core::router::{
+        execution_descriptor_from_manifest_parts, ExecutionProfile, ManifestData,
+    };
     use std::collections::HashMap;
 
     fn plan_from_manifest(tmp: &tempfile::TempDir, manifest: &str) -> ManifestData {
         let manifest_path = tmp.path().join("capsule.toml");
         std::fs::write(&manifest_path, manifest).expect("write manifest");
         let parsed: toml::Value = toml::from_str(manifest).expect("parse manifest");
-        ManifestData {
-            manifest: parsed,
+        execution_descriptor_from_manifest_parts(
+            parsed,
             manifest_path,
-            manifest_dir: tmp.path().to_path_buf(),
-            profile: ExecutionProfile::Dev,
-            selected_target: "app".to_string(),
-            state_source_overrides: HashMap::new(),
-        }
+            tmp.path().to_path_buf(),
+            ExecutionProfile::Dev,
+            Some("app"),
+            HashMap::new(),
+        )
+        .expect("execution descriptor")
     }
 
     #[test]
