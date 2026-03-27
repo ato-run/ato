@@ -2,187 +2,18 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
-## [0.5.5] - 2026-03-26
+## [0.6.0] - 2026-03-27
 
 ### What Changed
 
+#### Breaking Changes
 
-#### Bug Fixes
-
-- Unblock clippy on dev
-
-- Satisfy release clippy gates for diagnostics
-
-- Stabilize inferred github source apps
-
-- Support inferred deno github repos
-
-- Harden github install and build fallback flows
-
-- Correct argument passing in infer_source_driver function
-
-
-#### Features
-
-- Enhance inspect command with additional subcommands for lock, preview, diagnostics, and remediation
-
-- Implement durable workspace materialization and legacy manifest generation
-
-- Introduce input resolver and enhance manifest handling
-
-- Implement ato_lock module with canonicalization, hashing, and validation functionality
-
-- Implement GitHub auto-fix modes and related functionality
-
-- Introduce PipelineAttemptContext for enhanced phase management
-
-- Refine error taxonomy diagnostics
-
-- Polish progressive runtime release flow
-
-- Add preview session release candidate
-
-- Support chml manifests and v0.3 runtime flows
-
-- Add v0.3 runtime and capsule lock support
-
-- Enhance Deno command handling and environment setup
-
-- Add service binding scope initialization in test cases
-
-- Implement host-side service binding management and API
-
-- Implement persistent state management and API
-
-- Add persistent state bindings and thin registry
-
-- Add state-first manifest poc schema
-
-- Add platform-specific symlink creation for native delivery
-
-- Implement payload v3 manifest generation and related utilities
-
-- Enhance build process and clean up code across multiple modules
-
-- Refactor and clean up code across multiple modules
-
-- Migrate web deno orchestration to services supervisor mode
-
-- Lockfile-aware SBOM with JCS-canonical metadata and non-blocking generation path ([#40](https://github.com/Koh0920/ato-cli/pull/40))
-
-- Add dynamic app capsule recipe and update symlink handling in packaging
-
-- Add execution_required_envs method and preflight check for required environment variables
-
-- Bump version to 0.3.8 and enhance Deno artifact handling
-
-- Add static file server implementation in Deno
-
-- Add conditional compilation for Unix-specific imports in runtime and IPC modules
-
-- Add config schema for Nacelle runtime configuration
-
-- Finalize local registry, runtime guard, and silent runner UX
-
-- Implement manifest validation for build process and add smoke testing functionality
-
-- Expand runtime and capsule type foundations
-
-- Implement process management functionality
-
-- Update README and add tests for Python, Node, Deno, Bun, and custom app config generation
-
-
-#### Other Changes
-
-- Normalize inferred node scripts and yarn locks
-
-- Support authoritative ato.lock.json execution
-
-- Fix dev CI clippy and parity regressions
-
-- Harden lock-first workspace state and add CLI regressions
-
-- Release
-
-- Release
-
-- Merge pull request #181 from Koh0920/dev
-
-- Bump ato-cli to 0.4.28
-
-- Bump capsule-core to 0.3.0
-
-- Release 0.4.25
-
-- Release ([#155](https://github.com/Koh0920/ato-cli/pull/155))
-
-- Release
-
-- Refactor path handling and validation in manifest and execution plan
-
-- Polish persistent state docs and retries
-
-- Finalize state-first poc validation
-
-- Dev ([#49](https://github.com/Koh0920/ato-cli/pull/49))
-
-- Fix clippy for v0.4.7 release
-
-- Improve build lockfile performance and timings
-
-- Skip unsupported universal lock targets
-
-- Skip unsupported Deno platforms in universal locks
-
-- Regenerate stale universal lockfiles
-
-- Improve lockfile runtime platform detection and expand related tests
-
-- Expand web runtime lockfile platforms
-
-- Feat/multi cas ([#43](https://github.com/Koh0920/ato-cli/pull/43))
-
-- Feat/multi cas ([#42](https://github.com/Koh0920/ato-cli/pull/42))
-
-- Remove sensitive and unnecessary files before public release
-
-- Update to 0.3.8
-
-- Refactor CI workflows and clean up dependencies
-
-- Refactor consent handling and enhance permission management
-
-- Reliability update v0.2.1 final polish
-
-- Update tracked files
-
-- Add untracked files
-
-- Refactor error handling to use CapsuleError across various modules
-
-- Implement CLI reporters for metrics reporting: StdoutReporter and JsonReporter
-
-
-#### Refactoring
-
-- Streamline ato-cli modules and remove dead code ([#171](https://github.com/Koh0920/ato-cli/pull/171))
-
-- Clean up error handling and improve script documentation
-
-
-#### Tests
-
-- Clarify capsule SBOM verification assertions
-
-- Verify SBOM embedding in capsule packer
-
+- Add public single-file input resolution and lock-first execution metadata required by the new init and run flows
 
 ## [0.5.4] - 2026-03-24
 
 ### What Changed
 
-
 #### Bug Fixes
 
 - Unblock clippy on dev
@@ -196,7 +27,6 @@ All notable changes to `ato-cli` will be documented in this file.
 - Harden github install and build fallback flows
 
 - Correct argument passing in infer_source_driver function
-
 
 #### Features
 
@@ -258,7 +88,6 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Update README and add tests for Python, Node, Deno, Bun, and custom app config generation
 
-
 #### Other Changes
 
 - Release
@@ -319,26 +148,22 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Implement CLI reporters for metrics reporting: StdoutReporter and JsonReporter
 
-
 #### Refactoring
 
 - Streamline ato-cli modules and remove dead code ([#171](https://github.com/Koh0920/ato-cli/pull/171))
 
 - Clean up error handling and improve script documentation
 
-
 #### Tests
 
 - Clarify capsule SBOM verification assertions
 
 - Verify SBOM embedding in capsule packer
-
 
 ## [0.5.3] - 2026-03-24
 
 ### What Changed
 
-
 #### Bug Fixes
 
 - Unblock clippy on dev
@@ -352,7 +177,6 @@ All notable changes to `ato-cli` will be documented in this file.
 - Harden github install and build fallback flows
 
 - Correct argument passing in infer_source_driver function
-
 
 #### Features
 
@@ -414,7 +238,6 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Update README and add tests for Python, Node, Deno, Bun, and custom app config generation
 
-
 #### Other Changes
 
 - Merge pull request #181 from Koh0920/dev
@@ -473,26 +296,22 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Implement CLI reporters for metrics reporting: StdoutReporter and JsonReporter
 
-
 #### Refactoring
 
 - Streamline ato-cli modules and remove dead code ([#171](https://github.com/Koh0920/ato-cli/pull/171))
 
 - Clean up error handling and improve script documentation
 
-
 #### Tests
 
 - Clarify capsule SBOM verification assertions
 
 - Verify SBOM embedding in capsule packer
-
 
 ## [0.5.2] - 2026-03-24
 
 ### What Changed
 
-
 #### Bug Fixes
 
 - Unblock clippy on dev
@@ -506,7 +325,6 @@ All notable changes to `ato-cli` will be documented in this file.
 - Harden github install and build fallback flows
 
 - Correct argument passing in infer_source_driver function
-
 
 #### Features
 
@@ -566,7 +384,6 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Update README and add tests for Python, Node, Deno, Bun, and custom app config generation
 
-
 #### Other Changes
 
 - Release
@@ -625,26 +442,22 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Implement CLI reporters for metrics reporting: StdoutReporter and JsonReporter
 
-
 #### Refactoring
 
 - Streamline ato-cli modules and remove dead code ([#171](https://github.com/Koh0920/ato-cli/pull/171))
 
 - Clean up error handling and improve script documentation
 
-
 #### Tests
 
 - Clarify capsule SBOM verification assertions
 
 - Verify SBOM embedding in capsule packer
-
 
 ## [0.5.1] - 2026-03-24
 
 ### What Changed
 
-
 #### Bug Fixes
 
 - Unblock clippy on dev
@@ -658,7 +471,6 @@ All notable changes to `ato-cli` will be documented in this file.
 - Harden github install and build fallback flows
 
 - Correct argument passing in infer_source_driver function
-
 
 #### Features
 
@@ -718,7 +530,6 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Update README and add tests for Python, Node, Deno, Bun, and custom app config generation
 
-
 #### Other Changes
 
 - Bump ato-cli to 0.4.28
@@ -775,20 +586,17 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Implement CLI reporters for metrics reporting: StdoutReporter and JsonReporter
 
-
 #### Refactoring
 
 - Streamline ato-cli modules and remove dead code ([#171](https://github.com/Koh0920/ato-cli/pull/171))
 
 - Clean up error handling and improve script documentation
 
-
 #### Tests
 
 - Clarify capsule SBOM verification assertions
 
 - Verify SBOM embedding in capsule packer
-
 
 ## [0.5.0] - 2026-03-20
 

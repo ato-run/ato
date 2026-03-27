@@ -1,35 +1,41 @@
 # ato-cli
 
-[![CI](https://github.com/Koh0920/ato-cli/actions/workflows/build-multi-os.yml/badge.svg?branch=dev)](https://github.com/Koh0920/ato-cli/actions/workflows/build-multi-os.yml)
-[![GitHub Release](https://img.shields.io/github/v/release/Koh0920/ato-cli)](https://github.com/Koh0920/ato-cli/releases)
+[![CI](https://github.com/ato-run/ato-cli/actions/workflows/build-multi-os.yml/badge.svg?branch=dev)](https://github.com/ato-run/ato-cli/actions/workflows/build-multi-os.yml)
+[![GitHub Release](https://img.shields.io/github/v/release/ato-run/ato-cli)](https://github.com/ato-run/ato-cli/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-6f42c1)
-[![Issues](https://img.shields.io/github/issues/Koh0920/ato-cli)](https://github.com/Koh0920/ato-cli/issues)
-[![Last Commit](https://img.shields.io/github/last-commit/Koh0920/ato-cli/dev)](https://github.com/Koh0920/ato-cli/commits/dev)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Koh0920/ato-cli)
+[![Issues](https://img.shields.io/github/issues/ato-run/ato-cli)](https://github.com/ato-run/ato-cli/issues)
+[![Last Commit](https://img.shields.io/github/last-commit/ato-run/ato-cli/dev)](https://github.com/ato-run/ato-cli/commits/dev)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ato-run/ato-cli)
 
 English | [日本語](README_JA.md)
 
-`ato` is a meta-CLI that interprets `ato.lock.json` as the canonical command-entry input, while still supporting compatibility and source-only bootstrap flows to execute, distribute, and install capsules.
-It is designed around a Zero-Trust / fail-closed model: normal runs stay quiet, while consent prompts and policy violations are surfaced explicitly.
+`ato` is a command-line tool for running, sharing, and installing capsules.
 
-`ato init` now materializes a durable `ato.lock.json` baseline plus workspace-local `.ato/` inference state. The legacy prompt/manual manifest helpers remain available through `ato init --legacy prompt` and `ato init --legacy manual`.
+When you run `ato`, it reads your `ato.lock.json` and uses it as the main source of truth. If you haven't created one yet, older config formats still work — run `ato init` to migrate when you're ready.
 
-For a single-file consolidated specification of current behavior, see `docs/current-spec.md`.
+`ato` is quiet by design. It only shows output when something needs your attention, such as a missing permission or a policy violation.
+
+For the full specification, see `docs/current-spec.md`.
 
 ## Lock-Native Input Model
 
-- `ato.lock.json` is authoritative when present.
-- Compatibility and bootstrap inputs remain available for projects that have not yet been initialized into the canonical lock flow.
-- `capsule.lock.json` is legacy compatibility data and is not accepted as a standalone command-entry input.
-- If canonical and compatibility inputs coexist, `ato.lock.json` wins and compatibility inputs are advisory only.
-- `ato inspect lock`, `ato run`, and `ato build` resolve through this precedence.
+`ato.lock.json` is the single source of truth. When it exists, `ato` uses it and everything else becomes secondary.
+
+Here's how the different formats interact:
+
+- **`ato.lock.json`**: The main config file. Always takes priority when present.
+- **Legacy and bootstrap formats**: Still work for projects that haven't migrated yet. Run `ato init` to move to the canonical format.
+- **`capsule.lock.json`**: An older compatibility format. `ato` can read it alongside `ato.lock.json`, but it can't be used on its own.
+
+`ato inspect lock`, `ato run`, and `ato build` all follow this priority order.
 
 ## Key Commands
 
 ```bash
 ato run [path|publisher/slug|github.com/owner/repo] [--registry <url>]
+ato search [query]
 ato ps
 ato close --id <capsule-id> | --name <name> [--all] [--force]
 ato logs --id <capsule-id> [--follow]
@@ -40,33 +46,52 @@ ato publish [--registry <url>] [--artifact <file.capsule>] [--scoped-id <publish
 ato publish --dry-run
 ato publish --ci
 ato init [path] [--yes]
-ato gen-ci
-ato inspect requirements <path|publisher/slug> --json [--registry <url>]
 ato inspect lock [path] [--json]
-ato inspect preview [path] [--json]
 ato inspect diagnostics [path] [--json]
 ato inspect remediation [path] [--json]
-ato search [query]
-ato source sync-status --source-id <id> --sync-run-id <id> [--registry <url>]
-ato source rebuild --source-id <id> [--ref <branch|tag|sha>] [--wait] [--registry <url>]
-ato config engine install --engine nacelle [--version <ver>]
-ato setup --engine nacelle [--version <ver>] # compatibility command (deprecated)
-ato registry serve --host 127.0.0.1 --port 18787 [--auth-token <token>]
 ```
 
 ## Native Delivery (Experimental)
 
-- Primary product surface stays `ato build`, `ato publish`, and `ato install`.
-- For the current Tauri darwin/arm64 PoC, native delivery metadata is authored in the project manifest, but `ato.lock.json` is authoritative when present. A default target with `driver = "native"` and a `.app` `entrypoint` is enough for native build detection.
-- Source projects must declare native delivery metadata in the project manifest. `ato.delivery.toml` is no longer accepted as authored input; `ato` stages internal compatibility metadata into the artifact instead.
-- Native install JSON exposes `local_derivation` and `projection` envelopes. For this contract generation, `schema_version = "0.1"` is the stable machine-readable version for fetch/finalize/project/unproject/install metadata.
-- `fetch`, `finalize`, `project`, and `unproject` remain advanced/debug surfaces. Most users should stay on the integrated `build` / `publish` / `install` flow.
-- Local finalize is currently fail-closed and limited to macOS darwin/arm64 with `codesign`.
-- Projection currently creates a macOS `~/Applications` symlink on macOS hosts, and a Linux `.desktop` launcher plus `~/.local/bin` symlink on Linux hosts.
+> **Note:** The core commands — `ato build`, `ato publish`, and `ato install` — are stable. Native Delivery is experimental functionality built on top of them.
+
+Native Delivery lets you package and distribute native desktop apps. The current implementation supports Tauri apps on macOS darwin/arm64.
+
+**To get started:**
+
+Add a native target to your project manifest. Set `driver = "native"` and point `entrypoint` to your `.app` bundle. That's enough for `ato` to recognize it as a native app.
+
+```toml
+[targets.desktop]
+driver = "native"
+entrypoint = "MyApp.app"
+```
+
+**What `ato` fills in automatically:**
+
+For `.app`-style entrypoints, `ato` derives these defaults internally so you don't have to specify them:
+
+- `artifact.framework = "tauri"`
+- `artifact.stage = "unsigned"`
+- `artifact.target = "darwin/arm64"`
+- `artifact.input = <targets.<default>.entrypoint>`
+- `finalize.tool = "codesign"`
+- `finalize.args = ["--deep", "--force", "--sign", "-", <artifact.input>]`
+
+**Current limitations:**
+
+- macOS darwin/arm64 with `codesign` only.
+- Local fetch/finalize/projection phases are internal implementation details. The supported user workflow stays on `build` / `publish` / `install`.
+- Local finalize stops immediately on any error (fail-closed).
+- On macOS, projection creates a `~/Applications` symlink. On Linux, it creates a `.desktop` launcher and a `~/.local/bin` symlink.
+
+**For command-driven targets:**
+
+If your target is command-driven (`entrypoint = "sh"` with `cmd = [...]`), you need to write explicit delivery metadata in `[artifact]` and `[finalize]`. Partial configs are rejected. Source-side `ato.delivery.toml` is always rejected — write everything in the project manifest.
 
 ### Native Delivery contract (current canonical form)
 
-For native delivery authoring, the current canonical project manifest contract is:
+The full minimal project manifest for native delivery:
 
 ```toml
 schema_version = "0.2"
@@ -81,27 +106,19 @@ driver = "native"
 entrypoint = "MyApp.app"
 ```
 
-For this `.app`-entrypoint form, `ato` derives the current PoC defaults internally:
+### How artifact metadata flows
 
-- `artifact.framework = "tauri"`
-- `artifact.stage = "unsigned"`
-- `artifact.target = "darwin/arm64"`
-- `artifact.input = <targets.<default>.entrypoint>`
-- `finalize.tool = "codesign"`
-- `finalize.args = ["--deep", "--force", "--sign", "-", <artifact.input>]`
+`ato.delivery.toml` is managed internally by `ato`. You don't write it. Here's what happens behind the scenes:
 
-If the native target is command-driven (`entrypoint = "sh"` plus `cmd = [...]`), then the build still needs explicit delivery metadata today. The only supported source location for that metadata is inline in the project manifest as `[artifact]` + `[finalize]`. Source-side `ato.delivery.toml` is rejected fail-closed. Partial inline metadata is also rejected fail-closed.
+1. When you run `ato build`, it packages your app and embeds a `ato.delivery.toml` into the artifact.
+2. This embedded file makes the artifact self-describing so `ato install` can complete native delivery without the original source tree.
+3. The remaining fetch/finalize/projection steps are internal parts of the install pipeline.
 
-### Compatibility sidecar and artifact metadata flow
-
-- `ato.delivery.toml` is **not** a supported source-project manifest. It persists only as staged artifact metadata for local finalize/install/project flows.
-- Build always stages `ato.delivery.toml` into the artifact payload, even when only the project manifest was authored. This keeps the artifact self-describing for local finalize/install without requiring the original source tree.
-- `ato install`, `ato finalize`, and `ato project` read the staged artifact metadata plus `local-derivation.json`; they do not require the source checkout's sidecar to be present later.
-- Current policy: source projects must use the project manifest; `ato.delivery.toml` remains only as artifact-internal compatibility metadata.
+**Rule:** Write native delivery config in your project manifest only. Do not create `ato.delivery.toml` directly.
 
 ### Stable vs experimental machine-readable contract
 
-For the current `schema_version = "0.1"` generation, the repo documents and test-guards the presence of these machine-readable fields:
+The following fields are stable for `schema_version = "0.1"`. They are documented and test-guarded in the repo. Removing or renaming any of them is a breaking schema change.
 
 - `fetch.json`: `schema_version`, `scoped_id`, `version`, `registry`, `parent_digest`
 - build JSON: `build_strategy = "native-delivery"`, `schema_version`, `target`, `derived_from`
@@ -110,37 +127,29 @@ For the current `schema_version = "0.1"` generation, the repo documents and test
 - project JSON: `schema_version`, `projection_id`, `metadata_path`, `projected_path`, `derived_app_path`, `parent_digest`, `derived_digest`, `state`
 - unproject JSON: `schema_version`, `projection_id`, `metadata_path`, `projected_path`, `removed_projected_path`, `removed_metadata`, `state_before`
 - install JSON: `install_kind`, `launchable`, `local_derivation`, `projection`
-  - `install_kind = "NativeRequiresLocalDerivation"` means install succeeded, but the launchable path is the locally derived app bundle, not the stored `.capsule`
-  - `launchable.path` is the path a caller should use to run
-  - `local_derivation.provenance_path`, `parent_digest`, and `derived_digest` are the stable linkage between fetch/finalize/project/install
-  - `projection.metadata_path` is the stable recovery handle for `ato unproject` and for launcher state inspection
-
-These guarantees are intentionally narrow: additive fields may still appear, but removing or renaming the documented fields should be treated as a schema-version change.
+  - `install_kind = "NativeRequiresLocalDerivation"` — install succeeded, but the app must be launched from the locally derived bundle (not the `.capsule`)
+  - `launchable.path` — the path to use when launching the app
+  - `local_derivation.provenance_path`, `parent_digest`, `derived_digest` — links the internal derivation steps to the install result
+  - `projection.metadata_path` — metadata for launcher state inspection
 
 Still experimental:
 
-- exact on-disk directory layout under `~/.ato/fetches`, `~/.ato/apps`, and `~/.ato/native-delivery/projections`
-- any future additional keys beyond the stable fields above
-- advanced/debug command UX (`fetch`, `finalize`, `project`, `unproject`) beyond their current `schema_version = "0.1"` JSON envelopes
-- host/tool support beyond the current macOS darwin/arm64 + `codesign` PoC
+- On-disk layout under `~/.ato/fetches`, `~/.ato/apps`, and `~/.ato/native-delivery/projections`
+- Any fields beyond the stable set above
+- The internal fetch/finalize/projection implementation details
+- Support for platforms other than macOS darwin/arm64
 
 ### Migration path
 
-1. **Current**: the project manifest is the only supported authored source manifest for native delivery.
-2. **Current**: `ato` still stages `ato.delivery.toml` into artifacts as internal metadata for local finalize/install/project flows.
-3. **Later**: internal artifact metadata can be abstracted away from the user-facing sidecar name, while preserving the `schema_version = "0.1"` JSON/provenance contract for automation.
+1. **Now**: Write native delivery config in the project manifest only.
+2. **Now**: `ato` still embeds `ato.delivery.toml` in artifacts for internal finalize/install/project flows.
+3. **Later**: The internal metadata format may change, but the `schema_version = "0.1"` JSON contract will be preserved.
 
 ## Quick Start (Local)
 
 ```bash
 # build
 cargo build -p ato-cli
-
-# install nacelle engine if not installed (recommended)
-./target/debug/ato config engine install --engine nacelle
-
-# compatibility: setup subcommand
-./target/debug/ato setup --engine nacelle
 
 # run
 ./target/debug/ato run .
@@ -157,46 +166,70 @@ cargo build -p ato-cli
 
 ## Publish Model (Official / Dock / Custom)
 
-- Official registries (`https://api.ato.run`, `https://staging.api.ato.run`):
-  `ato publish` is CI-first (OIDC). Direct local uploads are not allowed.
-  Default execution is Publish only (handoff/diagnostics).
-- Personal Dock (default when logged in and no registry is specified):
-  `ato publish` resolves the target from `ato login` and uploads directly to `https://api.ato.run/v1/local/capsules/...`.
-  `--artifact` is recommended to avoid re-packing, and `--scoped-id` is auto-filled as `<handle>/<slug>`.
-  `/d/<handle>` is a public UI page only and is no longer a registry URL.
-- Custom/private registries (any other `--registry`):
-  `ato publish --registry ...` performs direct uploads. `--artifact` is recommended to avoid re-packing.
-  `--artifact` supports standalone artifact flow (no local project manifest required).
-  `--allow-existing` is available only when the final Publish stage is selected.
+When you run `ato publish`, it goes through up to 6 stages in order:
 
-`ato publish` uses the shared producer pipeline:
-`Prepare -> Build -> Verify -> Install -> Dry-run -> Publish`
+**`Prepare → Build → Verify → Install → Dry-run → Publish`**
 
-- Default (official registries): start and stop at Publish.
-- Default (private/local registries): start at Prepare and run through Publish.
-- `--prepare`, `--build`, and `--deploy` are stop points, not free-form phase toggles.
-- `--prepare` stops after Prepare.
-- `--build` stops after Verify. With source input, this means build then verify; with `--artifact`, it becomes Verify only.
-- `--deploy` stops after Publish.
-- `--artifact` changes the start phase to Verify.
-- `official + --deploy` remains Publish only (handoff, no local upload).
-- `private/local + --deploy` can auto-resolve earlier phases from source input, or run `Verify -> Publish` when `--artifact` is provided.
-- `--artifact --prepare` is invalid because the start phase would be after the selected stop point.
-- `--legacy-full-publish` (official only) temporarily restores the legacy default behavior, is deprecated, and is scheduled for removal in the next major release.
-- `--ci` / `--dry-run` cannot be combined with phase flags.
+Which stages run — and where the capsule ends up — depends on which registry you're targeting.
 
-Implementation note during migration:
+---
 
-- phase selection, stop-point validation, and phase ordering are already owned by the application producer pipeline
-- the current CLI entry routes through `cli::dispatch::publish`, which hosts the phase runner wiring for publish
-- `application::pipeline::phases::publish` owns the wrapper APIs for private and official publish execution, and private remote uploads now flow through `DestinationPort`
-- build-backed private publish now resolves source vs artifact input in `application::pipeline::phases::publish` before handing off to that same upload boundary
+### Publishing to the official store
+
+**Registry:** `https://api.ato.run` or `https://staging.api.ato.run`
+
+The official store uses OIDC for authentication. You can't upload directly from your local machine. Publishing happens through CI.
+
+Default behavior: runs the **Publish** stage only. This is a handoff — `ato` sends diagnostics to the registry and your CI pipeline handles the actual upload.
+
+---
+
+### Publishing to your Personal Dock
+
+**Registry:** default when you're logged in (no `--registry` needed)
+
+If you've run `ato login`, `ato publish` automatically uploads to your Dock.
+
+Default behavior: runs all stages from Prepare through Publish.
+
+Tips:
+- Use `--artifact <file>` to skip rebuilding. Upload a file you've already built.
+- `--scoped-id` defaults to `<your-handle>/<slug>` automatically.
+- Your Dock page is at `/d/<handle>`. This is a UI page, not a registry endpoint.
+
+---
+
+### Publishing to a custom or private registry
+
+**Registry:** any `--registry <url>` value not listed above
+
+Default behavior: runs all stages from Prepare through Publish, with direct upload.
+
+Tips:
+- `--artifact <file>` works here too. You can publish without a local project manifest.
+- `--allow-existing` is available for the final Publish stage only.
+
+---
+
+### Controlling which stages run
+
+The `--prepare`, `--build`, and `--deploy` flags are *stop points*. They tell `ato` where to stop, not which individual stages to run.
+
+| Flag | Stops after | Notes |
+|------|-------------|-------|
+| `--prepare` | Prepare | |
+| `--build` | Verify | With source: runs Build then Verify. With `--artifact`: runs Verify only. |
+| `--deploy` | Publish | Official: handoff only. Private/local: auto-resolves, or runs Verify → Publish with `--artifact`. |
+| `--artifact <file>` | *(changes start)* | Skips Prepare and Build. Starts pipeline at Verify. |
+
+Other things to know:
+- `--ci` and `--dry-run` cannot be combined with stage flags.
+- `--artifact --prepare` is invalid — the start stage would come after the stop point.
+- `--legacy-full-publish` (official only) restores the old default behavior. **Deprecated** — will be removed in the next major release.
 
 Official registry helpers:
-
-- `ato gen-ci` generates the fixed GitHub Actions workflow for OIDC publish.
-- `ato publish --fix` applies the official workflow fix once, then reruns diagnostics.
-- `ato publish --no-tui` disables the interactive handoff UI and prints CI guidance directly.
+- `ato publish --fix` — fixes a broken workflow once, then reruns diagnostics.
+- `ato publish --no-tui` — skips the interactive UI and prints CI output directly.
 
 ### Migration Notes
 
@@ -205,15 +238,15 @@ Official registry helpers:
 
 ## Dock-first Flow (Personal Dock)
 
-The Dock-first path uses existing commands (no new subcommands):
+The typical workflow for publishing to your Dock:
 
-1. Run `ato login` once and create/connect your Dock from Store Web `/publish`.
-2. Build artifact locally: `ato build .`
-3. Publish to your Dock:
-   `ato publish --artifact ./<name>.capsule`
-4. Share your public Dock page: `/d/<handle>` (`api.ato.run` install/search とは別)
-5. When ready for the official Store, use `ato publish --registry https://api.ato.run` or `ato publish --ci`.
-6. Final review/submission continues from Dock Control Tower (`Submit to Official Marketplace`).
+1. **Log in:** `ato login`
+   Then create or connect your Dock from the Store Web `/publish` page.
+2. **Build:** `ato build .`
+3. **Publish to your Dock:** `ato publish --artifact ./<name>.capsule`
+4. **Share your page:** Your public Dock URL is `/d/<handle>`.
+5. **Ready for the official store?** Use `ato publish --registry https://api.ato.run` or `ato publish --ci`.
+6. **Submit for review:** Go to Dock Control Tower and click `Submit to Official Marketplace`.
 
 ```bash
 # login once, then publish to your Personal Dock (recommended default)
@@ -232,112 +265,52 @@ ato publish --artifact ./<name>.capsule --build  # Verify only
 ato publish --artifact ./<name>.capsule          # default target: My Dock
 ATO_TOKEN=pwd ato publish --deploy --artifact ./<name>.capsule --registry http://127.0.0.1:18787
 ato publish --registry https://api.ato.run           # default: Publish only
-ato publish --registry https://api.ato.run --build   # explicit local build + verify, then stop
+ato publish --registry https://api.ato.run --build   # local build + verify, then stop
 ato publish --deploy --registry https://api.ato.run
 
 # temporary compatibility flag (official only; deprecated and will be removed in next major)
 ato publish --registry https://api.ato.run --legacy-full-publish
 
-# idempotent retry for the same version/content (CI retry best practice)
+# retry safely with the same version (CI best practice)
 ATO_TOKEN=pwd ato publish --registry http://127.0.0.1:18787 --artifact ./<name>.capsule --allow-existing
 ```
 
 ## Proto Regeneration (Maintenance Only)
 
-`protoc` is not required for normal builds.
-Run this only when `core/proto/tsnet/v1/tsnet.proto` changes.
+You don't need `protoc` for normal builds. Only run this when `core/proto/tsnet/v1/tsnet.proto` changes:
 
 ```bash
 ./core/scripts/gen_tsnet_proto.sh
 ```
 
-## Source Sync Operations
-
-Use these commands for source-backed registry workflows:
-
-```bash
-# inspect a sync run
-ato source sync-status --source-id <source-id> --sync-run-id <sync-run-id> --registry <url>
-
-# trigger rebuild / re-sign and optionally wait for status
-ato source rebuild --source-id <source-id> --ref <branch|tag|sha> --wait --registry <url>
-```
-
-Notes:
-
-- `sync-status` is read-only and can emit JSON with `--json`.
-- `rebuild` can be used without `--ref`; the registry default ref is used.
-- `rebuild --wait` triggers then polls the resulting sync run status.
-
-## Local Registry E2E
-
-```bash
-# Terminal 1: start local HTTP registry
-ato registry serve --host 127.0.0.1 --port 18787
-
-# Terminal 2: build -> publish(artifact) -> install -> run
-ato build .
-ATO_TOKEN=pwd ato publish --artifact ./<name>.capsule --registry http://127.0.0.1:18787
-ato install <publisher>/<slug> --registry http://127.0.0.1:18787
-ato run <publisher>/<slug> --registry http://127.0.0.1:18787 --yes
-```
-
-Notes:
-
-- Write operations (`publish`) require `ATO_TOKEN` when `registry serve --auth-token` is enabled.
-- Read operations (search/install/download) can remain unauthenticated.
-- Use `18787` in local verification to avoid collision with app services that also use `8787` (for example, worker HTTP ports).
-- `publish --artifact` is the recommended path for local/private workflows.
-- `--scoped-id` can override publisher/slug for artifact upload.
-- `--allow-existing` is not a blind conflict ignore; it is an idempotent operation gated by artifact hash/manifest consistency checks.
-- In enterprise CI, attach `--allow-existing` to retry paths to make reruns deterministic and safe.
-- Version conflict is reported as `E202` with next actions (`bump version`, `--allow-existing`, or reset local registry).
-
-Local registry Web UI:
-
-- The detail page stores per-target runtime config under `/v1/local/.../runtime-config`.
-- You can save target-specific `env` and `port` overrides from the UI.
-- Tier2 targets can also persist execution permission mode (`sandbox` or `dangerous`) and reuse it on later runs.
-
-## Cross-Device Publish (VPN / Tailscale)
-
-```bash
-# Server side: non-loopback exposure requires --auth-token
-ato registry serve --host 0.0.0.0 --port 18787 --auth-token pwd
-
-# Client side: install/run do not require token (read APIs)
-ato install <publisher>/<slug> --registry http://100.x.y.z:18787
-ato run <publisher>/<slug> --registry http://100.x.y.z:18787
-
-# Token required only for publish
-ATO_TOKEN=pwd ato publish --registry http://100.x.y.z:18787 --artifact ./<name>.capsule
-```
-
 ## Required Environment Variable Checks (Pre-Run)
 
-`ato run` validates required environment variables before startup.
-If missing or empty, execution stops fail-closed.
+Before launching a capsule, `ato run` checks that all required environment variables are set. If any are missing or empty, it stops immediately.
 
-- `targets.<label>.required_env = ["KEY1", "KEY2"]` (recommended)
-- Backward compatibility: `targets.<label>.env.ATO_ORCH_REQUIRED_ENVS = "KEY1,KEY2"`
+Declare required variables in your manifest:
 
-## Inspect Requirements JSON
+```toml
+# recommended
+targets.<label>.required_env = ["KEY1", "KEY2"]
 
-`ato inspect requirements <path|publisher/slug> --json` returns a stable machine-readable
-requirements contract derived from the project manifest.
+# legacy compatibility
+targets.<label>.env.ATO_ORCH_REQUIRED_ENVS = "KEY1,KEY2"
+```
 
-The same `ato inspect` family now covers lock-first troubleshooting:
+## Inspect and Troubleshoot Locks
 
-- `ato inspect lock [path] [--json]` shows field-level lock paths, provenance, unresolved markers, fallback use, and approval or selection gate involvement
-- `ato inspect preview [path] [--json]` previews durable workspace write-back and run-attempt ephemeral materialization paths without mutating files
-- `ato inspect diagnostics [path] [--json]` emits lock-path diagnostics and includes follow-up `inspect` / `preview` commands
-- `ato inspect remediation [path] [--json]` suggests lock-path-first remediation steps and attaches source mapping when provenance can identify it
+The public `ato inspect` workflow for lock-first debugging is:
 
-- the project manifest is the only source of truth for requirement discovery
-- local paths and remote `publisher/slug` refs return the same top-level JSON shape
-- state-related requirements are exposed under `requirements.state` (state-first), not `storage`
-- success prints JSON only to `stdout`
-- `--json` failures print structured JSON to `stderr` and exit non-zero
+- `ato inspect lock [path] [--json]` — shows what each lock field resolved to, where it came from, and what's still unresolved
+- `ato inspect diagnostics [path] [--json]` — shows what's wrong with your lock config and links to the right fix commands
+- `ato inspect remediation [path] [--json]` — suggests specific fixes, with source location mapping where possible
+
+A few notes:
+- Requirements are still derived from the project manifest, not the lock file.
+- `ato inspect requirements` and `ato inspect preview` remain available for compatibility and internal/debug use, but they are not part of the primary public troubleshooting surface.
+- Local paths and remote `publisher/slug` refs return the same JSON shape.
+- State-related requirements appear under `requirements.state`, not `storage`.
+- On success, output goes to `stdout`. On failure with `--json`, structured output goes to `stderr` and the process exits non-zero.
 
 Success shape:
 
@@ -378,18 +351,31 @@ Failure shape:
 
 ## Build Strictness
 
-`ato build --strict-v3` disables fallback when `source_digest` / CAS(v3 path) is unavailable.
-Use it when you want build diagnostics to fail immediately instead of falling back to a looser manifest path.
+By default, `ato build` falls back to a looser manifest path if the content-addressed source digest isn't available.
+
+Use `--strict-v3` to disable that fallback. With this flag, the build fails immediately if `source_digest` or the CAS v3 path is unavailable — useful when you want to catch problems early rather than silently fall back.
+
+```bash
+ato build --strict-v3
+```
 
 ## Dynamic App Capsule Recipe (Web + Services Supervisor)
 
-For multi-service apps (for example: dashboard + API + worker), use a single `web/deno` target with top-level `[services]`. `ato run` starts services in DAG order, waits on readiness probes, prefixes logs, and fail-fast stops all services when one exits.
+For apps with multiple services — for example, a dashboard, an API server, and a worker — you can package everything into a single capsule using `[services]`.
 
-1. Pre-bundle artifacts before packing (for example: `next build`, worker build, lockfiles).
-2. Include only runtime artifacts via `[pack].include` (do not package raw `node_modules`, `.venv`, caches).
-3. Build once, then publish with `--artifact` to avoid re-packing.
+When you run the capsule, `ato run`:
+- Starts services in dependency order (DAG)
+- Waits for each service to pass its readiness probe
+- Prefixes all log output with the service name
+- Stops everything immediately if any service exits unexpectedly
 
-Minimal project manifest pattern:
+**Before you package:**
+
+1. Build your artifacts first (e.g. `next build`, worker bundling, lockfile generation). Don't include source code in the capsule.
+2. In `[pack].include`, list only what's needed at runtime. Skip `node_modules`, `.venv`, and caches.
+3. Build once with `ato build`, then use `--artifact` to publish without rebuilding.
+
+Minimal project manifest:
 
 ```toml
 schema_version = "0.2"
@@ -435,7 +421,7 @@ env = { API_PORT = "8000" }
 readiness_probe = { http_get = "/health", port = "API_PORT" }
 ```
 
-Recommended flow:
+Recommended workflow:
 
 ```bash
 # 1) pre-bundle app artifacts
@@ -447,63 +433,77 @@ ato build .
 # 3) publish artifact (private/local registry)
 ATO_TOKEN=pwd ato publish --registry http://127.0.0.1:18787 --artifact ./my-dynamic-app.capsule
 
-# 4) install + run
+# 4) install and run
 ato install <publisher>/<slug> --registry http://127.0.0.1:18787
 ato run <publisher>/<slug> --registry http://127.0.0.1:18787
 ```
 
-Notes:
-
-- For Next.js standalone, copy `.next/static` (and `public` if used) into standalone output before `ato build`.
-- `ato run` stops before startup if `required_env` keys are missing.
-- `services.main` is required in services mode and receives `PORT=<targets.<label>.port`.
+A few gotchas:
+- For Next.js standalone, copy `.next/static` (and `public` if needed) into the standalone output before running `ato build`.
+- `ato run` stops before startup if any `required_env` key is missing.
+- `services.main` is required in services mode. It receives `PORT=<targets.<label>.port>`.
 - `targets.<label>.entrypoint = "ato-entry.ts"` is deprecated and rejected.
 - If a service command starts with `node`, `python`, or `uv`, pin the matching version in `runtime_tools`.
 
 ## Runtime Isolation Policy (Tiers)
 
-- `web/static`: Tier1 (`driver = "static"` + `targets.<label>.port` required; no `capsule.lock.json` needed)
-- `web/deno`: Tier1 (`capsule.lock.json` + `deno.lock` or `package-lock.json`)
-- `web/node`: Tier1 (Deno compat execution; requires `capsule.lock.json` + `package-lock.json`)
-- `web/python`: Tier2 (requires `uv.lock`; `--sandbox` recommended)
-- `source/deno`: Tier1 (`capsule.lock.json` + `deno.lock` or `package-lock.json`)
-- `source/node`: Tier1 (Deno compat execution; requires `capsule.lock.json` + `package-lock.json`)
-- `source/python`: Tier2 (requires `uv.lock`; `--sandbox` recommended)
-- `source/native`: Tier2 (`--sandbox` recommended)
+Different runtimes have different isolation requirements:
 
-Notes:
+| Runtime | Tier | What you need |
+|---------|------|-------------|
+| `web/static` | Tier1 | `driver = "static"` + port configured; no `capsule.lock.json` needed |
+| `web/deno` | Tier1 | `capsule.lock.json` + `deno.lock` or `package-lock.json` |
+| `web/node` | Tier1 | `capsule.lock.json` + `package-lock.json` (runs via Deno compat) |
+| `web/python` | Tier2 | `uv.lock`; `--sandbox` recommended |
+| `source/deno` | Tier1 | `capsule.lock.json` + `deno.lock` or `package-lock.json` |
+| `source/node` | Tier1 | `capsule.lock.json` + `package-lock.json` (runs via Deno compat) |
+| `source/python` | Tier2 | `uv.lock`; `--sandbox` recommended |
+| `source/native` | Tier2 | `--sandbox` recommended |
 
-- Node is Tier1 and does not require `--unsafe`.
-- Tier2 (`source/native|python`, `web/python`) requires the `nacelle` engine.
-  If not configured, execution stops fail-closed. Configure via `ato engine register`, `--nacelle`, or `NACELLE_PATH`.
-- Legacy compatibility flags (`--unsafe`, `--unsafe-bypass-sandbox`) remain but are discouraged.
-- Unsupported or out-of-policy Node/Python behavior does not auto-fallback; it stops fail-closed.
-- `runtime=web` requires `driver` (`static|node|deno|python`).
+**Tier1** runs without special flags. Node is Tier1 — you do not need `--unsafe`.
+
+**Tier2** (`source/native`, `source/python`, `web/python`) requires the `nacelle` engine. If it's not installed, `ato` stops fail-closed. Set it up with one of:
+
+```bash
+ato engine register     # register the engine path
+ato run --nacelle ...   # pass path at runtime
+# or set NACELLE_PATH environment variable
+```
+
+Other notes:
+- Legacy flags `--unsafe` and `--unsafe-bypass-sandbox` still exist but are discouraged.
+- Unsupported or out-of-policy behavior doesn't fall back silently — it stops with an error.
+- `runtime=web` requires a `driver` value: `static`, `node`, `deno`, or `python`.
 - `public` is deprecated for `runtime=web`.
-- For `runtime=web`, CLI prints the URL and does not automatically launch a browser.
+- For `runtime=web`, the CLI prints the URL but doesn't open a browser automatically.
 
 ## UX Policy (Silent Runner)
 
-- Minimal output on success (tool stdout-first)
-- Prompt only when explicit consent is required
-- In non-interactive environments, `-y/--yes` auto-approves consent
-- Policy violations and unmet requirements are emitted as `ATO_ERR_*` JSONL to `stderr`
+`ato` is designed to stay out of your way:
+
+- **On success**: minimal output. Tool stdout is printed directly.
+- **Consent prompts**: only when truly required.
+- **Non-interactive mode**: pass `-y` / `--yes` to auto-approve.
+- **Errors**: policy violations and unmet requirements are written as `ATO_ERR_*` JSONL to `stderr`.
 
 ## Security and Execution Policy (Zero-Trust / Fail-closed)
 
-- Required env validation: startup fails if `targets.<label>.required_env` (or `ATO_ORCH_REQUIRED_ENVS`) is missing/empty
-- Dangerous flag guard: `--dangerously-skip-permissions` is rejected unless `CAPSULE_ALLOW_UNSAFE=1`
-- Local registry write auth: when `registry serve --auth-token` is enabled, `publish` requires `ATO_TOKEN`
-- Engine auto-install: checksum retrieval/verification failures stop execution fail-closed
+`ato` is strict by default:
+
+- **Required env validation**: If a variable listed in `targets.<label>.required_env` (or `ATO_ORCH_REQUIRED_ENVS`) is missing or empty, `ato run` stops before launching.
+- **Dangerous flags**: `--dangerously-skip-permissions` is rejected unless `CAPSULE_ALLOW_UNSAFE=1` is set.
+- **Registry write auth**: Publishing to a registry started with `--auth-token` requires `ATO_TOKEN`.
+- **Engine verification**: If checksum verification fails during engine auto-install, execution stops.
 
 ## Environment Variable Reference (Core)
 
-- `CAPSULE_WATCH_DEBOUNCE_MS`: debounce interval for `run --watch` (ms, default: `300`)
-- `CAPSULE_ALLOW_UNSAFE`: explicit allow for `--dangerously-skip-permissions` (only `1` is valid)
-- `ATO_TOKEN`: auth token for local/private registry publish
-- `ATO_STORE_API_URL`: API base URL for `ato search` / install flows (default: `https://api.ato.run`)
-- `ATO_STORE_SITE_URL`: store web base URL (default: `https://store.ato.run`)
-- `ATO_TOKEN`: session token for headless/CI environments
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CAPSULE_WATCH_DEBOUNCE_MS` | Debounce interval for `run --watch`, in milliseconds | `300` |
+| `CAPSULE_ALLOW_UNSAFE` | Set to `1` to allow `--dangerously-skip-permissions` | — |
+| `ATO_TOKEN` | Auth token for local/private publish and CI sessions | — |
+| `ATO_STORE_API_URL` | API base URL for `ato search` and install | `https://api.ato.run` |
+| `ATO_STORE_SITE_URL` | Store web base URL | `https://ato.run` |
 
 ## Search and Auth
 
@@ -519,14 +519,14 @@ Default endpoints:
 - `ATO_STORE_API_URL` (default: `https://api.ato.run`)
 - `ATO_STORE_SITE_URL` (default: `https://ato.run`)
 - `ATO_TOKEN`
-- canonical auth file: `${XDG_CONFIG_HOME:-~/.config}/ato/credentials.toml`
+- Canonical auth file: `${XDG_CONFIG_HOME:-~/.config}/ato/credentials.toml`
 
-Auth precedence:
+Auth is resolved in this order:
 
-- `ATO_TOKEN`
-- OS keyring
-- `${XDG_CONFIG_HOME:-~/.config}/ato/credentials.toml`
-- legacy `~/.ato/credentials.json` (read-only fallback)
+1. `ATO_TOKEN` environment variable
+2. OS keyring
+3. `${XDG_CONFIG_HOME:-~/.config}/ato/credentials.toml`
+4. Legacy `~/.ato/credentials.json` (read-only fallback)
 
 ## Development Tests
 
