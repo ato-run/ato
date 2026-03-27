@@ -771,7 +771,11 @@ async fn normalize_run_target_after_install(
         || resolved_target
             .extension()
             .and_then(|value| value.to_str())
-            .map(|value| value.eq_ignore_ascii_case("py") || value.eq_ignore_ascii_case("ts"))
+            .map(|value| {
+                value.eq_ignore_ascii_case("py")
+                    || value.eq_ignore_ascii_case("ts")
+                    || value.eq_ignore_ascii_case("tsx")
+            })
             .unwrap_or(false)
     {
         return match resolve_authoritative_input(resolved_target, ResolveInputOptions::default())? {
