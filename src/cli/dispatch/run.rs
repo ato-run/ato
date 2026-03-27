@@ -182,7 +182,7 @@ mod tests {
         );
         lock.resolution.entries.insert(
             "closure".to_string(),
-            json!({"kind": "metadata_only", "observed_lockfiles": []}),
+            json!({"kind": "metadata_only", "status": "incomplete", "observed_lockfiles": []}),
         );
         ato_lock::write_pretty_to_path(&lock, &tmp.path().join("ato.lock.json")).expect("lock");
         let resolved = ResolvedRunTarget {

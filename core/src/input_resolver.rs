@@ -328,7 +328,8 @@ fn materialize_resolution(
                 .canonical_lock_path
                 .clone()
                 .expect("canonical lock path must exist");
-            let lock = ato_lock::load_unvalidated_from_path(&path)?;
+            let mut lock = ato_lock::load_unvalidated_from_path(&path)?;
+            ato_lock::normalize_lock_closure(&mut lock)?;
             ato_lock::validate_persisted(&lock, options.canonical_validation_mode).map_err(|errors| {
                 CapsuleError::Config(format!(
                     "{} is present but invalid at {}: {}. Compatibility inputs will not be used as fallback.",

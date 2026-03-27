@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{SecondsFormat, Utc};
 use goblin::Object;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::fs;
 use std::io::{self, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -802,6 +803,86 @@ fn delivery_config_from_input(input: &str) -> DeliveryConfig {
             args: default_finalize_args_for_input(input),
         },
     }
+}
+
+pub(crate) fn native_delivery_build_environment_skeleton(plan: &NativeBuildPlan) -> Value {
+    let package_managers = detect_build_environment_package_managers(&plan.manifest_dir);
+    let mut toolchains = Vec::new();
+    let mut sdks = Vec::new();
+    let mut helper_tools = Vec::new();
+
+    match plan.framework.as_str() {
+        "tauri" => {
+            push_unique(&mut toolchains, "rust");
+            push_unique(&mut toolchains, "cargo");
+            push_unique(&mut helper_tools, "tauri-cli");
+        }
+        framework if !framework.trim().is_empty() => {
+            push_unique(&mut helper_tools, framework);
+        }
+        _ => {}
+    }
+
+    if package_managers
+        .iter()
+        .any(|manager| matches!(manager.as_str(), "npm" | "pnpm" | "yarn" | "bun"))
+    {
+        push_unique(&mut toolchains, "node");
+    }
+    if package_managers.iter().any(|manager| manager == "deno") {
+        push_unique(&mut toolchains, "deno");
+    }
+    if package_managers.iter().any(|manager| manager == "cargo") {
+        push_unique(&mut toolchains, "rust");
+        push_unique(&mut toolchains, "cargo");
+    }
+
+    match delivery_target_os_family(&plan.target) {
+        Some("darwin") => push_unique(&mut sdks, "apple-sdk"),
+        Some("windows") => push_unique(&mut sdks, "windows-sdk"),
+        Some("linux") => push_unique(&mut sdks, "linux-system-libs"),
+        _ => {}
+    }
+
+    if let Ok(config) = staged_delivery_config(plan) {
+        push_unique(&mut helper_tools, config.finalize.tool.trim());
+    }
+
+    json!({
+        "toolchains": toolchains,
+        "package_managers": package_managers,
+        "sdks": sdks,
+        "helper_tools": helper_tools,
+    })
+}
+
+fn detect_build_environment_package_managers(manifest_dir: &Path) -> Vec<String> {
+    let mut package_managers = Vec::new();
+    let candidates = [
+        ("Cargo.lock", "cargo"),
+        ("package-lock.json", "npm"),
+        ("pnpm-lock.yaml", "pnpm"),
+        ("yarn.lock", "yarn"),
+        ("bun.lockb", "bun"),
+        ("bun.lock", "bun"),
+        ("deno.lock", "deno"),
+    ];
+
+    for (file_name, label) in candidates {
+        if manifest_dir.join(file_name).exists() {
+            push_unique(&mut package_managers, label);
+        }
+    }
+
+    package_managers
+}
+
+fn push_unique(values: &mut Vec<String>, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || values.iter().any(|existing| existing == trimmed) {
+        return;
+    }
+    values.push(trimmed.to_string());
 }
 
 fn detect_native_manifest_contract(

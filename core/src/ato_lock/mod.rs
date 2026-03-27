@@ -1,4 +1,5 @@
 mod canonicalize;
+mod closure;
 mod hash;
 mod schema;
 mod validate;
@@ -14,6 +15,10 @@ use std::path::Path;
 /// input-resolver and import flows can work with draft locks without being
 /// forced through persisted artifact validation too early.
 pub use canonicalize::{canonical_projection, CanonicalLockProjection};
+pub use closure::{
+    closure_info, compute_closure_digest, normalize_closure_value, normalize_lock_closure,
+    normalize_resolution_closure_entries, validate_closure_value, ClosureInfo,
+};
 pub use hash::{
     canonical_document_bytes, canonical_projection_bytes, compute_lock_id, recompute_lock_id,
 };
@@ -76,6 +81,7 @@ pub fn validate_structural_non_strict(
 /// before serialization and persisted validation must pass.
 pub fn to_pretty_json(lock: &AtoLock) -> Result<String> {
     let mut persisted = lock.clone();
+    normalize_lock_closure(&mut persisted)?;
     recompute_lock_id(&mut persisted)?;
     validate_persisted_strict(&persisted).map_err(validation_errors_to_capsule_error)?;
     serde_json::to_string_pretty(&persisted)
@@ -92,6 +98,7 @@ pub fn write_pretty_to_path(lock: &AtoLock, path: &Path) -> Result<()> {
 /// Returns canonical persisted bytes for a durable ato.lock artifact.
 pub fn write_canonical_to_vec(lock: &AtoLock) -> Result<Vec<u8>> {
     let mut persisted = lock.clone();
+    normalize_lock_closure(&mut persisted)?;
     recompute_lock_id(&mut persisted)?;
     validate_persisted_strict(&persisted).map_err(validation_errors_to_capsule_error)?;
     serde_jcs::to_vec(&persisted)
@@ -362,5 +369,29 @@ mod tests {
         recompute_lock_id(&mut draft).expect("recompute lock_id");
 
         assert!(validate_persisted_strict(&draft).is_ok());
+    }
+
+    #[test]
+    fn closure_normalization_keeps_lock_id_stable_across_legacy_and_normalized_shapes() {
+        let mut legacy = AtoLock::default();
+        legacy.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "dist", "driver": "static"}),
+        );
+        legacy.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"status": "complete", "inputs": []}),
+        );
+
+        let mut normalized = legacy.clone();
+        normalized.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"kind": "runtime_closure", "status": "complete", "inputs": []}),
+        );
+
+        assert_eq!(
+            compute_lock_id(&legacy).expect("legacy lock_id"),
+            compute_lock_id(&normalized).expect("normalized lock_id")
+        );
     }
 }
