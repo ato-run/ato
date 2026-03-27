@@ -2,7 +2,6 @@ mod binding;
 pub(crate) mod commands;
 mod config;
 pub(crate) mod dispatch;
-mod init;
 mod inspect;
 mod ipc;
 mod key;

@@ -13,6 +13,37 @@ use capsule_core::ato_lock::{
 use predicates::prelude::*;
 use tempfile::tempdir;
 
+#[test]
+fn top_level_help_hides_internal_surface() {
+    let mut cmd = Command::cargo_bin("ato").expect("binary");
+    cmd.arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "  search   Search the registry for agent skills and packages",
+        ))
+        .stdout(predicate::str::contains("Troubleshooting:"))
+        .stdout(predicate::str::contains(
+            "  inspect  Inspect lock-first metadata",
+        ))
+        .stdout(predicate::str::contains("  fetch ").not())
+        .stdout(predicate::str::contains("  finalize ").not())
+        .stdout(predicate::str::contains("  project ").not())
+        .stdout(predicate::str::contains("  unproject ").not())
+        .stdout(predicate::str::contains("  key ").not())
+        .stdout(predicate::str::contains("  config ").not())
+        .stdout(predicate::str::contains("  gen-ci ").not())
+        .stdout(predicate::str::contains("  registry ").not());
+}
+
+#[test]
+fn hidden_commands_still_support_direct_help() {
+    for command in ["fetch", "finalize", "config", "registry"] {
+        let mut cmd = Command::cargo_bin("ato").expect("binary");
+        cmd.args([command, "--help"]).assert().success();
+    }
+}
+
 fn write_static_publish_project(dir: &Path, name: &str, version: &str) {
     fs::create_dir_all(dir.join("dist")).expect("create dist");
     fs::write(
@@ -444,15 +475,20 @@ fn test_cli_help() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Primary Commands:"))
+        .stdout(predicate::str::contains("Troubleshooting:"))
         .stdout(predicate::str::contains("run"))
         .stdout(predicate::str::contains("install"))
         .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("build"))
         .stdout(predicate::str::contains("search"))
-        .stdout(predicate::str::contains("fetch"))
-        .stdout(predicate::str::contains("finalize"))
-        .stdout(predicate::str::contains("project"))
-        .stdout(predicate::str::contains("unproject"));
+        .stdout(predicate::str::contains("inspect"))
+        .stdout(predicate::str::contains("\n  fetch ").not())
+        .stdout(predicate::str::contains("\n  finalize ").not())
+        .stdout(predicate::str::contains("\n  project ").not())
+        .stdout(predicate::str::contains("\n  unproject ").not())
+        .stdout(predicate::str::contains("\n  key ").not())
+        .stdout(predicate::str::contains("\n  config ").not())
+        .stdout(predicate::str::contains("\n  registry ").not());
 }
 
 #[test]
@@ -1132,9 +1168,7 @@ fn test_project_help_shows_launcher_projection_contract() {
     cmd.args(["project", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Add a finalized app to launcher surfaces (experimental)",
-        ))
+        .stdout(predicate::str::contains("Usage: ato project"))
         .stdout(predicate::str::contains("ato finalize"))
         .stdout(predicate::str::contains("--launcher-dir <LAUNCHER_DIR>"))
         .stdout(predicate::str::contains("Commands:"))
@@ -1159,9 +1193,7 @@ fn test_unproject_help_shows_projection_reference_contract() {
     cmd.args(["unproject", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Remove an experimental launcher projection without mutating the finalized artifact",
-        ))
+        .stdout(predicate::str::contains("Usage: ato unproject"))
         .stdout(predicate::str::contains("Projection ID"))
         .stdout(predicate::str::contains("--json"));
 }
@@ -1826,7 +1858,10 @@ fn test_key_command_exists() {
     cmd.args(["key", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Manage signing keys"));
+        .stdout(predicate::str::contains("Usage: ato key <COMMAND>"))
+        .stdout(predicate::str::contains("gen"))
+        .stdout(predicate::str::contains("sign"))
+        .stdout(predicate::str::contains("verify"));
 }
 
 #[test]
