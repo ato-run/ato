@@ -1,12 +1,12 @@
 # Ticket 11: Single-File Script Input
 
-- Status: Draft
+- Status: In Progress
 - Priority: P1
 - Depends on: 02, 04
 
 ## Goal
 
-`ato run foo.py` のような単一ファイル入力を、lock-first を壊さずに source-only path へ統合する。
+`ato run foo.py` や `ato init foo.ts` のような単一ファイル入力を、lock-first を壊さずに source-only path と durable workspace materialization へ統合する。
 
 ## Decision
 
@@ -23,11 +23,12 @@
 - `uv lock` を virtual workspace で実行し、既存の `source/python + uv.lock` 実行モデルに接続する
 - TypeScript script は `main.ts` または `main.tsx` として正規化し、最小 `deno.json` と `deno.lock` を生成して既存の `source/deno` 実行モデルに接続する
 - `.tsx` は `compilerOptions.jsx = "react-jsx"` を生成し、`@jsxImportSource ...` pragma があれば `jsxImportSource` に反映する
+- `ato init foo.ts` / `foo.tsx` は workspace root に `main.ts` または `main.tsx` と `deno.json` と `deno.lock` を durable materialization してから canonical lock を生成する
 - cleanup は attempt cleanup scope に委譲する
 
 ## Non-Goals
 
-- `ato init foo.py` / `ato init foo.ts` の durable workspace 化
+- `ato init foo.py` の durable workspace 化
 - Node fallback / Ruby 単一ファイル run
 - PEP 723 以外の Python inline metadata 形式
 
@@ -39,7 +40,7 @@
 
 ## Follow-ups
 
-- `ato init foo.py` と `ato init foo.ts` で durable workspace を生成する
+- `ato init foo.py` で durable workspace を生成する
 - JSX runtime / compiler option inference を `@jsxRuntime` など追加 pragma まで広げる
 - Node fallback を selection gate 付きで追加する
 - Ruby single-file は runtime/driver surface を先に execution model へ追加する

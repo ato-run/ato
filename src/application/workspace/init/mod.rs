@@ -2,7 +2,8 @@
 
 use anyhow::{Context, Result};
 use capsule_core::input_resolver::{
-    resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
+    resolve_authoritative_input, ResolveInputOptions, ResolvedCompatibilityProject, ResolvedInput,
+    ResolvedSourceOnly,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -36,16 +37,13 @@ pub fn execute_durable_init(
     args: InitArgs,
     reporter: std::sync::Arc<crate::reporters::CliReporter>,
 ) -> Result<()> {
-    let project_dir = args
+    let input_path = args
         .path
         .unwrap_or_else(|| PathBuf::from("."))
         .canonicalize()
         .context("Failed to resolve project directory")?;
 
-    let init_target = match resolve_authoritative_input(
-        &project_dir,
-        ResolveInputOptions::default(),
-    ) {
+    let resolved = match resolve_authoritative_input(&input_path, ResolveInputOptions::default()) {
         Ok(ResolvedInput::CanonicalLock { canonical, .. }) => {
             anyhow::bail!(
                 "{} already exists at {}. `ato init` only materializes a durable baseline when canonical input is missing.",
@@ -53,8 +51,7 @@ pub fn execute_durable_init(
                 canonical.path.display()
             );
         }
-        Ok(ResolvedInput::CompatibilityProject { project, .. }) => Some(project),
-        Ok(ResolvedInput::SourceOnly { .. }) => None,
+        Ok(resolved) => resolved,
         Err(error)
             if error
                 .to_string()
@@ -62,22 +59,60 @@ pub fn execute_durable_init(
         {
             return Err(error.into());
         }
-        Err(_) => None,
+        Err(_) => ResolvedInput::SourceOnly {
+            source: ResolvedSourceOnly {
+                project_root: input_path.clone(),
+                single_script: None,
+            },
+            provenance: capsule_core::input_resolver::InputProvenance {
+                requested_path: input_path.clone(),
+                explicit_input_kind: capsule_core::input_resolver::ExplicitInputKind::Directory,
+                project_root: input_path.clone(),
+                discovered: capsule_core::input_resolver::DiscoveredArtifacts {
+                    canonical_lock_path: None,
+                    compatibility_manifest_path: None,
+                    compatibility_lock_path: None,
+                },
+                selected_kind: capsule_core::input_resolver::ResolvedInputKind::SourceOnly,
+                authoritative_path: None,
+            },
+            advisories: Vec::new(),
+        },
+    };
+
+    let (workspace_root, compatibility_target, source_target): (
+        PathBuf,
+        Option<ResolvedCompatibilityProject>,
+        Option<ResolvedSourceOnly>,
+    ) = match resolved {
+        ResolvedInput::CompatibilityProject { project, .. } => {
+            (project.project_root.clone(), Some(project), None)
+        }
+        ResolvedInput::SourceOnly { source, .. } => {
+            (source.project_root.clone(), None, Some(source))
+        }
+        ResolvedInput::CanonicalLock { .. } => unreachable!("canonical input handled above"),
     };
 
     futures::executor::block_on(reporter.notify(format!(
         "🔍 Initializing capsule in: {}\n",
-        project_dir.display()
+        workspace_root.display()
     )))?;
 
-    let materialized = if let Some(project) = init_target.as_ref() {
+    let materialized = if let Some(project) = compatibility_target.as_ref() {
         source_inference::execute_init_from_compatibility(project, reporter.clone(), args.yes)?
     } else {
-        source_inference::execute_init_from_source_only(&project_dir, reporter.clone(), args.yes)?
+        source_inference::execute_init_from_resolved_source_only(
+            source_target
+                .as_ref()
+                .expect("source-only target must exist"),
+            reporter.clone(),
+            args.yes,
+        )?
     };
 
-    if project_dir.join(".git").exists() {
-        add_to_gitignore(&project_dir, reporter.clone())?;
+    if workspace_root.join(".git").exists() {
+        add_to_gitignore(&workspace_root, reporter.clone())?;
     }
 
     futures::executor::block_on(reporter.notify(format!(
@@ -283,4 +318,39 @@ fn maybe_create_capsuleignore(
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::reporters::CliReporter;
+    use std::sync::Arc;
+
+    #[test]
+    fn durable_init_accepts_single_typescript_script_path() {
+        if std::process::Command::new("deno")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script_path = dir.path().join("scratch.ts");
+        std::fs::write(&script_path, "console.log('hello durable init');\n").expect("write script");
+
+        execute_durable_init(
+            InitArgs {
+                path: Some(script_path),
+                yes: true,
+            },
+            Arc::new(CliReporter::new(true)),
+        )
+        .expect("durable init");
+
+        assert!(dir.path().join("ato.lock.json").exists());
+        assert!(dir.path().join("main.ts").exists());
+        assert!(dir.path().join("deno.json").exists());
+    }
 }
