@@ -270,20 +270,21 @@ fn first_existing_path<const N: usize>(candidates: [PathBuf; N]) -> Option<PathB
 mod tests {
     use super::*;
 
-    use crate::router::{ExecutionProfile, ManifestData};
+    use crate::router::{execution_descriptor_from_manifest_parts, ExecutionProfile, ManifestData};
 
     fn plan_from_manifest(tmp: &tempfile::TempDir, manifest: &str) -> ManifestData {
         let manifest_path = tmp.path().join("capsule.toml");
         std::fs::write(&manifest_path, manifest).expect("write manifest");
         let parsed: toml::Value = toml::from_str(manifest).expect("parse manifest");
-        ManifestData {
-            manifest: parsed,
+        execution_descriptor_from_manifest_parts(
+            parsed,
             manifest_path,
-            manifest_dir: tmp.path().to_path_buf(),
-            profile: ExecutionProfile::Dev,
-            selected_target: "app".to_string(),
-            state_source_overrides: HashMap::new(),
-        }
+            tmp.path().to_path_buf(),
+            ExecutionProfile::Dev,
+            Some("app"),
+            HashMap::new(),
+        )
+        .expect("execution descriptor")
     }
 
     #[test]

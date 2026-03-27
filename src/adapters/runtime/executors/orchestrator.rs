@@ -1477,14 +1477,15 @@ mod tests {
     }
 
     fn manifest_data(manifest_toml: &str) -> ManifestData {
-        ManifestData {
-            manifest: toml::from_str(manifest_toml).expect("manifest toml"),
-            manifest_path: PathBuf::from("/tmp/capsule.toml"),
-            manifest_dir: PathBuf::from("/tmp"),
-            profile: capsule_core::router::ExecutionProfile::Dev,
-            selected_target: "app".to_string(),
-            state_source_overrides: HashMap::new(),
-        }
+        capsule_core::router::execution_descriptor_from_manifest_parts(
+            toml::from_str(manifest_toml).expect("manifest toml"),
+            PathBuf::from("/tmp/capsule.toml"),
+            PathBuf::from("/tmp"),
+            capsule_core::router::ExecutionProfile::Dev,
+            Some("app"),
+            HashMap::new(),
+        )
+        .expect("execution descriptor")
     }
 
     #[tokio::test]
@@ -1539,6 +1540,8 @@ target = "db"
             &plan,
             &PreparedRunContext {
                 authoritative_lock: None,
+                lock_path: None,
+                workspace_root: PathBuf::from("/tmp"),
                 effective_state: None,
                 raw_manifest: plan.manifest.clone(),
                 validation_mode: capsule_core::types::ValidationMode::Strict,

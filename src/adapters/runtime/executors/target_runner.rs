@@ -69,7 +69,7 @@ pub async fn resolve_launch_context(
         reporter.warn(diagnostic.to_string()).await?;
     }
 
-    let ipc_ctx = IpcContext::from_manifest(&plan.manifest)?;
+    let ipc_ctx = IpcContext::from_manifest(&prepared.raw_manifest)?;
     if ipc_ctx.has_ipc() {
         debug!(
             resolved_services = ipc_ctx.resolved_count,
@@ -167,9 +167,10 @@ pub fn prepare_target_execution(
         };
 
     if !options.defer_consent {
+        let guard_manifest_dir = runtime_decision.plan.execution_working_directory();
         let guard_result = guard::evaluate_for_mode_with_authority(
             &execution_plan,
-            &runtime_decision.plan.manifest_dir,
+            &guard_manifest_dir,
             &options.enforcement,
             options.sandbox_mode,
             options.dangerously_skip_permissions,
@@ -313,7 +314,7 @@ mod tests {
     use crate::executors::launch_context::RuntimeLaunchContext;
     use crate::reporters::CliReporter;
     use capsule_core::lockfile::{CapsuleLock, LockMeta};
-    use capsule_core::router::{ExecutionProfile, ManifestData};
+    use capsule_core::router::ExecutionProfile;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -349,14 +350,15 @@ mod tests {
         targets.insert("default".to_string(), toml::Value::Table(target));
         manifest.insert("targets".to_string(), toml::Value::Table(targets));
 
-        let plan = ManifestData {
-            manifest: toml::Value::Table(manifest),
-            manifest_path: PathBuf::from("/tmp/capsule.toml"),
-            manifest_dir: PathBuf::from("/tmp"),
-            profile: ExecutionProfile::Dev,
-            selected_target: "default".to_string(),
-            state_source_overrides: HashMap::new(),
-        };
+        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+            toml::Value::Table(manifest),
+            PathBuf::from("/tmp/capsule.toml"),
+            PathBuf::from("/tmp"),
+            ExecutionProfile::Dev,
+            Some("default"),
+            HashMap::new(),
+        )
+        .expect("execution descriptor");
 
         let launch_ctx = RuntimeLaunchContext::empty().with_injected_env(
             [(
@@ -389,16 +391,19 @@ entrypoint = "index.js"
         )
         .expect("parse manifest");
 
-        let plan = ManifestData {
-            manifest: raw_manifest.clone(),
+        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+            raw_manifest.clone(),
             manifest_path,
-            manifest_dir,
-            profile: ExecutionProfile::Dev,
-            selected_target: "default".to_string(),
-            state_source_overrides: HashMap::new(),
-        };
+            manifest_dir.clone(),
+            ExecutionProfile::Dev,
+            Some("default"),
+            HashMap::new(),
+        )
+        .expect("execution descriptor");
         let prepared = PreparedRunContext {
             authoritative_lock: None,
+            lock_path: None,
+            workspace_root: manifest_dir,
             effective_state: None,
             raw_manifest,
             validation_mode: capsule_core::types::ValidationMode::Strict,

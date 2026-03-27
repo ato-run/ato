@@ -7,6 +7,7 @@ pub(super) async fn generate_uv_lock(
     manifest: &toml::Value,
     reporter: Arc<dyn CapsuleReporter + 'static>,
 ) -> Result<Option<PathBuf>> {
+    let uv_lock = manifest_dir.join("uv.lock");
     let deps_path = read_dependencies_path(manifest, "python", manifest_dir)
         .or_else(|| {
             let candidate = manifest_dir.join("pyproject.toml");
@@ -27,10 +28,15 @@ pub(super) async fn generate_uv_lock(
     debug!(
         manifest_dir = %manifest_dir.display(),
         execution_working_directory = %manifest_dir.display(),
-        lockfile_check_paths = ?vec![("uv.lock", manifest_dir.join("uv.lock"), manifest_dir.join("uv.lock").exists())],
+        lockfile_check_paths = ?vec![("uv.lock", uv_lock.clone(), uv_lock.exists())],
         dependency_check_paths = ?deps_path.as_ref().map(|path| vec![path.clone()]).unwrap_or_default(),
         "Lockfile generation path diagnostics"
     );
+
+    if uv_lock.exists() {
+        return Ok(Some(uv_lock));
+    }
+
     let Some(deps_path) = deps_path else {
         return Ok(None);
     };
