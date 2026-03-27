@@ -229,6 +229,21 @@ fn prepare_single_script_workspace(
     }
 }
 
+fn prepare_durable_source_workspace(source: &ResolvedSourceOnly) -> Result<PathBuf> {
+    if let Some(script) = source.single_script.as_ref() {
+        match script.language {
+            SingleScriptLanguage::Python => {
+                anyhow::bail!("ato init does not support single-file Python inputs yet")
+            }
+            SingleScriptLanguage::TypeScript => {
+                prepare_durable_typescript_single_script_workspace(script, &source.project_root)?;
+            }
+        }
+    }
+
+    Ok(source.project_root.clone())
+}
+
 fn prepare_python_single_script_workspace(
     script: &ResolvedSingleScript,
     scope: Option<&mut CleanupScope>,
@@ -361,6 +376,49 @@ fn prepare_typescript_single_script_workspace(
     generate_deno_lock_for_single_script(&temp_root, entrypoint)?;
 
     Ok(temp_root)
+}
+
+fn prepare_durable_typescript_single_script_workspace(
+    script: &ResolvedSingleScript,
+    project_root: &Path,
+) -> Result<()> {
+    let script_text = fs::read_to_string(&script.path)
+        .with_context(|| format!("failed to read script {}", script.path.display()))?;
+    let metadata = parse_deno_typescript_metadata(&script_text, &script.path);
+    let entrypoint = if is_typescript_jsx_script(&script.path) {
+        "main.tsx"
+    } else {
+        "main.ts"
+    };
+    let entrypoint_path = project_root.join(entrypoint);
+
+    if script.path != entrypoint_path {
+        write_if_absent_or_same(&entrypoint_path, &script_text)?;
+    }
+
+    let deno_json_raw = serde_json::to_string_pretty(&deno_json_for_single_script(&metadata))
+        .context("failed to serialize deno.json for durable single-file TypeScript init")?
+        + "\n";
+    write_if_absent_or_same(&project_root.join("deno.json"), &deno_json_raw)?;
+
+    generate_deno_lock_for_single_script(project_root, entrypoint)
+}
+
+fn write_if_absent_or_same(path: &Path, content: &str) -> Result<()> {
+    if path.exists() {
+        let existing = fs::read_to_string(path)
+            .with_context(|| format!("failed to read existing {}", path.display()))?;
+        if existing == content {
+            return Ok(());
+        }
+
+        anyhow::bail!(
+            "refusing to overwrite existing file during durable single-file init: {}",
+            path.display()
+        );
+    }
+
+    fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn generate_deno_lock_for_single_script(project_root: &Path, entrypoint: &str) -> Result<()> {
@@ -554,13 +612,27 @@ pub(crate) fn materialize_run_from_compatibility(
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn execute_init_from_source_only(
     project_root: &Path,
     reporter: Arc<CliReporter>,
     assume_yes: bool,
 ) -> Result<WorkspaceMaterialization> {
-    let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
+    let source = ResolvedSourceOnly {
         project_root: project_root.to_path_buf(),
+        single_script: None,
+    };
+    execute_init_from_resolved_source_only(&source, reporter, assume_yes)
+}
+
+pub(crate) fn execute_init_from_resolved_source_only(
+    source: &ResolvedSourceOnly,
+    reporter: Arc<CliReporter>,
+    assume_yes: bool,
+) -> Result<WorkspaceMaterialization> {
+    let project_root = prepare_durable_source_workspace(source)?;
+    let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
+        project_root: project_root.clone(),
     });
     let result = execute_shared_engine(
         input,
@@ -568,7 +640,7 @@ pub(crate) fn execute_init_from_source_only(
         assume_yes,
         reporter,
     )?;
-    materialize_workspace_result(project_root, result)
+    materialize_workspace_result(&project_root, result)
 }
 
 pub(crate) fn execute_init_from_compatibility(
@@ -2043,6 +2115,37 @@ mod tests {
         assert!(materialized.sidecar_path.exists());
         assert!(materialized.provenance_cache_path.exists());
         assert!(materialized.binding_seed_path.exists());
+    }
+
+    #[test]
+    fn durable_init_materializes_single_typescript_script_into_workspace() {
+        if std::process::Command::new("deno")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("scratch.ts");
+        fs::write(&script_path, "console.log('hello durable init');\n").expect("write script");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: Some(ResolvedSingleScript {
+                path: script_path,
+                language: SingleScriptLanguage::TypeScript,
+            }),
+        };
+
+        let materialized = execute_init_from_resolved_source_only(&source, reporter(), true)
+            .expect("materialize workspace");
+
+        assert!(materialized.lock_path.exists());
+        assert!(dir.path().join("main.ts").exists());
+        assert!(dir.path().join("deno.json").exists());
+        assert!(dir.path().join("deno.lock").exists());
     }
 
     #[test]
