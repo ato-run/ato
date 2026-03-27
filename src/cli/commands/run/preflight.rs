@@ -15,7 +15,7 @@ pub(crate) fn preflight_native_sandbox(
 ) -> Result<PathBuf> {
     preflight_python_uv_lock_for_source_driver(plan)?;
     preflight_python_uv_binary_for_source_driver(plan, prepared.authoritative_lock.as_ref())?;
-    preflight_glibc_compat(plan)?;
+    preflight_glibc_compat(plan, prepared)?;
     preflight_macos_compat(plan)?;
 
     let nacelle = resolve_nacelle_for_tier2(nacelle_override, plan, prepared, reporter)?;
@@ -431,19 +431,29 @@ fn is_python_source_target(plan: &capsule_core::router::ManifestData) -> bool {
         .unwrap_or(false)
 }
 
-fn preflight_glibc_compat(plan: &capsule_core::router::ManifestData) -> Result<()> {
+fn preflight_glibc_compat(
+    plan: &capsule_core::router::ManifestData,
+    prepared: &PreparedRunContext,
+) -> Result<()> {
     let required_from_elf = detect_required_glibc_from_entrypoint(plan)?;
 
-    let lock_path = match plan.manifest_path.parent() {
-        Some(parent) => {
-            resolve_existing_lockfile_path(parent).unwrap_or_else(|| lockfile_output_path(parent))
-        }
-        None => {
-            if required_from_elf.is_none() {
-                return Ok(());
+    let lock_path = match prepared
+        .compatibility_legacy_lock
+        .as_ref()
+        .map(|legacy| legacy.path.clone())
+        .or_else(|| resolve_existing_lockfile_path(&prepared.workspace_root))
+    {
+        Some(path) => path,
+        None => match plan.manifest_path.parent() {
+            Some(parent) => resolve_existing_lockfile_path(parent)
+                .unwrap_or_else(|| lockfile_output_path(parent)),
+            None => {
+                if required_from_elf.is_none() {
+                    return Ok(());
+                }
+                PathBuf::from(CAPSULE_LOCK_FILE_NAME)
             }
-            PathBuf::from(CAPSULE_LOCK_FILE_NAME)
-        }
+        },
     };
 
     let required_from_lock = detect_required_glibc_from_lock(&lock_path)?;
@@ -506,13 +516,57 @@ fn detect_required_glibc_from_lock(lock_path: &Path) -> Result<Option<String>> {
 
     let raw = fs::read_to_string(lock_path)
         .with_context(|| format!("Failed to read {}", lock_path.display()))?;
-    let lockfile = parse_lockfile_text(&raw, lock_path)
-        .with_context(|| format!("Failed to parse {}", lock_path.display()))?;
+    let typed = parse_lockfile_text(&raw, lock_path);
+    if let Ok(lockfile) = typed.as_ref() {
+        if let Some(required) = lockfile
+            .targets
+            .values()
+            .find_map(|target| target.constraints.as_ref().and_then(|c| c.glibc.clone()))
+        {
+            return Ok(Some(required));
+        }
+    }
 
-    Ok(lockfile
-        .targets
+    if let Some(required) = extract_glibc_constraint_from_lock_text(&raw) {
+        return Ok(Some(required));
+    }
+
+    typed
+        .with_context(|| format!("Failed to parse {}", lock_path.display()))
+        .map(|_| None)
+}
+
+fn extract_glibc_constraint_from_lock_text(raw: &str) -> Option<String> {
+    extract_glibc_constraint_from_json(&serde_json::from_str::<serde_json::Value>(raw).ok()?)
+        .or_else(|| extract_glibc_constraint_from_toml(&toml::from_str::<toml::Value>(raw).ok()?))
+}
+
+fn extract_glibc_constraint_from_json(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("targets")?
+        .as_object()?
         .values()
-        .find_map(|target| target.constraints.as_ref().and_then(|c| c.glibc.clone())))
+        .find_map(|target| {
+            target
+                .get("constraints")
+                .and_then(|constraints| constraints.get("glibc"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+}
+
+fn extract_glibc_constraint_from_toml(value: &toml::Value) -> Option<String> {
+    value
+        .get("targets")?
+        .as_table()?
+        .values()
+        .find_map(|target| {
+            target
+                .get("constraints")
+                .and_then(|constraints| constraints.get("glibc"))
+                .and_then(toml::Value::as_str)
+                .map(str::to_string)
+        })
 }
 
 fn detect_required_glibc_from_entrypoint(
@@ -802,4 +856,38 @@ fn resolve_uv_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
 
 pub(super) fn resolve_python_dependency_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
     resolve_uv_lock_path(manifest_dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::detect_required_glibc_from_lock;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn detect_required_glibc_from_lock_reads_target_constraints_from_json() {
+        let dir = tempdir().expect("tempdir");
+        let lock_path = dir.path().join("capsule.lock.json");
+        fs::write(
+            &lock_path,
+            r#"{
+  "version": "1",
+  "meta": {
+    "created_at": "2026-02-23T00:00:00Z",
+    "manifest_hash": "blake3:test"
+  },
+  "targets": {
+    "x86_64-unknown-linux-gnu": {
+      "constraints": {
+        "glibc": "glibc-999.0"
+      }
+    }
+  }
+}"#,
+        )
+        .expect("write lock");
+
+        let detected = detect_required_glibc_from_lock(&lock_path).expect("detect glibc");
+        assert_eq!(detected.as_deref(), Some("glibc-999.0"));
+    }
 }
