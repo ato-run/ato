@@ -26,10 +26,7 @@ pub fn prepare_shadow_workspace(
     plan: &ManifestData,
     audit: &ProvisioningAudit,
 ) -> Result<ShadowWorkspaceRef> {
-    let manifest_dir = plan
-        .manifest_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    let manifest_dir = &plan.workspace_root;
     let run_id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -40,13 +37,7 @@ pub fn prepare_shadow_workspace(
         .join(format!("run-{}", run_id));
     fs::create_dir_all(&root_dir)
         .with_context(|| format!("Failed to create shadow workspace: {}", root_dir.display()))?;
-    let workspace_dir = root_dir.join("workspace");
-    fs::create_dir_all(&workspace_dir).with_context(|| {
-        format!(
-            "Failed to create shadow workspace copy root: {}",
-            workspace_dir.display()
-        )
-    })?;
+    let workspace_dir = root_dir.clone();
     copy_workspace_snapshot(manifest_dir, &workspace_dir, &root_dir)?;
 
     let audit_path = root_dir.join("audit.json");
@@ -201,8 +192,8 @@ pub fn materialize_shadow_manifest(
             .workspace_dir
             .join(relative_source_working_dir)
     };
-    let relative_working_dir = diff_paths(shadow_working_dir, &shadow_workspace.root_dir)
-        .unwrap_or_else(|| PathBuf::from("workspace"));
+    let relative_working_dir =
+        diff_paths(shadow_working_dir, &shadow_workspace.root_dir).unwrap_or_default();
 
     let Some(targets) = manifest.get_mut("targets").and_then(Value::as_table_mut) else {
         anyhow::bail!("targets table is missing from manifest");
@@ -211,10 +202,14 @@ pub fn materialize_shadow_manifest(
         anyhow::bail!("targets.{} is missing from manifest", target_label);
     };
 
-    target.insert(
-        "working_dir".to_string(),
-        Value::String(relative_working_dir.to_string_lossy().to_string()),
-    );
+    if relative_working_dir.as_os_str().is_empty() {
+        target.remove("working_dir");
+    } else {
+        target.insert(
+            "working_dir".to_string(),
+            Value::String(relative_working_dir.to_string_lossy().to_string()),
+        );
+    }
 
     for action in &summary.actions {
         if let ProvisioningAction::SelectRuntime {
@@ -229,6 +224,10 @@ pub fn materialize_shadow_manifest(
             }
 
             let selected_version = default_runtime_version(runtime, driver);
+            target.insert(
+                "runtime_version".to_string(),
+                Value::String(selected_version.clone()),
+            );
             if driver == "node" {
                 let runtime_tools = target
                     .entry("runtime_tools".to_string())
@@ -237,11 +236,6 @@ pub fn materialize_shadow_manifest(
                     anyhow::bail!("targets.{}.runtime_tools must be a table", target_label);
                 };
                 runtime_tools_table.insert("node".to_string(), Value::String(selected_version));
-            } else {
-                target.insert(
-                    "runtime_version".to_string(),
-                    Value::String(selected_version),
-                );
             }
         }
     }
@@ -520,15 +514,15 @@ mod tests {
     fn test_plan(dir: &Path, target_manifest: &str) -> ManifestData {
         let manifest_path = dir.join("capsule.toml");
         std::fs::write(&manifest_path, target_manifest).expect("manifest");
-        ManifestData {
-            manifest: toml::from_str(&std::fs::read_to_string(&manifest_path).expect("read"))
-                .expect("parse"),
+        capsule_core::router::execution_descriptor_from_manifest_parts(
+            toml::from_str(&std::fs::read_to_string(&manifest_path).expect("read")).expect("parse"),
             manifest_path,
-            manifest_dir: dir.to_path_buf(),
-            profile: ExecutionProfile::Dev,
-            selected_target: "app".to_string(),
-            state_source_overrides: HashMap::new(),
-        }
+            dir.to_path_buf(),
+            ExecutionProfile::Dev,
+            Some("app"),
+            HashMap::new(),
+        )
+        .expect("execution descriptor")
     }
 
     fn test_shadow_workspace(dir: &Path, run_id: &str) -> ShadowWorkspaceRef {
@@ -577,14 +571,15 @@ run_command = "node server.js"
 
         let manifest: toml::Value =
             toml::from_str(&std::fs::read_to_string(&manifest_path).expect("read")).expect("parse");
-        let plan = ManifestData {
+        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
             manifest,
-            manifest_path: manifest_path.clone(),
-            manifest_dir: dir.path().to_path_buf(),
-            profile: ExecutionProfile::Dev,
-            selected_target: "app".to_string(),
-            state_source_overrides: HashMap::new(),
-        };
+            manifest_path.clone(),
+            dir.path().to_path_buf(),
+            ExecutionProfile::Dev,
+            Some("app"),
+            HashMap::new(),
+        )
+        .expect("execution descriptor");
         let shadow_root = dir.path().join(".tmp").join("run-1");
         std::fs::create_dir_all(&shadow_root).expect("shadow root");
         let shadow = ShadowWorkspaceRef {
@@ -631,8 +626,8 @@ run_command = "node server.js"
     #[test]
     fn materializes_synthetic_env_file() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let plan = ManifestData {
-            manifest: toml::from_str(
+        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+            toml::from_str(
                 r#"
 name = "demo"
 default_target = "app"
@@ -644,12 +639,13 @@ run_command = "node server.js"
 "#,
             )
             .expect("manifest"),
-            manifest_path: dir.path().join("capsule.toml"),
-            manifest_dir: dir.path().to_path_buf(),
-            profile: ExecutionProfile::Dev,
-            selected_target: "app".to_string(),
-            state_source_overrides: HashMap::new(),
-        };
+            dir.path().join("capsule.toml"),
+            dir.path().to_path_buf(),
+            ExecutionProfile::Dev,
+            Some("app"),
+            HashMap::new(),
+        )
+        .expect("execution descriptor");
         let shadow_root = dir.path().join(".tmp").join("run-2");
         let workspace_dir = shadow_root.join("workspace");
         std::fs::create_dir_all(&workspace_dir).expect("workspace root");

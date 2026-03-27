@@ -9,6 +9,7 @@ name = "capsule_core"
 path = "src/lib.rs"
 
 [dependencies]
+lock-draft-engine = { path = "../lock-draft-engine" }
 libc = "0.2"
 prost = "0.13"
 tokio = { version = "1", features = ["full"] }

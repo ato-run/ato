@@ -509,7 +509,7 @@ fn create_bundle_archive(
 
         let uv_lock = source_dir.join("uv.lock");
         if uv_lock.exists() {
-            append_file(&mut builder, &uv_lock, "uv.lock")?;
+            append_file(&mut builder, &uv_lock, "source/uv.lock")?;
         }
 
         let locks_dir = source_dir.join("locks");
@@ -798,6 +798,8 @@ fn find_nacelle_binary(explicit_path: Option<&PathBuf>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+    use tar::Archive;
 
     #[test]
     fn build_bundle_with_stub_nacelle() {
@@ -843,5 +845,62 @@ entrypoint = "hello.sh"
         assert!(bundle_path.exists());
         let size = std::fs::metadata(&bundle_path).unwrap().len();
         assert!(size > 0);
+    }
+
+    #[test]
+    fn create_bundle_archive_places_uv_lock_under_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        let runtime_dir = root.join("runtime");
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+
+        let source_dir = root.join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let manifest = r#"
+schema_version = "0.2"
+name = "bundle-test"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11.10"
+entrypoint = "main.py"
+dependencies = "requirements.txt"
+"#;
+        let manifest_path = root.join("capsule.toml");
+        std::fs::write(&manifest_path, manifest).unwrap();
+        std::fs::write(source_dir.join("main.py"), "print('ok')\n").unwrap();
+        std::fs::write(source_dir.join("requirements.txt"), "fastapi==0.115.0\n").unwrap();
+        std::fs::write(
+            source_dir.join("uv.lock"),
+            "version = 1\nrevision = 1\nrequires-python = \">=3.11\"\n",
+        )
+        .unwrap();
+        let filter = crate::packers::pack_filter::load_pack_filter_from_path(&manifest_path)
+            .expect("filter");
+
+        let archive = create_bundle_archive(&runtime_dir, &source_dir, None, &filter, None, None)
+            .expect("archive");
+
+        let mut tar = Archive::new(std::io::Cursor::new(archive));
+        let entries = tar
+            .entries()
+            .expect("entries")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .path()
+                    .expect("path")
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect::<BTreeSet<_>>();
+
+        assert!(entries.contains("main.py"), "entries={entries:?}");
+        assert!(entries.contains("source/uv.lock"), "entries={entries:?}");
     }
 }
