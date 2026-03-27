@@ -442,7 +442,7 @@ async fn launch_service<C: OciRuntimeClient>(
                 ..plan.clone()
             };
             let service_launch_ctx = launch_ctx.clone().with_injected_env(env.clone());
-            let service_prepared = prepared.with_raw_manifest(
+            let service_prepared = prepared.with_bridge_manifest(
                 service_plan.manifest.clone(),
                 if options.target_launch_options().preview_mode {
                     capsule_core::types::ValidationMode::Preview
@@ -1543,7 +1543,7 @@ target = "db"
                 lock_path: None,
                 workspace_root: PathBuf::from("/tmp"),
                 effective_state: None,
-                raw_manifest: plan.manifest.clone(),
+                bridge_manifest: plan.manifest.clone(),
                 validation_mode: capsule_core::types::ValidationMode::Strict,
                 engine_override_declared: false,
                 compatibility_legacy_lock: None,

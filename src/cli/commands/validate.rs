@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::input_resolver::{
     resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
@@ -8,7 +8,7 @@ use capsule_core::lockfile::{
     CAPSULE_LOCK_FILE_NAME,
 };
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::application::source_inference::{
@@ -70,11 +70,6 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
             ..
         } => {
             let manifest_path = project.manifest.path.clone();
-            let raw_manifest_text = std::fs::read_to_string(&manifest_path)
-                .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
-            let raw_manifest: toml::Value = toml::from_str(&raw_manifest_text)
-                .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
-
             let materialized =
                 materialize_run_from_compatibility(&project, None, reporter.clone(), true)?;
             let decision = capsule_core::router::route_lock(
@@ -120,8 +115,8 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
             };
 
             let ipc_diagnostics = crate::ipc::validate::validate_manifest(
-                &raw_manifest,
-                manifest_path.parent().unwrap_or_else(|| Path::new(".")),
+                &decision.plan.manifest,
+                &decision.plan.manifest_dir,
             )
             .map_err(|err| {
                 AtoExecutionError::execution_contract_invalid(
