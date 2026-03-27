@@ -589,8 +589,19 @@ mod tests {
 
     fn plan_from_manifest(tmp: &tempfile::TempDir, manifest: &str) -> ManifestData {
         let manifest_path = tmp.path().join("capsule.toml");
-        std::fs::write(&manifest_path, manifest).expect("write manifest");
-        let parsed: toml::Value = toml::from_str(manifest).expect("parse manifest");
+        let manifest = format!(
+            r#"
+schema_version = "0.2"
+name = "app"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+{manifest}
+"#
+        );
+        std::fs::write(&manifest_path, &manifest).expect("write manifest");
+        let parsed: toml::Value = toml::from_str(&manifest).expect("parse manifest");
         execution_descriptor_from_manifest_parts(
             parsed,
             manifest_path,

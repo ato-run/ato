@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use capsule_core::ato_lock::{self, AtoLock, UnresolvedReason, UnresolvedValue};
+use capsule_core::ato_lock::{self, closure_info, AtoLock, UnresolvedReason, UnresolvedValue};
 use capsule_core::input_resolver::ATO_LOCK_FILE_NAME;
 use serde::Serialize;
 use serde_json::Value;
@@ -151,6 +151,7 @@ pub(crate) fn validate_durable_workspace_lock(lock: &AtoLock) -> Result<()> {
         &lock.resolution.unresolved,
         "resolution.closure",
     )?;
+    ensure_closure_completion_or_unresolved(lock)?;
 
     Ok(())
 }
@@ -237,6 +238,32 @@ fn ensure_field_or_unresolved(
     }
     anyhow::bail!(
         "durable workspace output must either resolve {field} or emit an inspectable unresolved marker"
+    );
+}
+
+fn ensure_closure_completion_or_unresolved(lock: &AtoLock) -> Result<()> {
+    let Some(closure) = lock.resolution.entries.get("closure") else {
+        return Ok(());
+    };
+
+    let info = closure_info(closure)?;
+    if info.kind == "metadata_only" || info.status == "incomplete" {
+        require_reasoned_unresolved_marker(&lock.resolution.unresolved, "resolution.closure")?;
+    }
+
+    Ok(())
+}
+
+fn require_reasoned_unresolved_marker(unresolved: &[UnresolvedValue], field: &str) -> Result<()> {
+    if unresolved
+        .iter()
+        .any(|entry| unresolved_matches_field(entry, field) && is_reasoned_unresolved(entry))
+    {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "durable workspace output must either complete {field} or emit an inspectable unresolved marker"
     );
 }
 
@@ -388,7 +415,7 @@ mod tests {
         );
         lock.resolution.entries.insert(
             "closure".to_string(),
-            json!({"kind": "metadata_only", "observed_lockfiles": ["deno.lock"]}),
+            json!({"kind": "runtime_closure", "status": "complete", "inputs": []}),
         );
         SourceInferenceResult {
             input_kind: SourceInferenceInputKind::SourceEvidence,
@@ -435,6 +462,57 @@ mod tests {
     }
 
     #[test]
+    fn durable_workspace_lock_requires_unresolved_marker_for_incomplete_closure() {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "main.ts", "cmd": []}),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "deno", "resolved_by": "test"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([{"label": "default"}]),
+        );
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"kind": "metadata_only", "status": "incomplete", "observed_lockfiles": ["deno.lock"]}),
+        );
+
+        let error = validate_durable_workspace_lock(&lock)
+            .expect_err("incomplete closure without unresolved marker must fail");
+        assert!(error.to_string().contains(
+            "either complete resolution.closure or emit an inspectable unresolved marker"
+        ));
+    }
+
+    #[test]
+    fn durable_workspace_lock_accepts_complete_closure_without_unresolved_marker() {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "main.ts", "cmd": []}),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "deno", "resolved_by": "test"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([{"label": "default"}]),
+        );
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"kind": "runtime_closure", "status": "complete", "inputs": []}),
+        );
+
+        validate_durable_workspace_lock(&lock)
+            .expect("complete closure should not require an unresolved marker");
+    }
+
+    #[test]
     fn durable_workspace_lock_rejects_embedded_binding_entries() {
         let mut lock = AtoLock::default();
         lock.binding
@@ -468,9 +546,10 @@ mod tests {
             "resolved_targets".to_string(),
             json!([{"label": "default"}]),
         );
-        lock.resolution
-            .entries
-            .insert("closure".to_string(), json!({"kind": "metadata_only"}));
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"kind": "metadata_only", "status": "incomplete"}),
+        );
 
         let error = validate_durable_workspace_lock(&lock)
             .expect_err("missing process without unresolved marker must fail");
