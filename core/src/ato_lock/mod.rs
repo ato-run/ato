@@ -423,4 +423,77 @@ mod tests {
         assert!(CANONICAL_IDENTITY_EXCLUDED_SECTIONS.contains(&"attestations"));
         assert!(CANONICAL_IDENTITY_EXCLUDED_SECTIONS.contains(&"signatures"));
     }
+
+    #[test]
+    fn structural_validation_accepts_native_delivery_contract() {
+        let mut lock = sample_lock();
+        lock.contract.entries.insert(
+            "delivery".to_string(),
+            json!({
+                "mode": "source-derivation",
+                "artifact": {
+                    "kind": "desktop-native",
+                    "framework": "tauri",
+                    "target": "darwin/arm64",
+                    "path": "dist/MyApp.app",
+                    "canonical_build_input": false,
+                    "provenance_limited": false,
+                    "reproducibility": "closure-tracked-build"
+                },
+                "build": {
+                    "kind": "native-delivery",
+                    "requires_build_closure": true,
+                    "closure_status": "complete"
+                },
+                "finalize": {
+                    "tool": "codesign",
+                    "args": ["--deep", "--force"],
+                    "host_local": true
+                },
+                "install": {
+                    "kind": "local-derivation",
+                    "host_local": true,
+                    "requires_local_derivation": true
+                },
+                "projection": {
+                    "kind": "launcher-surface",
+                    "host_local": true
+                }
+            }),
+        );
+
+        assert!(validate_structural_strict(&lock).is_ok());
+    }
+
+    #[test]
+    fn structural_validation_rejects_invalid_native_delivery_contract() {
+        let mut lock = sample_lock();
+        lock.contract.entries.insert(
+            "delivery".to_string(),
+            json!({
+                "mode": "artifact-import",
+                "artifact": {
+                    "kind": "desktop-native",
+                    "canonical_build_input": false,
+                    "provenance_limited": false
+                },
+                "install": {
+                    "kind": "local-derivation",
+                    "host_local": true,
+                    "requires_local_derivation": true
+                },
+                "projection": {
+                    "kind": "launcher-surface",
+                    "host_local": true
+                }
+            }),
+        );
+
+        let errors = validate_structural_strict(&lock).expect_err("delivery should be invalid");
+        assert!(errors.iter().any(|error| {
+            error
+                .to_string()
+                .contains("provenance_limited must be true for artifact-import")
+        }));
+    }
 }

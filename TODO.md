@@ -146,32 +146,32 @@
 
 ### 分けたい mode
 
-- [ ] `source-derivation`
+- [x] `source-derivation`
   - source project から build closure を固定して native artifact を生成する本命モード
-- [ ] `source-draft`
+- [x] `source-draft`
   - inference 済みだが closure 未解決で build 不可な draft モード
-- [ ] `artifact-import`
+- [x] `artifact-import`
   - `.app` / `.exe` / AppImage など既存ビルド成果物を imported artifact として扱うモード
 
 ### やること
 
-- [ ] `.app` / `.exe` / AppImage / `.dmg` を canonical build input と見なさないルールを明文化する
-- [ ] imported artifact は provenance-limited / impurity-bearing mode であることを明記する
-- [ ] desktop native-delivery canonical contract の top-level 論理セクションを整理する
-  - [ ] `contract.delivery.artifact`
-  - [ ] `contract.delivery.build`
-  - [ ] `contract.delivery.finalize`
-  - [ ] `contract.delivery.install`
-  - [ ] `contract.delivery.projection`
-- [ ] `process` だけでは表現できない desktop delivery semantics を contract に昇格する
-- [ ] source-derivation mode で何を resolve 完了と見なすか定義する
-- [ ] artifact-import mode で何を再現性 claim しないか明記する
+- [x] `.app` / `.exe` / AppImage / `.dmg` を canonical build input と見なさないルールを明文化する
+- [x] imported artifact は provenance-limited / impurity-bearing mode であることを明記する
+- [x] desktop native-delivery canonical contract の top-level 論理セクションを整理する
+  - [x] `contract.delivery.artifact`
+  - [x] `contract.delivery.build`
+  - [x] `contract.delivery.finalize`
+  - [x] `contract.delivery.install`
+  - [x] `contract.delivery.projection`
+- [x] `process` だけでは表現できない desktop delivery semantics を contract に昇格する
+- [x] source-derivation mode で何を resolve 完了と見なすか定義する
+- [x] artifact-import mode で何を再現性 claim しないか明記する
 
 ### 完了条件
 
-- desktop native-delivery の “本命” と “import compatibility path” が混ざらない
-- README / ADR / 実装で `.app` import の位置づけが一致する
-- desktop native-delivery でも lock-first canonical model が成立する
+- [x] desktop native-delivery の “本命” と “import compatibility path” が混ざらない
+- [x] README / ADR / 実装で `.app` import の位置づけが一致する
+- [x] desktop native-delivery でも lock-first canonical model が成立する
 
 ---
 
