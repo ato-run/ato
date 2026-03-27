@@ -63,6 +63,44 @@ These belong to `binding`, host-local state, or later approval flow.
 
 This ADR does not change the bidirectional hourglass pipeline defined in [docs/current-spec.md](docs/current-spec.md). It defines how source inputs are converted into canonical lock state before downstream execution semantics continue.
 
+## 2.1 Implementation Status (2026-03-27)
+
+This ADR is still `Proposed`, but large parts of the core handoff are already implemented. The purpose of this section is to separate current implementation fact from still-target design.
+
+Implemented:
+
+- a shared source inference engine exists and handles `SourceEvidence`, `DraftLock`, and `CanonicalLock` through a common infer -> resolve -> materialize entrypoint
+- canonical `ato.lock.json` input is reused as authoritative lock-shaped state rather than being semantically re-inferred
+- `ato run` performs attempt-scoped materialization by generating an attempt-local `ato.lock.json` plus provenance sidecar before entering downstream execution flow
+- `ato init` performs workspace-scoped materialization by writing durable `ato.lock.json` plus workspace-local `.ato/source-inference/provenance.json`, `.ato/source-inference/provenance-cache.json`, and `.ato/binding/seed.json`
+- equal-rank process ambiguity is handled fail-closed: `run` requires selection or fails, while durable output may preserve unresolved markers
+- execution-critical preconditions are enforced before `run` proceeds: `contract.process`, `resolution.runtime`, `resolution.resolved_targets`, and `resolution.closure` must be present
+- compatibility inputs are already funneled through the shared source inference handoff instead of remaining fully separate ad hoc execution paths
+
+Implemented but still partial:
+
+- the infer / resolve / materialize split now exists as explicit phase-oriented code paths: infer builds draft lock-shaped state and candidates, resolve performs deterministic promotion such as closure normalization and native-delivery build-derive, and materialize is the only phase that prepares single-script temporary workspaces or writes durable sidecars
+- compatibility import is now treated as an import-side draft handoff instead of source heuristic reinference, and canonical lock input skips source candidate generation during infer
+- equal-ranked candidate handling is deterministic (`score desc -> label asc -> entrypoint asc`) and remains fail-closed via unresolved markers plus selection gate
+- downstream run/validate preparation now consumes materialized lock-derived bridge manifests instead of carrying source-origin manifest semantics as execute authority
+- downstream lock-first consumption has progressed, but migration is still in flight and some compatibility helpers and transitional bridge artifacts remain
+- durable output validation already requires execution-critical fields or explicit unresolved markers, but the semantic depth of some resolved fields is intentionally shallow
+- `resolution.closure` currently normalizes into an explicit `kind`/`status` envelope; `metadata_only` remains allowed as `status = incomplete`, which satisfies lock-shaped handoff but does not yet represent a fully specified execution closure
+- `build_closure.build_environment` currently uses array-based categories (`toolchains`, `package_managers`, `sdks`, `helper_tools`) so framework-specific producers can report multiple inputs without collapsing them into one scalar slot
+- provenance sidecars, selection-gate state, and inspect handoff are implemented, but they are still internal workspace state rather than a stabilized public schema
+
+Not yet implemented:
+
+- approval-gated and script-capable resolution is still placeholder-only; approval-required paths fail closed and explicit approval mode is not implemented yet
+- general sandbox-assisted closure completion and safe promotion of generated ecosystem lockfiles into durable workspace state is not implemented as a complete policy
+- some transitional install/build helpers still own bootstrap and preparation concerns outside the source inference core, even though execute authority now enters downstream through materialized lock-derived bridge manifests
+- `closure_digest` is computed from the normalized `resolution.closure` envelope only when the closure is digestable and `status = complete`; incomplete metadata-only closure state does not produce a digest
+- compatibility import can now emit `imported_artifact_closure` for an existing `.app` bundle on disk, and native-delivery source-derivation can promote an incomplete closure into `build_closure`; broader imported-artifact coverage across `.exe` / AppImage and richer closure completion remain future work
+- the ADR-level goal of a fully explicit Ato-native closure/store/materialization model remains future work
+- remote-source acquisition semantics, workspace ownership rules, and complete onboarding UX remain outside the implemented source inference core
+
+When updating this ADR, keep this split current. Do not describe a target behavior as if it were already true unless it is either implemented or explicitly marked as future work here.
+
 ## 3. Definitions
 
 ### 3.1 Infer
