@@ -87,6 +87,9 @@ Implemented but still partial:
 - durable output validation already requires execution-critical fields or explicit unresolved markers, but the semantic depth of some resolved fields is intentionally shallow
 - `resolution.closure` currently normalizes into an explicit `kind`/`status` envelope; `metadata_only` remains allowed as `status = incomplete`, which satisfies lock-shaped handoff but does not yet represent a fully specified execution closure
 - `build_closure.build_environment` currently uses array-based categories (`toolchains`, `package_managers`, `sdks`, `helper_tools`) so framework-specific producers can report multiple inputs without collapsing them into one scalar slot
+- desktop native-delivery mode separation now appears in canonical contract state as `contract.delivery.mode = source-draft | source-derivation | artifact-import`
+- compatibility import emits `contract.delivery.mode = artifact-import` for existing `.app` bundles, while native-delivery draft locks emit `source-draft` and resolve promotion upgrades them to `source-derivation`
+- `contract.delivery.artifact.canonical_build_input` is fixed to `false` for imported artifacts and native build outputs; `.app` / `.exe` / AppImage / `.dmg` are not canonical build inputs
 - provenance sidecars, selection-gate state, and inspect handoff are implemented, but they are still internal workspace state rather than a stabilized public schema
 
 Not yet implemented:

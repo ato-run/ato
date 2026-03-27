@@ -306,6 +306,89 @@ entrypoint = "dist/MyApp.app"
                     .as_deref()
                     .is_some_and(|note| note.contains("provenance is intentionally limited"))
         }));
+        let delivery = result
+            .draft_lock
+            .contract
+            .entries
+            .get("delivery")
+            .expect("contract.delivery");
+        assert_eq!(
+            delivery.get("mode").and_then(Value::as_str),
+            Some("artifact-import")
+        );
+        let delivery_artifact = delivery
+            .get("artifact")
+            .and_then(Value::as_object)
+            .expect("delivery artifact");
+        assert_eq!(
+            delivery_artifact
+                .get("canonical_build_input")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            delivery_artifact
+                .get("provenance_limited")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn native_delivery_manifest_emits_source_draft_contract() {
+        let dir = tempdir().expect("tempdir");
+        write_manifest(
+            dir.path(),
+            r#"schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source"
+driver = "native"
+entrypoint = "pnpm"
+cmd = ["build"]
+working_dir = "."
+
+[artifact]
+framework = "tauri"
+stage = "unsigned"
+target = "darwin/arm64"
+input = "src-tauri/target/release/bundle/macos/MyApp.app"
+
+[finalize]
+tool = "codesign"
+args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/macos/MyApp.app"]
+"#,
+        );
+
+        let result = compile_from_dir(dir.path());
+        let delivery = result
+            .draft_lock
+            .contract
+            .entries
+            .get("delivery")
+            .expect("contract.delivery");
+        assert_eq!(
+            delivery.get("mode").and_then(Value::as_str),
+            Some("source-draft")
+        );
+        assert_eq!(
+            delivery
+                .get("build")
+                .and_then(|value| value.get("closure_status"))
+                .and_then(Value::as_str),
+            Some("incomplete")
+        );
+        assert_eq!(
+            delivery
+                .get("artifact")
+                .and_then(|value| value.get("canonical_build_input"))
+                .and_then(Value::as_bool),
+            Some(false)
+        );
     }
 
     #[test]
