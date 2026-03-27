@@ -768,6 +768,7 @@ pub(super) fn text_dependency_present(contents: &str, dependency: &str) -> bool 
 fn node_package_manager_label(package_manager: NodePackageManager) -> &'static str {
     match package_manager {
         NodePackageManager::Bun => "bun",
+        NodePackageManager::Deno => "deno",
         NodePackageManager::Npm => "npm",
         NodePackageManager::Pnpm => "pnpm",
         NodePackageManager::Yarn => "yarn",

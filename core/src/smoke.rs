@@ -585,6 +585,50 @@ fn prepare_smoke_working_directory(
     isolated_env: &HostIsolationContext,
 ) -> std::result::Result<(), SmokeFailureReport> {
     let cwd_path = resolve_path(root, &service.cwd);
+    if service.executable.trim() == "uv" && cwd_path.join("uv.lock").exists() {
+        let install_dir = cwd_path.join(".ato-smoke-site-packages");
+        if !install_dir.exists() {
+            let mut command = Command::new("uv");
+            command.args([
+                "pip",
+                "sync",
+                "uv.lock",
+                "--python",
+                "python3",
+                "--target",
+                ".ato-smoke-site-packages",
+            ]);
+            if let Some(uv_cache_dir) = resolve_bundled_uv_cache_dir(root, service) {
+                command.args(["--cache-dir", &uv_cache_dir]);
+            }
+            command.current_dir(&cwd_path);
+            command.stdin(Stdio::null());
+            command.stdout(Stdio::null());
+            command.stderr(Stdio::piped());
+            apply_isolated_command_env(&mut command, root, service, isolated_env);
+
+            let output = command.output().map_err(|err| {
+                SmokeFailureReport::new(
+                    SmokeFailureClass::SpawnFailed,
+                    format!("failed to prepare python smoke dependencies: {err}"),
+                    "",
+                    None,
+                )
+            })?;
+            if !output.status.success() {
+                return Err(SmokeFailureReport::new(
+                    SmokeFailureClass::SpawnFailed,
+                    format!(
+                        "smoke python dependency preparation failed (status {}): uv pip sync",
+                        output.status
+                    ),
+                    String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                    output.status.code(),
+                ));
+            }
+        }
+    }
+
     let package_json = cwd_path.join("package.json");
     let node_modules = cwd_path.join("node_modules");
     if !package_json.exists() || node_modules.exists() {
@@ -593,8 +637,6 @@ fn prepare_smoke_working_directory(
 
     let install = if cwd_path.join("pnpm-lock.yaml").exists() {
         Some(("pnpm", vec!["install", "--frozen-lockfile"]))
-    } else if cwd_path.join("yarn.lock").exists() {
-        Some(("yarn", vec!["install", "--frozen-lockfile"]))
     } else if cwd_path.join("package-lock.json").exists() {
         Some(("npm", vec!["ci"]))
     } else if cwd_path.join("bun.lock").exists() || cwd_path.join("bun.lockb").exists() {
@@ -722,6 +764,10 @@ fn apply_isolated_command_env(
     service: &MainService,
     isolated_env: &HostIsolationContext,
 ) {
+    let service_python_path = service
+        .env
+        .get("PYTHONPATH")
+        .map(|value| resolve_env_value(root, value));
     let extra_env = service
         .env
         .iter()
@@ -734,6 +780,44 @@ fn apply_isolated_command_env(
         )
         .collect::<Vec<_>>();
     isolated_env.apply_to_command(command, extra_env);
+
+    if let Some(uv_cache_dir) = resolve_bundled_uv_cache_dir(root, service) {
+        command.env("UV_CACHE_DIR", uv_cache_dir);
+    }
+    if let Some(site_packages) = resolve_smoke_site_packages_dir(root, service) {
+        let python_path = service_python_path
+            .map(|existing| format!("{}:{}", site_packages.display(), existing))
+            .unwrap_or_else(|| site_packages.display().to_string());
+        command.env("PYTHONPATH", python_path);
+    }
+}
+
+fn resolve_bundled_uv_cache_dir(root: &Path, service: &MainService) -> Option<String> {
+    let executable = service.executable.trim();
+    if executable != "uv" {
+        return None;
+    }
+
+    let cwd_path = resolve_path(root, &service.cwd);
+    for base in [cwd_path.join("artifacts"), root.join("artifacts")] {
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let candidate = entry.path().join("uv-cache");
+            if candidate.is_dir() {
+                return Some(candidate.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    None
+}
+
+fn resolve_smoke_site_packages_dir(root: &Path, service: &MainService) -> Option<PathBuf> {
+    let cwd_path = resolve_path(root, &service.cwd);
+    let site_packages = cwd_path.join(".ato-smoke-site-packages");
+    site_packages.is_dir().then_some(site_packages)
 }
 
 fn kill_child(child: &mut Child) -> Result<(), CapsuleError> {
@@ -1102,41 +1186,77 @@ startup_timeout_ms = 0
     }
 
     #[test]
-    fn prepare_smoke_working_directory_installs_yarn_dependencies_when_missing() {
+    fn apply_isolated_command_env_prefers_bundled_uv_cache() {
         let temp = tempfile::tempdir().expect("tempdir");
         let source_dir = temp.path().join("source");
-        fs::create_dir_all(&source_dir).expect("mkdir source");
-        fs::write(source_dir.join("package.json"), "{}\n").expect("write package.json");
-        fs::write(source_dir.join("yarn.lock"), "# yarn lockfile v1\n").expect("write yarn lock");
+        let cache_dir = source_dir.join("artifacts").join("app").join("uv-cache");
+        fs::create_dir_all(&cache_dir).expect("mkdir uv-cache");
 
-        let bin_dir = temp.path().join("bin");
-        fs::create_dir_all(&bin_dir).expect("mkdir bin");
-        let yarn_path = bin_dir.join("yarn");
-        fs::write(&yarn_path, "#!/bin/sh\nmkdir -p node_modules\nexit 0\n")
-            .expect("write fake yarn");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&yarn_path).expect("stat yarn").permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&yarn_path, perms).expect("chmod yarn");
-        }
-
-        let _path_guard = PathGuard::prepend(&bin_dir);
         let service = MainService {
-            executable: "sh".to_string(),
-            args: vec!["-c".to_string(), "echo ok".to_string()],
+            executable: "uv".to_string(),
+            args: vec!["run".to_string(), "--offline".to_string()],
             cwd: "source".to_string(),
             env: HashMap::new(),
             ports: HashMap::new(),
             health_port: None,
         };
+
         let isolated_env = prepare_isolated_host_environment(temp.path()).expect("isolated env");
+        let mut command = Command::new("env");
 
-        prepare_smoke_working_directory(temp.path(), &service, &isolated_env)
-            .expect("prepare deps");
+        apply_isolated_command_env(&mut command, temp.path(), &service, &isolated_env);
 
-        assert!(source_dir.join("node_modules").is_dir());
+        let envs = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().to_string(),
+                    value.map(|v| v.to_string_lossy().to_string()),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(
+            envs.get("UV_CACHE_DIR").and_then(|value| value.clone()),
+            Some(cache_dir.to_string_lossy().to_string())
+        );
+    }
+
+    #[test]
+    fn apply_isolated_command_env_adds_smoke_site_packages_to_pythonpath() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_dir = temp.path().join("source");
+        let site_packages = source_dir.join(".ato-smoke-site-packages");
+        fs::create_dir_all(&site_packages).expect("mkdir site-packages");
+
+        let service = MainService {
+            executable: "uv".to_string(),
+            args: vec!["run".to_string(), "--offline".to_string()],
+            cwd: "source".to_string(),
+            env: HashMap::new(),
+            ports: HashMap::new(),
+            health_port: None,
+        };
+
+        let isolated_env = prepare_isolated_host_environment(temp.path()).expect("isolated env");
+        let mut command = Command::new("env");
+
+        apply_isolated_command_env(&mut command, temp.path(), &service, &isolated_env);
+
+        let envs = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().to_string(),
+                    value.map(|v| v.to_string_lossy().to_string()),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(
+            envs.get("PYTHONPATH").and_then(|value| value.clone()),
+            Some(site_packages.to_string_lossy().to_string())
+        );
     }
 
     #[cfg(unix)]

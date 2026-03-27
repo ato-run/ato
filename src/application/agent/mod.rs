@@ -1486,15 +1486,15 @@ mod tests {
     fn test_plan(dir: &Path, manifest: &str) -> ManifestData {
         let manifest_path = dir.join("capsule.toml");
         std::fs::write(&manifest_path, manifest).expect("manifest");
-        ManifestData {
-            manifest: toml::from_str(&std::fs::read_to_string(&manifest_path).expect("read"))
-                .expect("parse"),
+        capsule_core::router::execution_descriptor_from_manifest_parts(
+            toml::from_str(&std::fs::read_to_string(&manifest_path).expect("read")).expect("parse"),
             manifest_path,
-            manifest_dir: dir.to_path_buf(),
-            profile: ExecutionProfile::Dev,
-            selected_target: "app".to_string(),
-            state_source_overrides: HashMap::new(),
-        }
+            dir.to_path_buf(),
+            ExecutionProfile::Dev,
+            Some("app"),
+            HashMap::new(),
+        )
+        .expect("execution descriptor")
     }
 
     #[test]

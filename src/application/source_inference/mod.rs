@@ -1,19 +1,9 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-use anyhow::{Context, Result};
-use capsule_core::ato_lock::{self, AtoLock, UnresolvedReason, UnresolvedValue};
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::input_resolver::{
-    ResolvedCanonicalLock, ResolvedCompatibilityProject, ResolvedSourceOnly, ATO_LOCK_FILE_NAME,
-};
-use capsule_core::CapsuleReporter;
-use serde::Serialize;
-use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::application::compat_import::{
     compile_compatibility_project, CompatibilityCompileResult, CompatibilityDiagnostic,
@@ -26,8 +16,18 @@ use crate::project::init::detect::{
 };
 use crate::project::init::recipe::{project_info_from_detection, ProjectInfo};
 use crate::reporters::CliReporter;
+use anyhow::{Context, Result};
+use capsule_core::ato_lock::{self, AtoLock, UnresolvedReason, UnresolvedValue};
+use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::input_resolver::{
+    ResolvedCanonicalLock, ResolvedCompatibilityProject, ResolvedSingleScript, ResolvedSourceOnly,
+    SingleScriptLanguage, ATO_LOCK_FILE_NAME,
+};
+use capsule_core::CapsuleReporter;
+use regex::Regex;
+use serde::Serialize;
+use serde_json::{json, Value};
 
-const RUN_GENERATED_MANIFEST_NAME: &str = ".ato.run.generated.capsule.toml";
 const RUN_SOURCE_INFERENCE_DIR: &str = ".tmp/source-inference";
 
 #[derive(Debug, Clone)]
@@ -165,8 +165,7 @@ pub(crate) struct SourceInferenceDiagnostic {
 #[derive(Debug, Clone)]
 pub(crate) struct RunMaterialization {
     pub(crate) project_root: PathBuf,
-    pub(crate) manifest_path: PathBuf,
-    pub(crate) bridge_manifest_sha256: String,
+    pub(crate) raw_manifest: Option<toml::Value>,
     pub(crate) lock: AtoLock,
     pub(crate) lock_path: PathBuf,
 }
@@ -206,12 +205,462 @@ pub(crate) fn materialize_run_from_source_only(
     reporter: Arc<CliReporter>,
     assume_yes: bool,
 ) -> Result<RunMaterialization> {
+    let mut scope = scope;
+    let project_root = if let Some(script) = source.single_script.as_ref() {
+        prepare_single_script_workspace(script, scope.as_deref_mut())?
+    } else {
+        source.project_root.clone()
+    };
     let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
-        project_root: source.project_root.clone(),
+        project_root: project_root.clone(),
     });
     let result =
         execute_shared_engine(input, MaterializationMode::RunAttempt, assume_yes, reporter)?;
-    materialize_run_result(&source.project_root, result, scope, None)
+    materialize_run_result(&project_root, result, scope, None)
+}
+
+fn prepare_single_script_workspace(
+    script: &ResolvedSingleScript,
+    scope: Option<&mut CleanupScope>,
+) -> Result<PathBuf> {
+    match script.language {
+        SingleScriptLanguage::Python => prepare_python_single_script_workspace(script, scope),
+        SingleScriptLanguage::TypeScript | SingleScriptLanguage::JavaScript => {
+            prepare_deno_single_script_workspace(script, scope)
+        }
+    }
+}
+
+fn prepare_durable_source_workspace(source: &ResolvedSourceOnly) -> Result<PathBuf> {
+    if let Some(script) = source.single_script.as_ref() {
+        match script.language {
+            SingleScriptLanguage::Python => {
+                prepare_durable_python_single_script_workspace(script, &source.project_root)?;
+            }
+            SingleScriptLanguage::TypeScript | SingleScriptLanguage::JavaScript => {
+                prepare_durable_deno_single_script_workspace(script, &source.project_root)?;
+            }
+        }
+    }
+
+    Ok(source.project_root.clone())
+}
+
+fn prepare_python_single_script_workspace(
+    script: &ResolvedSingleScript,
+    scope: Option<&mut CleanupScope>,
+) -> Result<PathBuf> {
+    let parent = script
+        .path
+        .parent()
+        .context("single-file script path must have a parent directory")?;
+    let temp_root = parent.join(".tmp").join(format!(
+        "ato-single-python-{}-{}",
+        script
+            .path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("script"),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    ));
+    fs::create_dir_all(&temp_root)
+        .with_context(|| format!("failed to create virtual workspace {}", temp_root.display()))?;
+    if let Some(scope) = scope {
+        scope.register_remove_dir(temp_root.clone());
+    }
+
+    let script_text = fs::read_to_string(&script.path)
+        .with_context(|| format!("failed to read script {}", script.path.display()))?;
+    let metadata = parse_pep723_python_metadata(&script_text)?;
+
+    fs::write(temp_root.join("main.py"), script_text)
+        .with_context(|| format!("failed to write virtual script {}", temp_root.display()))?;
+
+    if !metadata.dependencies.is_empty() {
+        fs::write(
+            temp_root.join("requirements.txt"),
+            format!("{}\n", metadata.dependencies.join("\n")),
+        )
+        .with_context(|| {
+            format!(
+                "failed to write requirements.txt in {}",
+                temp_root.display()
+            )
+        })?;
+    }
+
+    let pyproject = python_pyproject_for_single_script(&metadata);
+    fs::write(temp_root.join("pyproject.toml"), pyproject)
+        .with_context(|| format!("failed to write pyproject.toml in {}", temp_root.display()))?;
+
+    generate_uv_lock_for_single_script(&temp_root)?;
+
+    Ok(temp_root)
+}
+
+fn prepare_durable_python_single_script_workspace(
+    script: &ResolvedSingleScript,
+    project_root: &Path,
+) -> Result<()> {
+    let script_text = fs::read_to_string(&script.path)
+        .with_context(|| format!("failed to read script {}", script.path.display()))?;
+    let metadata = parse_pep723_python_metadata(&script_text)?;
+    let entrypoint_path = project_root.join("main.py");
+
+    if script.path != entrypoint_path {
+        write_if_absent_or_same(&entrypoint_path, &script_text)?;
+    }
+
+    let pyproject = python_pyproject_for_single_script(&metadata);
+    write_if_absent_or_same(&project_root.join("pyproject.toml"), &pyproject)?;
+
+    generate_uv_lock_for_single_script(project_root)
+}
+
+fn generate_uv_lock_for_single_script(project_root: &Path) -> Result<()> {
+    let output = std::process::Command::new("uv")
+        .arg("lock")
+        .current_dir(project_root)
+        .output()
+        .with_context(|| format!("failed to execute uv lock in {}", project_root.display()))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "failed to generate uv.lock for single-file Python script (status {}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+}
+
+fn prepare_deno_single_script_workspace(
+    script: &ResolvedSingleScript,
+    scope: Option<&mut CleanupScope>,
+) -> Result<PathBuf> {
+    let parent = script
+        .path
+        .parent()
+        .context("single-file script path must have a parent directory")?;
+    let temp_root = parent.join(".tmp").join(format!(
+        "ato-single-ts-{}-{}",
+        script
+            .path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("script"),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    ));
+    fs::create_dir_all(&temp_root)
+        .with_context(|| format!("failed to create virtual workspace {}", temp_root.display()))?;
+    if let Some(scope) = scope {
+        scope.register_remove_dir(temp_root.clone());
+    }
+
+    let script_text = fs::read_to_string(&script.path)
+        .with_context(|| format!("failed to read script {}", script.path.display()))?;
+    let metadata = parse_deno_script_metadata(&script_text, &script.path);
+    let entrypoint = deno_single_script_entrypoint_name(&script.path);
+    fs::write(temp_root.join(entrypoint), script_text)
+        .with_context(|| format!("failed to write virtual script {}", temp_root.display()))?;
+    let deno_json = deno_json_for_single_script(&metadata);
+    fs::write(
+        temp_root.join("deno.json"),
+        serde_json::to_string_pretty(&deno_json)
+            .context("failed to serialize deno.json for single-file Deno script")?
+            + "\n",
+    )
+    .with_context(|| format!("failed to write deno.json in {}", temp_root.display()))?;
+
+    generate_deno_lock_for_single_script(&temp_root, entrypoint)?;
+
+    Ok(temp_root)
+}
+
+fn prepare_durable_deno_single_script_workspace(
+    script: &ResolvedSingleScript,
+    project_root: &Path,
+) -> Result<()> {
+    let script_text = fs::read_to_string(&script.path)
+        .with_context(|| format!("failed to read script {}", script.path.display()))?;
+    let metadata = parse_deno_script_metadata(&script_text, &script.path);
+    let entrypoint = deno_single_script_entrypoint_name(&script.path);
+    let entrypoint_path = project_root.join(entrypoint);
+
+    if script.path != entrypoint_path {
+        write_if_absent_or_same(&entrypoint_path, &script_text)?;
+    }
+
+    let deno_json_raw = serde_json::to_string_pretty(&deno_json_for_single_script(&metadata))
+        .context("failed to serialize deno.json for durable single-file Deno init")?
+        + "\n";
+    write_if_absent_or_same(&project_root.join("deno.json"), &deno_json_raw)?;
+
+    generate_deno_lock_for_single_script(project_root, entrypoint)
+}
+
+fn write_if_absent_or_same(path: &Path, content: &str) -> Result<()> {
+    if path.exists() {
+        let existing = fs::read_to_string(path)
+            .with_context(|| format!("failed to read existing {}", path.display()))?;
+        if existing == content {
+            return Ok(());
+        }
+
+        anyhow::bail!(
+            "refusing to overwrite existing file during durable single-file init: {}",
+            path.display()
+        );
+    }
+
+    fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn generate_deno_lock_for_single_script(project_root: &Path, entrypoint: &str) -> Result<()> {
+    let output = std::process::Command::new("deno")
+        .args(["cache", "--lock=deno.lock", entrypoint])
+        .current_dir(project_root)
+        .output()
+        .with_context(|| format!("failed to execute deno cache in {}", project_root.display()))?;
+
+    if output.status.success() {
+        if project_root.join("deno.lock").exists() {
+            return Ok(());
+        }
+
+        fs::write(project_root.join("deno.lock"), "{}\n").with_context(|| {
+            format!(
+                "deno cache succeeded but failed to synthesize empty deno.lock for {}",
+                project_root.display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "failed to generate deno.lock for single-file Deno script (status {}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    anyhow::bail!(
+        "deno cache finished without creating deno.lock for {}",
+        project_root.display()
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DenoScriptMetadata {
+    is_jsx: bool,
+    jsx_import_source: Option<String>,
+    bare_imports: BTreeMap<String, String>,
+}
+
+fn is_deno_jsx_script(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case("tsx") || value.eq_ignore_ascii_case("jsx"))
+        .unwrap_or(false)
+}
+
+fn deno_single_script_entrypoint_name(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("tsx") => "main.tsx",
+        Some("js") => "main.js",
+        Some("jsx") => "main.jsx",
+        _ => "main.ts",
+    }
+}
+
+fn parse_deno_script_metadata(script_text: &str, path: &Path) -> DenoScriptMetadata {
+    let jsx_import_source = script_text.lines().find_map(|line| {
+        let marker = "@jsxImportSource";
+        let index = line.find(marker)?;
+        let value = line[index + marker.len()..]
+            .trim()
+            .trim_end_matches("*/")
+            .trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    });
+
+    DenoScriptMetadata {
+        is_jsx: is_deno_jsx_script(path),
+        jsx_import_source,
+        bare_imports: infer_deno_bare_imports(script_text),
+    }
+}
+
+fn deno_json_for_single_script(metadata: &DenoScriptMetadata) -> serde_json::Value {
+    let mut root = serde_json::Map::new();
+
+    if !metadata.bare_imports.is_empty() {
+        root.insert(
+            "imports".to_string(),
+            serde_json::to_value(&metadata.bare_imports).unwrap_or_else(|_| json!({})),
+        );
+    }
+
+    if metadata.is_jsx {
+        root.insert(
+            "compilerOptions".to_string(),
+            json!({
+                "jsx": "react-jsx",
+                "jsxImportSource": metadata
+                    .jsx_import_source
+                    .clone()
+                    .unwrap_or_else(|| "npm:react".to_string()),
+            }),
+        );
+    }
+
+    Value::Object(root)
+}
+
+fn infer_deno_bare_imports(script_text: &str) -> BTreeMap<String, String> {
+    let mut imports = BTreeMap::new();
+    for specifier in extract_script_import_specifiers(script_text) {
+        if !is_bare_dependency_specifier(&specifier) {
+            continue;
+        }
+        imports.insert(specifier.clone(), format!("npm:{specifier}"));
+    }
+    imports
+}
+
+fn extract_script_import_specifiers(script_text: &str) -> Vec<String> {
+    let patterns = [
+        r#"(?m)\b(?:import|export)\s[^\n;]*?\bfrom\s*[\"']([^\"']+)[\"']"#,
+        r#"(?m)^\s*import\s*[\"']([^\"']+)[\"']"#,
+        r#"(?m)\bimport\s*\(\s*[\"']([^\"']+)[\"']\s*\)"#,
+        r#"(?m)\brequire\s*\(\s*[\"']([^\"']+)[\"']\s*\)"#,
+    ];
+    let mut specifiers = Vec::new();
+
+    for pattern in patterns {
+        let regex = Regex::new(pattern).expect("static import regex must compile");
+        for captures in regex.captures_iter(script_text) {
+            if let Some(specifier) = captures.get(1) {
+                specifiers.push(specifier.as_str().to_string());
+            }
+        }
+    }
+
+    specifiers.sort();
+    specifiers.dedup();
+    specifiers
+}
+
+fn is_bare_dependency_specifier(specifier: &str) -> bool {
+    let trimmed = specifier.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    !(trimmed.starts_with("./")
+        || trimmed.starts_with("../")
+        || trimmed.starts_with('/')
+        || trimmed.starts_with("#")
+        || trimmed.contains("://")
+        || trimmed.starts_with("npm:")
+        || trimmed.starts_with("jsr:")
+        || trimmed.starts_with("node:")
+        || trimmed.starts_with("file:")
+        || trimmed.starts_with("data:"))
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Pep723PythonMetadata {
+    dependencies: Vec<String>,
+    requires_python: Option<String>,
+}
+
+fn python_pyproject_for_single_script(metadata: &Pep723PythonMetadata) -> String {
+    let mut pyproject =
+        String::from("[project]\nname = \"ato-single-script\"\nversion = \"0.1.0\"\n");
+    if let Some(requires_python) = metadata.requires_python.as_deref() {
+        pyproject.push_str(&format!("requires-python = \"{}\"\n", requires_python));
+    }
+    if !metadata.dependencies.is_empty() {
+        pyproject.push_str("dependencies = [\n");
+        for dependency in &metadata.dependencies {
+            pyproject.push_str(&format!("  \"{}\",\n", dependency));
+        }
+        pyproject.push_str("]\n");
+    }
+    pyproject
+}
+
+fn parse_pep723_python_metadata(script_text: &str) -> Result<Pep723PythonMetadata> {
+    let mut in_block = false;
+    let mut block = Vec::new();
+
+    for line in script_text.lines() {
+        let trimmed = line.trim_start();
+        if !in_block {
+            if trimmed == "# /// script" {
+                in_block = true;
+            }
+            continue;
+        }
+
+        if trimmed == "# ///" {
+            let block_text = block.join("\n");
+            if block_text.trim().is_empty() {
+                return Ok(Pep723PythonMetadata::default());
+            }
+            let value: toml::Value = toml::from_str(&block_text)
+                .with_context(|| "failed to parse PEP 723 script metadata block")?;
+            let dependencies = value
+                .get("dependencies")
+                .and_then(toml::Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(toml::Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let requires_python = value
+                .get("requires-python")
+                .and_then(toml::Value::as_str)
+                .map(str::to_string);
+            return Ok(Pep723PythonMetadata {
+                dependencies,
+                requires_python,
+            });
+        }
+
+        let content = trimmed
+            .strip_prefix("# ")
+            .or_else(|| trimmed.strip_prefix('#'))
+            .ok_or_else(|| anyhow::anyhow!("invalid PEP 723 metadata line: {}", line))?;
+        block.push(content.to_string());
+    }
+
+    if in_block {
+        anyhow::bail!("unterminated PEP 723 script metadata block");
+    }
+
+    Ok(Pep723PythonMetadata::default())
 }
 
 pub(crate) fn materialize_run_from_canonical_lock(
@@ -259,13 +708,27 @@ pub(crate) fn materialize_run_from_compatibility(
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn execute_init_from_source_only(
     project_root: &Path,
     reporter: Arc<CliReporter>,
     assume_yes: bool,
 ) -> Result<WorkspaceMaterialization> {
-    let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
+    let source = ResolvedSourceOnly {
         project_root: project_root.to_path_buf(),
+        single_script: None,
+    };
+    execute_init_from_resolved_source_only(&source, reporter, assume_yes)
+}
+
+pub(crate) fn execute_init_from_resolved_source_only(
+    source: &ResolvedSourceOnly,
+    reporter: Arc<CliReporter>,
+    assume_yes: bool,
+) -> Result<WorkspaceMaterialization> {
+    let project_root = prepare_durable_source_workspace(source)?;
+    let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
+        project_root: project_root.clone(),
     });
     let result = execute_shared_engine(
         input,
@@ -273,7 +736,7 @@ pub(crate) fn execute_init_from_source_only(
         assume_yes,
         reporter,
     )?;
-    materialize_workspace_result(project_root, result)
+    materialize_workspace_result(&project_root, result)
 }
 
 pub(crate) fn execute_init_from_compatibility(
@@ -854,24 +1317,9 @@ fn materialize_run_result(
     let sidecar_path = run_state_dir.join("provenance.json");
     write_sidecar(&sidecar_path, &result, MaterializationMode::RunAttempt)?;
 
-    let manifest_path = project_root.join(RUN_GENERATED_MANIFEST_NAME);
-    let bridge_manifest_sha256 = write_generated_manifest(
-        &manifest_path,
-        &result.lock,
-        project_root,
-        original_manifest,
-    )?;
-    if let Some(scope) = scope.as_mut() {
-        scope.register({
-            let manifest_path = manifest_path.clone();
-            move || remove_file_action(manifest_path)
-        });
-    }
-
     Ok(RunMaterialization {
         project_root: project_root.to_path_buf(),
-        manifest_path,
-        bridge_manifest_sha256,
+        raw_manifest: original_manifest.cloned(),
         lock: result.lock,
         lock_path,
     })
@@ -882,380 +1330,6 @@ fn materialize_workspace_result(
     result: SourceInferenceResult,
 ) -> Result<WorkspaceMaterialization> {
     crate::project::init::materialize::materialize_workspace_result(project_root, result)
-}
-
-fn write_generated_manifest(
-    manifest_path: &Path,
-    lock: &AtoLock,
-    project_root: &Path,
-    original_manifest: Option<&toml::Value>,
-) -> Result<String> {
-    let process = lock.contract.entries.get("process").ok_or_else(|| {
-        AtoExecutionError::ambiguous_entrypoint(
-            "shared source inference could not produce a deterministic process manifest adapter",
-            explicit_candidates(lock),
-        )
-    })?;
-    let entrypoint = process
-        .get("entrypoint")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let run_command = process
-        .get("run_command")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if entrypoint.is_none() && run_command.is_none() {
-        return Err(AtoExecutionError::execution_contract_invalid(
-            "contract.process.entrypoint or contract.process.run_command is required for run materialization",
-            Some("contract.process"),
-            None,
-        )
-        .into());
-    }
-    let cmd_values = process
-        .get("cmd")
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .or_else(|| {
-            process.get("args").and_then(Value::as_array).map(|values| {
-                values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-            })
-        })
-        .unwrap_or_default();
-    let metadata = lock.contract.entries.get("metadata");
-    let name = metadata
-        .and_then(|value| value.get("name"))
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| {
-            project_root
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("source-app")
-        });
-    let version = metadata
-        .and_then(|value| value.get("version"))
-        .and_then(Value::as_str)
-        .unwrap_or("0.1.0");
-    let target = bridge_target_from_lock(lock, process)?;
-    let description = original_manifest
-        .and_then(|manifest| manifest.get("metadata"))
-        .and_then(|metadata| metadata.get("description"))
-        .and_then(toml_value_as_non_empty_string)
-        .unwrap_or("")
-        .to_string();
-
-    let top_level_repository = original_manifest
-        .and_then(|manifest| manifest.get("repository"))
-        .and_then(toml_value_as_non_empty_string);
-    let metadata_repository = original_manifest
-        .and_then(|manifest| manifest.get("metadata"))
-        .and_then(|metadata| metadata.get("repository"))
-        .and_then(toml_value_as_non_empty_string);
-
-    let mut raw = format!(
-        "schema_version = \"0.2\"\nname = {name:?}\nversion = {version:?}\ntype = \"app\"\ndefault_target = {default_target:?}\n",
-        default_target = target.label,
-    );
-    if let Some(repository) = top_level_repository {
-        raw.push_str(&format!("repository = {repository:?}\n"));
-    }
-    raw.push_str(&format!("\n[metadata]\ndescription = {description:?}\n",));
-    if let Some(repository) = metadata_repository {
-        raw.push_str(&format!("repository = {repository:?}\n"));
-    }
-    raw.push_str("\n[requirements]\n");
-    if let Some(network) = manifest_network_from_lock(lock) {
-        raw.push_str("\n[network]\n");
-        if !network.egress_allow.is_empty() {
-            raw.push_str("egress_allow = [");
-            raw.push_str(&string_array_literal(&network.egress_allow));
-            raw.push_str("]\n");
-        }
-        if !network.egress_id_allow.is_empty() {
-            raw.push_str("egress_id_allow = [");
-            raw.push_str(
-                &network
-                    .egress_id_allow
-                    .iter()
-                    .map(|rule| {
-                        format!(
-                            "{{ type = {:?}, value = {:?} }}",
-                            match rule.rule_type {
-                                capsule_core::types::EgressIdType::Ip => "ip",
-                                capsule_core::types::EgressIdType::Cidr => "cidr",
-                                capsule_core::types::EgressIdType::Spiffe => "spiffe",
-                            },
-                            rule.value
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            );
-            raw.push_str("]\n");
-        }
-    }
-    raw.push('\n');
-    raw.push_str(&format!(
-        "[targets.{label}]\nruntime = {runtime:?}\n",
-        label = target.label,
-        runtime = target.runtime,
-    ));
-    if let Some(run_command) = target.run_command.as_deref().or(run_command) {
-        raw.push_str(&format!("run_command = {run_command:?}\n"));
-    } else if let Some(entrypoint) = target.entrypoint.as_deref().or(entrypoint) {
-        raw.push_str(&format!("entrypoint = {entrypoint:?}\n"));
-    }
-    if let Some(driver) = target.driver.as_deref() {
-        raw.push_str(&format!("driver = {driver:?}\n"));
-    }
-    if let Some(runtime_version) = target.runtime_version.as_deref() {
-        raw.push_str(&format!("runtime_version = {runtime_version:?}\n"));
-    }
-    if let Some(port) = target.port {
-        raw.push_str(&format!("port = {port}\n"));
-    }
-    if let Some(working_dir) = target.working_dir.as_deref() {
-        raw.push_str(&format!("working_dir = {working_dir:?}\n"));
-    }
-    if !target.required_env.is_empty() {
-        raw.push_str("required_env = [");
-        raw.push_str(&string_array_literal(&target.required_env));
-        raw.push_str("]\n");
-    }
-    let effective_cmd = if cmd_values.is_empty() {
-        target.cmd.clone()
-    } else {
-        cmd_values
-    };
-    if !effective_cmd.is_empty() {
-        raw.push_str("cmd = [");
-        raw.push_str(
-            &effective_cmd
-                .iter()
-                .map(|value| format!("{value:?}"))
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        raw.push_str("]\n");
-    }
-    if let Some(original_manifest) = original_manifest {
-        append_table_section_from_manifest(&mut raw, original_manifest, "build")?;
-        append_table_section_from_manifest(&mut raw, original_manifest, "store")?;
-        append_table_section_from_manifest(&mut raw, original_manifest, "ipc")?;
-    }
-    raw.push_str("\n[storage]\n\n[routing]\n");
-
-    fs::write(manifest_path, &raw)
-        .with_context(|| format!("Failed to write {}", manifest_path.display()))?;
-    Ok(sha256_hex(raw.as_bytes()))
-}
-
-fn append_table_section_from_manifest(
-    raw: &mut String,
-    original_manifest: &toml::Value,
-    table_name: &str,
-) -> Result<()> {
-    let Some(table) = original_manifest.get(table_name) else {
-        return Ok(());
-    };
-
-    let mut wrapped = toml::map::Map::new();
-    wrapped.insert(table_name.to_string(), table.clone());
-    let table_toml = toml::to_string(&toml::Value::Table(wrapped)).with_context(|| {
-        format!(
-            "serialize preserved [{}] section for run bridge",
-            table_name
-        )
-    })?;
-    raw.push('\n');
-    raw.push_str(&table_toml);
-    Ok(())
-}
-
-fn toml_value_as_non_empty_string(value: &toml::Value) -> Option<&str> {
-    value
-        .as_str()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
-}
-
-#[derive(Debug, Clone)]
-struct BridgeTarget {
-    label: String,
-    runtime: String,
-    driver: Option<String>,
-    runtime_version: Option<String>,
-    entrypoint: Option<String>,
-    run_command: Option<String>,
-    cmd: Vec<String>,
-    required_env: Vec<String>,
-    port: Option<u64>,
-    working_dir: Option<String>,
-}
-
-fn bridge_target_from_lock(lock: &AtoLock, process: &Value) -> Result<BridgeTarget> {
-    let selected_target = selected_draft_target(lock);
-    let label = selected_target
-        .and_then(|value| value.get("label"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            lock.contract
-                .entries
-                .get("metadata")
-                .and_then(|value| value.get("default_target"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "cli".to_string());
-    let runtime = selected_target
-        .and_then(|value| value.get("runtime"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| "source".to_string());
-    let driver = selected_target
-        .and_then(|value| value.get("driver"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            lock.resolution
-                .entries
-                .get("runtime")
-                .and_then(|value| value.get("kind"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty() && *value != "source" && *value != runtime)
-                .map(str::to_string)
-        });
-    let runtime_version = selected_target
-        .and_then(|value| value.get("runtime_version"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            lock.resolution
-                .entries
-                .get("runtime")
-                .and_then(|value| value.get("version"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        });
-    let entrypoint = selected_target
-        .and_then(|value| value.get("entrypoint"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            process
-                .get("entrypoint")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        });
-    let run_command = selected_target
-        .and_then(|value| value.get("run_command"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            process
-                .get("run_command")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        });
-    let cmd = selected_target
-        .and_then(|value| value.get("cmd"))
-        .and_then(json_string_array)
-        .or_else(|| process.get("cmd").and_then(json_string_array))
-        .or_else(|| process.get("args").and_then(json_string_array))
-        .unwrap_or_default();
-    let required_env = selected_target
-        .and_then(|value| value.get("required_env"))
-        .and_then(json_string_array)
-        .unwrap_or_default();
-    let port = selected_target
-        .and_then(|value| value.get("port"))
-        .and_then(Value::as_u64);
-    let working_dir = selected_target
-        .and_then(|value| value.get("working_dir"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-
-    Ok(BridgeTarget {
-        label,
-        runtime,
-        driver,
-        runtime_version,
-        entrypoint,
-        run_command,
-        cmd,
-        required_env,
-        port,
-        working_dir,
-    })
-}
-
-fn manifest_network_from_lock(lock: &AtoLock) -> Option<capsule_core::types::NetworkConfig> {
-    lock.contract
-        .entries
-        .get("network")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-}
-
-fn json_string_array(value: &Value) -> Option<Vec<String>> {
-    let values = value.as_array()?;
-    Some(
-        values
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect(),
-    )
-}
-
-fn string_array_literal(values: &[String]) -> String {
-    values
-        .iter()
-        .map(|value| format!("{value:?}"))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 pub(crate) fn write_sidecar(
@@ -1428,23 +1502,43 @@ fn process_candidates_for_source(
                     candidates.extend(existing_candidates(
                         &detected.dir,
                         &[
+                            "src/main.tsx",
                             "src/index.ts",
                             "src/main.ts",
+                            "src/main.jsx",
+                            "src/index.jsx",
+                            "src/main.js",
+                            "src/index.js",
+                            "main.tsx",
                             "index.ts",
                             "main.ts",
+                            "main.jsx",
+                            "index.jsx",
                             "index.js",
                             "main.js",
                             "app.js",
                             "server.js",
                         ],
                         70,
-                        if node.is_bun {
+                        if matches!(node.package_manager, NodePackageManager::Deno) {
+                            "deno:file_layout"
+                        } else if node.is_bun {
                             "bun:file_layout"
                         } else {
                             "node:file_layout"
                         },
-                        if node.is_bun { "bun" } else { "node" },
-                        "well-known Node file layout used as deterministic fallback",
+                        if matches!(node.package_manager, NodePackageManager::Deno) {
+                            ""
+                        } else if node.is_bun {
+                            "bun"
+                        } else {
+                            "node"
+                        },
+                        if matches!(node.package_manager, NodePackageManager::Deno) {
+                            "well-known Deno file layout used as deterministic fallback"
+                        } else {
+                            "well-known Node file layout used as deterministic fallback"
+                        },
                     ));
                 }
             }
@@ -1455,7 +1549,7 @@ fn process_candidates_for_source(
                 &["main.py", "app.py", "run.py", "server.py"],
                 90,
                 "python:file",
-                "python",
+                "",
                 "explicit Python entry file outranks convention-only fallbacks",
             ));
             if candidates.is_empty() && !info.entrypoint.is_empty() {
@@ -1545,6 +1639,7 @@ fn runtime_kind_from_project(detected: &DetectedProject) -> &'static str {
             .as_ref()
             .map(|node| match node.package_manager {
                 NodePackageManager::Bun => "bun",
+                NodePackageManager::Deno => "deno",
                 _ => "node",
             })
             .unwrap_or("node"),
@@ -1591,6 +1686,11 @@ fn inferred_runtime_version(
 }
 
 fn infer_node_runtime_version(project_root: &Path, runtime_kind: &str) -> Option<String> {
+    if runtime_kind.eq_ignore_ascii_case("deno") {
+        return infer_first_existing_trimmed(project_root, &[".deno-version"])
+            .or_else(|| Some("2".to_string()));
+    }
+
     if runtime_kind.eq_ignore_ascii_case("bun") {
         return infer_first_existing_trimmed(project_root, &[".bun-version"])
             .or_else(|| Some("1.1".to_string()));
@@ -1709,6 +1809,7 @@ fn inferred_filesystem_contract(detected: &DetectedProject) -> Value {
 fn inferred_closure_state(project_root: &Path) -> Value {
     let explicit_locks = [
         "package-lock.json",
+        "deno.lock",
         "pnpm-lock.yaml",
         "yarn.lock",
         "bun.lockb",
@@ -1961,29 +2062,6 @@ fn convert_compatibility_diagnostic(
     }
 }
 
-fn remove_file_action(path: PathBuf) -> capsule_core::execution_plan::error::CleanupActionRecord {
-    let detail = path.display().to_string();
-    match fs::remove_file(&path) {
-        Ok(()) => capsule_core::execution_plan::error::CleanupActionRecord {
-            action: "remove_generated_manifest".to_string(),
-            status: capsule_core::execution_plan::error::CleanupActionStatus::Succeeded,
-            detail: Some(detail),
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            capsule_core::execution_plan::error::CleanupActionRecord {
-                action: "remove_generated_manifest".to_string(),
-                status: capsule_core::execution_plan::error::CleanupActionStatus::Succeeded,
-                detail: Some(detail),
-            }
-        }
-        Err(error) => capsule_core::execution_plan::error::CleanupActionRecord {
-            action: "remove_generated_manifest".to_string(),
-            status: capsule_core::execution_plan::error::CleanupActionStatus::Failed,
-            detail: Some(format!("{}: {}", detail, error)),
-        },
-    }
-}
-
 fn unique_attempt_token() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2001,7 +2079,8 @@ mod tests {
     use std::fs;
 
     use capsule_core::input_resolver::{
-        resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
+        resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ResolvedSingleScript,
+        ResolvedSourceOnly, SingleScriptLanguage,
     };
     use tempfile::tempdir;
 
@@ -2067,6 +2146,32 @@ mod tests {
     }
 
     #[test]
+    fn source_only_python_project_uses_script_path_as_entrypoint() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("requirements.txt"), "fastapi==0.115.0\n")
+            .expect("write requirements");
+        fs::write(dir.path().join("main.py"), "print('ok')\n").expect("write main");
+
+        let result = execute_shared_engine(
+            SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
+                project_root: dir.path().to_path_buf(),
+            }),
+            MaterializationMode::RunAttempt,
+            true,
+            reporter(),
+        )
+        .expect("run engine");
+
+        assert_eq!(
+            result.lock.contract.entries.get("process"),
+            Some(&json!({
+                "entrypoint": "main.py",
+                "cmd": [],
+            }))
+        );
+    }
+
+    #[test]
     fn draft_lock_input_preserves_existing_process_without_reinference() {
         let mut lock = AtoLock::default();
         lock.contract.entries.insert(
@@ -2115,7 +2220,259 @@ mod tests {
     }
 
     #[test]
-    fn run_materialization_writes_generated_manifest() {
+    fn durable_init_materializes_single_typescript_script_into_workspace() {
+        if std::process::Command::new("deno")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("scratch.ts");
+        fs::write(&script_path, "console.log('hello durable init');\n").expect("write script");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: Some(ResolvedSingleScript {
+                path: script_path,
+                language: SingleScriptLanguage::TypeScript,
+            }),
+        };
+
+        let materialized = execute_init_from_resolved_source_only(&source, reporter(), true)
+            .expect("materialize workspace");
+
+        assert!(materialized.lock_path.exists());
+        assert!(dir.path().join("main.ts").exists());
+        assert!(dir.path().join("deno.json").exists());
+        assert!(dir.path().join("deno.lock").exists());
+    }
+
+    #[test]
+    fn durable_init_materializes_single_javascript_script_into_workspace() {
+        if std::process::Command::new("deno")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("scratch.js");
+        fs::write(&script_path, "console.log('hello durable js');\n").expect("write script");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: Some(ResolvedSingleScript {
+                path: script_path,
+                language: SingleScriptLanguage::JavaScript,
+            }),
+        };
+
+        let materialized = execute_init_from_resolved_source_only(&source, reporter(), true)
+            .expect("materialize workspace");
+
+        assert!(materialized.lock_path.exists());
+        assert!(dir.path().join("main.js").exists());
+        assert!(dir.path().join("deno.json").exists());
+        assert!(dir.path().join("deno.lock").exists());
+    }
+
+    #[test]
+    fn durable_init_materializes_single_python_script_into_workspace() {
+        if std::process::Command::new("uv")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("scratch.py");
+        fs::write(
+            &script_path,
+            "# /// script\n# requires-python = \">=3.11\"\n# dependencies = [\n#   \"rich\",\n# ]\n# ///\nprint('hello durable python')\n",
+        )
+        .expect("write script");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: Some(ResolvedSingleScript {
+                path: script_path,
+                language: SingleScriptLanguage::Python,
+            }),
+        };
+
+        let materialized = execute_init_from_resolved_source_only(&source, reporter(), true)
+            .expect("materialize workspace");
+
+        assert!(materialized.lock_path.exists());
+        assert!(dir.path().join("main.py").exists());
+        assert!(dir.path().join("pyproject.toml").exists());
+        assert!(dir.path().join("uv.lock").exists());
+    }
+
+    #[test]
+    fn javascript_single_script_virtual_workspace_generates_deno_lock() {
+        if std::process::Command::new("deno")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("hello.js");
+        fs::write(&script_path, "console.log('hello from js');\n").expect("write script");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: Some(ResolvedSingleScript {
+                path: script_path,
+                language: SingleScriptLanguage::JavaScript,
+            }),
+        };
+
+        let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
+            .expect("materialize run");
+        let routed = capsule_core::router::route_lock(
+            &materialized.lock_path,
+            &materialized.lock,
+            &materialized.project_root,
+            capsule_core::router::ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route lock");
+
+        assert_eq!(routed.plan.execution_runtime().as_deref(), Some("source"));
+        assert_eq!(routed.plan.execution_driver().as_deref(), Some("deno"));
+        assert_eq!(
+            routed.plan.execution_entrypoint().as_deref(),
+            Some("main.js")
+        );
+        assert!(materialized.project_root.join("deno.lock").exists());
+    }
+
+    #[test]
+    fn typescript_single_script_bare_imports_become_deno_imports() {
+        if std::process::Command::new("deno")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("hello.ts");
+        fs::write(
+            &script_path,
+            "import { z } from \"zod\";\nimport pc from \"picocolors\";\nconsole.log(pc.green(z.string().parse('ok')));\n",
+        )
+        .expect("write script");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: Some(ResolvedSingleScript {
+                path: script_path,
+                language: SingleScriptLanguage::TypeScript,
+            }),
+        };
+
+        let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
+            .expect("materialize run");
+        let deno_json: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(materialized.project_root.join("deno.json"))
+                .expect("read deno json"),
+        )
+        .expect("parse deno json");
+
+        assert_eq!(
+            deno_json
+                .get("imports")
+                .and_then(|value| value.get("zod"))
+                .and_then(serde_json::Value::as_str),
+            Some("npm:zod")
+        );
+        assert_eq!(
+            deno_json
+                .get("imports")
+                .and_then(|value| value.get("picocolors"))
+                .and_then(serde_json::Value::as_str),
+            Some("npm:picocolors")
+        );
+        assert!(materialized.project_root.join("deno.lock").exists());
+    }
+
+    #[test]
+    fn jsx_single_script_virtual_workspace_writes_jsx_compiler_options() {
+        if std::process::Command::new("deno")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("hello.jsx");
+        fs::write(
+            &script_path,
+            "/** @jsxImportSource npm:preact */\nexport const App = <div>hello</div>;\n",
+        )
+        .expect("write jsx script");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: Some(ResolvedSingleScript {
+                path: script_path,
+                language: SingleScriptLanguage::JavaScript,
+            }),
+        };
+
+        let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
+            .expect("materialize run");
+        let deno_json: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(materialized.project_root.join("deno.json"))
+                .expect("read deno json"),
+        )
+        .expect("parse deno json");
+        let routed = capsule_core::router::route_lock(
+            &materialized.lock_path,
+            &materialized.lock,
+            &materialized.project_root,
+            capsule_core::router::ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route lock");
+
+        assert_eq!(
+            routed.plan.execution_entrypoint().as_deref(),
+            Some("main.jsx")
+        );
+        assert_eq!(
+            deno_json
+                .get("compilerOptions")
+                .and_then(|value| value.get("jsx"))
+                .and_then(serde_json::Value::as_str),
+            Some("react-jsx")
+        );
+        assert_eq!(
+            deno_json
+                .get("compilerOptions")
+                .and_then(|value| value.get("jsxImportSource"))
+                .and_then(serde_json::Value::as_str),
+            Some("npm:preact")
+        );
+    }
+
+    #[test]
+    fn run_materialization_writes_lock_without_generated_manifest_bridge() {
         let dir = tempdir().expect("tempdir");
         fs::write(
             dir.path().join("package.json"),
@@ -2126,6 +2483,7 @@ mod tests {
 
         let source = ResolvedSourceOnly {
             project_root: dir.path().to_path_buf(),
+            single_script: None,
         };
         let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
             .expect("materialize run");
@@ -2135,9 +2493,10 @@ mod tests {
             .expect("run state dir")
             .join("provenance.json");
 
-        assert!(materialized.manifest_path.exists());
         assert!(materialized.lock_path.exists());
         assert!(sidecar_path.exists());
+        assert!(materialized.raw_manifest.is_none());
+        assert!(!dir.path().join(".ato.run.generated.capsule.toml").exists());
     }
 
     #[test]
@@ -2156,13 +2515,24 @@ mod tests {
 
         let source = ResolvedSourceOnly {
             project_root: dir.path().to_path_buf(),
+            single_script: None,
         };
         let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
             .expect("materialize run");
-        let generated = fs::read_to_string(&materialized.manifest_path).expect("read manifest");
+        let routed = capsule_core::router::route_lock(
+            &materialized.lock_path,
+            &materialized.lock,
+            &materialized.project_root,
+            capsule_core::router::ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route lock");
 
-        assert!(generated.contains("run_command = \"npm:vite --host 127.0.0.1 --port 5175\""));
-        assert!(!generated.contains("entrypoint = \"npm\""));
+        assert_eq!(
+            routed.plan.execution_run_command().as_deref(),
+            Some("npm:vite --host 127.0.0.1 --port 5175")
+        );
+        assert_ne!(routed.plan.execution_entrypoint().as_deref(), Some("npm"));
     }
 
     #[test]
@@ -2172,16 +2542,27 @@ mod tests {
 
         let source = ResolvedSourceOnly {
             project_root: dir.path().to_path_buf(),
+            single_script: None,
         };
         let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
             .expect("materialize run");
-        let generated = fs::read_to_string(&materialized.manifest_path).expect("read manifest");
+        let routed = capsule_core::router::route_lock(
+            &materialized.lock_path,
+            &materialized.lock,
+            &materialized.project_root,
+            capsule_core::router::ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route lock");
 
-        assert!(generated.contains("[targets.default]"));
-        assert!(generated.contains("description = \"\""));
-        assert!(generated.contains("runtime = \"source\""));
-        assert!(generated.contains("entrypoint = \"index.js\""));
-        assert!(!generated.contains("driver = \"source\""));
+        assert_eq!(routed.plan.execution_runtime().as_deref(), Some("source"));
+        assert_eq!(
+            routed.plan.execution_entrypoint().as_deref(),
+            Some("index.js")
+        );
+        assert!(routed.plan.execution_driver().is_none());
+        assert!(materialized.raw_manifest.is_none());
+        assert!(!dir.path().join(".ato.run.generated.capsule.toml").exists());
     }
 
     #[test]
@@ -2270,7 +2651,7 @@ driver = "node"
     }
 
     #[test]
-    fn compatibility_run_materialization_writes_lock_and_bridge() {
+    fn compatibility_run_materialization_writes_lock_without_bridge() {
         let dir = tempdir().expect("tempdir");
         fs::write(
             dir.path().join("capsule.toml"),
@@ -2307,10 +2688,10 @@ entrypoint = "main.ts"
                 .expect("parse sidecar");
 
         assert_eq!(sidecar["input_kind"], "draft_lock");
-        assert!(materialized.manifest_path.exists());
         assert!(materialized.lock_path.exists());
         assert!(sidecar_path.exists());
-        assert!(!materialized.bridge_manifest_sha256.is_empty());
+        assert!(materialized.raw_manifest.is_some());
+        assert!(!dir.path().join(".ato.run.generated.capsule.toml").exists());
         assert!(materialized.lock.contract.entries.contains_key("process"));
         assert!(materialized.lock.resolution.entries.contains_key("runtime"));
         assert!(materialized.lock.resolution.entries.contains_key("closure"));
@@ -2347,16 +2728,39 @@ port = 8080
 
         let materialized = materialize_run_from_compatibility(&project, None, reporter(), true)
             .expect("run materialize");
-        let generated = fs::read_to_string(&materialized.manifest_path).expect("read manifest");
+        let generated = materialized.raw_manifest.expect("raw manifest");
 
-        assert!(generated.contains("default_target = \"web\""));
-        assert!(generated.contains("[network]"));
-        assert!(generated.contains("egress_allow = [\"api.github.com\"]"));
-        assert!(generated.contains("[targets.web]"));
-        assert!(generated.contains("runtime = \"web\""));
-        assert!(generated.contains("driver = \"static\""));
-        assert!(generated.contains("entrypoint = \"public/index.html\""));
-        assert!(generated.contains("port = 8080"));
+        assert_eq!(
+            generated
+                .get("default_target")
+                .and_then(toml::Value::as_str),
+            Some("web")
+        );
+        assert_eq!(
+            generated
+                .get("network")
+                .and_then(|network| network.get("egress_allow"))
+                .and_then(toml::Value::as_array)
+                .and_then(|values| values.first())
+                .and_then(toml::Value::as_str),
+            Some("api.github.com")
+        );
+        assert_eq!(
+            generated
+                .get("targets")
+                .and_then(|targets| targets.get("web"))
+                .and_then(|target| target.get("runtime"))
+                .and_then(toml::Value::as_str),
+            Some("web")
+        );
+        assert_eq!(
+            generated
+                .get("targets")
+                .and_then(|targets| targets.get("web"))
+                .and_then(|target| target.get("driver"))
+                .and_then(toml::Value::as_str),
+            Some("static")
+        );
     }
 
     #[test]
@@ -2390,10 +2794,140 @@ from = "missing-service"
 
         let materialized = materialize_run_from_compatibility(&project, None, reporter(), true)
             .expect("run materialize");
-        let generated = fs::read_to_string(&materialized.manifest_path).expect("read manifest");
+        let generated = materialized.raw_manifest.expect("raw manifest");
 
-        assert!(generated.contains("[ipc.imports.greeter]"));
-        assert!(generated.contains("from = \"missing-service\""));
+        assert_eq!(
+            generated
+                .get("ipc")
+                .and_then(|ipc| ipc.get("imports"))
+                .and_then(|imports| imports.get("greeter"))
+                .and_then(|greeter| greeter.get("from"))
+                .and_then(toml::Value::as_str),
+            Some("missing-service")
+        );
+    }
+
+    #[test]
+    fn parse_pep723_python_metadata_extracts_dependencies_and_requires_python() {
+        let metadata = parse_pep723_python_metadata(
+            r#"# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "httpx>=0.27",
+#   "rich",
+# ]
+# ///
+print('ok')
+"#,
+        )
+        .expect("parse pep723");
+
+        assert_eq!(metadata.requires_python.as_deref(), Some(">=3.11"));
+        assert_eq!(metadata.dependencies, vec!["httpx>=0.27", "rich"]);
+    }
+
+    #[test]
+    fn typescript_single_script_virtual_workspace_generates_deno_lock() {
+        if std::process::Command::new("deno")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("hello.ts");
+        fs::write(&script_path, "console.log('hello from ts');\n").expect("write script");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: Some(ResolvedSingleScript {
+                path: script_path,
+                language: SingleScriptLanguage::TypeScript,
+            }),
+        };
+
+        let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
+            .expect("materialize run");
+        let routed = capsule_core::router::route_lock(
+            &materialized.lock_path,
+            &materialized.lock,
+            &materialized.project_root,
+            capsule_core::router::ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route lock");
+
+        assert_eq!(routed.plan.execution_runtime().as_deref(), Some("source"));
+        assert_eq!(routed.plan.execution_driver().as_deref(), Some("deno"));
+        assert_eq!(
+            routed.plan.execution_entrypoint().as_deref(),
+            Some("main.ts")
+        );
+        assert!(materialized.project_root.join("deno.lock").exists());
+    }
+
+    #[test]
+    fn tsx_single_script_virtual_workspace_writes_jsx_compiler_options() {
+        if std::process::Command::new("deno")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("hello.tsx");
+        fs::write(
+            &script_path,
+            "/** @jsxImportSource npm:preact */\nexport const App = <div>hello</div>;\n",
+        )
+        .expect("write tsx script");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: Some(ResolvedSingleScript {
+                path: script_path,
+                language: SingleScriptLanguage::TypeScript,
+            }),
+        };
+
+        let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
+            .expect("materialize run");
+        let deno_json: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(materialized.project_root.join("deno.json"))
+                .expect("read deno json"),
+        )
+        .expect("parse deno json");
+        let routed = capsule_core::router::route_lock(
+            &materialized.lock_path,
+            &materialized.lock,
+            &materialized.project_root,
+            capsule_core::router::ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route lock");
+
+        assert_eq!(
+            routed.plan.execution_entrypoint().as_deref(),
+            Some("main.tsx")
+        );
+        assert_eq!(
+            deno_json
+                .get("compilerOptions")
+                .and_then(|value| value.get("jsx"))
+                .and_then(serde_json::Value::as_str),
+            Some("react-jsx")
+        );
+        assert_eq!(
+            deno_json
+                .get("compilerOptions")
+                .and_then(|value| value.get("jsxImportSource"))
+                .and_then(serde_json::Value::as_str),
+            Some("npm:preact")
+        );
     }
 
     #[test]
