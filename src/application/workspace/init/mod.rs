@@ -353,4 +353,37 @@ mod tests {
         assert!(dir.path().join("main.ts").exists());
         assert!(dir.path().join("deno.json").exists());
     }
+
+    #[test]
+    fn durable_init_accepts_single_python_script_path() {
+        if std::process::Command::new("uv")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script_path = dir.path().join("scratch.py");
+        std::fs::write(
+            &script_path,
+            "# /// script\n# requires-python = \">=3.11\"\n# ///\nprint('hello durable init')\n",
+        )
+        .expect("write script");
+
+        execute_durable_init(
+            InitArgs {
+                path: Some(script_path),
+                yes: true,
+            },
+            Arc::new(CliReporter::new(true)),
+        )
+        .expect("durable init");
+
+        assert!(dir.path().join("ato.lock.json").exists());
+        assert!(dir.path().join("main.py").exists());
+        assert!(dir.path().join("pyproject.toml").exists());
+        assert!(dir.path().join("uv.lock").exists());
+    }
 }
