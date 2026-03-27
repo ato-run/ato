@@ -1502,10 +1502,8 @@ fn failed_projection_info(
 ) -> ProjectionInfo {
     if !json_output {
         eprintln!("Launcher projection failed: {err}");
-        eprintln!(
-            "Run `ato project {}` to try again later.",
-            derived_app_path.display()
-        );
+        eprintln!("Retry the install flow to attempt launcher projection again.");
+        eprintln!("Derived app path: {}", derived_app_path.display());
     }
     ProjectionInfo {
         performed: false,
