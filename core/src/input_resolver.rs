@@ -21,6 +21,7 @@ pub enum ExplicitInputKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SingleScriptLanguage {
     Python,
+    TypeScript,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -439,6 +440,7 @@ fn resolve_single_script_language(path: &Path) -> Option<SingleScriptLanguage> {
         .as_deref()
     {
         Some("py") => Some(SingleScriptLanguage::Python),
+        Some("ts") => Some(SingleScriptLanguage::TypeScript),
         _ => None,
     }
 }
@@ -662,6 +664,31 @@ port = 4173
                 let script = source.single_script.expect("single script metadata");
                 assert_eq!(script.path, script_path.canonicalize().expect("canonical"));
                 assert_eq!(script.language, SingleScriptLanguage::Python);
+            }
+            other => panic!("unexpected resolved input: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_typescript_script_resolves_as_source_only() {
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("hello.ts");
+        fs::write(&script_path, "console.log('hello');\n").expect("write script");
+
+        let resolved = resolve_authoritative_input(&script_path, ResolveInputOptions::default())
+            .expect("resolve single script");
+
+        match resolved {
+            ResolvedInput::SourceOnly {
+                source, provenance, ..
+            } => {
+                assert_eq!(
+                    provenance.explicit_input_kind,
+                    super::ExplicitInputKind::SingleScript
+                );
+                let script = source.single_script.expect("single script metadata");
+                assert_eq!(script.path, script_path.canonicalize().expect("canonical"));
+                assert_eq!(script.language, SingleScriptLanguage::TypeScript);
             }
             other => panic!("unexpected resolved input: {other:?}"),
         }
