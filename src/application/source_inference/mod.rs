@@ -223,8 +223,8 @@ fn prepare_single_script_workspace(
 ) -> Result<PathBuf> {
     match script.language {
         SingleScriptLanguage::Python => prepare_python_single_script_workspace(script, scope),
-        SingleScriptLanguage::TypeScript => {
-            prepare_typescript_single_script_workspace(script, scope)
+        SingleScriptLanguage::TypeScript | SingleScriptLanguage::JavaScript => {
+            prepare_deno_single_script_workspace(script, scope)
         }
     }
 }
@@ -235,8 +235,8 @@ fn prepare_durable_source_workspace(source: &ResolvedSourceOnly) -> Result<PathB
             SingleScriptLanguage::Python => {
                 prepare_durable_python_single_script_workspace(script, &source.project_root)?;
             }
-            SingleScriptLanguage::TypeScript => {
-                prepare_durable_typescript_single_script_workspace(script, &source.project_root)?;
+            SingleScriptLanguage::TypeScript | SingleScriptLanguage::JavaScript => {
+                prepare_durable_deno_single_script_workspace(script, &source.project_root)?;
             }
         }
     }
@@ -336,7 +336,7 @@ fn generate_uv_lock_for_single_script(project_root: &Path) -> Result<()> {
     );
 }
 
-fn prepare_typescript_single_script_workspace(
+fn prepare_deno_single_script_workspace(
     script: &ResolvedSingleScript,
     scope: Option<&mut CleanupScope>,
 ) -> Result<PathBuf> {
@@ -364,19 +364,15 @@ fn prepare_typescript_single_script_workspace(
 
     let script_text = fs::read_to_string(&script.path)
         .with_context(|| format!("failed to read script {}", script.path.display()))?;
-    let metadata = parse_deno_typescript_metadata(&script_text, &script.path);
-    let entrypoint = if is_typescript_jsx_script(&script.path) {
-        "main.tsx"
-    } else {
-        "main.ts"
-    };
+    let metadata = parse_deno_script_metadata(&script_text, &script.path);
+    let entrypoint = deno_single_script_entrypoint_name(&script.path);
     fs::write(temp_root.join(entrypoint), script_text)
         .with_context(|| format!("failed to write virtual script {}", temp_root.display()))?;
     let deno_json = deno_json_for_single_script(&metadata);
     fs::write(
         temp_root.join("deno.json"),
         serde_json::to_string_pretty(&deno_json)
-            .context("failed to serialize deno.json for single-file TypeScript")?
+            .context("failed to serialize deno.json for single-file Deno script")?
             + "\n",
     )
     .with_context(|| format!("failed to write deno.json in {}", temp_root.display()))?;
@@ -386,18 +382,14 @@ fn prepare_typescript_single_script_workspace(
     Ok(temp_root)
 }
 
-fn prepare_durable_typescript_single_script_workspace(
+fn prepare_durable_deno_single_script_workspace(
     script: &ResolvedSingleScript,
     project_root: &Path,
 ) -> Result<()> {
     let script_text = fs::read_to_string(&script.path)
         .with_context(|| format!("failed to read script {}", script.path.display()))?;
-    let metadata = parse_deno_typescript_metadata(&script_text, &script.path);
-    let entrypoint = if is_typescript_jsx_script(&script.path) {
-        "main.tsx"
-    } else {
-        "main.ts"
-    };
+    let metadata = parse_deno_script_metadata(&script_text, &script.path);
+    let entrypoint = deno_single_script_entrypoint_name(&script.path);
     let entrypoint_path = project_root.join(entrypoint);
 
     if script.path != entrypoint_path {
@@ -405,7 +397,7 @@ fn prepare_durable_typescript_single_script_workspace(
     }
 
     let deno_json_raw = serde_json::to_string_pretty(&deno_json_for_single_script(&metadata))
-        .context("failed to serialize deno.json for durable single-file TypeScript init")?
+        .context("failed to serialize deno.json for durable single-file Deno init")?
         + "\n";
     write_if_absent_or_same(&project_root.join("deno.json"), &deno_json_raw)?;
 
@@ -452,7 +444,7 @@ fn generate_deno_lock_for_single_script(project_root: &Path, entrypoint: &str) -
 
     if !output.status.success() {
         anyhow::bail!(
-            "failed to generate deno.lock for single-file TypeScript script (status {}): {}",
+            "failed to generate deno.lock for single-file Deno script (status {}): {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         );
@@ -465,19 +457,33 @@ fn generate_deno_lock_for_single_script(project_root: &Path, entrypoint: &str) -
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct DenoTypescriptMetadata {
+struct DenoScriptMetadata {
     is_jsx: bool,
     jsx_import_source: Option<String>,
 }
 
-fn is_typescript_jsx_script(path: &Path) -> bool {
+fn is_deno_jsx_script(path: &Path) -> bool {
     path.extension()
         .and_then(|value| value.to_str())
-        .map(|value| value.eq_ignore_ascii_case("tsx"))
+        .map(|value| value.eq_ignore_ascii_case("tsx") || value.eq_ignore_ascii_case("jsx"))
         .unwrap_or(false)
 }
 
-fn parse_deno_typescript_metadata(script_text: &str, path: &Path) -> DenoTypescriptMetadata {
+fn deno_single_script_entrypoint_name(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("tsx") => "main.tsx",
+        Some("js") => "main.js",
+        Some("jsx") => "main.jsx",
+        _ => "main.ts",
+    }
+}
+
+fn parse_deno_script_metadata(script_text: &str, path: &Path) -> DenoScriptMetadata {
     let jsx_import_source = script_text.lines().find_map(|line| {
         let marker = "@jsxImportSource";
         let index = line.find(marker)?;
@@ -492,13 +498,13 @@ fn parse_deno_typescript_metadata(script_text: &str, path: &Path) -> DenoTypescr
         }
     });
 
-    DenoTypescriptMetadata {
-        is_jsx: is_typescript_jsx_script(path),
+    DenoScriptMetadata {
+        is_jsx: is_deno_jsx_script(path),
         jsx_import_source,
     }
 }
 
-fn deno_json_for_single_script(metadata: &DenoTypescriptMetadata) -> serde_json::Value {
+fn deno_json_for_single_script(metadata: &DenoScriptMetadata) -> serde_json::Value {
     if !metadata.is_jsx {
         return serde_json::json!({});
     }
@@ -1433,9 +1439,15 @@ fn process_candidates_for_source(
                             "src/main.tsx",
                             "src/index.ts",
                             "src/main.ts",
+                            "src/main.jsx",
+                            "src/index.jsx",
+                            "src/main.js",
+                            "src/index.js",
                             "main.tsx",
                             "index.ts",
                             "main.ts",
+                            "main.jsx",
+                            "index.jsx",
                             "index.js",
                             "main.js",
                             "app.js",
@@ -2173,6 +2185,37 @@ mod tests {
     }
 
     #[test]
+    fn durable_init_materializes_single_javascript_script_into_workspace() {
+        if std::process::Command::new("deno")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("scratch.js");
+        fs::write(&script_path, "console.log('hello durable js');\n").expect("write script");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: Some(ResolvedSingleScript {
+                path: script_path,
+                language: SingleScriptLanguage::JavaScript,
+            }),
+        };
+
+        let materialized = execute_init_from_resolved_source_only(&source, reporter(), true)
+            .expect("materialize workspace");
+
+        assert!(materialized.lock_path.exists());
+        assert!(dir.path().join("main.js").exists());
+        assert!(dir.path().join("deno.json").exists());
+        assert!(dir.path().join("deno.lock").exists());
+    }
+
+    #[test]
     fn durable_init_materializes_single_python_script_into_workspace() {
         if std::process::Command::new("uv")
             .arg("--version")
@@ -2205,6 +2248,110 @@ mod tests {
         assert!(dir.path().join("main.py").exists());
         assert!(dir.path().join("pyproject.toml").exists());
         assert!(dir.path().join("uv.lock").exists());
+    }
+
+    #[test]
+    fn javascript_single_script_virtual_workspace_generates_deno_lock() {
+        if std::process::Command::new("deno")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("hello.js");
+        fs::write(&script_path, "console.log('hello from js');\n").expect("write script");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: Some(ResolvedSingleScript {
+                path: script_path,
+                language: SingleScriptLanguage::JavaScript,
+            }),
+        };
+
+        let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
+            .expect("materialize run");
+        let routed = capsule_core::router::route_lock(
+            &materialized.lock_path,
+            &materialized.lock,
+            &materialized.project_root,
+            capsule_core::router::ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route lock");
+
+        assert_eq!(routed.plan.execution_runtime().as_deref(), Some("source"));
+        assert_eq!(routed.plan.execution_driver().as_deref(), Some("deno"));
+        assert_eq!(
+            routed.plan.execution_entrypoint().as_deref(),
+            Some("main.js")
+        );
+        assert!(materialized.project_root.join("deno.lock").exists());
+    }
+
+    #[test]
+    fn jsx_single_script_virtual_workspace_writes_jsx_compiler_options() {
+        if std::process::Command::new("deno")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("hello.jsx");
+        fs::write(
+            &script_path,
+            "/** @jsxImportSource npm:preact */\nexport const App = <div>hello</div>;\n",
+        )
+        .expect("write jsx script");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: Some(ResolvedSingleScript {
+                path: script_path,
+                language: SingleScriptLanguage::JavaScript,
+            }),
+        };
+
+        let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
+            .expect("materialize run");
+        let deno_json: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(materialized.project_root.join("deno.json"))
+                .expect("read deno json"),
+        )
+        .expect("parse deno json");
+        let routed = capsule_core::router::route_lock(
+            &materialized.lock_path,
+            &materialized.lock,
+            &materialized.project_root,
+            capsule_core::router::ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route lock");
+
+        assert_eq!(
+            routed.plan.execution_entrypoint().as_deref(),
+            Some("main.jsx")
+        );
+        assert_eq!(
+            deno_json
+                .get("compilerOptions")
+                .and_then(|value| value.get("jsx"))
+                .and_then(serde_json::Value::as_str),
+            Some("react-jsx")
+        );
+        assert_eq!(
+            deno_json
+                .get("compilerOptions")
+                .and_then(|value| value.get("jsxImportSource"))
+                .and_then(serde_json::Value::as_str),
+            Some("npm:preact")
+        );
     }
 
     #[test]
