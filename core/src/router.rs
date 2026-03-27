@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
+use crate::ato_lock::AtoLock;
+use crate::lock_runtime::{self, LockContractMetadata, LockServiceUnit, ResolvedLockRuntimeModel};
 use crate::manifest;
 use crate::orchestration;
 use crate::types::{
@@ -28,20 +30,26 @@ pub enum ExecutionProfile {
 }
 
 #[derive(Debug, Clone)]
-pub struct ManifestData {
+pub struct ExecutionDescriptor {
     pub manifest: toml::Value,
     pub manifest_path: PathBuf,
     pub manifest_dir: PathBuf,
+    pub lock: AtoLock,
+    pub lock_path: PathBuf,
+    pub workspace_root: PathBuf,
     pub profile: ExecutionProfile,
     pub selected_target: String,
+    pub runtime_model: ResolvedLockRuntimeModel,
     pub state_source_overrides: HashMap<String, String>,
 }
+
+pub type ManifestData = ExecutionDescriptor;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeDecision {
     pub kind: RuntimeKind,
     pub reason: String,
-    pub plan: ManifestData,
+    pub plan: ExecutionDescriptor,
 }
 
 pub fn route_manifest(
@@ -95,18 +103,14 @@ pub fn route_manifest_with_state_overrides_and_validation_mode(
     validation_mode: ValidationMode,
 ) -> Result<RuntimeDecision> {
     let loaded = manifest::load_manifest_with_validation_mode(manifest_path, validation_mode)?;
-    let manifest = loaded.raw;
-    let manifest_dir = loaded.dir.clone();
-    let selected_target = resolve_target_label(&manifest, target_label)?;
-
-    let plan = ManifestData {
-        manifest,
-        manifest_path: loaded.path,
-        manifest_dir,
+    let plan = execution_descriptor_from_manifest_parts(
+        loaded.raw,
+        loaded.path,
+        loaded.dir,
         profile,
-        selected_target,
+        target_label,
         state_source_overrides,
-    };
+    )?;
 
     let runtime = plan.execution_runtime().ok_or_else(|| {
         anyhow!(
@@ -141,27 +145,350 @@ pub fn route_manifest_with_state_overrides_and_validation_mode(
     })
 }
 
-impl ManifestData {
+pub fn execution_descriptor_from_manifest_parts(
+    manifest: toml::Value,
+    manifest_path: PathBuf,
+    workspace_root: PathBuf,
+    profile: ExecutionProfile,
+    target_label: Option<&str>,
+    state_source_overrides: HashMap<String, String>,
+) -> Result<ExecutionDescriptor> {
+    let selected_target = resolve_target_label(&manifest, target_label)?;
+    let runtime_model = synthesize_runtime_model_from_manifest(&manifest, &selected_target)?;
+
+    Ok(ExecutionDescriptor {
+        manifest,
+        manifest_path,
+        manifest_dir: workspace_root.clone(),
+        lock: AtoLock::default(),
+        lock_path: PathBuf::new(),
+        workspace_root,
+        profile,
+        selected_target,
+        runtime_model,
+        state_source_overrides,
+    })
+}
+
+pub fn route_lock(
+    lock_path: &Path,
+    lock: &AtoLock,
+    workspace_root: &Path,
+    profile: ExecutionProfile,
+    target_label: Option<&str>,
+) -> Result<RuntimeDecision> {
+    route_lock_with_state_overrides(
+        lock_path,
+        lock,
+        workspace_root,
+        profile,
+        target_label,
+        HashMap::new(),
+    )
+}
+
+pub fn route_lock_with_state_overrides(
+    lock_path: &Path,
+    lock: &AtoLock,
+    workspace_root: &Path,
+    profile: ExecutionProfile,
+    target_label: Option<&str>,
+    state_source_overrides: HashMap<String, String>,
+) -> Result<RuntimeDecision> {
+    let runtime_model = lock_runtime::resolve_lock_runtime_model(lock, target_label)
+        .map_err(|err| anyhow!(err.to_string()))?;
+    let runtime = runtime_model.selected.runtime.runtime.clone();
+    let chosen = parse_runtime_kind(&runtime).ok_or_else(|| {
+        anyhow!(
+            "Unsupported runtime '{}' for target '{}'",
+            runtime,
+            runtime_model.selected.target_label
+        )
+    })?;
+    let plan = ExecutionDescriptor {
+        manifest: synthesize_manifest_from_lock(lock, &runtime_model),
+        manifest_path: lock_path.to_path_buf(),
+        manifest_dir: workspace_root.to_path_buf(),
+        lock: lock.clone(),
+        lock_path: lock_path.to_path_buf(),
+        workspace_root: workspace_root.to_path_buf(),
+        profile,
+        selected_target: runtime_model.selected.target_label.clone(),
+        runtime_model,
+        state_source_overrides,
+    };
+    Ok(RuntimeDecision {
+        kind: chosen,
+        reason: format!("lock target {}", plan.selected_target),
+        plan,
+    })
+}
+
+fn synthesize_manifest_from_lock(
+    lock: &AtoLock,
+    runtime_model: &ResolvedLockRuntimeModel,
+) -> toml::Value {
+    let mut manifest = toml::map::Map::new();
+    if let Some(name) = runtime_model.metadata.name.as_ref() {
+        manifest.insert("name".to_string(), toml::Value::String(name.clone()));
+    }
+    if let Some(version) = runtime_model.metadata.version.as_ref() {
+        manifest.insert("version".to_string(), toml::Value::String(version.clone()));
+    }
+    manifest.insert(
+        "schema_version".to_string(),
+        toml::Value::String("0.2".to_string()),
+    );
+    manifest.insert("type".to_string(), toml::Value::String("app".to_string()));
+    manifest.insert(
+        "default_target".to_string(),
+        toml::Value::String(runtime_model.selected.target_label.clone()),
+    );
+
+    if let Some(network) = runtime_model.network.as_ref() {
+        if let Ok(value) = toml::Value::try_from(network.clone()) {
+            manifest.insert("network".to_string(), value);
+        }
+    }
+
+    let mut targets = toml::map::Map::new();
+    for service in &runtime_model.services {
+        let mut target = toml::map::Map::new();
+        let runtime = &service.runtime;
+        target.insert(
+            "runtime".to_string(),
+            toml::Value::String(runtime.runtime.clone()),
+        );
+        if let Some(driver) = runtime.driver.as_ref() {
+            target.insert("driver".to_string(), toml::Value::String(driver.clone()));
+        }
+        if let Some(image) = runtime.image.as_ref() {
+            target.insert("image".to_string(), toml::Value::String(image.clone()));
+        }
+        if !runtime.entrypoint.trim().is_empty() {
+            target.insert(
+                "entrypoint".to_string(),
+                toml::Value::String(runtime.entrypoint.clone()),
+            );
+        }
+        if let Some(run_command) = runtime.run_command.as_ref() {
+            if !run_command.trim().is_empty() {
+                target.insert(
+                    "run_command".to_string(),
+                    toml::Value::String(run_command.clone()),
+                );
+            }
+        }
+        if !runtime.cmd.is_empty() {
+            target.insert(
+                "cmd".to_string(),
+                toml::Value::Array(
+                    runtime
+                        .cmd
+                        .iter()
+                        .cloned()
+                        .map(toml::Value::String)
+                        .collect(),
+                ),
+            );
+        }
+        if !runtime.env.is_empty() {
+            let env = runtime
+                .env
+                .iter()
+                .map(|(key, value)| (key.clone(), toml::Value::String(value.clone())))
+                .collect();
+            target.insert("env".to_string(), toml::Value::Table(env));
+        }
+        if let Some(working_dir) = runtime.working_dir.as_ref() {
+            target.insert(
+                "working_dir".to_string(),
+                toml::Value::String(working_dir.clone()),
+            );
+        }
+        if let Some(port) = runtime.port {
+            target.insert("port".to_string(), toml::Value::Integer(i64::from(port)));
+        }
+        if !runtime.required_env.is_empty() {
+            target.insert(
+                "required_env".to_string(),
+                toml::Value::Array(
+                    runtime
+                        .required_env
+                        .iter()
+                        .cloned()
+                        .map(toml::Value::String)
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(runtime_version) =
+            resolved_target_string_from_lock(lock, &service.target_label, "runtime_version")
+        {
+            target.insert(
+                "runtime_version".to_string(),
+                toml::Value::String(runtime_version),
+            );
+        }
+        if let Some(runtime_tools) =
+            resolved_target_table_from_lock(lock, &service.target_label, &["runtime_tools"])
+        {
+            target.insert(
+                "runtime_tools".to_string(),
+                toml::Value::Table(runtime_tools),
+            );
+        }
+        if let Some(readiness_probe) = service.readiness_probe.as_ref() {
+            if let Ok(value) = toml::Value::try_from(readiness_probe.clone()) {
+                target.insert("readiness_probe".to_string(), value);
+            }
+        }
+        targets.insert(service.target_label.clone(), toml::Value::Table(target));
+    }
+    manifest.insert("targets".to_string(), toml::Value::Table(targets));
+
+    if runtime_model.services.len() > 1 {
+        let mut services = toml::map::Map::new();
+        for service in &runtime_model.services {
+            let mut service_table = toml::map::Map::new();
+            service_table.insert(
+                "target".to_string(),
+                toml::Value::String(service.target_label.clone()),
+            );
+            if !service.depends_on.is_empty() {
+                service_table.insert(
+                    "depends_on".to_string(),
+                    toml::Value::Array(
+                        service
+                            .depends_on
+                            .iter()
+                            .cloned()
+                            .map(toml::Value::String)
+                            .collect(),
+                    ),
+                );
+            }
+            if let Some(readiness_probe) = service.readiness_probe.as_ref() {
+                if let Ok(value) = toml::Value::try_from(readiness_probe.clone()) {
+                    service_table.insert("readiness_probe".to_string(), value);
+                }
+            }
+            services.insert(service.name.clone(), toml::Value::Table(service_table));
+        }
+        manifest.insert("services".to_string(), toml::Value::Table(services));
+    }
+
+    toml::Value::Table(manifest)
+}
+
+fn resolved_target_string_from_lock(
+    lock: &AtoLock,
+    target_label: &str,
+    key: &str,
+) -> Option<String> {
+    let target_value = lock
+        .resolution
+        .entries
+        .get("resolved_targets")
+        .and_then(|value| value.as_array())
+        .and_then(|targets| {
+            targets.iter().find(|target| {
+                target
+                    .get("label")
+                    .and_then(|value| value.as_str())
+                    .map(|label| label == target_label)
+                    .unwrap_or(false)
+            })
+        })
+        .and_then(|target| target.get(key))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+
+    if target_value.is_some() || key != "runtime_version" {
+        return target_value;
+    }
+
+    lock.resolution
+        .entries
+        .get("runtime")
+        .and_then(|runtime| runtime.get("version"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn resolved_target_table_from_lock(
+    lock: &AtoLock,
+    target_label: &str,
+    keys: &[&str],
+) -> Option<toml::value::Table> {
+    let mut current = lock
+        .resolution
+        .entries
+        .get("resolved_targets")
+        .and_then(|value| value.as_array())
+        .and_then(|targets| {
+            targets.iter().find(|target| {
+                target
+                    .get("label")
+                    .and_then(|value| value.as_str())
+                    .map(|label| label == target_label)
+                    .unwrap_or(false)
+            })
+        })?;
+    for key in keys {
+        current = current.get(*key)?;
+    }
+    let object = current.as_object()?;
+    Some(
+        object
+            .iter()
+            .filter_map(|(key, value)| {
+                value
+                    .as_str()
+                    .map(|value| (key.clone(), toml::Value::String(value.to_string())))
+            })
+            .collect(),
+    )
+}
+
+impl ExecutionDescriptor {
     pub fn with_selected_target(&self, selected_target: impl Into<String>) -> Self {
         let mut cloned = self.clone();
         cloned.selected_target = selected_target.into();
+        if let Ok(runtime_model) =
+            lock_runtime::resolve_lock_runtime_model(&cloned.lock, Some(&cloned.selected_target))
+        {
+            cloned.runtime_model = runtime_model;
+        }
         cloned
     }
 
     pub fn execution_entrypoint(&self) -> Option<String> {
-        self.get_str(&["targets", &self.selected_target, "entrypoint"])
+        self.runtime_for_target(&self.selected_target)
+            .map(|runtime| runtime.entrypoint.clone())
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| self.get_str(&["targets", &self.selected_target, "entrypoint"]))
     }
 
     pub fn execution_runtime(&self) -> Option<String> {
-        self.get_str(&["targets", &self.selected_target, "runtime"])
+        self.runtime_for_target(&self.selected_target)
+            .map(|runtime| runtime.runtime.clone())
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| self.get_str(&["targets", &self.selected_target, "runtime"]))
     }
 
     pub fn execution_driver(&self) -> Option<String> {
-        self.get_str(&["targets", &self.selected_target, "driver"])
+        self.runtime_for_target(&self.selected_target)
+            .and_then(|runtime| runtime.driver.clone())
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| self.get_str(&["targets", &self.selected_target, "driver"]))
     }
 
     pub fn execution_run_command(&self) -> Option<String> {
-        self.get_str(&["targets", &self.selected_target, "run_command"])
+        self.runtime_for_target(&self.selected_target)
+            .and_then(|runtime| runtime.run_command.clone())
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| self.get_str(&["targets", &self.selected_target, "run_command"]))
     }
 
     pub fn execution_package_type(&self) -> Option<String> {
@@ -169,11 +496,13 @@ impl ManifestData {
     }
 
     pub fn execution_runtime_version(&self) -> Option<String> {
-        self.get_str(&["targets", &self.selected_target, "runtime_version"])
+        self.resolved_target_string(&self.selected_target, "runtime_version")
+            .or_else(|| self.get_str(&["targets", &self.selected_target, "runtime_version"]))
     }
 
     pub fn execution_runtime_tool_version(&self, tool: &str) -> Option<String> {
-        self.get_str(&["targets", &self.selected_target, "runtime_tools", tool])
+        self.resolved_target_nested_string(&self.selected_target, &["runtime_tools", tool])
+            .or_else(|| self.get_str(&["targets", &self.selected_target, "runtime_tools", tool]))
     }
 
     pub fn execution_language(&self) -> Option<String> {
@@ -185,9 +514,14 @@ impl ManifestData {
     }
 
     pub fn execution_env(&self) -> HashMap<String, String> {
-        self.get_table(&["targets", &self.selected_target, "env"])
-            .map(table_to_map)
-            .unwrap_or_default()
+        self.runtime_for_target(&self.selected_target)
+            .map(|runtime| runtime.env.clone())
+            .filter(|env| !env.is_empty())
+            .unwrap_or_else(|| {
+                self.get_table(&["targets", &self.selected_target, "env"])
+                    .map(table_to_map)
+                    .unwrap_or_default()
+            })
     }
 
     pub fn execution_required_envs(&self) -> Vec<String> {
@@ -223,8 +557,8 @@ impl ManifestData {
 
     pub fn execution_working_directory(&self) -> PathBuf {
         self.execution_working_dir()
-            .map(|value| self.manifest_dir.join(value))
-            .unwrap_or_else(|| self.manifest_dir.clone())
+            .map(|value| self.workspace_root.join(value))
+            .unwrap_or_else(|| self.workspace_root.clone())
     }
 
     pub fn target_package_dependencies(&self, target_label: &str) -> Vec<String> {
@@ -282,12 +616,19 @@ impl ManifestData {
     }
 
     pub fn selected_target_readiness_probe(&self) -> Option<ReadinessProbe> {
-        self.manifest
-            .get("targets")
-            .and_then(|targets| targets.get(&self.selected_target))
-            .cloned()
-            .and_then(|value| value.try_into::<NamedTarget>().ok())
-            .and_then(|target| target.readiness_probe)
+        self.runtime_model
+            .services
+            .iter()
+            .find(|service| service.target_label == self.selected_target)
+            .and_then(|service| service.readiness_probe.clone())
+            .or_else(|| {
+                self.manifest
+                    .get("targets")
+                    .and_then(|targets| targets.get(&self.selected_target))
+                    .cloned()
+                    .and_then(|value| value.try_into::<NamedTarget>().ok())
+                    .and_then(|target| target.readiness_probe)
+            })
     }
 
     pub fn services(&self) -> HashMap<String, ServiceSpec> {
@@ -305,6 +646,9 @@ impl ManifestData {
     }
 
     pub fn is_orchestration_mode(&self) -> bool {
+        if self.runtime_model.services.len() > 1 {
+            return true;
+        }
         self.services().values().any(|service| {
             service
                 .target
@@ -326,7 +670,11 @@ impl ManifestData {
     }
 
     pub fn manifest_name(&self) -> Option<String> {
-        self.get_str(&["name"])
+        self.runtime_model
+            .metadata
+            .name
+            .clone()
+            .or_else(|| self.get_str(&["name"]))
     }
 
     pub fn typed_manifest(&self) -> Result<CapsuleManifest> {
@@ -336,7 +684,11 @@ impl ManifestData {
     }
 
     pub fn manifest_version(&self) -> Option<String> {
-        self.get_str(&["version"])
+        self.runtime_model
+            .metadata
+            .version
+            .clone()
+            .or_else(|| self.get_str(&["version"]))
     }
 
     pub fn execution_port(&self) -> Option<u16> {
@@ -439,7 +791,11 @@ impl ManifestData {
     }
 
     pub fn default_target_label(&self) -> Result<String> {
-        self.get_str(&["default_target"])
+        self.runtime_model
+            .metadata
+            .default_target
+            .clone()
+            .or_else(|| self.get_str(&["default_target"]))
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow!("Missing required field: default_target"))
@@ -481,24 +837,36 @@ impl ManifestData {
         if p.is_absolute() {
             p
         } else {
-            self.manifest_dir.join(p)
+            self.workspace_root.join(p)
         }
     }
 
     pub fn target_runtime(&self, target_label: &str) -> Option<String> {
-        self.get_str(&["targets", target_label, "runtime"])
+        self.runtime_for_target(target_label)
+            .map(|runtime| runtime.runtime.clone())
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| self.get_str(&["targets", target_label, "runtime"]))
     }
 
     pub fn target_driver(&self, target_label: &str) -> Option<String> {
-        self.get_str(&["targets", target_label, "driver"])
+        self.runtime_for_target(target_label)
+            .and_then(|runtime| runtime.driver.clone())
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| self.get_str(&["targets", target_label, "driver"]))
     }
 
     pub fn target_entrypoint(&self, target_label: &str) -> Option<String> {
-        self.get_str(&["targets", target_label, "entrypoint"])
+        self.runtime_for_target(target_label)
+            .map(|runtime| runtime.entrypoint.clone())
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| self.get_str(&["targets", target_label, "entrypoint"]))
     }
 
     pub fn target_run_command(&self, target_label: &str) -> Option<String> {
-        self.get_str(&["targets", target_label, "run_command"])
+        self.runtime_for_target(target_label)
+            .and_then(|runtime| runtime.run_command.clone())
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| self.get_str(&["targets", target_label, "run_command"]))
     }
 
     pub fn target_image(&self, target_label: &str) -> Option<String> {
@@ -507,6 +875,11 @@ impl ManifestData {
     }
 
     pub fn target_cmd(&self, target_label: &str) -> Vec<String> {
+        if let Some(runtime) = self.runtime_for_target(target_label) {
+            if !runtime.cmd.is_empty() {
+                return runtime.cmd.clone();
+            }
+        }
         if let Some(values) = self.get_array(&["targets", target_label, "cmd"]) {
             return array_to_vec(values);
         }
@@ -529,12 +902,22 @@ impl ManifestData {
     }
 
     pub fn target_env(&self, target_label: &str) -> HashMap<String, String> {
-        self.get_table(&["targets", target_label, "env"])
-            .map(table_to_map)
-            .unwrap_or_default()
+        self.runtime_for_target(target_label)
+            .map(|runtime| runtime.env.clone())
+            .filter(|env| !env.is_empty())
+            .unwrap_or_else(|| {
+                self.get_table(&["targets", target_label, "env"])
+                    .map(table_to_map)
+                    .unwrap_or_default()
+            })
     }
 
     pub fn target_required_envs(&self, target_label: &str) -> Vec<String> {
+        if let Some(runtime) = self.runtime_for_target(target_label) {
+            if !runtime.required_env.is_empty() {
+                return runtime.required_env.clone();
+            }
+        }
         let mut ordered = Vec::new();
         let mut seen = HashSet::new();
 
@@ -553,14 +936,83 @@ impl ManifestData {
     }
 
     pub fn target_port(&self, target_label: &str) -> Option<u16> {
-        self.get_value(&["targets", target_label, "port"])
-            .or_else(|| self.get_value(&["port"]))
-            .and_then(|v| v.as_integer())
-            .and_then(|v| u16::try_from(v).ok())
+        self.runtime_for_target(target_label)
+            .and_then(|runtime| runtime.port)
+            .or_else(|| {
+                self.get_value(&["targets", target_label, "port"])
+                    .or_else(|| self.get_value(&["port"]))
+                    .and_then(|v| v.as_integer())
+                    .and_then(|v| u16::try_from(v).ok())
+            })
     }
 
     pub fn target_working_dir(&self, target_label: &str) -> Option<String> {
-        self.get_str(&["targets", target_label, "working_dir"])
+        self.runtime_for_target(target_label)
+            .and_then(|runtime| runtime.working_dir.clone())
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| self.get_str(&["targets", target_label, "working_dir"]))
+    }
+
+    fn runtime_for_target(&self, target_label: &str) -> Option<&ResolvedTargetRuntime> {
+        self.runtime_model
+            .services
+            .iter()
+            .find(|service| service.target_label == target_label)
+            .map(|service| &service.runtime)
+            .or_else(|| {
+                (self.runtime_model.selected.target_label == target_label)
+                    .then_some(&self.runtime_model.selected.runtime)
+            })
+    }
+
+    fn resolved_target_value<'a>(
+        &'a self,
+        target_label: &str,
+        key: &str,
+    ) -> Option<&'a serde_json::Value> {
+        self.lock
+            .resolution
+            .entries
+            .get("resolved_targets")
+            .and_then(|value| value.as_array())
+            .and_then(|targets| {
+                targets.iter().find(|target| {
+                    target
+                        .get("label")
+                        .and_then(|value| value.as_str())
+                        .map(|label| label == target_label)
+                        .unwrap_or(false)
+                })
+            })
+            .and_then(|target| target.get(key))
+    }
+
+    fn resolved_target_string(&self, target_label: &str, key: &str) -> Option<String> {
+        self.resolved_target_value(target_label, key)
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    }
+
+    fn resolved_target_nested_string(&self, target_label: &str, keys: &[&str]) -> Option<String> {
+        let mut current = self
+            .lock
+            .resolution
+            .entries
+            .get("resolved_targets")
+            .and_then(|value| value.as_array())
+            .and_then(|targets| {
+                targets.iter().find(|target| {
+                    target
+                        .get("label")
+                        .and_then(|value| value.as_str())
+                        .map(|label| label == target_label)
+                        .unwrap_or(false)
+                })
+            })?;
+        for key in keys {
+            current = current.get(*key)?;
+        }
+        current.as_str().map(str::to_string)
     }
 
     fn target_named(&self, service_name: &str, target_label: &str) -> Result<NamedTarget> {
@@ -599,6 +1051,61 @@ impl ManifestData {
             .and_then(|v| v.as_str())
             .map(|v| v.to_string())
     }
+}
+
+fn synthesize_runtime_model_from_manifest(
+    manifest: &toml::Value,
+    selected_target: &str,
+) -> Result<ResolvedLockRuntimeModel> {
+    let metadata = LockContractMetadata {
+        name: manifest
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        version: manifest
+            .get("version")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        default_target: manifest
+            .get("default_target")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+    };
+    let target = manifest
+        .get("targets")
+        .and_then(|targets| targets.get(selected_target))
+        .cloned()
+        .ok_or_else(|| anyhow!("Missing required [targets.{}] table", selected_target))?;
+    let named_target: NamedTarget = target
+        .try_into()
+        .map_err(|_| anyhow!("targets.{} is not a valid target table", selected_target))?;
+    let runtime = ResolvedTargetRuntime {
+        target: selected_target.to_string(),
+        runtime: named_target.runtime,
+        driver: named_target.driver,
+        image: named_target.image,
+        entrypoint: named_target.entrypoint,
+        run_command: named_target.run_command,
+        cmd: named_target.cmd,
+        env: named_target.env,
+        working_dir: named_target.working_dir,
+        port: named_target.port,
+        required_env: named_target.required_env,
+        mounts: Vec::<Mount>::new(),
+    };
+    let selected = LockServiceUnit {
+        name: "main".to_string(),
+        target_label: selected_target.to_string(),
+        runtime: runtime.clone(),
+        depends_on: Vec::new(),
+        readiness_probe: named_target.readiness_probe,
+    };
+    Ok(ResolvedLockRuntimeModel {
+        metadata,
+        network: None,
+        selected: selected.clone(),
+        services: vec![selected],
+    })
 }
 
 fn parse_runtime_kind(value: &str) -> Option<RuntimeKind> {

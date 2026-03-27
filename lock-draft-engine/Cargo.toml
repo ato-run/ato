@@ -1,0 +1,23 @@
+[package]
+name = "lock-draft-engine"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+name = "lock_draft_engine"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+hex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "2.0"
+toml = "0.8"
+wasm-bindgen = { version = "=0.2.100", optional = true }
+
+[features]
+default = []
+wasm = ["dep:wasm-bindgen"]

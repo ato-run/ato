@@ -9,6 +9,12 @@ use capsule_core::lockfile::{
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use crate::application::source_inference::{
+    materialize_run_from_compatibility, materialize_run_from_source_only,
+};
+use crate::reporters::CliReporter;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ValidateResult {
@@ -27,6 +33,7 @@ pub struct ValidateResult {
 
 pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
     let resolved = resolve_authoritative_input(&path, ResolveInputOptions::default())?;
+    let reporter = Arc::new(CliReporter::new(false));
     let mut warnings = resolved
         .advisories()
         .iter()
@@ -38,15 +45,25 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
             canonical,
             provenance,
             ..
-        } => ValidateResult {
-            authoritative_input: provenance.selected_kind.as_str().to_string(),
-            manifest_path: None,
-            canonical_lock_path: Some(canonical.path),
-            runtime: None,
-            target_label: None,
-            lockfile_checked: false,
-            warnings,
-        },
+        } => {
+            let decision = capsule_core::router::route_lock(
+                &canonical.path,
+                &canonical.lock,
+                &canonical.project_root,
+                capsule_core::router::ExecutionProfile::Release,
+                None,
+            )?;
+
+            ValidateResult {
+                authoritative_input: provenance.selected_kind.as_str().to_string(),
+                manifest_path: None,
+                canonical_lock_path: Some(canonical.path),
+                runtime: Some(format!("{:?}", decision.kind).to_lowercase()),
+                target_label: Some(decision.plan.selected_target_label().to_string()),
+                lockfile_checked: false,
+                warnings,
+            }
+        }
         ResolvedInput::CompatibilityProject {
             project,
             provenance,
@@ -58,8 +75,12 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
             let raw_manifest: toml::Value = toml::from_str(&raw_manifest_text)
                 .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
 
-            let decision = capsule_core::router::route_manifest(
-                &manifest_path,
+            let materialized =
+                materialize_run_from_compatibility(&project, None, reporter.clone(), true)?;
+            let decision = capsule_core::router::route_lock(
+                &materialized.lock_path,
+                &materialized.lock,
+                &project.project_root,
                 capsule_core::router::ExecutionProfile::Release,
                 None,
             )?;
@@ -133,16 +154,28 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
                 warnings,
             }
         }
-        ResolvedInput::SourceOnly { source, .. } => {
-            return Err(AtoExecutionError::execution_contract_invalid(
-                format!(
-                    "No authoritative project input was found in {}. Source-only/bootstrap validation is not part of `ato validate` yet.",
-                    source.project_root.display()
-                ),
+        ResolvedInput::SourceOnly {
+            source, provenance, ..
+        } => {
+            let materialized =
+                materialize_run_from_source_only(&source, None, reporter.clone(), true)?;
+            let decision = capsule_core::router::route_lock(
+                &materialized.lock_path,
+                &materialized.lock,
+                &source.project_root,
+                capsule_core::router::ExecutionProfile::Release,
                 None,
-                None,
-            )
-            .into());
+            )?;
+
+            ValidateResult {
+                authoritative_input: provenance.selected_kind.as_str().to_string(),
+                manifest_path: None,
+                canonical_lock_path: Some(materialized.lock_path),
+                runtime: Some(format!("{:?}", decision.kind).to_lowercase()),
+                target_label: Some(decision.plan.selected_target_label().to_string()),
+                lockfile_checked: false,
+                warnings,
+            }
         }
     };
 

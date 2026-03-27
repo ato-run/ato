@@ -172,8 +172,8 @@ mod tests {
     };
 
     fn manifest_data() -> ManifestData {
-        ManifestData {
-            manifest: toml::from_str(
+        capsule_core::router::execution_descriptor_from_manifest_parts(
+            toml::from_str(
                 r#"
 name = "demo"
 default_target = "app"
@@ -185,12 +185,13 @@ run_command = "node server.js"
 "#,
             )
             .expect("manifest"),
-            manifest_path: PathBuf::from("/workspace/capsule.toml"),
-            manifest_dir: PathBuf::from("/workspace"),
-            profile: ExecutionProfile::Dev,
-            selected_target: "app".to_string(),
-            state_source_overrides: HashMap::new(),
-        }
+            PathBuf::from("/workspace/capsule.toml"),
+            PathBuf::from("/workspace"),
+            ExecutionProfile::Dev,
+            Some("app"),
+            HashMap::new(),
+        )
+        .expect("execution descriptor")
     }
 
     #[test]
