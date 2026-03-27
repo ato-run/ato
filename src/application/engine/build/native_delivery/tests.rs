@@ -222,6 +222,63 @@ entrypoint = "dist/MyApp.exe"
 }
 
 #[test]
+fn build_environment_skeleton_captures_native_delivery_inputs() -> Result<()> {
+    let tmp = tempdir()?;
+    let plan = sample_native_build_plan(tmp.path(), 0o755)?;
+    fs::write(plan.manifest_dir.join("Cargo.lock"), "version = 3\n")?;
+    fs::write(plan.manifest_dir.join("package-lock.json"), "{}")?;
+
+    let skeleton = native_delivery_build_environment_skeleton(&plan);
+    assert_json_object_has_keys(
+        &skeleton,
+        &["toolchains", "package_managers", "sdks", "helper_tools"],
+    );
+
+    let toolchains = skeleton
+        .get("toolchains")
+        .and_then(serde_json::Value::as_array)
+        .expect("toolchains");
+    assert!(toolchains
+        .iter()
+        .any(|value| value.as_str() == Some("rust")));
+    assert!(toolchains
+        .iter()
+        .any(|value| value.as_str() == Some("cargo")));
+    assert!(toolchains
+        .iter()
+        .any(|value| value.as_str() == Some("node")));
+
+    let package_managers = skeleton
+        .get("package_managers")
+        .and_then(serde_json::Value::as_array)
+        .expect("package_managers");
+    assert!(package_managers
+        .iter()
+        .any(|value| value.as_str() == Some("cargo")));
+    assert!(package_managers
+        .iter()
+        .any(|value| value.as_str() == Some("npm")));
+
+    let sdks = skeleton
+        .get("sdks")
+        .and_then(serde_json::Value::as_array)
+        .expect("sdks");
+    assert!(sdks.iter().any(|value| value.as_str() == Some("apple-sdk")));
+
+    let helper_tools = skeleton
+        .get("helper_tools")
+        .and_then(serde_json::Value::as_array)
+        .expect("helper_tools");
+    assert!(helper_tools
+        .iter()
+        .any(|value| value.as_str() == Some("tauri-cli")));
+    assert!(helper_tools
+        .iter()
+        .any(|value| value.as_str() == Some("codesign")));
+    Ok(())
+}
+
+#[test]
 fn detect_build_strategy_rejects_command_mode_source_delivery_sidecar() -> Result<()> {
     let tmp = tempdir()?;
     let manifest_dir = tmp.path().join("command-build-project");

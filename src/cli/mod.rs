@@ -23,8 +23,6 @@ pub(crate) use config::{
     ConfigCommands, ConfigEngineCommands, ConfigRegistryCommands, EngineCommands,
 };
 #[allow(unused_imports)]
-pub(crate) use init::InitLegacyMode;
-#[allow(unused_imports)]
 pub(crate) use inspect::InspectCommands;
 #[allow(unused_imports)]
 pub(crate) use ipc::IpcCommands;

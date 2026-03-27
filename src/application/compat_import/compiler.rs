@@ -189,6 +189,13 @@ mod tests {
         fs::write(dir.join("capsule.toml"), content).expect("write manifest");
     }
 
+    fn write_minimal_macos_app_bundle(dir: &std::path::Path, relative: &str) {
+        let binary = dir.join(relative).join("Contents/MacOS/MyApp");
+        fs::create_dir_all(binary.parent().expect("bundle binary parent"))
+            .expect("create app bundle");
+        fs::write(binary, b"demo-app").expect("write app bundle binary");
+    }
+
     fn compile_from_dir(dir: &std::path::Path) -> super::CompatibilityCompileResult {
         let resolved = resolve_authoritative_input(dir, ResolveInputOptions::default())
             .expect("resolve compatibility input");
@@ -235,6 +242,70 @@ target = "web"
             .and_then(Value::as_array)
             .expect("workloads array");
         assert_eq!(workloads.len(), 1);
+    }
+
+    #[test]
+    fn native_app_import_emits_imported_artifact_closure() {
+        let dir = tempdir().expect("tempdir");
+        write_manifest(
+            dir.path(),
+            r#"schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source"
+driver = "native"
+entrypoint = "dist/MyApp.app"
+"#,
+        );
+        write_minimal_macos_app_bundle(dir.path(), "dist/MyApp.app");
+
+        let result = compile_from_dir(dir.path());
+        let closure = result
+            .draft_lock
+            .resolution
+            .entries
+            .get("closure")
+            .expect("resolution.closure");
+
+        assert_eq!(
+            closure.get("kind").and_then(Value::as_str),
+            Some("imported_artifact_closure")
+        );
+        assert_eq!(
+            closure.get("status").and_then(Value::as_str),
+            Some("complete")
+        );
+        let artifact = closure
+            .get("artifact")
+            .and_then(Value::as_object)
+            .expect("artifact");
+        assert_eq!(
+            artifact.get("artifact_type").and_then(Value::as_str),
+            Some("macos_app_bundle")
+        );
+        assert_eq!(
+            artifact.get("provenance_limited").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(artifact
+            .get("digest")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.starts_with("blake3:")));
+        assert!(result.provenance.iter().any(|record| {
+            record.field
+                == crate::application::compat_import::CompilerOwnedField::new(
+                    "resolution",
+                    "closure",
+                )
+                && record
+                    .note
+                    .as_deref()
+                    .is_some_and(|note| note.contains("provenance is intentionally limited"))
+        }));
     }
 
     #[test]

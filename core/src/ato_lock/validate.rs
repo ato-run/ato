@@ -1,3 +1,4 @@
+use crate::ato_lock::closure::validate_closure_value;
 use chrono::DateTime;
 use thiserror::Error;
 
@@ -41,6 +42,8 @@ pub enum AtoLockValidationError {
     InvalidUnresolvedCandidates,
     #[error("signature kind must not be empty")]
     EmptySignatureKind,
+    #[error("invalid resolution.closure: {0}")]
+    InvalidClosure(String),
 }
 
 /// Structural validation accepts draft locks without requiring lock_id.
@@ -72,6 +75,7 @@ pub fn validate_structural(
 
     validate_declared_features(&lock.features.declared, mode, &mut errors);
     validate_required_features(&lock.features.required_for_execution, mode, &mut errors);
+    validate_resolution_closure(lock, &mut errors);
 
     for unresolved in lock
         .resolution
@@ -206,6 +210,20 @@ fn validate_unresolved(unresolved: &UnresolvedValue, errors: &mut Vec<AtoLockVal
 fn validate_signature(signature: &LockSignature, errors: &mut Vec<AtoLockValidationError>) {
     if signature.kind.trim().is_empty() {
         errors.push(AtoLockValidationError::EmptySignatureKind);
+    }
+}
+
+fn validate_resolution_closure(lock: &AtoLock, errors: &mut Vec<AtoLockValidationError>) {
+    let Some(closure) = lock.resolution.entries.get("closure") else {
+        return;
+    };
+
+    if let Err(closure_errors) = validate_closure_value(closure) {
+        errors.extend(
+            closure_errors
+                .into_iter()
+                .map(AtoLockValidationError::InvalidClosure),
+        );
     }
 }
 
