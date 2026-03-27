@@ -233,7 +233,7 @@ fn prepare_durable_source_workspace(source: &ResolvedSourceOnly) -> Result<PathB
     if let Some(script) = source.single_script.as_ref() {
         match script.language {
             SingleScriptLanguage::Python => {
-                anyhow::bail!("ato init does not support single-file Python inputs yet")
+                prepare_durable_python_single_script_workspace(script, &source.project_root)?;
             }
             SingleScriptLanguage::TypeScript => {
                 prepare_durable_typescript_single_script_workspace(script, &source.project_root)?;
@@ -290,24 +290,32 @@ fn prepare_python_single_script_workspace(
         })?;
     }
 
-    let mut pyproject =
-        String::from("[project]\nname = \"ato-single-script\"\nversion = \"0.1.0\"\n");
-    if let Some(requires_python) = metadata.requires_python.as_deref() {
-        pyproject.push_str(&format!("requires-python = \"{}\"\n", requires_python));
-    }
-    if !metadata.dependencies.is_empty() {
-        pyproject.push_str("dependencies = [\n");
-        for dependency in &metadata.dependencies {
-            pyproject.push_str(&format!("  \"{}\",\n", dependency));
-        }
-        pyproject.push_str("]\n");
-    }
+    let pyproject = python_pyproject_for_single_script(&metadata);
     fs::write(temp_root.join("pyproject.toml"), pyproject)
         .with_context(|| format!("failed to write pyproject.toml in {}", temp_root.display()))?;
 
     generate_uv_lock_for_single_script(&temp_root)?;
 
     Ok(temp_root)
+}
+
+fn prepare_durable_python_single_script_workspace(
+    script: &ResolvedSingleScript,
+    project_root: &Path,
+) -> Result<()> {
+    let script_text = fs::read_to_string(&script.path)
+        .with_context(|| format!("failed to read script {}", script.path.display()))?;
+    let metadata = parse_pep723_python_metadata(&script_text)?;
+    let entrypoint_path = project_root.join("main.py");
+
+    if script.path != entrypoint_path {
+        write_if_absent_or_same(&entrypoint_path, &script_text)?;
+    }
+
+    let pyproject = python_pyproject_for_single_script(&metadata);
+    write_if_absent_or_same(&project_root.join("pyproject.toml"), &pyproject)?;
+
+    generate_uv_lock_for_single_script(project_root)
 }
 
 fn generate_uv_lock_for_single_script(project_root: &Path) -> Result<()> {
@@ -510,6 +518,22 @@ fn deno_json_for_single_script(metadata: &DenoTypescriptMetadata) -> serde_json:
 struct Pep723PythonMetadata {
     dependencies: Vec<String>,
     requires_python: Option<String>,
+}
+
+fn python_pyproject_for_single_script(metadata: &Pep723PythonMetadata) -> String {
+    let mut pyproject =
+        String::from("[project]\nname = \"ato-single-script\"\nversion = \"0.1.0\"\n");
+    if let Some(requires_python) = metadata.requires_python.as_deref() {
+        pyproject.push_str(&format!("requires-python = \"{}\"\n", requires_python));
+    }
+    if !metadata.dependencies.is_empty() {
+        pyproject.push_str("dependencies = [\n");
+        for dependency in &metadata.dependencies {
+            pyproject.push_str(&format!("  \"{}\",\n", dependency));
+        }
+        pyproject.push_str("]\n");
+    }
+    pyproject
 }
 
 fn parse_pep723_python_metadata(script_text: &str) -> Result<Pep723PythonMetadata> {
@@ -2146,6 +2170,41 @@ mod tests {
         assert!(dir.path().join("main.ts").exists());
         assert!(dir.path().join("deno.json").exists());
         assert!(dir.path().join("deno.lock").exists());
+    }
+
+    #[test]
+    fn durable_init_materializes_single_python_script_into_workspace() {
+        if std::process::Command::new("uv")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("scratch.py");
+        fs::write(
+            &script_path,
+            "# /// script\n# requires-python = \">=3.11\"\n# dependencies = [\n#   \"rich\",\n# ]\n# ///\nprint('hello durable python')\n",
+        )
+        .expect("write script");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: Some(ResolvedSingleScript {
+                path: script_path,
+                language: SingleScriptLanguage::Python,
+            }),
+        };
+
+        let materialized = execute_init_from_resolved_source_only(&source, reporter(), true)
+            .expect("materialize workspace");
+
+        assert!(materialized.lock_path.exists());
+        assert!(dir.path().join("main.py").exists());
+        assert!(dir.path().join("pyproject.toml").exists());
+        assert!(dir.path().join("uv.lock").exists());
     }
 
     #[test]
