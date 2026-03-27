@@ -15,18 +15,19 @@
 
 ## Rules
 
-- authoritative input として受けるのは、当面 `*.py` のみ
+- authoritative input として受けるのは、当面 `*.py` と `*.ts`
 - resolver は `ExplicitInputKind::SingleScript` として受理する
 - resolver の出力は `ResolvedSourceOnly` を維持しつつ、script metadata を付与する
-- run materialization は script を `.tmp/ato-single-python-*` の virtual workspace へコピーする
+- run materialization は script を language-specific な `.tmp/ato-single-*` virtual workspace へコピーする
 - Python script は `main.py` として正規化し、PEP 723 があれば `pyproject.toml` と `requirements.txt` を合成する
 - `uv lock` を virtual workspace で実行し、既存の `source/python + uv.lock` 実行モデルに接続する
+- TypeScript script は `main.ts` として正規化し、最小 `deno.json` と `deno.lock` を生成して既存の `source/deno` 実行モデルに接続する
 - cleanup は attempt cleanup scope に委譲する
 
 ## Non-Goals
 
-- `ato init foo.py` の durable workspace 化
-- TypeScript / Ruby 単一ファイル run
+- `ato init foo.py` / `ato init foo.ts` の durable workspace 化
+- `.tsx` / Node fallback / Ruby 単一ファイル run
 - PEP 723 以外の Python inline metadata 形式
 
 ## Rationale
@@ -37,6 +38,7 @@
 
 ## Follow-ups
 
-- `ato init foo.py` で durable workspace を生成する
-- TypeScript single-file は Deno/Node selection と lock strategy を別途 ADR 化する
+- `ato init foo.py` と `ato init foo.ts` で durable workspace を生成する
+- `.tsx` と JSX compiler options を Deno metadata として扱う
+- Node fallback を selection gate 付きで追加する
 - Ruby single-file は runtime/driver surface を先に execution model へ追加する
