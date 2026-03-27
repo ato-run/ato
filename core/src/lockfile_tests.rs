@@ -836,6 +836,52 @@ entrypoint = "main.ts"
 }
 
 #[test]
+fn ensure_lockfile_accepts_existing_uv_lock() {
+    let temp = TempDir::new().unwrap();
+    let manifest_path = temp.path().join("capsule.toml");
+    let manifest_text = r#"
+schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11.10"
+entrypoint = "main.py"
+run_command = "uv run python3 main.py"
+dependencies = "requirements.txt"
+"#;
+    fs::write(&manifest_path, manifest_text).unwrap();
+    fs::write(temp.path().join("main.py"), "print('demo')\n").unwrap();
+    fs::write(temp.path().join("requirements.txt"), "fastapi==0.115.0\n").unwrap();
+    fs::write(
+        temp.path().join("uv.lock"),
+        "version = 1\nrevision = 1\nrequires-python = \">=3.11\"\n",
+    )
+    .unwrap();
+
+    let manifest_raw: toml::Value = toml::from_str(manifest_text).unwrap();
+    let reporter: Arc<dyn CapsuleReporter + 'static> = Arc::new(crate::reporter::NoOpReporter);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    let lock_path = rt
+        .block_on(ensure_lockfile(
+            &manifest_path,
+            &manifest_raw,
+            manifest_text,
+            reporter,
+            false,
+        ))
+        .unwrap();
+
+    assert!(lock_path.exists());
+    assert!(temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
+}
+
+#[test]
 fn ensure_lockfile_accepts_existing_pnpm_lock() {
     let temp = TempDir::new().unwrap();
     let manifest_path = temp.path().join("capsule.toml");
@@ -908,6 +954,7 @@ entrypoint = "main.sh"
 
     let lockfile = rt
         .block_on(generate_lockfile(
+            &manifest_path,
             &manifest_raw,
             manifest_text,
             temp.path(),

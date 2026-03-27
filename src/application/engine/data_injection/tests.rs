@@ -2,8 +2,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-use capsule_core::router::ManifestData;
-
 use super::*;
 
 fn with_cache_dir(test_name: &str) -> (PathBuf, String) {
@@ -59,14 +57,15 @@ async fn resolves_string_injection_from_cli_binding() {
             )])),
         ),
     ]));
-    let plan = ManifestData {
+    let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
         manifest,
-        manifest_path: PathBuf::from("capsule.toml"),
-        manifest_dir: PathBuf::from("."),
-        profile: capsule_core::router::ExecutionProfile::Dev,
-        selected_target: "default".to_string(),
-        state_source_overrides: HashMap::new(),
-    };
+        PathBuf::from("capsule.toml"),
+        PathBuf::from("."),
+        capsule_core::router::ExecutionProfile::Dev,
+        Some("default"),
+        HashMap::new(),
+    )
+    .expect("execution descriptor");
 
     let resolved = resolve_and_record(&plan, &["API_KEY=test-token".to_string()])
         .await
@@ -121,14 +120,15 @@ async fn resolves_directory_injection_from_file_uri() {
             )])),
         ),
     ]));
-    let plan = ManifestData {
+    let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
         manifest,
-        manifest_path: cache_dir.join("capsule.toml"),
-        manifest_dir: cache_dir.clone(),
-        profile: capsule_core::router::ExecutionProfile::Dev,
-        selected_target: "default".to_string(),
-        state_source_overrides: HashMap::new(),
-    };
+        cache_dir.join("capsule.toml"),
+        cache_dir.clone(),
+        capsule_core::router::ExecutionProfile::Dev,
+        Some("default"),
+        HashMap::new(),
+    )
+    .expect("execution descriptor");
 
     let resolved = resolve_and_record(
         &plan,
@@ -183,14 +183,15 @@ async fn resolves_oci_file_injection_as_mount() {
             )])),
         ),
     ]));
-    let plan = ManifestData {
+    let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
         manifest,
-        manifest_path: cache_dir.join("capsule.toml"),
-        manifest_dir: cache_dir.clone(),
-        profile: capsule_core::router::ExecutionProfile::Dev,
-        selected_target: "default".to_string(),
-        state_source_overrides: HashMap::new(),
-    };
+        cache_dir.join("capsule.toml"),
+        cache_dir.clone(),
+        capsule_core::router::ExecutionProfile::Dev,
+        Some("default"),
+        HashMap::new(),
+    )
+    .expect("execution descriptor");
 
     let resolved = resolve_and_record(
         &plan,

@@ -95,11 +95,17 @@ fn validate_engine_path(path: PathBuf) -> Result<PathBuf> {
 }
 
 fn resolve_from_manifest(manifest_path: &Path) -> Result<Option<PathBuf>> {
+    let manifest_path = normalize_manifest_lookup_path(manifest_path);
+
+    if manifest_path.file_name().and_then(|name| name.to_str()) != Some("capsule.toml") {
+        return Ok(None);
+    }
+
     if !manifest_path.exists() {
         return Ok(None);
     }
 
-    let raw = std::fs::read_to_string(manifest_path)
+    let raw = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
     let parsed = toml::from_str::<toml::Value>(&raw)
         .with_context(|| format!("Failed to parse manifest TOML: {}", manifest_path.display()))?;
@@ -146,6 +152,14 @@ fn resolve_from_manifest(manifest_path: &Path) -> Result<Option<PathBuf>> {
     }
 
     Ok(None)
+}
+
+fn normalize_manifest_lookup_path(manifest_path: &Path) -> PathBuf {
+    if manifest_path.is_dir() {
+        return manifest_path.join("capsule.toml");
+    }
+
+    manifest_path.to_path_buf()
 }
 
 pub fn run_internal(engine: &Path, subcommand: &str, payload: &Value) -> Result<Value> {
@@ -243,4 +257,115 @@ pub fn run_internal_streaming(engine: &Path, subcommand: &str, payload: &Value) 
     };
 
     Ok(status.code().unwrap_or(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_nacelle_falls_back_to_registered_engine_for_directory_manifest_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = TempDir::new().expect("tempdir");
+        let _home = EnvGuard::set("HOME", home.path().to_string_lossy().as_ref());
+
+        let project = TempDir::new().expect("project");
+        fs::write(project.path().join("capsule.toml"), "name = \"demo\"\n").expect("manifest");
+
+        let engine_path = home.path().join("nacelle");
+        fs::write(&engine_path, "#!/bin/sh\nexit 0\n").expect("engine");
+        let mut perms = fs::metadata(&engine_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&engine_path, perms).expect("chmod");
+
+        let config_dir = home.path().join(".ato");
+        fs::create_dir_all(&config_dir).expect("config dir");
+        fs::write(
+            config_dir.join("config.toml"),
+            format!(
+                "default_engine = \"nacelle\"\n\n[engines.nacelle]\npath = \"{}\"\n",
+                engine_path.display()
+            ),
+        )
+        .expect("config");
+
+        let discovered = discover_nacelle(EngineRequest {
+            explicit_path: None,
+            manifest_path: Some(project.path().to_path_buf()),
+        })
+        .expect("discover nacelle");
+
+        assert_eq!(discovered, engine_path.canonicalize().expect("canonical"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_nacelle_ignores_generated_shadow_manifest_for_engine_lookup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = TempDir::new().expect("tempdir");
+        let _home = EnvGuard::set("HOME", home.path().to_string_lossy().as_ref());
+
+        let project = TempDir::new().expect("project");
+        let shadow_manifest = project.path().join(".ato-nacelle-123.toml");
+        fs::write(
+            &shadow_manifest,
+            "name = \"demo\"\n[execution]\nentrypoint = \"uv\"\n",
+        )
+        .expect("shadow manifest");
+
+        let engine_path = home.path().join("nacelle");
+        fs::write(&engine_path, "#!/bin/sh\nexit 0\n").expect("engine");
+        let mut perms = fs::metadata(&engine_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&engine_path, perms).expect("chmod");
+
+        let config_dir = home.path().join(".ato");
+        fs::create_dir_all(&config_dir).expect("config dir");
+        fs::write(
+            config_dir.join("config.toml"),
+            format!(
+                "default_engine = \"nacelle\"\n\n[engines.nacelle]\npath = \"{}\"\n",
+                engine_path.display()
+            ),
+        )
+        .expect("config");
+
+        let discovered = discover_nacelle(EngineRequest {
+            explicit_path: None,
+            manifest_path: Some(shadow_manifest),
+        })
+        .expect("discover nacelle");
+
+        assert_eq!(discovered, engine_path.canonicalize().expect("canonical"));
+    }
 }

@@ -208,7 +208,6 @@ pub fn try_emit_json_error(err: &AnyhowError) -> bool {
 }
 
 const INSPECT_SCHEMA_VERSION: &str = "1";
-const RUN_GENERATED_MANIFEST_NAME: &str = ".ato.run.generated.capsule.toml";
 const RUN_SOURCE_INFERENCE_DIR: &str = ".tmp/source-inference";
 const WORKSPACE_SOURCE_INFERENCE_DIR: &str = ".ato/source-inference";
 const WORKSPACE_BINDING_SEED_PATH: &str = ".ato/binding/seed.json";
@@ -824,14 +823,6 @@ fn build_preview_view(snapshot: &InspectionSnapshot) -> PreviewLockView {
                             .join(RUN_SOURCE_INFERENCE_DIR)
                             .join("<attempt>")
                             .join("provenance.json")
-                            .display()
-                            .to_string(),
-                    },
-                    PreviewOutputPathView {
-                        label: "generated_manifest".to_string(),
-                        path: snapshot
-                            .project_root
-                            .join(RUN_GENERATED_MANIFEST_NAME)
                             .display()
                             .to_string(),
                     },
