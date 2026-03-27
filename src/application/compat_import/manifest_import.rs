@@ -5,7 +5,10 @@ use anyhow::Result;
 use capsule_core::ato_lock::{AtoLock, UnresolvedReason, UnresolvedValue};
 use serde_json::{json, Value};
 
-use crate::application::engine::build::native_delivery::{compute_tree_digest, path_has_extension};
+use crate::application::engine::build::native_delivery::{
+    compute_tree_digest, imported_native_artifact_delivery_contract,
+    native_delivery_draft_contract_from_manifest, path_has_extension,
+};
 
 use super::compiler::CompatibilityCompilerInput;
 use super::diagnostics::{
@@ -103,7 +106,26 @@ pub(super) fn import_manifest(
         None,
     ));
 
-    if let Some(closure) = import_native_artifact_closure(input)? {
+    let imported_artifact_closure = import_native_artifact_closure(input)?;
+    if let Some(delivery) =
+        import_native_delivery_contract(input, imported_artifact_closure.as_ref())?
+    {
+        draft_lock
+            .contract
+            .entries
+            .insert("delivery".to_string(), delivery);
+        provenance.push(ProvenanceRecord::new(
+            CompilerOwnedField::new("contract", "delivery"),
+            ProvenanceKind::CompilerInferred,
+            Some(manifest.path.as_path()),
+            Some("targets.<default_target>"),
+            Some(
+                "desktop native delivery mode is recorded in contract.delivery so source-derivation and artifact-import remain distinct",
+            ),
+        ));
+    }
+
+    if let Some(closure) = imported_artifact_closure {
         draft_lock
             .resolution
             .entries
@@ -124,6 +146,26 @@ pub(super) fn import_manifest(
         diagnostics,
         provenance,
     })
+}
+
+fn import_native_delivery_contract(
+    input: &CompatibilityCompilerInput<'_>,
+    imported_artifact_closure: Option<&Value>,
+) -> Result<Option<Value>> {
+    if imported_artifact_closure.is_some() {
+        let manifest = input.manifest;
+        let target = manifest.model.resolve_default_target()?;
+        let entrypoint = target.entrypoint.trim();
+        if entrypoint.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(imported_native_artifact_delivery_contract(
+            &PathBuf::from(entrypoint),
+            "macos_app_bundle",
+        )));
+    }
+
+    native_delivery_draft_contract_from_manifest(input.manifest.path.as_path())
 }
 
 fn import_workloads(

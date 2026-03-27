@@ -11,6 +11,7 @@ use crate::application::compat_import::{
 };
 use crate::application::engine::build::native_delivery::{
     detect_build_strategy, native_delivery_build_environment_skeleton,
+    native_delivery_contract_from_build_plan,
 };
 use crate::application::pipeline::cleanup::CleanupScope;
 use crate::application::ports::OutputPort;
@@ -1355,6 +1356,10 @@ fn maybe_promote_native_build_closure(result: &mut SourceInferenceResult) -> Res
             "build_environment": native_delivery_build_environment_skeleton(&plan),
         }),
     );
+    result.lock.contract.entries.insert(
+        "delivery".to_string(),
+        native_delivery_contract_from_build_plan(&plan, "source-derivation", "complete")?,
+    );
     result
         .lock
         .resolution
@@ -1367,6 +1372,16 @@ fn maybe_promote_native_build_closure(result: &mut SourceInferenceResult) -> Res
         source_field: Some("[artifact]/[finalize]".to_string()),
         note: Some(
             "native delivery build plan resolved into build_closure using observed lockfiles and build-environment skeleton"
+                .to_string(),
+        ),
+    });
+    result.provenance.push(SourceInferenceProvenance {
+        field: "contract.delivery".to_string(),
+        kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
+        source_path: Some(plan.manifest_dir.join("capsule.toml")),
+        source_field: Some("[artifact]/[finalize]".to_string()),
+        note: Some(
+            "native delivery contract promoted from source-draft to source-derivation after build_closure resolved"
                 .to_string(),
         ),
     });
@@ -3263,6 +3278,12 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
             .entries
             .get("closure")
             .expect("resolution.closure");
+        let delivery = result
+            .lock
+            .contract
+            .entries
+            .get("delivery")
+            .expect("contract.delivery");
         assert_eq!(
             closure.get("kind").and_then(Value::as_str),
             Some("build_closure")
@@ -3323,6 +3344,17 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
             .unresolved
             .iter()
             .all(|value| value.field.as_deref() != Some("resolution.closure")));
+        assert_eq!(
+            delivery.get("mode").and_then(Value::as_str),
+            Some("source-derivation")
+        );
+        assert_eq!(
+            delivery
+                .get("build")
+                .and_then(|value| value.get("closure_status"))
+                .and_then(Value::as_str),
+            Some("complete")
+        );
     }
 
     #[test]
@@ -3365,6 +3397,17 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
             draft_lock_input_from_compatibility(&project).expect("compile compatibility draft");
 
         let inferred = infer_phase(SourceInferenceInput::DraftLock(draft_input)).expect("infer");
+        assert_eq!(
+            inferred
+                .result
+                .lock
+                .contract
+                .entries
+                .get("delivery")
+                .and_then(|value| value.get("mode"))
+                .and_then(Value::as_str),
+            Some("source-draft")
+        );
         assert_eq!(
             inferred
                 .result
