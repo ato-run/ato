@@ -2,6 +2,14 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
+## [0.6.0] - 2026-03-27
+
+### What Changed
+
+#### Breaking Changes
+
+- Add public single-file input resolution and lock-first execution metadata required by the new init and run flows
+
 ## [0.5.6] - 2026-03-26
 
 ### What Changed
