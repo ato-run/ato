@@ -311,12 +311,15 @@ portable かつ artifact に随伴すべき publisher-declared constraints は `
 
 - canonical hash に含めない
 - repo diff ノイズを避けるため workspace-local 分離を推奨する
+- `observations` は当面 `attestations` の workspace-local store に含め、独立 top-level section を標準化しない
 
 既定の運用推奨として、`attestations` は repo-tracked canonical lock content の外側に保持する。repo へ埋め込む運用は opt-in とする。
 
 ## 9. Derived Artifacts
 
 `ato.lock.json` は唯一の canonical input だが、内部派生物は残す。
+
+native-delivery の `local_derivation` / `projection`、workspace-local approval result、host-local observation records は derived artifact または local overlay であり、canonical projection や `lock_id` の対象ではない。
 
 派生物として残すもの:
 
