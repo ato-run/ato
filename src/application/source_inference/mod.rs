@@ -341,19 +341,31 @@ fn prepare_typescript_single_script_workspace(
 
     let script_text = fs::read_to_string(&script.path)
         .with_context(|| format!("failed to read script {}", script.path.display()))?;
-    fs::write(temp_root.join("main.ts"), script_text)
+    let metadata = parse_deno_typescript_metadata(&script_text, &script.path);
+    let entrypoint = if is_typescript_jsx_script(&script.path) {
+        "main.tsx"
+    } else {
+        "main.ts"
+    };
+    fs::write(temp_root.join(entrypoint), script_text)
         .with_context(|| format!("failed to write virtual script {}", temp_root.display()))?;
-    fs::write(temp_root.join("deno.json"), "{}\n")
-        .with_context(|| format!("failed to write deno.json in {}", temp_root.display()))?;
+    let deno_json = deno_json_for_single_script(&metadata);
+    fs::write(
+        temp_root.join("deno.json"),
+        serde_json::to_string_pretty(&deno_json)
+            .context("failed to serialize deno.json for single-file TypeScript")?
+            + "\n",
+    )
+    .with_context(|| format!("failed to write deno.json in {}", temp_root.display()))?;
 
-    generate_deno_lock_for_single_script(&temp_root)?;
+    generate_deno_lock_for_single_script(&temp_root, entrypoint)?;
 
     Ok(temp_root)
 }
 
-fn generate_deno_lock_for_single_script(project_root: &Path) -> Result<()> {
+fn generate_deno_lock_for_single_script(project_root: &Path, entrypoint: &str) -> Result<()> {
     let output = std::process::Command::new("deno")
-        .args(["cache", "--lock=deno.lock", "main.ts"])
+        .args(["cache", "--lock=deno.lock", entrypoint])
         .current_dir(project_root)
         .output()
         .with_context(|| format!("failed to execute deno cache in {}", project_root.display()))?;
@@ -384,6 +396,56 @@ fn generate_deno_lock_for_single_script(project_root: &Path) -> Result<()> {
         "deno cache finished without creating deno.lock for {}",
         project_root.display()
     )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DenoTypescriptMetadata {
+    is_jsx: bool,
+    jsx_import_source: Option<String>,
+}
+
+fn is_typescript_jsx_script(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case("tsx"))
+        .unwrap_or(false)
+}
+
+fn parse_deno_typescript_metadata(script_text: &str, path: &Path) -> DenoTypescriptMetadata {
+    let jsx_import_source = script_text.lines().find_map(|line| {
+        let marker = "@jsxImportSource";
+        let index = line.find(marker)?;
+        let value = line[index + marker.len()..]
+            .trim()
+            .trim_end_matches("*/")
+            .trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    });
+
+    DenoTypescriptMetadata {
+        is_jsx: is_typescript_jsx_script(path),
+        jsx_import_source,
+    }
+}
+
+fn deno_json_for_single_script(metadata: &DenoTypescriptMetadata) -> serde_json::Value {
+    if !metadata.is_jsx {
+        return serde_json::json!({});
+    }
+
+    serde_json::json!({
+        "compilerOptions": {
+            "jsx": "react-jsx",
+            "jsxImportSource": metadata
+                .jsx_import_source
+                .clone()
+                .unwrap_or_else(|| "npm:react".to_string()),
+        }
+    })
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1272,8 +1334,10 @@ fn process_candidates_for_source(
                     candidates.extend(existing_candidates(
                         &detected.dir,
                         &[
+                            "src/main.tsx",
                             "src/index.ts",
                             "src/main.ts",
+                            "main.tsx",
                             "index.ts",
                             "main.ts",
                             "index.js",
@@ -2376,6 +2440,68 @@ print('ok')
             Some("main.ts")
         );
         assert!(materialized.project_root.join("deno.lock").exists());
+    }
+
+    #[test]
+    fn tsx_single_script_virtual_workspace_writes_jsx_compiler_options() {
+        if std::process::Command::new("deno")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("hello.tsx");
+        fs::write(
+            &script_path,
+            "/** @jsxImportSource npm:preact */\nexport const App = <div>hello</div>;\n",
+        )
+        .expect("write tsx script");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: Some(ResolvedSingleScript {
+                path: script_path,
+                language: SingleScriptLanguage::TypeScript,
+            }),
+        };
+
+        let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
+            .expect("materialize run");
+        let deno_json: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(materialized.project_root.join("deno.json"))
+                .expect("read deno json"),
+        )
+        .expect("parse deno json");
+        let routed = capsule_core::router::route_lock(
+            &materialized.lock_path,
+            &materialized.lock,
+            &materialized.project_root,
+            capsule_core::router::ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route lock");
+
+        assert_eq!(
+            routed.plan.execution_entrypoint().as_deref(),
+            Some("main.tsx")
+        );
+        assert_eq!(
+            deno_json
+                .get("compilerOptions")
+                .and_then(|value| value.get("jsx"))
+                .and_then(serde_json::Value::as_str),
+            Some("react-jsx")
+        );
+        assert_eq!(
+            deno_json
+                .get("compilerOptions")
+                .and_then(|value| value.get("jsxImportSource"))
+                .and_then(serde_json::Value::as_str),
+            Some("npm:preact")
+        );
     }
 
     #[test]

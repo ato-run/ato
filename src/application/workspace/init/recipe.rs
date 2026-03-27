@@ -259,9 +259,11 @@ fn node_release_entrypoint(dir: &Path, node: &DetectedNode) -> Vec<String> {
     // Fallbacks based on typical file layout.
     let candidates: &[&str] = if matches!(node.package_manager, NodePackageManager::Deno) {
         &[
+            "src/main.tsx",
             "src/main.ts",
             "src/mod.ts",
             "src/index.ts",
+            "main.tsx",
             "main.ts",
             "mod.ts",
             "index.ts",
