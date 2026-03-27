@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -23,6 +24,7 @@ use capsule_core::input_resolver::{
     SingleScriptLanguage, ATO_LOCK_FILE_NAME,
 };
 use capsule_core::CapsuleReporter;
+use regex::Regex;
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -460,6 +462,7 @@ fn generate_deno_lock_for_single_script(project_root: &Path, entrypoint: &str) -
 struct DenoScriptMetadata {
     is_jsx: bool,
     jsx_import_source: Option<String>,
+    bare_imports: BTreeMap<String, String>,
 }
 
 fn is_deno_jsx_script(path: &Path) -> bool {
@@ -501,23 +504,86 @@ fn parse_deno_script_metadata(script_text: &str, path: &Path) -> DenoScriptMetad
     DenoScriptMetadata {
         is_jsx: is_deno_jsx_script(path),
         jsx_import_source,
+        bare_imports: infer_deno_bare_imports(script_text),
     }
 }
 
 fn deno_json_for_single_script(metadata: &DenoScriptMetadata) -> serde_json::Value {
-    if !metadata.is_jsx {
-        return serde_json::json!({});
+    let mut root = serde_json::Map::new();
+
+    if !metadata.bare_imports.is_empty() {
+        root.insert(
+            "imports".to_string(),
+            serde_json::to_value(&metadata.bare_imports).unwrap_or_else(|_| json!({})),
+        );
     }
 
-    serde_json::json!({
-        "compilerOptions": {
-            "jsx": "react-jsx",
-            "jsxImportSource": metadata
-                .jsx_import_source
-                .clone()
-                .unwrap_or_else(|| "npm:react".to_string()),
+    if metadata.is_jsx {
+        root.insert(
+            "compilerOptions".to_string(),
+            json!({
+                "jsx": "react-jsx",
+                "jsxImportSource": metadata
+                    .jsx_import_source
+                    .clone()
+                    .unwrap_or_else(|| "npm:react".to_string()),
+            }),
+        );
+    }
+
+    Value::Object(root)
+}
+
+fn infer_deno_bare_imports(script_text: &str) -> BTreeMap<String, String> {
+    let mut imports = BTreeMap::new();
+    for specifier in extract_script_import_specifiers(script_text) {
+        if !is_bare_dependency_specifier(&specifier) {
+            continue;
         }
-    })
+        imports.insert(specifier.clone(), format!("npm:{specifier}"));
+    }
+    imports
+}
+
+fn extract_script_import_specifiers(script_text: &str) -> Vec<String> {
+    let patterns = [
+        r#"(?m)\b(?:import|export)\s[^\n;]*?\bfrom\s*[\"']([^\"']+)[\"']"#,
+        r#"(?m)^\s*import\s*[\"']([^\"']+)[\"']"#,
+        r#"(?m)\bimport\s*\(\s*[\"']([^\"']+)[\"']\s*\)"#,
+        r#"(?m)\brequire\s*\(\s*[\"']([^\"']+)[\"']\s*\)"#,
+    ];
+    let mut specifiers = Vec::new();
+
+    for pattern in patterns {
+        let regex = Regex::new(pattern).expect("static import regex must compile");
+        for captures in regex.captures_iter(script_text) {
+            if let Some(specifier) = captures.get(1) {
+                specifiers.push(specifier.as_str().to_string());
+            }
+        }
+    }
+
+    specifiers.sort();
+    specifiers.dedup();
+    specifiers
+}
+
+fn is_bare_dependency_specifier(specifier: &str) -> bool {
+    let trimmed = specifier.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    !(trimmed.starts_with("./")
+        || trimmed.starts_with("../")
+        || trimmed.starts_with('/')
+        || trimmed.starts_with("#")
+        || trimmed.contains("://")
+        || trimmed.starts_with("npm:")
+        || trimmed.starts_with("jsr:")
+        || trimmed.starts_with("node:")
+        || trimmed.starts_with("file:")
+        || trimmed.starts_with("data:"))
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -2288,6 +2354,57 @@ mod tests {
         assert_eq!(
             routed.plan.execution_entrypoint().as_deref(),
             Some("main.js")
+        );
+        assert!(materialized.project_root.join("deno.lock").exists());
+    }
+
+    #[test]
+    fn typescript_single_script_bare_imports_become_deno_imports() {
+        if std::process::Command::new("deno")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("hello.ts");
+        fs::write(
+            &script_path,
+            "import { z } from \"zod\";\nimport pc from \"picocolors\";\nconsole.log(pc.green(z.string().parse('ok')));\n",
+        )
+        .expect("write script");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: Some(ResolvedSingleScript {
+                path: script_path,
+                language: SingleScriptLanguage::TypeScript,
+            }),
+        };
+
+        let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
+            .expect("materialize run");
+        let deno_json: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(materialized.project_root.join("deno.json"))
+                .expect("read deno json"),
+        )
+        .expect("parse deno json");
+
+        assert_eq!(
+            deno_json
+                .get("imports")
+                .and_then(|value| value.get("zod"))
+                .and_then(serde_json::Value::as_str),
+            Some("npm:zod")
+        );
+        assert_eq!(
+            deno_json
+                .get("imports")
+                .and_then(|value| value.get("picocolors"))
+                .and_then(serde_json::Value::as_str),
+            Some("npm:picocolors")
         );
         assert!(materialized.project_root.join("deno.lock").exists());
     }
