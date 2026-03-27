@@ -216,7 +216,7 @@ pub(crate) fn materialize_run_from_source_only(
     });
     let result =
         execute_shared_engine(input, MaterializationMode::RunAttempt, assume_yes, reporter)?;
-    materialize_run_result(&project_root, result, scope.as_deref_mut(), None)
+    materialize_run_result(&project_root, result, scope, None)
 }
 
 fn prepare_single_script_workspace(
