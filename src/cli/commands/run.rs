@@ -768,6 +768,11 @@ async fn normalize_run_target_after_install(
     if resolved_target.is_dir()
         || resolved_target.file_name().and_then(|value| value.to_str()) == Some("capsule.toml")
         || resolved_target.file_name().and_then(|value| value.to_str()) == Some(ATO_LOCK_FILE_NAME)
+        || resolved_target
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.eq_ignore_ascii_case("py"))
+            .unwrap_or(false)
     {
         return match resolve_authoritative_input(resolved_target, ResolveInputOptions::default())? {
             ResolvedInput::CanonicalLock { canonical, .. } => {
