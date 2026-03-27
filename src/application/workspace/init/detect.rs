@@ -257,9 +257,11 @@ fn detect_deno(dir: &Path) -> Result<DetectedNode> {
 
     let main = [
         "main.ts",
+        "main.tsx",
         "mod.ts",
         "index.ts",
         "src/main.ts",
+        "src/main.tsx",
         "src/mod.ts",
         "src/index.ts",
     ]
