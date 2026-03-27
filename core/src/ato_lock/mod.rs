@@ -14,13 +14,18 @@ use std::path::Path;
 /// Load, validation, lock_id computation, and serialization are split so later
 /// input-resolver and import flows can work with draft locks without being
 /// forced through persisted artifact validation too early.
-pub use canonicalize::{canonical_projection, CanonicalLockProjection};
+pub use canonicalize::{
+    canonical_identity_projection, canonical_projection, is_canonical_identity_section,
+    CanonicalLockProjection, CANONICAL_IDENTITY_EXCLUDED_SECTIONS,
+    CANONICAL_IDENTITY_INCLUDED_SECTIONS,
+};
 pub use closure::{
     closure_info, compute_closure_digest, normalize_closure_value, normalize_lock_closure,
     normalize_resolution_closure_entries, validate_closure_value, ClosureInfo,
 };
 pub use hash::{
-    canonical_document_bytes, canonical_projection_bytes, compute_lock_id, recompute_lock_id,
+    canonical_document_bytes, canonical_projection_bytes, canonical_signature_payload_bytes,
+    compute_lock_id, recompute_lock_id,
 };
 pub use schema::{
     AtoLock, AttestationsSection, BindingSection, ContractSection, FeatureName, KnownFeature,
@@ -393,5 +398,29 @@ mod tests {
             compute_lock_id(&legacy).expect("legacy lock_id"),
             compute_lock_id(&normalized).expect("normalized lock_id")
         );
+    }
+
+    #[test]
+    fn standard_signature_payload_matches_canonical_projection_bytes() {
+        let lock = persisted_sample_lock();
+        assert_eq!(
+            canonical_signature_payload_bytes(&lock).expect("signature payload"),
+            canonical_projection_bytes(&lock).expect("canonical bytes")
+        );
+    }
+
+    #[test]
+    fn canonical_identity_helpers_report_expected_sections() {
+        assert!(is_canonical_identity_section("schema_version"));
+        assert!(is_canonical_identity_section("resolution"));
+        assert!(is_canonical_identity_section("contract"));
+        assert!(!is_canonical_identity_section("binding"));
+        assert!(!is_canonical_identity_section("policy"));
+        assert!(!is_canonical_identity_section("attestations"));
+        assert!(!is_canonical_identity_section("signatures"));
+        assert!(CANONICAL_IDENTITY_EXCLUDED_SECTIONS.contains(&"binding"));
+        assert!(CANONICAL_IDENTITY_EXCLUDED_SECTIONS.contains(&"policy"));
+        assert!(CANONICAL_IDENTITY_EXCLUDED_SECTIONS.contains(&"attestations"));
+        assert!(CANONICAL_IDENTITY_EXCLUDED_SECTIONS.contains(&"signatures"));
     }
 }
