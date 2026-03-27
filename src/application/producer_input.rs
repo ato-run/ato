@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use capsule_core::ato_lock::{compute_lock_id, AtoLock};
+use capsule_core::ato_lock::{compute_closure_digest, compute_lock_id, AtoLock};
 use capsule_core::input_resolver::{
     resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
 };
@@ -131,15 +131,14 @@ impl ProducerAuthoritativeInput {
                     .as_ref()
                     .map(|value| value.as_str().to_string())
             });
-        let closure_digest = materialized
-            .lock
+        let closure_digest = sanitized_lock
             .resolution
             .entries
             .get("closure")
-            .map(serde_json::to_vec)
+            .map(compute_closure_digest)
             .transpose()
-            .context("Failed to serialize resolution.closure for registry metadata")?
-            .map(|bytes| crate::artifact_hash::compute_blake3_label(&bytes));
+            .context("Failed to compute resolution.closure for registry metadata")?
+            .flatten();
 
         Ok(Self {
             manifest_path: manifest_path.clone(),
@@ -199,7 +198,7 @@ mod tests {
         assert!(generated_lock.attestations.entries.is_empty());
         assert!(generated_lock.attestations.unresolved.is_empty());
         assert!(!input.manifest_raw.is_empty());
-        assert_eq!(input.workspace_root, dir.path());
+        assert_eq!(input.workspace_root, dir.path().canonicalize().unwrap());
         assert_eq!(
             input.lock_path.file_name().and_then(|v| v.to_str()),
             Some("ato.lock.json")

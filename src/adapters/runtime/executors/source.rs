@@ -785,7 +785,25 @@ mod tests {
 
     fn plan_from_manifest(dir: &tempfile::TempDir, manifest: &str, target: &str) -> ManifestData {
         let manifest_path = dir.path().join("capsule.toml");
-        let parsed = toml::from_str(manifest).expect("manifest");
+        let mut parsed: toml::Value = toml::from_str(manifest).expect("manifest");
+        let table = parsed
+            .as_table_mut()
+            .expect("test manifest must parse to a table");
+        table
+            .entry("schema_version".to_string())
+            .or_insert_with(|| toml::Value::String("0.2".to_string()));
+        table
+            .entry("name".to_string())
+            .or_insert_with(|| toml::Value::String("app".to_string()));
+        table
+            .entry("version".to_string())
+            .or_insert_with(|| toml::Value::String("0.1.0".to_string()));
+        table
+            .entry("type".to_string())
+            .or_insert_with(|| toml::Value::String("app".to_string()));
+        table
+            .entry("default_target".to_string())
+            .or_insert_with(|| toml::Value::String(target.to_string()));
         capsule_core::router::execution_descriptor_from_manifest_parts(
             parsed,
             manifest_path,
@@ -920,7 +938,7 @@ mod tests {
         let normalized = fs::read_to_string(&normalized_path).unwrap();
 
         assert!(normalized.contains("entrypoint = \"uv\""));
-        assert!(normalized.contains("command = \"run --offline python3 main.py --flag value\""));
+        assert!(normalized.contains("command = \"run python3 main.py --flag value\""));
         assert!(normalized.contains("language = \"python\""));
         assert!(normalized.contains("version = \"3.12\""));
     }

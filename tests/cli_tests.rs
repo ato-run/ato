@@ -13,22 +13,6 @@ use capsule_core::ato_lock::{
 use predicates::prelude::*;
 use tempfile::tempdir;
 
-fn run_init_in(dir: &std::path::Path) -> String {
-    let output = Command::cargo_bin("ato")
-        .unwrap()
-        .current_dir(dir)
-        .args(["init", "--legacy", "prompt"])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
-}
-
 fn write_static_publish_project(dir: &Path, name: &str, version: &str) {
     fs::create_dir_all(dir.join("dist")).expect("create dist");
     fs::write(
@@ -77,6 +61,7 @@ fn write_canonical_ato_lock(dir: &Path) {
     lock.resolution.entries.insert(
         "closure".to_string(),
         serde_json::json!({
+            "kind": "runtime_closure",
             "status": "complete",
             "inputs": []
         }),
@@ -141,9 +126,16 @@ fn write_inspect_lock_workspace(dir: &Path) {
         "closure".to_string(),
         serde_json::json!({
             "kind": "metadata_only",
+            "status": "incomplete",
             "observed_lockfiles": ["package-lock.json"]
         }),
     );
+    lock.resolution.unresolved.push(UnresolvedValue {
+        field: Some("resolution.closure".to_string()),
+        reason: UnresolvedReason::InsufficientEvidence,
+        detail: Some("closure remains metadata-only/incomplete".to_string()),
+        candidates: Vec::new(),
+    });
     lock.resolution.unresolved.push(UnresolvedValue {
         field: Some("resolution.runtime".to_string()),
         reason: UnresolvedReason::InsufficientEvidence,
@@ -174,7 +166,7 @@ fn write_inspect_lock_workspace(dir: &Path) {
                     "kind": "metadata_observation",
                     "source_path": dir.join("package-lock.json"),
                     "source_field": "package-lock.json",
-                    "note": "metadata-only observed lockfile state"
+                    "note": "metadata-only/incomplete observed lockfile state"
                 },
                 {
                     "field": "resolution.runtime",
@@ -216,6 +208,12 @@ fn write_inspect_lock_workspace(dir: &Path) {
             "lock_id": lock.lock_id.as_ref().map(|value| value.as_str()),
             "generated_at": null,
             "unresolved": [
+                {
+                    "field": "resolution.closure",
+                    "reason": "insufficient_evidence",
+                    "detail": "closure remains metadata-only/incomplete",
+                    "candidates": []
+                },
                 {
                     "field": "resolution.runtime",
                     "reason": "insufficient_evidence",
@@ -553,6 +551,22 @@ fn test_inspect_lock_surface_reports_field_statuses() {
     assert_eq!(
         closure.get("observed").and_then(|value| value.as_bool()),
         Some(true)
+    );
+    assert_eq!(
+        closure.get("closureKind").and_then(|value| value.as_str()),
+        Some("metadata_only")
+    );
+    assert_eq!(
+        closure
+            .get("closureStatus")
+            .and_then(|value| value.as_str()),
+        Some("incomplete")
+    );
+    assert_eq!(
+        closure
+            .get("closureDigestable")
+            .and_then(|value| value.as_bool()),
+        Some(false)
     );
     assert_eq!(
         closure.get("fallback").and_then(|value| value.as_bool()),
@@ -918,7 +932,7 @@ fn test_install_rejects_version_with_from_gh_repo() {
 }
 
 #[test]
-fn test_install_from_gh_repo_without_manifest_uses_zero_config_build_fallback() {
+fn test_install_from_gh_repo_without_manifest_reports_fail_closed_lockfile_guidance() {
     let tmp = tempdir().unwrap();
     let output_dir = tmp.path().join("installed");
     let runtime_root = tmp.path().join("runtime");
@@ -929,7 +943,7 @@ fn test_install_from_gh_repo_without_manifest_uses_zero_config_build_fallback() 
     );
     let server = spawn_github_archive_server("/repos/Koh0920/demo-repo/tarball", archive);
 
-    let assert = Command::cargo_bin("ato")
+    let output = Command::cargo_bin("ato")
         .unwrap()
         .current_dir(tmp.path())
         .env("ATO_GITHUB_API_BASE_URL", &server.base_url)
@@ -943,34 +957,36 @@ fn test_install_from_gh_repo_without_manifest_uses_zero_config_build_fallback() 
         ])
         .arg(&output_dir)
         .args(["--yes", "--no-project"])
-        .assert();
+        .output()
+        .unwrap();
 
-    assert.success();
+    assert!(
+        !output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Falling back to local zero-config inference"),
+        "stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("Missing native lockfile(s):"),
+        "stderr={stderr}"
+    );
+    assert!(stderr.contains("package-lock.json"), "stderr={stderr}");
 
     let installed = output_dir
         .join("koh0920")
         .join("demo-repo")
         .join("0.1.0")
         .join("demo-repo-0.1.0.capsule");
-    assert!(
-        installed.exists(),
-        "installed artifact missing: {}",
-        installed.display()
-    );
-
-    let manifest = extract_manifest_from_archive(&installed);
-    assert!(
-        manifest.contains("name = \"demo-repo\""),
-        "manifest={manifest}"
-    );
-    assert!(
-        manifest.contains("entrypoint = \"index.js\""),
-        "manifest={manifest}"
-    );
+    assert!(!installed.exists(), "installed artifact should not exist");
 }
 
 #[test]
-fn test_install_from_gh_repo_accepts_host_path_and_metadata_archive() {
+fn test_install_from_gh_repo_accepts_host_path_and_reports_fail_closed_lockfile_guidance() {
     let tmp = tempdir().unwrap();
     let output_dir = tmp.path().join("installed");
     let runtime_root = tmp.path().join("runtime");
@@ -981,7 +997,7 @@ fn test_install_from_gh_repo_accepts_host_path_and_metadata_archive() {
     );
     let server = spawn_github_archive_server("/repos/Koh0920/demo-repo/tarball", archive);
 
-    let assert = Command::cargo_bin("ato")
+    let output = Command::cargo_bin("ato")
         .unwrap()
         .current_dir(tmp.path())
         .env("ATO_GITHUB_API_BASE_URL", &server.base_url)
@@ -995,20 +1011,32 @@ fn test_install_from_gh_repo_accepts_host_path_and_metadata_archive() {
         ])
         .arg(&output_dir)
         .args(["--yes", "--no-project"])
-        .assert();
+        .output()
+        .unwrap();
 
-    assert.success();
+    assert!(
+        !output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Falling back to local zero-config inference"),
+        "stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("Missing native lockfile(s):"),
+        "stderr={stderr}"
+    );
+    assert!(stderr.contains("package-lock.json"), "stderr={stderr}");
 
     let installed = output_dir
         .join("koh0920")
         .join("demo-repo")
         .join("0.1.0")
         .join("demo-repo-0.1.0.capsule");
-    assert!(
-        installed.exists(),
-        "installed artifact missing: {}",
-        installed.display()
-    );
+    assert!(!installed.exists(), "installed artifact should not exist");
 }
 
 #[test]
@@ -1020,13 +1048,14 @@ fn test_init_help_describes_durable_baseline_output() {
         .stdout(predicate::str::contains(
             "Materialize a durable ato.lock.json baseline for a local workspace",
         ))
-        .stdout(predicate::str::contains("--legacy <LEGACY>"))
+        .stdout(predicate::str::contains("--legacy <LEGACY>").not())
+        .stdout(predicate::str::contains("--yes"))
         .stdout(predicate::str::contains("Usage: ato init"))
         .stdout(predicate::str::contains("<NAME>").not());
 }
 
 #[test]
-fn test_init_outputs_agent_prompt_for_next_project_without_writing_manifest() {
+fn test_init_materializes_durable_baseline_for_next_project_without_writing_manifest() {
     let tmp = tempdir().unwrap();
     fs::write(
         tmp.path().join("package.json"),
@@ -1048,220 +1077,27 @@ fn test_init_outputs_agent_prompt_for_next_project_without_writing_manifest() {
     fs::create_dir_all(tmp.path().join("app")).unwrap();
     fs::create_dir_all(tmp.path().join("public")).unwrap();
 
-    let stdout = run_init_in(tmp.path());
+    let output = Command::cargo_bin("ato")
+        .unwrap()
+        .current_dir(tmp.path())
+        .args(["init", "--yes"])
+        .output()
+        .unwrap();
+
     assert!(
-        stdout.contains("Generated an agent-ready prompt for capsule.toml creation."),
-        "stdout={stdout}"
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(stdout.contains("Next.js"), "stdout={stdout}");
-    assert!(
-        stdout.contains("static export (`out/`) or a dynamic server"),
-        "stdout={stdout}"
-    );
-    assert!(
-        stdout.contains("schema_version = \"0.2\""),
-        "stdout={stdout}"
-    );
-    assert!(stdout.contains("```toml"), "stdout={stdout}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Created"), "stdout={stdout}");
+    assert!(stdout.contains("ato.lock.json"), "stdout={stdout}");
+    assert!(tmp.path().join("ato.lock.json").exists());
+    assert!(tmp
+        .path()
+        .join(".ato/source-inference/provenance.json")
+        .exists());
     assert!(!tmp.path().join("capsule.toml").exists());
-}
-
-#[test]
-fn test_init_detects_astro_project_and_config_facts() {
-    let tmp = tempdir().unwrap();
-    fs::write(
-        tmp.path().join("package.json"),
-        r#"{
-  "dependencies": {
-    "astro": "^4.0.0"
-  },
-  "scripts": {
-    "build": "astro build"
-  }
-}"#,
-    )
-    .unwrap();
-    fs::write(
-        tmp.path().join("astro.config.mjs"),
-        "export default { output: 'static' };",
-    )
-    .unwrap();
-    fs::create_dir_all(tmp.path().join("dist")).unwrap();
-
-    let stdout = run_init_in(tmp.path());
-    assert!(stdout.contains("Astro"), "stdout={stdout}");
-    assert!(stdout.contains("astro.config.mjs"), "stdout={stdout}");
-    assert!(stdout.contains("dist"), "stdout={stdout}");
-}
-
-#[test]
-fn test_init_detects_nuxt_ambiguity() {
-    let tmp = tempdir().unwrap();
-    fs::write(
-        tmp.path().join("package.json"),
-        r#"{
-  "dependencies": {
-    "nuxt": "^3.0.0"
-  }
-}"#,
-    )
-    .unwrap();
-    fs::write(
-        tmp.path().join("nuxt.config.ts"),
-        "export default defineNuxtConfig({});",
-    )
-    .unwrap();
-
-    let stdout = run_init_in(tmp.path());
-    assert!(stdout.contains("Nuxt"), "stdout={stdout}");
-    assert!(
-        stdout.contains("static generate build or a server deployment"),
-        "stdout={stdout}"
-    );
-}
-
-#[test]
-fn test_init_detects_react_vite_static_facts() {
-    let tmp = tempdir().unwrap();
-    fs::write(
-        tmp.path().join("package.json"),
-        r#"{
-  "dependencies": {
-    "react": "^19.0.0",
-    "vite": "^5.0.0"
-  },
-  "scripts": {
-    "build": "vite build",
-    "preview": "vite preview"
-  }
-}"#,
-    )
-    .unwrap();
-    fs::write(tmp.path().join("vite.config.ts"), "export default {};").unwrap();
-    fs::create_dir_all(tmp.path().join("dist")).unwrap();
-    fs::create_dir_all(tmp.path().join("src")).unwrap();
-    fs::write(tmp.path().join("src/main.ts"), "console.log('hi');").unwrap();
-
-    let stdout = run_init_in(tmp.path());
-    assert!(stdout.contains("React + Vite"), "stdout={stdout}");
-    assert!(stdout.contains("vite.config.ts"), "stdout={stdout}");
-    assert!(stdout.contains("`dist`"), "stdout={stdout}");
-    assert!(stdout.contains("pure Vite static build"), "stdout={stdout}");
-}
-
-#[test]
-fn test_init_detects_express_server_entry_hints() {
-    let tmp = tempdir().unwrap();
-    fs::write(
-        tmp.path().join("package.json"),
-        r#"{
-  "dependencies": {
-    "express": "^4.0.0"
-  },
-  "scripts": {
-    "start": "node dist/server.js"
-  }
-}"#,
-    )
-    .unwrap();
-    fs::create_dir_all(tmp.path().join("dist")).unwrap();
-    fs::write(tmp.path().join("dist/server.js"), "console.log('server');").unwrap();
-
-    let stdout = run_init_in(tmp.path());
-    assert!(stdout.contains("Express"), "stdout={stdout}");
-    assert!(stdout.contains("dist/server.js"), "stdout={stdout}");
-    assert!(stdout.contains("`npm start`"), "stdout={stdout}");
-}
-
-#[test]
-fn test_init_detects_tauri_native_facts_and_ambiguity() {
-    let tmp = tempdir().unwrap();
-    fs::create_dir_all(
-        tmp.path()
-            .join("src-tauri/target/release/bundle/macos/sample.app"),
-    )
-    .unwrap();
-    fs::write(
-        tmp.path().join("src-tauri/Cargo.toml"),
-        "[package]\nname = \"sample-tauri\"\nversion = \"0.1.0\"\n",
-    )
-    .unwrap();
-    fs::write(tmp.path().join("tauri.conf.json"), "{}").unwrap();
-
-    let stdout = run_init_in(tmp.path());
-    assert!(stdout.contains("Tauri"), "stdout={stdout}");
-    assert!(stdout.contains("src-tauri/Cargo.toml"), "stdout={stdout}");
-    assert!(stdout.contains("tauri.conf.json"), "stdout={stdout}");
-    assert!(stdout.contains("sample.app"), "stdout={stdout}");
-    assert!(
-        stdout.contains("embedded in the desktop app"),
-        "stdout={stdout}"
-    );
-}
-
-#[test]
-fn test_init_detects_electron_native_ambiguity() {
-    let tmp = tempdir().unwrap();
-    fs::write(
-        tmp.path().join("package.json"),
-        r#"{
-  "main": "electron/main.js",
-  "devDependencies": {
-    "electron": "^30.0.0",
-    "electron-builder": "^24.0.0"
-  }
-}"#,
-    )
-    .unwrap();
-    fs::write(
-        tmp.path().join("electron-builder.yml"),
-        "appId: com.example.demo\n",
-    )
-    .unwrap();
-
-    let stdout = run_init_in(tmp.path());
-    assert!(stdout.contains("Electron"), "stdout={stdout}");
-    assert!(stdout.contains("electron-builder.yml"), "stdout={stdout}");
-    assert!(
-        stdout.contains("packaged desktop artifact"),
-        "stdout={stdout}"
-    );
-}
-
-#[test]
-fn test_init_detects_fastapi_and_module_ambiguity() {
-    let tmp = tempdir().unwrap();
-    fs::write(tmp.path().join("requirements.txt"), "fastapi\nuvicorn\n").unwrap();
-    fs::write(
-        tmp.path().join("server.py"),
-        "from fastapi import FastAPI\napp = FastAPI()\n",
-    )
-    .unwrap();
-
-    let stdout = run_init_in(tmp.path());
-    assert!(stdout.contains("FastAPI"), "stdout={stdout}");
-    assert!(
-        stdout.contains("uvicorn module:app")
-            && stdout.contains("which module and app object should be used"),
-        "stdout={stdout}"
-    );
-}
-
-#[test]
-fn test_init_detects_plain_rust_binary_facts() {
-    let tmp = tempdir().unwrap();
-    fs::create_dir_all(tmp.path().join("src")).unwrap();
-    fs::write(
-        tmp.path().join("Cargo.toml"),
-        "[package]\nname = \"demo-rust\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-    )
-    .unwrap();
-    fs::write(tmp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
-
-    let stdout = run_init_in(tmp.path());
-    assert!(stdout.contains("Rust binary"), "stdout={stdout}");
-    assert!(stdout.contains("Cargo.toml"), "stdout={stdout}");
-    assert!(stdout.contains("src/main.rs"), "stdout={stdout}");
 }
 
 #[test]
@@ -2109,7 +1945,7 @@ fn test_publish_json_artifact_build_reports_six_phase_matrix() {
 }
 
 #[test]
-fn test_publish_json_missing_manifest_uses_diagnostic_envelope() {
+fn test_publish_json_source_only_rust_workspace_uses_diagnostic_envelope() {
     let output = Command::cargo_bin("ato")
         .unwrap()
         .args(["publish", "--json"])
@@ -2121,7 +1957,7 @@ fn test_publish_json_missing_manifest_uses_diagnostic_envelope() {
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(value["schema_version"], "1");
     assert_eq!(value["status"], "error");
-    assert_eq!(value["error"]["code"], "E002");
+    assert_eq!(value["error"]["code"], "E999");
     assert!(value["error"]["message"]
         .as_str()
         .expect("message string")
