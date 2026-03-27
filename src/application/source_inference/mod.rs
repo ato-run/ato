@@ -17,7 +17,9 @@ use crate::project::init::detect::{
 use crate::project::init::recipe::{project_info_from_detection, ProjectInfo};
 use crate::reporters::CliReporter;
 use anyhow::{Context, Result};
-use capsule_core::ato_lock::{self, AtoLock, UnresolvedReason, UnresolvedValue};
+use capsule_core::ato_lock::{
+    self, closure_info, normalize_lock_closure, AtoLock, UnresolvedReason, UnresolvedValue,
+};
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::input_resolver::{
     ResolvedCanonicalLock, ResolvedCompatibilityProject, ResolvedSingleScript, ResolvedSourceOnly,
@@ -1066,7 +1068,7 @@ fn promote_draft_execution_resolution(
             source_path: Some(project_root.to_path_buf()),
             source_field: Some("project_root".to_string()),
             note: Some(
-                "dependency closure remained unresolved in the draft lock, so run uses metadata-only observed lockfile state"
+                "dependency closure remained unresolved in the draft lock, so run uses metadata-only/incomplete observed lockfile state"
                     .to_string(),
             ),
         });
@@ -1183,6 +1185,9 @@ fn sole_object_key(value: Option<&Value>) -> Option<String> {
 }
 
 fn resolve(result: &mut SourceInferenceResult) -> Result<()> {
+    normalize_lock_closure(&mut result.lock)?;
+    ensure_incomplete_closure_unresolved_marker(&mut result.lock)?;
+
     let process_resolved = result.lock.contract.entries.contains_key("process");
     let runtime_resolved = result.lock.resolution.entries.contains_key("runtime");
     let target_resolved = result
@@ -1209,6 +1214,44 @@ fn resolve(result: &mut SourceInferenceResult) -> Result<()> {
             result.selection_gate = Some(gate);
         }
     }
+
+    Ok(())
+}
+
+fn ensure_incomplete_closure_unresolved_marker(lock: &mut AtoLock) -> Result<()> {
+    let Some(closure) = lock.resolution.entries.get("closure") else {
+        return Ok(());
+    };
+
+    let info = closure_info(closure)?;
+    if info.kind != "metadata_only" && info.status != "incomplete" {
+        return Ok(());
+    }
+
+    let detail = if info.kind == "metadata_only" {
+        "dependency closure remains metadata-only and incomplete until durable dependency inputs are captured"
+    } else {
+        "dependency closure remains incomplete until all required dependency inputs are captured"
+    };
+
+    if let Some(unresolved) = lock
+        .resolution
+        .unresolved
+        .iter_mut()
+        .find(|value| value.field.as_deref() == Some("resolution.closure"))
+    {
+        unresolved.reason = UnresolvedReason::InsufficientEvidence;
+        unresolved.detail = Some(detail.to_string());
+        unresolved.candidates.clear();
+        return Ok(());
+    }
+
+    lock.resolution.unresolved.push(UnresolvedValue {
+        field: Some("resolution.closure".to_string()),
+        reason: UnresolvedReason::InsufficientEvidence,
+        detail: Some(detail.to_string()),
+        candidates: Vec::new(),
+    });
 
     Ok(())
 }
@@ -1826,6 +1869,7 @@ fn inferred_closure_state(project_root: &Path) -> Value {
 
     json!({
         "kind": "metadata_only",
+        "status": "incomplete",
         "observed_lockfiles": explicit_locks,
     })
 }
@@ -2114,6 +2158,36 @@ mod tests {
         assert!(result.lock.resolution.entries.contains_key("runtime"));
         assert!(result.lock.resolution.entries.contains_key("closure"));
         assert!(result.selection_gate.is_none());
+    }
+
+    #[test]
+    fn source_only_inference_emits_normalized_incomplete_metadata_closure() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"demo","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("write package json");
+        fs::write(dir.path().join("index.js"), "console.log('ok')").expect("write index");
+
+        let result = execute_shared_engine(
+            SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
+                project_root: dir.path().to_path_buf(),
+            }),
+            MaterializationMode::InitWorkspace,
+            true,
+            reporter(),
+        )
+        .expect("run engine");
+
+        assert_eq!(
+            result.lock.resolution.entries.get("closure"),
+            Some(&json!({
+                "kind": "metadata_only",
+                "status": "incomplete",
+                "observed_lockfiles": [],
+            }))
+        );
     }
 
     #[test]
@@ -2994,7 +3068,7 @@ target = "worker"
         );
         lock.resolution.entries.insert(
             "closure".to_string(),
-            json!({"kind": "metadata_only", "observed_lockfiles": []}),
+            json!({"kind": "metadata_only", "status": "incomplete", "observed_lockfiles": []}),
         );
 
         let error = execute_shared_engine(
@@ -3010,6 +3084,54 @@ target = "worker"
         .expect_err("draft lock without a resolvable target/runtime must fail closed");
 
         assert!(error.to_string().contains("ATO_ERR_RUNTIME_NOT_RESOLVED"));
+    }
+
+    #[test]
+    fn draft_lock_normalizes_legacy_complete_closure_shape() {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "main.ts", "cmd": []}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([{"name": "main", "process": {"entrypoint": "main.ts", "cmd": []}}]),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "deno", "version": "2.1.3"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([
+                {"label": "web", "runtime": "source", "driver": "deno", "entrypoint": "main.ts"}
+            ]),
+        );
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"status": "complete", "inputs": []}),
+        );
+
+        let result = execute_shared_engine(
+            SourceInferenceInput::DraftLock(DraftLockInput {
+                project_root: PathBuf::from("."),
+                draft_lock: lock,
+                provenance: Vec::new(),
+            }),
+            MaterializationMode::InitWorkspace,
+            true,
+            reporter(),
+        )
+        .expect("draft lock engine");
+
+        assert_eq!(
+            result.lock.resolution.entries.get("closure"),
+            Some(&json!({
+                "kind": "runtime_closure",
+                "status": "complete",
+                "inputs": [],
+            }))
+        );
     }
 
     #[test]
@@ -3029,7 +3151,7 @@ target = "worker"
         );
         lock.resolution.entries.insert(
             "closure".to_string(),
-            json!({"kind": "metadata_only", "observed_lockfiles": []}),
+            json!({"kind": "metadata_only", "status": "incomplete", "observed_lockfiles": []}),
         );
 
         let error = execute_shared_engine(
@@ -3085,5 +3207,53 @@ target = "worker"
         .expect_err("canonical lock without closure must fail closed");
 
         assert!(error.to_string().contains("dependency closure state"));
+    }
+
+    #[test]
+    fn canonical_lock_normalizes_legacy_complete_closure_shape() {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "main.ts", "cmd": []}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([{"name": "main", "process": {"entrypoint": "main.ts", "cmd": []}}]),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "deno", "version": "2.1.3"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([
+                {"label": "web", "runtime": "source", "driver": "deno", "entrypoint": "main.ts"}
+            ]),
+        );
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"status": "complete", "inputs": []}),
+        );
+
+        let result = execute_shared_engine(
+            SourceInferenceInput::CanonicalLock(CanonicalLockInput {
+                project_root: PathBuf::from("."),
+                canonical_path: PathBuf::from("ato.lock.json"),
+                lock,
+            }),
+            MaterializationMode::InitWorkspace,
+            true,
+            reporter(),
+        )
+        .expect("canonical lock engine");
+
+        assert_eq!(
+            result.lock.resolution.entries.get("closure"),
+            Some(&json!({
+                "kind": "runtime_closure",
+                "status": "complete",
+                "inputs": [],
+            }))
+        );
     }
 }

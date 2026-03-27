@@ -1451,7 +1451,7 @@ run_command = "node server.js"
         );
         lock.resolution.entries.insert(
             "closure".to_string(),
-            json!({"kind": "metadata_only", "observed_lockfiles": []}),
+            json!({"kind": "metadata_only", "status": "incomplete", "observed_lockfiles": []}),
         );
         ato_lock::write_pretty_to_path(&lock, &lock_path).expect("write lock");
 
@@ -1483,7 +1483,7 @@ run_command = "node server.js"
             .expect("normalize target");
 
         assert!(normalized.authoritative_input.is_some());
-        assert_eq!(normalized.target, tmp.path());
+        assert_eq!(normalized.target, tmp.path().canonicalize().unwrap());
         assert!(normalized.target.exists());
     }
 
@@ -1517,6 +1517,12 @@ run_command = "node server.js"
         let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
             toml::from_str(
                 r#"
+                schema_version = "0.2"
+                name = "app"
+                version = "0.1.0"
+                type = "app"
+                default_target = "app"
+
                 [targets.app]
                 runtime = "source"
                 driver = "node"
