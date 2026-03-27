@@ -676,6 +676,7 @@ fn append_allow_env_permission(
     keys.extend(runtime_overrides::merged_env(plan.execution_env()).into_keys());
     keys.extend(manifest_allow_env_keys(plan));
     keys.extend(launch_ctx.env_permission_keys());
+    keys.extend(default_deno_env_permission_keys());
     if keys.is_empty() {
         return;
     }
@@ -700,6 +701,13 @@ fn manifest_allow_env_keys(plan: &ManifestData) -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
+}
+
+fn default_deno_env_permission_keys() -> Vec<String> {
+    ["CI", "TERM", "NO_COLOR", "FORCE_COLOR"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 fn resolve_deno_runtime_dir(manifest_dir: &Path, entrypoint: &str) -> PathBuf {
@@ -937,10 +945,20 @@ fn verify_execution_plan_hashes(execution_plan: &ExecutionPlan) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        disable_runtime_lockfile, ensure_deno_runtime_env_paths,
+        default_deno_env_permission_keys, disable_runtime_lockfile, ensure_deno_runtime_env_paths,
         resolve_deno_launch_spec_from_run_command, resolve_deno_lock_path,
         resolve_deno_runtime_dir, resolve_package_lock_path,
     };
+
+    #[test]
+    fn default_deno_env_permission_keys_include_color_detection_vars() {
+        let keys = default_deno_env_permission_keys();
+
+        assert!(keys.contains(&"CI".to_string()));
+        assert!(keys.contains(&"TERM".to_string()));
+        assert!(keys.contains(&"NO_COLOR".to_string()));
+        assert!(keys.contains(&"FORCE_COLOR".to_string()));
+    }
 
     #[test]
     fn deno_runtime_dir_uses_source_when_entrypoint_exists_only_there() {
