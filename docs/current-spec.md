@@ -939,6 +939,17 @@ Current metadata policy:
 - install, finalize, and project read staged artifact metadata plus local-derivation.json
 - the original source checkout is not required later for those flows
 
+Current canonical lock contract policy for desktop native delivery:
+
+- desktop-native semantics are surfaced under `contract.delivery`, not only through `contract.process`
+- `contract.delivery.mode` is one of `source-draft`, `source-derivation`, or `artifact-import`
+- `source-draft` means the project expresses native-delivery intent but build closure is still incomplete
+- `source-derivation` means native-delivery intent plus build closure has resolved into `resolution.closure.kind = "build_closure"`
+- `artifact-import` means an existing built artifact such as `.app` is being imported as compatibility input; this mode is provenance-limited and does not claim reproducible rebuild semantics
+- `.app`, `.exe`, AppImage, and `.dmg` are never treated as canonical build inputs; they are build outputs or imported artifacts, so `contract.delivery.artifact.canonical_build_input` remains `false`
+- `contract.delivery` is organized into `artifact`, `build`, `finalize`, `install`, and `projection` logical sections
+- `local_derivation` and `projection` remain host-local execution/install metadata; they do not participate in canonical lock identity
+
 Stable machine-readable contract fields for schema_version = "0.1" native JSON envelopes:
 
 - fetch.json: schema_version, scoped_id, version, registry, parent_digest

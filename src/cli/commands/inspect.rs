@@ -313,6 +313,8 @@ pub struct InspectFieldView {
     pub closure_digestable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub closure_provenance_limited: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provenance: Vec<InspectProvenanceView>,
 }
@@ -976,6 +978,7 @@ fn collect_field_views(
                         .map(|gate| !gate.capability.is_empty() || !gate.message.is_empty())
                         .unwrap_or(false);
             let closure_surface = closure_surface_for_field(&lock_path, value.as_ref());
+            let delivery_mode = delivery_mode_for_field(&lock_path, value.as_ref());
             InspectFieldView {
                 resolved: value.is_some(),
                 explicit: provenance.iter().any(provenance_is_explicit),
@@ -991,6 +994,7 @@ fn collect_field_views(
                 closure_provenance_limited: closure_surface
                     .as_ref()
                     .map(|value| value.provenance_limited),
+                delivery_mode,
                 lock_path,
                 value,
                 provenance: provenance
@@ -1300,6 +1304,17 @@ fn closure_surface_for_field(lock_path: &str, value: Option<&Value>) -> Option<C
     })
 }
 
+fn delivery_mode_for_field(lock_path: &str, value: Option<&Value>) -> Option<String> {
+    if lock_path != "contract.delivery" {
+        return None;
+    }
+
+    value?
+        .get("mode")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 fn append_compatibility_diagnostics(
     result: &mut SourceInferenceResult,
     compiled: &CompatibilityCompileResult,
@@ -1561,6 +1576,9 @@ fn print_lock_view(view: &InspectLockView) {
                 field.closure_digestable.unwrap_or(false),
                 field.closure_provenance_limited.unwrap_or(false)
             );
+        }
+        if let Some(mode) = field.delivery_mode.as_deref() {
+            print!(" mode={}", mode);
         }
         println!();
     }

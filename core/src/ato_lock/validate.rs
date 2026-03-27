@@ -1,5 +1,6 @@
 use crate::ato_lock::closure::validate_closure_value;
 use chrono::DateTime;
+use serde_json::Value;
 use thiserror::Error;
 
 use crate::ato_lock::hash::compute_lock_id;
@@ -44,6 +45,8 @@ pub enum AtoLockValidationError {
     EmptySignatureKind,
     #[error("invalid resolution.closure: {0}")]
     InvalidClosure(String),
+    #[error("invalid contract.delivery: {0}")]
+    InvalidDelivery(String),
 }
 
 /// Structural validation accepts draft locks without requiring lock_id.
@@ -76,6 +79,7 @@ pub fn validate_structural(
     validate_declared_features(&lock.features.declared, mode, &mut errors);
     validate_required_features(&lock.features.required_for_execution, mode, &mut errors);
     validate_resolution_closure(lock, &mut errors);
+    validate_contract_delivery(lock, &mut errors);
 
     for unresolved in lock
         .resolution
@@ -224,6 +228,118 @@ fn validate_resolution_closure(lock: &AtoLock, errors: &mut Vec<AtoLockValidatio
                 .into_iter()
                 .map(AtoLockValidationError::InvalidClosure),
         );
+    }
+}
+
+fn validate_contract_delivery(lock: &AtoLock, errors: &mut Vec<AtoLockValidationError>) {
+    let Some(delivery) = lock.contract.entries.get("delivery") else {
+        return;
+    };
+
+    if let Err(delivery_errors) = validate_delivery_value(delivery) {
+        errors.extend(
+            delivery_errors
+                .into_iter()
+                .map(AtoLockValidationError::InvalidDelivery),
+        );
+    }
+}
+
+fn validate_delivery_value(value: &Value) -> std::result::Result<(), Vec<String>> {
+    let mut errors = Vec::new();
+    let Some(object) = value.as_object() else {
+        return Err(vec!["contract.delivery must be an object".to_string()]);
+    };
+
+    let mode = match object.get("mode").and_then(Value::as_str) {
+        Some(mode @ ("source-draft" | "source-derivation" | "artifact-import")) => mode,
+        Some(other) => {
+            errors.push(format!("contract.delivery.mode '{}' is unsupported", other));
+            ""
+        }
+        None => {
+            errors.push("contract.delivery.mode is required".to_string());
+            ""
+        }
+    };
+
+    validate_delivery_section(object, "artifact", &mut errors);
+    validate_delivery_section(object, "install", &mut errors);
+    validate_delivery_section(object, "projection", &mut errors);
+
+    if let Some(artifact) = object.get("artifact").and_then(Value::as_object) {
+        if artifact.get("kind").and_then(Value::as_str) != Some("desktop-native") {
+            errors.push("contract.delivery.artifact.kind must be 'desktop-native'".to_string());
+        }
+        if artifact
+            .get("canonical_build_input")
+            .and_then(Value::as_bool)
+            .is_none()
+        {
+            errors.push(
+                "contract.delivery.artifact.canonical_build_input must be a boolean".to_string(),
+            );
+        }
+        if artifact
+            .get("provenance_limited")
+            .and_then(Value::as_bool)
+            .is_none()
+        {
+            errors.push(
+                "contract.delivery.artifact.provenance_limited must be a boolean".to_string(),
+            );
+        }
+    }
+
+    match mode {
+        "source-draft" | "source-derivation" => {
+            validate_delivery_section(object, "build", &mut errors);
+            validate_delivery_section(object, "finalize", &mut errors);
+            if let Some(build) = object.get("build").and_then(Value::as_object) {
+                if build.get("kind").and_then(Value::as_str) != Some("native-delivery") {
+                    errors
+                        .push("contract.delivery.build.kind must be 'native-delivery'".to_string());
+                }
+                let expected_status = if mode == "source-derivation" {
+                    "complete"
+                } else {
+                    "incomplete"
+                };
+                if build.get("closure_status").and_then(Value::as_str) != Some(expected_status) {
+                    errors.push(format!(
+                        "contract.delivery.build.closure_status must be '{}' for mode '{}'",
+                        expected_status, mode
+                    ));
+                }
+            }
+        }
+        "artifact-import" => {
+            if let Some(artifact) = object.get("artifact").and_then(Value::as_object) {
+                if artifact.get("provenance_limited").and_then(Value::as_bool) != Some(true) {
+                    errors.push(
+                        "contract.delivery.artifact.provenance_limited must be true for artifact-import"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn validate_delivery_section(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+    errors: &mut Vec<String>,
+) {
+    if !object.get(key).is_some_and(Value::is_object) {
+        errors.push(format!("contract.delivery.{} must be an object", key));
     }
 }
 

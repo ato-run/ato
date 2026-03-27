@@ -142,6 +142,38 @@ fn write_inspect_lock_workspace(dir: &Path) {
             "entrypoint": "dist"
         }),
     );
+    lock.contract.entries.insert(
+        "delivery".to_string(),
+        serde_json::json!({
+            "mode": "source-draft",
+            "artifact": {
+                "kind": "desktop-native",
+                "path": "dist/MyApp.app",
+                "canonical_build_input": false,
+                "provenance_limited": false,
+                "reproducibility": "closure-incomplete-draft"
+            },
+            "build": {
+                "kind": "native-delivery",
+                "requires_build_closure": true,
+                "closure_status": "incomplete"
+            },
+            "finalize": {
+                "tool": "codesign",
+                "args": ["--deep", "--force"],
+                "host_local": true
+            },
+            "install": {
+                "kind": "local-derivation",
+                "host_local": true,
+                "requires_local_derivation": true
+            },
+            "projection": {
+                "kind": "launcher-surface",
+                "host_local": true
+            }
+        }),
+    );
     lock.resolution.entries.insert(
         "resolved_targets".to_string(),
         serde_json::json!([
@@ -627,6 +659,18 @@ fn test_inspect_lock_surface_reports_field_statuses() {
     assert_eq!(
         closure.get("fallback").and_then(|value| value.as_bool()),
         Some(true)
+    );
+    let delivery = fields
+        .iter()
+        .find(|value| {
+            value.get("lockPath").and_then(|entry| entry.as_str()) == Some("contract.delivery")
+        })
+        .expect("contract.delivery field");
+    assert_eq!(
+        delivery
+            .get("deliveryMode")
+            .and_then(|value| value.as_str()),
+        Some("source-draft")
     );
 
     let unresolved = payload
