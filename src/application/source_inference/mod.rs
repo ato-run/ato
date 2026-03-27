@@ -223,6 +223,9 @@ fn prepare_single_script_workspace(
 ) -> Result<PathBuf> {
     match script.language {
         SingleScriptLanguage::Python => prepare_python_single_script_workspace(script, scope),
+        SingleScriptLanguage::TypeScript => {
+            prepare_typescript_single_script_workspace(script, scope)
+        }
     }
 }
 
@@ -308,6 +311,79 @@ fn generate_uv_lock_for_single_script(project_root: &Path) -> Result<()> {
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     );
+}
+
+fn prepare_typescript_single_script_workspace(
+    script: &ResolvedSingleScript,
+    scope: Option<&mut CleanupScope>,
+) -> Result<PathBuf> {
+    let parent = script
+        .path
+        .parent()
+        .context("single-file script path must have a parent directory")?;
+    let temp_root = parent.join(".tmp").join(format!(
+        "ato-single-ts-{}-{}",
+        script
+            .path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("script"),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    ));
+    fs::create_dir_all(&temp_root)
+        .with_context(|| format!("failed to create virtual workspace {}", temp_root.display()))?;
+    if let Some(scope) = scope {
+        scope.register_remove_dir(temp_root.clone());
+    }
+
+    let script_text = fs::read_to_string(&script.path)
+        .with_context(|| format!("failed to read script {}", script.path.display()))?;
+    fs::write(temp_root.join("main.ts"), script_text)
+        .with_context(|| format!("failed to write virtual script {}", temp_root.display()))?;
+    fs::write(temp_root.join("deno.json"), "{}\n")
+        .with_context(|| format!("failed to write deno.json in {}", temp_root.display()))?;
+
+    generate_deno_lock_for_single_script(&temp_root)?;
+
+    Ok(temp_root)
+}
+
+fn generate_deno_lock_for_single_script(project_root: &Path) -> Result<()> {
+    let output = std::process::Command::new("deno")
+        .args(["cache", "--lock=deno.lock", "main.ts"])
+        .current_dir(project_root)
+        .output()
+        .with_context(|| format!("failed to execute deno cache in {}", project_root.display()))?;
+
+    if output.status.success() {
+        if project_root.join("deno.lock").exists() {
+            return Ok(());
+        }
+
+        fs::write(project_root.join("deno.lock"), "{}\n").with_context(|| {
+            format!(
+                "deno cache succeeded but failed to synthesize empty deno.lock for {}",
+                project_root.display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "failed to generate deno.lock for single-file TypeScript script (status {}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    anyhow::bail!(
+        "deno cache finished without creating deno.lock for {}",
+        project_root.display()
+    )
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1206,13 +1282,25 @@ fn process_candidates_for_source(
                             "server.js",
                         ],
                         70,
-                        if node.is_bun {
+                        if matches!(node.package_manager, NodePackageManager::Deno) {
+                            "deno:file_layout"
+                        } else if node.is_bun {
                             "bun:file_layout"
                         } else {
                             "node:file_layout"
                         },
-                        if node.is_bun { "bun" } else { "node" },
-                        "well-known Node file layout used as deterministic fallback",
+                        if matches!(node.package_manager, NodePackageManager::Deno) {
+                            ""
+                        } else if node.is_bun {
+                            "bun"
+                        } else {
+                            "node"
+                        },
+                        if matches!(node.package_manager, NodePackageManager::Deno) {
+                            "well-known Deno file layout used as deterministic fallback"
+                        } else {
+                            "well-known Node file layout used as deterministic fallback"
+                        },
                     ));
                 }
             }
@@ -1313,6 +1401,7 @@ fn runtime_kind_from_project(detected: &DetectedProject) -> &'static str {
             .as_ref()
             .map(|node| match node.package_manager {
                 NodePackageManager::Bun => "bun",
+                NodePackageManager::Deno => "deno",
                 _ => "node",
             })
             .unwrap_or("node"),
@@ -1359,6 +1448,11 @@ fn inferred_runtime_version(
 }
 
 fn infer_node_runtime_version(project_root: &Path, runtime_kind: &str) -> Option<String> {
+    if runtime_kind.eq_ignore_ascii_case("deno") {
+        return infer_first_existing_trimmed(project_root, &[".deno-version"])
+            .or_else(|| Some("2".to_string()));
+    }
+
     if runtime_kind.eq_ignore_ascii_case("bun") {
         return infer_first_existing_trimmed(project_root, &[".bun-version"])
             .or_else(|| Some("1.1".to_string()));
@@ -1477,6 +1571,7 @@ fn inferred_filesystem_contract(detected: &DetectedProject) -> Value {
 fn inferred_closure_state(project_root: &Path) -> Value {
     let explicit_locks = [
         "package-lock.json",
+        "deno.lock",
         "pnpm-lock.yaml",
         "yarn.lock",
         "bun.lockb",
@@ -1746,7 +1841,8 @@ mod tests {
     use std::fs;
 
     use capsule_core::input_resolver::{
-        resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
+        resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ResolvedSingleScript,
+        ResolvedSourceOnly, SingleScriptLanguage,
     };
     use tempfile::tempdir;
 
@@ -2238,6 +2334,48 @@ print('ok')
 
         assert_eq!(metadata.requires_python.as_deref(), Some(">=3.11"));
         assert_eq!(metadata.dependencies, vec!["httpx>=0.27", "rich"]);
+    }
+
+    #[test]
+    fn typescript_single_script_virtual_workspace_generates_deno_lock() {
+        if std::process::Command::new("deno")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("hello.ts");
+        fs::write(&script_path, "console.log('hello from ts');\n").expect("write script");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: Some(ResolvedSingleScript {
+                path: script_path,
+                language: SingleScriptLanguage::TypeScript,
+            }),
+        };
+
+        let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
+            .expect("materialize run");
+        let routed = capsule_core::router::route_lock(
+            &materialized.lock_path,
+            &materialized.lock,
+            &materialized.project_root,
+            capsule_core::router::ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route lock");
+
+        assert_eq!(routed.plan.execution_runtime().as_deref(), Some("source"));
+        assert_eq!(routed.plan.execution_driver().as_deref(), Some("deno"));
+        assert_eq!(
+            routed.plan.execution_entrypoint().as_deref(),
+            Some("main.ts")
+        );
+        assert!(materialized.project_root.join("deno.lock").exists());
     }
 
     #[test]

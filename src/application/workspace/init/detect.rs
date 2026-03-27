@@ -37,6 +37,7 @@ impl ProjectType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodePackageManager {
     Bun,
+    Deno,
     Npm,
     Pnpm,
     Yarn,
@@ -83,6 +84,16 @@ pub fn detect_project(dir: &Path) -> Result<DetectedProject> {
 
     if dir.join("package.json").exists() {
         let node = detect_node(dir)?;
+        return Ok(DetectedProject {
+            dir: dir.to_path_buf(),
+            name,
+            project_type: ProjectType::NodeJs,
+            node: Some(node),
+        });
+    }
+
+    if dir.join("deno.json").exists() || dir.join("deno.jsonc").exists() {
+        let node = detect_deno(dir)?;
         return Ok(DetectedProject {
             dir: dir.to_path_buf(),
             name,
@@ -232,4 +243,70 @@ fn detect_node(dir: &Path) -> Result<DetectedNode> {
         main,
         has_hono,
     })
+}
+
+fn detect_deno(dir: &Path) -> Result<DetectedNode> {
+    let config_path = if dir.join("deno.json").exists() {
+        dir.join("deno.json")
+    } else {
+        dir.join("deno.jsonc")
+    };
+    let content = fs::read_to_string(&config_path)
+        .with_context(|| format!("Failed to read {}", config_path.display()))?;
+    let parsed = serde_json::from_str::<serde_json::Value>(&content).ok();
+
+    let main = [
+        "main.ts",
+        "mod.ts",
+        "index.ts",
+        "src/main.ts",
+        "src/mod.ts",
+        "src/index.ts",
+    ]
+    .iter()
+    .find(|candidate| dir.join(candidate).exists())
+    .map(|candidate| (*candidate).to_string());
+
+    let scripts = parsed
+        .as_ref()
+        .and_then(|value| value.get("tasks"))
+        .and_then(serde_json::Value::as_object)
+        .map(|tasks| NodeScripts {
+            has_dev: tasks.get("dev").is_some(),
+            has_start: tasks.get("start").is_some(),
+            has_build: tasks.get("build").is_some(),
+        })
+        .unwrap_or(NodeScripts {
+            has_dev: false,
+            has_start: false,
+            has_build: false,
+        });
+
+    Ok(DetectedNode {
+        package_manager: NodePackageManager::Deno,
+        is_bun: false,
+        scripts,
+        main,
+        has_hono: false,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_project_recognizes_deno_workspace_without_package_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("deno.json"), "{}\n").expect("write deno json");
+        fs::write(dir.path().join("main.ts"), "console.log('ok')\n").expect("write main");
+
+        let detected = detect_project(dir.path()).expect("detect project");
+
+        assert!(matches!(detected.project_type, ProjectType::NodeJs));
+        assert!(matches!(
+            detected.node.expect("node detection").package_manager,
+            NodePackageManager::Deno
+        ));
+    }
 }

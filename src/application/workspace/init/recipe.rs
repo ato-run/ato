@@ -203,6 +203,11 @@ fn node_dev_entrypoint(node: &DetectedNode) -> Option<Vec<String>> {
             "run".to_string(),
             "dev".to_string(),
         ]),
+        NodePackageManager::Deno => Some(vec![
+            "deno".to_string(),
+            "task".to_string(),
+            "dev".to_string(),
+        ]),
         NodePackageManager::Pnpm => Some(vec!["pnpm".to_string(), "dev".to_string()]),
         NodePackageManager::Yarn => Some(vec!["yarn".to_string(), "dev".to_string()]),
         NodePackageManager::Npm | NodePackageManager::Unknown => Some(vec![
@@ -219,6 +224,9 @@ fn node_release_entrypoint(dir: &Path, node: &DetectedNode) -> Vec<String> {
             NodePackageManager::Bun => {
                 vec!["bun".to_string(), "run".to_string(), "start".to_string()]
             }
+            NodePackageManager::Deno => {
+                vec!["deno".to_string(), "task".to_string(), "start".to_string()]
+            }
             NodePackageManager::Pnpm => vec!["pnpm".to_string(), "start".to_string()],
             NodePackageManager::Yarn => vec!["yarn".to_string(), "start".to_string()],
             NodePackageManager::Npm | NodePackageManager::Unknown => {
@@ -232,6 +240,9 @@ fn node_release_entrypoint(dir: &Path, node: &DetectedNode) -> Vec<String> {
         if node.is_bun {
             return vec!["bun".to_string(), "dist/server.js".to_string()];
         }
+        if matches!(node.package_manager, NodePackageManager::Deno) {
+            return vec!["dist/server.js".to_string()];
+        }
         return vec!["node".to_string(), "dist/server.js".to_string()];
     }
 
@@ -239,11 +250,23 @@ fn node_release_entrypoint(dir: &Path, node: &DetectedNode) -> Vec<String> {
         if node.is_bun {
             return vec!["bun".to_string(), main.clone()];
         }
+        if matches!(node.package_manager, NodePackageManager::Deno) {
+            return vec![main.clone()];
+        }
         return vec!["node".to_string(), main.clone()];
     }
 
     // Fallbacks based on typical file layout.
-    let candidates: &[&str] = if node.is_bun {
+    let candidates: &[&str] = if matches!(node.package_manager, NodePackageManager::Deno) {
+        &[
+            "src/main.ts",
+            "src/mod.ts",
+            "src/index.ts",
+            "main.ts",
+            "mod.ts",
+            "index.ts",
+        ]
+    } else if node.is_bun {
         &[
             "src/index.ts",
             "src/main.ts",
@@ -263,11 +286,18 @@ fn node_release_entrypoint(dir: &Path, node: &DetectedNode) -> Vec<String> {
             if node.is_bun {
                 return vec!["bun".to_string(), candidate.to_string()];
             }
+            if matches!(node.package_manager, NodePackageManager::Deno) {
+                return vec![candidate.to_string()];
+            }
             return vec!["node".to_string(), candidate.to_string()];
         }
     }
 
-    vec!["npm".to_string(), "start".to_string()]
+    if matches!(node.package_manager, NodePackageManager::Deno) {
+        vec!["main.ts".to_string()]
+    } else {
+        vec!["npm".to_string(), "start".to_string()]
+    }
 }
 
 fn detect_python_entrypoint(dir: &Path) -> Vec<String> {
