@@ -115,7 +115,9 @@ pub fn execute_pack_command_with_injected_manifest(
         for advisory in &resolved.advisories {
             futures::executor::block_on(reporter.warn(advisory.clone()))?;
         }
-        manifest = resolved.manifest_path.clone();
+        if resolved.manifest_path.exists() {
+            manifest = resolved.manifest_path.clone();
+        }
         Some(resolved)
     } else {
         None
@@ -124,7 +126,18 @@ pub fn execute_pack_command_with_injected_manifest(
     let mut temporary_manifest: Option<TemporaryManifestGuard> = None;
     if !manifest.exists() {
         let stdin_is_tty = std::io::stdin().is_terminal();
-        if init_if_missing {
+        if let Some(authoritative_input) = authoritative_input.as_ref() {
+            std::fs::write(&manifest, &authoritative_input.manifest_raw).with_context(|| {
+                format!(
+                    "Failed to write temporary producer manifest: {}",
+                    manifest.display()
+                )
+            })?;
+            temporary_manifest = Some(TemporaryManifestGuard::new(
+                manifest.clone(),
+                !keep_failed_artifacts,
+            ));
+        } else if init_if_missing {
             if !stdin_is_tty {
                 anyhow::bail!("--init requires an interactive TTY");
             }
@@ -171,10 +184,10 @@ pub fn execute_pack_command_with_injected_manifest(
     }
 
     let _temporary_manifest_guard = temporary_manifest;
-    if let Some(authoritative_input) = authoritative_input.as_ref() {
-        authoritative_input.validate_bridge_manifest()?;
-    }
     let _authoritative_input_guard = authoritative_input;
+    let synthesized_producer_manifest = _authoritative_input_guard
+        .as_ref()
+        .is_some_and(|input| !input.manifest_path.exists());
     let validation_mode = if injected_manifest.is_some() {
         ValidationMode::Preview
     } else {
@@ -182,45 +195,57 @@ pub fn execute_pack_command_with_injected_manifest(
     };
 
     let validation_started = Instant::now();
-    let decision = capsule_core::router::route_manifest_with_validation_mode(
-        &manifest,
-        capsule_core::router::ExecutionProfile::Release,
-        None,
-        validation_mode,
-    )?;
+    let decision = if let Some(authoritative_input) = _authoritative_input_guard.as_ref() {
+        capsule_core::router::route_lock(
+            &authoritative_input.lock_path,
+            &authoritative_input.lock,
+            &authoritative_input.workspace_root,
+            capsule_core::router::ExecutionProfile::Release,
+            None,
+        )?
+    } else {
+        capsule_core::router::route_manifest_with_validation_mode(
+            &manifest,
+            capsule_core::router::ExecutionProfile::Release,
+            None,
+            validation_mode,
+        )?
+    };
     let loaded_manifest =
         capsule_core::manifest::load_manifest_with_validation_mode(&manifest, validation_mode)?;
     let raw_manifest: toml::Value = toml::from_str(&loaded_manifest.raw_text)
         .context("Failed to parse manifest TOML for IPC validation")?;
     let capsule_name = loaded_manifest.model.name.clone();
     let capsule_version = loaded_manifest.model.version.clone();
-    capsule_core::diagnostics::manifest::validate_manifest_for_build_with_mode(
-        &manifest,
-        decision.plan.selected_target_label(),
-        validation_mode,
-    )?;
-    let ipc_diagnostics =
-        crate::ipc::validate::validate_manifest(&raw_manifest, &loaded_manifest.dir).map_err(
-            |err| {
-                AtoExecutionError::execution_contract_invalid(
-                    format!("IPC validation failed: {err}"),
-                    None,
-                    None,
-                )
-            },
+    if !synthesized_producer_manifest {
+        capsule_core::diagnostics::manifest::validate_manifest_for_build_with_mode(
+            &manifest,
+            decision.plan.selected_target_label(),
+            validation_mode,
         )?;
-    if crate::ipc::validate::has_errors(&ipc_diagnostics) {
-        return Err(AtoExecutionError::execution_contract_invalid(
-            crate::ipc::validate::format_diagnostics(&ipc_diagnostics),
-            None,
-            None,
-        )
-        .into());
+        let ipc_diagnostics =
+            crate::ipc::validate::validate_manifest(&raw_manifest, &loaded_manifest.dir).map_err(
+                |err| {
+                    AtoExecutionError::execution_contract_invalid(
+                        format!("IPC validation failed: {err}"),
+                        None,
+                        None,
+                    )
+                },
+            )?;
+        if crate::ipc::validate::has_errors(&ipc_diagnostics) {
+            return Err(AtoExecutionError::execution_contract_invalid(
+                crate::ipc::validate::format_diagnostics(&ipc_diagnostics),
+                None,
+                None,
+            )
+            .into());
+        }
+        for diagnostic in ipc_diagnostics {
+            futures::executor::block_on(reporter.warn(diagnostic.to_string()))?;
+        }
+        run_v03_build_lifecycle_steps(&decision.plan, &reporter)?;
     }
-    for diagnostic in ipc_diagnostics {
-        futures::executor::block_on(reporter.warn(diagnostic.to_string()))?;
-    }
-    run_v03_build_lifecycle_steps(&decision.plan, &reporter)?;
     record_timing(
         &mut timing_entries,
         "build.validation",
@@ -1498,13 +1523,14 @@ port = 18080
         targets.insert("default".to_string(), toml::Value::Table(target));
         manifest.insert("targets".to_string(), toml::Value::Table(targets));
 
-        ManifestData {
-            manifest: toml::Value::Table(manifest),
-            manifest_path: manifest_dir.join("capsule.toml"),
+        capsule_core::router::execution_descriptor_from_manifest_parts(
+            toml::Value::Table(manifest),
+            manifest_dir.join("capsule.toml"),
             manifest_dir,
-            profile: ExecutionProfile::Dev,
-            selected_target: "default".to_string(),
-            state_source_overrides: std::collections::HashMap::new(),
-        }
+            ExecutionProfile::Dev,
+            Some("default"),
+            std::collections::HashMap::new(),
+        )
+        .expect("execution descriptor")
     }
 }

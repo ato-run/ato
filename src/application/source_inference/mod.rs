@@ -4,17 +4,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
-use capsule_core::ato_lock::{self, AtoLock, UnresolvedReason, UnresolvedValue};
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::input_resolver::{
-    ResolvedCanonicalLock, ResolvedCompatibilityProject, ResolvedSourceOnly, ATO_LOCK_FILE_NAME,
-};
-use capsule_core::CapsuleReporter;
-use serde::Serialize;
-use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
-
 use crate::application::compat_import::{
     compile_compatibility_project, CompatibilityCompileResult, CompatibilityDiagnostic,
     CompatibilityDiagnosticSeverity, ProvenanceRecord as CompatibilityProvenanceRecord,
@@ -26,8 +15,16 @@ use crate::project::init::detect::{
 };
 use crate::project::init::recipe::{project_info_from_detection, ProjectInfo};
 use crate::reporters::CliReporter;
+use anyhow::{Context, Result};
+use capsule_core::ato_lock::{self, AtoLock, UnresolvedReason, UnresolvedValue};
+use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::input_resolver::{
+    ResolvedCanonicalLock, ResolvedCompatibilityProject, ResolvedSourceOnly, ATO_LOCK_FILE_NAME,
+};
+use capsule_core::CapsuleReporter;
+use serde::Serialize;
+use serde_json::{json, Value};
 
-const RUN_GENERATED_MANIFEST_NAME: &str = ".ato.run.generated.capsule.toml";
 const RUN_SOURCE_INFERENCE_DIR: &str = ".tmp/source-inference";
 
 #[derive(Debug, Clone)]
@@ -165,8 +162,7 @@ pub(crate) struct SourceInferenceDiagnostic {
 #[derive(Debug, Clone)]
 pub(crate) struct RunMaterialization {
     pub(crate) project_root: PathBuf,
-    pub(crate) manifest_path: PathBuf,
-    pub(crate) bridge_manifest_sha256: String,
+    pub(crate) raw_manifest: Option<toml::Value>,
     pub(crate) lock: AtoLock,
     pub(crate) lock_path: PathBuf,
 }
@@ -854,24 +850,9 @@ fn materialize_run_result(
     let sidecar_path = run_state_dir.join("provenance.json");
     write_sidecar(&sidecar_path, &result, MaterializationMode::RunAttempt)?;
 
-    let manifest_path = project_root.join(RUN_GENERATED_MANIFEST_NAME);
-    let bridge_manifest_sha256 = write_generated_manifest(
-        &manifest_path,
-        &result.lock,
-        project_root,
-        original_manifest,
-    )?;
-    if let Some(scope) = scope.as_mut() {
-        scope.register({
-            let manifest_path = manifest_path.clone();
-            move || remove_file_action(manifest_path)
-        });
-    }
-
     Ok(RunMaterialization {
         project_root: project_root.to_path_buf(),
-        manifest_path,
-        bridge_manifest_sha256,
+        raw_manifest: original_manifest.cloned(),
         lock: result.lock,
         lock_path,
     })
@@ -882,380 +863,6 @@ fn materialize_workspace_result(
     result: SourceInferenceResult,
 ) -> Result<WorkspaceMaterialization> {
     crate::project::init::materialize::materialize_workspace_result(project_root, result)
-}
-
-fn write_generated_manifest(
-    manifest_path: &Path,
-    lock: &AtoLock,
-    project_root: &Path,
-    original_manifest: Option<&toml::Value>,
-) -> Result<String> {
-    let process = lock.contract.entries.get("process").ok_or_else(|| {
-        AtoExecutionError::ambiguous_entrypoint(
-            "shared source inference could not produce a deterministic process manifest adapter",
-            explicit_candidates(lock),
-        )
-    })?;
-    let entrypoint = process
-        .get("entrypoint")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let run_command = process
-        .get("run_command")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if entrypoint.is_none() && run_command.is_none() {
-        return Err(AtoExecutionError::execution_contract_invalid(
-            "contract.process.entrypoint or contract.process.run_command is required for run materialization",
-            Some("contract.process"),
-            None,
-        )
-        .into());
-    }
-    let cmd_values = process
-        .get("cmd")
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .or_else(|| {
-            process.get("args").and_then(Value::as_array).map(|values| {
-                values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-            })
-        })
-        .unwrap_or_default();
-    let metadata = lock.contract.entries.get("metadata");
-    let name = metadata
-        .and_then(|value| value.get("name"))
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| {
-            project_root
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("source-app")
-        });
-    let version = metadata
-        .and_then(|value| value.get("version"))
-        .and_then(Value::as_str)
-        .unwrap_or("0.1.0");
-    let target = bridge_target_from_lock(lock, process)?;
-    let description = original_manifest
-        .and_then(|manifest| manifest.get("metadata"))
-        .and_then(|metadata| metadata.get("description"))
-        .and_then(toml_value_as_non_empty_string)
-        .unwrap_or("")
-        .to_string();
-
-    let top_level_repository = original_manifest
-        .and_then(|manifest| manifest.get("repository"))
-        .and_then(toml_value_as_non_empty_string);
-    let metadata_repository = original_manifest
-        .and_then(|manifest| manifest.get("metadata"))
-        .and_then(|metadata| metadata.get("repository"))
-        .and_then(toml_value_as_non_empty_string);
-
-    let mut raw = format!(
-        "schema_version = \"0.2\"\nname = {name:?}\nversion = {version:?}\ntype = \"app\"\ndefault_target = {default_target:?}\n",
-        default_target = target.label,
-    );
-    if let Some(repository) = top_level_repository {
-        raw.push_str(&format!("repository = {repository:?}\n"));
-    }
-    raw.push_str(&format!("\n[metadata]\ndescription = {description:?}\n",));
-    if let Some(repository) = metadata_repository {
-        raw.push_str(&format!("repository = {repository:?}\n"));
-    }
-    raw.push_str("\n[requirements]\n");
-    if let Some(network) = manifest_network_from_lock(lock) {
-        raw.push_str("\n[network]\n");
-        if !network.egress_allow.is_empty() {
-            raw.push_str("egress_allow = [");
-            raw.push_str(&string_array_literal(&network.egress_allow));
-            raw.push_str("]\n");
-        }
-        if !network.egress_id_allow.is_empty() {
-            raw.push_str("egress_id_allow = [");
-            raw.push_str(
-                &network
-                    .egress_id_allow
-                    .iter()
-                    .map(|rule| {
-                        format!(
-                            "{{ type = {:?}, value = {:?} }}",
-                            match rule.rule_type {
-                                capsule_core::types::EgressIdType::Ip => "ip",
-                                capsule_core::types::EgressIdType::Cidr => "cidr",
-                                capsule_core::types::EgressIdType::Spiffe => "spiffe",
-                            },
-                            rule.value
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            );
-            raw.push_str("]\n");
-        }
-    }
-    raw.push('\n');
-    raw.push_str(&format!(
-        "[targets.{label}]\nruntime = {runtime:?}\n",
-        label = target.label,
-        runtime = target.runtime,
-    ));
-    if let Some(run_command) = target.run_command.as_deref().or(run_command) {
-        raw.push_str(&format!("run_command = {run_command:?}\n"));
-    } else if let Some(entrypoint) = target.entrypoint.as_deref().or(entrypoint) {
-        raw.push_str(&format!("entrypoint = {entrypoint:?}\n"));
-    }
-    if let Some(driver) = target.driver.as_deref() {
-        raw.push_str(&format!("driver = {driver:?}\n"));
-    }
-    if let Some(runtime_version) = target.runtime_version.as_deref() {
-        raw.push_str(&format!("runtime_version = {runtime_version:?}\n"));
-    }
-    if let Some(port) = target.port {
-        raw.push_str(&format!("port = {port}\n"));
-    }
-    if let Some(working_dir) = target.working_dir.as_deref() {
-        raw.push_str(&format!("working_dir = {working_dir:?}\n"));
-    }
-    if !target.required_env.is_empty() {
-        raw.push_str("required_env = [");
-        raw.push_str(&string_array_literal(&target.required_env));
-        raw.push_str("]\n");
-    }
-    let effective_cmd = if cmd_values.is_empty() {
-        target.cmd.clone()
-    } else {
-        cmd_values
-    };
-    if !effective_cmd.is_empty() {
-        raw.push_str("cmd = [");
-        raw.push_str(
-            &effective_cmd
-                .iter()
-                .map(|value| format!("{value:?}"))
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        raw.push_str("]\n");
-    }
-    if let Some(original_manifest) = original_manifest {
-        append_table_section_from_manifest(&mut raw, original_manifest, "build")?;
-        append_table_section_from_manifest(&mut raw, original_manifest, "store")?;
-        append_table_section_from_manifest(&mut raw, original_manifest, "ipc")?;
-    }
-    raw.push_str("\n[storage]\n\n[routing]\n");
-
-    fs::write(manifest_path, &raw)
-        .with_context(|| format!("Failed to write {}", manifest_path.display()))?;
-    Ok(sha256_hex(raw.as_bytes()))
-}
-
-fn append_table_section_from_manifest(
-    raw: &mut String,
-    original_manifest: &toml::Value,
-    table_name: &str,
-) -> Result<()> {
-    let Some(table) = original_manifest.get(table_name) else {
-        return Ok(());
-    };
-
-    let mut wrapped = toml::map::Map::new();
-    wrapped.insert(table_name.to_string(), table.clone());
-    let table_toml = toml::to_string(&toml::Value::Table(wrapped)).with_context(|| {
-        format!(
-            "serialize preserved [{}] section for run bridge",
-            table_name
-        )
-    })?;
-    raw.push('\n');
-    raw.push_str(&table_toml);
-    Ok(())
-}
-
-fn toml_value_as_non_empty_string(value: &toml::Value) -> Option<&str> {
-    value
-        .as_str()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
-}
-
-#[derive(Debug, Clone)]
-struct BridgeTarget {
-    label: String,
-    runtime: String,
-    driver: Option<String>,
-    runtime_version: Option<String>,
-    entrypoint: Option<String>,
-    run_command: Option<String>,
-    cmd: Vec<String>,
-    required_env: Vec<String>,
-    port: Option<u64>,
-    working_dir: Option<String>,
-}
-
-fn bridge_target_from_lock(lock: &AtoLock, process: &Value) -> Result<BridgeTarget> {
-    let selected_target = selected_draft_target(lock);
-    let label = selected_target
-        .and_then(|value| value.get("label"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            lock.contract
-                .entries
-                .get("metadata")
-                .and_then(|value| value.get("default_target"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "cli".to_string());
-    let runtime = selected_target
-        .and_then(|value| value.get("runtime"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| "source".to_string());
-    let driver = selected_target
-        .and_then(|value| value.get("driver"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            lock.resolution
-                .entries
-                .get("runtime")
-                .and_then(|value| value.get("kind"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty() && *value != "source" && *value != runtime)
-                .map(str::to_string)
-        });
-    let runtime_version = selected_target
-        .and_then(|value| value.get("runtime_version"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            lock.resolution
-                .entries
-                .get("runtime")
-                .and_then(|value| value.get("version"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        });
-    let entrypoint = selected_target
-        .and_then(|value| value.get("entrypoint"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            process
-                .get("entrypoint")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        });
-    let run_command = selected_target
-        .and_then(|value| value.get("run_command"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            process
-                .get("run_command")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        });
-    let cmd = selected_target
-        .and_then(|value| value.get("cmd"))
-        .and_then(json_string_array)
-        .or_else(|| process.get("cmd").and_then(json_string_array))
-        .or_else(|| process.get("args").and_then(json_string_array))
-        .unwrap_or_default();
-    let required_env = selected_target
-        .and_then(|value| value.get("required_env"))
-        .and_then(json_string_array)
-        .unwrap_or_default();
-    let port = selected_target
-        .and_then(|value| value.get("port"))
-        .and_then(Value::as_u64);
-    let working_dir = selected_target
-        .and_then(|value| value.get("working_dir"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-
-    Ok(BridgeTarget {
-        label,
-        runtime,
-        driver,
-        runtime_version,
-        entrypoint,
-        run_command,
-        cmd,
-        required_env,
-        port,
-        working_dir,
-    })
-}
-
-fn manifest_network_from_lock(lock: &AtoLock) -> Option<capsule_core::types::NetworkConfig> {
-    lock.contract
-        .entries
-        .get("network")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-}
-
-fn json_string_array(value: &Value) -> Option<Vec<String>> {
-    let values = value.as_array()?;
-    Some(
-        values
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect(),
-    )
-}
-
-fn string_array_literal(values: &[String]) -> String {
-    values
-        .iter()
-        .map(|value| format!("{value:?}"))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 pub(crate) fn write_sidecar(
@@ -1455,7 +1062,7 @@ fn process_candidates_for_source(
                 &["main.py", "app.py", "run.py", "server.py"],
                 90,
                 "python:file",
-                "python",
+                "",
                 "explicit Python entry file outranks convention-only fallbacks",
             ));
             if candidates.is_empty() && !info.entrypoint.is_empty() {
@@ -1961,29 +1568,6 @@ fn convert_compatibility_diagnostic(
     }
 }
 
-fn remove_file_action(path: PathBuf) -> capsule_core::execution_plan::error::CleanupActionRecord {
-    let detail = path.display().to_string();
-    match fs::remove_file(&path) {
-        Ok(()) => capsule_core::execution_plan::error::CleanupActionRecord {
-            action: "remove_generated_manifest".to_string(),
-            status: capsule_core::execution_plan::error::CleanupActionStatus::Succeeded,
-            detail: Some(detail),
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            capsule_core::execution_plan::error::CleanupActionRecord {
-                action: "remove_generated_manifest".to_string(),
-                status: capsule_core::execution_plan::error::CleanupActionStatus::Succeeded,
-                detail: Some(detail),
-            }
-        }
-        Err(error) => capsule_core::execution_plan::error::CleanupActionRecord {
-            action: "remove_generated_manifest".to_string(),
-            status: capsule_core::execution_plan::error::CleanupActionStatus::Failed,
-            detail: Some(format!("{}: {}", detail, error)),
-        },
-    }
-}
-
 fn unique_attempt_token() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2067,6 +1651,32 @@ mod tests {
     }
 
     #[test]
+    fn source_only_python_project_uses_script_path_as_entrypoint() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("requirements.txt"), "fastapi==0.115.0\n")
+            .expect("write requirements");
+        fs::write(dir.path().join("main.py"), "print('ok')\n").expect("write main");
+
+        let result = execute_shared_engine(
+            SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
+                project_root: dir.path().to_path_buf(),
+            }),
+            MaterializationMode::RunAttempt,
+            true,
+            reporter(),
+        )
+        .expect("run engine");
+
+        assert_eq!(
+            result.lock.contract.entries.get("process"),
+            Some(&json!({
+                "entrypoint": "main.py",
+                "cmd": [],
+            }))
+        );
+    }
+
+    #[test]
     fn draft_lock_input_preserves_existing_process_without_reinference() {
         let mut lock = AtoLock::default();
         lock.contract.entries.insert(
@@ -2115,7 +1725,7 @@ mod tests {
     }
 
     #[test]
-    fn run_materialization_writes_generated_manifest() {
+    fn run_materialization_writes_lock_without_generated_manifest_bridge() {
         let dir = tempdir().expect("tempdir");
         fs::write(
             dir.path().join("package.json"),
@@ -2135,9 +1745,10 @@ mod tests {
             .expect("run state dir")
             .join("provenance.json");
 
-        assert!(materialized.manifest_path.exists());
         assert!(materialized.lock_path.exists());
         assert!(sidecar_path.exists());
+        assert!(materialized.raw_manifest.is_none());
+        assert!(!dir.path().join(".ato.run.generated.capsule.toml").exists());
     }
 
     #[test]
@@ -2159,10 +1770,20 @@ mod tests {
         };
         let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
             .expect("materialize run");
-        let generated = fs::read_to_string(&materialized.manifest_path).expect("read manifest");
+        let routed = capsule_core::router::route_lock(
+            &materialized.lock_path,
+            &materialized.lock,
+            &materialized.project_root,
+            capsule_core::router::ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route lock");
 
-        assert!(generated.contains("run_command = \"npm:vite --host 127.0.0.1 --port 5175\""));
-        assert!(!generated.contains("entrypoint = \"npm\""));
+        assert_eq!(
+            routed.plan.execution_run_command().as_deref(),
+            Some("npm:vite --host 127.0.0.1 --port 5175")
+        );
+        assert_ne!(routed.plan.execution_entrypoint().as_deref(), Some("npm"));
     }
 
     #[test]
@@ -2175,13 +1796,23 @@ mod tests {
         };
         let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
             .expect("materialize run");
-        let generated = fs::read_to_string(&materialized.manifest_path).expect("read manifest");
+        let routed = capsule_core::router::route_lock(
+            &materialized.lock_path,
+            &materialized.lock,
+            &materialized.project_root,
+            capsule_core::router::ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route lock");
 
-        assert!(generated.contains("[targets.default]"));
-        assert!(generated.contains("description = \"\""));
-        assert!(generated.contains("runtime = \"source\""));
-        assert!(generated.contains("entrypoint = \"index.js\""));
-        assert!(!generated.contains("driver = \"source\""));
+        assert_eq!(routed.plan.execution_runtime().as_deref(), Some("source"));
+        assert_eq!(
+            routed.plan.execution_entrypoint().as_deref(),
+            Some("index.js")
+        );
+        assert!(routed.plan.execution_driver().is_none());
+        assert!(materialized.raw_manifest.is_none());
+        assert!(!dir.path().join(".ato.run.generated.capsule.toml").exists());
     }
 
     #[test]
@@ -2270,7 +1901,7 @@ driver = "node"
     }
 
     #[test]
-    fn compatibility_run_materialization_writes_lock_and_bridge() {
+    fn compatibility_run_materialization_writes_lock_without_bridge() {
         let dir = tempdir().expect("tempdir");
         fs::write(
             dir.path().join("capsule.toml"),
@@ -2307,10 +1938,10 @@ entrypoint = "main.ts"
                 .expect("parse sidecar");
 
         assert_eq!(sidecar["input_kind"], "draft_lock");
-        assert!(materialized.manifest_path.exists());
         assert!(materialized.lock_path.exists());
         assert!(sidecar_path.exists());
-        assert!(!materialized.bridge_manifest_sha256.is_empty());
+        assert!(materialized.raw_manifest.is_some());
+        assert!(!dir.path().join(".ato.run.generated.capsule.toml").exists());
         assert!(materialized.lock.contract.entries.contains_key("process"));
         assert!(materialized.lock.resolution.entries.contains_key("runtime"));
         assert!(materialized.lock.resolution.entries.contains_key("closure"));
@@ -2347,16 +1978,39 @@ port = 8080
 
         let materialized = materialize_run_from_compatibility(&project, None, reporter(), true)
             .expect("run materialize");
-        let generated = fs::read_to_string(&materialized.manifest_path).expect("read manifest");
+        let generated = materialized.raw_manifest.expect("raw manifest");
 
-        assert!(generated.contains("default_target = \"web\""));
-        assert!(generated.contains("[network]"));
-        assert!(generated.contains("egress_allow = [\"api.github.com\"]"));
-        assert!(generated.contains("[targets.web]"));
-        assert!(generated.contains("runtime = \"web\""));
-        assert!(generated.contains("driver = \"static\""));
-        assert!(generated.contains("entrypoint = \"public/index.html\""));
-        assert!(generated.contains("port = 8080"));
+        assert_eq!(
+            generated
+                .get("default_target")
+                .and_then(toml::Value::as_str),
+            Some("web")
+        );
+        assert_eq!(
+            generated
+                .get("network")
+                .and_then(|network| network.get("egress_allow"))
+                .and_then(toml::Value::as_array)
+                .and_then(|values| values.first())
+                .and_then(toml::Value::as_str),
+            Some("api.github.com")
+        );
+        assert_eq!(
+            generated
+                .get("targets")
+                .and_then(|targets| targets.get("web"))
+                .and_then(|target| target.get("runtime"))
+                .and_then(toml::Value::as_str),
+            Some("web")
+        );
+        assert_eq!(
+            generated
+                .get("targets")
+                .and_then(|targets| targets.get("web"))
+                .and_then(|target| target.get("driver"))
+                .and_then(toml::Value::as_str),
+            Some("static")
+        );
     }
 
     #[test]
@@ -2390,10 +2044,17 @@ from = "missing-service"
 
         let materialized = materialize_run_from_compatibility(&project, None, reporter(), true)
             .expect("run materialize");
-        let generated = fs::read_to_string(&materialized.manifest_path).expect("read manifest");
+        let generated = materialized.raw_manifest.expect("raw manifest");
 
-        assert!(generated.contains("[ipc.imports.greeter]"));
-        assert!(generated.contains("from = \"missing-service\""));
+        assert_eq!(
+            generated
+                .get("ipc")
+                .and_then(|ipc| ipc.get("imports"))
+                .and_then(|imports| imports.get("greeter"))
+                .and_then(|greeter| greeter.get("from"))
+                .and_then(toml::Value::as_str),
+            Some("missing-service")
+        );
     }
 
     #[test]

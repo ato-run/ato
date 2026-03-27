@@ -954,6 +954,7 @@ entrypoint = "main.sh"
 
     let lockfile = rt
         .block_on(generate_lockfile(
+            &manifest_path,
             &manifest_raw,
             manifest_text,
             temp.path(),

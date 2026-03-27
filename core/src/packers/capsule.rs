@@ -1281,4 +1281,92 @@ manifest_hash = "sha256:dummy"
         .expect("rebuild");
         assert_eq!(rebuilt, payload_tar);
     }
+
+    #[tokio::test]
+    async fn collect_payload_entries_keeps_python_lock_and_uv_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest_path = tmp.path().join("capsule.toml");
+        std::fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.2"
+name = "python-demo"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11.10"
+entrypoint = "main.py"
+dependencies = "requirements.txt"
+"#,
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("main.py"), "print('ok')\n").unwrap();
+        std::fs::write(tmp.path().join("requirements.txt"), "fastapi==0.115.0\n").unwrap();
+        std::fs::write(
+            tmp.path().join("uv.lock"),
+            "version = 1\nrevision = 1\nrequires-python = \">=3.11\"\n",
+        )
+        .unwrap();
+        let uv_cache = tmp
+            .path()
+            .join("artifacts")
+            .join("macos-arm64")
+            .join("uv-cache");
+        std::fs::create_dir_all(&uv_cache).unwrap();
+        std::fs::write(uv_cache.join("marker.txt"), "cached\n").unwrap();
+
+        let parsed: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        let plan = crate::router::execution_descriptor_from_manifest_parts(
+            parsed,
+            manifest_path.clone(),
+            tmp.path().to_path_buf(),
+            crate::router::ExecutionProfile::Release,
+            Some("app"),
+            std::collections::HashMap::new(),
+        )
+        .expect("execution descriptor");
+        let loaded = crate::manifest::load_manifest(&manifest_path).unwrap();
+        let pack_filter = PackFilter::from_manifest(&loaded.model).unwrap();
+
+        let payload_roots = select_payload_roots(&plan, tmp.path()).unwrap();
+        let mut names = Vec::new();
+        for root in payload_roots {
+            let entries = collect_payload_entries(
+                root.disk_root.as_path(),
+                &root.archive_prefix,
+                &pack_filter,
+                root.filter_prefix.as_deref(),
+            )
+            .await
+            .unwrap();
+            names.extend(
+                entries
+                    .into_iter()
+                    .map(|entry| entry.archive_path().to_string()),
+            );
+        }
+        names.sort();
+
+        assert!(
+            names.contains(&"source/main.py".to_string()),
+            "names={names:?}"
+        );
+        assert!(
+            names.contains(&"source/requirements.txt".to_string()),
+            "names={names:?}"
+        );
+        assert!(
+            names.contains(&"source/uv.lock".to_string()),
+            "names={names:?}"
+        );
+        assert!(
+            names.contains(&"source/artifacts/macos-arm64/uv-cache/marker.txt".to_string()),
+            "names={names:?}"
+        );
+    }
 }
