@@ -223,29 +223,14 @@ fn init_command_defaults_to_durable_workspace_materialization() {
     let cli = Cli::try_parse_from(["ato", "init"]).expect("parse");
 
     match cli.command {
-        Commands::Init { path, yes, legacy } => {
+        Commands::Init { path, yes } => {
             assert_eq!(path, PathBuf::from("."));
             assert!(!yes);
-            assert!(legacy.is_none());
         }
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 }
 
-#[test]
-fn init_command_parses_legacy_modes() {
-    let cli = Cli::try_parse_from(["ato", "init", "./demo", "--yes", "--legacy", "prompt"])
-        .expect("parse");
-
-    match cli.command {
-        Commands::Init { path, yes, legacy } => {
-            assert_eq!(path, PathBuf::from("./demo"));
-            assert!(yes);
-            assert_eq!(legacy, Some(InitLegacyMode::Prompt));
-        }
-        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
-    }
-}
 
 #[test]
 fn state_command_parses_register_and_inspect_forms() {
