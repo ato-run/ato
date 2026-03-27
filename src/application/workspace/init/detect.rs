@@ -258,12 +258,20 @@ fn detect_deno(dir: &Path) -> Result<DetectedNode> {
     let main = [
         "main.ts",
         "main.tsx",
+        "main.js",
+        "main.jsx",
         "mod.ts",
         "index.ts",
+        "index.js",
+        "index.jsx",
         "src/main.ts",
         "src/main.tsx",
+        "src/main.js",
+        "src/main.jsx",
         "src/mod.ts",
         "src/index.ts",
+        "src/index.js",
+        "src/index.jsx",
     ]
     .iter()
     .find(|candidate| dir.join(candidate).exists())

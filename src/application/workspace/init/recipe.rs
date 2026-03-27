@@ -261,12 +261,20 @@ fn node_release_entrypoint(dir: &Path, node: &DetectedNode) -> Vec<String> {
         &[
             "src/main.tsx",
             "src/main.ts",
+            "src/main.jsx",
+            "src/main.js",
             "src/mod.ts",
             "src/index.ts",
+            "src/index.jsx",
+            "src/index.js",
             "main.tsx",
             "main.ts",
+            "main.jsx",
+            "main.js",
             "mod.ts",
             "index.ts",
+            "index.jsx",
+            "index.js",
         ]
     } else if node.is_bun {
         &[
