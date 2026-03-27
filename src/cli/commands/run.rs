@@ -432,7 +432,6 @@ fn authoritative_input_from_materialization(
         lock: materialized.lock,
         lock_path: materialized.lock_path,
         workspace_root: materialized.project_root,
-        raw_manifest: materialized.raw_manifest,
         effective_state,
         compatibility_legacy_lock,
     })
@@ -1388,7 +1387,7 @@ run_command = "node server.js"
             lock_path: None,
             workspace_root: tmp.path().to_path_buf(),
             effective_state: None,
-            raw_manifest: toml::Value::Table(toml::map::Map::new()),
+            bridge_manifest: toml::Value::Table(toml::map::Map::new()),
             validation_mode: capsule_core::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,

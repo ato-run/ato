@@ -91,6 +91,29 @@ pub(crate) struct SourceInferenceResult {
     pub(crate) approval_gate: Option<ApprovalGate>,
 }
 
+#[derive(Debug, Clone)]
+struct InferredSourceDraft {
+    result: SourceInferenceResult,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedSourceModel {
+    result: SourceInferenceResult,
+    import_involved: bool,
+    build_derive_involved: bool,
+}
+
+#[derive(Debug, Clone)]
+struct GatedSourceModel {
+    result: SourceInferenceResult,
+}
+
+#[derive(Debug, Clone)]
+struct MaterializationAdapter {
+    project_root: PathBuf,
+    original_manifest: Option<toml::Value>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SourceInferenceInputKind {
@@ -223,17 +246,13 @@ pub(crate) fn materialize_run_from_source_only(
     assume_yes: bool,
 ) -> Result<RunMaterialization> {
     let mut scope = scope;
-    let project_root = if let Some(script) = source.single_script.as_ref() {
-        prepare_single_script_workspace(script, scope.as_deref_mut())?
-    } else {
-        source.project_root.clone()
-    };
+    let adapter = prepare_run_materialization_adapter(source, scope.as_deref_mut())?;
     let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
-        project_root: project_root.clone(),
+        project_root: adapter.project_root.clone(),
     });
     let result =
         execute_shared_engine(input, MaterializationMode::RunAttempt, assume_yes, reporter)?;
-    materialize_run_result(&project_root, result, scope, None)
+    materialize_run_model(adapter, scope, result)
 }
 
 fn prepare_single_script_workspace(
@@ -261,6 +280,31 @@ fn prepare_durable_source_workspace(source: &ResolvedSourceOnly) -> Result<PathB
     }
 
     Ok(source.project_root.clone())
+}
+
+fn prepare_run_materialization_adapter(
+    source: &ResolvedSourceOnly,
+    scope: Option<&mut CleanupScope>,
+) -> Result<MaterializationAdapter> {
+    let project_root = if let Some(script) = source.single_script.as_ref() {
+        prepare_single_script_workspace(script, scope)?
+    } else {
+        source.project_root.clone()
+    };
+    Ok(MaterializationAdapter {
+        project_root,
+        original_manifest: None,
+    })
+}
+
+fn prepare_workspace_materialization_adapter(
+    source: &ResolvedSourceOnly,
+) -> Result<MaterializationAdapter> {
+    let project_root = prepare_durable_source_workspace(source)?;
+    Ok(MaterializationAdapter {
+        project_root,
+        original_manifest: None,
+    })
 }
 
 fn prepare_python_single_script_workspace(
@@ -686,6 +730,10 @@ pub(crate) fn materialize_run_from_canonical_lock(
     reporter: Arc<CliReporter>,
     assume_yes: bool,
 ) -> Result<RunMaterialization> {
+    let adapter = MaterializationAdapter {
+        project_root: canonical.project_root.clone(),
+        original_manifest: None,
+    };
     let input = SourceInferenceInput::CanonicalLock(CanonicalLockInput {
         project_root: canonical.project_root.clone(),
         canonical_path: canonical.path.clone(),
@@ -693,7 +741,7 @@ pub(crate) fn materialize_run_from_canonical_lock(
     });
     let result =
         execute_shared_engine(input, MaterializationMode::RunAttempt, assume_yes, reporter)?;
-    materialize_run_result(&canonical.project_root, result, scope, None)
+    materialize_run_model(adapter, scope, result)
 }
 
 pub(crate) fn materialize_run_from_compatibility(
@@ -703,6 +751,12 @@ pub(crate) fn materialize_run_from_compatibility(
     assume_yes: bool,
 ) -> Result<RunMaterialization> {
     let (draft_input, compiled) = draft_lock_input_from_compatibility(project)?;
+    let original_manifest =
+        toml::from_str(&project.manifest.raw_text).unwrap_or_else(|_| project.manifest.raw.clone());
+    let adapter = MaterializationAdapter {
+        project_root: project.project_root.clone(),
+        original_manifest: Some(original_manifest),
+    };
     let mut result = execute_shared_engine(
         SourceInferenceInput::DraftLock(draft_input),
         MaterializationMode::RunAttempt,
@@ -715,14 +769,7 @@ pub(crate) fn materialize_run_from_compatibility(
             .iter()
             .map(convert_compatibility_diagnostic),
     );
-    let original_manifest =
-        toml::from_str(&project.manifest.raw_text).unwrap_or_else(|_| project.manifest.raw.clone());
-    materialize_run_result(
-        &project.project_root,
-        result,
-        scope,
-        Some(&original_manifest),
-    )
+    materialize_run_model(adapter, scope, result)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -743,9 +790,9 @@ pub(crate) fn execute_init_from_resolved_source_only(
     reporter: Arc<CliReporter>,
     assume_yes: bool,
 ) -> Result<WorkspaceMaterialization> {
-    let project_root = prepare_durable_source_workspace(source)?;
+    let adapter = prepare_workspace_materialization_adapter(source)?;
     let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
-        project_root: project_root.clone(),
+        project_root: adapter.project_root.clone(),
     });
     let result = execute_shared_engine(
         input,
@@ -753,7 +800,7 @@ pub(crate) fn execute_init_from_resolved_source_only(
         assume_yes,
         reporter,
     )?;
-    materialize_workspace_result(&project_root, result)
+    materialize_workspace_model(adapter, result)
 }
 
 pub(crate) fn execute_init_from_compatibility(
@@ -762,6 +809,10 @@ pub(crate) fn execute_init_from_compatibility(
     assume_yes: bool,
 ) -> Result<WorkspaceMaterialization> {
     let (draft_input, compiled) = draft_lock_input_from_compatibility(project)?;
+    let adapter = MaterializationAdapter {
+        project_root: project.project_root.clone(),
+        original_manifest: None,
+    };
     let mut result = execute_shared_engine(
         SourceInferenceInput::DraftLock(draft_input),
         MaterializationMode::InitWorkspace,
@@ -774,7 +825,7 @@ pub(crate) fn execute_init_from_compatibility(
             .iter()
             .map(convert_compatibility_diagnostic),
     );
-    materialize_workspace_result(&project.project_root, result)
+    materialize_workspace_model(adapter, result)
 }
 
 pub(crate) fn execute_shared_engine(
@@ -783,10 +834,10 @@ pub(crate) fn execute_shared_engine(
     assume_yes: bool,
     reporter: Arc<CliReporter>,
 ) -> Result<SourceInferenceResult> {
-    let mut result = infer(input)?;
-    resolve(&mut result)?;
-    enforce_mode_preconditions(&mut result, mode, assume_yes, reporter)?;
-    Ok(result)
+    let inferred = infer_phase(input)?;
+    let resolved = resolve_phase(inferred)?;
+    let gated = apply_gates_phase(resolved, mode, assume_yes, reporter)?;
+    Ok(gated.result)
 }
 
 pub(crate) fn draft_lock_input_from_compatibility(
@@ -805,12 +856,39 @@ pub(crate) fn draft_lock_input_from_compatibility(
     Ok((input, compiled))
 }
 
-fn infer(input: SourceInferenceInput) -> Result<SourceInferenceResult> {
-    match input {
-        SourceInferenceInput::SourceEvidence(input) => infer_from_source_evidence(input),
-        SourceInferenceInput::DraftLock(input) => infer_from_draft_lock(input),
-        SourceInferenceInput::CanonicalLock(input) => infer_from_canonical_lock(input),
-    }
+fn infer_phase(input: SourceInferenceInput) -> Result<InferredSourceDraft> {
+    let result = match input {
+        SourceInferenceInput::SourceEvidence(input) => infer_from_source_evidence(input)?,
+        SourceInferenceInput::DraftLock(input) => infer_from_draft_lock(input)?,
+        SourceInferenceInput::CanonicalLock(input) => infer_from_canonical_lock(input)?,
+    };
+    Ok(InferredSourceDraft { result })
+}
+
+fn resolve_phase(mut inferred: InferredSourceDraft) -> Result<ResolvedSourceModel> {
+    let import_involved = inferred
+        .result
+        .provenance
+        .iter()
+        .any(|record| record.kind == SourceInferenceProvenanceKind::CompatibilityImport);
+    let build_derive_involved = resolve(&mut inferred.result)?;
+    Ok(ResolvedSourceModel {
+        result: inferred.result,
+        import_involved,
+        build_derive_involved,
+    })
+}
+
+fn apply_gates_phase(
+    mut resolved: ResolvedSourceModel,
+    mode: MaterializationMode,
+    assume_yes: bool,
+    reporter: Arc<CliReporter>,
+) -> Result<GatedSourceModel> {
+    enforce_mode_preconditions(&mut resolved.result, mode, assume_yes, reporter)?;
+    Ok(GatedSourceModel {
+        result: resolved.result,
+    })
 }
 
 fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInferenceResult> {
@@ -1199,8 +1277,8 @@ fn sole_object_key(value: Option<&Value>) -> Option<String> {
     object.keys().next().cloned()
 }
 
-fn resolve(result: &mut SourceInferenceResult) -> Result<()> {
-    maybe_promote_native_build_closure(result)?;
+fn resolve(result: &mut SourceInferenceResult) -> Result<bool> {
+    let build_derive_involved = maybe_promote_native_build_closure(result)?;
     normalize_lock_closure(&mut result.lock)?;
     ensure_incomplete_closure_unresolved_marker(&mut result.lock)?;
 
@@ -1231,12 +1309,12 @@ fn resolve(result: &mut SourceInferenceResult) -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(build_derive_involved)
 }
 
-fn maybe_promote_native_build_closure(result: &mut SourceInferenceResult) -> Result<()> {
+fn maybe_promote_native_build_closure(result: &mut SourceInferenceResult) -> Result<bool> {
     if matches!(result.input_kind, SourceInferenceInputKind::CanonicalLock) {
-        return Ok(());
+        return Ok(false);
     }
 
     let should_promote = match result.lock.resolution.entries.get("closure") {
@@ -1247,14 +1325,14 @@ fn maybe_promote_native_build_closure(result: &mut SourceInferenceResult) -> Res
         }
     };
     if !should_promote {
-        return Ok(());
+        return Ok(false);
     }
 
     let Some(project_root) = result_project_root(result) else {
-        return Ok(());
+        return Ok(false);
     };
     let Ok(Some(plan)) = detect_build_strategy(&project_root) else {
-        return Ok(());
+        return Ok(false);
     };
 
     let inputs = observed_closure_lockfiles(&plan.manifest_dir)
@@ -1293,7 +1371,7 @@ fn maybe_promote_native_build_closure(result: &mut SourceInferenceResult) -> Res
         ),
     });
 
-    Ok(())
+    Ok(true)
 }
 
 fn result_project_root(result: &SourceInferenceResult) -> Option<PathBuf> {
@@ -1470,6 +1548,26 @@ fn materialize_workspace_result(
     result: SourceInferenceResult,
 ) -> Result<WorkspaceMaterialization> {
     crate::project::init::materialize::materialize_workspace_result(project_root, result)
+}
+
+fn materialize_run_model(
+    adapter: MaterializationAdapter,
+    scope: Option<&mut CleanupScope>,
+    result: SourceInferenceResult,
+) -> Result<RunMaterialization> {
+    materialize_run_result(
+        &adapter.project_root,
+        result,
+        scope,
+        adapter.original_manifest.as_ref(),
+    )
+}
+
+fn materialize_workspace_model(
+    adapter: MaterializationAdapter,
+    result: SourceInferenceResult,
+) -> Result<WorkspaceMaterialization> {
+    materialize_workspace_result(&adapter.project_root, result)
 }
 
 pub(crate) fn write_sidecar(
@@ -1739,13 +1837,18 @@ fn process_candidates_for_source(
         }
     }
 
+    sort_ranked_candidates(&mut candidates);
+    candidates
+}
+
+fn sort_ranked_candidates(candidates: &mut Vec<RankedCandidate>) {
     candidates.sort_by(|left, right| {
         right
             .score
             .cmp(&left.score)
             .then_with(|| left.label.cmp(&right.label))
+            .then_with(|| left.entrypoint.join("\0").cmp(&right.entrypoint.join("\0")))
     });
-    candidates
 }
 
 fn existing_candidates(
@@ -2375,6 +2478,51 @@ mod tests {
     }
 
     #[test]
+    fn canonical_lock_infer_phase_does_not_generate_source_candidates() {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "main.ts", "cmd": []}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([{"name": "main", "process": {"entrypoint": "main.ts", "cmd": []}}]),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "deno", "version": "2.1.3"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([
+                {"label": "default", "runtime": "source", "driver": "deno", "entrypoint": "main.ts", "compatible": true}
+            ]),
+        );
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"kind": "runtime_closure", "status": "complete", "inputs": []}),
+        );
+
+        let inferred = infer_phase(SourceInferenceInput::CanonicalLock(CanonicalLockInput {
+            project_root: PathBuf::from("."),
+            canonical_path: PathBuf::from("ato.lock.json"),
+            lock,
+        }))
+        .expect("infer phase");
+
+        assert!(inferred.result.infer.candidate_sets.is_empty());
+        assert_eq!(
+            inferred.result.input_kind,
+            SourceInferenceInputKind::CanonicalLock
+        );
+        assert!(inferred
+            .result
+            .provenance
+            .iter()
+            .all(|record| record.kind != SourceInferenceProvenanceKind::DeterministicHeuristic));
+    }
+
+    #[test]
     fn materialize_workspace_writes_lock_and_sidecar() {
         let dir = tempdir().expect("tempdir");
         fs::write(
@@ -2761,6 +2909,37 @@ mod tests {
     }
 
     #[test]
+    fn equal_ranked_candidates_are_sorted_deterministically() {
+        let mut candidates = vec![
+            RankedCandidate {
+                label: "same".to_string(),
+                score: 100,
+                entrypoint: vec!["z-entry".to_string()],
+                rationale: "later".to_string(),
+            },
+            RankedCandidate {
+                label: "alpha".to_string(),
+                score: 100,
+                entrypoint: vec!["m-entry".to_string()],
+                rationale: "first label".to_string(),
+            },
+            RankedCandidate {
+                label: "same".to_string(),
+                score: 100,
+                entrypoint: vec!["a-entry".to_string()],
+                rationale: "first entrypoint".to_string(),
+            },
+        ];
+
+        sort_ranked_candidates(&mut candidates);
+
+        assert_eq!(candidates[0].label, "alpha");
+        assert_eq!(candidates[1].entrypoint, vec!["a-entry"]);
+        assert_eq!(candidates[2].entrypoint, vec!["z-entry"]);
+        assert!(is_equal_ranked(&candidates));
+    }
+
+    #[test]
     fn run_fails_when_equal_rank_candidates_remain_without_selection() {
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("package.json"), r#"{"name":"demo"}"#)
@@ -2822,6 +3001,54 @@ driver = "node"
             result.lock.contract.entries.get("process"),
             compiled.draft_lock.contract.entries.get("process")
         );
+    }
+
+    #[test]
+    fn compatibility_import_stays_out_of_source_candidate_generation() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("capsule.toml"),
+            r#"schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "node"
+entrypoint = "npm"
+cmd = ["start"]
+runtime_version = "20"
+"#,
+        )
+        .expect("write manifest");
+
+        let resolved = resolve_authoritative_input(dir.path(), ResolveInputOptions::default())
+            .expect("resolve compatibility input");
+        let ResolvedInput::CompatibilityProject { project, .. } = resolved else {
+            panic!("expected compatibility project");
+        };
+        let (draft_input, _) =
+            draft_lock_input_from_compatibility(&project).expect("compile compatibility draft");
+
+        let inferred = infer_phase(SourceInferenceInput::DraftLock(draft_input)).expect("infer");
+
+        assert!(inferred.result.infer.candidate_sets.is_empty());
+        assert!(inferred
+            .result
+            .provenance
+            .iter()
+            .any(|record| record.kind == SourceInferenceProvenanceKind::CompatibilityImport));
+        assert!(inferred
+            .result
+            .provenance
+            .iter()
+            .all(|record| !(record.field == "contract.process"
+                && record.kind == SourceInferenceProvenanceKind::DeterministicHeuristic)));
+
+        let resolved = resolve_phase(inferred).expect("resolve");
+        assert!(resolved.import_involved);
     }
 
     #[test]
@@ -3096,6 +3323,92 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
             .unresolved
             .iter()
             .all(|value| value.field.as_deref() != Some("resolution.closure")));
+    }
+
+    #[test]
+    fn native_delivery_build_derive_only_appears_in_resolve_phase() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("capsule.toml"),
+            r#"schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source"
+driver = "native"
+entrypoint = "pnpm"
+cmd = ["build"]
+
+[artifact]
+framework = "tauri"
+stage = "unsigned"
+target = "darwin/arm64"
+input = "src-tauri/target/release/bundle/macos/MyApp.app"
+
+[finalize]
+tool = "codesign"
+args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/macos/MyApp.app"]
+"#,
+        )
+        .expect("write manifest");
+        fs::write(dir.path().join("Cargo.lock"), "version = 3\n").expect("write cargo lock");
+
+        let resolved = resolve_authoritative_input(dir.path(), ResolveInputOptions::default())
+            .expect("resolve compatibility input");
+        let ResolvedInput::CompatibilityProject { project, .. } = resolved else {
+            panic!("expected compatibility project");
+        };
+        let (draft_input, _) =
+            draft_lock_input_from_compatibility(&project).expect("compile compatibility draft");
+
+        let inferred = infer_phase(SourceInferenceInput::DraftLock(draft_input)).expect("infer");
+        assert_eq!(
+            inferred
+                .result
+                .lock
+                .resolution
+                .entries
+                .get("closure")
+                .and_then(|value| value.get("kind"))
+                .and_then(Value::as_str),
+            Some("metadata_only")
+        );
+
+        let resolved = resolve_phase(inferred).expect("resolve");
+        assert!(resolved.build_derive_involved);
+        assert_eq!(
+            resolved
+                .result
+                .lock
+                .resolution
+                .entries
+                .get("closure")
+                .and_then(|value| value.get("kind"))
+                .and_then(Value::as_str),
+            Some("build_closure")
+        );
+    }
+
+    #[test]
+    fn single_script_workspace_adapter_is_materialization_scoped() {
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("hello.ts");
+        fs::write(&script_path, "console.log('hello');\n").expect("write script");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: Some(ResolvedSingleScript {
+                path: script_path,
+                language: SingleScriptLanguage::TypeScript,
+            }),
+        };
+
+        let adapter = prepare_run_materialization_adapter(&source, None).expect("adapter");
+        assert_ne!(adapter.project_root, source.project_root);
+        assert!(adapter.project_root.join("deno.json").exists());
     }
 
     #[test]
