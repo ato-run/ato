@@ -19,7 +19,8 @@ use anyhow::{Context, Result};
 use capsule_core::ato_lock::{self, AtoLock, UnresolvedReason, UnresolvedValue};
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::input_resolver::{
-    ResolvedCanonicalLock, ResolvedCompatibilityProject, ResolvedSourceOnly, ATO_LOCK_FILE_NAME,
+    ResolvedCanonicalLock, ResolvedCompatibilityProject, ResolvedSingleScript, ResolvedSourceOnly,
+    SingleScriptLanguage, ATO_LOCK_FILE_NAME,
 };
 use capsule_core::CapsuleReporter;
 use serde::Serialize;
@@ -202,12 +203,172 @@ pub(crate) fn materialize_run_from_source_only(
     reporter: Arc<CliReporter>,
     assume_yes: bool,
 ) -> Result<RunMaterialization> {
+    let mut scope = scope;
+    let project_root = if let Some(script) = source.single_script.as_ref() {
+        prepare_single_script_workspace(script, scope.as_deref_mut())?
+    } else {
+        source.project_root.clone()
+    };
     let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
-        project_root: source.project_root.clone(),
+        project_root: project_root.clone(),
     });
     let result =
         execute_shared_engine(input, MaterializationMode::RunAttempt, assume_yes, reporter)?;
-    materialize_run_result(&source.project_root, result, scope, None)
+    materialize_run_result(&project_root, result, scope.as_deref_mut(), None)
+}
+
+fn prepare_single_script_workspace(
+    script: &ResolvedSingleScript,
+    scope: Option<&mut CleanupScope>,
+) -> Result<PathBuf> {
+    match script.language {
+        SingleScriptLanguage::Python => prepare_python_single_script_workspace(script, scope),
+    }
+}
+
+fn prepare_python_single_script_workspace(
+    script: &ResolvedSingleScript,
+    scope: Option<&mut CleanupScope>,
+) -> Result<PathBuf> {
+    let parent = script
+        .path
+        .parent()
+        .context("single-file script path must have a parent directory")?;
+    let temp_root = parent.join(".tmp").join(format!(
+        "ato-single-python-{}-{}",
+        script
+            .path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("script"),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    ));
+    fs::create_dir_all(&temp_root)
+        .with_context(|| format!("failed to create virtual workspace {}", temp_root.display()))?;
+    if let Some(scope) = scope {
+        scope.register_remove_dir(temp_root.clone());
+    }
+
+    let script_text = fs::read_to_string(&script.path)
+        .with_context(|| format!("failed to read script {}", script.path.display()))?;
+    let metadata = parse_pep723_python_metadata(&script_text)?;
+
+    fs::write(temp_root.join("main.py"), script_text)
+        .with_context(|| format!("failed to write virtual script {}", temp_root.display()))?;
+
+    if !metadata.dependencies.is_empty() {
+        fs::write(
+            temp_root.join("requirements.txt"),
+            format!("{}\n", metadata.dependencies.join("\n")),
+        )
+        .with_context(|| {
+            format!(
+                "failed to write requirements.txt in {}",
+                temp_root.display()
+            )
+        })?;
+    }
+
+    let mut pyproject =
+        String::from("[project]\nname = \"ato-single-script\"\nversion = \"0.1.0\"\n");
+    if let Some(requires_python) = metadata.requires_python.as_deref() {
+        pyproject.push_str(&format!("requires-python = \"{}\"\n", requires_python));
+    }
+    if !metadata.dependencies.is_empty() {
+        pyproject.push_str("dependencies = [\n");
+        for dependency in &metadata.dependencies {
+            pyproject.push_str(&format!("  \"{}\",\n", dependency));
+        }
+        pyproject.push_str("]\n");
+    }
+    fs::write(temp_root.join("pyproject.toml"), pyproject)
+        .with_context(|| format!("failed to write pyproject.toml in {}", temp_root.display()))?;
+
+    generate_uv_lock_for_single_script(&temp_root)?;
+
+    Ok(temp_root)
+}
+
+fn generate_uv_lock_for_single_script(project_root: &Path) -> Result<()> {
+    let output = std::process::Command::new("uv")
+        .arg("lock")
+        .current_dir(project_root)
+        .output()
+        .with_context(|| format!("failed to execute uv lock in {}", project_root.display()))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "failed to generate uv.lock for single-file Python script (status {}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Pep723PythonMetadata {
+    dependencies: Vec<String>,
+    requires_python: Option<String>,
+}
+
+fn parse_pep723_python_metadata(script_text: &str) -> Result<Pep723PythonMetadata> {
+    let mut in_block = false;
+    let mut block = Vec::new();
+
+    for line in script_text.lines() {
+        let trimmed = line.trim_start();
+        if !in_block {
+            if trimmed == "# /// script" {
+                in_block = true;
+            }
+            continue;
+        }
+
+        if trimmed == "# ///" {
+            let block_text = block.join("\n");
+            if block_text.trim().is_empty() {
+                return Ok(Pep723PythonMetadata::default());
+            }
+            let value: toml::Value = toml::from_str(&block_text)
+                .with_context(|| "failed to parse PEP 723 script metadata block")?;
+            let dependencies = value
+                .get("dependencies")
+                .and_then(toml::Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(toml::Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let requires_python = value
+                .get("requires-python")
+                .and_then(toml::Value::as_str)
+                .map(str::to_string);
+            return Ok(Pep723PythonMetadata {
+                dependencies,
+                requires_python,
+            });
+        }
+
+        let content = trimmed
+            .strip_prefix("# ")
+            .or_else(|| trimmed.strip_prefix('#'))
+            .ok_or_else(|| anyhow::anyhow!("invalid PEP 723 metadata line: {}", line))?;
+        block.push(content.to_string());
+    }
+
+    if in_block {
+        anyhow::bail!("unterminated PEP 723 script metadata block");
+    }
+
+    Ok(Pep723PythonMetadata::default())
 }
 
 pub(crate) fn materialize_run_from_canonical_lock(
@@ -1736,6 +1897,7 @@ mod tests {
 
         let source = ResolvedSourceOnly {
             project_root: dir.path().to_path_buf(),
+            single_script: None,
         };
         let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
             .expect("materialize run");
@@ -1767,6 +1929,7 @@ mod tests {
 
         let source = ResolvedSourceOnly {
             project_root: dir.path().to_path_buf(),
+            single_script: None,
         };
         let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
             .expect("materialize run");
@@ -1793,6 +1956,7 @@ mod tests {
 
         let source = ResolvedSourceOnly {
             project_root: dir.path().to_path_buf(),
+            single_script: None,
         };
         let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
             .expect("materialize run");
@@ -2055,6 +2219,25 @@ from = "missing-service"
                 .and_then(toml::Value::as_str),
             Some("missing-service")
         );
+    }
+
+    #[test]
+    fn parse_pep723_python_metadata_extracts_dependencies_and_requires_python() {
+        let metadata = parse_pep723_python_metadata(
+            r#"# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "httpx>=0.27",
+#   "rich",
+# ]
+# ///
+print('ok')
+"#,
+        )
+        .expect("parse pep723");
+
+        assert_eq!(metadata.requires_python.as_deref(), Some(">=3.11"));
+        assert_eq!(metadata.dependencies, vec!["httpx>=0.27", "rich"]);
     }
 
     #[test]
