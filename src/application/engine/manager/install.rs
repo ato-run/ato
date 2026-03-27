@@ -112,10 +112,9 @@ pub(crate) fn auto_bootstrap_nacelle(
             .disabled_reason
             .unwrap_or_else(|| "auto-bootstrap policy disabled network access".to_string());
         anyhow::bail!(
-            "Tier 2 execution requires nacelle {}, but auto-bootstrap is disabled: {}. Run `ato config engine install --engine nacelle --version {}` first.",
+            "Tier 2 execution requires nacelle {}, but auto-bootstrap is disabled: {}. Install the matching nacelle runtime and register it before retrying.",
             policy.version,
-            reason,
-            policy.version
+            reason
         );
     }
 
