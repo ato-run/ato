@@ -173,6 +173,26 @@ fn write_inspect_lock_workspace(dir: &Path) {
         detail: Some("runtime selection remains unresolved".to_string()),
         candidates: Vec::new(),
     });
+    lock.binding.unresolved.push(UnresolvedValue {
+        field: Some("binding".to_string()),
+        reason: UnresolvedReason::DeferredHostLocalBinding,
+        detail: Some("host-local state binding is deferred to workspace-local seed".to_string()),
+        candidates: Vec::new(),
+    });
+    lock.policy.unresolved.push(UnresolvedValue {
+        field: Some("policy".to_string()),
+        reason: UnresolvedReason::PolicyGatedResolution,
+        detail: Some(
+            "workspace-local policy approval is still required before execution".to_string(),
+        ),
+        candidates: Vec::new(),
+    });
+    lock.attestations.unresolved.push(UnresolvedValue {
+        field: Some("attestations".to_string()),
+        reason: UnresolvedReason::InsufficientEvidence,
+        detail: Some("workspace-local attestation evidence has not been recorded yet".to_string()),
+        candidates: Vec::new(),
+    });
     recompute_lock_id(&mut lock).expect("recompute inspect lock id");
     fs::write(
         dir.join("ato.lock.json"),
@@ -740,6 +760,35 @@ fn test_inspect_remediation_surface_prefers_lock_paths() {
         Some("insufficient_evidence")
     );
     assert!(runtime.get("sourceMapping").is_some());
+
+    let binding = suggestions
+        .iter()
+        .find(|value| value.get("lockPath").and_then(|entry| entry.as_str()) == Some("binding"))
+        .expect("binding suggestion");
+    assert!(binding
+        .get("recommendedAction")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| value.contains("workspace-local binding seed")));
+
+    let policy = suggestions
+        .iter()
+        .find(|value| value.get("lockPath").and_then(|entry| entry.as_str()) == Some("policy"))
+        .expect("policy suggestion");
+    assert!(policy
+        .get("recommendedAction")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| value.contains("does not change lock identity")));
+
+    let attestations = suggestions
+        .iter()
+        .find(|value| {
+            value.get("lockPath").and_then(|entry| entry.as_str()) == Some("attestations")
+        })
+        .expect("attestations suggestion");
+    assert!(attestations
+        .get("recommendedAction")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| value.contains("not part of canonical lock content")));
 }
 
 #[test]

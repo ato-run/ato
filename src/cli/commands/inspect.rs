@@ -1167,8 +1167,14 @@ fn remediation_action(lock_path: &str, reason_class: &str) -> String {
         ("resolution.closure", _) => {
             "materialize dependency closure state such as package lockfiles before regenerating ato.lock.json".to_string()
         }
-        _ if lock_path.starts_with("binding.") => {
+        _ if lock_path == "binding" || lock_path.starts_with("binding.") => {
             "populate workspace-local binding seed entries or accept the host-local binding prompt".to_string()
+        }
+        _ if lock_path == "policy" || lock_path.starts_with("policy.") => {
+            "update the workspace-local policy bundle or embedded lock policy; policy gates execution but does not change lock identity".to_string()
+        }
+        _ if lock_path == "attestations" || lock_path.starts_with("attestations.") => {
+            "record or refresh workspace-local attestation/observation evidence; attestation state is not part of canonical lock content".to_string()
         }
         _ => "update the source field mapped by provenance, then rerun ato inspect preview to verify the lock path".to_string(),
     }
