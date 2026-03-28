@@ -190,7 +190,7 @@ fn write_inspect_lock_workspace(dir: &Path) {
         serde_json::json!({
             "kind": "metadata_only",
             "status": "incomplete",
-            "observed_lockfiles": ["package-lock.json"]
+            "observed_lockfiles": ["npm"]
         }),
     );
     lock.resolution.unresolved.push(UnresolvedValue {
@@ -246,10 +246,12 @@ fn write_inspect_lock_workspace(dir: &Path) {
                 },
                 {
                     "field": "resolution.closure",
-                    "kind": "metadata_observation",
+                    "kind": "importer_observation",
                     "source_path": dir.join("package-lock.json"),
-                    "source_field": "package-lock.json",
-                    "note": "metadata-only/incomplete observed lockfile state"
+                    "importer_id": "npm",
+                    "evidence_kind": "lockfile",
+                    "source_field": "npm",
+                    "note": "metadata-only/incomplete observed importer evidence"
                 },
                 {
                     "field": "resolution.runtime",
@@ -640,6 +642,15 @@ fn test_inspect_lock_surface_reports_field_statuses() {
         closure.get("observed").and_then(|value| value.as_bool()),
         Some(true)
     );
+    let closure_provenance = closure
+        .get("provenance")
+        .and_then(|value| value.as_array())
+        .expect("closure provenance");
+    assert!(closure_provenance.iter().any(|value| {
+        value.get("kind").and_then(|entry| entry.as_str()) == Some("importer_observation")
+            && value.get("importerId").and_then(|entry| entry.as_str()) == Some("npm")
+            && value.get("evidenceKind").and_then(|entry| entry.as_str()) == Some("lockfile")
+    }));
     assert_eq!(
         closure.get("closureKind").and_then(|value| value.as_str()),
         Some("metadata_only")

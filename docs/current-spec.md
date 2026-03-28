@@ -104,6 +104,17 @@ Public CLI phase-selection rules:
 - Public CLI flags remain coarse-grained rather than exposing every phase directly
 - For `publish`, `--prepare`, `--build`, and `--deploy` select stop points over this shared vocabulary
 
+### 2.5 Ecosystem Importer Boundary
+
+ato treats ecosystem lockfiles and framework metadata as read-only importer evidence, not as Ato-native canonical truth.
+
+- importer evidence currently covers `uv.lock`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `deno.lock`, `Cargo.lock`, `go.sum`, and `poetry.lock`
+- importer evidence also covers native-delivery framework metadata for Tauri, Electron, and Wails
+- importer output is canonicalization input used to build `resolution.closure`, `build_closure.inputs`, preflight lockfile decisions, and native build cache inputs
+- importer output does not directly define `lock_id` or `closure_digest`; those are computed only after ato normalizes canonical lock-shaped state
+- importer probing is read-only; ato does not run package managers or framework CLIs as part of importer observation
+- transitional helpers such as `generate_uv_lock`, `generate_pnpm_lock`, and `generate_deno_lock` keep their public names but now behave as evidence wrappers that either find required importer evidence or fail closed with manual-generation guidance
+
 ## 3. Supported CLI Surface
 
 ## 3.1 Primary Commands
@@ -198,6 +209,7 @@ Current contract:
 - initializes workspace-local `.ato/policy/bundle.json`
 - initializes workspace-local `.ato/attestations/store.json`
 - `resolution.closure` uses a normalized envelope with `kind` and `status`; metadata-only closure state is explicit and remains incomplete until closure completion materializes a digestable closure
+- metadata-only closure observation records importer labels in `observed_lockfiles`; concrete filesystem paths remain provenance-side evidence
 - `build_closure.build_environment` uses array-based categories: `toolchains`, `package_managers`, `sdks`, and `helper_tools`
 - compatibility import may emit `imported_artifact_closure` for an existing native artifact such as a `.app` bundle; this remains provenance-limited and distinct from source-derived build closure
 - canonical lock identity remains `schema_version + resolution + contract`; embedded `binding`, `policy`, `attestations`, and `signatures` do not affect `lock_id`

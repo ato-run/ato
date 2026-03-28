@@ -326,6 +326,10 @@ pub struct InspectProvenanceView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub importer_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -435,6 +439,8 @@ struct StoredProvenanceRecord {
     field: String,
     kind: String,
     source_path: Option<PathBuf>,
+    importer_id: Option<String>,
+    evidence_kind: Option<String>,
     source_field: Option<String>,
     note: Option<String>,
 }
@@ -483,6 +489,10 @@ struct StoredSidecarProvenance {
     field: String,
     kind: String,
     source_path: Option<PathBuf>,
+    #[serde(default)]
+    importer_id: Option<String>,
+    #[serde(default)]
+    evidence_kind: Option<String>,
     source_field: Option<String>,
     note: Option<String>,
 }
@@ -1002,6 +1012,8 @@ fn collect_field_views(
                     .map(|record| InspectProvenanceView {
                         kind: record.kind,
                         source_path: record.source_path.map(|value| value.display().to_string()),
+                        importer_id: record.importer_id,
+                        evidence_kind: record.evidence_kind,
                         source_field: record.source_field,
                         note: record.note,
                     })
@@ -1228,6 +1240,8 @@ fn default_provenance(snapshot: &InspectionSnapshot, field: &str) -> Vec<StoredP
                 "explicit_artifact".to_string()
             },
             source_path: Some(path.clone()),
+            importer_id: None,
+            evidence_kind: None,
             source_field: Some(field.to_string()),
             note: Some("no persisted provenance sidecar was present, so authoritative input ownership was used".to_string()),
         })
@@ -1359,6 +1373,8 @@ fn apply_stored_sidecar(result: &mut SourceInferenceResult, sidecar: StoredSidec
             field: record.field,
             kind: provenance_kind_from_str(&record.kind),
             source_path: record.source_path,
+            importer_id: record.importer_id,
+            evidence_kind: record.evidence_kind,
             source_field: record.source_field,
             note: record.note,
         })
@@ -1399,6 +1415,8 @@ fn convert_provenance_record(record: &SourceInferenceProvenance) -> StoredProven
         field: record.field.clone(),
         kind: provenance_kind_label(record.kind).to_string(),
         source_path: record.source_path.clone(),
+        importer_id: record.importer_id.clone(),
+        evidence_kind: record.evidence_kind.clone(),
         source_field: record.source_field.clone(),
         note: record.note.clone(),
     }
@@ -1452,6 +1470,7 @@ fn provenance_kind_label(kind: SourceInferenceProvenanceKind) -> &'static str {
         SourceInferenceProvenanceKind::CompatibilityImport => "compatibility_import",
         SourceInferenceProvenanceKind::CanonicalInput => "canonical_input",
         SourceInferenceProvenanceKind::DeterministicHeuristic => "deterministic_heuristic",
+        SourceInferenceProvenanceKind::ImporterObservation => "importer_observation",
         SourceInferenceProvenanceKind::MetadataObservation => "metadata_observation",
         SourceInferenceProvenanceKind::SelectionGate => "selection_gate",
         SourceInferenceProvenanceKind::ApprovalGate => "approval_gate",
@@ -1463,6 +1482,7 @@ fn provenance_kind_from_str(value: &str) -> SourceInferenceProvenanceKind {
         "explicit_artifact" => SourceInferenceProvenanceKind::ExplicitArtifact,
         "compatibility_import" => SourceInferenceProvenanceKind::CompatibilityImport,
         "canonical_input" => SourceInferenceProvenanceKind::CanonicalInput,
+        "importer_observation" => SourceInferenceProvenanceKind::ImporterObservation,
         "metadata_observation" => SourceInferenceProvenanceKind::MetadataObservation,
         "selection_gate" => SourceInferenceProvenanceKind::SelectionGate,
         "approval_gate" => SourceInferenceProvenanceKind::ApprovalGate,
@@ -1500,6 +1520,7 @@ fn provenance_is_inferred(record: &StoredProvenanceRecord) -> bool {
 
 fn provenance_is_observed(record: &StoredProvenanceRecord) -> bool {
     record.kind == "metadata_observation"
+        || record.kind == "importer_observation"
         || record
             .note
             .as_deref()
