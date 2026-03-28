@@ -74,6 +74,16 @@
 - Prefer explicit types in public APIs and complex logic.
 - Avoid unnecessary clones; pass references when possible.
 
+## Comments
+
+- Prefer self-explanatory names and small functions before adding comments.
+- Use comments to explain intent, constraints, and trade-offs; do not restate what the code already says.
+- Write comments in English and keep them short enough to stay in sync with code changes.
+- Use `///` on public or shared Rust APIs when a teammate would need behavior, assumptions, errors, or usage clarified.
+- Use `//` inside function bodies only for non-obvious logic, safety assumptions, cleanup guarantees, or deliberate fail-closed behavior.
+- Document why a workaround, fallback, or temporary behavior exists, and add `TODO`, `FIXME`, or `HACK` only when there is a concrete follow-up need.
+- Update or remove comments in the same change that modifies the related code.
+
 ## Imports
 
 - Group imports by `std`, external crates, then internal crates.

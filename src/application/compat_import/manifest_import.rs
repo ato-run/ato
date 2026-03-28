@@ -1,8 +1,14 @@
 use std::collections::BTreeMap;
+use std::path::{Component, PathBuf};
 
 use anyhow::Result;
 use capsule_core::ato_lock::{AtoLock, UnresolvedReason, UnresolvedValue};
 use serde_json::{json, Value};
+
+use crate::application::engine::build::native_delivery::{
+    compute_tree_digest, imported_native_artifact_delivery_contract,
+    native_delivery_draft_contract_from_manifest, path_has_extension,
+};
 
 use super::compiler::CompatibilityCompilerInput;
 use super::diagnostics::{
@@ -100,11 +106,66 @@ pub(super) fn import_manifest(
         None,
     ));
 
+    let imported_artifact_closure = import_native_artifact_closure(input)?;
+    if let Some(delivery) =
+        import_native_delivery_contract(input, imported_artifact_closure.as_ref())?
+    {
+        draft_lock
+            .contract
+            .entries
+            .insert("delivery".to_string(), delivery);
+        provenance.push(ProvenanceRecord::new(
+            CompilerOwnedField::new("contract", "delivery"),
+            ProvenanceKind::CompilerInferred,
+            Some(manifest.path.as_path()),
+            Some("targets.<default_target>"),
+            Some(
+                "desktop native delivery mode is recorded in contract.delivery so source-derivation and artifact-import remain distinct",
+            ),
+        ));
+    }
+
+    if let Some(closure) = imported_artifact_closure {
+        draft_lock
+            .resolution
+            .entries
+            .insert("closure".to_string(), closure);
+        provenance.push(ProvenanceRecord::new(
+            CompilerOwnedField::new("resolution", "closure"),
+            ProvenanceKind::CompilerInferred,
+            Some(manifest.path.as_path()),
+            Some("targets.<default_target>.entrypoint"),
+            Some(
+                "imported_artifact_closure derived from an existing native artifact on disk; provenance is intentionally limited",
+            ),
+        ));
+    }
+
     Ok(ManifestImportResult {
         draft_lock,
         diagnostics,
         provenance,
     })
+}
+
+fn import_native_delivery_contract(
+    input: &CompatibilityCompilerInput<'_>,
+    imported_artifact_closure: Option<&Value>,
+) -> Result<Option<Value>> {
+    if imported_artifact_closure.is_some() {
+        let manifest = input.manifest;
+        let target = manifest.model.resolve_default_target()?;
+        let entrypoint = target.entrypoint.trim();
+        if entrypoint.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(imported_native_artifact_delivery_contract(
+            &PathBuf::from(entrypoint),
+            "macos_app_bundle",
+        )));
+    }
+
+    native_delivery_draft_contract_from_manifest(input.manifest.path.as_path())
 }
 
 fn import_workloads(
@@ -297,4 +358,50 @@ fn import_target_hints(
         Some("manifest target definitions lifted as resolution-owned hints"),
     ));
     Ok(imported)
+}
+
+fn import_native_artifact_closure(input: &CompatibilityCompilerInput<'_>) -> Result<Option<Value>> {
+    let manifest = input.manifest;
+    let Some(targets) = manifest.model.targets.as_ref() else {
+        return Ok(None);
+    };
+    let Some(target) = targets.named.get(&manifest.model.default_target) else {
+        return Ok(None);
+    };
+    if target.driver.as_deref() != Some("native") {
+        return Ok(None);
+    }
+
+    let entrypoint = target.entrypoint.trim();
+    if entrypoint.is_empty() {
+        return Ok(None);
+    }
+
+    let manifest_dir = manifest
+        .path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let artifact_relative = PathBuf::from(entrypoint);
+    if artifact_relative.is_absolute()
+        || artifact_relative
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Ok(None);
+    }
+
+    let artifact_path = manifest_dir.join(&artifact_relative);
+    if !(artifact_path.is_dir() && path_has_extension(&artifact_path, "app")) {
+        return Ok(None);
+    }
+
+    Ok(Some(json!({
+        "kind": "imported_artifact_closure",
+        "status": "complete",
+        "artifact": {
+            "artifact_type": "macos_app_bundle",
+            "digest": compute_tree_digest(&artifact_path)?,
+            "provenance_limited": true,
+        }
+    })))
 }

@@ -9,6 +9,10 @@ use crate::application::compat_import::{
     compile_compatibility_project, CompatibilityCompileResult, CompatibilityDiagnostic,
     CompatibilityDiagnosticSeverity, ProvenanceRecord as CompatibilityProvenanceRecord,
 };
+use crate::application::engine::build::native_delivery::{
+    detect_build_strategy, native_delivery_build_environment_skeleton,
+    native_delivery_contract_from_build_plan,
+};
 use crate::application::pipeline::cleanup::CleanupScope;
 use crate::application::ports::OutputPort;
 use crate::project::init::detect::{
@@ -17,8 +21,13 @@ use crate::project::init::detect::{
 use crate::project::init::recipe::{project_info_from_detection, ProjectInfo};
 use crate::reporters::CliReporter;
 use anyhow::{Context, Result};
-use capsule_core::ato_lock::{self, AtoLock, UnresolvedReason, UnresolvedValue};
+use capsule_core::ato_lock::{
+    self, closure_info, normalize_lock_closure, AtoLock, UnresolvedReason, UnresolvedValue,
+};
 use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::importer::{
+    probe_ecosystem_lockfile_evidence, probe_native_framework_evidence, ImportedEvidence,
+};
 use capsule_core::input_resolver::{
     ResolvedCanonicalLock, ResolvedCompatibilityProject, ResolvedSingleScript, ResolvedSourceOnly,
     SingleScriptLanguage, ATO_LOCK_FILE_NAME,
@@ -29,7 +38,6 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 const RUN_SOURCE_INFERENCE_DIR: &str = ".tmp/source-inference";
-
 #[derive(Debug, Clone)]
 pub(crate) enum SourceInferenceInput {
     SourceEvidence(SourceEvidenceInput),
@@ -72,6 +80,31 @@ pub(crate) struct SourceInferenceResult {
     pub(crate) resolve: ResolveResult,
     pub(crate) selection_gate: Option<SelectionGate>,
     pub(crate) approval_gate: Option<ApprovalGate>,
+}
+
+#[derive(Debug, Clone)]
+struct InferredSourceDraft {
+    result: SourceInferenceResult,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedSourceModel {
+    result: SourceInferenceResult,
+    #[cfg_attr(not(test), allow(dead_code))]
+    import_involved: bool,
+    #[cfg_attr(not(test), allow(dead_code))]
+    build_derive_involved: bool,
+}
+
+#[derive(Debug, Clone)]
+struct GatedSourceModel {
+    result: SourceInferenceResult,
+}
+
+#[derive(Debug, Clone)]
+struct MaterializationAdapter {
+    project_root: PathBuf,
+    original_manifest: Option<toml::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -131,6 +164,7 @@ pub(crate) enum SourceInferenceProvenanceKind {
     CompatibilityImport,
     CanonicalInput,
     DeterministicHeuristic,
+    ImporterObservation,
     MetadataObservation,
     SelectionGate,
     ApprovalGate,
@@ -142,6 +176,10 @@ pub(crate) struct SourceInferenceProvenance {
     pub(crate) kind: SourceInferenceProvenanceKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) source_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) importer_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) evidence_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) source_field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -206,17 +244,13 @@ pub(crate) fn materialize_run_from_source_only(
     assume_yes: bool,
 ) -> Result<RunMaterialization> {
     let mut scope = scope;
-    let project_root = if let Some(script) = source.single_script.as_ref() {
-        prepare_single_script_workspace(script, scope.as_deref_mut())?
-    } else {
-        source.project_root.clone()
-    };
+    let adapter = prepare_run_materialization_adapter(source, scope.as_deref_mut())?;
     let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
-        project_root: project_root.clone(),
+        project_root: adapter.project_root.clone(),
     });
     let result =
         execute_shared_engine(input, MaterializationMode::RunAttempt, assume_yes, reporter)?;
-    materialize_run_result(&project_root, result, scope, None)
+    materialize_run_model(adapter, scope, result)
 }
 
 fn prepare_single_script_workspace(
@@ -244,6 +278,31 @@ fn prepare_durable_source_workspace(source: &ResolvedSourceOnly) -> Result<PathB
     }
 
     Ok(source.project_root.clone())
+}
+
+fn prepare_run_materialization_adapter(
+    source: &ResolvedSourceOnly,
+    scope: Option<&mut CleanupScope>,
+) -> Result<MaterializationAdapter> {
+    let project_root = if let Some(script) = source.single_script.as_ref() {
+        prepare_single_script_workspace(script, scope)?
+    } else {
+        source.project_root.clone()
+    };
+    Ok(MaterializationAdapter {
+        project_root,
+        original_manifest: None,
+    })
+}
+
+fn prepare_workspace_materialization_adapter(
+    source: &ResolvedSourceOnly,
+) -> Result<MaterializationAdapter> {
+    let project_root = prepare_durable_source_workspace(source)?;
+    Ok(MaterializationAdapter {
+        project_root,
+        original_manifest: None,
+    })
 }
 
 fn prepare_python_single_script_workspace(
@@ -669,6 +728,10 @@ pub(crate) fn materialize_run_from_canonical_lock(
     reporter: Arc<CliReporter>,
     assume_yes: bool,
 ) -> Result<RunMaterialization> {
+    let adapter = MaterializationAdapter {
+        project_root: canonical.project_root.clone(),
+        original_manifest: None,
+    };
     let input = SourceInferenceInput::CanonicalLock(CanonicalLockInput {
         project_root: canonical.project_root.clone(),
         canonical_path: canonical.path.clone(),
@@ -676,7 +739,7 @@ pub(crate) fn materialize_run_from_canonical_lock(
     });
     let result =
         execute_shared_engine(input, MaterializationMode::RunAttempt, assume_yes, reporter)?;
-    materialize_run_result(&canonical.project_root, result, scope, None)
+    materialize_run_model(adapter, scope, result)
 }
 
 pub(crate) fn materialize_run_from_compatibility(
@@ -686,6 +749,12 @@ pub(crate) fn materialize_run_from_compatibility(
     assume_yes: bool,
 ) -> Result<RunMaterialization> {
     let (draft_input, compiled) = draft_lock_input_from_compatibility(project)?;
+    let original_manifest =
+        toml::from_str(&project.manifest.raw_text).unwrap_or_else(|_| project.manifest.raw.clone());
+    let adapter = MaterializationAdapter {
+        project_root: project.project_root.clone(),
+        original_manifest: Some(original_manifest),
+    };
     let mut result = execute_shared_engine(
         SourceInferenceInput::DraftLock(draft_input),
         MaterializationMode::RunAttempt,
@@ -698,14 +767,7 @@ pub(crate) fn materialize_run_from_compatibility(
             .iter()
             .map(convert_compatibility_diagnostic),
     );
-    let original_manifest =
-        toml::from_str(&project.manifest.raw_text).unwrap_or_else(|_| project.manifest.raw.clone());
-    materialize_run_result(
-        &project.project_root,
-        result,
-        scope,
-        Some(&original_manifest),
-    )
+    materialize_run_model(adapter, scope, result)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -726,9 +788,9 @@ pub(crate) fn execute_init_from_resolved_source_only(
     reporter: Arc<CliReporter>,
     assume_yes: bool,
 ) -> Result<WorkspaceMaterialization> {
-    let project_root = prepare_durable_source_workspace(source)?;
+    let adapter = prepare_workspace_materialization_adapter(source)?;
     let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
-        project_root: project_root.clone(),
+        project_root: adapter.project_root.clone(),
     });
     let result = execute_shared_engine(
         input,
@@ -736,7 +798,7 @@ pub(crate) fn execute_init_from_resolved_source_only(
         assume_yes,
         reporter,
     )?;
-    materialize_workspace_result(&project_root, result)
+    materialize_workspace_model(adapter, result)
 }
 
 pub(crate) fn execute_init_from_compatibility(
@@ -745,6 +807,10 @@ pub(crate) fn execute_init_from_compatibility(
     assume_yes: bool,
 ) -> Result<WorkspaceMaterialization> {
     let (draft_input, compiled) = draft_lock_input_from_compatibility(project)?;
+    let adapter = MaterializationAdapter {
+        project_root: project.project_root.clone(),
+        original_manifest: None,
+    };
     let mut result = execute_shared_engine(
         SourceInferenceInput::DraftLock(draft_input),
         MaterializationMode::InitWorkspace,
@@ -757,7 +823,7 @@ pub(crate) fn execute_init_from_compatibility(
             .iter()
             .map(convert_compatibility_diagnostic),
     );
-    materialize_workspace_result(&project.project_root, result)
+    materialize_workspace_model(adapter, result)
 }
 
 pub(crate) fn execute_shared_engine(
@@ -766,10 +832,10 @@ pub(crate) fn execute_shared_engine(
     assume_yes: bool,
     reporter: Arc<CliReporter>,
 ) -> Result<SourceInferenceResult> {
-    let mut result = infer(input)?;
-    resolve(&mut result)?;
-    enforce_mode_preconditions(&mut result, mode, assume_yes, reporter)?;
-    Ok(result)
+    let inferred = infer_phase(input)?;
+    let resolved = resolve_phase(inferred)?;
+    let gated = apply_gates_phase(resolved, mode, assume_yes, reporter)?;
+    Ok(gated.result)
 }
 
 pub(crate) fn draft_lock_input_from_compatibility(
@@ -788,12 +854,39 @@ pub(crate) fn draft_lock_input_from_compatibility(
     Ok((input, compiled))
 }
 
-fn infer(input: SourceInferenceInput) -> Result<SourceInferenceResult> {
-    match input {
-        SourceInferenceInput::SourceEvidence(input) => infer_from_source_evidence(input),
-        SourceInferenceInput::DraftLock(input) => infer_from_draft_lock(input),
-        SourceInferenceInput::CanonicalLock(input) => infer_from_canonical_lock(input),
-    }
+fn infer_phase(input: SourceInferenceInput) -> Result<InferredSourceDraft> {
+    let result = match input {
+        SourceInferenceInput::SourceEvidence(input) => infer_from_source_evidence(input)?,
+        SourceInferenceInput::DraftLock(input) => infer_from_draft_lock(input)?,
+        SourceInferenceInput::CanonicalLock(input) => infer_from_canonical_lock(input)?,
+    };
+    Ok(InferredSourceDraft { result })
+}
+
+fn resolve_phase(mut inferred: InferredSourceDraft) -> Result<ResolvedSourceModel> {
+    let import_involved = inferred
+        .result
+        .provenance
+        .iter()
+        .any(|record| record.kind == SourceInferenceProvenanceKind::CompatibilityImport);
+    let build_derive_involved = resolve(&mut inferred.result)?;
+    Ok(ResolvedSourceModel {
+        result: inferred.result,
+        import_involved,
+        build_derive_involved,
+    })
+}
+
+fn apply_gates_phase(
+    mut resolved: ResolvedSourceModel,
+    mode: MaterializationMode,
+    assume_yes: bool,
+    reporter: Arc<CliReporter>,
+) -> Result<GatedSourceModel> {
+    enforce_mode_preconditions(&mut resolved.result, mode, assume_yes, reporter)?;
+    Ok(GatedSourceModel {
+        result: resolved.result,
+    })
 }
 
 fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInferenceResult> {
@@ -807,6 +900,8 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         field: "contract.metadata".to_string(),
         kind: SourceInferenceProvenanceKind::ExplicitArtifact,
         source_path: Some(input.project_root.clone()),
+        importer_id: None,
+        evidence_kind: None,
         source_field: Some("project_root".to_string()),
         note: Some("source-only workspace analyzed for shared inference".to_string()),
     }];
@@ -860,6 +955,8 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         field: "resolution.runtime".to_string(),
         kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
         source_path: Some(input.project_root.clone()),
+        importer_id: None,
+        evidence_kind: None,
         source_field: Some("project_type".to_string()),
         note: Some(format!(
             "runtime resolved from deterministic project-type inference{}",
@@ -870,6 +967,13 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
                 .unwrap_or_default()
         )),
     });
+    for evidence in observed_closure_evidence(&input.project_root) {
+        provenance.push(importer_observation_provenance(
+            "resolution.closure",
+            &evidence,
+            "importer evidence observed while building metadata-only closure state",
+        ));
+    }
 
     if process_candidates.is_empty() {
         lock.contract
@@ -923,6 +1027,8 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
             field: "contract.process".to_string(),
             kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
             source_path: Some(input.project_root.clone()),
+            importer_id: None,
+            evidence_kind: None,
             source_field: Some(candidate.label.clone()),
             note: Some(candidate.rationale.clone()),
         });
@@ -991,6 +1097,8 @@ fn infer_from_canonical_lock(input: CanonicalLockInput) -> Result<SourceInferenc
         field: "root".to_string(),
         kind: SourceInferenceProvenanceKind::CanonicalInput,
         source_path: Some(input.canonical_path),
+        importer_id: None,
+        evidence_kind: None,
         source_field: Some(ATO_LOCK_FILE_NAME.to_string()),
         note: Some("persisted canonical lock reused as shared source inference input".to_string()),
     }];
@@ -1005,6 +1113,8 @@ fn infer_from_canonical_lock(input: CanonicalLockInput) -> Result<SourceInferenc
         field: "contract.process".to_string(),
         kind: SourceInferenceProvenanceKind::CanonicalInput,
         source_path: Some(input.project_root),
+        importer_id: None,
+        evidence_kind: None,
         source_field: Some("ato.lock.json".to_string()),
         note: Some(
             "canonical lock drives run/init materialization without re-inferring semantics"
@@ -1047,6 +1157,8 @@ fn promote_draft_execution_resolution(
                 field: "resolution.runtime".to_string(),
                 kind: SourceInferenceProvenanceKind::CompatibilityImport,
                 source_path: Some(project_root.to_path_buf()),
+                importer_id: None,
+                evidence_kind: None,
                 source_field: Some("resolution.target_selection".to_string()),
                 note: Some(
                     "draft compatibility target hints promoted into an execution-ready runtime"
@@ -1064,12 +1176,21 @@ fn promote_draft_execution_resolution(
             field: "resolution.closure".to_string(),
             kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
             source_path: Some(project_root.to_path_buf()),
+            importer_id: None,
+            evidence_kind: None,
             source_field: Some("project_root".to_string()),
             note: Some(
-                "dependency closure remained unresolved in the draft lock, so run uses metadata-only observed lockfile state"
+                "dependency closure remained unresolved in the draft lock, so run uses metadata-only/incomplete observed lockfile state"
                     .to_string(),
             ),
         });
+        for evidence in observed_closure_evidence(project_root) {
+            provenance.push(importer_observation_provenance(
+                "resolution.closure",
+                &evidence,
+                "importer evidence observed while promoting draft closure state",
+            ));
+        }
     }
 }
 
@@ -1182,7 +1303,11 @@ fn sole_object_key(value: Option<&Value>) -> Option<String> {
     object.keys().next().cloned()
 }
 
-fn resolve(result: &mut SourceInferenceResult) -> Result<()> {
+fn resolve(result: &mut SourceInferenceResult) -> Result<bool> {
+    let build_derive_involved = maybe_promote_native_build_closure(result)?;
+    normalize_lock_closure(&mut result.lock)?;
+    ensure_incomplete_closure_unresolved_marker(&mut result.lock)?;
+
     let process_resolved = result.lock.contract.entries.contains_key("process");
     let runtime_resolved = result.lock.resolution.entries.contains_key("runtime");
     let target_resolved = result
@@ -1209,6 +1334,156 @@ fn resolve(result: &mut SourceInferenceResult) -> Result<()> {
             result.selection_gate = Some(gate);
         }
     }
+
+    Ok(build_derive_involved)
+}
+
+fn maybe_promote_native_build_closure(result: &mut SourceInferenceResult) -> Result<bool> {
+    if matches!(result.input_kind, SourceInferenceInputKind::CanonicalLock) {
+        return Ok(false);
+    }
+
+    let should_promote = match result.lock.resolution.entries.get("closure") {
+        None => true,
+        Some(closure) => {
+            let info = closure_info(closure)?;
+            info.status == "incomplete"
+        }
+    };
+    if !should_promote {
+        return Ok(false);
+    }
+
+    let Some(project_root) = result_project_root(result) else {
+        return Ok(false);
+    };
+    let Ok(Some(plan)) = detect_build_strategy(&project_root) else {
+        return Ok(false);
+    };
+
+    let mut imported_evidence = observed_closure_evidence(&plan.manifest_dir);
+    imported_evidence.extend(
+        probe_native_framework_evidence(&plan.manifest_dir)?
+            .into_iter()
+            .filter(|evidence| evidence.importer_id.as_str() == plan.framework.as_str()),
+    );
+    let inputs = imported_evidence
+        .iter()
+        .map(|evidence| {
+            json!({
+                "kind": evidence.evidence_kind.as_str(),
+                "name": evidence.importer_id.as_str(),
+                "digest": evidence.digest,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    result.lock.resolution.entries.insert(
+        "closure".to_string(),
+        json!({
+            "kind": "build_closure",
+            "status": "complete",
+            "inputs": inputs,
+            "build_environment": native_delivery_build_environment_skeleton(&plan),
+        }),
+    );
+    result.lock.contract.entries.insert(
+        "delivery".to_string(),
+        native_delivery_contract_from_build_plan(&plan, "source-derivation", "complete")?,
+    );
+    result
+        .lock
+        .resolution
+        .unresolved
+        .retain(|value| value.field.as_deref() != Some("resolution.closure"));
+    result.provenance.push(SourceInferenceProvenance {
+        field: "resolution.closure".to_string(),
+        kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
+        source_path: Some(plan.manifest_path),
+        importer_id: None,
+        evidence_kind: None,
+        source_field: Some("[artifact]/[finalize]".to_string()),
+        note: Some(
+            "native delivery build plan resolved into build_closure using observed lockfiles and build-environment skeleton"
+                .to_string(),
+        ),
+    });
+    for evidence in &imported_evidence {
+        result.provenance.push(importer_observation_provenance(
+            "resolution.closure",
+            evidence,
+            "importer evidence promoted into build_closure input",
+        ));
+    }
+    result.provenance.push(SourceInferenceProvenance {
+        field: "contract.delivery".to_string(),
+        kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
+        source_path: Some(plan.manifest_dir.join("capsule.toml")),
+        importer_id: None,
+        evidence_kind: None,
+        source_field: Some("[artifact]/[finalize]".to_string()),
+        note: Some(
+            "native delivery contract promoted from source-draft to source-derivation after build_closure resolved"
+                .to_string(),
+        ),
+    });
+
+    Ok(true)
+}
+
+fn result_project_root(result: &SourceInferenceResult) -> Option<PathBuf> {
+    let path = result
+        .provenance
+        .iter()
+        .find_map(|record| record.source_path.clone())?;
+
+    if path.is_dir() {
+        return Some(path);
+    }
+
+    Some(path.parent().map(Path::to_path_buf).unwrap_or(path))
+}
+
+fn ensure_incomplete_closure_unresolved_marker(lock: &mut AtoLock) -> Result<()> {
+    let Some(closure) = lock.resolution.entries.get("closure") else {
+        return Ok(());
+    };
+
+    let info = closure_info(closure)?;
+    if info.status == "complete" {
+        lock.resolution
+            .unresolved
+            .retain(|value| value.field.as_deref() != Some("resolution.closure"));
+        return Ok(());
+    }
+    if info.kind != "metadata_only" && info.status != "incomplete" {
+        return Ok(());
+    }
+
+    let detail = if info.kind == "metadata_only" {
+        "dependency closure remains metadata-only and incomplete until durable dependency inputs are captured"
+    } else {
+        "dependency closure remains incomplete until all required dependency inputs are captured"
+    };
+
+    if let Some(unresolved) = lock
+        .resolution
+        .unresolved
+        .iter_mut()
+        .find(|value| value.field.as_deref() == Some("resolution.closure"))
+    {
+        unresolved.reason = UnresolvedReason::InsufficientEvidence;
+        unresolved.detail = Some(detail.to_string());
+        unresolved.candidates.clear();
+        return Ok(());
+    }
+
+    lock.resolution.unresolved.push(UnresolvedValue {
+        field: Some("resolution.closure".to_string()),
+        reason: UnresolvedReason::InsufficientEvidence,
+        detail: Some(detail.to_string()),
+        candidates: Vec::new(),
+    });
 
     Ok(())
 }
@@ -1332,6 +1607,26 @@ fn materialize_workspace_result(
     crate::project::init::materialize::materialize_workspace_result(project_root, result)
 }
 
+fn materialize_run_model(
+    adapter: MaterializationAdapter,
+    scope: Option<&mut CleanupScope>,
+    result: SourceInferenceResult,
+) -> Result<RunMaterialization> {
+    materialize_run_result(
+        &adapter.project_root,
+        result,
+        scope,
+        adapter.original_manifest.as_ref(),
+    )
+}
+
+fn materialize_workspace_model(
+    adapter: MaterializationAdapter,
+    result: SourceInferenceResult,
+) -> Result<WorkspaceMaterialization> {
+    materialize_workspace_result(&adapter.project_root, result)
+}
+
 pub(crate) fn write_sidecar(
     path: &Path,
     result: &SourceInferenceResult,
@@ -1426,6 +1721,8 @@ fn apply_selection(
             field: field.to_string(),
             kind: SourceInferenceProvenanceKind::SelectionGate,
             source_path: None,
+            importer_id: None,
+            evidence_kind: None,
             source_field: Some(selection.label.clone()),
             note: Some("interactive selection resolved equal-ranked process ambiguity".to_string()),
         });
@@ -1599,13 +1896,18 @@ fn process_candidates_for_source(
         }
     }
 
+    sort_ranked_candidates(&mut candidates);
+    candidates
+}
+
+fn sort_ranked_candidates(candidates: &mut [RankedCandidate]) {
     candidates.sort_by(|left, right| {
         right
             .score
             .cmp(&left.score)
             .then_with(|| left.label.cmp(&right.label))
+            .then_with(|| left.entrypoint.join("\0").cmp(&right.entrypoint.join("\0")))
     });
-    candidates
 }
 
 fn existing_candidates(
@@ -1807,27 +2109,36 @@ fn inferred_filesystem_contract(detected: &DetectedProject) -> Value {
 }
 
 fn inferred_closure_state(project_root: &Path) -> Value {
-    let explicit_locks = [
-        "package-lock.json",
-        "deno.lock",
-        "pnpm-lock.yaml",
-        "yarn.lock",
-        "bun.lockb",
-        "Cargo.lock",
-        "poetry.lock",
-        "requirements.txt",
-        "go.sum",
-        "Gemfile.lock",
-    ]
-    .iter()
-    .filter(|name| project_root.join(name).exists())
-    .map(|name| json!(name))
-    .collect::<Vec<_>>();
+    let explicit_locks = observed_closure_evidence(project_root)
+        .into_iter()
+        .map(|evidence| json!(evidence.importer_id.as_str()))
+        .collect::<Vec<_>>();
 
     json!({
         "kind": "metadata_only",
+        "status": "incomplete",
         "observed_lockfiles": explicit_locks,
     })
+}
+
+fn observed_closure_evidence(project_root: &Path) -> Vec<ImportedEvidence> {
+    probe_ecosystem_lockfile_evidence(project_root).unwrap_or_default()
+}
+
+fn importer_observation_provenance(
+    field: &str,
+    evidence: &ImportedEvidence,
+    note: &str,
+) -> SourceInferenceProvenance {
+    SourceInferenceProvenance {
+        field: field.to_string(),
+        kind: SourceInferenceProvenanceKind::ImporterObservation,
+        source_path: Some(evidence.primary_path.clone()),
+        importer_id: Some(evidence.importer_id.as_str().to_string()),
+        evidence_kind: Some(evidence.evidence_kind.as_str().to_string()),
+        source_field: Some(evidence.importer_id.as_str().to_string()),
+        note: Some(note.to_string()),
+    }
 }
 
 fn source_metadata(detected: &DetectedProject, project_root: &Path) -> Value {
@@ -2044,6 +2355,8 @@ fn convert_compatibility_provenance(
             }
         },
         source_path: record.source_path.clone(),
+        importer_id: None,
+        evidence_kind: None,
         source_field: record.source_field.clone(),
         note: record.note.clone(),
     }
@@ -2114,6 +2427,36 @@ mod tests {
         assert!(result.lock.resolution.entries.contains_key("runtime"));
         assert!(result.lock.resolution.entries.contains_key("closure"));
         assert!(result.selection_gate.is_none());
+    }
+
+    #[test]
+    fn source_only_inference_emits_normalized_incomplete_metadata_closure() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"demo","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("write package json");
+        fs::write(dir.path().join("index.js"), "console.log('ok')").expect("write index");
+
+        let result = execute_shared_engine(
+            SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
+                project_root: dir.path().to_path_buf(),
+            }),
+            MaterializationMode::InitWorkspace,
+            true,
+            reporter(),
+        )
+        .expect("run engine");
+
+        assert_eq!(
+            result.lock.resolution.entries.get("closure"),
+            Some(&json!({
+                "kind": "metadata_only",
+                "status": "incomplete",
+                "observed_lockfiles": [],
+            }))
+        );
     }
 
     #[test]
@@ -2198,6 +2541,51 @@ mod tests {
             result.lock.contract.entries.get("process"),
             lock.contract.entries.get("process")
         );
+    }
+
+    #[test]
+    fn canonical_lock_infer_phase_does_not_generate_source_candidates() {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "main.ts", "cmd": []}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([{"name": "main", "process": {"entrypoint": "main.ts", "cmd": []}}]),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "deno", "version": "2.1.3"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([
+                {"label": "default", "runtime": "source", "driver": "deno", "entrypoint": "main.ts", "compatible": true}
+            ]),
+        );
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"kind": "runtime_closure", "status": "complete", "inputs": []}),
+        );
+
+        let inferred = infer_phase(SourceInferenceInput::CanonicalLock(CanonicalLockInput {
+            project_root: PathBuf::from("."),
+            canonical_path: PathBuf::from("ato.lock.json"),
+            lock,
+        }))
+        .expect("infer phase");
+
+        assert!(inferred.result.infer.candidate_sets.is_empty());
+        assert_eq!(
+            inferred.result.input_kind,
+            SourceInferenceInputKind::CanonicalLock
+        );
+        assert!(inferred
+            .result
+            .provenance
+            .iter()
+            .all(|record| record.kind != SourceInferenceProvenanceKind::DeterministicHeuristic));
     }
 
     #[test]
@@ -2587,6 +2975,37 @@ mod tests {
     }
 
     #[test]
+    fn equal_ranked_candidates_are_sorted_deterministically() {
+        let mut candidates = vec![
+            RankedCandidate {
+                label: "same".to_string(),
+                score: 100,
+                entrypoint: vec!["z-entry".to_string()],
+                rationale: "later".to_string(),
+            },
+            RankedCandidate {
+                label: "alpha".to_string(),
+                score: 100,
+                entrypoint: vec!["m-entry".to_string()],
+                rationale: "first label".to_string(),
+            },
+            RankedCandidate {
+                label: "same".to_string(),
+                score: 100,
+                entrypoint: vec!["a-entry".to_string()],
+                rationale: "first entrypoint".to_string(),
+            },
+        ];
+
+        sort_ranked_candidates(&mut candidates);
+
+        assert_eq!(candidates[0].label, "alpha");
+        assert_eq!(candidates[1].entrypoint, vec!["a-entry"]);
+        assert_eq!(candidates[2].entrypoint, vec!["z-entry"]);
+        assert!(is_equal_ranked(&candidates));
+    }
+
+    #[test]
     fn run_fails_when_equal_rank_candidates_remain_without_selection() {
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("package.json"), r#"{"name":"demo"}"#)
@@ -2648,6 +3067,54 @@ driver = "node"
             result.lock.contract.entries.get("process"),
             compiled.draft_lock.contract.entries.get("process")
         );
+    }
+
+    #[test]
+    fn compatibility_import_stays_out_of_source_candidate_generation() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("capsule.toml"),
+            r#"schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "node"
+entrypoint = "npm"
+cmd = ["start"]
+runtime_version = "20"
+"#,
+        )
+        .expect("write manifest");
+
+        let resolved = resolve_authoritative_input(dir.path(), ResolveInputOptions::default())
+            .expect("resolve compatibility input");
+        let ResolvedInput::CompatibilityProject { project, .. } = resolved else {
+            panic!("expected compatibility project");
+        };
+        let (draft_input, _) =
+            draft_lock_input_from_compatibility(&project).expect("compile compatibility draft");
+
+        let inferred = infer_phase(SourceInferenceInput::DraftLock(draft_input)).expect("infer");
+
+        assert!(inferred.result.infer.candidate_sets.is_empty());
+        assert!(inferred
+            .result
+            .provenance
+            .iter()
+            .any(|record| record.kind == SourceInferenceProvenanceKind::CompatibilityImport));
+        assert!(inferred
+            .result
+            .provenance
+            .iter()
+            .all(|record| !(record.field == "contract.process"
+                && record.kind == SourceInferenceProvenanceKind::DeterministicHeuristic)));
+
+        let resolved = resolve_phase(inferred).expect("resolve");
+        assert!(resolved.import_involved);
     }
 
     #[test]
@@ -2805,6 +3272,239 @@ from = "missing-service"
                 .and_then(toml::Value::as_str),
             Some("missing-service")
         );
+    }
+
+    #[test]
+    fn compatibility_native_delivery_promotes_build_closure() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("capsule.toml"),
+            r#"schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source"
+driver = "native"
+entrypoint = "pnpm"
+cmd = ["build"]
+working_dir = "."
+
+[artifact]
+framework = "tauri"
+stage = "unsigned"
+target = "darwin/arm64"
+input = "src-tauri/target/release/bundle/macos/MyApp.app"
+
+[finalize]
+tool = "codesign"
+args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/macos/MyApp.app"]
+"#,
+        )
+        .expect("write manifest");
+        fs::write(dir.path().join("Cargo.lock"), "version = 3\n").expect("write cargo lock");
+        fs::write(dir.path().join("package-lock.json"), "{}").expect("write package lock");
+
+        let resolved = resolve_authoritative_input(dir.path(), ResolveInputOptions::default())
+            .expect("resolve compatibility input");
+        let ResolvedInput::CompatibilityProject { project, .. } = resolved else {
+            panic!("expected compatibility project");
+        };
+        let (draft_input, _) =
+            draft_lock_input_from_compatibility(&project).expect("compile compatibility draft");
+
+        let result = execute_shared_engine(
+            SourceInferenceInput::DraftLock(draft_input),
+            MaterializationMode::InitWorkspace,
+            true,
+            reporter(),
+        )
+        .expect("run shared engine");
+
+        let closure = result
+            .lock
+            .resolution
+            .entries
+            .get("closure")
+            .expect("resolution.closure");
+        let delivery = result
+            .lock
+            .contract
+            .entries
+            .get("delivery")
+            .expect("contract.delivery");
+        assert_eq!(
+            closure.get("kind").and_then(Value::as_str),
+            Some("build_closure")
+        );
+        assert_eq!(
+            closure.get("status").and_then(Value::as_str),
+            Some("complete")
+        );
+        let inputs = closure
+            .get("inputs")
+            .and_then(Value::as_array)
+            .expect("closure inputs");
+        assert_eq!(inputs.len(), 2);
+        assert!(inputs.iter().any(|value| {
+            value.get("name").and_then(Value::as_str) == Some("cargo")
+                && value.get("kind").and_then(Value::as_str) == Some("lockfile")
+                && value
+                    .get("digest")
+                    .and_then(Value::as_str)
+                    .is_some_and(|digest| digest.starts_with("blake3:"))
+        }));
+        assert!(inputs.iter().any(|value| {
+            value.get("name").and_then(Value::as_str) == Some("npm")
+                && value.get("kind").and_then(Value::as_str) == Some("lockfile")
+                && value
+                    .get("digest")
+                    .and_then(Value::as_str)
+                    .is_some_and(|digest| digest.starts_with("blake3:"))
+        }));
+
+        let environment = closure
+            .get("build_environment")
+            .and_then(Value::as_object)
+            .expect("build_environment");
+        assert!(environment
+            .get("toolchains")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("rust"))));
+        assert!(environment
+            .get("package_managers")
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                values.iter().any(|value| value.as_str() == Some("cargo"))
+                    && values.iter().any(|value| value.as_str() == Some("npm"))
+            }));
+        assert!(environment
+            .get("helper_tools")
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                values
+                    .iter()
+                    .any(|value| value.as_str() == Some("tauri-cli"))
+                    && values
+                        .iter()
+                        .any(|value| value.as_str() == Some("codesign"))
+            }));
+        assert!(result
+            .lock
+            .resolution
+            .unresolved
+            .iter()
+            .all(|value| value.field.as_deref() != Some("resolution.closure")));
+        assert_eq!(
+            delivery.get("mode").and_then(Value::as_str),
+            Some("source-derivation")
+        );
+        assert_eq!(
+            delivery
+                .get("build")
+                .and_then(|value| value.get("closure_status"))
+                .and_then(Value::as_str),
+            Some("complete")
+        );
+    }
+
+    #[test]
+    fn native_delivery_build_derive_only_appears_in_resolve_phase() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("capsule.toml"),
+            r#"schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source"
+driver = "native"
+entrypoint = "pnpm"
+cmd = ["build"]
+
+[artifact]
+framework = "tauri"
+stage = "unsigned"
+target = "darwin/arm64"
+input = "src-tauri/target/release/bundle/macos/MyApp.app"
+
+[finalize]
+tool = "codesign"
+args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/macos/MyApp.app"]
+"#,
+        )
+        .expect("write manifest");
+        fs::write(dir.path().join("Cargo.lock"), "version = 3\n").expect("write cargo lock");
+
+        let resolved = resolve_authoritative_input(dir.path(), ResolveInputOptions::default())
+            .expect("resolve compatibility input");
+        let ResolvedInput::CompatibilityProject { project, .. } = resolved else {
+            panic!("expected compatibility project");
+        };
+        let (draft_input, _) =
+            draft_lock_input_from_compatibility(&project).expect("compile compatibility draft");
+
+        let inferred = infer_phase(SourceInferenceInput::DraftLock(draft_input)).expect("infer");
+        assert_eq!(
+            inferred
+                .result
+                .lock
+                .contract
+                .entries
+                .get("delivery")
+                .and_then(|value| value.get("mode"))
+                .and_then(Value::as_str),
+            Some("source-draft")
+        );
+        assert_eq!(
+            inferred
+                .result
+                .lock
+                .resolution
+                .entries
+                .get("closure")
+                .and_then(|value| value.get("kind"))
+                .and_then(Value::as_str),
+            Some("metadata_only")
+        );
+
+        let resolved = resolve_phase(inferred).expect("resolve");
+        assert!(resolved.build_derive_involved);
+        assert_eq!(
+            resolved
+                .result
+                .lock
+                .resolution
+                .entries
+                .get("closure")
+                .and_then(|value| value.get("kind"))
+                .and_then(Value::as_str),
+            Some("build_closure")
+        );
+    }
+
+    #[test]
+    fn single_script_workspace_adapter_is_materialization_scoped() {
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("hello.ts");
+        fs::write(&script_path, "console.log('hello');\n").expect("write script");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: Some(ResolvedSingleScript {
+                path: script_path,
+                language: SingleScriptLanguage::TypeScript,
+            }),
+        };
+
+        let adapter = prepare_run_materialization_adapter(&source, None).expect("adapter");
+        assert_ne!(adapter.project_root, source.project_root);
+        assert!(adapter.project_root.join("deno.json").exists());
     }
 
     #[test]
@@ -2994,7 +3694,7 @@ target = "worker"
         );
         lock.resolution.entries.insert(
             "closure".to_string(),
-            json!({"kind": "metadata_only", "observed_lockfiles": []}),
+            json!({"kind": "metadata_only", "status": "incomplete", "observed_lockfiles": []}),
         );
 
         let error = execute_shared_engine(
@@ -3010,6 +3710,54 @@ target = "worker"
         .expect_err("draft lock without a resolvable target/runtime must fail closed");
 
         assert!(error.to_string().contains("ATO_ERR_RUNTIME_NOT_RESOLVED"));
+    }
+
+    #[test]
+    fn draft_lock_normalizes_legacy_complete_closure_shape() {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "main.ts", "cmd": []}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([{"name": "main", "process": {"entrypoint": "main.ts", "cmd": []}}]),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "deno", "version": "2.1.3"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([
+                {"label": "web", "runtime": "source", "driver": "deno", "entrypoint": "main.ts"}
+            ]),
+        );
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"status": "complete", "inputs": []}),
+        );
+
+        let result = execute_shared_engine(
+            SourceInferenceInput::DraftLock(DraftLockInput {
+                project_root: PathBuf::from("."),
+                draft_lock: lock,
+                provenance: Vec::new(),
+            }),
+            MaterializationMode::InitWorkspace,
+            true,
+            reporter(),
+        )
+        .expect("draft lock engine");
+
+        assert_eq!(
+            result.lock.resolution.entries.get("closure"),
+            Some(&json!({
+                "kind": "runtime_closure",
+                "status": "complete",
+                "inputs": [],
+            }))
+        );
     }
 
     #[test]
@@ -3029,7 +3777,7 @@ target = "worker"
         );
         lock.resolution.entries.insert(
             "closure".to_string(),
-            json!({"kind": "metadata_only", "observed_lockfiles": []}),
+            json!({"kind": "metadata_only", "status": "incomplete", "observed_lockfiles": []}),
         );
 
         let error = execute_shared_engine(
@@ -3085,5 +3833,53 @@ target = "worker"
         .expect_err("canonical lock without closure must fail closed");
 
         assert!(error.to_string().contains("dependency closure state"));
+    }
+
+    #[test]
+    fn canonical_lock_normalizes_legacy_complete_closure_shape() {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "main.ts", "cmd": []}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([{"name": "main", "process": {"entrypoint": "main.ts", "cmd": []}}]),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "deno", "version": "2.1.3"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([
+                {"label": "web", "runtime": "source", "driver": "deno", "entrypoint": "main.ts"}
+            ]),
+        );
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"status": "complete", "inputs": []}),
+        );
+
+        let result = execute_shared_engine(
+            SourceInferenceInput::CanonicalLock(CanonicalLockInput {
+                project_root: PathBuf::from("."),
+                canonical_path: PathBuf::from("ato.lock.json"),
+                lock,
+            }),
+            MaterializationMode::InitWorkspace,
+            true,
+            reporter(),
+        )
+        .expect("canonical lock engine");
+
+        assert_eq!(
+            result.lock.resolution.entries.get("closure"),
+            Some(&json!({
+                "kind": "runtime_closure",
+                "status": "complete",
+                "inputs": [],
+            }))
+        );
     }
 }
