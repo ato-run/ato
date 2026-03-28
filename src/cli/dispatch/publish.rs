@@ -1020,20 +1020,25 @@ fn build_capsule_artifact_for_publish(cwd: &Path) -> Result<PathBuf> {
         std::sync::Arc::new(crate::reporters::CliReporter::new(false)),
         false,
     )?;
-    let manifest_path = authoritative_input.manifest_path.clone();
-    let manifest = authoritative_input.manifest.clone();
-    let version = if manifest.version.trim().is_empty() {
+    let metadata = &authoritative_input.descriptor.runtime_model.metadata;
+    let name = metadata
+        .name
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .context("authoritative lock metadata is missing package name")?;
+    let version = if metadata
+        .version
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
         "auto"
     } else {
-        manifest.version.trim()
+        metadata.version.as_deref().unwrap_or_default().trim()
     };
-    crate::publish_ci::build_capsule_artifact(
-        &manifest_path,
-        &manifest.name,
-        version,
-        Some(&authoritative_input),
-    )
-    .with_context(|| "Failed to build artifact for publish")
+    crate::publish_ci::build_capsule_artifact(&name, version, Some(&authoritative_input), None)
+        .with_context(|| "Failed to build artifact for publish")
 }
 
 fn emit_publish_json_output(
@@ -1156,19 +1161,62 @@ fn discover_manifest_publish_registry() -> Result<Option<String>> {
         Ok(value) => value,
         Err(_) => return Ok(None),
     };
-    let parsed: toml::Value =
-        toml::from_str(&authoritative_input.manifest_raw).with_context(|| {
-            format!(
-                "Failed to parse {}",
-                authoritative_input.manifest_path.display()
-            )
-        })?;
+    Ok(authoritative_input
+        .compat_manifest
+        .as_ref()
+        .and_then(|bridge| bridge.raw_value().ok())
+        .and_then(|parsed| {
+            parsed
+                .get("store")
+                .and_then(|v| v.get("registry"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(ToOwned::to_owned)
+        }))
+}
 
-    Ok(parsed
-        .get("store")
-        .and_then(|v| v.get("registry"))
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(ToOwned::to_owned))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct CwdGuard {
+        original: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn set_to(path: &Path) -> Self {
+            let original = std::env::current_dir().expect("cwd");
+            std::env::set_current_dir(path).expect("set cwd");
+            Self { original }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
+    #[test]
+    fn build_capsule_artifact_for_publish_does_not_materialize_capsule_toml() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"demo","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("package.json");
+        std::fs::write(
+            tmp.path().join("package-lock.json"),
+            r#"{"name":"demo","lockfileVersion":3,"packages":{}}"#,
+        )
+        .expect("package-lock.json");
+        std::fs::write(tmp.path().join("index.js"), "console.log('demo');\n").expect("index.js");
+        let _guard = CwdGuard::set_to(tmp.path());
+
+        let error = build_capsule_artifact_for_publish(tmp.path())
+            .expect_err("publish build may fail but must not materialize manifest");
+        assert!(!error.to_string().is_empty());
+        assert!(!tmp.path().join("capsule.toml").exists());
+    }
 }
