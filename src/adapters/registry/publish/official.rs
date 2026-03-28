@@ -7,7 +7,7 @@ use capsule_core::router::ExecutionProfile;
 use serde::Serialize;
 
 use crate::application::producer_input::resolve_producer_authoritative_input;
-use crate::publish_preflight::{self, find_manifest_repository, CI_WORKFLOW_REL_PATH};
+use crate::publish_preflight::{self, CI_WORKFLOW_REL_PATH};
 
 const MAIN_BRANCH: &str = "main";
 
@@ -105,12 +105,13 @@ pub fn diagnose_official(cwd: &Path, registry_url: &str) -> OfficialPublishDiagn
         false,
     ) {
         Ok(authoritative_input) => {
-            let manifest_path = authoritative_input.manifest_path.clone();
-            let manifest_raw = authoritative_input.manifest_raw.clone();
-            let manifest = authoritative_input.manifest.clone();
-            capsule_name = Some(manifest.name.clone());
-            version = Some(manifest.version.clone());
-            manifest_repo = find_manifest_repository(&manifest_raw);
+            let manifest_path = authoritative_input.descriptor.manifest_path.clone();
+            capsule_name = authoritative_input.semantic_package_name().ok();
+            version = Some(authoritative_input.semantic_package_version());
+            manifest_repo = authoritative_input
+                .compat_manifest
+                .as_ref()
+                .and_then(|bridge| bridge.repository());
 
             let compiled =
                 derive::compile_execution_plan(&manifest_path, ExecutionProfile::Release, None);

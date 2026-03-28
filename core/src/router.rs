@@ -37,6 +37,10 @@ pub struct CompatManifestBridge {
 }
 
 impl CompatManifestBridge {
+    pub fn toml_value(&self) -> Result<toml::Value> {
+        toml::from_str(&self.raw_toml).map_err(|err| anyhow!("parse compat manifest bridge: {err}"))
+    }
+
     pub fn from_manifest_value(manifest: &toml::Value) -> Result<Self> {
         let raw_toml =
             toml::to_string(manifest).map_err(|err| anyhow!("serialize manifest bridge: {err}"))?;
@@ -54,11 +58,19 @@ impl CompatManifestBridge {
     }
 
     pub fn raw_value(&self) -> Result<toml::Value> {
-        toml::from_str(&self.raw_toml).map_err(|err| anyhow!("parse compat manifest bridge: {err}"))
+        self.toml_value()
+    }
+
+    pub fn package_name(&self) -> &str {
+        self.manifest.name.as_str()
+    }
+
+    pub fn package_version(&self) -> &str {
+        self.manifest.version.as_str()
     }
 
     pub fn repository(&self) -> Option<String> {
-        self.raw_value().ok().and_then(|parsed| {
+        self.toml_value().ok().and_then(|parsed| {
             parsed
                 .get("metadata")
                 .and_then(|value| value.get("repository"))
@@ -69,7 +81,7 @@ impl CompatManifestBridge {
     }
 
     pub fn store_playground_enabled(&self) -> bool {
-        self.raw_value()
+        self.toml_value()
             .ok()
             .and_then(|parsed| {
                 parsed
@@ -85,14 +97,28 @@ impl CompatManifestBridge {
     }
 
     pub fn ipc_section(&self) -> Result<Option<toml::Value>> {
-        Ok(self.raw_value()?.get("ipc").cloned())
+        Ok(self.toml_value()?.get("ipc").cloned())
+    }
+
+    pub fn publish_registry(&self) -> Option<String> {
+        self.toml_value().ok().and_then(|parsed| {
+            parsed
+                .get("store")
+                .and_then(|value| value.get("registry"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ExecutionDescriptor {
+    // Transitional compatibility surface retained for run/install-oriented APIs.
     pub manifest: toml::Value,
     pub compat_manifest: Option<CompatManifestBridge>,
+    // Transitional source-location metadata; build/publish semantic authority must not depend on these.
     pub manifest_path: PathBuf,
     pub manifest_dir: PathBuf,
     pub lock: AtoLock,

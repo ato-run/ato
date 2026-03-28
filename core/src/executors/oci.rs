@@ -45,7 +45,7 @@ pub fn execute(plan: &ManifestData) -> Result<i32> {
     if let Some(raw_manifest) = plan
         .compat_manifest()
         .and_then(|bridge| bridge.raw_value().ok())
-        .filter(|manifest| hardware::requires_gpu(manifest))
+        .filter(hardware::requires_gpu)
     {
         let _ = raw_manifest;
         if let Some(report) = hardware::detect_nvidia_gpus()? {
