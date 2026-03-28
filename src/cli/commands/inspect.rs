@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Error as AnyhowError, Result};
-use capsule_core::ato_lock::{AtoLock, UnresolvedValue};
+use capsule_core::ato_lock::{closure_info, AtoLock, UnresolvedValue};
 use capsule_core::input_resolver::{
     resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ATO_LOCK_FILE_NAME,
 };
@@ -305,6 +305,16 @@ pub struct InspectFieldView {
     pub fallback: bool,
     pub selection_gate_involved: bool,
     pub approval_gate_involved: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closure_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closure_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closure_digestable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closure_provenance_limited: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provenance: Vec<InspectProvenanceView>,
 }
@@ -315,6 +325,10 @@ pub struct InspectProvenanceView {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub importer_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -425,6 +439,8 @@ struct StoredProvenanceRecord {
     field: String,
     kind: String,
     source_path: Option<PathBuf>,
+    importer_id: Option<String>,
+    evidence_kind: Option<String>,
     source_field: Option<String>,
     note: Option<String>,
 }
@@ -473,6 +489,10 @@ struct StoredSidecarProvenance {
     field: String,
     kind: String,
     source_path: Option<PathBuf>,
+    #[serde(default)]
+    importer_id: Option<String>,
+    #[serde(default)]
+    evidence_kind: Option<String>,
     source_field: Option<String>,
     note: Option<String>,
 }
@@ -967,6 +987,8 @@ fn collect_field_views(
                         .as_ref()
                         .map(|gate| !gate.capability.is_empty() || !gate.message.is_empty())
                         .unwrap_or(false);
+            let closure_surface = closure_surface_for_field(&lock_path, value.as_ref());
+            let delivery_mode = delivery_mode_for_field(&lock_path, value.as_ref());
             InspectFieldView {
                 resolved: value.is_some(),
                 explicit: provenance.iter().any(provenance_is_explicit),
@@ -976,6 +998,13 @@ fn collect_field_views(
                 fallback: provenance.iter().any(provenance_uses_fallback),
                 selection_gate_involved,
                 approval_gate_involved,
+                closure_kind: closure_surface.as_ref().map(|value| value.kind.clone()),
+                closure_status: closure_surface.as_ref().map(|value| value.status.clone()),
+                closure_digestable: closure_surface.as_ref().map(|value| value.digestable),
+                closure_provenance_limited: closure_surface
+                    .as_ref()
+                    .map(|value| value.provenance_limited),
+                delivery_mode,
                 lock_path,
                 value,
                 provenance: provenance
@@ -983,6 +1012,8 @@ fn collect_field_views(
                     .map(|record| InspectProvenanceView {
                         kind: record.kind,
                         source_path: record.source_path.map(|value| value.display().to_string()),
+                        importer_id: record.importer_id,
+                        evidence_kind: record.evidence_kind,
                         source_field: record.source_field,
                         note: record.note,
                     })
@@ -1085,6 +1116,26 @@ fn collect_diagnostic_views(snapshot: &InspectionSnapshot) -> Vec<InspectDiagnos
         });
     }
 
+    if let Some(closure) = snapshot.lock.resolution.entries.get("closure") {
+        if let Ok(info) = closure_info(closure) {
+            if info.status == "incomplete"
+                && !diagnostics
+                    .iter()
+                    .any(|value| value.lock_path == "resolution.closure")
+            {
+                diagnostics.push(InspectDiagnosticView {
+                    severity: "warning".to_string(),
+                    lock_path: "resolution.closure".to_string(),
+                    message: format!("resolution.closure remains incomplete ({})", info.kind),
+                    reason_class: Some("incomplete_closure".to_string()),
+                    source_mapping: source_mapping_for_field(snapshot, "resolution.closure"),
+                    inspect_command: inspect_command.clone(),
+                    preview_command: preview_command.clone(),
+                });
+            }
+        }
+    }
+
     diagnostics.sort_by(|left, right| {
         left.lock_path
             .cmp(&right.lock_path)
@@ -1132,8 +1183,14 @@ fn remediation_action(lock_path: &str, reason_class: &str) -> String {
         ("resolution.closure", _) => {
             "materialize dependency closure state such as package lockfiles before regenerating ato.lock.json".to_string()
         }
-        _ if lock_path.starts_with("binding.") => {
+        _ if lock_path == "binding" || lock_path.starts_with("binding.") => {
             "populate workspace-local binding seed entries or accept the host-local binding prompt".to_string()
+        }
+        _ if lock_path == "policy" || lock_path.starts_with("policy.") => {
+            "update the workspace-local policy bundle or embedded lock policy; policy gates execution but does not change lock identity".to_string()
+        }
+        _ if lock_path == "attestations" || lock_path.starts_with("attestations.") => {
+            "record or refresh workspace-local attestation/observation evidence; attestation state is not part of canonical lock content".to_string()
         }
         _ => "update the source field mapped by provenance, then rerun ato inspect preview to verify the lock path".to_string(),
     }
@@ -1183,6 +1240,8 @@ fn default_provenance(snapshot: &InspectionSnapshot, field: &str) -> Vec<StoredP
                 "explicit_artifact".to_string()
             },
             source_path: Some(path.clone()),
+            importer_id: None,
+            evidence_kind: None,
             source_field: Some(field.to_string()),
             note: Some("no persisted provenance sidecar was present, so authoritative input ownership was used".to_string()),
         })
@@ -1238,6 +1297,38 @@ fn append_section_fields(
     }
 }
 
+struct ClosureSurfaceView {
+    kind: String,
+    status: String,
+    digestable: bool,
+    provenance_limited: bool,
+}
+
+fn closure_surface_for_field(lock_path: &str, value: Option<&Value>) -> Option<ClosureSurfaceView> {
+    if lock_path != "resolution.closure" {
+        return None;
+    }
+
+    let info = closure_info(value?).ok()?;
+    Some(ClosureSurfaceView {
+        kind: info.kind,
+        status: info.status,
+        digestable: info.digestable,
+        provenance_limited: info.provenance_limited,
+    })
+}
+
+fn delivery_mode_for_field(lock_path: &str, value: Option<&Value>) -> Option<String> {
+    if lock_path != "contract.delivery" {
+        return None;
+    }
+
+    value?
+        .get("mode")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 fn append_compatibility_diagnostics(
     result: &mut SourceInferenceResult,
     compiled: &CompatibilityCompileResult,
@@ -1282,6 +1373,8 @@ fn apply_stored_sidecar(result: &mut SourceInferenceResult, sidecar: StoredSidec
             field: record.field,
             kind: provenance_kind_from_str(&record.kind),
             source_path: record.source_path,
+            importer_id: record.importer_id,
+            evidence_kind: record.evidence_kind,
             source_field: record.source_field,
             note: record.note,
         })
@@ -1322,6 +1415,8 @@ fn convert_provenance_record(record: &SourceInferenceProvenance) -> StoredProven
         field: record.field.clone(),
         kind: provenance_kind_label(record.kind).to_string(),
         source_path: record.source_path.clone(),
+        importer_id: record.importer_id.clone(),
+        evidence_kind: record.evidence_kind.clone(),
         source_field: record.source_field.clone(),
         note: record.note.clone(),
     }
@@ -1375,6 +1470,7 @@ fn provenance_kind_label(kind: SourceInferenceProvenanceKind) -> &'static str {
         SourceInferenceProvenanceKind::CompatibilityImport => "compatibility_import",
         SourceInferenceProvenanceKind::CanonicalInput => "canonical_input",
         SourceInferenceProvenanceKind::DeterministicHeuristic => "deterministic_heuristic",
+        SourceInferenceProvenanceKind::ImporterObservation => "importer_observation",
         SourceInferenceProvenanceKind::MetadataObservation => "metadata_observation",
         SourceInferenceProvenanceKind::SelectionGate => "selection_gate",
         SourceInferenceProvenanceKind::ApprovalGate => "approval_gate",
@@ -1386,6 +1482,7 @@ fn provenance_kind_from_str(value: &str) -> SourceInferenceProvenanceKind {
         "explicit_artifact" => SourceInferenceProvenanceKind::ExplicitArtifact,
         "compatibility_import" => SourceInferenceProvenanceKind::CompatibilityImport,
         "canonical_input" => SourceInferenceProvenanceKind::CanonicalInput,
+        "importer_observation" => SourceInferenceProvenanceKind::ImporterObservation,
         "metadata_observation" => SourceInferenceProvenanceKind::MetadataObservation,
         "selection_gate" => SourceInferenceProvenanceKind::SelectionGate,
         "approval_gate" => SourceInferenceProvenanceKind::ApprovalGate,
@@ -1423,6 +1520,7 @@ fn provenance_is_inferred(record: &StoredProvenanceRecord) -> bool {
 
 fn provenance_is_observed(record: &StoredProvenanceRecord) -> bool {
     record.kind == "metadata_observation"
+        || record.kind == "importer_observation"
         || record
             .note
             .as_deref()
@@ -1482,15 +1580,28 @@ fn print_lock_view(view: &InspectLockView) {
             "unresolved"
         };
         if labels.is_empty() {
-            println!("  - {} [{}]", field.lock_path, status);
+            print!("  - {} [{}]", field.lock_path, status);
         } else {
-            println!(
+            print!(
                 "  - {} [{}; {}]",
                 field.lock_path,
                 status,
                 labels.join(", ")
             );
         }
+        if let Some(kind) = field.closure_kind.as_ref() {
+            print!(
+                " kind={}, status={}, digestable={}, provenance_limited={}",
+                kind,
+                field.closure_status.as_deref().unwrap_or("unknown"),
+                field.closure_digestable.unwrap_or(false),
+                field.closure_provenance_limited.unwrap_or(false)
+            );
+        }
+        if let Some(mode) = field.delivery_mode.as_deref() {
+            print!(" mode={}", mode);
+        }
+        println!();
     }
     if !view.unresolved.is_empty() {
         println!("Unresolved:");

@@ -36,6 +36,10 @@ mod lockfile_support;
 use lockfile_runtime::*;
 use lockfile_support::*;
 
+// This module owns Ato-native canonical lock generation.
+// Ecosystem lockfiles and framework metadata are observed through importer probes
+// and treated as read-only canonicalization inputs rather than as canonical truth.
+
 const UV_VERSION: &str = "0.4.19";
 const PNPM_VERSION: &str = "9.9.0";
 const LOCKFILE_INPUT_SNAPSHOT_VERSION: u32 = 1;

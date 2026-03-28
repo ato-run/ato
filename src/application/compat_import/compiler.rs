@@ -189,6 +189,13 @@ mod tests {
         fs::write(dir.join("capsule.toml"), content).expect("write manifest");
     }
 
+    fn write_minimal_macos_app_bundle(dir: &std::path::Path, relative: &str) {
+        let binary = dir.join(relative).join("Contents/MacOS/MyApp");
+        fs::create_dir_all(binary.parent().expect("bundle binary parent"))
+            .expect("create app bundle");
+        fs::write(binary, b"demo-app").expect("write app bundle binary");
+    }
+
     fn compile_from_dir(dir: &std::path::Path) -> super::CompatibilityCompileResult {
         let resolved = resolve_authoritative_input(dir, ResolveInputOptions::default())
             .expect("resolve compatibility input");
@@ -235,6 +242,153 @@ target = "web"
             .and_then(Value::as_array)
             .expect("workloads array");
         assert_eq!(workloads.len(), 1);
+    }
+
+    #[test]
+    fn native_app_import_emits_imported_artifact_closure() {
+        let dir = tempdir().expect("tempdir");
+        write_manifest(
+            dir.path(),
+            r#"schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source"
+driver = "native"
+entrypoint = "dist/MyApp.app"
+"#,
+        );
+        write_minimal_macos_app_bundle(dir.path(), "dist/MyApp.app");
+
+        let result = compile_from_dir(dir.path());
+        let closure = result
+            .draft_lock
+            .resolution
+            .entries
+            .get("closure")
+            .expect("resolution.closure");
+
+        assert_eq!(
+            closure.get("kind").and_then(Value::as_str),
+            Some("imported_artifact_closure")
+        );
+        assert_eq!(
+            closure.get("status").and_then(Value::as_str),
+            Some("complete")
+        );
+        let artifact = closure
+            .get("artifact")
+            .and_then(Value::as_object)
+            .expect("artifact");
+        assert_eq!(
+            artifact.get("artifact_type").and_then(Value::as_str),
+            Some("macos_app_bundle")
+        );
+        assert_eq!(
+            artifact.get("provenance_limited").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(artifact
+            .get("digest")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.starts_with("blake3:")));
+        assert!(result.provenance.iter().any(|record| {
+            record.field
+                == crate::application::compat_import::CompilerOwnedField::new(
+                    "resolution",
+                    "closure",
+                )
+                && record
+                    .note
+                    .as_deref()
+                    .is_some_and(|note| note.contains("provenance is intentionally limited"))
+        }));
+        let delivery = result
+            .draft_lock
+            .contract
+            .entries
+            .get("delivery")
+            .expect("contract.delivery");
+        assert_eq!(
+            delivery.get("mode").and_then(Value::as_str),
+            Some("artifact-import")
+        );
+        let delivery_artifact = delivery
+            .get("artifact")
+            .and_then(Value::as_object)
+            .expect("delivery artifact");
+        assert_eq!(
+            delivery_artifact
+                .get("canonical_build_input")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            delivery_artifact
+                .get("provenance_limited")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn native_delivery_manifest_emits_source_draft_contract() {
+        let dir = tempdir().expect("tempdir");
+        write_manifest(
+            dir.path(),
+            r#"schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source"
+driver = "native"
+entrypoint = "pnpm"
+cmd = ["build"]
+working_dir = "."
+
+[artifact]
+framework = "tauri"
+stage = "unsigned"
+target = "darwin/arm64"
+input = "src-tauri/target/release/bundle/macos/MyApp.app"
+
+[finalize]
+tool = "codesign"
+args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/macos/MyApp.app"]
+"#,
+        );
+
+        let result = compile_from_dir(dir.path());
+        let delivery = result
+            .draft_lock
+            .contract
+            .entries
+            .get("delivery")
+            .expect("contract.delivery");
+        assert_eq!(
+            delivery.get("mode").and_then(Value::as_str),
+            Some("source-draft")
+        );
+        assert_eq!(
+            delivery
+                .get("build")
+                .and_then(|value| value.get("closure_status"))
+                .and_then(Value::as_str),
+            Some("incomplete")
+        );
+        assert_eq!(
+            delivery
+                .get("artifact")
+                .and_then(|value| value.get("canonical_build_input"))
+                .and_then(Value::as_bool),
+            Some(false)
+        );
     }
 
     #[test]

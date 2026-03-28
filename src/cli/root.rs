@@ -4,7 +4,6 @@ use clap::{Parser, Subcommand};
 
 use super::binding::BindingCommands;
 use super::config::{ConfigCommands, EngineCommands};
-use super::init::InitLegacyMode;
 use super::inspect::InspectCommands;
 use super::ipc::IpcCommands;
 use super::key::KeyCommands;
@@ -25,35 +24,27 @@ use super::state::StateCommands;
 Usage: {usage}
 
 Primary Commands:
-  run      Execute a capsule or local project in a strict Zero-Trust sandbox
+  run      Execute a .capsule archive or local project in a sandbox
   build    Pack a project into an immutable .capsule archive
   publish  Publish capsule artifacts to a registry
   install  Install a verified package from the registry
+  init     Materialize a durable ato.lock.json baseline for the current project
   search   Search the registry for agent skills and packages
-    init     Materialize a durable ato.lock.json baseline for the current project
 
 Management:
   ps       List running capsules
   stop     Stop a running capsule
   logs     Show logs of a running capsule
-    state    Inspect or register persistent state bindings
-    binding  Inspect or register host-side service bindings
+  state    Inspect or register persistent state bindings
+  binding  Inspect or register host-side service bindings
 
 Auth:
   login    Login to Ato registry
   logout   Logout
   whoami   Show current authentication status
 
-Advanced Commands:
-    inspect  Inspect lock-first metadata, preview write-back, diagnostics, and runtime requirements
-  fetch    Fetch an artifact into local cache for debugging or manual workflows
-  finalize Perform local derivation for a fetched native artifact
-  project  Add a finalized app to launcher surfaces
-  unproject Remove a launcher projection
-  key      Manage signing keys
-  config   Manage configuration (registry, engine, source)
-  gen-ci   Generate GitHub Actions workflow for OIDC CI publish
-  registry Manage registry commands (resolve/list/cache/serve)
+Troubleshooting:
+  inspect  Inspect lock-first metadata, preview write-back, diagnostics, and runtime requirements
 
 Options:
 {options}
@@ -282,10 +273,6 @@ pub(crate) enum Commands {
         /// Skip prompts when source inference requires explicit confirmation
         #[arg(short = 'y', long = "yes", default_value_t = false)]
         yes: bool,
-
-        /// Use a legacy manifest-first init surface instead of durable lock materialization
-        #[arg(long, value_enum)]
-        legacy: Option<InitLegacyMode>,
     },
 
     #[command(
@@ -317,7 +304,7 @@ pub(crate) enum Commands {
     },
 
     #[command(
-        next_help_heading = "Advanced Commands",
+        next_help_heading = "Troubleshooting",
         about = "Validate capsule build/run inputs without executing"
     )]
     Validate {
@@ -328,13 +315,13 @@ pub(crate) enum Commands {
     },
 
     #[command(
-        next_help_heading = "Advanced Commands",
+        next_help_heading = "Troubleshooting",
         about = "Update ato CLI to the latest version"
     )]
     Update,
 
     #[command(
-        next_help_heading = "Advanced Commands",
+        next_help_heading = "Troubleshooting",
         about = "Inspect lock-first metadata, preview write-back, diagnostics, remediation, and runtime requirements"
     )]
     Inspect {
@@ -368,10 +355,7 @@ pub(crate) enum Commands {
         show_manifest: bool,
     },
 
-    #[command(
-        next_help_heading = "Advanced Commands",
-        about = "Fetch an artifact into local cache for debugging or manual workflows"
-    )]
+    #[command(hide = true)]
     Fetch {
         /// Capsule reference such as publisher/slug or localhost:8080/slug:version
         capsule_ref: String,
@@ -386,10 +370,7 @@ pub(crate) enum Commands {
         json: bool,
     },
 
-    #[command(
-        next_help_heading = "Advanced Commands",
-        about = "Perform local derivation for a fetched native artifact. Most users should use `ato install`."
-    )]
+    #[command(hide = true)]
     Finalize {
         /// Path to fetched artifact directory
         fetched_artifact_dir: PathBuf,
@@ -403,10 +384,7 @@ pub(crate) enum Commands {
         json: bool,
     },
 
-    #[command(
-        next_help_heading = "Advanced Commands",
-        about = "Add a finalized app to launcher surfaces (experimental). Typically used after `ato finalize`."
-    )]
+    #[command(hide = true)]
     Project {
         /// Path to the finalized app produced by ato finalize
         derived_app_path: Option<PathBuf>,
@@ -419,10 +397,7 @@ pub(crate) enum Commands {
         command: Option<ProjectCommands>,
     },
 
-    #[command(
-        next_help_heading = "Advanced Commands",
-        about = "Remove an experimental launcher projection without mutating the finalized artifact"
-    )]
+    #[command(hide = true)]
     Unproject {
         /// Projection ID or projected path
         projection_ref: String,
@@ -507,16 +482,13 @@ pub(crate) enum Commands {
     )]
     Whoami,
 
-    #[command(next_help_heading = "Advanced Commands", about = "Manage signing keys")]
+    #[command(hide = true)]
     Key {
         #[command(subcommand)]
         command: KeyCommands,
     },
 
-    #[command(
-        next_help_heading = "Advanced Commands",
-        about = "Manage configuration (registry, engine)"
-    )]
+    #[command(hide = true)]
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
@@ -601,10 +573,7 @@ pub(crate) enum Commands {
         json: bool,
     },
 
-    #[command(
-        next_help_heading = "Advanced Commands",
-        about = "Generate fixed GitHub Actions workflow for OIDC CI publish"
-    )]
+    #[command(hide = true)]
     GenCi,
 
     #[command(hide = true)]
@@ -613,10 +582,7 @@ pub(crate) enum Commands {
         command: EngineCommands,
     },
 
-    #[command(
-        next_help_heading = "Advanced Commands",
-        about = "Manage registry commands (resolve/list/cache/serve)"
-    )]
+    #[command(hide = true)]
     Registry {
         #[command(subcommand)]
         command: RegistryCommands,

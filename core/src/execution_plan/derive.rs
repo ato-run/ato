@@ -528,9 +528,10 @@ mod tests {
                 }
             ]),
         );
-        lock.resolution
-            .entries
-            .insert("closure".to_string(), json!({"kind": "metadata_only"}));
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"kind": "metadata_only", "status": "incomplete"}),
+        );
         lock
     }
 

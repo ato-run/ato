@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::*;
+use capsule_core::bootstrap::{BootstrapAuthorityKind, BootstrapClosureRole};
 use tempfile::tempdir;
 
 #[cfg(unix)]
@@ -219,6 +220,77 @@ entrypoint = "dist/MyApp.exe"
     fs::write(&source_file_path, sample_windows_executable_bytes())?;
 
     detect_build_strategy(&manifest_dir)?.context("expected native delivery build plan")
+}
+
+#[test]
+fn build_environment_skeleton_captures_native_delivery_inputs() -> Result<()> {
+    let tmp = tempdir()?;
+    let plan = sample_native_build_plan(tmp.path(), 0o755)?;
+    fs::write(plan.manifest_dir.join("Cargo.lock"), "version = 3\n")?;
+    fs::write(plan.manifest_dir.join("package-lock.json"), "{}")?;
+
+    let skeleton = native_delivery_build_environment_skeleton(&plan);
+    assert_json_object_has_keys(
+        &skeleton,
+        &["toolchains", "package_managers", "sdks", "helper_tools"],
+    );
+
+    let toolchains = skeleton
+        .get("toolchains")
+        .and_then(serde_json::Value::as_array)
+        .expect("toolchains");
+    assert!(toolchains
+        .iter()
+        .any(|value| value.as_str() == Some("rust")));
+    assert!(toolchains
+        .iter()
+        .any(|value| value.as_str() == Some("cargo")));
+    assert!(toolchains
+        .iter()
+        .any(|value| value.as_str() == Some("node")));
+
+    let package_managers = skeleton
+        .get("package_managers")
+        .and_then(serde_json::Value::as_array)
+        .expect("package_managers");
+    assert!(package_managers
+        .iter()
+        .any(|value| value.as_str() == Some("cargo")));
+    assert!(package_managers
+        .iter()
+        .any(|value| value.as_str() == Some("npm")));
+
+    let sdks = skeleton
+        .get("sdks")
+        .and_then(serde_json::Value::as_array)
+        .expect("sdks");
+    assert!(sdks.iter().any(|value| value.as_str() == Some("apple-sdk")));
+
+    let helper_tools = skeleton
+        .get("helper_tools")
+        .and_then(serde_json::Value::as_array)
+        .expect("helper_tools");
+    assert!(helper_tools
+        .iter()
+        .any(|value| value.as_str() == Some("tauri-cli")));
+    assert!(helper_tools
+        .iter()
+        .any(|value| value.as_str() == Some("codesign")));
+    Ok(())
+}
+
+#[test]
+fn finalize_helper_boundary_is_host_local_but_recorded_as_build_environment_claim() {
+    let boundary = finalize_helper_boundary("codesign");
+    assert_eq!(
+        boundary.authority_kind,
+        BootstrapAuthorityKind::HostCapability
+    );
+    assert_eq!(
+        boundary.closure_role,
+        BootstrapClosureRole::BuildEnvironmentClaim
+    );
+    assert_eq!(boundary.subject_name, "codesign");
 }
 
 #[test]

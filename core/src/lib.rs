@@ -1,4 +1,5 @@
 pub mod ato_lock;
+pub mod bootstrap;
 pub mod capsule_v3;
 pub mod common;
 pub mod config;
@@ -9,6 +10,7 @@ pub mod error;
 pub mod execution_plan;
 pub mod executors;
 pub mod hardware;
+pub mod importer;
 pub mod input_resolver;
 pub mod isolation;
 pub mod launch_spec;

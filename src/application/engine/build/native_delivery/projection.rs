@@ -47,22 +47,34 @@ fn project_with_roots_and_command_dir(
     metadata_root: &Path,
     projected_command_dir: &Path,
 ) -> Result<ProjectResult> {
+    let derived_plan = DerivedProjectionPlan {
+        launcher_dir: launcher_dir.to_path_buf(),
+        metadata_root: metadata_root.to_path_buf(),
+        projected_command_dir: projected_command_dir.to_path_buf(),
+    };
+    project_with_derived_plan(derived_app_path, &derived_plan)
+}
+
+fn project_with_derived_plan(
+    derived_app_path: &Path,
+    derived_plan: &DerivedProjectionPlan,
+) -> Result<ProjectResult> {
     let source = load_projection_source(derived_app_path)?;
-    fs::create_dir_all(launcher_dir).with_context(|| {
+    fs::create_dir_all(&derived_plan.launcher_dir).with_context(|| {
         format!(
             "Failed to create launcher directory: {}",
-            launcher_dir.display()
+            derived_plan.launcher_dir.display()
         )
     })?;
-    fs::create_dir_all(metadata_root).with_context(|| {
+    fs::create_dir_all(&derived_plan.metadata_root).with_context(|| {
         format!(
             "Failed to create projection metadata directory: {}",
-            metadata_root.display()
+            derived_plan.metadata_root.display()
         )
     })?;
 
-    let launcher_dir = absolute_path(launcher_dir)?;
-    let projected_command_dir = absolute_path(projected_command_dir)?;
+    let launcher_dir = absolute_path(&derived_plan.launcher_dir)?;
+    let projected_command_dir = absolute_path(&derived_plan.projected_command_dir)?;
     let display_name =
         projection_display_name(&source.derived_app_path, source.scoped_id.as_deref())?;
     let command_name =
@@ -79,7 +91,7 @@ fn project_with_roots_and_command_dir(
         .as_ref()
         .map(|_| projected_command_dir.join(&command_name));
 
-    let existing = load_projection_records(metadata_root)?;
+    let existing = load_projection_records(&derived_plan.metadata_root)?;
     for record in &existing {
         if paths_match(&record.metadata.derived_app_path, &source.derived_app_path)? {
             let status = inspect_projection(&record.metadata, &record.metadata_path)?;
@@ -141,7 +153,9 @@ fn project_with_roots_and_command_dir(
                 &existing_path,
                 &source.derived_digest,
             );
-            let metadata_path = metadata_root.join(format!("{}.json", projection_id));
+            let metadata_path = derived_plan
+                .metadata_root
+                .join(format!("{}.json", projection_id));
             return Ok(ProjectResult {
                 projection_id,
                 metadata_path,
@@ -241,7 +255,9 @@ fn project_with_roots_and_command_dir(
             &projected_path,
             &source.derived_digest,
         );
-        let metadata_path = metadata_root.join(format!("{}.json", projection_id));
+        let metadata_path = derived_plan
+            .metadata_root
+            .join(format!("{}.json", projection_id));
         written_metadata_path = Some(metadata_path.clone());
         let metadata = ProjectionMetadata {
             schema_version: DELIVERY_SCHEMA_VERSION.to_string(),

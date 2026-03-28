@@ -20,6 +20,8 @@ use serde_json::Value;
 // - default local allow means "no extra local restriction"; it does not grant
 //   capabilities beyond the lock-derived contract/plan/config
 // - deny wins over allow
+// - attestations/observations are consumed from the workspace-local attestation
+//   store only; embedded lock attestations are not an authoritative read source
 // - an empty attestation store means no approvals or observations have been
 //   recorded yet
 // - distribution sanitization strips only mutable/local sections
@@ -158,6 +160,10 @@ pub(crate) fn resolve_effective_lock_state(
     lock: &AtoLock,
     cli_state_bindings: &[String],
 ) -> Result<EffectiveLockState> {
+    // Binding and policy are resolved exactly once at this boundary so run,
+    // install, and lock-derived execution reuse the same precedence rules.
+    // Attestations/observations remain workspace-local evidence only; they are
+    // affinity-checked here but are not loaded from embedded lock state.
     let paths = workspace_state_paths(project_root);
     let embedded_binding = parse_binding_entries(&lock.binding.entries)?;
     let workspace_binding = load_workspace_binding_seed(&paths.binding_seed_path)?
@@ -203,6 +209,8 @@ pub(crate) fn resolve_effective_lock_state(
 }
 
 pub(crate) fn sanitize_lock_for_distribution(lock: &AtoLock) -> AtoLock {
+    // Distribution keeps the canonical lock plus embedded policy, but strips
+    // mutable/local sections that must not be published by default.
     let mut sanitized = lock.clone();
     sanitized.binding.entries.clear();
     sanitized.binding.unresolved.clear();
@@ -688,6 +696,7 @@ mod tests {
             effective.policy.network.deny_hosts,
             vec!["workspace.example.com"]
         );
+        assert!(effective.policy.network.allow_hosts.is_empty());
     }
 
     #[test]
@@ -849,6 +858,7 @@ mod tests {
         assert!(sanitized.binding.unresolved.is_empty());
         assert!(sanitized.attestations.entries.is_empty());
         assert!(sanitized.attestations.unresolved.is_empty());
+        assert_eq!(sanitized.policy, lock.policy);
         assert_eq!(sanitized.contract, lock.contract);
         assert_eq!(sanitized.resolution, lock.resolution);
     }
