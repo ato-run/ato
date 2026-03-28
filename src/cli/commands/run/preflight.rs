@@ -847,6 +847,7 @@ fn detect_host_macos_version() -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn resolve_uv_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
     match probe_required_python_lockfile(manifest_dir).ok()? {
         ProbeResult::Found(values) => values.first().map(|value| value.primary_path.clone()),
@@ -854,6 +855,7 @@ fn resolve_uv_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
     }
 }
 
+#[cfg(test)]
 pub(super) fn resolve_python_dependency_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
     resolve_uv_lock_path(manifest_dir)
 }

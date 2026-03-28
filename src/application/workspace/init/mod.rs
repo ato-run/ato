@@ -22,10 +22,12 @@ pub struct InitArgs {
     pub yes: bool,
 }
 
+#[allow(dead_code)]
 pub struct PromptArgs {
     pub path: Option<PathBuf>,
 }
 
+#[allow(dead_code)]
 pub fn execute_prompt(
     args: PromptArgs,
     reporter: std::sync::Arc<crate::reporters::CliReporter>,
