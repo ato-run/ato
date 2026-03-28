@@ -242,17 +242,10 @@ pub fn execute_pack_command_with_injected_manifest(
     {
         authoritative_input.validate_compat_bridge()?;
         let kind = runtime_kind_from_plan(&authoritative_input.descriptor)?;
-        let metadata = &authoritative_input.descriptor.runtime_model.metadata;
-        let capsule_name = metadata
-            .name
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .context("authoritative lock metadata is missing package name")?;
-        let capsule_version = metadata.version.clone().unwrap_or_default();
+        let capsule_name = authoritative_input.semantic_package_name()?;
+        let capsule_version = authoritative_input.semantic_package_version();
         let raw_manifest = authoritative_input
-            .compat_manifest
-            .as_ref()
-            .and_then(|bridge| bridge.raw_value().ok())
+            .compat_manifest_value()
             .unwrap_or_else(|| authoritative_input.descriptor.manifest.clone());
         (
             RuntimeDecision {
@@ -273,10 +266,10 @@ pub fn execute_pack_command_with_injected_manifest(
         (
             decision,
             bridge
-                .raw_value()
+                .toml_value()
                 .context("Failed to parse fallback manifest bridge")?,
-            bridge.manifest.name.clone(),
-            bridge.manifest.version.clone(),
+            bridge.package_name().to_string(),
+            bridge.package_version().to_string(),
         )
     } else {
         let decision = capsule_core::router::route_manifest_with_validation_mode(
@@ -873,7 +866,7 @@ fn plan_v03_build_provision_command(
     let driver = plan.execution_driver().unwrap_or_default();
     let runtime = runtime.trim().to_ascii_lowercase();
     let driver = driver.trim().to_ascii_lowercase();
-    let manifest_dir = plan.manifest_dir.clone();
+    let workspace_root = plan.workspace_root.clone();
     let execution_working_directory = plan
         .compat_target_working_dir(plan.selected_target_label())
         .map(|value| plan.workspace_root.join(value))
@@ -884,7 +877,7 @@ fn plan_v03_build_provision_command(
             phase = "build",
             runtime,
             driver,
-            manifest_dir = %manifest_dir.display(),
+            workspace_root = %workspace_root.display(),
             execution_working_directory = %execution_working_directory.display(),
             lockfile_check_paths = ?Vec::<(&str, std::path::PathBuf, bool)>::new(),
             "Provision command path diagnostics"
@@ -913,7 +906,7 @@ fn plan_v03_build_provision_command(
             phase = "build",
             runtime,
             driver,
-            manifest_dir = %manifest_dir.display(),
+            workspace_root = %workspace_root.display(),
             execution_working_directory = %execution_working_directory.display(),
             lockfile_check_paths = ?lockfile_check_paths,
             "Provision command path diagnostics"
@@ -952,7 +945,7 @@ fn plan_v03_build_provision_command(
             phase = "build",
             runtime,
             driver,
-            manifest_dir = %manifest_dir.display(),
+            workspace_root = %workspace_root.display(),
             execution_working_directory = %execution_working_directory.display(),
             lockfile_check_paths = ?vec![("uv.lock", uv_lock.clone(), uv_lock.exists())],
             "Provision command path diagnostics"
@@ -973,7 +966,7 @@ fn plan_v03_build_provision_command(
         phase = "build",
         runtime,
         driver,
-        manifest_dir = %manifest_dir.display(),
+        workspace_root = %workspace_root.display(),
         execution_working_directory = %execution_working_directory.display(),
         lockfile_check_paths = ?vec![("Cargo.lock", cargo_lock.clone(), cargo_lock.exists())],
         "Provision command path diagnostics"
@@ -1145,7 +1138,7 @@ fn compute_v03_build_cache_key(
     let mut hasher = Sha256::new();
 
     update_hash_text(&mut hasher, BUILD_CACHE_LAYOUT_VERSION);
-    update_hash_text(&mut hasher, &plan.manifest_path.display().to_string());
+    update_hash_text(&mut hasher, &plan.workspace_root.display().to_string());
     update_hash_text(&mut hasher, plan.selected_target_label());
     update_hash_text(&mut hasher, build_command);
 

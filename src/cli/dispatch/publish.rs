@@ -1164,16 +1164,7 @@ fn discover_manifest_publish_registry() -> Result<Option<String>> {
     Ok(authoritative_input
         .compat_manifest
         .as_ref()
-        .and_then(|bridge| bridge.raw_value().ok())
-        .and_then(|parsed| {
-            parsed
-                .get("store")
-                .and_then(|v| v.get("registry"))
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .map(ToOwned::to_owned)
-        }))
+        .and_then(|bridge| bridge.publish_registry()))
 }
 
 #[cfg(test)]
