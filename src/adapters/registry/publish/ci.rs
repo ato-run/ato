@@ -444,7 +444,7 @@ pub(crate) fn build_capsule_artifact(
             capsule_core::packers::source::pack(
                 &decision.plan,
                 capsule_core::packers::source::SourcePackOptions {
-                    compat_manifest: decision.plan.compat_manifest.clone(),
+                    compat_input: decision.plan.compat_project_input()?,
                     workspace_root: decision.plan.workspace_root.clone(),
                     config_json: prepared_config.config_json.clone(),
                     config_path: prepared_config.config_path.clone(),
@@ -470,7 +470,7 @@ pub(crate) fn build_capsule_artifact(
                 capsule_core::packers::web::pack(
                     &decision.plan,
                     capsule_core::packers::web::WebPackOptions {
-                        compat_manifest: decision.plan.compat_manifest.clone(),
+                        compat_input: decision.plan.compat_project_input()?,
                         workspace_root: decision.plan.workspace_root.clone(),
                         output: Some(artifact_path.clone()),
                     },
@@ -486,7 +486,7 @@ pub(crate) fn build_capsule_artifact(
                 capsule_core::packers::source::pack(
                     &decision.plan,
                     capsule_core::packers::source::SourcePackOptions {
-                        compat_manifest: decision.plan.compat_manifest.clone(),
+                        compat_input: decision.plan.compat_project_input()?,
                         workspace_root: decision.plan.workspace_root.clone(),
                         config_json: prepared_config.config_json.clone(),
                         config_path: prepared_config.config_path.clone(),
