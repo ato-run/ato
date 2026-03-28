@@ -1210,4 +1210,61 @@ mod tests {
         assert!(!error.to_string().is_empty());
         assert!(!tmp.path().join("capsule.toml").exists());
     }
+
+    #[test]
+    fn ensure_publish_source_manifest_ready_does_not_materialize_capsule_toml() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"demo","version":"0.1.0","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("package.json");
+        std::fs::write(
+            tmp.path().join("package-lock.json"),
+            r#"{"name":"demo","version":"0.1.0","lockfileVersion":3,"packages":{}}"#,
+        )
+        .expect("package-lock.json");
+        std::fs::write(tmp.path().join("index.js"), "console.log('demo');\n").expect("index.js");
+        let _guard = CwdGuard::set_to(tmp.path());
+
+        ensure_publish_source_manifest_ready(&PublishCommandArgs {
+            registry: None,
+            artifact: None,
+            scoped_id: None,
+            allow_existing: false,
+            prepare: false,
+            build: false,
+            deploy: false,
+            legacy_full_publish: false,
+            force_large_payload: false,
+            fix: false,
+            no_tui: true,
+            json: true,
+        })
+        .expect("authoritative publish source should resolve without manifest write");
+
+        assert!(!tmp.path().join("capsule.toml").exists());
+    }
+
+    #[test]
+    fn discover_manifest_publish_registry_does_not_materialize_capsule_toml() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"demo","version":"0.1.0","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("package.json");
+        std::fs::write(
+            tmp.path().join("package-lock.json"),
+            r#"{"name":"demo","version":"0.1.0","lockfileVersion":3,"packages":{}}"#,
+        )
+        .expect("package-lock.json");
+        std::fs::write(tmp.path().join("index.js"), "console.log('demo');\n").expect("index.js");
+        let _guard = CwdGuard::set_to(tmp.path());
+
+        let registry = discover_manifest_publish_registry().expect("discover publish registry");
+
+        assert!(registry.is_none());
+        assert!(!tmp.path().join("capsule.toml").exists());
+    }
 }

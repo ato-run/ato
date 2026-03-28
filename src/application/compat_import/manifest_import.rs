@@ -6,8 +6,8 @@ use capsule_core::ato_lock::{AtoLock, UnresolvedReason, UnresolvedValue};
 use serde_json::{json, Value};
 
 use crate::application::engine::build::native_delivery::{
-    compute_tree_digest, imported_native_artifact_delivery_contract,
-    native_delivery_draft_contract_from_manifest, path_has_extension,
+    imported_native_artifact_closure, imported_native_artifact_delivery_contract,
+    imported_native_artifact_type, native_delivery_draft_contract_from_manifest,
 };
 
 use super::compiler::CompatibilityCompilerInput;
@@ -391,17 +391,12 @@ fn import_native_artifact_closure(input: &CompatibilityCompilerInput<'_>) -> Res
     }
 
     let artifact_path = manifest_dir.join(&artifact_relative);
-    if !(artifact_path.is_dir() && path_has_extension(&artifact_path, "app")) {
+    let Some(artifact_type) = imported_native_artifact_type(&artifact_path) else {
         return Ok(None);
-    }
+    };
 
-    Ok(Some(json!({
-        "kind": "imported_artifact_closure",
-        "status": "complete",
-        "artifact": {
-            "artifact_type": "macos_app_bundle",
-            "digest": compute_tree_digest(&artifact_path)?,
-            "provenance_limited": true,
-        }
-    })))
+    Ok(Some(imported_native_artifact_closure(
+        &artifact_path,
+        artifact_type,
+    )?))
 }

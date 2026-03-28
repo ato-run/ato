@@ -1353,10 +1353,12 @@ fn sign_if_requested(
 #[cfg(test)]
 mod tests {
     use super::{
-        execute_pack_command, execute_pack_command_with_injected_manifest,
-        plan_v03_build_provision_command, run_v03_build_lifecycle_steps,
+        build_decision_from_manifest_text, execute_pack_command,
+        execute_pack_command_with_injected_manifest, plan_v03_build_provision_command,
+        run_v03_build_lifecycle_steps,
     };
     use capsule_core::router::{ExecutionProfile, ManifestData};
+    use capsule_core::types::ValidationMode;
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -1534,6 +1536,33 @@ entrypoint = "site"
         assert!(result.ok);
         assert_eq!(result.build_strategy, "web");
         assert!(result.artifact.as_ref().is_some_and(|path| path.exists()));
+        assert!(!tmp.path().join("capsule.toml").exists());
+    }
+
+    #[test]
+    fn build_decision_from_manifest_text_does_not_materialize_capsule_toml() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("main.js"), "console.log('demo');\n").expect("main.js");
+        let manifest = r#"
+schema_version = "0.2"
+name = "build-helper-demo"
+version = "0.1.0"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "node"
+runtime_version = "20.11.0"
+entrypoint = "main.js"
+"#;
+
+        let (decision, bridge) =
+            build_decision_from_manifest_text(tmp.path(), manifest, ValidationMode::Strict)
+                .expect("build decision from manifest text");
+
+        assert_eq!(decision.plan.selected_target_label(), "cli");
+        assert_eq!(bridge.package_name(), "build-helper-demo");
         assert!(!tmp.path().join("capsule.toml").exists());
     }
 
