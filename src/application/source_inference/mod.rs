@@ -1400,7 +1400,7 @@ fn maybe_promote_native_build_closure(result: &mut SourceInferenceResult) -> Res
     result.provenance.push(SourceInferenceProvenance {
         field: "resolution.closure".to_string(),
         kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
-        source_path: Some(plan.workspace_root.join("capsule.toml")),
+        source_path: Some(plan.workspace_root.clone()),
         importer_id: None,
         evidence_kind: None,
         source_field: Some("[artifact]/[finalize]".to_string()),
@@ -1419,7 +1419,7 @@ fn maybe_promote_native_build_closure(result: &mut SourceInferenceResult) -> Res
     result.provenance.push(SourceInferenceProvenance {
         field: "contract.delivery".to_string(),
         kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
-        source_path: Some(plan.workspace_root.join("capsule.toml")),
+        source_path: Some(plan.workspace_root.clone()),
         importer_id: None,
         evidence_kind: None,
         source_field: Some("[artifact]/[finalize]".to_string()),

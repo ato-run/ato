@@ -10,13 +10,13 @@ use crate::packers::bundle::{build_bundle, PackBundleArgs};
 use crate::packers::capsule as capsule_packer;
 use crate::r3_config;
 use crate::resource::cas::create_cas_client_from_env;
-use crate::router::{CompatManifestBridge, ManifestData};
+use crate::router::{CompatManifestBridge, CompatProjectInput, ManifestData};
 use crate::validation;
 use tracing::debug;
 
 #[derive(Debug, Clone)]
 pub struct SourcePackOptions {
-    pub compat_manifest: Option<CompatManifestBridge>,
+    pub compat_input: Option<CompatProjectInput>,
     pub workspace_root: PathBuf,
     pub config_json: Arc<r3_config::ConfigJson>,
     pub config_path: PathBuf,
@@ -62,13 +62,10 @@ pub fn prepare_source_config_from_descriptor(
     let bridge = plan.compat_manifest().ok_or_else(|| {
         CapsuleError::Pack("source pack requires compat manifest bridge".to_string())
     })?;
-    let raw = bridge
-        .raw_value()
+    let compat_input = CompatProjectInput::from_bridge(plan.workspace_root.clone(), bridge.clone())
         .map_err(|err| CapsuleError::Pack(err.to_string()))?;
-    let config_json = Arc::new(r3_config::generate_config_from_parts(
-        &plan.workspace_root,
-        &raw,
-        &bridge.raw_toml,
+    let config_json = Arc::new(r3_config::generate_config_from_compat_input(
+        &compat_input,
         Some(enforcement),
         standalone,
     )?);
@@ -86,17 +83,10 @@ pub fn pack(
 ) -> Result<PathBuf> {
     let strict_manifest = opts.strict_manifest || strict_manifest_from_env()?;
 
-    let bridge = opts.compat_manifest.as_ref().ok_or_else(|| {
-        CapsuleError::Pack("source pack requires compat manifest bridge".to_string())
+    let compat_input = opts.compat_input.as_ref().ok_or_else(|| {
+        CapsuleError::Pack("source pack requires compat manifest input".to_string())
     })?;
-    let loaded_raw = bridge
-        .raw_value()
-        .map_err(|err| CapsuleError::Pack(err.to_string()))?;
-    let source_digest = bridge
-        .manifest
-        .targets
-        .as_ref()
-        .and_then(|targets| targets.source_digest.as_deref());
+    let source_digest = compat_input.source_digest();
     if let Some(digest) = source_digest {
         debug!("Phase 0: checking CAS for source_digest");
         let cas = create_cas_client_from_env()?;
@@ -154,7 +144,7 @@ pub fn pack(
 
     if !opts.skip_validation {
         debug!("Phase 1b: entrypoint validation");
-        validate_entrypoint_bridge(plan, bridge, &opts.workspace_root)?;
+        validate_entrypoint_compat(plan, compat_input, &opts.workspace_root)?;
         debug!("Entrypoint validation passed");
     }
 
@@ -169,10 +159,8 @@ pub fn pack(
     debug!("config.json ready: {}", opts.config_path.display());
 
     let lockfile_started = Instant::now();
-    let lockfile_path = block_on_runtime(lockfile::ensure_lockfile_in_dir(
-        &opts.workspace_root,
-        &loaded_raw,
-        &bridge.raw_toml,
+    let lockfile_path = block_on_runtime(lockfile::ensure_lockfile_for_compat_input(
+        compat_input,
         config_reporter,
         opts.timings,
     ))?;
@@ -190,8 +178,7 @@ pub fn pack(
         let nacelle = engine::discover_nacelle(engine::EngineRequest {
             explicit_path: opts.nacelle_override,
             manifest_path: None,
-            workspace_root: Some(opts.workspace_root.clone()),
-            compat_manifest: opts.compat_manifest.clone(),
+            compat_input: Some(compat_input.clone()),
         })?;
 
         let bundle_started = Instant::now();
@@ -199,7 +186,7 @@ pub fn pack(
             PackBundleArgs {
                 manifest_path: None,
                 workspace_root: opts.workspace_root.clone(),
-                compat_manifest: opts.compat_manifest.clone(),
+                compat_manifest: Some(compat_input.bridge().clone()),
                 runtime_path: opts.runtime.clone(),
                 output: opts.output.clone(),
                 nacelle_path: Some(nacelle),
@@ -222,7 +209,7 @@ pub fn pack(
         let artifact_path = block_on_runtime(capsule_packer::pack(
             plan,
             capsule_packer::CapsulePackOptions {
-                compat_manifest: opts.compat_manifest.clone(),
+                compat_manifest: Some(compat_input.bridge().clone()),
                 workspace_root: opts.workspace_root.clone(),
                 output: opts.output.clone(),
                 config_json: opts.config_json,
@@ -282,14 +269,12 @@ fn parse_bool_env(key: &str, raw: &str) -> Result<bool> {
     }
 }
 
-fn validate_entrypoint_bridge(
+fn validate_entrypoint_compat(
     plan: &ManifestData,
-    bridge: &CompatManifestBridge,
+    compat_input: &CompatProjectInput,
     manifest_dir: &Path,
 ) -> Result<()> {
-    let manifest = bridge
-        .raw_value()
-        .map_err(|err| CapsuleError::Pack(err.to_string()))?;
+    let manifest = compat_input.manifest_value();
 
     let default_target = plan.selected_target_label();
 
@@ -389,7 +374,9 @@ fn validate_entrypoint(manifest_path: &Path, manifest_dir: &Path) -> Result<()> 
         None,
     )
     .map_err(|err| CapsuleError::Pack(err.to_string()))?;
-    validate_entrypoint_bridge(&decision.plan, &bridge, manifest_dir)
+    let compat_input = CompatProjectInput::from_bridge(manifest_dir.to_path_buf(), bridge)
+        .map_err(|err| CapsuleError::Pack(err.to_string()))?;
+    validate_entrypoint_compat(&decision.plan, &compat_input, manifest_dir)
 }
 
 #[cfg(test)]
