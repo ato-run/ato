@@ -10,7 +10,7 @@
 - [x] Phase 1: `ato init` を desktop toml レス化の主戦場にする
 - [x] Phase 2: `ato run` を lock-first consumer として締める
 - [x] Phase 3: `ato publish` を lock-first consumer として締める
-- [x] Phase 4: architecture cleanup
+- [ ] Phase 4: architecture cleanup
 
 優先順位は次の 4 点です。
 
@@ -223,14 +223,14 @@ source でも artifact でも、配布可能な結果を lock-first かつ prove
 
 ## 4.1 Supported input matrix
 
-| Input | `init` | `run` | `publish` | Notes |
-| --- | --- | --- | --- | --- |
-| Tauri source | [x] durable lock 化 | [x] source-derived run | [ ] source-derived publish | 最優先 |
-| Electron source | [x] durable lock 化 | [x] source-derived run | [ ] source-derived publish | Tauri の次 |
-| Wails source | [x] durable lock 化 | [x] source-derived run | [ ] source-derived publish | 第三優先 |
-| built `.app` | [x] artifact-import lock 化 | [x] artifact-import run | [ ] provenance-limited publish | source build と区別 |
+| Input             | `init`                      | `run`                   | `publish`                      | Notes               |
+| ----------------- | --------------------------- | ----------------------- | ------------------------------ | ------------------- |
+| Tauri source      | [x] durable lock 化         | [x] source-derived run  | [ ] source-derived publish     | 最優先              |
+| Electron source   | [x] durable lock 化         | [x] source-derived run  | [ ] source-derived publish     | Tauri の次          |
+| Wails source      | [x] durable lock 化         | [x] source-derived run  | [ ] source-derived publish     | 第三優先            |
+| built `.app`      | [x] artifact-import lock 化 | [x] artifact-import run | [ ] provenance-limited publish | source build と区別 |
 | built `.AppImage` | [x] artifact-import lock 化 | [x] artifact-import run | [ ] provenance-limited publish | source build と区別 |
-| built `.exe` | [x] artifact-import lock 化 | [x] artifact-import run | [ ] provenance-limited publish | source build と区別 |
+| built `.exe`      | [x] artifact-import lock 化 | [x] artifact-import run | [ ] provenance-limited publish | source build と区別 |
 
 ## 4.2 Phase A: `init` first
 
@@ -250,7 +250,15 @@ source でも artifact でも、配布可能な結果を lock-first かつ prove
 
 - [x] temporary `capsule.toml` write を compatibility-only path へ押し戻す
 - [x] bridge manifest の責務を縮小し、derived artifact として位置づける
-- [x] planner / installer / finalize / projection の責務を lock-first contract に合わせて厳密化する
+- [ ] planner / installer / finalize / projection の責務を lock-first contract に合わせて厳密化する
+      build/publish と native-delivery build path はかなり整理できたが、run/install は transitional manifest path / dir をまだ保持する
+
+### run/install に残す transitional surface
+
+- [ ] `run` の process/session 記録は `manifest_path` をまだ保持する
+- [ ] `run` の shadow workspace / preview session は `shadow_manifest_path` と `manifest_dir` ベースの互換面をまだ使う
+- [ ] `install` は preview/manual recovery と projection persistence のため `source_manifest_path` をまだ保持する
+- [ ] これらの surface は build/publish の semantic authority とは切り離したまま、run/install 専用の移行対象として後段で縮退する
 
 ---
 
@@ -302,7 +310,7 @@ source でも artifact でも、配布可能な結果を lock-first かつ prove
 - [x] `ato run` が source-only input から attempt-local lock を作り、entry/runtime/closure/security/network contract が未解決なら execute に進まない
 - [x] `ato run` が imported artifact を provenance-limited path で実行でき、build reproducibility を claim しない
 - [ ] `ato publish` が source-derived unsigned / locally finalized signed / imported artifact を別 identity として扱い、metadata と provenance を分離する
-  現状は source-derived unsigned / imported artifact を分離済みで、locally finalized signed の first-class producer path は後続
+      現状は source-derived unsigned / imported artifact を分離済みで、locally finalized signed の first-class producer path は後続
 - [x] authoritative `ato.lock.json` がある場合、`capsule.toml` や ad hoc file scan が実行意味論を上書きしない
 - [ ] `inspect` / `validate` / diagnostics が unresolved、fallback、host-local、import path、blocking / non-blocking を明示する
 

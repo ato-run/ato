@@ -133,11 +133,11 @@ Current boundary rules:
 
 ato evaluates lock-first behavior command by command rather than by architecture purity alone.
 
-| Command | Must be fixed before success | May remain unresolved | Host-local / non-canonical state | Provenance / diagnostics requirement |
-| --- | --- | --- | --- | --- |
-| `run` | immutable execution input, runtime selection, process entry, required closure materialization, expected network/binding contract, security gate verdict | descriptive metadata, optional hints, non-required env/config hints | actual host ports, secret values, local paths, approval results, binding selections | unresolved fields must indicate whether they block execute; import, fallback, and host-local influence must be machine-readable |
-| `init` | durable `ato.lock.json`, runtime/toolchain baseline, resolved target selection or explicit unresolved marker, executable process contract or explicit unresolved marker, delivery build contract where applicable | partially resolved fields that still support deterministic re-validation | workspace-local binding seed, policy bundle, attestations store, approval results | fallback, importer evidence, observation, and user-confirmed information must remain inspectable after generation |
-| `publish` | build closure, artifact identity class, publish metadata, provenance linkage, source-derived build/verify/publish path | optional descriptive metadata that does not change artifact identity or verification outcome | local finalize credentials, local projection/install state, registry session/auth state | metadata must preserve whether the artifact is source-derived unsigned, locally finalized signed, or imported third-party input |
+| Command   | Must be fixed before success                                                                                                                                                                                      | May remain unresolved                                                                        | Host-local / non-canonical state                                                        | Provenance / diagnostics requirement                                                                                            |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `run`     | immutable execution input, runtime selection, process entry, required closure materialization, expected network/binding contract, security gate verdict                                                           | descriptive metadata, optional hints, non-required env/config hints                          | actual host ports, secret values, local paths, approval results, binding selections     | unresolved fields must indicate whether they block execute; import, fallback, and host-local influence must be machine-readable |
+| `init`    | durable `ato.lock.json`, runtime/toolchain baseline, resolved target selection or explicit unresolved marker, executable process contract or explicit unresolved marker, delivery build contract where applicable | partially resolved fields that still support deterministic re-validation                     | workspace-local binding seed, policy bundle, attestations store, approval results       | fallback, importer evidence, observation, and user-confirmed information must remain inspectable after generation               |
+| `publish` | build closure, artifact identity class, publish metadata, provenance linkage, source-derived build/verify/publish path                                                                                            | optional descriptive metadata that does not change artifact identity or verification outcome | local finalize credentials, local projection/install state, registry session/auth state | metadata must preserve whether the artifact is source-derived unsigned, locally finalized signed, or imported third-party input |
 
 Shared rules:
 
@@ -190,6 +190,11 @@ Current lock-first contract:
 - host-local selections such as actual bound ports, secret values, local paths, and approval results remain outside canonical lock identity
 - imported desktop artifacts may run through a provenance-limited `artifact-import` path, but that path does not claim reproducible rebuild semantics
 
+Migration note:
+
+- `run` still retains transitional manifest-path surfaces for process records, shadow workspaces, and preview-session compatibility
+- these surfaces are not intended to override authoritative lock semantics, but they have not yet been fully removed from run/install-adjacent plumbing
+
 Important flags:
 
 - --target <label>
@@ -234,6 +239,12 @@ Important flags:
 - --project
 - --no-project
 - --json
+
+Current contract:
+
+- install remains verification-first and lock-first for artifact semantics
+- launcher projection, preview/manual recovery, and some persistence paths still retain transitional `source_manifest_path` plumbing during migration
+- those transitional paths are compatibility surfaces for install/projection workflows and are not intended to redefine canonical execution semantics
 
 ### init
 
@@ -989,20 +1000,20 @@ Current canonical lock contract policy for desktop native delivery:
 
 Supported input matrix for the current roadmap:
 
-| Input | `init` | `run` | `publish` | Notes |
-| --- | --- | --- | --- | --- |
-| Tauri source | target | target | target | highest priority source-derived desktop path |
-| Electron source | target | target | target | second priority |
-| Wails source | target | target | target | third priority |
-| built `.app` | target | target | target | handled as `artifact-import`, not canonical build input |
-| built `.AppImage` | target | target | target | handled as `artifact-import`, not canonical build input |
-| built `.exe` | target | target | target | handled as `artifact-import`, not canonical build input |
+| Input             | `init` | `run`  | `publish` | Notes                                                   |
+| ----------------- | ------ | ------ | --------- | ------------------------------------------------------- |
+| Tauri source      | target | target | target    | highest priority source-derived desktop path            |
+| Electron source   | target | target | target    | second priority                                         |
+| Wails source      | target | target | target    | third priority                                          |
+| built `.app`      | target | target | target    | handled as `artifact-import`, not canonical build input |
+| built `.AppImage` | target | target | target    | handled as `artifact-import`, not canonical build input |
+| built `.exe`      | target | target | target    | handled as `artifact-import`, not canonical build input |
 
 Command-first roadmap:
 
 - Phase A: `ato init` learns to compile desktop source or imported artifacts into durable `ato.lock.json`
 - Phase B: `ato run` and `ato publish` consume that lock-derived desktop state as lock-first consumers
-- Phase C: compatibility manifest bridges and temporary manifest writes are pushed back into compatibility-only paths
+- Phase C: compatibility manifest bridges and temporary manifest writes are pushed back into compatibility-only paths for build/publish; run/install may still retain transitional manifest-path surfaces during migration
 
 Stable machine-readable contract fields for schema_version = "0.1" native JSON envelopes:
 
