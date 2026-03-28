@@ -108,8 +108,8 @@ impl ProducerAuthoritativeInput {
         let Some(bridge) = self.compat_manifest.as_ref() else {
             return Ok(());
         };
-        let actual_sha256 = sha256_hex(bridge.raw_toml.as_bytes());
-        if actual_sha256 != bridge.sha256 {
+        let actual_sha256 = sha256_hex(bridge.manifest_text().as_bytes());
+        if actual_sha256 != bridge.manifest_sha256() {
             anyhow::bail!(
                 "generated manifest bridge no longer matches the authoritative lock-derived producer input"
             );
@@ -118,19 +118,19 @@ impl ProducerAuthoritativeInput {
         let runtime_model =
             resolve_lock_runtime_model(&self.descriptor.lock, None).map_err(anyhow::Error::from)?;
         if let Some(expected_name) = runtime_model.metadata.name.as_ref() {
-            if bridge.manifest.name != *expected_name {
+            if bridge.package_name() != expected_name {
                 anyhow::bail!(
                     "generated manifest bridge diverged from authoritative lock metadata: manifest name '{}' != lock name '{}'",
-                    bridge.manifest.name,
+                    bridge.package_name(),
                     expected_name
                 );
             }
         }
         if let Some(expected_version) = runtime_model.metadata.version.as_ref() {
-            if bridge.manifest.version != *expected_version {
+            if bridge.package_version() != expected_version {
                 anyhow::bail!(
                     "generated manifest bridge diverged from authoritative lock metadata: manifest version '{}' != lock version '{}'",
-                    bridge.manifest.version,
+                    bridge.package_version(),
                     expected_version
                 );
             }
@@ -141,33 +141,33 @@ impl ProducerAuthoritativeInput {
             .default_target
             .clone()
             .unwrap_or_else(|| runtime_model.selected.target_label.clone());
-        if bridge.manifest.default_target != expected_target {
+        if bridge.manifest_model().default_target != expected_target {
             anyhow::bail!(
                 "generated manifest bridge diverged from authoritative lock target selection: manifest default_target '{}' != lock target '{}'",
-                bridge.manifest.default_target,
+                bridge.manifest_model().default_target,
                 expected_target
             );
         }
 
         let named_targets = bridge
-            .manifest
+            .manifest_model()
             .targets
             .as_ref()
             .context("generated manifest bridge is missing [targets]")?;
         let manifest_target = named_targets
             .named
-            .get(&bridge.manifest.default_target)
+            .get(&bridge.manifest_model().default_target)
             .with_context(|| {
                 format!(
                     "generated manifest bridge is missing [targets.{}]",
-                    bridge.manifest.default_target
+                    bridge.manifest_model().default_target
                 )
             })?;
         let selected_runtime = &runtime_model.selected.runtime;
         if manifest_target.runtime.trim() != selected_runtime.runtime {
             anyhow::bail!(
                 "generated manifest bridge diverged from authoritative lock runtime: target '{}' runtime '{}' != '{}'",
-                bridge.manifest.default_target,
+                bridge.manifest_model().default_target,
                 manifest_target.runtime.trim(),
                 selected_runtime.runtime
             );
@@ -175,7 +175,7 @@ impl ProducerAuthoritativeInput {
         if manifest_target.driver.as_deref() != selected_runtime.driver.as_deref() {
             anyhow::bail!(
                 "generated manifest bridge diverged from authoritative lock driver: target '{}' driver '{:?}' != '{:?}'",
-                bridge.manifest.default_target,
+                bridge.manifest_model().default_target,
                 manifest_target.driver,
                 selected_runtime.driver
             );
@@ -183,7 +183,7 @@ impl ProducerAuthoritativeInput {
         if manifest_target.entrypoint.trim() != selected_runtime.entrypoint {
             anyhow::bail!(
                 "generated manifest bridge diverged from authoritative lock entrypoint: target '{}' entrypoint '{}' != '{}'",
-                bridge.manifest.default_target,
+                bridge.manifest_model().default_target,
                 manifest_target.entrypoint.trim(),
                 selected_runtime.entrypoint
             );
@@ -191,13 +191,13 @@ impl ProducerAuthoritativeInput {
         if manifest_target.run_command.as_deref() != selected_runtime.run_command.as_deref() {
             anyhow::bail!(
                 "generated manifest bridge diverged from authoritative lock run_command: target '{}' run_command '{:?}' != '{:?}'",
-                bridge.manifest.default_target,
+                bridge.manifest_model().default_target,
                 manifest_target.run_command,
                 selected_runtime.run_command
             );
         }
 
-        if let Some(services) = bridge.manifest.services.as_ref() {
+        if let Some(services) = bridge.manifest_model().services.as_ref() {
             if services.len() != runtime_model.services.len() {
                 anyhow::bail!(
                     "generated manifest bridge diverged from authoritative lock orchestration: manifest has {} services but lock resolved {}",
@@ -216,7 +216,7 @@ impl ProducerAuthoritativeInput {
                 let manifest_target = manifest_service
                     .target
                     .as_deref()
-                    .unwrap_or(bridge.manifest.default_target.as_str());
+                    .unwrap_or(bridge.manifest_model().default_target.as_str());
                 if manifest_target != service.target_label {
                     anyhow::bail!(
                         "generated manifest bridge diverged from authoritative lock orchestration: service '{}' target '{}' != '{}'",

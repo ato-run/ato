@@ -20,6 +20,7 @@ use crate::packers::payload::{
 };
 use crate::packers::sbom::{generate_embedded_sbom_from_inputs_async, SbomFileInput, SBOM_PATH};
 use crate::r3_config;
+use crate::router::CompatProjectInput;
 
 const README_CANDIDATES: [&str; 4] = ["README.md", "README.mdx", "README.txt", "README"];
 
@@ -36,7 +37,7 @@ const README_CANDIDATES: [&str; 4] = ["README.md", "README.mdx", "README.txt", "
 
 #[derive(Debug, Clone)]
 pub struct CapsulePackOptions {
-    pub compat_manifest: Option<crate::router::CompatManifestBridge>,
+    pub compat_input: Option<CompatProjectInput>,
     pub workspace_root: PathBuf,
     pub output: Option<PathBuf>,
     pub config_json: Arc<r3_config::ConfigJson>,
@@ -158,10 +159,10 @@ pub async fn pack(
 ) -> CapsuleResult<PathBuf> {
     debug!("Creating capsule archive (.capsule format)");
 
-    let bridge = opts.compat_manifest.as_ref().ok_or_else(|| {
-        CapsuleError::Pack("capsule pack requires compat manifest bridge".to_string())
+    let compat_input = opts.compat_input.as_ref().ok_or_else(|| {
+        CapsuleError::Pack("capsule pack requires compat manifest input".to_string())
     })?;
-    let pack_filter = PackFilter::from_manifest(&bridge.manifest)?;
+    let pack_filter = PackFilter::from_manifest(compat_input.manifest())?;
 
     // config/lockfile are prepared by the caller once and injected into this packer.
     debug!(
@@ -248,7 +249,7 @@ pub async fn pack(
     debug!("Compressed payload size: {}", format_bytes(compressed_size));
     let payload_tar_bytes = read_payload_tar_bytes_from_zst(&payload_zst_path)?;
     let (distribution_manifest, manifest_toml_bytes) =
-        build_distribution_manifest(&bridge.manifest, &payload_tar_bytes)?;
+        build_distribution_manifest(compat_input.manifest(), &payload_tar_bytes)?;
     let rebuilt_payload = reconstruct_from_chunks(
         &payload_tar_bytes,
         &distribution_manifest
@@ -272,7 +273,7 @@ pub async fn pack(
     debug!("Phase 3: creating final .capsule archive");
 
     let output_path = opts.output.clone().unwrap_or_else(|| {
-        let name_str = bridge.manifest.name.replace('\"', "-");
+        let name_str = compat_input.package_name().replace('\"', "-");
         opts.workspace_root.join(format!("{}.capsule", name_str))
     });
 
@@ -299,8 +300,11 @@ pub async fn pack(
         reproducible_mtime_epoch(),
     )?;
 
-    let sbom =
-        generate_embedded_sbom_from_inputs_async(bridge.manifest.name.clone(), sbom_inputs).await?;
+    let sbom = generate_embedded_sbom_from_inputs_async(
+        compat_input.package_name().to_string(),
+        sbom_inputs,
+    )
+    .await?;
     let sbom_temp_path = temp_dir.path().join(SBOM_PATH);
     fs::write(&sbom_temp_path, &sbom.document)?;
     append_regular_file_normalized(
@@ -1111,7 +1115,7 @@ manifest_hash = "sha256:dummy"
         pack(
             &decision.plan,
             CapsulePackOptions {
-                compat_manifest: decision.plan.compat_manifest.clone(),
+                compat_input: decision.plan.compat_project_input().expect("compat input"),
                 workspace_root: tmp.path().to_path_buf(),
                 output: Some(out1.clone()),
                 config_json: config.clone(),
@@ -1126,7 +1130,7 @@ manifest_hash = "sha256:dummy"
         pack(
             &decision.plan,
             CapsulePackOptions {
-                compat_manifest: decision.plan.compat_manifest.clone(),
+                compat_input: decision.plan.compat_project_input().expect("compat input"),
                 workspace_root: tmp.path().to_path_buf(),
                 output: Some(out2.clone()),
                 config_json: config,
@@ -1191,7 +1195,7 @@ manifest_hash = "sha256:dummy"
         pack(
             &decision.plan,
             CapsulePackOptions {
-                compat_manifest: decision.plan.compat_manifest.clone(),
+                compat_input: decision.plan.compat_project_input().expect("compat input"),
                 workspace_root: tmp.path().to_path_buf(),
                 output: Some(out.clone()),
                 config_json: config,

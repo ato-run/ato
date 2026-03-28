@@ -9,7 +9,7 @@ use super::runtime_fetcher::RuntimeFetcher;
 use crate::error::{CapsuleError, Result};
 use crate::lockfile::{resolve_existing_lockfile_path, CAPSULE_LOCK_FILE_NAME};
 use crate::packers::pack_filter::load_pack_filter_from_path;
-use crate::router::CompatManifestBridge;
+use crate::router::CompatProjectInput;
 use crate::types::CapsuleManifest;
 
 /// Magic bytes to identify self-extracting v2 bundles.
@@ -18,7 +18,7 @@ const BUNDLE_MAGIC: &[u8] = b"NACELLE_V2_BUNDLE";
 pub struct PackBundleArgs {
     pub manifest_path: Option<PathBuf>,
     pub workspace_root: PathBuf,
-    pub compat_manifest: Option<CompatManifestBridge>,
+    pub compat_input: Option<CompatProjectInput>,
     pub runtime_path: Option<PathBuf>,
     pub output: Option<PathBuf>,
     pub nacelle_path: Option<PathBuf>,
@@ -46,8 +46,8 @@ pub async fn build_bundle(
         .manifest_path
         .as_ref()
         .and_then(|path| path.canonicalize().ok());
-    let compat_manifest = args.compat_manifest.as_ref();
-    let manifest = compat_manifest.map(|bridge| bridge.manifest.clone());
+    let compat_input = args.compat_input.as_ref();
+    let manifest = compat_input.map(|input| input.manifest().clone());
 
     let output_path = args
         .output
@@ -928,7 +928,7 @@ entrypoint = "hello.sh"
                 PackBundleArgs {
                     manifest_path: Some(manifest_path),
                     workspace_root: root.to_path_buf(),
-                    compat_manifest: None,
+                    compat_input: None,
                     runtime_path: None,
                     output: Some(output.clone()),
                     nacelle_path: Some(nacelle_stub),

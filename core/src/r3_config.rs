@@ -191,11 +191,7 @@ pub fn generate_config(
     standalone: bool,
 ) -> Result<ConfigJson> {
     let loaded = manifest::load_manifest(manifest_path)?;
-    let bridge = crate::router::CompatManifestBridge {
-        raw_toml: loaded.raw_text,
-        manifest: loaded.model,
-        sha256: String::new(),
-    };
+    let bridge = crate::router::CompatManifestBridge::from_normalized_toml(loaded.raw_text)?;
     let workspace_root = manifest_path
         .parent()
         .map(Path::to_path_buf)
@@ -203,27 +199,6 @@ pub fn generate_config(
     let compat_input = CompatProjectInput::from_bridge_with_label(
         workspace_root,
         manifest_path.display().to_string(),
-        bridge,
-    )?;
-    let config = build_config_json(&compat_input, enforcement_override, standalone)?;
-    validate_config_json(&config)?;
-    Ok(config)
-}
-
-pub fn generate_config_from_parts(
-    workspace_root: &Path,
-    manifest: &toml::Value,
-    _manifest_raw: &str,
-    enforcement_override: Option<String>,
-    standalone: bool,
-) -> Result<ConfigJson> {
-    let bridge = crate::router::CompatManifestBridge::from_manifest_value(manifest)?;
-    let compat_input = CompatProjectInput::from_bridge_with_label(
-        workspace_root.to_path_buf(),
-        format!(
-            "compatibility manifest bridge for {}",
-            workspace_root.display()
-        ),
         bridge,
     )?;
     let config = build_config_json(&compat_input, enforcement_override, standalone)?;
