@@ -8,8 +8,8 @@ use capsule_core::input_resolver::{
     resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
 };
 use capsule_core::lock_runtime::resolve_lock_runtime_model;
+use capsule_core::router::{CompatManifestBridge, ExecutionDescriptor};
 use capsule_core::types::CapsuleManifest;
-use sha2::{Digest, Sha256};
 
 use crate::application::source_inference::{
     materialize_run_from_canonical_lock, materialize_run_from_compatibility,
@@ -20,9 +20,12 @@ use crate::reporters::CliReporter;
 
 #[derive(Debug)]
 pub(crate) struct ProducerAuthoritativeInput {
+    pub(crate) descriptor: ExecutionDescriptor,
+    pub(crate) compat_manifest: Option<CompatManifestBridge>,
     pub(crate) manifest_path: PathBuf,
     pub(crate) manifest_raw: String,
     pub(crate) manifest: CapsuleManifest,
+    #[allow(dead_code)]
     pub(crate) lock: AtoLock,
     pub(crate) bridge_manifest_sha256: String,
     pub(crate) advisories: Vec<String>,
@@ -83,8 +86,11 @@ fn producer_authoritative_input_from_resolved(
 }
 
 impl ProducerAuthoritativeInput {
-    pub(crate) fn validate_bridge_manifest(&self) -> Result<()> {
-        let actual_sha256 = sha256_hex(self.manifest_raw.as_bytes());
+    pub(crate) fn validate_compat_bridge(&self) -> Result<()> {
+        let Some(bridge) = self.compat_manifest.as_ref() else {
+            return Ok(());
+        };
+        let actual_sha256 = sha256_hex(bridge.raw_toml.as_bytes());
         if actual_sha256 != self.bridge_manifest_sha256 {
             anyhow::bail!(
                 "generated manifest bridge no longer matches the authoritative lock-derived producer input"
@@ -92,21 +98,21 @@ impl ProducerAuthoritativeInput {
         }
 
         let runtime_model =
-            resolve_lock_runtime_model(&self.lock, None).map_err(anyhow::Error::from)?;
+            resolve_lock_runtime_model(&self.descriptor.lock, None).map_err(anyhow::Error::from)?;
         if let Some(expected_name) = runtime_model.metadata.name.as_ref() {
-            if self.manifest.name != *expected_name {
+            if bridge.manifest.name != *expected_name {
                 anyhow::bail!(
                     "generated manifest bridge diverged from authoritative lock metadata: manifest name '{}' != lock name '{}'",
-                    self.manifest.name,
+                    bridge.manifest.name,
                     expected_name
                 );
             }
         }
         if let Some(expected_version) = runtime_model.metadata.version.as_ref() {
-            if self.manifest.version != *expected_version {
+            if bridge.manifest.version != *expected_version {
                 anyhow::bail!(
                     "generated manifest bridge diverged from authoritative lock metadata: manifest version '{}' != lock version '{}'",
-                    self.manifest.version,
+                    bridge.manifest.version,
                     expected_version
                 );
             }
@@ -117,33 +123,33 @@ impl ProducerAuthoritativeInput {
             .default_target
             .clone()
             .unwrap_or_else(|| runtime_model.selected.target_label.clone());
-        if self.manifest.default_target != expected_target {
+        if bridge.manifest.default_target != expected_target {
             anyhow::bail!(
                 "generated manifest bridge diverged from authoritative lock target selection: manifest default_target '{}' != lock target '{}'",
-                self.manifest.default_target,
+                bridge.manifest.default_target,
                 expected_target
             );
         }
 
-        let named_targets = self
+        let named_targets = bridge
             .manifest
             .targets
             .as_ref()
             .context("generated manifest bridge is missing [targets]")?;
         let manifest_target = named_targets
             .named
-            .get(&self.manifest.default_target)
+            .get(&bridge.manifest.default_target)
             .with_context(|| {
                 format!(
                     "generated manifest bridge is missing [targets.{}]",
-                    self.manifest.default_target
+                    bridge.manifest.default_target
                 )
             })?;
         let selected_runtime = &runtime_model.selected.runtime;
         if manifest_target.runtime.trim() != selected_runtime.runtime {
             anyhow::bail!(
                 "generated manifest bridge diverged from authoritative lock runtime: target '{}' runtime '{}' != '{}'",
-                self.manifest.default_target,
+                bridge.manifest.default_target,
                 manifest_target.runtime.trim(),
                 selected_runtime.runtime
             );
@@ -173,7 +179,7 @@ impl ProducerAuthoritativeInput {
             );
         }
 
-        if let Some(services) = self.manifest.services.as_ref() {
+        if let Some(services) = bridge.manifest.services.as_ref() {
             if services.len() != runtime_model.services.len() {
                 anyhow::bail!(
                     "generated manifest bridge diverged from authoritative lock orchestration: manifest has {} services but lock resolved {}",
@@ -192,7 +198,7 @@ impl ProducerAuthoritativeInput {
                 let manifest_target = manifest_service
                     .target
                     .as_deref()
-                    .unwrap_or(self.manifest.default_target.as_str());
+                    .unwrap_or(bridge.manifest.default_target.as_str());
                 if manifest_target != service.target_label {
                     anyhow::bail!(
                         "generated manifest bridge diverged from authoritative lock orchestration: service '{}' target '{}' != '{}'",
@@ -227,16 +233,15 @@ impl ProducerAuthoritativeInput {
             capsule_core::router::ExecutionProfile::Release,
             None,
         )?;
-        let manifest_raw = toml::to_string(&lock_decision.plan.manifest)
-            .context("Failed to serialize lock-derived manifest bridge for producer input")?;
-        let manifest = CapsuleManifest::from_toml(&manifest_raw).map_err(|err| {
-            anyhow::anyhow!(
-                "Failed to parse lock-derived producer manifest bridge {}: {}",
-                manifest_path.display(),
-                err
-            )
-        })?;
-        let bridge_manifest_sha256 = sha256_hex(manifest_raw.as_bytes());
+        let compat_manifest = Some(
+            CompatManifestBridge::from_lock(&sanitized_lock, &lock_decision.plan.runtime_model)
+                .with_context(|| {
+                    format!(
+                        "Failed to build lock-derived producer manifest bridge {}",
+                        manifest_path.display()
+                    )
+                })?,
+        );
         let run_state_dir = materialized
             .lock_path
             .parent()
@@ -262,22 +267,33 @@ impl ProducerAuthoritativeInput {
             .flatten();
 
         Ok(Self {
-            manifest_path,
-            manifest_raw,
-            manifest,
+            descriptor: lock_decision.plan,
+            manifest_path: manifest_path.clone(),
+            manifest_raw: compat_manifest
+                .as_ref()
+                .map(|bridge| bridge.raw_toml.clone())
+                .unwrap_or_default(),
+            manifest: compat_manifest
+                .as_ref()
+                .map(|bridge| bridge.manifest.clone())
+                .expect("producer materialization must create compat manifest bridge"),
             lock: sanitized_lock,
-            bridge_manifest_sha256,
+            bridge_manifest_sha256: compat_manifest
+                .as_ref()
+                .map(|bridge| bridge.sha256.clone())
+                .unwrap_or_default(),
+            compat_manifest,
             advisories,
             lock_id,
             closure_digest,
-            _cleanup: ProducerMaterializationCleanup {
-                run_state_dir,
-            },
+            _cleanup: ProducerMaterializationCleanup { run_state_dir },
         })
     }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
@@ -328,8 +344,23 @@ mod tests {
         lock.resolution
             .entries
             .insert("closure".to_string(), json!({"kind": "metadata_only"}));
+        let compat_manifest = CompatManifestBridge::from_manifest_value(
+            &toml::from_str(&manifest_raw).expect("raw manifest"),
+        )
+        .expect("compat bridge");
+        let descriptor = capsule_core::router::route_lock(
+            &manifest_path,
+            &lock,
+            dir.path(),
+            capsule_core::router::ExecutionProfile::Release,
+            None,
+        )
+        .expect("route lock")
+        .plan;
 
         let input = ProducerAuthoritativeInput {
+            descriptor,
+            compat_manifest: Some(compat_manifest),
             manifest_path: manifest_path.clone(),
             manifest_raw: manifest_raw.clone(),
             manifest: CapsuleManifest::from_toml(&manifest_raw).expect("parse manifest"),
@@ -344,7 +375,7 @@ mod tests {
         };
 
         let error = input
-            .validate_bridge_manifest()
+            .validate_compat_bridge()
             .expect_err("target mismatch must fail closed");
         assert!(error.to_string().contains("default_target"));
     }

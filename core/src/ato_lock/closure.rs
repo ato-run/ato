@@ -414,7 +414,12 @@ fn sort_inputs_array_field(object: &mut Map<String, Value>, field: &str) {
 
 fn closure_input_sort_key(value: &Value) -> (String, String, String, String) {
     let Some(object) = value.as_object() else {
-        return (String::new(), String::new(), String::new(), value.to_string());
+        return (
+            String::new(),
+            String::new(),
+            String::new(),
+            value.to_string(),
+        );
     };
 
     (
