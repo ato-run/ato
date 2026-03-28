@@ -1,6 +1,7 @@
 use super::locks::env_lock;
 use super::policy::{resolve_auto_bootstrap_policy, AutoBootstrapMode};
 use super::*;
+use capsule_core::bootstrap::{BootstrapAuthorityKind, BootstrapCacheScope};
 
 #[test]
 fn test_parse_engine_filename() {
@@ -146,6 +147,24 @@ fn auto_bootstrap_policy_force_mode_overrides_ci() {
     );
     assert!(policy.network_allowed);
     assert!(policy.disabled_reason.is_none());
+}
+
+#[test]
+fn auto_bootstrap_policy_maps_to_engine_boundary() {
+    let policy = resolve_auto_bootstrap_policy(
+        AutoBootstrapMode::Auto,
+        PINNED_NACELLE_VERSION.to_string(),
+        DEFAULT_NACELLE_RELEASE_BASE_URL.to_string(),
+        false,
+        false,
+    );
+    let boundary = policy.bootstrap_boundary();
+    assert_eq!(
+        boundary.authority_kind,
+        BootstrapAuthorityKind::NetworkBootstrap
+    );
+    assert_eq!(boundary.cache_scope, BootstrapCacheScope::EngineCache);
+    assert!(boundary.network_policy.network_allowed);
 }
 
 #[test]

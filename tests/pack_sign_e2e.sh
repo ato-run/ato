@@ -58,8 +58,8 @@ else
     exit 1
 fi
 
-# Test that required subcommands exist
-for cmd in run build init key config publish; do
+# Test that public subcommands exist
+for cmd in run build init search inspect publish install; do
     if "${ATO_CLI}" help 2>&1 | grep -q "\s${cmd}\s"; then
         log_info "  Subcommand '${cmd}' exists"
     else
@@ -88,12 +88,21 @@ echo ""
 log_info "Test 2: PASSED"
 echo ""
 
-# Test 3: Key command
-echo "Test 3: Key command"
+# Test 3: Hidden command compatibility
+echo "Test 3: Hidden command compatibility"
 echo "----------------------"
 
 TEST_DIR="${SCRIPT_DIR}/test-workspace/keygen-test"
 mkdir -p "${TEST_DIR}"
+
+for cmd in key config fetch finalize registry; do
+    if "${ATO_CLI}" "${cmd}" --help > /dev/null 2>&1; then
+        log_info "  Hidden subcommand '${cmd}' is still callable directly"
+    else
+        log_error "  Hidden subcommand '${cmd}' is not callable directly"
+        exit 1
+    fi
+done
 
 if "${ATO_CLI}" key gen --out "${TEST_DIR}/test-key" 2>&1 | grep -q "Key generated successfully"; then
     log_info "  Key generation succeeded"

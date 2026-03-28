@@ -5,6 +5,8 @@ mod policy;
 mod release;
 
 use anyhow::{Context, Result};
+use capsule_core::bootstrap::{BootstrapBoundary, NetworkBootstrapPolicy};
+use capsule_core::common::paths::engine_cache_dir;
 use std::path::PathBuf;
 
 #[allow(unused_imports)]
@@ -16,7 +18,6 @@ pub(crate) use release::{
     extract_first_sha256_hex, fetch_release_sha256, parse_sha256_for_artifact,
 };
 
-pub(super) const ENGINES_DIR: &str = ".ato/engines";
 pub(super) const ENGINE_LOCK_DIR: &str = ".locks";
 pub(super) const DEFAULT_NACELLE_RELEASE_BASE_URL: &str = "https://releases.capsule.dev/nacelle";
 pub(super) const AUTO_BOOTSTRAP_ENV: &str = "ATO_NACELLE_AUTO_BOOTSTRAP";
@@ -55,15 +56,26 @@ pub(crate) struct NacelleBootstrapPolicy {
     pub disabled_reason: Option<String>,
 }
 
+impl NacelleBootstrapPolicy {
+    pub(crate) fn network_policy(&self) -> NetworkBootstrapPolicy {
+        match &self.disabled_reason {
+            Some(reason) => NetworkBootstrapPolicy::disabled(reason.clone()),
+            None => NetworkBootstrapPolicy::allowed(),
+        }
+    }
+
+    pub(crate) fn bootstrap_boundary(&self) -> BootstrapBoundary {
+        BootstrapBoundary::engine("nacelle", self.network_policy())
+    }
+}
+
 pub struct EngineManager {
     engines_dir: PathBuf,
 }
 
 impl EngineManager {
     pub fn new() -> Result<Self> {
-        let engines_dir = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-            .join(ENGINES_DIR);
+        let engines_dir = engine_cache_dir()?;
 
         if !engines_dir.exists() {
             std::fs::create_dir_all(&engines_dir).with_context(|| {

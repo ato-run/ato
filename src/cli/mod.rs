@@ -2,7 +2,6 @@ mod binding;
 pub(crate) mod commands;
 mod config;
 pub(crate) mod dispatch;
-mod init;
 mod inspect;
 mod ipc;
 mod key;
@@ -22,8 +21,6 @@ pub(crate) use binding::BindingCommands;
 pub(crate) use config::{
     ConfigCommands, ConfigEngineCommands, ConfigRegistryCommands, EngineCommands,
 };
-#[allow(unused_imports)]
-pub(crate) use init::InitLegacyMode;
 #[allow(unused_imports)]
 pub(crate) use inspect::InspectCommands;
 #[allow(unused_imports)]

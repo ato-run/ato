@@ -10,6 +10,7 @@ pub struct ProjectInfo {
     pub project_type: ProjectType,
     pub entrypoint: Vec<String>,
     pub node_dev_entrypoint: Option<Vec<String>>,
+    #[allow(dead_code)]
     pub node_release_entrypoint: Option<Vec<String>>,
 }
 

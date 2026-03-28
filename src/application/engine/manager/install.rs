@@ -107,15 +107,16 @@ pub(crate) fn auto_bootstrap_nacelle(
     reporter: &dyn capsule_core::CapsuleReporter,
 ) -> Result<EngineInstallResult> {
     let policy = resolve_auto_bootstrap_policy_from_env();
-    if !policy.network_allowed {
+    let boundary = policy.bootstrap_boundary();
+    if !boundary.network_policy.network_allowed {
         let reason = policy
             .disabled_reason
+            .clone()
             .unwrap_or_else(|| "auto-bootstrap policy disabled network access".to_string());
         anyhow::bail!(
-            "Tier 2 execution requires nacelle {}, but auto-bootstrap is disabled: {}. Run `ato config engine install --engine nacelle --version {}` first.",
+            "Tier 2 execution requires nacelle {}, but auto-bootstrap is disabled: {}. Install the matching nacelle runtime and register it before retrying.",
             policy.version,
-            reason,
-            policy.version
+            reason
         );
     }
 

@@ -1,7 +1,9 @@
 use anyhow::{bail, Context, Result};
+use capsule_core::bootstrap::BootstrapBoundary;
 use chrono::{SecondsFormat, Utc};
 use goblin::Object;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::fs;
 use std::io::{self, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -106,6 +108,12 @@ pub struct FinalizeResult {
     pub schema_version: String,
 }
 
+#[derive(Debug, Clone)]
+struct DerivedFinalizePlan {
+    fetched_dir: PathBuf,
+    output_dir: PathBuf,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ProjectResult {
     pub projection_id: String,
@@ -119,6 +127,13 @@ pub struct ProjectResult {
     pub problems: Vec<String>,
     pub created: bool,
     pub schema_version: String,
+}
+
+#[derive(Debug, Clone)]
+struct DerivedProjectionPlan {
+    launcher_dir: PathBuf,
+    metadata_root: PathBuf,
+    projected_command_dir: PathBuf,
 }
 
 #[derive(Debug, Serialize)]
@@ -804,6 +819,305 @@ fn delivery_config_from_input(input: &str) -> DeliveryConfig {
     }
 }
 
+pub(crate) fn native_delivery_build_environment_skeleton(plan: &NativeBuildPlan) -> Value {
+    let package_managers = detect_build_environment_package_managers(&plan.manifest_dir);
+    let mut toolchains = Vec::new();
+    let mut sdks = Vec::new();
+    let mut helper_tools = Vec::new();
+
+    match plan.framework.as_str() {
+        "tauri" => {
+            push_unique(&mut toolchains, "rust");
+            push_unique(&mut toolchains, "cargo");
+            push_unique(&mut helper_tools, "tauri-cli");
+        }
+        framework if !framework.trim().is_empty() => {
+            push_unique(&mut helper_tools, framework);
+        }
+        _ => {}
+    }
+
+    if package_managers
+        .iter()
+        .any(|manager| matches!(manager.as_str(), "npm" | "pnpm" | "yarn" | "bun"))
+    {
+        push_unique(&mut toolchains, "node");
+    }
+    if package_managers.iter().any(|manager| manager == "deno") {
+        push_unique(&mut toolchains, "deno");
+    }
+    if package_managers.iter().any(|manager| manager == "cargo") {
+        push_unique(&mut toolchains, "rust");
+        push_unique(&mut toolchains, "cargo");
+    }
+
+    match delivery_target_os_family(&plan.target) {
+        Some("darwin") => push_unique(&mut sdks, "apple-sdk"),
+        Some("windows") => push_unique(&mut sdks, "windows-sdk"),
+        Some("linux") => push_unique(&mut sdks, "linux-system-libs"),
+        _ => {}
+    }
+
+    if let Ok(config) = staged_delivery_config(plan) {
+        let boundary = finalize_helper_boundary(config.finalize.tool.trim());
+        push_unique(&mut helper_tools, &boundary.subject_name);
+    }
+
+    json!({
+        "toolchains": toolchains,
+        "package_managers": package_managers,
+        "sdks": sdks,
+        "helper_tools": helper_tools,
+    })
+}
+
+pub(crate) fn finalize_helper_boundary(tool: &str) -> BootstrapBoundary {
+    BootstrapBoundary::finalize_helper(tool.trim())
+}
+
+pub(crate) fn native_delivery_contract_from_build_plan(
+    plan: &NativeBuildPlan,
+    mode: &str,
+    closure_status: &str,
+) -> Result<Value> {
+    let config = staged_delivery_config(plan)?;
+    Ok(json!({
+        "mode": mode,
+        "artifact": {
+            "kind": "desktop-native",
+            "framework": config.artifact.framework,
+            "target": config.artifact.target,
+            "path": config.artifact.input,
+            "canonical_build_input": false,
+            "provenance_limited": false,
+            "reproducibility": match closure_status {
+                "complete" => "closure-tracked-build",
+                _ => "closure-incomplete-draft",
+            },
+        },
+        "build": {
+            "kind": "native-delivery",
+            "requires_build_closure": true,
+            "closure_status": closure_status,
+            "build_command": plan.build_command.as_ref().map(|command| {
+                json!({
+                    "program": command.program,
+                    "args": command.args,
+                    "working_dir": command.working_dir,
+                })
+            }),
+            "build_environment": native_delivery_build_environment_skeleton(plan),
+        },
+        "finalize": {
+            "tool": config.finalize.tool,
+            "args": config.finalize.args,
+            "host_local": true,
+        },
+        "install": {
+            "kind": "local-derivation",
+            "host_local": true,
+            "requires_local_derivation": true,
+        },
+        "projection": {
+            "kind": "launcher-surface",
+            "host_local": true,
+        },
+    }))
+}
+
+pub(crate) fn native_delivery_draft_contract_from_manifest(
+    manifest_path: &Path,
+) -> Result<Option<Value>> {
+    let manifest_raw = fs::read_to_string(manifest_path)
+        .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
+    let manifest = capsule_core::types::CapsuleManifest::from_toml(&manifest_raw)
+        .map_err(|err| anyhow::anyhow!("Failed to parse {}: {}", manifest_path.display(), err))?;
+    let target = match manifest.resolve_default_target() {
+        Ok(target) if target.driver.as_deref() == Some("native") => target,
+        _ => return Ok(None),
+    };
+
+    let parsed: toml::Value = toml::from_str(&manifest_raw)
+        .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
+    let artifact = parsed.get("artifact");
+    let finalize = parsed.get("finalize");
+    let canonical = detect_native_manifest_contract(target)?;
+
+    let mut artifact_value = serde_json::Map::new();
+    artifact_value.insert(
+        "kind".to_string(),
+        Value::String("desktop-native".to_string()),
+    );
+    artifact_value.insert("canonical_build_input".to_string(), Value::Bool(false));
+    artifact_value.insert("provenance_limited".to_string(), Value::Bool(false));
+    artifact_value.insert(
+        "reproducibility".to_string(),
+        Value::String("closure-incomplete-draft".to_string()),
+    );
+
+    let framework = artifact
+        .and_then(|table| table.get("framework"))
+        .and_then(toml::Value::as_str)
+        .or_else(|| {
+            canonical
+                .as_ref()
+                .map(|config| config.artifact.framework.as_str())
+        });
+    if let Some(framework) = framework {
+        artifact_value.insert(
+            "framework".to_string(),
+            Value::String(framework.to_string()),
+        );
+    }
+
+    let delivery_target = artifact
+        .and_then(|table| table.get("target"))
+        .and_then(toml::Value::as_str)
+        .or_else(|| {
+            canonical
+                .as_ref()
+                .map(|config| config.artifact.target.as_str())
+        });
+    if let Some(delivery_target) = delivery_target {
+        artifact_value.insert(
+            "target".to_string(),
+            Value::String(delivery_target.to_string()),
+        );
+    }
+
+    let artifact_path = artifact
+        .and_then(|table| table.get("input"))
+        .and_then(toml::Value::as_str)
+        .or_else(|| {
+            canonical
+                .as_ref()
+                .map(|config| config.artifact.input.as_str())
+        });
+    if let Some(artifact_path) = artifact_path {
+        artifact_value.insert("path".to_string(), Value::String(artifact_path.to_string()));
+    }
+
+    let mut build = serde_json::Map::new();
+    build.insert(
+        "kind".to_string(),
+        Value::String("native-delivery".to_string()),
+    );
+    build.insert("requires_build_closure".to_string(), Value::Bool(true));
+    build.insert(
+        "closure_status".to_string(),
+        Value::String("incomplete".to_string()),
+    );
+    build.insert(
+        "program".to_string(),
+        Value::String(target.entrypoint.trim().to_string()),
+    );
+    if !target.cmd.is_empty() {
+        build.insert(
+            "args".to_string(),
+            Value::Array(target.cmd.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    if let Some(working_dir) = target.working_dir.as_ref() {
+        build.insert(
+            "working_dir".to_string(),
+            Value::String(working_dir.clone()),
+        );
+    }
+
+    let finalize_value = finalize
+        .map(toml_to_json)
+        .or_else(|| {
+            canonical.as_ref().map(|config| {
+                json!({
+                    "tool": config.finalize.tool,
+                    "args": config.finalize.args,
+                })
+            })
+        })
+        .map(|mut value| {
+            if let Some(object) = value.as_object_mut() {
+                object.insert("host_local".to_string(), Value::Bool(true));
+            }
+            value
+        })
+        .unwrap_or_else(|| json!({ "host_local": true }));
+
+    Ok(Some(json!({
+        "mode": "source-draft",
+        "artifact": Value::Object(artifact_value),
+        "build": Value::Object(build),
+        "finalize": finalize_value,
+        "install": {
+            "kind": "local-derivation",
+            "host_local": true,
+            "requires_local_derivation": true,
+        },
+        "projection": {
+            "kind": "launcher-surface",
+            "host_local": true,
+        },
+    })))
+}
+
+pub(crate) fn imported_native_artifact_delivery_contract(
+    artifact_path: &Path,
+    artifact_type: &str,
+) -> Value {
+    json!({
+        "mode": "artifact-import",
+        "artifact": {
+            "kind": "desktop-native",
+            "artifact_type": artifact_type,
+            "path": artifact_path,
+            "canonical_build_input": false,
+            "provenance_limited": true,
+            "reproducibility": "imported-artifact-no-reproducibility-claim",
+        },
+        "install": {
+            "kind": "local-derivation",
+            "host_local": true,
+            "requires_local_derivation": true,
+        },
+        "projection": {
+            "kind": "launcher-surface",
+            "host_local": true,
+        },
+    })
+}
+
+fn toml_to_json(value: &toml::Value) -> Value {
+    serde_json::to_value(value).expect("toml value should serialize into json")
+}
+
+fn detect_build_environment_package_managers(manifest_dir: &Path) -> Vec<String> {
+    let mut package_managers = Vec::new();
+    let candidates = [
+        ("Cargo.lock", "cargo"),
+        ("package-lock.json", "npm"),
+        ("pnpm-lock.yaml", "pnpm"),
+        ("yarn.lock", "yarn"),
+        ("bun.lockb", "bun"),
+        ("bun.lock", "bun"),
+        ("deno.lock", "deno"),
+    ];
+
+    for (file_name, label) in candidates {
+        if manifest_dir.join(file_name).exists() {
+            push_unique(&mut package_managers, label);
+        }
+    }
+
+    package_managers
+}
+
+fn push_unique(values: &mut Vec<String>, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || values.iter().any(|existing| existing == trimmed) {
+        return;
+    }
+    values.push(trimmed.to_string());
+}
+
 fn detect_native_manifest_contract(
     target: &capsule_core::types::NamedTarget,
 ) -> Result<Option<DeliveryConfig>> {
@@ -927,11 +1241,16 @@ pub(crate) fn finalize_fetched_artifact(fetched_dir: &Path) -> Result<FinalizeRe
 include!("projection.rs");
 
 fn finalize_with_dispatch(fetched_dir: &Path, output_dir: &Path) -> Result<FinalizeResult> {
-    finalize_with_runner(fetched_dir, output_dir, |derived_dir, config| {
+    let derived_plan = DerivedFinalizePlan {
+        fetched_dir: fetched_dir.to_path_buf(),
+        output_dir: output_dir.to_path_buf(),
+    };
+    finalize_with_runner_plan(&derived_plan, |derived_dir, config| {
         FinalizeRunner::for_tool(&config.finalize.tool).run(derived_dir, config)
     })
 }
 
+#[allow(dead_code)]
 fn finalize_with_runner<F>(
     fetched_dir: &Path,
     output_dir: &Path,
@@ -940,8 +1259,22 @@ fn finalize_with_runner<F>(
 where
     F: Fn(&Path, &DeliveryConfig) -> Result<()>,
 {
-    let metadata = load_fetch_metadata(fetched_dir)?;
-    let artifact_root = fetched_dir.join(FETCH_ARTIFACT_DIR);
+    let derived_plan = DerivedFinalizePlan {
+        fetched_dir: fetched_dir.to_path_buf(),
+        output_dir: output_dir.to_path_buf(),
+    };
+    finalize_with_runner_plan(&derived_plan, runner)
+}
+
+fn finalize_with_runner_plan<F>(
+    derived_plan: &DerivedFinalizePlan,
+    runner: F,
+) -> Result<FinalizeResult>
+where
+    F: Fn(&Path, &DeliveryConfig) -> Result<()>,
+{
+    let metadata = load_fetch_metadata(&derived_plan.fetched_dir)?;
+    let artifact_root = derived_plan.fetched_dir.join(FETCH_ARTIFACT_DIR);
     if !artifact_root.is_dir() {
         bail!(
             "Fetched artifact directory is missing: {}",
@@ -966,13 +1299,13 @@ where
     validate_native_bundle_directory(&input_app_path)?;
     ensure_native_artifact_kind_supported(&input_app_path, "finalize")?;
 
-    fs::create_dir_all(output_dir).with_context(|| {
+    fs::create_dir_all(&derived_plan.output_dir).with_context(|| {
         format!(
             "Failed to create output directory: {}",
-            output_dir.display()
+            derived_plan.output_dir.display()
         )
     })?;
-    let derived_dir = create_unique_output_dir(output_dir)?;
+    let derived_dir = create_unique_output_dir(&derived_plan.output_dir)?;
     let input_name = input_app_path
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("Finalize input path has no terminal name"))?;
@@ -1004,7 +1337,7 @@ where
         let provenance_path = derived_dir.join(PROVENANCE_FILE);
         write_json_pretty(&provenance_path, &provenance)?;
         Ok(FinalizeResult {
-            fetched_dir: fetched_dir.to_path_buf(),
+            fetched_dir: derived_plan.fetched_dir.clone(),
             output_dir: derived_dir.clone(),
             derived_app_path,
             provenance_path,

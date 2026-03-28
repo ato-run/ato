@@ -7,7 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use capsule_core::ato_lock::{recompute_lock_id, to_pretty_json, AtoLock};
+use capsule_core::ato_lock::{compute_closure_digest, recompute_lock_id, to_pretty_json, AtoLock};
 use capsule_core::packers::payload::compute_manifest_hash_without_signatures;
 use capsule_core::types::CapsuleManifest;
 use tempfile::TempDir;
@@ -107,13 +107,12 @@ fn write_canonical_static_publish_lock(
     version: &str,
 ) -> Result<(String, String)> {
     let closure = serde_json::json!({
+        "kind": "runtime_closure",
         "status": "complete",
         "inputs": []
     });
-    let closure_digest = format!(
-        "blake3:{}",
-        blake3::hash(&serde_json::to_vec(&closure)?).to_hex()
-    );
+    let closure_digest = compute_closure_digest(&closure)?
+        .context("compute closure digest for canonical publish fixture")?;
 
     let mut lock = AtoLock::default();
     lock.resolution.entries.insert(
@@ -1462,15 +1461,25 @@ entrypoint = "main.py"
         return Ok(());
     };
 
-    build_publish_install(
-        &ato,
-        &node_no_lock,
-        &base_url,
-        "local/test-node-no-lock",
-        "test-node-no-lock",
-        tmp.path(),
-        &home_dir,
-    )?;
+    let node_no_lock_build = run_ato_with_home(&ato, &["build", "."], &node_no_lock, &home_dir)?;
+    assert!(
+        !node_no_lock_build.status.success(),
+        "node no lock build must fail-closed"
+    );
+    let node_no_lock_build_stderr = String::from_utf8_lossy(&node_no_lock_build.stderr);
+    assert!(
+        node_no_lock_build_stderr.contains("E102")
+            || node_no_lock_build_stderr.contains("LockDraft is not ready to finalize locally"),
+        "expected node no lock build to report lockdraft failure; stderr={}",
+        node_no_lock_build_stderr
+    );
+    assert!(
+        node_no_lock_build_stderr.contains("package-lock.json")
+            && node_no_lock_build_stderr.contains("pnpm-lock.yaml")
+            && node_no_lock_build_stderr.contains("bun.lock"),
+        "expected node lockfile requirement to be surfaced during build; stderr={}",
+        node_no_lock_build_stderr
+    );
     build_publish_install(
         &ato,
         &node_with_lock,
@@ -1480,15 +1489,24 @@ entrypoint = "main.py"
         tmp.path(),
         &home_dir,
     )?;
-    build_publish_install(
-        &ato,
-        &python_no_lock,
-        &base_url,
-        "local/test-python-no-lock",
-        "test-python-no-lock",
-        tmp.path(),
-        &home_dir,
-    )?;
+    let python_no_lock_build =
+        run_ato_with_home(&ato, &["build", "."], &python_no_lock, &home_dir)?;
+    assert!(
+        !python_no_lock_build.status.success(),
+        "python no lock build must fail-closed"
+    );
+    let python_no_lock_build_stderr = String::from_utf8_lossy(&python_no_lock_build.stderr);
+    assert!(
+        python_no_lock_build_stderr.contains("E102")
+            || python_no_lock_build_stderr.contains("LockDraft is not ready to finalize locally"),
+        "expected python no lock build to report lockdraft failure; stderr={}",
+        python_no_lock_build_stderr
+    );
+    assert!(
+        python_no_lock_build_stderr.contains("uv.lock"),
+        "expected uv.lock requirement to be surfaced during build; stderr={}",
+        python_no_lock_build_stderr
+    );
     build_publish_install(
         &ato,
         &python_with_lock,
@@ -1508,12 +1526,7 @@ entrypoint = "main.py"
         &home_dir,
     )?;
 
-    let node_no_lock_run = run_ato_with_home(
-        &ato,
-        &["run", "local/test-node-no-lock", "--registry", &base_url],
-        tmp.path(),
-        &home_dir,
-    )?;
+    let node_no_lock_run = run_ato_with_home(&ato, &["run", "."], &node_no_lock, &home_dir)?;
     assert!(
         !node_no_lock_run.status.success(),
         "node no lock run must fail-closed"
@@ -1521,7 +1534,9 @@ entrypoint = "main.py"
     let node_no_lock_stderr = String::from_utf8_lossy(&node_no_lock_run.stderr);
     assert!(
         node_no_lock_stderr.contains("ATO_ERR_PROVISIONING_LOCK_INCOMPLETE")
-            || node_no_lock_stderr.contains("E104"),
+            || node_no_lock_stderr.contains("E104")
+            || node_no_lock_stderr.contains("E102")
+            || node_no_lock_stderr.contains("LockDraft is not ready to finalize locally"),
         "expected lock incomplete JSONL for node no lock; stderr={}",
         node_no_lock_stderr
     );
@@ -1590,12 +1605,7 @@ entrypoint = "main.py"
         node_policy_violation_stderr
     );
 
-    let python_no_lock_run = run_ato_with_home(
-        &ato,
-        &["run", "local/test-python-no-lock", "--registry", &base_url],
-        tmp.path(),
-        &home_dir,
-    )?;
+    let python_no_lock_run = run_ato_with_home(&ato, &["run", "."], &python_no_lock, &home_dir)?;
     assert!(
         !python_no_lock_run.status.success(),
         "python no lock run must fail-closed"
@@ -1603,7 +1613,9 @@ entrypoint = "main.py"
     let python_no_lock_stderr = String::from_utf8_lossy(&python_no_lock_run.stderr);
     assert!(
         python_no_lock_stderr.contains("ATO_ERR_PROVISIONING_LOCK_INCOMPLETE")
-            || python_no_lock_stderr.contains("E104"),
+            || python_no_lock_stderr.contains("E104")
+            || python_no_lock_stderr.contains("E102")
+            || python_no_lock_stderr.contains("LockDraft is not ready to finalize locally"),
         "expected lock incomplete JSONL for python no lock; stderr={}",
         python_no_lock_stderr
     );
