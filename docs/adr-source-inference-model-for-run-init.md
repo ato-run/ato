@@ -99,6 +99,9 @@ Not yet implemented:
 - some transitional install/build helpers still own bootstrap and preparation concerns outside the source inference core, even though execute authority now enters downstream through materialized lock-derived bridge manifests
 - `closure_digest` is computed from the normalized `resolution.closure` envelope only when the closure is digestable and `status = complete`; incomplete metadata-only closure state does not produce a digest
 - compatibility import can now emit `imported_artifact_closure` for an existing `.app` bundle on disk, and native-delivery source-derivation can promote an incomplete closure into `build_closure`; broader imported-artifact coverage across `.exe` / AppImage and richer closure completion remain future work
+- ecosystem and native-delivery framework observation now flow through shared read-only importer probes; source inference, build closure inputs, run/build preflight, and inspect provenance consume importer evidence rather than ad hoc filename scans
+- `metadata_only.observed_lockfiles` now prefers importer labels such as `npm`, `uv`, or `cargo`; concrete observed paths remain provenance-side evidence rather than top-level canonical identity
+- framework adapters for Tauri / Electron / Wails are currently evidence importers only; framework CLI execution and full graph recreation remain future work
 - the ADR-level goal of a fully explicit Ato-native closure/store/materialization model remains future work
 - remote-source acquisition semantics, workspace ownership rules, and complete onboarding UX remain outside the implemented source inference core
 

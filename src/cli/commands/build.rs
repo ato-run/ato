@@ -1,5 +1,9 @@
 use anyhow::{Context, Result};
 use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::importer::{
+    probe_ecosystem_lockfile_evidence, probe_required_cargo_lockfile, probe_required_node_lockfile,
+    probe_required_python_lockfile, ImportedEvidence, ImporterId, ProbeResult,
+};
 use capsule_core::types::ValidationMode;
 use capsule_core::CapsuleReporter;
 use serde::Serialize;
@@ -838,96 +842,104 @@ fn plan_v03_build_provision_command(
     }
 
     if matches!(driver.as_str(), "node") {
-        let package_lock = execution_working_directory.join("package-lock.json");
-        let yarn_lock = execution_working_directory.join("yarn.lock");
-        let pnpm_lock = execution_working_directory.join("pnpm-lock.yaml");
-        let bun_lock = execution_working_directory.join("bun.lock");
-        let bun_lockb = execution_working_directory.join("bun.lockb");
-        let lockfile_check_paths = vec![
-            (
-                "package-lock.json",
-                package_lock.clone(),
-                package_lock.exists(),
-            ),
-            ("yarn.lock", yarn_lock.clone(), yarn_lock.exists()),
-            ("pnpm-lock.yaml", pnpm_lock.clone(), pnpm_lock.exists()),
-            ("bun.lock", bun_lock.clone(), bun_lock.exists()),
-            ("bun.lockb", bun_lockb.clone(), bun_lockb.exists()),
-        ];
         debug!(
             phase = "build",
             runtime,
             driver,
             manifest_dir = %manifest_dir.display(),
             execution_working_directory = %execution_working_directory.display(),
-            lockfile_check_paths = ?lockfile_check_paths,
             "Provision command path diagnostics"
         );
-        let mut matches = Vec::new();
-        if package_lock.exists() {
-            matches.push("npm ci");
-        }
-        if yarn_lock.exists() {
-            matches.push("yarn install --frozen-lockfile");
-        }
-        if pnpm_lock.exists() {
-            matches.push("pnpm install --frozen-lockfile");
-        }
-        if bun_lock.exists() || bun_lockb.exists() {
-            matches.push("bun install --frozen-lockfile");
-        }
-        return match matches.as_slice() {
-            [] => Err(AtoExecutionError::lock_incomplete(
-                "source/node target requires one of package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lock, or bun.lockb",
-                Some("package-lock.json"),
-            )
-            .into()),
-            [command] => Ok(Some((*command).to_string())),
-            _ => Err(AtoExecutionError::lock_incomplete(
-                "multiple node lockfiles detected; keep only one of package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lock, or bun.lockb",
-                Some("package-lock.json"),
-            )
-            .into()),
-        };
+        return provision_command_from_node_importer(&execution_working_directory);
     }
 
     if matches!(driver.as_str(), "python") {
-        let uv_lock = execution_working_directory.join("uv.lock");
         debug!(
             phase = "build",
             runtime,
             driver,
             manifest_dir = %manifest_dir.display(),
             execution_working_directory = %execution_working_directory.display(),
-            lockfile_check_paths = ?vec![("uv.lock", uv_lock.clone(), uv_lock.exists())],
             "Provision command path diagnostics"
         );
-        return if uv_lock.exists() {
-            Ok(Some("uv sync --frozen".to_string()))
-        } else {
-            Err(AtoExecutionError::lock_incomplete(
-                "source/python target requires uv.lock for fail-closed provisioning",
-                Some("uv.lock"),
-            )
-            .into())
-        };
+        return provision_command_from_python_importer(&execution_working_directory);
     }
 
-    let cargo_lock = execution_working_directory.join("Cargo.lock");
     debug!(
         phase = "build",
         runtime,
         driver,
         manifest_dir = %manifest_dir.display(),
         execution_working_directory = %execution_working_directory.display(),
-        lockfile_check_paths = ?vec![("Cargo.lock", cargo_lock.clone(), cargo_lock.exists())],
         "Provision command path diagnostics"
     );
-    if matches!(driver.as_str(), "native") && cargo_lock.exists() {
-        return Ok(Some("cargo fetch --locked".to_string()));
+    if matches!(driver.as_str(), "native") {
+        return provision_command_from_cargo_importer(&execution_working_directory);
     }
 
     Ok(None)
+}
+
+fn provision_command_from_node_importer(
+    execution_working_directory: &Path,
+) -> Result<Option<String>> {
+    match probe_required_node_lockfile(execution_working_directory)? {
+        ProbeResult::Found(values) => Ok(Some(node_install_command_from_evidence(&values[0])?)),
+        ProbeResult::Missing(missing) => Err(AtoExecutionError::lock_incomplete(
+            missing.message,
+            Some("package-lock.json"),
+        )
+        .into()),
+        ProbeResult::Ambiguous(ambiguity) => Err(AtoExecutionError::lock_incomplete(
+            ambiguity.message,
+            Some("package-lock.json"),
+        )
+        .into()),
+        ProbeResult::NotApplicable => Ok(None),
+    }
+}
+
+fn provision_command_from_python_importer(
+    execution_working_directory: &Path,
+) -> Result<Option<String>> {
+    match probe_required_python_lockfile(execution_working_directory)? {
+        ProbeResult::Found(_) => Ok(Some("uv sync --frozen".to_string())),
+        ProbeResult::Missing(missing) => {
+            Err(AtoExecutionError::lock_incomplete(missing.message, Some("uv.lock")).into())
+        }
+        ProbeResult::Ambiguous(ambiguity) => {
+            Err(AtoExecutionError::lock_incomplete(ambiguity.message, Some("uv.lock")).into())
+        }
+        ProbeResult::NotApplicable => Ok(None),
+    }
+}
+
+fn provision_command_from_cargo_importer(
+    execution_working_directory: &Path,
+) -> Result<Option<String>> {
+    match probe_required_cargo_lockfile(execution_working_directory)? {
+        ProbeResult::Found(_) => Ok(Some("cargo fetch --locked".to_string())),
+        ProbeResult::Missing(_) | ProbeResult::NotApplicable => Ok(None),
+        ProbeResult::Ambiguous(ambiguity) => {
+            Err(AtoExecutionError::lock_incomplete(ambiguity.message, Some("Cargo.lock")).into())
+        }
+    }
+}
+
+fn node_install_command_from_evidence(evidence: &ImportedEvidence) -> Result<String> {
+    let command = match evidence.importer_id {
+        ImporterId::Npm => "npm ci",
+        ImporterId::Yarn => "yarn install --frozen-lockfile",
+        ImporterId::Pnpm => "pnpm install --frozen-lockfile",
+        ImporterId::Bun => "bun install --frozen-lockfile",
+        other => {
+            return Err(anyhow::anyhow!(
+                "unsupported node importer '{}' for build provision command",
+                other.as_str()
+            ))
+        }
+    };
+    Ok(command.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -1129,21 +1141,13 @@ fn compute_v03_build_cache_key(
 }
 
 fn native_lockfiles_for_build_cache(working_dir: &Path) -> Vec<PathBuf> {
-    let mut paths = [
-        "package-lock.json",
-        "pnpm-lock.yaml",
-        "bun.lock",
-        "bun.lockb",
-        "uv.lock",
-        "Cargo.lock",
-        "deno.lock",
-        "poetry.lock",
-    ]
-    .into_iter()
-    .map(|name| working_dir.join(name))
-    .filter(|path| path.exists())
-    .collect::<Vec<_>>();
+    let mut paths = probe_ecosystem_lockfile_evidence(working_dir)
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|evidence| evidence.paths)
+        .collect::<Vec<_>>();
     paths.sort();
+    paths.dedup();
     paths
 }
 

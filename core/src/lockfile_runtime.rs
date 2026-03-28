@@ -1,6 +1,10 @@
 //! Lockfile runtime/tool resolution, generation, and artifact prefetch helpers.
 
 use super::*;
+use crate::importer::{
+    probe_required_deno_lockfile, probe_required_node_lockfile, probe_required_python_lockfile,
+    ImporterId, ProbeResult,
+};
 
 pub(super) async fn generate_uv_lock(
     manifest_dir: &Path,
@@ -33,13 +37,20 @@ pub(super) async fn generate_uv_lock(
         "Lockfile generation path diagnostics"
     );
 
-    if uv_lock.exists() {
-        return Ok(Some(uv_lock));
-    }
-
     let Some(deps_path) = deps_path else {
         return Ok(None);
     };
+
+    match probe_required_python_lockfile(manifest_dir)? {
+        ProbeResult::Found(evidence) => {
+            return Ok(evidence.first().map(|value| value.primary_path.clone()));
+        }
+        ProbeResult::Missing(_) => {}
+        ProbeResult::Ambiguous(ambiguity) => {
+            return Err(CapsuleError::Pack(ambiguity.message));
+        }
+        ProbeResult::NotApplicable => return Ok(None),
+    }
 
     reporter
         .notify("ℹ️  uv.lock is required but will not be generated automatically".to_string())
@@ -80,20 +91,52 @@ pub(super) async fn generate_pnpm_lock(
         dependency_check_paths = ?deps_path.as_ref().map(|path| vec![path.clone()]).unwrap_or_default(),
         "Lockfile generation path diagnostics"
     );
-    if package_lock.exists() {
-        reporter
-            .notify(
-                "ℹ️  package-lock.json detected; skipping pnpm-lock.yaml generation".to_string(),
-            )
-            .await?;
-        return Ok(None);
-    }
-    if pnpm_lock.exists() {
-        return Ok(Some(pnpm_lock));
-    }
     let Some(_) = deps_path else {
         return Ok(None);
     };
+
+    match probe_required_node_lockfile(manifest_dir)? {
+        ProbeResult::Found(evidence) => {
+            let Some(primary) = evidence.first() else {
+                return Ok(None);
+            };
+            match primary.importer_id {
+                ImporterId::Npm => {
+                    reporter
+                        .notify(
+                            "ℹ️  package-lock.json detected; skipping pnpm-lock.yaml generation"
+                                .to_string(),
+                        )
+                        .await?;
+                    return Ok(None);
+                }
+                ImporterId::Pnpm => return Ok(Some(primary.primary_path.clone())),
+                ImporterId::Yarn => {
+                    reporter
+                        .notify(
+                            "ℹ️  yarn.lock detected; skipping pnpm-lock.yaml generation"
+                                .to_string(),
+                        )
+                        .await?;
+                    return Ok(None);
+                }
+                ImporterId::Bun => {
+                    reporter
+                        .notify(
+                            "ℹ️  bun.lock detected; skipping pnpm-lock.yaml generation".to_string(),
+                        )
+                        .await?;
+                    return Ok(None);
+                }
+                _ => return Ok(None),
+            }
+        }
+        ProbeResult::Missing(_) => {}
+        ProbeResult::Ambiguous(ambiguity) => {
+            return Err(CapsuleError::Pack(ambiguity.message));
+        }
+        ProbeResult::NotApplicable => return Ok(None),
+    }
 
     reporter
         .notify(
@@ -141,13 +184,15 @@ pub(super) async fn generate_deno_lock(
         return Ok(None);
     }
 
-    for candidate in [
-        manifest_dir.join("deno.lock"),
-        manifest_dir.join("source").join("deno.lock"),
-    ] {
-        if candidate.exists() {
-            return Ok(Some(candidate));
+    match probe_required_deno_lockfile(manifest_dir)? {
+        ProbeResult::Found(evidence) => {
+            return Ok(evidence.first().map(|value| value.primary_path.clone()));
         }
+        ProbeResult::Missing(_) => {}
+        ProbeResult::Ambiguous(ambiguity) => {
+            return Err(CapsuleError::Pack(ambiguity.message));
+        }
+        ProbeResult::NotApplicable => return Ok(None),
     }
 
     reporter
