@@ -455,6 +455,7 @@ pub(crate) fn build_capsule_archive(
     manifest: &capsule_core::types::CapsuleManifest,
     payload_tar_zst: &[u8],
     payload_tar: &[u8],
+    capsule_lock_json: Option<&str>,
 ) -> Result<Vec<u8>> {
     let (_distribution_manifest, manifest_toml_bytes) =
         capsule_core::packers::payload::build_distribution_manifest(manifest, payload_tar)
@@ -464,6 +465,14 @@ pub(crate) fn build_capsule_archive(
     {
         let mut builder = tar::Builder::new(&mut out);
         append_tar_entry(&mut builder, "capsule.toml", &manifest_toml_bytes, 0o644)?;
+        if let Some(capsule_lock_json) = capsule_lock_json {
+            append_tar_entry(
+                &mut builder,
+                "capsule.lock.json",
+                capsule_lock_json.as_bytes(),
+                0o644,
+            )?;
+        }
         append_tar_entry(&mut builder, "payload.tar.zst", payload_tar_zst, 0o644)?;
         builder.finish()?;
     }
