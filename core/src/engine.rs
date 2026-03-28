@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use crate::config;
-use crate::router::CompatManifestBridge;
+use crate::router::CompatProjectInput;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -14,8 +14,7 @@ use std::os::unix::fs::PermissionsExt;
 pub struct EngineRequest {
     pub explicit_path: Option<PathBuf>,
     pub manifest_path: Option<PathBuf>,
-    pub workspace_root: Option<PathBuf>,
-    pub compat_manifest: Option<CompatManifestBridge>,
+    pub compat_input: Option<CompatProjectInput>,
 }
 
 pub fn discover_nacelle(req: EngineRequest) -> Result<PathBuf> {
@@ -32,9 +31,8 @@ pub fn discover_nacelle(req: EngineRequest) -> Result<PathBuf> {
     }
 
     // 3) Project manifest (capsule.toml)
-    if let (Some(workspace_root), Some(compat_manifest)) = (req.workspace_root, req.compat_manifest)
-    {
-        if let Some(path) = resolve_from_compat_manifest(&compat_manifest, &workspace_root)? {
+    if let Some(compat_input) = req.compat_input {
+        if let Some(path) = resolve_from_compat_input(&compat_input)? {
             return validate_engine_path(path);
         }
     }
@@ -165,32 +163,12 @@ fn resolve_from_manifest(manifest_path: &Path) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
-fn resolve_from_compat_manifest(
-    compat_manifest: &CompatManifestBridge,
-    workspace_root: &Path,
-) -> Result<Option<PathBuf>> {
-    let parsed = compat_manifest.raw_value()?;
-    let engine = parsed.get("engine");
-    if engine.is_none() {
-        return Ok(None);
+fn resolve_from_compat_input(compat_input: &CompatProjectInput) -> Result<Option<PathBuf>> {
+    if let Some(path) = compat_input.engine_nacelle_path() {
+        return Ok(Some(path));
     }
 
-    if let Some(path) = engine
-        .and_then(|t| t.get("nacelle_path"))
-        .and_then(|v| v.as_str())
-    {
-        let p = PathBuf::from(path);
-        return Ok(Some(if p.is_absolute() {
-            p
-        } else {
-            workspace_root.join(p)
-        }));
-    }
-
-    if let Some(alias) = engine
-        .and_then(|t| t.get("source"))
-        .and_then(|v| v.as_str())
-    {
+    if let Some(alias) = compat_input.engine_source_alias() {
         let cfg = config::load_config()?;
         if let Some(entry) = cfg.engines.get(alias) {
             return Ok(Some(PathBuf::from(&entry.path)));
@@ -372,8 +350,7 @@ mod tests {
         let discovered = discover_nacelle(EngineRequest {
             explicit_path: None,
             manifest_path: Some(project.path().to_path_buf()),
-            workspace_root: None,
-            compat_manifest: None,
+            compat_input: None,
         })
         .expect("discover nacelle");
 
@@ -416,8 +393,7 @@ mod tests {
         let discovered = discover_nacelle(EngineRequest {
             explicit_path: None,
             manifest_path: Some(shadow_manifest),
-            workspace_root: None,
-            compat_manifest: None,
+            compat_input: None,
         })
         .expect("discover nacelle");
 

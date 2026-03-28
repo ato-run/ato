@@ -114,6 +114,114 @@ impl CompatManifestBridge {
 }
 
 #[derive(Debug, Clone)]
+pub struct CompatProjectInput {
+    workspace_root: PathBuf,
+    logical_source_label: String,
+    manifest_value: toml::Value,
+    bridge: CompatManifestBridge,
+}
+
+impl CompatProjectInput {
+    pub fn from_bridge(workspace_root: PathBuf, bridge: CompatManifestBridge) -> Result<Self> {
+        let logical_source_label = format!(
+            "compatibility manifest bridge for {}",
+            workspace_root.display()
+        );
+        Self::from_bridge_with_label(workspace_root, logical_source_label, bridge)
+    }
+
+    pub fn from_bridge_with_label(
+        workspace_root: PathBuf,
+        logical_source_label: impl Into<String>,
+        bridge: CompatManifestBridge,
+    ) -> Result<Self> {
+        let manifest_value = bridge.toml_value()?;
+        Ok(Self {
+            workspace_root,
+            logical_source_label: logical_source_label.into(),
+            manifest_value,
+            bridge,
+        })
+    }
+
+    pub fn workspace_root(&self) -> &Path {
+        self.workspace_root.as_path()
+    }
+
+    pub fn logical_source_label(&self) -> &str {
+        self.logical_source_label.as_str()
+    }
+
+    pub fn manifest_value(&self) -> &toml::Value {
+        &self.manifest_value
+    }
+
+    pub fn manifest_text(&self) -> &str {
+        self.bridge.raw_toml.as_str()
+    }
+
+    pub fn bridge(&self) -> &CompatManifestBridge {
+        &self.bridge
+    }
+
+    pub fn manifest(&self) -> &CapsuleManifest {
+        &self.bridge.manifest
+    }
+
+    pub fn package_name(&self) -> &str {
+        self.bridge.package_name()
+    }
+
+    pub fn package_version(&self) -> &str {
+        self.bridge.package_version()
+    }
+
+    pub fn sha256(&self) -> &str {
+        self.bridge.sha256.as_str()
+    }
+
+    pub fn ipc_section(&self) -> Result<Option<toml::Value>> {
+        self.bridge.ipc_section()
+    }
+
+    pub fn publish_registry(&self) -> Option<String> {
+        self.bridge.publish_registry()
+    }
+
+    pub fn source_digest(&self) -> Option<&str> {
+        self.bridge
+            .manifest
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.source_digest.as_deref())
+    }
+
+    pub fn engine_nacelle_path(&self) -> Option<PathBuf> {
+        self.manifest_value
+            .get("engine")
+            .and_then(|table| table.get("nacelle_path"))
+            .and_then(|value| value.as_str())
+            .map(PathBuf::from)
+            .map(|path| {
+                if path.is_absolute() {
+                    path
+                } else {
+                    self.workspace_root.join(path)
+                }
+            })
+    }
+
+    pub fn engine_source_alias(&self) -> Option<&str> {
+        self.manifest_value
+            .get("engine")
+            .and_then(|table| table.get("source"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ExecutionDescriptor {
     // Transitional compatibility surface retained for run/install-oriented APIs.
     pub manifest: toml::Value,
@@ -552,6 +660,13 @@ impl ExecutionDescriptor {
             cloned.runtime_model = runtime_model;
         }
         cloned
+    }
+
+    pub fn compat_project_input(&self) -> Result<Option<CompatProjectInput>> {
+        self.compat_manifest
+            .clone()
+            .map(|bridge| CompatProjectInput::from_bridge(self.workspace_root.clone(), bridge))
+            .transpose()
     }
 
     pub fn execution_entrypoint(&self) -> Option<String> {
