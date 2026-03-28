@@ -1250,6 +1250,7 @@ fn finalize_with_dispatch(fetched_dir: &Path, output_dir: &Path) -> Result<Final
     })
 }
 
+#[allow(dead_code)]
 fn finalize_with_runner<F>(
     fetched_dir: &Path,
     output_dir: &Path,
