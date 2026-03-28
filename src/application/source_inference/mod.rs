@@ -90,7 +90,9 @@ struct InferredSourceDraft {
 #[derive(Debug, Clone)]
 struct ResolvedSourceModel {
     result: SourceInferenceResult,
+    #[cfg_attr(not(test), allow(dead_code))]
     import_involved: bool,
+    #[cfg_attr(not(test), allow(dead_code))]
     build_derive_involved: bool,
 }
 
@@ -1898,7 +1900,7 @@ fn process_candidates_for_source(
     candidates
 }
 
-fn sort_ranked_candidates(candidates: &mut Vec<RankedCandidate>) {
+fn sort_ranked_candidates(candidates: &mut [RankedCandidate]) {
     candidates.sort_by(|left, right| {
         right
             .score
