@@ -10,7 +10,7 @@ use crate::application::compat_import::{
     CompatibilityDiagnosticSeverity, ProvenanceRecord as CompatibilityProvenanceRecord,
 };
 use crate::application::engine::build::native_delivery::{
-    detect_build_strategy, imported_native_artifact_closure,
+    detect_build_strategy_with_legacy_fallback, imported_native_artifact_closure,
     imported_native_artifact_delivery_contract, imported_native_artifact_type,
     native_delivery_build_environment_skeleton, native_delivery_contract_from_build_plan,
     path_has_extension, NativeBuildCommand, NativeBuildPlan,
@@ -1574,8 +1574,16 @@ fn maybe_promote_native_build_closure(result: &mut SourceInferenceResult) -> Res
 }
 
 fn detect_promotable_native_build_plan(project_root: &Path) -> Result<Option<NativeBuildPlan>> {
-    if let Some(plan) = detect_build_strategy(project_root)? {
-        return Ok(Some(plan));
+    let manifest_path = project_root.join("capsule.toml");
+    if manifest_path.is_file() {
+        let decision = capsule_core::router::route_manifest(
+            &manifest_path,
+            capsule_core::router::ExecutionProfile::Release,
+            None,
+        )?;
+        if let Some(plan) = detect_build_strategy_with_legacy_fallback(&decision.plan)? {
+            return Ok(Some(plan));
+        }
     }
 
     let detected = detect_project(project_root)?;
