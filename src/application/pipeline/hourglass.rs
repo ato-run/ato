@@ -5,6 +5,7 @@ pub(crate) enum HourglassPhase {
     Install,
     Prepare,
     Build,
+    Finalize,
     Verify,
     DryRun,
     Execute,
@@ -17,6 +18,7 @@ impl HourglassPhase {
             Self::Install => "install",
             Self::Prepare => "prepare",
             Self::Build => "build",
+            Self::Finalize => "finalize",
             Self::Verify => "verify",
             Self::DryRun => "dry_run",
             Self::Execute => "execute",
@@ -48,6 +50,7 @@ impl HourglassPhaseState {
 pub(crate) enum HourglassFlow {
     ConsumerRun,
     ProducerPublish,
+    ProducerPublishFinalize,
 }
 
 impl HourglassFlow {
@@ -66,6 +69,15 @@ impl HourglassFlow {
                 HourglassPhase::Build,
                 HourglassPhase::Verify,
                 HourglassPhase::Install,
+                HourglassPhase::DryRun,
+                HourglassPhase::Publish,
+            ],
+            Self::ProducerPublishFinalize => &[
+                HourglassPhase::Prepare,
+                HourglassPhase::Build,
+                HourglassPhase::Install,
+                HourglassPhase::Finalize,
+                HourglassPhase::Verify,
                 HourglassPhase::DryRun,
                 HourglassPhase::Publish,
             ],
@@ -129,6 +141,11 @@ impl HourglassPhaseSelection {
 
     pub(crate) fn runs_install(self) -> bool {
         self.runs(HourglassPhase::Install)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn runs_finalize(self) -> bool {
+        self.runs(HourglassPhase::Finalize)
     }
 
     pub(crate) fn runs_dry_run(self) -> bool {
