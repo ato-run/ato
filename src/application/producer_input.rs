@@ -3,13 +3,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use capsule_core::ato_lock::{compute_closure_digest, compute_lock_id, AtoLock};
+use capsule_core::ato_lock::{compute_closure_digest, compute_lock_id};
 use capsule_core::input_resolver::{
     resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
 };
 use capsule_core::lock_runtime::resolve_lock_runtime_model;
 use capsule_core::router::{CompatManifestBridge, ExecutionDescriptor};
-use capsule_core::types::CapsuleManifest;
 
 use crate::application::source_inference::{
     materialize_run_from_canonical_lock, materialize_run_from_compatibility,
@@ -22,12 +21,6 @@ use crate::reporters::CliReporter;
 pub(crate) struct ProducerAuthoritativeInput {
     pub(crate) descriptor: ExecutionDescriptor,
     pub(crate) compat_manifest: Option<CompatManifestBridge>,
-    pub(crate) manifest_path: PathBuf,
-    pub(crate) manifest_raw: String,
-    pub(crate) manifest: CapsuleManifest,
-    #[allow(dead_code)]
-    pub(crate) lock: AtoLock,
-    pub(crate) bridge_manifest_sha256: String,
     pub(crate) advisories: Vec<String>,
     pub(crate) lock_id: Option<String>,
     pub(crate) closure_digest: Option<String>,
@@ -86,12 +79,37 @@ fn producer_authoritative_input_from_resolved(
 }
 
 impl ProducerAuthoritativeInput {
+    pub(crate) fn semantic_package_name(&self) -> Result<String> {
+        self.descriptor
+            .runtime_model
+            .metadata
+            .name
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .context("authoritative lock metadata is missing package name")
+    }
+
+    pub(crate) fn semantic_package_version(&self) -> String {
+        self.descriptor
+            .runtime_model
+            .metadata
+            .version
+            .clone()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn compat_manifest_value(&self) -> Option<toml::Value> {
+        self.compat_manifest
+            .as_ref()
+            .and_then(|bridge| bridge.toml_value().ok())
+    }
+
     pub(crate) fn validate_compat_bridge(&self) -> Result<()> {
         let Some(bridge) = self.compat_manifest.as_ref() else {
             return Ok(());
         };
         let actual_sha256 = sha256_hex(bridge.raw_toml.as_bytes());
-        if actual_sha256 != self.bridge_manifest_sha256 {
+        if actual_sha256 != bridge.sha256 {
             anyhow::bail!(
                 "generated manifest bridge no longer matches the authoritative lock-derived producer input"
             );
@@ -157,7 +175,7 @@ impl ProducerAuthoritativeInput {
         if manifest_target.driver.as_deref() != selected_runtime.driver.as_deref() {
             anyhow::bail!(
                 "generated manifest bridge diverged from authoritative lock driver: target '{}' driver '{:?}' != '{:?}'",
-                self.manifest.default_target,
+                bridge.manifest.default_target,
                 manifest_target.driver,
                 selected_runtime.driver
             );
@@ -165,7 +183,7 @@ impl ProducerAuthoritativeInput {
         if manifest_target.entrypoint.trim() != selected_runtime.entrypoint {
             anyhow::bail!(
                 "generated manifest bridge diverged from authoritative lock entrypoint: target '{}' entrypoint '{}' != '{}'",
-                self.manifest.default_target,
+                bridge.manifest.default_target,
                 manifest_target.entrypoint.trim(),
                 selected_runtime.entrypoint
             );
@@ -173,7 +191,7 @@ impl ProducerAuthoritativeInput {
         if manifest_target.run_command.as_deref() != selected_runtime.run_command.as_deref() {
             anyhow::bail!(
                 "generated manifest bridge diverged from authoritative lock run_command: target '{}' run_command '{:?}' != '{:?}'",
-                self.manifest.default_target,
+                bridge.manifest.default_target,
                 manifest_target.run_command,
                 selected_runtime.run_command
             );
@@ -225,7 +243,6 @@ impl ProducerAuthoritativeInput {
                     materialized.lock_path.display()
                 )
             })?;
-        let manifest_path = materialized.project_root.join("capsule.toml");
         let lock_decision = capsule_core::router::route_lock(
             &materialized.lock_path,
             &sanitized_lock,
@@ -238,7 +255,7 @@ impl ProducerAuthoritativeInput {
                 CompatManifestBridge::from_manifest_value(raw_manifest).with_context(|| {
                     format!(
                         "Failed to build producer manifest bridge from compatibility manifest {}",
-                        manifest_path.display()
+                        materialized.project_root.join("capsule.toml").display()
                     )
                 })?
             } else {
@@ -246,7 +263,7 @@ impl ProducerAuthoritativeInput {
                     .with_context(|| {
                         format!(
                             "Failed to build lock-derived producer manifest bridge {}",
-                            manifest_path.display()
+                            materialized.project_root.join("capsule.toml").display()
                         )
                     })?
             },
@@ -277,20 +294,6 @@ impl ProducerAuthoritativeInput {
 
         Ok(Self {
             descriptor: lock_decision.plan,
-            manifest_path: manifest_path.clone(),
-            manifest_raw: compat_manifest
-                .as_ref()
-                .map(|bridge| bridge.raw_toml.clone())
-                .unwrap_or_default(),
-            manifest: compat_manifest
-                .as_ref()
-                .map(|bridge| bridge.manifest.clone())
-                .expect("producer materialization must create compat manifest bridge"),
-            lock: sanitized_lock,
-            bridge_manifest_sha256: compat_manifest
-                .as_ref()
-                .map(|bridge| bridge.sha256.clone())
-                .unwrap_or_default(),
             compat_manifest,
             advisories,
             lock_id,
@@ -311,6 +314,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use capsule_core::ato_lock::AtoLock;
     use serde_json::json;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -370,11 +374,6 @@ mod tests {
         let input = ProducerAuthoritativeInput {
             descriptor,
             compat_manifest: Some(compat_manifest),
-            manifest_path: manifest_path.clone(),
-            manifest_raw: manifest_raw.clone(),
-            manifest: CapsuleManifest::from_toml(&manifest_raw).expect("parse manifest"),
-            lock,
-            bridge_manifest_sha256: sha256_hex(manifest_raw.as_bytes()),
             advisories: Vec::new(),
             lock_id: None,
             closure_digest: None,
@@ -412,10 +411,10 @@ mod tests {
         )
         .expect("resolve producer input");
 
-        assert!(input.lock.binding.entries.is_empty());
-        assert!(input.lock.binding.unresolved.is_empty());
-        assert!(input.lock.attestations.entries.is_empty());
-        assert!(input.lock.attestations.unresolved.is_empty());
+        assert!(input.descriptor.lock.binding.entries.is_empty());
+        assert!(input.descriptor.lock.binding.unresolved.is_empty());
+        assert!(input.descriptor.lock.attestations.entries.is_empty());
+        assert!(input.descriptor.lock.attestations.unresolved.is_empty());
 
         let generated_lock = capsule_core::ato_lock::load_unvalidated_from_path(
             &input._cleanup.run_state_dir.join("ato.lock.json"),
