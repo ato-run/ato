@@ -233,12 +233,12 @@ pub fn execute_pack_command_with_injected_manifest(
     let (decision, raw_manifest, capsule_name, capsule_version) = if let Some(authoritative_input) =
         authoritative_input.as_ref()
     {
-        authoritative_input.validate_compat_bridge()?;
+        authoritative_input.validate_legacy_producer_bridge()?;
         let kind = runtime_kind_from_plan(&authoritative_input.descriptor)?;
         let capsule_name = authoritative_input.semantic_package_name()?;
         let capsule_version = authoritative_input.semantic_package_version();
         let raw_manifest = authoritative_input
-            .compat_manifest_value()
+            .legacy_producer_manifest_value()
             .unwrap_or_else(|| authoritative_input.descriptor.manifest.clone());
         (
             RuntimeDecision {

@@ -9,7 +9,9 @@ use capsule_core::input_resolver::{
 };
 use capsule_core::lock_runtime::resolve_lock_runtime_model;
 use capsule_core::router::{CompatManifestBridge, ExecutionDescriptor};
+use serde_json::Value;
 
+use crate::application::ports::publish::{PublishArtifactIdentityClass, PublishArtifactMetadata};
 use crate::application::source_inference::{
     materialize_run_from_canonical_lock, materialize_run_from_compatibility,
     materialize_run_from_source_only, RunMaterialization,
@@ -20,16 +22,28 @@ use crate::reporters::CliReporter;
 #[derive(Debug)]
 pub(crate) struct ProducerAuthoritativeInput {
     pub(crate) descriptor: ExecutionDescriptor,
-    pub(crate) compat_manifest: Option<CompatManifestBridge>,
     pub(crate) advisories: Vec<String>,
     pub(crate) lock_id: Option<String>,
     pub(crate) closure_digest: Option<String>,
+    legacy_producer_bridge: Option<LegacyProducerBridge>,
     _cleanup: ProducerMaterializationCleanup,
 }
 
 #[derive(Debug)]
 struct ProducerMaterializationCleanup {
     run_state_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyProducerBridgeOrigin {
+    CompatibilityInput,
+    LockDerived,
+}
+
+#[derive(Debug, Clone)]
+struct LegacyProducerBridge {
+    bridge: CompatManifestBridge,
+    origin: LegacyProducerBridgeOrigin,
 }
 
 impl Drop for ProducerMaterializationCleanup {
@@ -98,14 +112,14 @@ impl ProducerAuthoritativeInput {
             .unwrap_or_default()
     }
 
-    pub(crate) fn compat_manifest_value(&self) -> Option<toml::Value> {
-        self.compat_manifest
+    pub(crate) fn legacy_producer_manifest_value(&self) -> Option<toml::Value> {
+        self.legacy_producer_bridge
             .as_ref()
-            .and_then(|bridge| bridge.toml_value().ok())
+            .and_then(|bridge| bridge.bridge.toml_value().ok())
     }
 
-    pub(crate) fn validate_compat_bridge(&self) -> Result<()> {
-        let Some(bridge) = self.compat_manifest.as_ref() else {
+    pub(crate) fn validate_legacy_producer_bridge(&self) -> Result<()> {
+        let Some(bridge) = self.legacy_producer_bridge() else {
             return Ok(());
         };
         let actual_sha256 = sha256_hex(bridge.manifest_text().as_bytes());
@@ -231,6 +245,39 @@ impl ProducerAuthoritativeInput {
         Ok(())
     }
 
+    pub(crate) fn compatibility_input_repository(&self) -> Option<String> {
+        self.compatibility_input_bridge()
+            .and_then(CompatManifestBridge::repository)
+    }
+
+    pub(crate) fn compatibility_publish_registry(&self) -> Option<String> {
+        self.compatibility_input_bridge()
+            .and_then(CompatManifestBridge::publish_registry)
+    }
+
+    pub(crate) fn compatibility_store_playground_enabled(&self) -> bool {
+        self.compatibility_input_bridge()
+            .map(CompatManifestBridge::store_playground_enabled)
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn publish_metadata(&self) -> Option<PublishArtifactMetadata> {
+        publish_metadata_from_lock(&self.descriptor.lock)
+    }
+
+    fn legacy_producer_bridge(&self) -> Option<&CompatManifestBridge> {
+        self.legacy_producer_bridge
+            .as_ref()
+            .map(|bridge| &bridge.bridge)
+    }
+
+    fn compatibility_input_bridge(&self) -> Option<&CompatManifestBridge> {
+        self.legacy_producer_bridge.as_ref().and_then(|bridge| {
+            (bridge.origin == LegacyProducerBridgeOrigin::CompatibilityInput)
+                .then_some(&bridge.bridge)
+        })
+    }
+
     fn from_materialized(
         materialized: RunMaterialization,
         advisories: Vec<String>,
@@ -250,22 +297,33 @@ impl ProducerAuthoritativeInput {
             capsule_core::router::ExecutionProfile::Release,
             None,
         )?;
-        let compat_manifest = Some(
+        let legacy_producer_bridge = Some(
             if let Some(raw_manifest) = materialized.raw_manifest.as_ref() {
-                CompatManifestBridge::from_manifest_value(raw_manifest).with_context(|| {
-                    format!(
-                        "Failed to build producer manifest bridge from compatibility manifest {}",
-                        materialized.project_root.join("capsule.toml").display()
-                    )
-                })?
+                LegacyProducerBridge {
+                    bridge: CompatManifestBridge::from_manifest_value(raw_manifest).with_context(
+                        || {
+                            format!(
+                                "Failed to build producer manifest bridge from compatibility manifest {}",
+                                materialized.project_root.join("capsule.toml").display()
+                            )
+                        },
+                    )?,
+                    origin: LegacyProducerBridgeOrigin::CompatibilityInput,
+                }
             } else {
-                CompatManifestBridge::from_lock(&sanitized_lock, &lock_decision.plan.runtime_model)
+                LegacyProducerBridge {
+                    bridge: CompatManifestBridge::from_lock(
+                        &sanitized_lock,
+                        &lock_decision.plan.runtime_model,
+                    )
                     .with_context(|| {
                         format!(
                             "Failed to build lock-derived producer manifest bridge {}",
                             materialized.project_root.join("capsule.toml").display()
                         )
-                    })?
+                    })?,
+                    origin: LegacyProducerBridgeOrigin::LockDerived,
+                }
             },
         );
         let run_state_dir = materialized
@@ -294,10 +352,10 @@ impl ProducerAuthoritativeInput {
 
         Ok(Self {
             descriptor: lock_decision.plan,
-            compat_manifest,
             advisories,
             lock_id,
             closure_digest,
+            legacy_producer_bridge,
             _cleanup: ProducerMaterializationCleanup { run_state_dir },
         })
     }
@@ -309,6 +367,38 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
+}
+
+pub(crate) fn publish_metadata_from_lock(
+    lock: &capsule_core::ato_lock::AtoLock,
+) -> Option<PublishArtifactMetadata> {
+    let delivery = lock.contract.entries.get("delivery")?.as_object()?;
+    let mode = delivery
+        .get("mode")
+        .and_then(Value::as_str)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let artifact = delivery.get("artifact")?.as_object()?;
+    if artifact.get("kind").and_then(Value::as_str)? != "desktop-native" {
+        return None;
+    }
+
+    let identity_class = match mode.as_deref() {
+        Some("source-draft") | Some("source-derivation") => {
+            PublishArtifactIdentityClass::SourceDerivedUnsignedBundle
+        }
+        Some("artifact-import") => PublishArtifactIdentityClass::ImportedThirdPartyArtifact,
+        _ => return None,
+    };
+
+    Some(PublishArtifactMetadata {
+        identity_class,
+        delivery_mode: mode,
+        provenance_limited: artifact
+            .get("provenance_limited")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
 }
 
 #[cfg(test)]
@@ -373,17 +463,20 @@ mod tests {
 
         let input = ProducerAuthoritativeInput {
             descriptor,
-            compat_manifest: Some(compat_manifest),
             advisories: Vec::new(),
             lock_id: None,
             closure_digest: None,
+            legacy_producer_bridge: Some(LegacyProducerBridge {
+                bridge: compat_manifest,
+                origin: LegacyProducerBridgeOrigin::CompatibilityInput,
+            }),
             _cleanup: ProducerMaterializationCleanup {
                 run_state_dir: dir.path().join(".tmp"),
             },
         };
 
         let error = input
-            .validate_compat_bridge()
+            .validate_legacy_producer_bridge()
             .expect_err("target mismatch must fail closed");
         assert!(error.to_string().contains("default_target"));
     }
@@ -424,5 +517,163 @@ mod tests {
         assert!(generated_lock.binding.unresolved.is_empty());
         assert!(generated_lock.attestations.entries.is_empty());
         assert!(generated_lock.attestations.unresolved.is_empty());
+    }
+
+    #[test]
+    fn publish_metadata_from_lock_classifies_source_derived_desktop_delivery() {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "delivery".to_string(),
+            serde_json::json!({
+                "mode": "source-derivation",
+                "artifact": {
+                    "kind": "desktop-native",
+                    "provenance_limited": false
+                }
+            }),
+        );
+
+        let metadata = publish_metadata_from_lock(&lock).expect("publish metadata");
+        assert_eq!(
+            metadata.identity_class,
+            PublishArtifactIdentityClass::SourceDerivedUnsignedBundle
+        );
+        assert_eq!(metadata.delivery_mode.as_deref(), Some("source-derivation"));
+        assert!(!metadata.provenance_limited);
+    }
+
+    #[test]
+    fn publish_metadata_from_lock_classifies_imported_desktop_delivery() {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "delivery".to_string(),
+            serde_json::json!({
+                "mode": "artifact-import",
+                "artifact": {
+                    "kind": "desktop-native",
+                    "provenance_limited": true
+                }
+            }),
+        );
+
+        let metadata = publish_metadata_from_lock(&lock).expect("publish metadata");
+        assert_eq!(
+            metadata.identity_class,
+            PublishArtifactIdentityClass::ImportedThirdPartyArtifact
+        );
+        assert_eq!(metadata.delivery_mode.as_deref(), Some("artifact-import"));
+        assert!(metadata.provenance_limited);
+    }
+
+    #[test]
+    fn compatibility_accessors_ignore_lock_derived_legacy_bridge() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"demo","version":"0.1.0","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("package.json");
+        std::fs::write(
+            dir.path().join("package-lock.json"),
+            r#"{"name":"demo","version":"0.1.0","lockfileVersion":3,"packages":{}}"#,
+        )
+        .expect("package-lock.json");
+        std::fs::write(dir.path().join("index.js"), "console.log('demo');\n").expect("index.js");
+
+        let input = resolve_producer_authoritative_input(
+            dir.path(),
+            Arc::new(crate::reporters::CliReporter::new(false)),
+            true,
+        )
+        .expect("resolve producer input");
+
+        assert!(input.legacy_producer_manifest_value().is_some());
+        assert!(input.compatibility_input_repository().is_none());
+        assert!(input.compatibility_publish_registry().is_none());
+        assert!(!input.compatibility_store_playground_enabled());
+    }
+
+    #[test]
+    fn compatibility_accessors_only_read_explicit_compatibility_input() {
+        let manifest_raw = r#"
+schema_version = "0.2"
+name = "demo-app"
+version = "1.2.3"
+type = "app"
+default_target = "cli"
+
+[metadata]
+repository = "https://github.com/example/demo-app"
+
+[store]
+registry = "https://registry.example.test"
+playground = true
+
+[targets.cli]
+runtime = "source"
+driver = "deno"
+entrypoint = "main.ts"
+"#;
+        let dir = tempdir().expect("tempdir");
+        let manifest_path = dir.path().join("generated.capsule.toml");
+        std::fs::write(&manifest_path, manifest_raw).expect("write manifest");
+
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "metadata".to_string(),
+            json!({"name": "demo-app", "version": "1.2.3", "default_target": "cli"}),
+        );
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "main.ts", "driver": "deno"}),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "deno", "selected_target": "cli"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([{"label": "cli", "runtime": "source", "driver": "deno", "entrypoint": "main.ts"}]),
+        );
+        lock.resolution
+            .entries
+            .insert("closure".to_string(), json!({"kind": "metadata_only"}));
+        let descriptor = capsule_core::router::route_lock(
+            &manifest_path,
+            &lock,
+            dir.path(),
+            capsule_core::router::ExecutionProfile::Release,
+            None,
+        )
+        .expect("route lock")
+        .plan;
+        let bridge = CompatManifestBridge::from_manifest_value(
+            &toml::from_str(manifest_raw).expect("manifest value"),
+        )
+        .expect("compat bridge");
+
+        let input = ProducerAuthoritativeInput {
+            descriptor,
+            advisories: Vec::new(),
+            lock_id: None,
+            closure_digest: None,
+            legacy_producer_bridge: Some(LegacyProducerBridge {
+                bridge,
+                origin: LegacyProducerBridgeOrigin::CompatibilityInput,
+            }),
+            _cleanup: ProducerMaterializationCleanup {
+                run_state_dir: dir.path().join(".tmp"),
+            },
+        };
+
+        assert_eq!(
+            input.compatibility_input_repository().as_deref(),
+            Some("https://github.com/example/demo-app")
+        );
+        assert_eq!(
+            input.compatibility_publish_registry().as_deref(),
+            Some("https://registry.example.test")
+        );
+        assert!(input.compatibility_store_playground_enabled());
     }
 }

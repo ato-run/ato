@@ -7,6 +7,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::application::ports::publish::PublishArtifactMetadata;
 use crate::artifact_hash::{
     compute_blake3_label as compute_blake3, compute_sha256_label as compute_sha256,
 };
@@ -20,6 +21,7 @@ pub struct PublishArtifactBytesArgs {
     pub allow_existing: bool,
     pub lock_id: Option<String>,
     pub closure_digest: Option<String>,
+    pub publish_metadata: Option<PublishArtifactMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +39,8 @@ pub struct PublishArtifactResult {
     pub lock_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closure_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_metadata: Option<PublishArtifactMetadata>,
 }
 
 #[derive(Debug)]
@@ -160,6 +164,7 @@ pub fn publish_artifact_bytes(args: PublishArtifactBytesArgs) -> Result<PublishA
         args.allow_existing,
         args.lock_id.as_deref(),
         args.closure_digest.as_deref(),
+        args.publish_metadata.as_ref(),
     )
 }
 
@@ -252,6 +257,7 @@ fn upload_artifact_payload(
     allow_existing: bool,
     lock_id: Option<&str>,
     closure_digest: Option<&str>,
+    publish_metadata: Option<&PublishArtifactMetadata>,
 ) -> Result<PublishArtifactResult> {
     let v3_sync_payload = payload.v3_sync_payload();
     let endpoint = build_upload_endpoint(
@@ -286,6 +292,32 @@ fn upload_artifact_payload(
         } else {
             request
         };
+    let request = if let Some(metadata) = publish_metadata {
+        let request = request.header(
+            "x-ato-publish-identity-class",
+            metadata.identity_class.as_str(),
+        );
+        let request = if let Some(delivery_mode) = metadata
+            .delivery_mode
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            request.header("x-ato-publish-delivery-mode", delivery_mode)
+        } else {
+            request
+        };
+        request.header(
+            "x-ato-publish-provenance-limited",
+            if metadata.provenance_limited {
+                "true"
+            } else {
+                "false"
+            },
+        )
+    } else {
+        request
+    };
 
     let request = crate::registry::http::with_blocking_ato_token(request);
 

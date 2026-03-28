@@ -3,6 +3,43 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublishArtifactIdentityClass {
+    SourceDerivedUnsignedBundle,
+    LocallyFinalizedSignedBundle,
+    ImportedThirdPartyArtifact,
+}
+
+impl PublishArtifactIdentityClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SourceDerivedUnsignedBundle => "source_derived_unsigned_bundle",
+            Self::LocallyFinalizedSignedBundle => "locally_finalized_signed_bundle",
+            Self::ImportedThirdPartyArtifact => "imported_third_party_artifact",
+        }
+    }
+
+    pub fn parse(input: &str) -> Option<Self> {
+        match input.trim() {
+            "source_derived_unsigned_bundle" => Some(Self::SourceDerivedUnsignedBundle),
+            "locally_finalized_signed_bundle" => Some(Self::LocallyFinalizedSignedBundle),
+            "imported_third_party_artifact" => Some(Self::ImportedThirdPartyArtifact),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishArtifactMetadata {
+    pub identity_class: PublishArtifactIdentityClass,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_mode: Option<String>,
+    #[serde(default)]
+    pub provenance_limited: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishableArtifact {
@@ -13,6 +50,7 @@ pub struct PublishableArtifact {
     pub content_hash: String,
     pub lock_id: Option<String>,
     pub closure_digest: Option<String>,
+    pub publish_metadata: Option<PublishArtifactMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +60,7 @@ pub struct PublishReceiptMetadata {
     pub blake3: String,
     pub size_bytes: u64,
     pub already_existed: bool,
+    pub publish_metadata: Option<PublishArtifactMetadata>,
 }
 
 #[allow(dead_code)]
