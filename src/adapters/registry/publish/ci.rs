@@ -97,21 +97,22 @@ pub async fn execute(
 
     let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
     let authoritative_input = resolve_producer_authoritative_input(&cwd, reporter.clone(), false)?;
-    let manifest_path = authoritative_input.manifest_path.clone();
-    let manifest_raw = authoritative_input.manifest_raw.clone();
-    let manifest = authoritative_input.manifest.clone();
+    let (manifest_name, manifest_version) =
+        semantic_publish_identity(&authoritative_input.descriptor)?;
+    let compat_manifest = authoritative_input.compat_manifest.as_ref();
 
     let tag = github.r#ref.strip_prefix("refs/tags/").unwrap_or_default();
     let resolved_version = normalize_tag_version(tag)?;
-    if !manifest.version.trim().is_empty() && manifest.version.trim() != resolved_version {
+    if !manifest_version.trim().is_empty() && manifest_version.trim() != resolved_version {
         anyhow::bail!(
             "Tag/version mismatch: expected version {} from capsule.toml, got tag {}",
-            manifest.version,
+            manifest_version,
             github.r#ref
         );
     }
 
-    let source_repo = find_manifest_repository(&manifest_raw)
+    let source_repo = compat_manifest
+        .and_then(|bridge| bridge.repository())
         .and_then(|v| normalize_source_repo(&v).ok())
         .unwrap_or_else(|| github.repository.clone());
     if source_repo != github.repository {
@@ -131,10 +132,10 @@ pub async fn execute(
             .await?;
     }
     let artifact_path = build_capsule_artifact(
-        &manifest_path,
-        &manifest.name,
+        &manifest_name,
         &resolved_version,
         Some(&authoritative_input),
+        None,
     );
     if !args.json_output {
         reporter.progress_finish(None).await?;
@@ -160,9 +161,11 @@ pub async fn execute(
         .map(|v| v.to_string())
         .context("Failed to derive artifact file name")?;
 
-    let request_playground = manifest_store_playground_enabled(&manifest_raw);
+    let request_playground = compat_manifest
+        .map(|bridge| bridge.store_playground_enabled())
+        .unwrap_or(false);
     let metadata = CiMetadataPayload {
-        capsule_slug: manifest.name.clone(),
+        capsule_slug: manifest_name.clone(),
         version: resolved_version.clone(),
         source_repo: source_repo.clone(),
         source_commit: github.sha.clone(),
@@ -312,27 +315,6 @@ fn normalize_tag_version(tag: &str) -> Result<String> {
     Ok(without_prefix.to_string())
 }
 
-fn find_manifest_repository(manifest_raw: &str) -> Option<String> {
-    let parsed = toml::from_str::<toml::Value>(manifest_raw).ok()?;
-    parsed
-        .get("metadata")
-        .and_then(|v| v.get("repository"))
-        .and_then(|v| v.as_str())
-        .or_else(|| parsed.get("repository").and_then(|v| v.as_str()))
-        .map(|v| v.to_string())
-}
-
-fn manifest_store_playground_enabled(manifest_raw: &str) -> bool {
-    let Ok(parsed) = toml::from_str::<toml::Value>(manifest_raw) else {
-        return false;
-    };
-    parsed
-        .get("store")
-        .and_then(|v| v.get("playground"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-}
-
 fn normalize_source_repo(raw: &str) -> Result<String> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -368,11 +350,30 @@ fn normalize_source_repo(raw: &str) -> Result<String> {
     Ok(format!("{}/{}", owner, repo))
 }
 
+fn semantic_publish_identity(
+    descriptor: &capsule_core::router::ExecutionDescriptor,
+) -> Result<(String, String)> {
+    let name = descriptor
+        .runtime_model
+        .metadata
+        .name
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .context("authoritative lock metadata is missing package name")?;
+    let version = descriptor
+        .runtime_model
+        .metadata
+        .version
+        .clone()
+        .unwrap_or_default();
+    Ok((name, version))
+}
+
 pub(crate) fn build_capsule_artifact(
-    manifest_path: &Path,
     name: &str,
     version: &str,
     authoritative_input: Option<&crate::application::producer_input::ProducerAuthoritativeInput>,
+    manifest_path: Option<&Path>,
 ) -> Result<PathBuf> {
     let (decision, manifest_dir) = if let Some(authoritative_input) = authoritative_input {
         authoritative_input.validate_compat_bridge()?;
@@ -400,6 +401,9 @@ pub(crate) fn build_capsule_artifact(
             authoritative_input.descriptor.workspace_root.clone(),
         )
     } else {
+        let manifest_path = manifest_path.context(
+            "manifest path is required when building a publish artifact without authoritative input",
+        )?;
         let manifest_dir = manifest_path.parent().ok_or_else(|| {
             anyhow::anyhow!("Manifest path has no parent: {}", manifest_path.display())
         })?;
@@ -412,12 +416,20 @@ pub(crate) fn build_capsule_artifact(
             manifest_dir.to_path_buf(),
         )
     };
-    let artifact_dir = std::env::temp_dir().join("ato-ci-artifacts");
+    let artifact_dir = manifest_dir.join(".tmp").join("ato-ci-artifacts");
     fs::create_dir_all(&artifact_dir)
         .with_context(|| format!("Failed to create {}", artifact_dir.display()))?;
     let artifact_path = artifact_dir.join(format!("{}-{}.capsule", name, version));
 
-    if let Some(plan) = crate::build::native_delivery::detect_build_strategy(&manifest_dir)? {
+    let native_plan = if let Some(plan) =
+        crate::build::native_delivery::detect_build_strategy_from_descriptor(&decision.plan)?
+    {
+        Some(plan)
+    } else {
+        crate::build::native_delivery::detect_build_strategy(&manifest_dir)?
+    };
+
+    if let Some(plan) = native_plan {
         let result =
             crate::build::native_delivery::build_native_artifact(&plan, Some(&artifact_path))?;
         return Ok(result.artifact_path);
@@ -550,7 +562,11 @@ Deploy latest ato-store (OIDC multipart CI publish), or point ATO_STORE_API_URL 
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_tag_version;
+    use std::sync::Arc;
+
+    use super::{build_capsule_artifact, normalize_tag_version, semantic_publish_identity};
+    use crate::application::producer_input::resolve_producer_authoritative_input;
+    use crate::reporters::CliReporter;
 
     #[test]
     fn normalize_tag_version_strips_v_prefix() {
@@ -560,5 +576,33 @@ mod tests {
     #[test]
     fn normalize_tag_version_rejects_empty_tag() {
         assert!(normalize_tag_version("").is_err());
+    }
+
+    #[test]
+    fn authoritative_ci_build_does_not_materialize_project_manifest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"demo","version":"0.1.0","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("package.json");
+        std::fs::write(
+            tmp.path().join("package-lock.json"),
+            r#"{"name":"demo","version":"0.1.0","lockfileVersion":3,"packages":{}}"#,
+        )
+        .expect("package-lock.json");
+        std::fs::write(tmp.path().join("index.js"), "console.log('demo');\n").expect("index.js");
+
+        let authoritative_input = resolve_producer_authoritative_input(
+            tmp.path(),
+            Arc::new(CliReporter::new(false)),
+            false,
+        )
+        .expect("authoritative input");
+        let (name, version) =
+            semantic_publish_identity(&authoritative_input.descriptor).expect("identity");
+
+        let _outcome = build_capsule_artifact(&name, &version, Some(&authoritative_input), None);
+        assert!(!tmp.path().join("capsule.toml").exists());
     }
 }

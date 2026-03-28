@@ -1111,8 +1111,8 @@ manifest_hash = "sha256:dummy"
         pack(
             &decision.plan,
             CapsulePackOptions {
-                manifest_path: manifest_path.clone(),
-                manifest_dir: tmp.path().to_path_buf(),
+                compat_manifest: decision.plan.compat_manifest.clone(),
+                workspace_root: tmp.path().to_path_buf(),
                 output: Some(out1.clone()),
                 config_json: config.clone(),
                 config_path: config_path.clone(),
@@ -1126,8 +1126,8 @@ manifest_hash = "sha256:dummy"
         pack(
             &decision.plan,
             CapsulePackOptions {
-                manifest_path: manifest_path.clone(),
-                manifest_dir: tmp.path().to_path_buf(),
+                compat_manifest: decision.plan.compat_manifest.clone(),
+                workspace_root: tmp.path().to_path_buf(),
                 output: Some(out2.clone()),
                 config_json: config,
                 config_path,
@@ -1191,8 +1191,8 @@ manifest_hash = "sha256:dummy"
         pack(
             &decision.plan,
             CapsulePackOptions {
-                manifest_path: manifest_path.clone(),
-                manifest_dir: tmp.path().to_path_buf(),
+                compat_manifest: decision.plan.compat_manifest.clone(),
+                workspace_root: tmp.path().to_path_buf(),
                 output: Some(out.clone()),
                 config_json: config,
                 config_path,
