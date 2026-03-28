@@ -945,6 +945,9 @@ pub(crate) fn native_delivery_build_environment_skeleton(plan: &NativeBuildPlan)
         push_unique(&mut toolchains, "rust");
         push_unique(&mut toolchains, "cargo");
     }
+    if package_managers.iter().any(|manager| manager == "go") {
+        push_unique(&mut toolchains, "go");
+    }
 
     match delivery_target_os_family(&plan.target) {
         Some("darwin") => push_unique(&mut sdks, "apple-sdk"),
@@ -1180,6 +1183,34 @@ pub(crate) fn imported_native_artifact_delivery_contract(
     })
 }
 
+pub(crate) fn imported_native_artifact_closure(
+    artifact_path: &Path,
+    artifact_type: &str,
+) -> Result<Value> {
+    Ok(json!({
+        "kind": "imported_artifact_closure",
+        "status": "complete",
+        "artifact": {
+            "artifact_type": artifact_type,
+            "digest": compute_tree_digest(artifact_path)?,
+            "provenance_limited": true,
+        }
+    }))
+}
+
+pub(crate) fn imported_native_artifact_type(artifact_path: &Path) -> Option<&'static str> {
+    if artifact_path.is_dir() && path_has_extension(artifact_path, "app") {
+        return Some("macos_app_bundle");
+    }
+    if artifact_path.is_file() && path_has_extension(artifact_path, "exe") {
+        return Some("windows_executable");
+    }
+    if artifact_path.is_file() && path_has_extension(artifact_path, "AppImage") {
+        return Some("appimage");
+    }
+    None
+}
+
 fn toml_to_json(value: &toml::Value) -> Value {
     serde_json::to_value(value).expect("toml value should serialize into json")
 }
@@ -1188,6 +1219,7 @@ fn detect_build_environment_package_managers(manifest_dir: &Path) -> Vec<String>
     let mut package_managers = Vec::new();
     let candidates = [
         ("Cargo.lock", "cargo"),
+        ("go.sum", "go"),
         ("package-lock.json", "npm"),
         ("pnpm-lock.yaml", "pnpm"),
         ("yarn.lock", "yarn"),

@@ -1,4 +1,4 @@
-# ADR: Source Inference Model For ato run / ato init
+# ADR: Shared Source Compiler For ato run / ato init / ato publish
 
 - Status: Proposed
 - Date: 2026-03-25
@@ -7,7 +7,7 @@
 
 ## 1. Context
 
-`ato.lock.json` is the canonical input for execution under the lock-first architecture. However, many real projects and onboarding flows still begin from source-only inputs.
+`ato.lock.json` is the canonical input for execution and distribution under the lock-first architecture. However, many real projects and onboarding flows still begin from source-only inputs.
 
 Typical examples include:
 
@@ -20,38 +20,41 @@ This creates a necessary transitional problem:
 
 - `ato run` must be able to execute from source when no canonical lock exists yet
 - `ato init` must be able to materialize a durable `ato.lock.json` from source
+- `ato publish` must be able to package and distribute from source without inventing a separate manifest-first path
 - the system must preserve lock-first semantics without falling back to ad hoc manifest-first execution
 
 The core question is not whether inference is allowed. The core question is how much may be inferred deterministically, what must remain unresolved, and what may only be resolved through sandboxed execution, user confirmation, or host-local binding.
 
-This ADR defines the source inference model for `ato run` and `ato init`.
+This ADR defines the shared source compiler model that serves `ato run`, `ato init`, and source-backed `ato publish`.
 
 ## 2. Decision
 
-ato-cli defines a shared source inference pipeline for `ato run` and `ato init`.
+ato-cli defines a shared source compiler for `ato run`, `ato init`, and source-backed `ato publish`.
 
-Both commands use the same inference and resolution engine, but they differ in materialization scope and durability semantics.
+All three commands use the same infer / resolve / materialize compiler, but they consume its output with different persistence and success semantics.
 
 - `ato run` performs attempt-scoped materialization
 - `ato init` performs workspace-scoped materialization
+- `ato publish` consumes canonical lock-shaped state produced by the same compiler and must not own a separate manifest-first heuristic path
 
 More precisely:
 
 - `ato run` may start from source, but it must synthesize an ephemeral canonical lock state and host-local binding before execution
 - `ato init` may start from source, but it must synthesize and persist a workspace `ato.lock.json` and materialize it into the target workspace directory together with optional workspace-local state
+- `ato publish` may start from source, but it must synthesize canonical lock-shaped state before producer phases derive artifact identity, build closure, and publish metadata
 
 Canonical lock state in this ADR may be fully resolved or explicitly partially resolved. Unresolved state must be represented by first-class schema markers rather than by silent omission.
 
-The canonical lock state synthesized during inference should conform to the same logical lock-shaped model as `ato.lock.json`, even when it is ephemeral and not persisted. Execution-only metadata may exist outside the canonical hashed projection, but downstream consumers must operate on the canonical lock-shaped model rather than directly on source heuristics.
+The canonical lock state synthesized during inference should conform to the same logical lock-shaped model as `ato.lock.json`, even when it is ephemeral and not persisted. Execution-only or publish-only metadata may exist outside the canonical hashed projection, but downstream consumers must operate on the canonical lock-shaped model rather than directly on source heuristics.
 
 Unresolved state should preserve reason classes such as insufficient evidence, ambiguity, deferred host-local binding, policy-gated resolution, explicit user selection required, or bounded observation required.
 
-Inference must prioritize portable core data:
+The compiler must prioritize portable core data:
 
 - `contract`
 - `resolution`
 
-Inference must not prematurely freeze environment-specific data:
+The compiler must not prematurely freeze environment-specific data:
 
 - actual host port allocation
 - host-local paths
@@ -61,7 +64,7 @@ Inference must not prematurely freeze environment-specific data:
 
 These belong to `binding`, host-local state, or later approval flow.
 
-This ADR does not change the bidirectional hourglass pipeline defined in [docs/current-spec.md](docs/current-spec.md). It defines how source inputs are converted into canonical lock state before downstream execution semantics continue.
+This ADR does not change the bidirectional hourglass pipeline defined in [docs/current-spec.md](docs/current-spec.md). It defines how source inputs are compiled into canonical lock state before downstream run/init/publish semantics continue.
 
 ## 2.1 Implementation Status (2026-03-27)
 
@@ -73,6 +76,7 @@ Implemented:
 - canonical `ato.lock.json` input is reused as authoritative lock-shaped state rather than being semantically re-inferred
 - `ato run` performs attempt-scoped materialization by generating an attempt-local `ato.lock.json` plus provenance sidecar before entering downstream execution flow
 - `ato init` performs workspace-scoped materialization by writing durable `ato.lock.json` plus workspace-local `.ato/source-inference/provenance.json`, `.ato/source-inference/provenance-cache.json`, and `.ato/binding/seed.json`
+- source-backed `publish` has already moved phase selection and source-vs-artifact branching into shared application pipeline boundaries, even though full source-compiler consumption is still in flight
 - equal-rank process ambiguity is handled fail-closed: `run` requires selection or fails, while durable output may preserve unresolved markers
 - execution-critical preconditions are enforced before `run` proceeds: `contract.process`, `resolution.runtime`, `resolution.resolved_targets`, and `resolution.closure` must be present
 - compatibility inputs are already funneled through the shared source inference handoff instead of remaining fully separate ad hoc execution paths
@@ -83,6 +87,7 @@ Implemented but still partial:
 - compatibility import is now treated as an import-side draft handoff instead of source heuristic reinference, and canonical lock input skips source candidate generation during infer
 - equal-ranked candidate handling is deterministic (`score desc -> label asc -> entrypoint asc`) and remains fail-closed via unresolved markers plus selection gate
 - downstream run/validate preparation now consumes materialized lock-derived bridge manifests instead of carrying source-origin manifest semantics as execute authority
+- source-backed publish already routes source-vs-artifact choice through application publish phases, but a fully lock-derived artifact identity and provenance model is still incomplete
 - downstream lock-first consumption has progressed, but migration is still in flight and some compatibility helpers and transitional bridge artifacts remain
 - durable output validation already requires execution-critical fields or explicit unresolved markers, but the semantic depth of some resolved fields is intentionally shallow
 - `resolution.closure` currently normalizes into an explicit `kind`/`status` envelope; `metadata_only` remains allowed as `status = incomplete`, which satisfies lock-shaped handoff but does not yet represent a fully specified execution closure
@@ -97,6 +102,7 @@ Not yet implemented:
 - approval-gated and script-capable resolution is still placeholder-only; approval-required paths fail closed and explicit approval mode is not implemented yet
 - general sandbox-assisted closure completion and safe promotion of generated ecosystem lockfiles into durable workspace state is not implemented as a complete policy
 - some transitional install/build helpers still own bootstrap and preparation concerns outside the source inference core, even though execute authority now enters downstream through materialized lock-derived bridge manifests
+- source-backed `publish` still needs a fully fixed command-level contract for build closure, artifact identity class, and provenance linkage
 - `closure_digest` is computed from the normalized `resolution.closure` envelope only when the closure is digestable and `status = complete`; incomplete metadata-only closure state does not produce a digest
 - compatibility import can now emit `imported_artifact_closure` for an existing `.app` bundle on disk, and native-delivery source-derivation can promote an incomplete closure into `build_closure`; broader imported-artifact coverage across `.exe` / AppImage and richer closure completion remain future work
 - ecosystem and native-delivery framework observation now flow through shared read-only importer probes; source inference, build closure inputs, run/build preflight, and inspect provenance consume importer evidence rather than ad hoc filename scans
@@ -146,7 +152,7 @@ Examples:
 - generating execution plan artifacts
 - compatibility-only legacy manifest or `capsule.lock.json` bridge inputs
 
-Legacy `capsule.toml` and `capsule.lock.json` remain compatibility inputs only. Once a canonical `ato.lock.json` is authoritative, downstream run/build/validate paths must consume lock-derived artifacts instead of rediscovering manifest semantics from disk.
+Legacy `capsule.toml` and `capsule.lock.json` remain compatibility inputs only. Once a canonical `ato.lock.json` is authoritative, downstream run/build/publish/validate paths must consume lock-derived artifacts instead of rediscovering manifest semantics from disk.
 
 ### 3.4 Ephemeral lock state
 
@@ -255,15 +261,37 @@ Partially resolved durable output is allowed, but only when unresolved state is 
 
 `ato init` may persist unresolved fields only when they are explicitly represented and do not undermine deterministic re-validation of the resulting workspace state.
 
-### 4.3 Shared engine, different persistence
+### 4.3 ato publish
 
-Both commands must reuse the same inference rules for consistency.
+`ato publish` is a lock-first producer command.
+
+Responsibilities:
+
+- accept authoritative canonical lock or source inputs
+- compile source inputs into canonical lock-shaped state when needed
+- derive build / verify / publish metadata from that lock-shaped state
+- preserve artifact identity class and provenance linkage for distribution
+
+For source-started publish, `ato publish` must not keep a separate manifest-first interpretation path after canonical lock-shaped state has been synthesized for the publish attempt.
+
+Source-backed publish must distinguish at least:
+
+- source-derived unsigned bundle
+- locally finalized signed bundle
+- imported third-party artifact
+
+Imported artifacts may still be publishable, but they remain provenance-limited and must not claim source-derived rebuild reproducibility.
+
+### 4.4 Shared compiler, different persistence and consumption
+
+All three commands must reuse the same compiler rules for consistency.
 
 The difference is not what they infer. The difference is:
 
 - whether the result is ephemeral or durable
 - whether unresolved ambiguity is tolerated for immediate execution
 - whether attempt-scoped or workspace-scoped state is materialized as part of the command contract
+- whether publish identity / provenance rules permit distribution from that state
 
 ## 5. Inference Principles
 
