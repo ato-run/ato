@@ -10,17 +10,16 @@ use zstd::stream::write::Encoder as ZstdEncoder;
 use crate::error::{CapsuleError, Result};
 use crate::lockfile;
 use crate::lockfile::{CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME};
-use crate::manifest;
 use crate::packers::payload::{
     build_distribution_manifest, normalize_relative_utf8_path, reconstruct_from_chunks,
 };
 use crate::packers::sbom::{generate_embedded_sbom, SBOM_PATH};
-use crate::router::ManifestData;
+use crate::router::{CompatManifestBridge, ManifestData};
 
 #[derive(Debug, Clone)]
 pub struct WebPackOptions {
-    pub manifest_path: PathBuf,
-    pub manifest_dir: PathBuf,
+    pub compat_manifest: Option<CompatManifestBridge>,
+    pub workspace_root: PathBuf,
     pub output: Option<PathBuf>,
 }
 
@@ -53,13 +52,15 @@ pub fn pack(
         )));
     }
 
-    let loaded = manifest::load_manifest(&opts.manifest_path)?;
+    let bridge = opts.compat_manifest.as_ref().ok_or_else(|| {
+        CapsuleError::Pack("web pack requires compat manifest bridge".to_string())
+    })?;
     let entrypoint = plan
         .execution_entrypoint()
         .filter(|v| !v.trim().is_empty())
         .ok_or_else(|| CapsuleError::Pack("runtime=web target requires entrypoint".to_string()))?;
     let (entrypoint_dir, entrypoint_prefix) =
-        resolve_static_entrypoint(&opts.manifest_dir, &entrypoint)?;
+        resolve_static_entrypoint(&opts.workspace_root, &entrypoint)?;
 
     let temp_dir = tempfile::tempdir().map_err(CapsuleError::Io)?;
     let payload_tar_path = temp_dir.path().join("payload.tar");
@@ -80,7 +81,7 @@ pub fn pack(
     drop(payload_builder);
     let payload_tar_bytes = fs::read(&payload_tar_path).map_err(CapsuleError::Io)?;
     let (distribution_manifest, manifest_toml_bytes) =
-        build_distribution_manifest(&loaded.model, &payload_tar_bytes)?;
+        build_distribution_manifest(&bridge.manifest, &payload_tar_bytes)?;
     let rebuilt_payload = reconstruct_from_chunks(
         &payload_tar_bytes,
         &distribution_manifest
@@ -106,8 +107,8 @@ pub fn pack(
     let _ = zst_encoder.finish().map_err(CapsuleError::Io)?;
 
     let output_path = opts.output.unwrap_or_else(|| {
-        let name = loaded.model.name.replace('\"', "-");
-        opts.manifest_dir.join(format!("{}.capsule", name))
+        let name = bridge.manifest.name.replace('\"', "-");
+        opts.workspace_root.join(format!("{}.capsule", name))
     });
 
     let mut capsule_file = fs::File::create(&output_path).map_err(CapsuleError::Io)?;
@@ -115,9 +116,11 @@ pub fn pack(
     let manifest_tmp = temp_dir.path().join("capsule.toml");
     fs::write(&manifest_tmp, &manifest_toml_bytes).map_err(CapsuleError::Io)?;
     let lockfile_path = ensure_lockfile(
-        &opts.manifest_path,
-        &loaded.raw,
-        &loaded.raw_text,
+        &opts.workspace_root,
+        &bridge
+            .raw_value()
+            .map_err(|err| CapsuleError::Pack(err.to_string()))?,
+        &bridge.raw_toml,
         reporter.clone(),
     )?;
     append_regular_file_normalized(
@@ -137,7 +140,7 @@ pub fn pack(
         reproducible_mtime_epoch(),
     )?;
 
-    let sbom = generate_embedded_sbom(&loaded.model.name, &sbom_files)?;
+    let sbom = generate_embedded_sbom(&bridge.manifest.name, &sbom_files)?;
     let sbom_tmp = temp_dir.path().join(SBOM_PATH);
     fs::write(&sbom_tmp, sbom.document).map_err(CapsuleError::Io)?;
     append_regular_file_normalized(&mut outer, &sbom_tmp, SBOM_PATH, reproducible_mtime_epoch())?;
@@ -169,7 +172,7 @@ pub fn pack(
         reproducible_mtime_epoch(),
     )?;
     if let Some((readme_path, archive_name)) =
-        crate::packers::capsule::find_nearest_readme_candidate(&opts.manifest_dir)
+        crate::packers::capsule::find_nearest_readme_candidate(&opts.workspace_root)
     {
         append_regular_file_normalized(
             &mut outer,
@@ -184,15 +187,15 @@ pub fn pack(
 }
 
 fn ensure_lockfile(
-    manifest_path: &Path,
+    manifest_dir: &Path,
     manifest_raw: &toml::Value,
     manifest_text: &str,
     reporter: Arc<dyn crate::reporter::CapsuleReporter + 'static>,
 ) -> Result<PathBuf> {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         return tokio::task::block_in_place(|| {
-            handle.block_on(lockfile::ensure_lockfile(
-                manifest_path,
+            handle.block_on(lockfile::ensure_lockfile_in_dir(
+                manifest_dir,
                 manifest_raw,
                 manifest_text,
                 reporter,
@@ -202,8 +205,8 @@ fn ensure_lockfile(
     }
 
     let rt = tokio::runtime::Runtime::new().map_err(CapsuleError::Io)?;
-    rt.block_on(lockfile::ensure_lockfile(
-        manifest_path,
+    rt.block_on(lockfile::ensure_lockfile_in_dir(
+        manifest_dir,
         manifest_raw,
         manifest_text,
         reporter,

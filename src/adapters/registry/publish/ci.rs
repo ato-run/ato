@@ -374,45 +374,71 @@ pub(crate) fn build_capsule_artifact(
     version: &str,
     authoritative_input: Option<&crate::application::producer_input::ProducerAuthoritativeInput>,
 ) -> Result<PathBuf> {
-    if let Some(authoritative_input) = authoritative_input {
-        authoritative_input.validate_bridge_manifest()?;
-    }
-
-    let manifest_dir = manifest_path.parent().ok_or_else(|| {
-        anyhow::anyhow!("Manifest path has no parent: {}", manifest_path.display())
-    })?;
+    let (decision, manifest_dir) = if let Some(authoritative_input) = authoritative_input {
+        authoritative_input.validate_compat_bridge()?;
+        (
+            capsule_core::router::RuntimeDecision {
+                kind: match authoritative_input
+                    .descriptor
+                    .execution_runtime()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+                    .as_str()
+                {
+                    "source" | "native" => capsule_core::router::RuntimeKind::Source,
+                    "web" => capsule_core::router::RuntimeKind::Web,
+                    "wasm" => capsule_core::router::RuntimeKind::Wasm,
+                    "oci" | "docker" | "youki" | "runc" => capsule_core::router::RuntimeKind::Oci,
+                    other => anyhow::bail!("Unsupported runtime '{other}'"),
+                },
+                reason: format!(
+                    "lock target {}",
+                    authoritative_input.descriptor.selected_target_label()
+                ),
+                plan: authoritative_input.descriptor.clone(),
+            },
+            authoritative_input.descriptor.workspace_root.clone(),
+        )
+    } else {
+        let manifest_dir = manifest_path.parent().ok_or_else(|| {
+            anyhow::anyhow!("Manifest path has no parent: {}", manifest_path.display())
+        })?;
+        (
+            capsule_core::router::route_manifest(
+                manifest_path,
+                capsule_core::router::ExecutionProfile::Release,
+                None,
+            )?,
+            manifest_dir.to_path_buf(),
+        )
+    };
     let artifact_dir = std::env::temp_dir().join("ato-ci-artifacts");
     fs::create_dir_all(&artifact_dir)
         .with_context(|| format!("Failed to create {}", artifact_dir.display()))?;
     let artifact_path = artifact_dir.join(format!("{}-{}.capsule", name, version));
 
-    if let Some(plan) = crate::build::native_delivery::detect_build_strategy(manifest_dir)? {
+    if let Some(plan) = crate::build::native_delivery::detect_build_strategy(&manifest_dir)? {
         let result =
             crate::build::native_delivery::build_native_artifact(&plan, Some(&artifact_path))?;
         return Ok(result.artifact_path);
     }
-
-    let decision = capsule_core::router::route_manifest(
-        manifest_path,
-        capsule_core::router::ExecutionProfile::Release,
-        None,
-    )?;
 
     let reporter = std::sync::Arc::new(capsule_core::reporter::NoOpReporter)
         as std::sync::Arc<dyn capsule_core::reporter::CapsuleReporter + 'static>;
 
     match decision.kind {
         capsule_core::router::RuntimeKind::Source => {
-            let prepared_config = capsule_core::packers::source::prepare_source_config(
-                &decision.plan.manifest_path,
-                "strict".to_string(),
-                false,
-            )?;
+            let prepared_config =
+                capsule_core::packers::source::prepare_source_config_from_descriptor(
+                    &decision.plan,
+                    "strict".to_string(),
+                    false,
+                )?;
             capsule_core::packers::source::pack(
                 &decision.plan,
                 capsule_core::packers::source::SourcePackOptions {
-                    manifest_path: decision.plan.manifest_path.clone(),
-                    manifest_dir: decision.plan.manifest_dir.clone(),
+                    compat_manifest: decision.plan.compat_manifest.clone(),
+                    workspace_root: decision.plan.workspace_root.clone(),
                     config_json: prepared_config.config_json.clone(),
                     config_path: prepared_config.config_path.clone(),
                     output: Some(artifact_path.clone()),
@@ -437,23 +463,24 @@ pub(crate) fn build_capsule_artifact(
                 capsule_core::packers::web::pack(
                     &decision.plan,
                     capsule_core::packers::web::WebPackOptions {
-                        manifest_path: decision.plan.manifest_path.clone(),
-                        manifest_dir: decision.plan.manifest_dir.clone(),
+                        compat_manifest: decision.plan.compat_manifest.clone(),
+                        workspace_root: decision.plan.workspace_root.clone(),
                         output: Some(artifact_path.clone()),
                     },
                     reporter,
                 )?;
             } else {
-                let prepared_config = capsule_core::packers::source::prepare_source_config(
-                    &decision.plan.manifest_path,
-                    "strict".to_string(),
-                    false,
-                )?;
+                let prepared_config =
+                    capsule_core::packers::source::prepare_source_config_from_descriptor(
+                        &decision.plan,
+                        "strict".to_string(),
+                        false,
+                    )?;
                 capsule_core::packers::source::pack(
                     &decision.plan,
                     capsule_core::packers::source::SourcePackOptions {
-                        manifest_path: decision.plan.manifest_path.clone(),
-                        manifest_dir: decision.plan.manifest_dir.clone(),
+                        compat_manifest: decision.plan.compat_manifest.clone(),
+                        workspace_root: decision.plan.workspace_root.clone(),
                         config_json: prepared_config.config_json.clone(),
                         config_path: prepared_config.config_path.clone(),
                         output: Some(artifact_path.clone()),

@@ -95,8 +95,8 @@ manifest_hash = "sha256:dummy"
         .block_on(capsule_core::packers::capsule::pack(
             &decision.plan,
             capsule_core::packers::capsule::CapsulePackOptions {
-                manifest_path: manifest_path.clone(),
-                manifest_dir: project_root.to_path_buf(),
+                compat_manifest: decision.plan.compat_manifest.clone(),
+                workspace_root: project_root.to_path_buf(),
                 output: Some(output),
                 config_json,
                 config_path,
