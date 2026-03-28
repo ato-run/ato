@@ -1543,7 +1543,10 @@ target = "db"
                 lock_path: None,
                 workspace_root: PathBuf::from("/tmp"),
                 effective_state: None,
-                bridge_manifest: plan.manifest.clone(),
+                bridge_manifest:
+                    crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
+                        plan.manifest.clone(),
+                    ),
                 validation_mode: capsule_core::types::ValidationMode::Strict,
                 engine_override_declared: false,
                 compatibility_legacy_lock: None,

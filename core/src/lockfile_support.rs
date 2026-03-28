@@ -1,6 +1,7 @@
 //! Lockfile support helpers for tool bootstrap, downloads, and atomic filesystem writes.
 
 use super::*;
+use crate::bootstrap::{BootstrapBoundary, BootstrapVerificationKind};
 
 pub(super) struct PnpmCommand {
     pub(super) program: PathBuf,
@@ -12,6 +13,8 @@ pub(super) async fn ensure_uv(reporter: Arc<dyn CapsuleReporter + 'static>) -> R
         return Ok(found);
     }
 
+    let boundary =
+        BootstrapBoundary::network_tool("uv", BootstrapVerificationKind::ChecksumUnavailable);
     let version = UV_VERSION;
     reporter
         .notify(format!("⬇️  Downloading uv {}", version))
@@ -19,7 +22,7 @@ pub(super) async fn ensure_uv(reporter: Arc<dyn CapsuleReporter + 'static>) -> R
     let target_triple = platform_triple()?;
     let tools_dir = toolchain_cache_dir()?
         .join("tools")
-        .join("uv")
+        .join(boundary.subject_name.as_str())
         .join(version);
     std::fs::create_dir_all(&tools_dir)
         .map_err(|e| CapsuleError::Pack(format!("Failed to create uv tools directory: {}", e)))?;
@@ -56,14 +59,15 @@ pub(super) async fn ensure_pnpm(
             args_prefix: Vec::new(),
         });
     }
-
+    let boundary =
+        BootstrapBoundary::network_tool("pnpm", BootstrapVerificationKind::ChecksumUnavailable);
     let version = PNPM_VERSION;
     reporter
         .notify(format!("⬇️  Downloading pnpm {}", version))
         .await?;
     let tools_dir = toolchain_cache_dir()?
         .join("tools")
-        .join("pnpm")
+        .join(boundary.subject_name.as_str())
         .join(version);
     std::fs::create_dir_all(&tools_dir)
         .map_err(|e| CapsuleError::Pack(format!("Failed to create pnpm tools directory: {}", e)))?;

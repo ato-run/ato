@@ -115,6 +115,22 @@ ato treats ecosystem lockfiles and framework metadata as read-only importer evid
 - importer probing is read-only; ato does not run package managers or framework CLIs as part of importer observation
 - transitional helpers such as `generate_uv_lock`, `generate_pnpm_lock`, and `generate_deno_lock` keep their public names but now behave as evidence wrappers that either find required importer evidence or fail closed with manual-generation guidance
 
+### 2.6 Bootstrap Trust Boundary
+
+ato distinguishes three bootstrap authorities.
+
+- `locked_artifact`: a runtime or tool artifact declared in lock data and installed into a durable user cache with checksum verification
+- `network_bootstrap`: a network fetch used to acquire a helper such as `uv`, `pnpm`, or `nacelle`; this remains policy-gated and cache-backed rather than becoming canonical lock content
+- `host_capability`: a host-local executable that must already exist on `PATH` for authoritative lock-derived source execution or native finalize/projection
+
+Current boundary rules:
+
+- lock-derived source execution prefers `host_capability` for host runtimes/tools such as `node`, `python`, `deno`, and `uv`
+- compatibility/runtime-manager install paths use `locked_artifact` when `capsule.lock.json` carries runtime or tool artifacts plus checksums
+- `nacelle` auto-bootstrap is a `network_bootstrap` path with a typed network policy derived from environment configuration
+- native-delivery finalize helpers such as `codesign` and `signtool` are `host_capability`, but they may still appear in `build_environment.helper_tools` as build-environment claims rather than as canonical closure artifacts
+- durable bootstrap caches live under `~/.ato/runtimes`, `~/.ato/toolchains`, and `~/.ato/engines`; transient download/extract staging remains under `.downloads` and `.tmp` inside those durable roots
+
 ## 3. Supported CLI Surface
 
 ## 3.1 Primary Commands
@@ -1101,6 +1117,8 @@ Current install JSON includes these top-level fields:
 - promotion
 
 `local_derivation` and `projection` are host-local derived artifact metadata. They may appear in install results and workspace-local files, but they do not participate in canonical lock identity or distribution lock content.
+
+`PreparedRunContext.bridge_manifest`, execution plans, `config.json`, and native-delivery finalize/projection plans are derived artifacts. When an authoritative `ato.lock.json` is available, run/build flows must prefer lock-derived artifacts and must not rediscover manifest semantics from disk except inside compatibility-only paths.
 
 Install kind currently includes:
 

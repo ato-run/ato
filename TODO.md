@@ -201,17 +201,17 @@ Ato は package manager を再実装するのではなく、ecosystem truth を 
 
 ### やること
 
-- [ ] `ensure_uv` / `ensure_node` / `ensure_pnpm` / nacelle bootstrap / native-delivery finalize helper の扱いを比較する
-- [ ] download source / checksum / cache reuse / offline policy を共通モデルに寄せる
-- [ ] bootstrap artifact を一時 cache と durable store のどちらに置くか決める
-- [ ] 環境変数ベースの bootstrap policy を typed な policy overlay に寄せる方針を作る
-- [ ] tool bootstrap artifact を closure の一部として扱うか、host capability として扱うかをルール化する
-- [ ] desktop native-delivery の signing / packaging helper を toolchain closure にどう含めるか定める
+- [x] `ensure_uv` / `ensure_node` / `ensure_pnpm` / nacelle bootstrap / native-delivery finalize helper の扱いを比較する
+- [x] download source / checksum / cache reuse / offline policy を共通モデルに寄せる
+- [x] bootstrap artifact を一時 cache と durable store のどちらに置くか決める
+- [x] 環境変数ベースの bootstrap policy を typed な policy overlay に寄せる方針を作る
+- [x] tool bootstrap artifact を closure の一部として扱うか、host capability として扱うかをルール化する
+- [x] desktop native-delivery の signing / packaging helper を toolchain closure にどう含めるか定める
 
 ### 完了条件
 
-- runtime/tool bootstrap の安全境界を、実装ごとではなく共通ルールで説明できる
-- build closure と host capability の境界がぶれない
+- [x] runtime/tool bootstrap の安全境界を、実装ごとではなく共通ルールで説明できる
+- [x] build closure と host capability の境界がぶれない
 
 ---
 
@@ -219,11 +219,11 @@ Ato は package manager を再実装するのではなく、ecosystem truth を 
 
 ### やること
 
-- [ ] authoritative lock がある場合に disk 上の manifest semantics を再解釈しない箇所を増やす
-- [ ] compatibility path のみが legacy manifest/lock を見るように整理する
-- [ ] lock-derived execution に必要な最小入力を型で明示する
-- [ ] `config.json` と execution plan が canonical input ではなく derived artifact であることをコードにも反映する
-- [ ] desktop native-delivery の finalize / install / projection plan も derived artifact として表現する
+- [x] authoritative lock がある場合に disk 上の manifest semantics を再解釈しない箇所を増やす
+- [x] compatibility path のみが legacy manifest/lock を見るように整理する
+- [x] lock-derived execution に必要な最小入力を型で明示する
+- [x] `config.json` と execution plan が canonical input ではなく derived artifact であることをコードにも反映する
+- [x] desktop native-delivery の finalize / install / projection plan も derived artifact として表現する
 
 ### 完了条件
 
