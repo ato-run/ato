@@ -473,6 +473,7 @@ fn spawn_github_archive_server(
     }
 }
 
+#[allow(dead_code)]
 fn extract_manifest_from_archive(path: &Path) -> String {
     let bytes = fs::read(path).unwrap();
     let mut archive = tar::Archive::new(std::io::Cursor::new(bytes));
