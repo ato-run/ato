@@ -1,9 +1,5 @@
 use anyhow::{Context, Result};
 use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::importer::{
-    probe_ecosystem_lockfile_evidence, probe_required_cargo_lockfile, probe_required_node_lockfile,
-    probe_required_python_lockfile, ImportedEvidence, ImporterId, ProbeResult,
-};
 use capsule_core::types::ValidationMode;
 use capsule_core::CapsuleReporter;
 use serde::Serialize;
@@ -119,30 +115,19 @@ pub fn execute_pack_command_with_injected_manifest(
         for advisory in &resolved.advisories {
             futures::executor::block_on(reporter.warn(advisory.clone()))?;
         }
-        if resolved.manifest_path.exists() {
-            manifest = resolved.manifest_path.clone();
-        }
+        manifest = resolved.manifest_path.clone();
         Some(resolved)
     } else {
         None
     };
 
-    let authoritative_lock_present = authoritative_input.is_some();
+    // Build still relies on a manifest-shaped compatibility bridge for source-only
+    // and injected-manifest flows. Keep this temporary write isolated until packers
+    // can consume lock-derived producer input directly.
     let mut temporary_manifest: Option<TemporaryManifestGuard> = None;
     if !manifest.exists() {
         let stdin_is_tty = std::io::stdin().is_terminal();
-        if let Some(authoritative_input) = authoritative_input.as_ref() {
-            std::fs::write(&manifest, &authoritative_input.manifest_raw).with_context(|| {
-                format!(
-                    "Failed to write temporary producer manifest: {}",
-                    manifest.display()
-                )
-            })?;
-            temporary_manifest = Some(TemporaryManifestGuard::new(
-                manifest.clone(),
-                !keep_failed_artifacts,
-            ));
-        } else if init_if_missing {
+        if init_if_missing {
             if !stdin_is_tty {
                 anyhow::bail!("--init requires an interactive TTY");
             }
@@ -171,7 +156,7 @@ pub fn execute_pack_command_with_injected_manifest(
             ));
         } else {
             futures::executor::block_on(reporter.warn(
-                "No `capsule.toml` found. Using defaults. Run `ato init` to materialize `ato.lock.json`, `ato init --legacy prompt` for the old prompt flow, or `ato build --init` to create an inferred `capsule.toml`.".to_string(),
+                "No `capsule.toml` found. Using defaults. Run `ato init` to materialize `ato.lock.json`, or `ato build --init` to create an inferred compatibility `capsule.toml`.".to_string(),
             ))?;
             let inferred = infer_zero_config_manifest(&dir)?;
             std::fs::write(&manifest, inferred).with_context(|| {
@@ -189,10 +174,10 @@ pub fn execute_pack_command_with_injected_manifest(
     }
 
     let _temporary_manifest_guard = temporary_manifest;
+    if let Some(authoritative_input) = authoritative_input.as_ref() {
+        authoritative_input.validate_bridge_manifest()?;
+    }
     let _authoritative_input_guard = authoritative_input;
-    let synthesized_producer_manifest = _authoritative_input_guard
-        .as_ref()
-        .is_some_and(|input| !input.manifest_path.exists());
     let validation_mode = if injected_manifest.is_some() {
         ValidationMode::Preview
     } else {
@@ -200,61 +185,45 @@ pub fn execute_pack_command_with_injected_manifest(
     };
 
     let validation_started = Instant::now();
-    let decision = if let Some(authoritative_input) = _authoritative_input_guard.as_ref() {
-        capsule_core::router::route_lock(
-            &authoritative_input.lock_path,
-            &authoritative_input.lock,
-            &authoritative_input.workspace_root,
-            capsule_core::router::ExecutionProfile::Release,
-            None,
-        )?
-    } else {
-        capsule_core::router::route_manifest_with_validation_mode(
-            &manifest,
-            capsule_core::router::ExecutionProfile::Release,
-            None,
-            validation_mode,
-        )?
-    };
+    let decision = capsule_core::router::route_manifest_with_validation_mode(
+        &manifest,
+        capsule_core::router::ExecutionProfile::Release,
+        None,
+        validation_mode,
+    )?;
     let loaded_manifest =
         capsule_core::manifest::load_manifest_with_validation_mode(&manifest, validation_mode)?;
-    let raw_manifest = manifest_for_build_validation(
-        authoritative_lock_present,
-        &decision.plan.manifest,
-        &loaded_manifest.raw_text,
-        loaded_manifest.raw.clone(),
-    )?;
+    let raw_manifest: toml::Value = toml::from_str(&loaded_manifest.raw_text)
+        .context("Failed to parse manifest TOML for IPC validation")?;
     let capsule_name = loaded_manifest.model.name.clone();
     let capsule_version = loaded_manifest.model.version.clone();
-    if !synthesized_producer_manifest {
-        capsule_core::diagnostics::manifest::validate_manifest_for_build_with_mode(
-            &manifest,
-            decision.plan.selected_target_label(),
-            validation_mode,
+    capsule_core::diagnostics::manifest::validate_manifest_for_build_with_mode(
+        &manifest,
+        decision.plan.selected_target_label(),
+        validation_mode,
+    )?;
+    let ipc_diagnostics =
+        crate::ipc::validate::validate_manifest(&raw_manifest, &loaded_manifest.dir).map_err(
+            |err| {
+                AtoExecutionError::execution_contract_invalid(
+                    format!("IPC validation failed: {err}"),
+                    None,
+                    None,
+                )
+            },
         )?;
-        let ipc_diagnostics =
-            crate::ipc::validate::validate_manifest(&raw_manifest, &loaded_manifest.dir).map_err(
-                |err| {
-                    AtoExecutionError::execution_contract_invalid(
-                        format!("IPC validation failed: {err}"),
-                        None,
-                        None,
-                    )
-                },
-            )?;
-        if crate::ipc::validate::has_errors(&ipc_diagnostics) {
-            return Err(AtoExecutionError::execution_contract_invalid(
-                crate::ipc::validate::format_diagnostics(&ipc_diagnostics),
-                None,
-                None,
-            )
-            .into());
-        }
-        for diagnostic in ipc_diagnostics {
-            futures::executor::block_on(reporter.warn(diagnostic.to_string()))?;
-        }
-        run_v03_build_lifecycle_steps(&decision.plan, &reporter)?;
+    if crate::ipc::validate::has_errors(&ipc_diagnostics) {
+        return Err(AtoExecutionError::execution_contract_invalid(
+            crate::ipc::validate::format_diagnostics(&ipc_diagnostics),
+            None,
+            None,
+        )
+        .into());
     }
+    for diagnostic in ipc_diagnostics {
+        futures::executor::block_on(reporter.warn(diagnostic.to_string()))?;
+    }
+    run_v03_build_lifecycle_steps(&decision.plan, &reporter)?;
     record_timing(
         &mut timing_entries,
         "build.validation",
@@ -535,22 +504,6 @@ pub fn execute_pack_command_with_injected_manifest(
     emit_timings(reporter.clone(), timings, &timing_entries)?;
 
     Ok(result)
-}
-
-fn manifest_for_build_validation(
-    authoritative_lock_present: bool,
-    routed_manifest: &toml::Value,
-    raw_manifest_text: &str,
-    fallback_manifest: toml::Value,
-) -> Result<toml::Value> {
-    if authoritative_lock_present {
-        return Ok(routed_manifest.clone());
-    }
-
-    match toml::from_str(raw_manifest_text) {
-        Ok(parsed) => Ok(parsed),
-        Err(_) => Ok(fallback_manifest),
-    }
 }
 
 fn record_timing(entries: &mut Vec<(String, Duration)>, label: &str, elapsed: Duration) {
@@ -863,104 +816,96 @@ fn plan_v03_build_provision_command(
     }
 
     if matches!(driver.as_str(), "node") {
+        let package_lock = execution_working_directory.join("package-lock.json");
+        let yarn_lock = execution_working_directory.join("yarn.lock");
+        let pnpm_lock = execution_working_directory.join("pnpm-lock.yaml");
+        let bun_lock = execution_working_directory.join("bun.lock");
+        let bun_lockb = execution_working_directory.join("bun.lockb");
+        let lockfile_check_paths = vec![
+            (
+                "package-lock.json",
+                package_lock.clone(),
+                package_lock.exists(),
+            ),
+            ("yarn.lock", yarn_lock.clone(), yarn_lock.exists()),
+            ("pnpm-lock.yaml", pnpm_lock.clone(), pnpm_lock.exists()),
+            ("bun.lock", bun_lock.clone(), bun_lock.exists()),
+            ("bun.lockb", bun_lockb.clone(), bun_lockb.exists()),
+        ];
         debug!(
             phase = "build",
             runtime,
             driver,
             manifest_dir = %manifest_dir.display(),
             execution_working_directory = %execution_working_directory.display(),
+            lockfile_check_paths = ?lockfile_check_paths,
             "Provision command path diagnostics"
         );
-        return provision_command_from_node_importer(&execution_working_directory);
+        let mut matches = Vec::new();
+        if package_lock.exists() {
+            matches.push("npm ci");
+        }
+        if yarn_lock.exists() {
+            matches.push("yarn install --frozen-lockfile");
+        }
+        if pnpm_lock.exists() {
+            matches.push("pnpm install --frozen-lockfile");
+        }
+        if bun_lock.exists() || bun_lockb.exists() {
+            matches.push("bun install --frozen-lockfile");
+        }
+        return match matches.as_slice() {
+            [] => Err(AtoExecutionError::lock_incomplete(
+                "source/node target requires one of package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lock, or bun.lockb",
+                Some("package-lock.json"),
+            )
+            .into()),
+            [command] => Ok(Some((*command).to_string())),
+            _ => Err(AtoExecutionError::lock_incomplete(
+                "multiple node lockfiles detected; keep only one of package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lock, or bun.lockb",
+                Some("package-lock.json"),
+            )
+            .into()),
+        };
     }
 
     if matches!(driver.as_str(), "python") {
+        let uv_lock = execution_working_directory.join("uv.lock");
         debug!(
             phase = "build",
             runtime,
             driver,
             manifest_dir = %manifest_dir.display(),
             execution_working_directory = %execution_working_directory.display(),
+            lockfile_check_paths = ?vec![("uv.lock", uv_lock.clone(), uv_lock.exists())],
             "Provision command path diagnostics"
         );
-        return provision_command_from_python_importer(&execution_working_directory);
+        return if uv_lock.exists() {
+            Ok(Some("uv sync --frozen".to_string()))
+        } else {
+            Err(AtoExecutionError::lock_incomplete(
+                "source/python target requires uv.lock for fail-closed provisioning",
+                Some("uv.lock"),
+            )
+            .into())
+        };
     }
 
+    let cargo_lock = execution_working_directory.join("Cargo.lock");
     debug!(
         phase = "build",
         runtime,
         driver,
         manifest_dir = %manifest_dir.display(),
         execution_working_directory = %execution_working_directory.display(),
+        lockfile_check_paths = ?vec![("Cargo.lock", cargo_lock.clone(), cargo_lock.exists())],
         "Provision command path diagnostics"
     );
-    if matches!(driver.as_str(), "native") {
-        return provision_command_from_cargo_importer(&execution_working_directory);
+    if matches!(driver.as_str(), "native") && cargo_lock.exists() {
+        return Ok(Some("cargo fetch --locked".to_string()));
     }
 
     Ok(None)
-}
-
-fn provision_command_from_node_importer(
-    execution_working_directory: &Path,
-) -> Result<Option<String>> {
-    match probe_required_node_lockfile(execution_working_directory)? {
-        ProbeResult::Found(values) => Ok(Some(node_install_command_from_evidence(&values[0])?)),
-        ProbeResult::Missing(missing) => Err(AtoExecutionError::lock_incomplete(
-            missing.message,
-            Some("package-lock.json"),
-        )
-        .into()),
-        ProbeResult::Ambiguous(ambiguity) => Err(AtoExecutionError::lock_incomplete(
-            ambiguity.message,
-            Some("package-lock.json"),
-        )
-        .into()),
-        ProbeResult::NotApplicable => Ok(None),
-    }
-}
-
-fn provision_command_from_python_importer(
-    execution_working_directory: &Path,
-) -> Result<Option<String>> {
-    match probe_required_python_lockfile(execution_working_directory)? {
-        ProbeResult::Found(_) => Ok(Some("uv sync --frozen".to_string())),
-        ProbeResult::Missing(missing) => {
-            Err(AtoExecutionError::lock_incomplete(missing.message, Some("uv.lock")).into())
-        }
-        ProbeResult::Ambiguous(ambiguity) => {
-            Err(AtoExecutionError::lock_incomplete(ambiguity.message, Some("uv.lock")).into())
-        }
-        ProbeResult::NotApplicable => Ok(None),
-    }
-}
-
-fn provision_command_from_cargo_importer(
-    execution_working_directory: &Path,
-) -> Result<Option<String>> {
-    match probe_required_cargo_lockfile(execution_working_directory)? {
-        ProbeResult::Found(_) => Ok(Some("cargo fetch --locked".to_string())),
-        ProbeResult::Missing(_) | ProbeResult::NotApplicable => Ok(None),
-        ProbeResult::Ambiguous(ambiguity) => {
-            Err(AtoExecutionError::lock_incomplete(ambiguity.message, Some("Cargo.lock")).into())
-        }
-    }
-}
-
-fn node_install_command_from_evidence(evidence: &ImportedEvidence) -> Result<String> {
-    let command = match evidence.importer_id {
-        ImporterId::Npm => "npm ci",
-        ImporterId::Yarn => "yarn install --frozen-lockfile",
-        ImporterId::Pnpm => "pnpm install --frozen-lockfile",
-        ImporterId::Bun => "bun install --frozen-lockfile",
-        other => {
-            return Err(anyhow::anyhow!(
-                "unsupported node importer '{}' for build provision command",
-                other.as_str()
-            ))
-        }
-    };
-    Ok(command.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -1162,13 +1107,21 @@ fn compute_v03_build_cache_key(
 }
 
 fn native_lockfiles_for_build_cache(working_dir: &Path) -> Vec<PathBuf> {
-    let mut paths = probe_ecosystem_lockfile_evidence(working_dir)
-        .unwrap_or_default()
-        .into_iter()
-        .flat_map(|evidence| evidence.paths)
-        .collect::<Vec<_>>();
+    let mut paths = [
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "bun.lock",
+        "bun.lockb",
+        "uv.lock",
+        "Cargo.lock",
+        "deno.lock",
+        "poetry.lock",
+    ]
+    .into_iter()
+    .map(|name| working_dir.join(name))
+    .filter(|path| path.exists())
+    .collect::<Vec<_>>();
     paths.sort();
-    paths.dedup();
     paths
 }
 
@@ -1345,8 +1298,8 @@ fn sign_if_requested(
 #[cfg(test)]
 mod tests {
     use super::{
-        execute_pack_command_with_injected_manifest, manifest_for_build_validation,
-        plan_v03_build_provision_command, run_v03_build_lifecycle_steps,
+        execute_pack_command_with_injected_manifest, plan_v03_build_provision_command,
+        run_v03_build_lifecycle_steps,
     };
     use capsule_core::router::{ExecutionProfile, ManifestData};
     use std::ffi::OsString;
@@ -1523,34 +1476,29 @@ port = 18080
         assert!(result.artifact.as_ref().is_some_and(|path| path.exists()));
     }
 
-    #[test]
-    fn authoritative_build_validation_prefers_routed_manifest() {
-        let routed = toml::from_str::<toml::Value>(
-            r#"
-schema_version = "0.3"
-name = "demo"
-version = "0.1.0"
-type = "app"
-"#,
-        )
-        .expect("parse routed manifest");
-
-        let manifest = manifest_for_build_validation(
-            true,
-            &routed,
-            "not valid toml = ",
-            toml::Value::String("fallback".to_string()),
-        )
-        .expect("use routed manifest");
-
-        assert_eq!(manifest, routed);
-    }
-
     fn manifest_with_schema_and_target(
         schema_version: &str,
         manifest_dir: PathBuf,
         entries: Vec<(&str, toml::Value)>,
     ) -> ManifestData {
+        let runtime = entries
+            .iter()
+            .find(|(key, _)| *key == "runtime")
+            .and_then(|(_, value)| value.as_str())
+            .unwrap_or("source")
+            .to_string();
+        let driver = entries
+            .iter()
+            .find(|(key, _)| *key == "driver")
+            .and_then(|(_, value)| value.as_str())
+            .unwrap_or("node")
+            .to_string();
+        let entrypoint = entries
+            .iter()
+            .find(|(key, _)| *key == "entrypoint")
+            .and_then(|(_, value)| value.as_str())
+            .unwrap_or("main.ts")
+            .to_string();
         let mut manifest = toml::map::Map::new();
         manifest.insert(
             "schema_version".to_string(),
@@ -1563,22 +1511,61 @@ type = "app"
         );
 
         let mut target = toml::map::Map::new();
-        for (key, value) in entries {
-            target.insert(key.to_string(), value);
+        for (key, value) in &entries {
+            target.insert((*key).to_string(), value.clone());
         }
 
         let mut targets = toml::map::Map::new();
         targets.insert("default".to_string(), toml::Value::Table(target));
         manifest.insert("targets".to_string(), toml::Value::Table(targets));
 
-        capsule_core::router::execution_descriptor_from_manifest_parts(
-            toml::Value::Table(manifest),
-            manifest_dir.join("capsule.toml"),
+        let mut lock = capsule_core::ato_lock::AtoLock::default();
+        lock.contract.entries.insert(
+            "metadata".to_string(),
+            serde_json::json!({
+                "name": "demo",
+                "default_target": "default",
+            }),
+        );
+        lock.contract.entries.insert(
+            "process".to_string(),
+            serde_json::json!({
+                "driver": driver,
+                "entrypoint": entrypoint,
+            }),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            serde_json::json!({
+                "kind": runtime,
+                "selected_target": "default",
+            }),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            serde_json::json!([{
+                "label": "default",
+                "runtime": runtime,
+                "driver": driver,
+                "entrypoint": entrypoint,
+            }]),
+        );
+        let lock_path = manifest_dir.join("ato.lock.json");
+        let workspace_root = manifest_dir.clone();
+        let runtime_model = capsule_core::lock_runtime::resolve_lock_runtime_model(&lock, None)
+            .expect("resolve test runtime model");
+
+        ManifestData {
+            manifest: toml::Value::Table(manifest),
+            manifest_path: manifest_dir.join("capsule.toml"),
             manifest_dir,
-            ExecutionProfile::Dev,
-            Some("default"),
-            std::collections::HashMap::new(),
-        )
-        .expect("execution descriptor")
+            lock,
+            lock_path,
+            workspace_root,
+            profile: ExecutionProfile::Dev,
+            selected_target: "default".to_string(),
+            runtime_model,
+            state_source_overrides: std::collections::HashMap::new(),
+        }
     }
 }

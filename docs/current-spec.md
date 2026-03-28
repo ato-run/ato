@@ -230,7 +230,7 @@ Current contract:
 - compatibility import may emit `imported_artifact_closure` for an existing native artifact such as a `.app` bundle; this remains provenance-limited and distinct from source-derived build closure
 - canonical lock identity remains `schema_version + resolution + contract`; embedded `binding`, `policy`, `attestations`, and `signatures` do not affect `lock_id`
 - may persist partially resolved output, but unresolved state must remain inspectable through first-class markers and provenance metadata
-- legacy manifest-first helpers remain available through `ato init --legacy prompt` and `ato init --legacy manual`
+- top-level `ato init` only materializes durable `ato.lock.json` workspace state; compatibility `capsule.toml` scaffolding remains on `ato build --init` and local manifest recovery paths
 
 ### build
 

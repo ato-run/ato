@@ -9,11 +9,19 @@ All notable changes to `ato-cli` will be documented in this file.
 #### Breaking Changes
 
 - Add public single-file input resolution and lock-first execution metadata required by the new init and run flows
+- Make top-level `ato init` durable-only; compatibility `capsule.toml` scaffolding remains on `ato build --init` and recovery paths
+
+#### Bug Fixes
+
+- Compute registry `closure_digest` from canonical normalized `resolution.closure` instead of hashing raw serialized JSON
+
+#### Documentation
+
+- Align manifest examples and lock-first migration notes with current `capsule.toml` and `ato init` behavior
 
 ## [0.5.6] - 2026-03-26
 
 ### What Changed
-
 
 #### Bug Fixes
 
@@ -28,7 +36,6 @@ All notable changes to `ato-cli` will be documented in this file.
 - Harden github install and build fallback flows
 
 - Correct argument passing in infer_source_driver function
-
 
 #### Features
 
@@ -99,7 +106,6 @@ All notable changes to `ato-cli` will be documented in this file.
 - Implement process management functionality
 
 - Update README and add tests for Python, Node, Deno, Bun, and custom app config generation
-
 
 #### Other Changes
 
@@ -173,20 +179,17 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Implement CLI reporters for metrics reporting: StdoutReporter and JsonReporter
 
-
 #### Refactoring
 
 - Streamline ato-cli modules and remove dead code ([#171](https://github.com/Koh0920/ato-cli/pull/171))
 
 - Clean up error handling and improve script documentation
 
-
 #### Tests
 
 - Clarify capsule SBOM verification assertions
 
 - Verify SBOM embedding in capsule packer
-
 
 ## [0.5.5] - 2026-03-26
 

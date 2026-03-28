@@ -70,7 +70,7 @@
   - [x] `build_closure`（native-delivery source-derivation path）
   - [x] `imported_artifact_closure`（compatibility import の `.app` path）
 - [x] `closure_digest` の定義を固定する
-- [x] publish / install / run / build で `closure_digest` に期待してよい意味をそろえる
+- [ ] publish / install / run / build で `closure_digest` に期待してよい意味をそろえる
 - [x] complete closure と incomplete/unresolved closure の区別を first-class にする
 - [x] ecosystem lockfile digest を closure 全体の identity と混同しないルールを定める
 - [x] desktop native-delivery で必要な `build_environment` closure を producer に接続する
@@ -171,7 +171,7 @@
 
 - [x] desktop native-delivery の “本命” と “import compatibility path” が混ざらない
 - [x] README / ADR / 実装で `.app` import の位置づけが一致する
-- [x] desktop native-delivery でも lock-first canonical model が成立する
+- [ ] desktop native-delivery でも lock-first canonical model が成立する
 
 ---
 
@@ -210,7 +210,7 @@ Ato は package manager を再実装するのではなく、ecosystem truth を 
 
 ### 完了条件
 
-- [x] runtime/tool bootstrap の安全境界を、実装ごとではなく共通ルールで説明できる
+- [ ] runtime/tool bootstrap の安全境界を、実装ごとではなく共通ルールで説明できる
 - [x] build closure と host capability の境界がぶれない
 
 ---
@@ -229,6 +229,8 @@ Ato は package manager を再実装するのではなく、ecosystem truth を 
 
 - execution plan と `config.json` が一貫して派生物であり、authority source ではない状態になる
 - finalize/project/install の host-local plan も canonical source と混線しない
+
+注: bridge manifest への寄せは進んだが、producer/build path には temporary `capsule.toml` write を使う transitional compatibility bridge がまだ残っている
 
 ---
 
