@@ -183,17 +183,17 @@ Ato は package manager を再実装するのではなく、ecosystem truth を 
 
 ### やること
 
-- [ ] `uv.lock` / `pnpm-lock.yaml` / `deno.lock` / `package-lock.json` / `Cargo.lock` / `go.sum` 等を evidence importer として整理する
-- [ ] 「ecosystem が解くこと」と「Ato が canonical 化すること」を分離する
-- [ ] `generate_uv_lock()` / `generate_pnpm_lock()` の責務を見直す
-- [ ] 自動生成しない方針と、将来 safe に生成してよい範囲を分けて定義する
-- [ ] importer provenance を inspectable にする
-- [ ] native-delivery framework adapter（Tauri / Electron / Wails）を importer 的に整理する
+- [x] `uv.lock` / `pnpm-lock.yaml` / `deno.lock` / `package-lock.json` / `Cargo.lock` / `go.sum` 等を evidence importer として整理する
+- [x] 「ecosystem が解くこと」と「Ato が canonical 化すること」を分離する
+- [x] `generate_uv_lock()` / `generate_pnpm_lock()` の責務を見直す
+- [x] 自動生成しない方針と、将来 safe に生成してよい範囲を分けて定義する
+- [x] importer provenance を inspectable にする
+- [x] native-delivery framework adapter（Tauri / Electron / Wails）を importer 的に整理する
 
 ### 完了条件
 
-- Ato が package manager / framework CLI を再実装せず、ecosystem truth を importer として利用する構図が明確になる
-- importer の出力が canonical truth ではなく canonical 化の入力であることが明確になる
+- [x] Ato が package manager / framework CLI を再実装せず、ecosystem truth を importer として利用する構図が明確になる
+- [x] importer の出力が canonical truth ではなく canonical 化の入力であることが明確になる
 
 ---
 
