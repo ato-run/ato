@@ -46,6 +46,14 @@ struct LegacyProducerBridge {
     origin: LegacyProducerBridgeOrigin,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DesktopSourcePublishContract {
+    pub(crate) framework: String,
+    pub(crate) target: String,
+    pub(crate) mode: String,
+    pub(crate) closure_status: String,
+}
+
 impl Drop for ProducerMaterializationCleanup {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.run_state_dir);
@@ -116,6 +124,12 @@ impl ProducerAuthoritativeInput {
         self.legacy_producer_bridge
             .as_ref()
             .and_then(|bridge| bridge.bridge.toml_value().ok())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn legacy_producer_manifest_text(&self) -> Option<&str> {
+        self.legacy_producer_bridge()
+            .map(CompatManifestBridge::manifest_text)
     }
 
     pub(crate) fn validate_legacy_producer_bridge(&self) -> Result<()> {
@@ -263,6 +277,138 @@ impl ProducerAuthoritativeInput {
 
     pub(crate) fn publish_metadata(&self) -> Option<PublishArtifactMetadata> {
         publish_metadata_from_lock(&self.descriptor.lock)
+    }
+
+    pub(crate) fn publish_metadata_for_source_artifact(
+        &self,
+        finalized_locally: bool,
+    ) -> Option<PublishArtifactMetadata> {
+        let mut metadata = self.publish_metadata()?;
+        if finalized_locally {
+            metadata.identity_class = PublishArtifactIdentityClass::LocallyFinalizedSignedBundle;
+            metadata.provenance_limited = false;
+        }
+        Some(metadata)
+    }
+
+    pub(crate) fn serialized_lock_json(&self) -> Result<String> {
+        serde_json::to_string_pretty(&self.descriptor.lock)
+            .context("failed to serialize authoritative lock for distribution artifact")
+    }
+
+    pub(crate) fn desktop_source_publish_contract(&self) -> Option<DesktopSourcePublishContract> {
+        let delivery = self
+            .descriptor
+            .lock
+            .contract
+            .entries
+            .get("delivery")?
+            .as_object()?;
+        let artifact = delivery.get("artifact")?.as_object()?;
+        if artifact.get("kind").and_then(Value::as_str)? != "desktop-native" {
+            return None;
+        }
+
+        let mode = delivery
+            .get("mode")
+            .and_then(Value::as_str)?
+            .trim()
+            .to_string();
+        if !matches!(mode.as_str(), "source-draft" | "source-derivation") {
+            return None;
+        }
+
+        let framework = artifact
+            .get("framework")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?
+            .to_string();
+        let target = artifact
+            .get("target")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?
+            .to_string();
+        let closure_status = delivery
+            .get("build")
+            .and_then(Value::as_object)
+            .and_then(|build| build.get("closure_status"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("incomplete")
+            .to_string();
+
+        Some(DesktopSourcePublishContract {
+            framework,
+            target,
+            mode,
+            closure_status,
+        })
+    }
+
+    pub(crate) fn ensure_desktop_source_publish_ready(&self) -> Result<()> {
+        let Some(contract) = self.desktop_source_publish_contract() else {
+            return Ok(());
+        };
+
+        if !matches!(contract.framework.as_str(), "tauri" | "electron" | "wails") {
+            anyhow::bail!(
+                "desktop source publish currently supports only Tauri, Electron, or Wails (got '{}')",
+                contract.framework
+            );
+        }
+        if contract.mode != "source-derivation" {
+            anyhow::bail!(
+                "desktop source publish requires contract.delivery.mode=source-derivation (got '{}')",
+                contract.mode
+            );
+        }
+        if contract.closure_status != "complete" {
+            anyhow::bail!(
+                "desktop source publish requires contract.delivery.build.closure_status=complete (got '{}')",
+                contract.closure_status
+            );
+        }
+
+        let closure = self
+            .descriptor
+            .lock
+            .resolution
+            .entries
+            .get("closure")
+            .context("desktop source publish requires resolution.closure")?;
+        let info = capsule_core::ato_lock::closure_info(closure)
+            .map_err(anyhow::Error::from)
+            .context("desktop source publish requires a normalized resolution.closure")?;
+        if info.kind != "build_closure" || info.status != "complete" {
+            anyhow::bail!(
+                "desktop source publish requires resolution.closure.kind=build_closure and status=complete (got kind='{}', status='{}')",
+                info.kind,
+                info.status
+            );
+        }
+
+        crate::build::native_delivery::ensure_current_host_delivery_target(
+            &contract.target,
+            "desktop source publish",
+        )
+    }
+
+    pub(crate) fn ensure_finalize_local_publish_ready(
+        &self,
+    ) -> Result<DesktopSourcePublishContract> {
+        let contract = self.desktop_source_publish_contract().context(
+            "--finalize-local is only available for Tauri/Electron/Wails source publish",
+        )?;
+        self.ensure_desktop_source_publish_ready()?;
+        if !crate::build::native_delivery::host_supports_finalize() {
+            anyhow::bail!(
+                "--finalize-local currently supports only macOS and Windows desktop publish targets"
+            );
+        }
+        Ok(contract)
     }
 
     fn legacy_producer_bridge(&self) -> Option<&CompatManifestBridge> {

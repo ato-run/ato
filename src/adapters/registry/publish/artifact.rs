@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::application::ports::publish::PublishArtifactMetadata;
+use crate::application::producer_input::publish_metadata_from_lock;
 use crate::artifact_hash::{
     compute_blake3_label as compute_blake3, compute_sha256_label as compute_sha256,
 };
@@ -223,6 +224,31 @@ pub fn verify_artifact(path: &Path) -> Result<VerifiedArtifactInfo> {
     })
 }
 
+pub fn infer_publish_metadata_from_capsule_bytes(
+    bytes: &[u8],
+) -> Result<Option<PublishArtifactMetadata>> {
+    if let Some(metadata) = infer_publish_metadata_from_finalized_payload(bytes)? {
+        return Ok(Some(metadata));
+    }
+
+    if let Some(lock) = extract_capsule_lock_from_capsule(bytes)? {
+        if let Some(metadata) = publish_metadata_from_lock(&lock) {
+            return Ok(Some(metadata));
+        }
+    }
+
+    if crate::build::native_delivery::detect_install_requires_local_derivation(bytes)?.is_some() {
+        return Ok(Some(PublishArtifactMetadata {
+            identity_class:
+                crate::application::ports::publish::PublishArtifactIdentityClass::ImportedThirdPartyArtifact,
+            delivery_mode: Some("artifact-import".to_string()),
+            provenance_limited: true,
+        }));
+    }
+
+    Ok(None)
+}
+
 fn build_upload_endpoint(
     base_url: &str,
     publisher: &str,
@@ -402,6 +428,81 @@ fn extract_manifest_from_capsule(bytes: &[u8]) -> Result<String> {
     }
 
     bail!("Invalid artifact: capsule.toml not found in .capsule archive")
+}
+
+fn extract_capsule_lock_from_capsule(
+    bytes: &[u8],
+) -> Result<Option<capsule_core::ato_lock::AtoLock>> {
+    let mut archive = tar::Archive::new(Cursor::new(bytes));
+    let entries = archive
+        .entries()
+        .context("Failed to read .capsule archive entries")?;
+
+    for entry in entries {
+        let mut entry = entry.context("Invalid .capsule entry")?;
+        let entry_path = entry
+            .path()
+            .context("Failed to read archive entry path")?
+            .to_string_lossy()
+            .to_string();
+        if entry_path != "capsule.lock.json" {
+            continue;
+        }
+        let mut lock_bytes = Vec::new();
+        entry
+            .read_to_end(&mut lock_bytes)
+            .context("Failed to read capsule.lock.json from artifact")?;
+        let lock = serde_json::from_slice(&lock_bytes)
+            .context("Failed to parse capsule.lock.json from artifact")?;
+        return Ok(Some(lock));
+    }
+
+    Ok(None)
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalDerivationSummary {
+    #[serde(default)]
+    finalized_locally: bool,
+}
+
+fn infer_publish_metadata_from_finalized_payload(
+    bytes: &[u8],
+) -> Result<Option<PublishArtifactMetadata>> {
+    let payload_tar = match crate::capsule_archive::extract_payload_tar_from_capsule(bytes) {
+        Ok(payload_tar) => payload_tar,
+        Err(_) => return Ok(None),
+    };
+    let mut archive = tar::Archive::new(Cursor::new(payload_tar));
+    let entries = archive
+        .entries()
+        .context("Failed to read payload.tar entries from artifact")?;
+    for entry in entries {
+        let mut entry = entry.context("Invalid payload.tar entry in artifact")?;
+        let entry_path = entry
+            .path()
+            .context("Failed to read payload entry path")?
+            .to_string_lossy()
+            .to_string();
+        if entry_path != "local-derivation.json" {
+            continue;
+        }
+        let mut payload = Vec::new();
+        entry
+            .read_to_end(&mut payload)
+            .context("Failed to read local-derivation.json from artifact")?;
+        let derivation: LocalDerivationSummary = serde_json::from_slice(&payload)
+            .context("Failed to parse local-derivation.json from artifact")?;
+        if derivation.finalized_locally {
+            return Ok(Some(PublishArtifactMetadata {
+                identity_class:
+                    crate::application::ports::publish::PublishArtifactIdentityClass::LocallyFinalizedSignedBundle,
+                delivery_mode: Some("source-derivation".to_string()),
+                provenance_limited: false,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 fn extract_payload_v3_manifest_from_capsule(
@@ -1010,12 +1111,190 @@ entrypoint = "main.ts"
         rebuilt
     }
 
+    fn build_native_source_lock_bytes() -> Vec<u8> {
+        let mut lock = capsule_core::ato_lock::AtoLock::default();
+        lock.contract.entries.insert(
+            "delivery".to_string(),
+            serde_json::json!({
+                "mode": "source-derivation",
+                "artifact": {
+                    "kind": "desktop-native",
+                    "framework": "tauri",
+                    "target": "darwin/arm64",
+                    "provenance_limited": false
+                },
+                "build": {
+                    "closure_status": "complete"
+                }
+            }),
+        );
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            serde_json::json!({
+                "kind": "build_closure",
+                "status": "complete"
+            }),
+        );
+        serde_json::to_vec(&lock).expect("serialize source lock")
+    }
+
+    fn build_native_capsule_with_optional_metadata(
+        lock_json: Option<Vec<u8>>,
+        local_derivation_json: Option<&str>,
+    ) -> Vec<u8> {
+        let manifest = r#"schema_version = "0.2"
+name = "demo-native"
+version = "0.1.0"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source"
+driver = "native"
+entrypoint = "Demo.app"
+"#;
+        let delivery = r#"schema_version = "0.1"
+
+[artifact]
+framework = "tauri"
+stage = "unsigned"
+target = "darwin/arm64"
+input = "Demo.app"
+
+[finalize]
+tool = "codesign"
+args = ["--deep", "--force", "--sign", "-", "Demo.app"]
+"#;
+
+        let mut payload_tar = Vec::new();
+        {
+            let mut builder = Builder::new(&mut payload_tar);
+            for (path, bytes) in [
+                ("ato.delivery.toml", delivery.as_bytes()),
+                ("Demo.app/Contents/MacOS/demo", b"binary".as_slice()),
+            ] {
+                let mut header = tar::Header::new_gnu();
+                header.set_mode(0o755);
+                header.set_size(bytes.len() as u64);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, path, bytes)
+                    .expect("append payload entry");
+            }
+            if let Some(local_derivation_json) = local_derivation_json {
+                let mut header = tar::Header::new_gnu();
+                header.set_mode(0o644);
+                header.set_size(local_derivation_json.len() as u64);
+                header.set_cksum();
+                builder
+                    .append_data(
+                        &mut header,
+                        "local-derivation.json",
+                        local_derivation_json.as_bytes(),
+                    )
+                    .expect("append local derivation");
+            }
+            builder.finish().expect("finish payload tar");
+        }
+        let payload_tar_zst =
+            zstd::stream::encode_all(Cursor::new(payload_tar), 3).expect("encode payload");
+
+        let mut artifact = Vec::new();
+        {
+            let mut builder = Builder::new(&mut artifact);
+            let mut manifest_header = tar::Header::new_gnu();
+            manifest_header.set_mode(0o644);
+            manifest_header.set_size(manifest.len() as u64);
+            manifest_header.set_cksum();
+            builder
+                .append_data(&mut manifest_header, "capsule.toml", manifest.as_bytes())
+                .expect("append manifest");
+            if let Some(lock_json) = lock_json {
+                let mut lock_header = tar::Header::new_gnu();
+                lock_header.set_mode(0o644);
+                lock_header.set_size(lock_json.len() as u64);
+                lock_header.set_cksum();
+                builder
+                    .append_data(
+                        &mut lock_header,
+                        "capsule.lock.json",
+                        Cursor::new(lock_json),
+                    )
+                    .expect("append lock");
+            }
+            let mut payload_header = tar::Header::new_gnu();
+            payload_header.set_mode(0o644);
+            payload_header.set_size(payload_tar_zst.len() as u64);
+            payload_header.set_cksum();
+            builder
+                .append_data(
+                    &mut payload_header,
+                    "payload.tar.zst",
+                    Cursor::new(payload_tar_zst),
+                )
+                .expect("append payload");
+            builder.finish().expect("finish artifact tar");
+        }
+        artifact
+    }
+
     #[test]
     fn extract_manifest_from_capsule_succeeds() {
         let bytes = test_capsule_bytes("sample-capsule", "1.0.0");
         let manifest = extract_manifest_from_capsule(&bytes).expect("extract manifest");
         assert!(manifest.contains("name = \"sample-capsule\""));
         assert!(manifest.contains("version = \"1.0.0\""));
+    }
+
+    #[test]
+    fn infer_publish_metadata_from_source_derived_native_capsule_prefers_embedded_lock() {
+        let bytes = build_native_capsule_with_optional_metadata(
+            Some(build_native_source_lock_bytes()),
+            None,
+        );
+
+        let metadata = infer_publish_metadata_from_capsule_bytes(&bytes)
+            .expect("infer metadata")
+            .expect("metadata");
+        assert_eq!(
+            metadata.identity_class,
+            crate::application::ports::publish::PublishArtifactIdentityClass::SourceDerivedUnsignedBundle
+        );
+        assert_eq!(metadata.delivery_mode.as_deref(), Some("source-derivation"));
+        assert!(!metadata.provenance_limited);
+    }
+
+    #[test]
+    fn infer_publish_metadata_from_finalized_native_capsule_marks_signed_bundle() {
+        let bytes = build_native_capsule_with_optional_metadata(
+            Some(build_native_source_lock_bytes()),
+            Some(r#"{"finalized_locally":true}"#),
+        );
+
+        let metadata = infer_publish_metadata_from_capsule_bytes(&bytes)
+            .expect("infer metadata")
+            .expect("metadata");
+        assert_eq!(
+            metadata.identity_class,
+            crate::application::ports::publish::PublishArtifactIdentityClass::LocallyFinalizedSignedBundle
+        );
+        assert_eq!(metadata.delivery_mode.as_deref(), Some("source-derivation"));
+        assert!(!metadata.provenance_limited);
+    }
+
+    #[test]
+    fn infer_publish_metadata_from_native_capsule_without_lock_marks_imported_artifact() {
+        let bytes = build_native_capsule_with_optional_metadata(None, None);
+
+        let metadata = infer_publish_metadata_from_capsule_bytes(&bytes)
+            .expect("infer metadata")
+            .expect("metadata");
+        assert_eq!(
+            metadata.identity_class,
+            crate::application::ports::publish::PublishArtifactIdentityClass::ImportedThirdPartyArtifact
+        );
+        assert_eq!(metadata.delivery_mode.as_deref(), Some("artifact-import"));
+        assert!(metadata.provenance_limited);
     }
 
     #[test]

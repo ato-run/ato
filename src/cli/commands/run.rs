@@ -671,7 +671,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     emit_run_phase_failure(self.args, HourglassPhase::Execute, err);
                 })
             }
-            HourglassPhase::Publish => anyhow::bail!(
+            HourglassPhase::Finalize | HourglassPhase::Publish => anyhow::bail!(
                 "unsupported run pipeline phase {} in run command",
                 phase.as_str()
             ),
@@ -698,6 +698,9 @@ fn run_phase_detail(boundary: HourglassPhase) -> &'static str {
         HourglassPhase::Install => "target resolution and install",
         HourglassPhase::Prepare => "manifest and launch context resolution",
         HourglassPhase::Build => "build and lifecycle hooks",
+        HourglassPhase::Finalize => {
+            panic!("unsupported run phase {}", boundary.as_str())
+        }
         HourglassPhase::Verify => "execution plan verification",
         HourglassPhase::DryRun => "runtime preflight",
         HourglassPhase::Execute => "capsule execution",

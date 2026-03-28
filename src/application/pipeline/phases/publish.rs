@@ -6,8 +6,8 @@ use serde::Serialize;
 
 use crate::application::pipeline::producer::PublishDryRunStageResult;
 use crate::application::ports::publish::{
-    DestinationSpec, PublishArtifactIdentityClass, PublishArtifactMetadata, PublishableArtifact,
-    PublishedLocation, SharedDestinationPort,
+    DestinationSpec, PublishArtifactMetadata, PublishableArtifact, PublishedLocation,
+    SharedDestinationPort,
 };
 use crate::application::producer_input::{
     resolve_producer_authoritative_input, ProducerAuthoritativeInput,
@@ -445,10 +445,11 @@ async fn run_direct_publish_phase_async(
     let phase = PublishPhase::new(Arc::new(
         crate::adapters::publish::destination::remote_api::RemoteRegistryDestination,
     ));
-    let publish_metadata = request
-        .publish_metadata
-        .clone()
-        .or_else(|| infer_publish_metadata_from_capsule_bytes(&artifact_bytes));
+    let publish_metadata = request.publish_metadata.clone().or_else(|| {
+        crate::publish_artifact::infer_publish_metadata_from_capsule_bytes(&artifact_bytes)
+            .ok()
+            .flatten()
+    });
     let published = phase
         .execute(&PublishPhaseRequest {
             artifact: PublishableArtifact {
@@ -486,17 +487,6 @@ async fn run_direct_publish_phase_async(
         registry_url: request.registry_url.clone(),
         publish_metadata: metadata.publish_metadata,
     })
-}
-
-fn infer_publish_metadata_from_capsule_bytes(bytes: &[u8]) -> Option<PublishArtifactMetadata> {
-    crate::build::native_delivery::detect_install_requires_local_derivation(bytes)
-        .ok()
-        .flatten()
-        .map(|_| PublishArtifactMetadata {
-            identity_class: PublishArtifactIdentityClass::ImportedThirdPartyArtifact,
-            delivery_mode: Some("artifact-import".to_string()),
-            provenance_limited: true,
-        })
 }
 
 pub fn run_official_publish_phase(
@@ -689,9 +679,8 @@ mod tests {
     use tar::Builder;
 
     use super::{
-        infer_publish_metadata_from_capsule_bytes, normalize_segment,
-        prepare_private_publish_artifact, resolve_private_publisher, summarize_private_publish,
-        PrivatePublishRequest, PublishPhase, PublishPhaseRequest,
+        normalize_segment, prepare_private_publish_artifact, resolve_private_publisher,
+        summarize_private_publish, PrivatePublishRequest, PublishPhase, PublishPhaseRequest,
     };
     use crate::application::ports::publish::{
         DestinationPort, DestinationSpec, PublishArtifactIdentityClass, PublishableArtifact,
@@ -1046,8 +1035,9 @@ entrypoint = "main.ts"
     fn infer_publish_metadata_from_native_capsule_marks_imported_artifact() {
         let bytes = build_native_test_artifact_bytes();
 
-        let metadata =
-            infer_publish_metadata_from_capsule_bytes(&bytes).expect("native publish metadata");
+        let metadata = crate::publish_artifact::infer_publish_metadata_from_capsule_bytes(&bytes)
+            .expect("native publish metadata")
+            .expect("publish metadata");
         assert_eq!(
             metadata.identity_class,
             PublishArtifactIdentityClass::ImportedThirdPartyArtifact
