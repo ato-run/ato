@@ -695,11 +695,12 @@ impl<'a> PublishCommandExecution<'a> {
             Some(preview.scoped_id.clone())
         };
         let source_lock_metadata = if source_is_artifact {
-            (None, None)
+            (None, None, None)
         } else {
             let resolved =
                 resolve_producer_authoritative_input(&self.cwd, self.reporter.clone(), false)?;
-            (resolved.lock_id, resolved.closure_digest)
+            let publish_metadata = resolved.publish_metadata();
+            (resolved.lock_id, resolved.closure_digest, publish_metadata)
         };
         let upload_result =
             publish_phase::run_private_publish_phase_async(publish_phase::PrivatePublishRequest {
@@ -711,6 +712,7 @@ impl<'a> PublishCommandExecution<'a> {
                 allow_existing: self.args.allow_existing,
                 lock_id: source_lock_metadata.0,
                 closure_digest: source_lock_metadata.1,
+                publish_metadata: source_lock_metadata.2,
             })
             .await;
         if !self.args.json {
@@ -841,6 +843,7 @@ fn execute_publish_pipeline(
                 allow_existing: args.allow_existing,
                 lock_id: None,
                 closure_digest: None,
+                publish_metadata: None,
             },
         )?)
     } else {
@@ -1161,10 +1164,7 @@ fn discover_manifest_publish_registry() -> Result<Option<String>> {
         Ok(value) => value,
         Err(_) => return Ok(None),
     };
-    Ok(authoritative_input
-        .compat_manifest
-        .as_ref()
-        .and_then(|bridge| bridge.publish_registry()))
+    Ok(authoritative_input.compatibility_publish_registry())
 }
 
 #[cfg(test)]

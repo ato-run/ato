@@ -1800,7 +1800,7 @@ fn infer_source_native_delivery_plan(
     let build_command = infer_source_native_build_command(project_root, detected, *framework);
     let plan = NativeBuildPlan {
         workspace_root: project_root.to_path_buf(),
-        compat_manifest: None,
+        legacy_manifest_bridge: None,
         package_name: detected.name.clone(),
         package_version: infer_project_version(detected, project_root)
             .unwrap_or_else(|| "0.1.0".to_string()),
