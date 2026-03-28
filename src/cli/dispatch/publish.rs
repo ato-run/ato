@@ -110,7 +110,7 @@ pub(crate) fn execute_publish_guidance_command(
         println!("This guarantees published capsules match committed source.");
         println!();
         println!("👉 Next steps:");
-        println!("  1. Run `ato gen-ci` to generate `.github/workflows/ato-publish.yml`.");
+        println!("  1. Ensure `.github/workflows/ato-publish.yml` is present and committed.");
         println!("  2. Commit and tag your release (e.g. `git tag v0.1.0`).");
         println!("  3. Push the tag to GitHub (`git push origin v0.1.0`).");
         println!("  4. GitHub Actions runs `ato publish --ci` automatically.");

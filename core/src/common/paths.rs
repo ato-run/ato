@@ -37,3 +37,17 @@ pub fn nacelle_home_dir_or_workspace_tmp() -> PathBuf {
 pub fn toolchain_cache_dir() -> Result<PathBuf> {
     Ok(nacelle_home_dir()?.join("toolchains"))
 }
+
+/// Returns the runtime cache directory.
+///
+/// Layout: `~/.ato/runtimes`
+pub fn runtime_cache_dir() -> Result<PathBuf> {
+    Ok(nacelle_home_dir()?.join("runtimes"))
+}
+
+/// Returns the durable engine cache directory.
+///
+/// Layout: `~/.ato/engines`
+pub fn engine_cache_dir() -> Result<PathBuf> {
+    Ok(nacelle_home_dir()?.join("engines"))
+}

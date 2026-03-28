@@ -1,4 +1,5 @@
 mod canonicalize;
+mod closure;
 mod hash;
 mod schema;
 mod validate;
@@ -13,9 +14,18 @@ use std::path::Path;
 /// Load, validation, lock_id computation, and serialization are split so later
 /// input-resolver and import flows can work with draft locks without being
 /// forced through persisted artifact validation too early.
-pub use canonicalize::{canonical_projection, CanonicalLockProjection};
+pub use canonicalize::{
+    canonical_identity_projection, canonical_projection, is_canonical_identity_section,
+    CanonicalLockProjection, CANONICAL_IDENTITY_EXCLUDED_SECTIONS,
+    CANONICAL_IDENTITY_INCLUDED_SECTIONS,
+};
+pub use closure::{
+    closure_info, compute_closure_digest, normalize_closure_value, normalize_lock_closure,
+    normalize_resolution_closure_entries, validate_closure_value, ClosureInfo,
+};
 pub use hash::{
-    canonical_document_bytes, canonical_projection_bytes, compute_lock_id, recompute_lock_id,
+    canonical_document_bytes, canonical_projection_bytes, canonical_signature_payload_bytes,
+    compute_lock_id, recompute_lock_id,
 };
 pub use schema::{
     AtoLock, AttestationsSection, BindingSection, ContractSection, FeatureName, KnownFeature,
@@ -76,6 +86,7 @@ pub fn validate_structural_non_strict(
 /// before serialization and persisted validation must pass.
 pub fn to_pretty_json(lock: &AtoLock) -> Result<String> {
     let mut persisted = lock.clone();
+    normalize_lock_closure(&mut persisted)?;
     recompute_lock_id(&mut persisted)?;
     validate_persisted_strict(&persisted).map_err(validation_errors_to_capsule_error)?;
     serde_json::to_string_pretty(&persisted)
@@ -92,6 +103,7 @@ pub fn write_pretty_to_path(lock: &AtoLock, path: &Path) -> Result<()> {
 /// Returns canonical persisted bytes for a durable ato.lock artifact.
 pub fn write_canonical_to_vec(lock: &AtoLock) -> Result<Vec<u8>> {
     let mut persisted = lock.clone();
+    normalize_lock_closure(&mut persisted)?;
     recompute_lock_id(&mut persisted)?;
     validate_persisted_strict(&persisted).map_err(validation_errors_to_capsule_error)?;
     serde_jcs::to_vec(&persisted)
@@ -362,5 +374,126 @@ mod tests {
         recompute_lock_id(&mut draft).expect("recompute lock_id");
 
         assert!(validate_persisted_strict(&draft).is_ok());
+    }
+
+    #[test]
+    fn closure_normalization_keeps_lock_id_stable_across_legacy_and_normalized_shapes() {
+        let mut legacy = AtoLock::default();
+        legacy.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "dist", "driver": "static"}),
+        );
+        legacy.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"status": "complete", "inputs": []}),
+        );
+
+        let mut normalized = legacy.clone();
+        normalized.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"kind": "runtime_closure", "status": "complete", "inputs": []}),
+        );
+
+        assert_eq!(
+            compute_lock_id(&legacy).expect("legacy lock_id"),
+            compute_lock_id(&normalized).expect("normalized lock_id")
+        );
+    }
+
+    #[test]
+    fn standard_signature_payload_matches_canonical_projection_bytes() {
+        let lock = persisted_sample_lock();
+        assert_eq!(
+            canonical_signature_payload_bytes(&lock).expect("signature payload"),
+            canonical_projection_bytes(&lock).expect("canonical bytes")
+        );
+    }
+
+    #[test]
+    fn canonical_identity_helpers_report_expected_sections() {
+        assert!(is_canonical_identity_section("schema_version"));
+        assert!(is_canonical_identity_section("resolution"));
+        assert!(is_canonical_identity_section("contract"));
+        assert!(!is_canonical_identity_section("binding"));
+        assert!(!is_canonical_identity_section("policy"));
+        assert!(!is_canonical_identity_section("attestations"));
+        assert!(!is_canonical_identity_section("signatures"));
+        assert!(CANONICAL_IDENTITY_EXCLUDED_SECTIONS.contains(&"binding"));
+        assert!(CANONICAL_IDENTITY_EXCLUDED_SECTIONS.contains(&"policy"));
+        assert!(CANONICAL_IDENTITY_EXCLUDED_SECTIONS.contains(&"attestations"));
+        assert!(CANONICAL_IDENTITY_EXCLUDED_SECTIONS.contains(&"signatures"));
+    }
+
+    #[test]
+    fn structural_validation_accepts_native_delivery_contract() {
+        let mut lock = sample_lock();
+        lock.contract.entries.insert(
+            "delivery".to_string(),
+            json!({
+                "mode": "source-derivation",
+                "artifact": {
+                    "kind": "desktop-native",
+                    "framework": "tauri",
+                    "target": "darwin/arm64",
+                    "path": "dist/MyApp.app",
+                    "canonical_build_input": false,
+                    "provenance_limited": false,
+                    "reproducibility": "closure-tracked-build"
+                },
+                "build": {
+                    "kind": "native-delivery",
+                    "requires_build_closure": true,
+                    "closure_status": "complete"
+                },
+                "finalize": {
+                    "tool": "codesign",
+                    "args": ["--deep", "--force"],
+                    "host_local": true
+                },
+                "install": {
+                    "kind": "local-derivation",
+                    "host_local": true,
+                    "requires_local_derivation": true
+                },
+                "projection": {
+                    "kind": "launcher-surface",
+                    "host_local": true
+                }
+            }),
+        );
+
+        assert!(validate_structural_strict(&lock).is_ok());
+    }
+
+    #[test]
+    fn structural_validation_rejects_invalid_native_delivery_contract() {
+        let mut lock = sample_lock();
+        lock.contract.entries.insert(
+            "delivery".to_string(),
+            json!({
+                "mode": "artifact-import",
+                "artifact": {
+                    "kind": "desktop-native",
+                    "canonical_build_input": false,
+                    "provenance_limited": false
+                },
+                "install": {
+                    "kind": "local-derivation",
+                    "host_local": true,
+                    "requires_local_derivation": true
+                },
+                "projection": {
+                    "kind": "launcher-surface",
+                    "host_local": true
+                }
+            }),
+        );
+
+        let errors = validate_structural_strict(&lock).expect_err("delivery should be invalid");
+        assert!(errors.iter().any(|error| {
+            error
+                .to_string()
+                .contains("provenance_limited must be true for artifact-import")
+        }));
     }
 }

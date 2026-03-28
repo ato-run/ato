@@ -39,7 +39,7 @@ pub fn validate_ci_workflow(cwd: &Path) -> Result<CiWorkflowCheckResult> {
     let path = cwd.join(CI_WORKFLOW_REL_PATH);
     if !path.exists() {
         anyhow::bail!(
-            "CI workflow not found: {}. Run `ato gen-ci` first.",
+            "CI workflow not found: {}. Add the official publish workflow before running CI-first publish checks.",
             path.display()
         );
     }
@@ -50,7 +50,7 @@ pub fn validate_ci_workflow(cwd: &Path) -> Result<CiWorkflowCheckResult> {
     let has_oidc_permission = content.contains("id-token: write");
     if !has_oidc_permission {
         anyhow::bail!(
-            "CI workflow is missing `id-token: write` permission. Regenerate with `ato gen-ci`."
+            "CI workflow is missing `id-token: write` permission. Update `.github/workflows/ato-publish.yml` to use the official OIDC publish workflow."
         );
     }
 
@@ -58,7 +58,7 @@ pub fn validate_ci_workflow(cwd: &Path) -> Result<CiWorkflowCheckResult> {
         content.contains("push:") && content.contains("tags:") && content.contains("v*.*.*");
     if !has_tag_trigger {
         anyhow::bail!(
-            "CI workflow is missing tag-based trigger (`on.push.tags`). Regenerate with `ato gen-ci`."
+            "CI workflow is missing tag-based trigger (`on.push.tags`). Update `.github/workflows/ato-publish.yml` to match the official publish workflow."
         );
     }
 
@@ -66,7 +66,7 @@ pub fn validate_ci_workflow(cwd: &Path) -> Result<CiWorkflowCheckResult> {
         content.contains("ATO_VERSION") && content.contains("sha256sum -c");
     if !has_checksum_verification {
         anyhow::bail!(
-            "CI workflow is missing pinned checksum verification. Regenerate with `ato gen-ci`."
+            "CI workflow is missing pinned checksum verification. Update `.github/workflows/ato-publish.yml` to include the official pinned verification step."
         );
     }
 
