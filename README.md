@@ -193,6 +193,7 @@ If you've run `ato login`, `ato publish` automatically uploads to your Dock.
 Default behavior: runs all stages from Prepare through Publish.
 
 Tips:
+
 - Use `--artifact <file>` to skip rebuilding. Upload a file you've already built.
 - `--scoped-id` defaults to `<your-handle>/<slug>` automatically.
 - Your Dock page is at `/d/<handle>`. This is a UI page, not a registry endpoint.
@@ -206,6 +207,7 @@ Tips:
 Default behavior: runs all stages from Prepare through Publish, with direct upload.
 
 Tips:
+
 - `--artifact <file>` works here too. You can publish without a local project manifest.
 - `--allow-existing` is available for the final Publish stage only.
 
@@ -213,21 +215,23 @@ Tips:
 
 ### Controlling which stages run
 
-The `--prepare`, `--build`, and `--deploy` flags are *stop points*. They tell `ato` where to stop, not which individual stages to run.
+The `--prepare`, `--build`, and `--deploy` flags are _stop points_. They tell `ato` where to stop, not which individual stages to run.
 
-| Flag | Stops after | Notes |
-|------|-------------|-------|
-| `--prepare` | Prepare | |
-| `--build` | Verify | With source: runs Build then Verify. With `--artifact`: runs Verify only. |
-| `--deploy` | Publish | Official: handoff only. Private/local: auto-resolves, or runs Verify → Publish with `--artifact`. |
-| `--artifact <file>` | *(changes start)* | Skips Prepare and Build. Starts pipeline at Verify. |
+| Flag                | Stops after       | Notes                                                                                             |
+| ------------------- | ----------------- | ------------------------------------------------------------------------------------------------- |
+| `--prepare`         | Prepare           |                                                                                                   |
+| `--build`           | Verify            | With source: runs Build then Verify. With `--artifact`: runs Verify only.                         |
+| `--deploy`          | Publish           | Official: handoff only. Private/local: auto-resolves, or runs Verify → Publish with `--artifact`. |
+| `--artifact <file>` | _(changes start)_ | Skips Prepare and Build. Starts pipeline at Verify.                                               |
 
 Other things to know:
+
 - `--ci` and `--dry-run` cannot be combined with stage flags.
 - `--artifact --prepare` is invalid — the start stage would come after the stop point.
 - `--legacy-full-publish` (official only) restores the old default behavior. **Deprecated** — will be removed in the next major release.
 
 Official registry helpers:
+
 - `ato publish --fix` — fixes a broken workflow once, then reruns diagnostics.
 - `ato publish --no-tui` — skips the interactive UI and prints CI output directly.
 
@@ -306,6 +310,7 @@ The public `ato inspect` workflow for lock-first debugging is:
 - `ato inspect remediation [path] [--json]` — suggests specific fixes, with source location mapping where possible
 
 A few notes:
+
 - Requirements are still derived from the project manifest, not the lock file.
 - `ato inspect requirements` and `ato inspect preview` remain available for compatibility and internal/debug use, but they are not part of the primary public troubleshooting surface.
 - Local paths and remote `publisher/slug` refs return the same JSON shape.
@@ -364,6 +369,7 @@ ato build --strict-v3
 For apps with multiple services — for example, a dashboard, an API server, and a worker — you can package everything into a single capsule using `[services]`.
 
 When you run the capsule, `ato run`:
+
 - Starts services in dependency order (DAG)
 - Waits for each service to pass its readiness probe
 - Prefixes all log output with the service name
@@ -385,7 +391,7 @@ default_target = "default"
 
 [pack]
 include = [
-  "project-manifest.toml",
+  "capsule.toml",
   "capsule.lock.json",
   "apps/dashboard/.next/standalone/**",
   "apps/dashboard/.next/static/**",
@@ -439,6 +445,7 @@ ato run <publisher>/<slug> --registry http://127.0.0.1:18787
 ```
 
 A few gotchas:
+
 - For Next.js standalone, copy `.next/static` (and `public` if needed) into the standalone output before running `ato build`.
 - `ato run` stops before startup if any `required_env` key is missing.
 - `services.main` is required in services mode. It receives `PORT=<targets.<label>.port>`.
@@ -449,16 +456,16 @@ A few gotchas:
 
 Different runtimes have different isolation requirements:
 
-| Runtime | Tier | What you need |
-|---------|------|-------------|
-| `web/static` | Tier1 | `driver = "static"` + port configured; no `capsule.lock.json` needed |
-| `web/deno` | Tier1 | `capsule.lock.json` + `deno.lock` or `package-lock.json` |
-| `web/node` | Tier1 | `capsule.lock.json` + `package-lock.json` (runs via Deno compat) |
-| `web/python` | Tier2 | `uv.lock`; `--sandbox` recommended |
-| `source/deno` | Tier1 | `capsule.lock.json` + `deno.lock` or `package-lock.json` |
-| `source/node` | Tier1 | `capsule.lock.json` + `package-lock.json` (runs via Deno compat) |
-| `source/python` | Tier2 | `uv.lock`; `--sandbox` recommended |
-| `source/native` | Tier2 | `--sandbox` recommended |
+| Runtime         | Tier  | What you need                                                        |
+| --------------- | ----- | -------------------------------------------------------------------- |
+| `web/static`    | Tier1 | `driver = "static"` + port configured; no `capsule.lock.json` needed |
+| `web/deno`      | Tier1 | `capsule.lock.json` + `deno.lock` or `package-lock.json`             |
+| `web/node`      | Tier1 | `capsule.lock.json` + `package-lock.json` (runs via Deno compat)     |
+| `web/python`    | Tier2 | `uv.lock`; `--sandbox` recommended                                   |
+| `source/deno`   | Tier1 | `capsule.lock.json` + `deno.lock` or `package-lock.json`             |
+| `source/node`   | Tier1 | `capsule.lock.json` + `package-lock.json` (runs via Deno compat)     |
+| `source/python` | Tier2 | `uv.lock`; `--sandbox` recommended                                   |
+| `source/native` | Tier2 | `--sandbox` recommended                                              |
 
 **Tier1** runs without special flags. Node is Tier1 — you do not need `--unsafe`.
 
@@ -471,6 +478,7 @@ ato run --nacelle ...   # pass path at runtime
 ```
 
 Other notes:
+
 - Legacy flags `--unsafe` and `--unsafe-bypass-sandbox` still exist but are discouraged.
 - Unsupported or out-of-policy behavior doesn't fall back silently — it stops with an error.
 - `runtime=web` requires a `driver` value: `static`, `node`, `deno`, or `python`.
@@ -497,13 +505,13 @@ Other notes:
 
 ## Environment Variable Reference (Core)
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `CAPSULE_WATCH_DEBOUNCE_MS` | Debounce interval for `run --watch`, in milliseconds | `300` |
-| `CAPSULE_ALLOW_UNSAFE` | Set to `1` to allow `--dangerously-skip-permissions` | — |
-| `ATO_TOKEN` | Auth token for local/private publish and CI sessions | — |
-| `ATO_STORE_API_URL` | API base URL for `ato search` and install | `https://api.ato.run` |
-| `ATO_STORE_SITE_URL` | Store web base URL | `https://ato.run` |
+| Variable                    | Description                                          | Default               |
+| --------------------------- | ---------------------------------------------------- | --------------------- |
+| `CAPSULE_WATCH_DEBOUNCE_MS` | Debounce interval for `run --watch`, in milliseconds | `300`                 |
+| `CAPSULE_ALLOW_UNSAFE`      | Set to `1` to allow `--dangerously-skip-permissions` | —                     |
+| `ATO_TOKEN`                 | Auth token for local/private publish and CI sessions | —                     |
+| `ATO_STORE_API_URL`         | API base URL for `ato search` and install            | `https://api.ato.run` |
+| `ATO_STORE_SITE_URL`        | Store web base URL                                   | `https://ato.run`     |
 
 ## Search and Auth
 

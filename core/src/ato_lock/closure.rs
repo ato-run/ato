@@ -80,6 +80,8 @@ pub fn normalize_closure_value(value: &Value) -> Result<Value> {
         normalize_build_environment_shape(&mut closure)?;
     }
 
+    sort_closure_arrays(&mut closure);
+
     Ok(Value::Object(closure))
 }
 
@@ -376,6 +378,65 @@ fn normalize_build_environment_field(
     }
 }
 
+fn sort_closure_arrays(closure: &mut Map<String, Value>) {
+    sort_string_array_field(closure, "observed_lockfiles");
+    sort_inputs_array_field(closure, "inputs");
+
+    if let Some(environment) = closure
+        .get_mut("build_environment")
+        .and_then(Value::as_object_mut)
+    {
+        for field in ["toolchains", "package_managers", "sdks", "helper_tools"] {
+            sort_string_array_field(environment, field);
+        }
+    }
+}
+
+fn sort_string_array_field(object: &mut Map<String, Value>, field: &str) {
+    let Some(values) = object.get_mut(field).and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    values.sort_by(|left, right| {
+        left.as_str()
+            .unwrap_or_default()
+            .cmp(right.as_str().unwrap_or_default())
+    });
+}
+
+fn sort_inputs_array_field(object: &mut Map<String, Value>, field: &str) {
+    let Some(values) = object.get_mut(field).and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    values.sort_by_key(closure_input_sort_key);
+}
+
+fn closure_input_sort_key(value: &Value) -> (String, String, String, String) {
+    let Some(object) = value.as_object() else {
+        return (String::new(), String::new(), String::new(), value.to_string());
+    };
+
+    (
+        object
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        object
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        object
+            .get("digest")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        value.to_string(),
+    )
+}
+
 fn validate_artifact(value: Option<&Value>, errors: &mut Vec<String>) {
     let Some(value) = value else {
         errors.push("resolution.closure.artifact is required".to_string());
@@ -490,7 +551,7 @@ mod tests {
                     "toolchains": ["rust"],
                     "package_managers": ["pnpm"],
                     "sdks": ["apple-sdk"],
-                    "helper_tools": ["tauri-cli", "codesign"]
+                    "helper_tools": ["codesign", "tauri-cli"]
                 }
             })
         );
@@ -538,6 +599,43 @@ mod tests {
             }))
             .expect("compute digest"),
             None
+        );
+    }
+
+    #[test]
+    fn sorts_digest_relevant_closure_arrays_deterministically() {
+        let normalized = normalize_closure_value(&json!({
+            "kind": "build_closure",
+            "status": "complete",
+            "inputs": [
+                {"kind": "package", "name": "z", "digest": "sha256:z"},
+                {"kind": "lockfile", "name": "a", "digest": "sha256:a"}
+            ],
+            "build_environment": {
+                "toolchains": ["z", "a"],
+                "package_managers": ["pnpm", "npm"],
+                "sdks": ["xcode", "apple-sdk"],
+                "helper_tools": ["codesign", "actool"]
+            }
+        }))
+        .expect("normalize closure");
+
+        assert_eq!(
+            normalized,
+            json!({
+                "kind": "build_closure",
+                "status": "complete",
+                "inputs": [
+                    {"kind": "lockfile", "name": "a", "digest": "sha256:a"},
+                    {"kind": "package", "name": "z", "digest": "sha256:z"}
+                ],
+                "build_environment": {
+                    "toolchains": ["a", "z"],
+                    "package_managers": ["npm", "pnpm"],
+                    "sdks": ["apple-sdk", "xcode"],
+                    "helper_tools": ["actool", "codesign"]
+                }
+            })
         );
     }
 }
