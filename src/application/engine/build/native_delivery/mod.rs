@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use capsule_core::bootstrap::BootstrapBoundary;
 use chrono::{SecondsFormat, Utc};
 use goblin::Object;
 use serde::{Deserialize, Serialize};
@@ -107,6 +108,12 @@ pub struct FinalizeResult {
     pub schema_version: String,
 }
 
+#[derive(Debug, Clone)]
+struct DerivedFinalizePlan {
+    fetched_dir: PathBuf,
+    output_dir: PathBuf,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ProjectResult {
     pub projection_id: String,
@@ -120,6 +127,13 @@ pub struct ProjectResult {
     pub problems: Vec<String>,
     pub created: bool,
     pub schema_version: String,
+}
+
+#[derive(Debug, Clone)]
+struct DerivedProjectionPlan {
+    launcher_dir: PathBuf,
+    metadata_root: PathBuf,
+    projected_command_dir: PathBuf,
 }
 
 #[derive(Debug, Serialize)]
@@ -845,7 +859,8 @@ pub(crate) fn native_delivery_build_environment_skeleton(plan: &NativeBuildPlan)
     }
 
     if let Ok(config) = staged_delivery_config(plan) {
-        push_unique(&mut helper_tools, config.finalize.tool.trim());
+        let boundary = finalize_helper_boundary(config.finalize.tool.trim());
+        push_unique(&mut helper_tools, &boundary.subject_name);
     }
 
     json!({
@@ -854,6 +869,10 @@ pub(crate) fn native_delivery_build_environment_skeleton(plan: &NativeBuildPlan)
         "sdks": sdks,
         "helper_tools": helper_tools,
     })
+}
+
+pub(crate) fn finalize_helper_boundary(tool: &str) -> BootstrapBoundary {
+    BootstrapBoundary::finalize_helper(tool.trim())
 }
 
 pub(crate) fn native_delivery_contract_from_build_plan(
@@ -1222,7 +1241,11 @@ pub(crate) fn finalize_fetched_artifact(fetched_dir: &Path) -> Result<FinalizeRe
 include!("projection.rs");
 
 fn finalize_with_dispatch(fetched_dir: &Path, output_dir: &Path) -> Result<FinalizeResult> {
-    finalize_with_runner(fetched_dir, output_dir, |derived_dir, config| {
+    let derived_plan = DerivedFinalizePlan {
+        fetched_dir: fetched_dir.to_path_buf(),
+        output_dir: output_dir.to_path_buf(),
+    };
+    finalize_with_runner_plan(&derived_plan, |derived_dir, config| {
         FinalizeRunner::for_tool(&config.finalize.tool).run(derived_dir, config)
     })
 }
@@ -1235,8 +1258,22 @@ fn finalize_with_runner<F>(
 where
     F: Fn(&Path, &DeliveryConfig) -> Result<()>,
 {
-    let metadata = load_fetch_metadata(fetched_dir)?;
-    let artifact_root = fetched_dir.join(FETCH_ARTIFACT_DIR);
+    let derived_plan = DerivedFinalizePlan {
+        fetched_dir: fetched_dir.to_path_buf(),
+        output_dir: output_dir.to_path_buf(),
+    };
+    finalize_with_runner_plan(&derived_plan, runner)
+}
+
+fn finalize_with_runner_plan<F>(
+    derived_plan: &DerivedFinalizePlan,
+    runner: F,
+) -> Result<FinalizeResult>
+where
+    F: Fn(&Path, &DeliveryConfig) -> Result<()>,
+{
+    let metadata = load_fetch_metadata(&derived_plan.fetched_dir)?;
+    let artifact_root = derived_plan.fetched_dir.join(FETCH_ARTIFACT_DIR);
     if !artifact_root.is_dir() {
         bail!(
             "Fetched artifact directory is missing: {}",
@@ -1261,13 +1298,13 @@ where
     validate_native_bundle_directory(&input_app_path)?;
     ensure_native_artifact_kind_supported(&input_app_path, "finalize")?;
 
-    fs::create_dir_all(output_dir).with_context(|| {
+    fs::create_dir_all(&derived_plan.output_dir).with_context(|| {
         format!(
             "Failed to create output directory: {}",
-            output_dir.display()
+            derived_plan.output_dir.display()
         )
     })?;
-    let derived_dir = create_unique_output_dir(output_dir)?;
+    let derived_dir = create_unique_output_dir(&derived_plan.output_dir)?;
     let input_name = input_app_path
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("Finalize input path has no terminal name"))?;
@@ -1299,7 +1336,7 @@ where
         let provenance_path = derived_dir.join(PROVENANCE_FILE);
         write_json_pretty(&provenance_path, &provenance)?;
         Ok(FinalizeResult {
-            fetched_dir: fetched_dir.to_path_buf(),
+            fetched_dir: derived_plan.fetched_dir.clone(),
             output_dir: derived_dir.clone(),
             derived_app_path,
             provenance_path,

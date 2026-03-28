@@ -144,6 +144,9 @@ Examples:
 - producing workspace-local binding state
 - generating `config.json`
 - generating execution plan artifacts
+- compatibility-only legacy manifest or `capsule.lock.json` bridge inputs
+
+Legacy `capsule.toml` and `capsule.lock.json` remain compatibility inputs only. Once a canonical `ato.lock.json` is authoritative, downstream run/build/validate paths must consume lock-derived artifacts instead of rediscovering manifest semantics from disk.
 
 ### 3.4 Ephemeral lock state
 
