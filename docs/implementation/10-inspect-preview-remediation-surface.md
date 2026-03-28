@@ -28,6 +28,8 @@ lock-first 移行後の利用者向け surface を整備し、`inspect`, `previe
 - partially resolved / unresolved state を lock path ベースで確認できる
 - fallback, observation, user confirmation, approval gate の関与有無を surface できる
 - remediation suggestion が manifest-first path ではなく lock path を主に返す
+- unresolved が command blocking か non-blocking かを machine-readable に返せる
+- field が import / fallback / host-local のどれに属するかを machine-readable に返せる
 
 ## Implementation Slices
 
@@ -44,6 +46,7 @@ lock-first 移行後の利用者向け surface を整備し、`inspect`, `previe
 - unresolved marker が lock path と reason class 付きで表示される
 - preview が durable `ato.lock.json` または ephemeral lock materialization の要点を確認できる
 - diagnostics が lock path を主に返し、必要に応じて import source mapping を補助的に示せる
+- inspect / validate / diagnostics が unresolved の blocking / non-blocking と import / fallback / host-local category を機械可読で返せる
 
 ## Primary Touchpoints
 

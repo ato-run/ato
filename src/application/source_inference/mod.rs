@@ -10,8 +10,10 @@ use crate::application::compat_import::{
     CompatibilityDiagnosticSeverity, ProvenanceRecord as CompatibilityProvenanceRecord,
 };
 use crate::application::engine::build::native_delivery::{
-    detect_build_strategy, native_delivery_build_environment_skeleton,
-    native_delivery_contract_from_build_plan,
+    detect_build_strategy, imported_native_artifact_closure,
+    imported_native_artifact_delivery_contract, imported_native_artifact_type,
+    native_delivery_build_environment_skeleton, native_delivery_contract_from_build_plan,
+    path_has_extension, NativeBuildCommand, NativeBuildPlan,
 };
 use crate::application::pipeline::cleanup::CleanupScope;
 use crate::application::ports::OutputPort;
@@ -36,6 +38,7 @@ use capsule_core::CapsuleReporter;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::{json, Value};
+use walkdir::WalkDir;
 
 const RUN_SOURCE_INFERENCE_DIR: &str = ".tmp/source-inference";
 #[derive(Debug, Clone)]
@@ -48,6 +51,7 @@ pub(crate) enum SourceInferenceInput {
 #[derive(Debug, Clone)]
 pub(crate) struct SourceEvidenceInput {
     pub(crate) project_root: PathBuf,
+    pub(crate) explicit_native_artifact: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +109,28 @@ struct GatedSourceModel {
 struct MaterializationAdapter {
     project_root: PathBuf,
     original_manifest: Option<toml::Value>,
+}
+
+#[derive(Debug, Clone)]
+struct SourceNativeDeliveryPlan {
+    plan: NativeBuildPlan,
+    framework_evidence: Vec<ImportedEvidence>,
+    closure_complete: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ImportedNativeArtifactCandidate {
+    artifact_path: PathBuf,
+    artifact_type: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct DesktopExecutionOverride {
+    process: Value,
+    runtime: Value,
+    resolved_target: Value,
+    provenance_note: String,
+    source_field: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -248,6 +274,30 @@ pub(crate) fn materialize_run_from_source_only(
     let adapter = prepare_run_materialization_adapter(source, scope.as_deref_mut())?;
     let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
         project_root: adapter.project_root.clone(),
+        explicit_native_artifact: None,
+    });
+    let result =
+        execute_shared_engine(input, MaterializationMode::RunAttempt, assume_yes, reporter)?;
+    materialize_run_model(adapter, scope, result)
+}
+
+pub(crate) fn materialize_run_from_explicit_native_artifact(
+    artifact_path: &Path,
+    scope: Option<&mut CleanupScope>,
+    reporter: Arc<CliReporter>,
+    assume_yes: bool,
+) -> Result<RunMaterialization> {
+    let project_root = artifact_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let adapter = MaterializationAdapter {
+        project_root: project_root.clone(),
+        original_manifest: None,
+    };
+    let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
+        project_root,
+        explicit_native_artifact: Some(artifact_path.to_path_buf()),
     });
     let result =
         execute_shared_engine(input, MaterializationMode::RunAttempt, assume_yes, reporter)?;
@@ -792,6 +842,7 @@ pub(crate) fn execute_init_from_resolved_source_only(
     let adapter = prepare_workspace_materialization_adapter(source)?;
     let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
         project_root: adapter.project_root.clone(),
+        explicit_native_artifact: None,
     });
     let result = execute_shared_engine(
         input,
@@ -893,9 +944,27 @@ fn apply_gates_phase(
 fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInferenceResult> {
     let detected = detect_project(&input.project_root)?;
     let info = project_info_from_detection(&detected)?;
+    let desktop_execution = infer_desktop_execution_override(
+        &input.project_root,
+        &detected,
+        &info,
+        input.explicit_native_artifact.as_deref(),
+    )?;
     let metadata = source_metadata(&detected, &input.project_root);
-    let runtime_kind = runtime_kind_from_project(&detected);
-    let process_candidates = process_candidates_for_source(&detected, &info);
+    let runtime_kind = desktop_execution
+        .as_ref()
+        .and_then(|override_contract| {
+            override_contract
+                .resolved_target
+                .get("driver")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or_else(|| runtime_kind_from_project(&detected));
+    let process_candidates = if desktop_execution.is_some() {
+        Vec::new()
+    } else {
+        process_candidates_for_source(&detected, &info)
+    };
     let mut lock = AtoLock::default();
     let mut provenance = vec![SourceInferenceProvenance {
         field: "contract.metadata".to_string(),
@@ -927,30 +996,46 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         "filesystem".to_string(),
         inferred_filesystem_contract(&detected),
     );
-    let runtime_resolution = inferred_runtime_resolution(&detected, &input.project_root);
+    let runtime_resolution = desktop_execution
+        .as_ref()
+        .map(|override_contract| override_contract.runtime.clone())
+        .unwrap_or_else(|| inferred_runtime_resolution(&detected, &input.project_root));
     lock.resolution
         .entries
         .insert("runtime".to_string(), runtime_resolution.clone());
     lock.resolution.entries.insert(
         "resolved_targets".to_string(),
-        Value::Array(vec![{
-            let mut target = serde_json::Map::new();
-            target.insert("label".to_string(), Value::String("default".to_string()));
-            target.insert("runtime".to_string(), Value::String("source".to_string()));
-            if runtime_kind != "source" {
-                target.insert(
-                    "driver".to_string(),
-                    Value::String(runtime_kind.to_string()),
-                );
-            }
-            target.insert("compatible".to_string(), Value::Bool(true));
-            Value::Object(target)
-        }]),
+        desktop_execution
+            .as_ref()
+            .map(|override_contract| Value::Array(vec![override_contract.resolved_target.clone()]))
+            .unwrap_or_else(|| {
+                Value::Array(vec![{
+                    let mut target = serde_json::Map::new();
+                    target.insert("label".to_string(), Value::String("default".to_string()));
+                    target.insert("runtime".to_string(), Value::String("source".to_string()));
+                    if runtime_kind != "source" {
+                        target.insert(
+                            "driver".to_string(),
+                            Value::String(runtime_kind.to_string()),
+                        );
+                    }
+                    target.insert("compatible".to_string(), Value::Bool(true));
+                    Value::Object(target)
+                }])
+            }),
     );
     lock.resolution.entries.insert(
         "closure".to_string(),
         inferred_closure_state(&input.project_root),
     );
+    apply_source_native_delivery_inference(
+        &input.project_root,
+        &detected,
+        input.explicit_native_artifact.as_deref(),
+        &mut lock,
+        &mut provenance,
+        &mut diagnostics,
+    )?;
 
     provenance.push(SourceInferenceProvenance {
         field: "resolution.runtime".to_string(),
@@ -976,7 +1061,59 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         ));
     }
 
-    if process_candidates.is_empty() {
+    if let Some(override_contract) = desktop_execution {
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            Value::Array(vec![json!({
+                "name": "main",
+                "target": "desktop",
+                "process": override_contract.process.clone(),
+            })]),
+        );
+        lock.contract
+            .entries
+            .insert("process".to_string(), override_contract.process);
+        lock.resolution.entries.insert(
+            "target_selection".to_string(),
+            json!({
+                "default_target": "desktop",
+                "source": "shared_source_inference",
+            }),
+        );
+        provenance.push(SourceInferenceProvenance {
+            field: "contract.process".to_string(),
+            kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
+            source_path: Some(input.project_root.clone()),
+            importer_id: None,
+            evidence_kind: Some("desktop_native_execution".to_string()),
+            source_field: Some(override_contract.source_field.clone()),
+            note: Some(override_contract.provenance_note.clone()),
+        });
+        provenance.push(SourceInferenceProvenance {
+            field: "resolution.runtime".to_string(),
+            kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
+            source_path: Some(input.project_root.clone()),
+            importer_id: None,
+            evidence_kind: Some("desktop_native_execution".to_string()),
+            source_field: Some(override_contract.source_field.clone()),
+            note: Some(
+                "desktop native execution overrides runtime selection to driver=native with a fixed desktop target"
+                    .to_string(),
+            ),
+        });
+        provenance.push(SourceInferenceProvenance {
+            field: "resolution.resolved_targets".to_string(),
+            kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
+            source_path: Some(input.project_root.clone()),
+            importer_id: None,
+            evidence_kind: Some("desktop_native_execution".to_string()),
+            source_field: Some(override_contract.source_field),
+            note: Some(
+                "desktop native execution records a single immutable target-compatible native run contract"
+                    .to_string(),
+            ),
+        });
+    } else if process_candidates.is_empty() {
         lock.contract
             .entries
             .insert("workloads".to_string(), Value::Array(Vec::new()));
@@ -1041,7 +1178,11 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         provenance,
         diagnostics,
         infer: InferResult {
-            candidate_sets: vec![candidate_set],
+            candidate_sets: if process_candidates.is_empty() {
+                Vec::new()
+            } else {
+                vec![candidate_set]
+            },
             unresolved,
         },
         resolve: ResolveResult {
@@ -1358,7 +1499,7 @@ fn maybe_promote_native_build_closure(result: &mut SourceInferenceResult) -> Res
     let Some(project_root) = result_project_root(result) else {
         return Ok(false);
     };
-    let Ok(Some(plan)) = detect_build_strategy(&project_root) else {
+    let Ok(Some(plan)) = detect_promotable_native_build_plan(&project_root) else {
         return Ok(false);
     };
 
@@ -1430,6 +1571,697 @@ fn maybe_promote_native_build_closure(result: &mut SourceInferenceResult) -> Res
     });
 
     Ok(true)
+}
+
+fn detect_promotable_native_build_plan(project_root: &Path) -> Result<Option<NativeBuildPlan>> {
+    if let Some(plan) = detect_build_strategy(project_root)? {
+        return Ok(Some(plan));
+    }
+
+    let detected = detect_project(project_root)?;
+    let Some(plan) = infer_source_native_delivery_plan(project_root, &detected)? else {
+        return Ok(None);
+    };
+    if plan.closure_complete {
+        return Ok(Some(plan.plan));
+    }
+    Ok(None)
+}
+
+fn apply_source_native_delivery_inference(
+    project_root: &Path,
+    detected: &DetectedProject,
+    explicit_native_artifact: Option<&Path>,
+    lock: &mut AtoLock,
+    provenance: &mut Vec<SourceInferenceProvenance>,
+    diagnostics: &mut Vec<SourceInferenceDiagnostic>,
+) -> Result<()> {
+    if let Some(explicit_artifact) = explicit_native_artifact {
+        if let Some(artifact_type) = imported_native_artifact_type(explicit_artifact) {
+            lock.contract.entries.insert(
+                "delivery".to_string(),
+                imported_native_artifact_delivery_contract(
+                    &relative_or_absolute_path(project_root, explicit_artifact),
+                    artifact_type,
+                ),
+            );
+            lock.resolution.entries.insert(
+                "closure".to_string(),
+                imported_native_artifact_closure(explicit_artifact, artifact_type)?,
+            );
+            provenance.push(SourceInferenceProvenance {
+                field: "contract.delivery".to_string(),
+                kind: SourceInferenceProvenanceKind::ExplicitArtifact,
+                source_path: Some(explicit_artifact.to_path_buf()),
+                importer_id: None,
+                evidence_kind: Some("native_artifact".to_string()),
+                source_field: Some(artifact_type.to_string()),
+                note: Some(
+                    "explicit native artifact input forces artifact-import delivery semantics for source-started run"
+                        .to_string(),
+                ),
+            });
+            provenance.push(SourceInferenceProvenance {
+                field: "resolution.closure".to_string(),
+                kind: SourceInferenceProvenanceKind::ExplicitArtifact,
+                source_path: Some(explicit_artifact.to_path_buf()),
+                importer_id: None,
+                evidence_kind: Some("native_artifact".to_string()),
+                source_field: Some(artifact_type.to_string()),
+                note: Some(
+                    "explicit native artifact input hashes the selected artifact into imported_artifact_closure"
+                        .to_string(),
+                ),
+            });
+            return Ok(());
+        }
+    }
+
+    if let Some(plan) = infer_source_native_delivery_plan(project_root, detected)? {
+        lock.contract.entries.insert(
+            "delivery".to_string(),
+            native_delivery_contract_from_build_plan(&plan.plan, "source-draft", "incomplete")?,
+        );
+        provenance.push(SourceInferenceProvenance {
+            field: "contract.delivery".to_string(),
+            kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
+            source_path: Some(project_root.to_path_buf()),
+            importer_id: None,
+            evidence_kind: None,
+            source_field: Some("framework-source".to_string()),
+            note: Some(
+                "source-only native framework evidence compiled into a durable desktop delivery draft"
+                    .to_string(),
+            ),
+        });
+        for evidence in &plan.framework_evidence {
+            provenance.push(importer_observation_provenance(
+                "contract.delivery",
+                evidence,
+                "framework importer evidence observed while creating native delivery draft",
+            ));
+        }
+        if !plan.closure_complete {
+            diagnostics.push(SourceInferenceDiagnostic {
+                severity: SourceInferenceDiagnosticSeverity::Warning,
+                field: "resolution.closure".to_string(),
+                message: "native delivery source was detected, but build closure remains incomplete until required lockfile evidence is materialized".to_string(),
+            });
+        }
+        return Ok(());
+    }
+
+    match infer_imported_native_artifact_candidate(project_root)? {
+        ImportedArtifactProbe::Single(candidate) => {
+            lock.contract.entries.insert(
+                "delivery".to_string(),
+                imported_native_artifact_delivery_contract(
+                    &relative_or_absolute_path(project_root, &candidate.artifact_path),
+                    candidate.artifact_type,
+                ),
+            );
+            lock.resolution.entries.insert(
+                "closure".to_string(),
+                imported_native_artifact_closure(&candidate.artifact_path, candidate.artifact_type)?,
+            );
+            provenance.push(SourceInferenceProvenance {
+                field: "contract.delivery".to_string(),
+                kind: SourceInferenceProvenanceKind::ExplicitArtifact,
+                source_path: Some(candidate.artifact_path.clone()),
+                importer_id: None,
+                evidence_kind: Some("native_artifact".to_string()),
+                source_field: Some(candidate.artifact_type.to_string()),
+                note: Some(
+                    "existing native artifact detected in source-only workspace; delivery mode is artifact-import"
+                        .to_string(),
+                ),
+            });
+            provenance.push(SourceInferenceProvenance {
+                field: "resolution.closure".to_string(),
+                kind: SourceInferenceProvenanceKind::ExplicitArtifact,
+                source_path: Some(candidate.artifact_path),
+                importer_id: None,
+                evidence_kind: Some("native_artifact".to_string()),
+                source_field: Some(candidate.artifact_type.to_string()),
+                note: Some(
+                    "existing native artifact hashed as imported_artifact_closure with provenance-limited semantics"
+                        .to_string(),
+                ),
+            });
+        }
+        ImportedArtifactProbe::Ambiguous(paths) => diagnostics.push(SourceInferenceDiagnostic {
+            severity: SourceInferenceDiagnosticSeverity::Warning,
+            field: "contract.delivery".to_string(),
+            message: format!(
+                "multiple imported native artifact candidates were detected ({}) so source-only init did not choose one automatically",
+                paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }),
+        ImportedArtifactProbe::None => {}
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+enum ImportedArtifactProbe {
+    None,
+    Single(ImportedNativeArtifactCandidate),
+    Ambiguous(Vec<PathBuf>),
+}
+
+fn infer_imported_native_artifact_candidate(project_root: &Path) -> Result<ImportedArtifactProbe> {
+    let mut candidates = Vec::new();
+    if let Some(artifact_type) = imported_native_artifact_type(project_root) {
+        candidates.push(ImportedNativeArtifactCandidate {
+            artifact_path: project_root.to_path_buf(),
+            artifact_type,
+        });
+    }
+
+    for entry in WalkDir::new(project_root)
+        .follow_links(false)
+        .sort_by_file_name()
+        .max_depth(6)
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path == project_root {
+            continue;
+        }
+        if let Some(artifact_type) = imported_native_artifact_type(path) {
+            candidates.push(ImportedNativeArtifactCandidate {
+                artifact_path: path.to_path_buf(),
+                artifact_type,
+            });
+        }
+    }
+
+    candidates.sort_by(|left, right| left.artifact_path.cmp(&right.artifact_path));
+    candidates.dedup_by(|left, right| left.artifact_path == right.artifact_path);
+
+    Ok(match candidates.len() {
+        0 => ImportedArtifactProbe::None,
+        1 => ImportedArtifactProbe::Single(candidates.remove(0)),
+        _ => ImportedArtifactProbe::Ambiguous(
+            candidates
+                .into_iter()
+                .map(|candidate| candidate.artifact_path)
+                .collect(),
+        ),
+    })
+}
+
+fn infer_source_native_delivery_plan(
+    project_root: &Path,
+    detected: &DetectedProject,
+) -> Result<Option<SourceNativeDeliveryPlan>> {
+    let framework_evidence = probe_native_framework_evidence(project_root)?;
+    let mut frameworks = framework_evidence
+        .iter()
+        .map(|evidence| evidence.importer_id)
+        .collect::<Vec<_>>();
+    frameworks.sort();
+    frameworks.dedup();
+    let [framework] = frameworks.as_slice() else {
+        return Ok(None);
+    };
+
+    let framework_name = framework.as_str().to_string();
+    let artifact_relative = detect_framework_artifact_relative(project_root, *framework)
+        .unwrap_or_else(|| default_framework_artifact_relative(detected, *framework));
+    let target = inferred_delivery_target(&artifact_relative);
+    let staged_delivery_config_toml =
+        inferred_delivery_config_toml(&framework_name, &target, &artifact_relative);
+    let build_command = infer_source_native_build_command(project_root, detected, *framework);
+    let plan = NativeBuildPlan {
+        workspace_root: project_root.to_path_buf(),
+        compat_manifest: None,
+        package_name: detected.name.clone(),
+        package_version: infer_project_version(detected, project_root)
+            .unwrap_or_else(|| "0.1.0".to_string()),
+        delivery_config_path: None,
+        staged_delivery_config_toml,
+        source_app_path: project_root.join(&artifact_relative),
+        input_relative: artifact_relative,
+        build_command,
+        framework: framework_name,
+        target,
+    };
+    Ok(Some(SourceNativeDeliveryPlan {
+        closure_complete: source_native_closure_complete(project_root, *framework, &plan),
+        plan,
+        framework_evidence,
+    }))
+}
+
+fn detect_framework_artifact_relative(
+    project_root: &Path,
+    framework: capsule_core::importer::ImporterId,
+) -> Option<PathBuf> {
+    let roots = match framework {
+        capsule_core::importer::ImporterId::Tauri => vec![
+            project_root.join("src-tauri/target/release/bundle"),
+            project_root.join("src-tauri/target/release"),
+        ],
+        capsule_core::importer::ImporterId::Electron => vec![
+            project_root.join("dist"),
+            project_root.join("out"),
+            project_root.join("release"),
+        ],
+        capsule_core::importer::ImporterId::Wails => {
+            vec![project_root.join("build/bin"), project_root.join("dist")]
+        }
+        _ => Vec::new(),
+    };
+
+    let mut candidates = Vec::new();
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(&root)
+            .follow_links(false)
+            .sort_by_file_name()
+            .max_depth(6)
+        {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if imported_native_artifact_type(path).is_some() {
+                let relative = path.strip_prefix(project_root).ok()?.to_path_buf();
+                candidates.push(relative);
+            }
+        }
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    candidates.into_iter().next()
+}
+
+fn default_framework_artifact_relative(
+    detected: &DetectedProject,
+    framework: capsule_core::importer::ImporterId,
+) -> PathBuf {
+    let file_name = match std::env::consts::OS {
+        "windows" => format!("{}.exe", detected.name),
+        "linux" => format!("{}.AppImage", detected.name),
+        _ => format!("{}.app", detected.name),
+    };
+
+    match framework {
+        capsule_core::importer::ImporterId::Tauri => match std::env::consts::OS {
+            "windows" => PathBuf::from(format!("src-tauri/target/release/{}", file_name)),
+            "linux" => PathBuf::from(format!(
+                "src-tauri/target/release/bundle/appimage/{}",
+                file_name
+            )),
+            _ => PathBuf::from(format!(
+                "src-tauri/target/release/bundle/macos/{}",
+                file_name
+            )),
+        },
+        capsule_core::importer::ImporterId::Electron => {
+            PathBuf::from(format!("dist/{}", file_name))
+        }
+        capsule_core::importer::ImporterId::Wails => {
+            PathBuf::from(format!("build/bin/{}", file_name))
+        }
+        _ => PathBuf::from(file_name),
+    }
+}
+
+fn inferred_delivery_target(artifact_relative: &Path) -> String {
+    if path_has_extension(artifact_relative, "exe") {
+        return format!("windows/{}", normalized_delivery_arch());
+    }
+    if path_has_extension(artifact_relative, "AppImage") {
+        return format!("linux/{}", normalized_delivery_arch());
+    }
+    match std::env::consts::ARCH {
+        "x86_64" => "darwin/x86_64".to_string(),
+        _ => "darwin/arm64".to_string(),
+    }
+}
+
+fn inferred_delivery_config_toml(
+    framework: &str,
+    target: &str,
+    artifact_relative: &Path,
+) -> String {
+    let input = artifact_relative.to_string_lossy();
+    let (tool, args) = if path_has_extension(artifact_relative, "exe") {
+        ("signtool", vec!["sign", "/fd", "SHA256", input.as_ref()])
+    } else if path_has_extension(artifact_relative, "AppImage") {
+        ("host-finalizer", vec![input.as_ref()])
+    } else {
+        (
+            "codesign",
+            vec!["--deep", "--force", "--sign", "-", input.as_ref()],
+        )
+    };
+    let rendered_args = args
+        .into_iter()
+        .map(|value| format!("{:?}", value))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "schema_version = \"0.1\"\n[artifact]\nframework = {:?}\nstage = \"unsigned\"\ntarget = {:?}\ninput = {:?}\n[finalize]\ntool = {:?}\nargs = [{}]\n",
+        framework, target, input.as_ref(), tool, rendered_args
+    )
+}
+
+fn normalized_delivery_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        other => other,
+    }
+}
+
+fn infer_source_native_build_command(
+    project_root: &Path,
+    detected: &DetectedProject,
+    framework: capsule_core::importer::ImporterId,
+) -> Option<NativeBuildCommand> {
+    if let Some(node) = detected.node.as_ref() {
+        if node.scripts.has_build {
+            let (program, args) = match node.package_manager {
+                NodePackageManager::Bun => (
+                    "bun".to_string(),
+                    vec!["run".to_string(), "build".to_string()],
+                ),
+                NodePackageManager::Deno => (
+                    "deno".to_string(),
+                    vec!["task".to_string(), "build".to_string()],
+                ),
+                NodePackageManager::Pnpm => ("pnpm".to_string(), vec!["build".to_string()]),
+                NodePackageManager::Yarn => ("yarn".to_string(), vec!["build".to_string()]),
+                NodePackageManager::Npm | NodePackageManager::Unknown => (
+                    "npm".to_string(),
+                    vec!["run".to_string(), "build".to_string()],
+                ),
+            };
+            return Some(NativeBuildCommand {
+                program,
+                args,
+                working_dir: project_root.to_path_buf(),
+            });
+        }
+    }
+
+    match framework {
+        capsule_core::importer::ImporterId::Tauri
+            if project_root.join("src-tauri/Cargo.toml").is_file() =>
+        {
+            Some(NativeBuildCommand {
+                program: "cargo".to_string(),
+                args: vec![
+                    "build".to_string(),
+                    "--manifest-path".to_string(),
+                    "src-tauri/Cargo.toml".to_string(),
+                    "--release".to_string(),
+                ],
+                working_dir: project_root.to_path_buf(),
+            })
+        }
+        capsule_core::importer::ImporterId::Wails if project_root.join("wails.json").is_file() => {
+            Some(NativeBuildCommand {
+                program: "wails".to_string(),
+                args: vec!["build".to_string()],
+                working_dir: project_root.to_path_buf(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn source_native_closure_complete(
+    project_root: &Path,
+    framework: capsule_core::importer::ImporterId,
+    plan: &NativeBuildPlan,
+) -> bool {
+    if plan.build_command.is_none() {
+        return false;
+    }
+    let observed = observed_closure_evidence(project_root)
+        .into_iter()
+        .map(|evidence| evidence.importer_id)
+        .collect::<Vec<_>>();
+
+    let has = |importer: capsule_core::importer::ImporterId| observed.contains(&importer);
+    let has_node_lock = [
+        capsule_core::importer::ImporterId::Npm,
+        capsule_core::importer::ImporterId::Pnpm,
+        capsule_core::importer::ImporterId::Yarn,
+        capsule_core::importer::ImporterId::Bun,
+        capsule_core::importer::ImporterId::Deno,
+    ]
+    .into_iter()
+    .any(has);
+
+    match framework {
+        capsule_core::importer::ImporterId::Tauri => {
+            has(capsule_core::importer::ImporterId::Cargo) && has_node_lock
+        }
+        capsule_core::importer::ImporterId::Electron => has_node_lock,
+        capsule_core::importer::ImporterId::Wails => {
+            has(capsule_core::importer::ImporterId::Go)
+                && (!project_root.join("package.json").exists()
+                    && !project_root.join("deno.json").exists()
+                    && !project_root.join("deno.jsonc").exists()
+                    || has_node_lock)
+        }
+        _ => false,
+    }
+}
+
+fn relative_or_absolute_path(project_root: &Path, artifact_path: &Path) -> PathBuf {
+    artifact_path
+        .strip_prefix(project_root)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| artifact_path.to_path_buf())
+}
+
+fn infer_desktop_execution_override(
+    project_root: &Path,
+    detected: &DetectedProject,
+    info: &ProjectInfo,
+    explicit_native_artifact: Option<&Path>,
+) -> Result<Option<DesktopExecutionOverride>> {
+    if let Some(explicit_artifact) = explicit_native_artifact {
+        if let Some(artifact_type) = imported_native_artifact_type(explicit_artifact) {
+            return Ok(Some(desktop_execution_from_artifact(
+                project_root,
+                explicit_artifact,
+                artifact_type,
+                "explicit-native-artifact".to_string(),
+                "explicit native artifact input fixed the desktop execution path before run"
+                    .to_string(),
+            )?));
+        }
+    }
+
+    if let Some(plan) = infer_source_native_delivery_plan(project_root, detected)? {
+        if let Some(process) =
+            infer_source_native_run_process(project_root, detected, info, &plan.plan.framework)
+        {
+            return Ok(Some(desktop_execution_from_process(
+                process,
+                format!("framework:{}", plan.plan.framework),
+                format!(
+                    "desktop source-derived execution selected a native dev/run process for framework '{}'",
+                    plan.plan.framework
+                ),
+            )));
+        }
+
+        if plan.plan.source_app_path.exists() {
+            if let Some(artifact_type) = imported_native_artifact_type(&plan.plan.source_app_path) {
+                return Ok(Some(desktop_execution_from_artifact(
+                    project_root,
+                    &plan.plan.source_app_path,
+                    artifact_type,
+                    format!("framework-artifact:{}", plan.plan.framework),
+                    format!(
+                        "desktop source-derived execution fell back to the built native artifact for framework '{}'",
+                        plan.plan.framework
+                    ),
+                )?));
+            }
+        }
+    }
+
+    match infer_imported_native_artifact_candidate(project_root)? {
+        ImportedArtifactProbe::Single(candidate) => Ok(Some(desktop_execution_from_artifact(
+            project_root,
+            &candidate.artifact_path,
+            candidate.artifact_type,
+            format!("artifact-import:{}", candidate.artifact_type),
+            "desktop artifact-import execution selected the single observed native artifact"
+                .to_string(),
+        )?)),
+        ImportedArtifactProbe::Ambiguous(_) | ImportedArtifactProbe::None => Ok(None),
+    }
+}
+
+fn desktop_execution_from_process(
+    process: Value,
+    source_field: String,
+    provenance_note: String,
+) -> DesktopExecutionOverride {
+    let mut resolved_target = serde_json::Map::new();
+    resolved_target.insert("label".to_string(), Value::String("desktop".to_string()));
+    resolved_target.insert("runtime".to_string(), Value::String("source".to_string()));
+    resolved_target.insert("driver".to_string(), Value::String("native".to_string()));
+    resolved_target.insert("compatible".to_string(), Value::Bool(true));
+    if let Some(entrypoint) = process.get("entrypoint").cloned() {
+        resolved_target.insert("entrypoint".to_string(), entrypoint);
+    }
+    if let Some(cmd) = process.get("cmd").cloned() {
+        resolved_target.insert("cmd".to_string(), cmd);
+    }
+    if let Some(run_command) = process.get("run_command").cloned() {
+        resolved_target.insert("run_command".to_string(), run_command);
+    }
+
+    DesktopExecutionOverride {
+        process,
+        runtime: json!({
+            "kind": "native",
+            "resolved_by": "shared_source_inference",
+            "selected_target": "desktop",
+        }),
+        resolved_target: Value::Object(resolved_target),
+        provenance_note,
+        source_field,
+    }
+}
+
+fn desktop_execution_from_artifact(
+    project_root: &Path,
+    artifact_path: &Path,
+    artifact_type: &str,
+    source_field: String,
+    provenance_note: String,
+) -> Result<DesktopExecutionOverride> {
+    let launch_path = native_artifact_launch_path(artifact_path, artifact_type)?;
+    Ok(desktop_execution_from_process(
+        json!({
+            "entrypoint": relative_or_absolute_path(project_root, &launch_path),
+            "cmd": [],
+        }),
+        source_field,
+        provenance_note,
+    ))
+}
+
+fn infer_source_native_run_process(
+    project_root: &Path,
+    detected: &DetectedProject,
+    info: &ProjectInfo,
+    framework: &str,
+) -> Option<Value> {
+    if let Some(node) = detected.node.as_ref() {
+        if node.scripts.has_dev {
+            return node_package_manager_process(node.package_manager, "dev");
+        }
+        if node.scripts.has_start {
+            return node_package_manager_process(node.package_manager, "start");
+        }
+    }
+
+    match framework {
+        "tauri" if project_root.join("src-tauri/Cargo.toml").is_file() => Some(json!({
+            "entrypoint": "cargo",
+            "cmd": ["run", "--manifest-path", "src-tauri/Cargo.toml"],
+        })),
+        "wails" if project_root.join("wails.json").is_file() => Some(json!({
+            "entrypoint": "wails",
+            "cmd": ["dev"],
+        })),
+        "electron" if !info.entrypoint.is_empty() => Some(json!({
+            "entrypoint": info.entrypoint.first().cloned().unwrap_or_default(),
+            "cmd": info.entrypoint.iter().skip(1).cloned().collect::<Vec<_>>(),
+        })),
+        _ => None,
+    }
+}
+
+fn node_package_manager_process(
+    package_manager: NodePackageManager,
+    script_name: &str,
+) -> Option<Value> {
+    let (entrypoint, cmd) = match package_manager {
+        NodePackageManager::Bun => (
+            "bun".to_string(),
+            vec!["run".to_string(), script_name.to_string()],
+        ),
+        NodePackageManager::Deno => (
+            "deno".to_string(),
+            vec!["task".to_string(), script_name.to_string()],
+        ),
+        NodePackageManager::Pnpm => ("pnpm".to_string(), vec![script_name.to_string()]),
+        NodePackageManager::Yarn => ("yarn".to_string(), vec![script_name.to_string()]),
+        NodePackageManager::Npm | NodePackageManager::Unknown => (
+            "npm".to_string(),
+            vec!["run".to_string(), script_name.to_string()],
+        ),
+    };
+    Some(json!({
+        "entrypoint": entrypoint,
+        "cmd": cmd,
+    }))
+}
+
+fn native_artifact_launch_path(artifact_path: &Path, artifact_type: &str) -> Result<PathBuf> {
+    if artifact_type != "macos_app_bundle" {
+        return Ok(artifact_path.to_path_buf());
+    }
+
+    let macos_dir = artifact_path.join("Contents").join("MacOS");
+    let expected_name = artifact_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let mut files = fs::read_dir(&macos_dir)
+        .with_context(|| format!("failed to read {}", macos_dir.display()))?
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| format!("failed to enumerate {}", macos_dir.display()))?
+        .into_iter()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    files.sort();
+
+    if let Some(expected_name) = expected_name {
+        if let Some(path) = files.iter().find(|path| {
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .map(|value| value == expected_name)
+                .unwrap_or(false)
+        }) {
+            return Ok(path.clone());
+        }
+    }
+
+    match files.as_slice() {
+        [single] => Ok(single.clone()),
+        [] => anyhow::bail!(
+            "native artifact run could not find an executable within {}",
+            macos_dir.display()
+        ),
+        _ => anyhow::bail!(
+            "native artifact run found multiple executable candidates within {}",
+            macos_dir.display()
+        ),
+    }
 }
 
 fn result_project_root(result: &SourceInferenceResult) -> Option<PathBuf> {
@@ -2391,7 +3223,9 @@ fn is_equal_ranked(candidates: &[RankedCandidate]) -> bool {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
 
+    use capsule_core::ato_lock::{self, AtoLock};
     use capsule_core::input_resolver::{
         resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ResolvedSingleScript,
         ResolvedSourceOnly, SingleScriptLanguage,
@@ -2402,6 +3236,21 @@ mod tests {
 
     fn reporter() -> Arc<CliReporter> {
         Arc::new(CliReporter::new(false))
+    }
+
+    fn load_materialized_lock(path: &Path) -> AtoLock {
+        ato_lock::load_unvalidated_from_path(path).expect("load durable ato.lock.json")
+    }
+
+    fn write_macos_app_bundle(path: &Path) {
+        let executable = path.join("Contents/MacOS/app");
+        fs::create_dir_all(
+            executable
+                .parent()
+                .expect("macOS app executable path must have a parent"),
+        )
+        .expect("create app bundle");
+        fs::write(&executable, "#!/bin/sh\nexit 0\n").expect("write app executable");
     }
 
     #[test]
@@ -2417,6 +3266,7 @@ mod tests {
         let result = execute_shared_engine(
             SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
                 project_root: dir.path().to_path_buf(),
+                explicit_native_artifact: None,
             }),
             MaterializationMode::RunAttempt,
             true,
@@ -2443,6 +3293,7 @@ mod tests {
         let result = execute_shared_engine(
             SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
                 project_root: dir.path().to_path_buf(),
+                explicit_native_artifact: None,
             }),
             MaterializationMode::InitWorkspace,
             true,
@@ -2472,6 +3323,7 @@ mod tests {
         let result = execute_shared_engine(
             SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
                 project_root: dir.path().to_path_buf(),
+                explicit_native_artifact: None,
             }),
             MaterializationMode::RunAttempt,
             true,
@@ -2499,6 +3351,7 @@ mod tests {
         let result = execute_shared_engine(
             SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
                 project_root: dir.path().to_path_buf(),
+                explicit_native_artifact: None,
             }),
             MaterializationMode::RunAttempt,
             true,
@@ -3017,6 +3870,7 @@ mod tests {
         let error = execute_shared_engine(
             SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
                 project_root: dir.path().to_path_buf(),
+                explicit_native_artifact: None,
             }),
             MaterializationMode::RunAttempt,
             true,
@@ -3408,6 +4262,421 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
                 .and_then(|value| value.get("closure_status"))
                 .and_then(Value::as_str),
             Some("complete")
+        );
+    }
+
+    #[test]
+    fn durable_init_source_only_tauri_promotes_to_source_derivation() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"my-tauri-app","version":"1.2.3","scripts":{"build":"npm run tauri build"}}"#,
+        )
+        .expect("write package json");
+        fs::write(dir.path().join("package-lock.json"), "{}\n").expect("write package lock");
+        fs::write(dir.path().join("Cargo.lock"), "version = 3\n").expect("write cargo lock");
+        fs::create_dir_all(dir.path().join("src-tauri")).expect("create src-tauri");
+        fs::write(
+            dir.path().join("src-tauri/Cargo.toml"),
+            "[package]\nname = \"my-tauri-app\"\nversion = \"1.2.3\"\n",
+        )
+        .expect("write Cargo.toml");
+        fs::write(dir.path().join("src-tauri/tauri.conf.json"), "{}\n")
+            .expect("write tauri config");
+        write_macos_app_bundle(
+            &dir.path()
+                .join("src-tauri/target/release/bundle/macos/my-tauri-app.app"),
+        );
+
+        let materialized = execute_init_from_source_only(dir.path(), reporter(), true)
+            .expect("materialize tauri workspace");
+        let lock = load_materialized_lock(&materialized.lock_path);
+
+        let delivery = lock
+            .contract
+            .entries
+            .get("delivery")
+            .expect("contract.delivery");
+        let closure = lock
+            .resolution
+            .entries
+            .get("closure")
+            .expect("resolution.closure");
+        let environment = closure
+            .get("build_environment")
+            .and_then(Value::as_object)
+            .expect("build_environment");
+
+        assert_eq!(
+            delivery.get("mode").and_then(Value::as_str),
+            Some("source-derivation")
+        );
+        assert_eq!(
+            closure.get("kind").and_then(Value::as_str),
+            Some("build_closure")
+        );
+        assert!(environment
+            .get("toolchains")
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                values.iter().any(|value| value.as_str() == Some("rust"))
+                    && values.iter().any(|value| value.as_str() == Some("node"))
+            }));
+        assert!(environment
+            .get("package_managers")
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                values.iter().any(|value| value.as_str() == Some("cargo"))
+                    && values.iter().any(|value| value.as_str() == Some("npm"))
+            }));
+        assert!(environment
+            .get("helper_tools")
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                values
+                    .iter()
+                    .any(|value| value.as_str() == Some("tauri-cli"))
+                    && values
+                        .iter()
+                        .any(|value| value.as_str() == Some("codesign"))
+            }));
+    }
+
+    #[test]
+    fn durable_init_source_only_electron_promotes_to_source_derivation() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"my-electron-app","version":"2.0.0","scripts":{"build":"electron-builder"}}"#,
+        )
+        .expect("write package json");
+        fs::write(dir.path().join("package-lock.json"), "{}\n").expect("write package lock");
+        fs::write(dir.path().join("electron-builder.json"), "{}\n")
+            .expect("write electron builder config");
+        write_macos_app_bundle(&dir.path().join("dist/my-electron-app.app"));
+
+        let materialized = execute_init_from_source_only(dir.path(), reporter(), true)
+            .expect("materialize electron workspace");
+        let lock = load_materialized_lock(&materialized.lock_path);
+
+        let delivery = lock
+            .contract
+            .entries
+            .get("delivery")
+            .expect("contract.delivery");
+        let closure = lock
+            .resolution
+            .entries
+            .get("closure")
+            .expect("resolution.closure");
+        let environment = closure
+            .get("build_environment")
+            .and_then(Value::as_object)
+            .expect("build_environment");
+
+        assert_eq!(
+            delivery.get("mode").and_then(Value::as_str),
+            Some("source-derivation")
+        );
+        assert_eq!(
+            delivery
+                .get("artifact")
+                .and_then(|value| value.get("framework"))
+                .and_then(Value::as_str),
+            Some("electron")
+        );
+        assert_eq!(
+            closure.get("kind").and_then(Value::as_str),
+            Some("build_closure")
+        );
+        assert!(environment
+            .get("toolchains")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("node"))));
+        assert!(environment
+            .get("package_managers")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("npm"))));
+        assert!(environment
+            .get("helper_tools")
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                values
+                    .iter()
+                    .any(|value| value.as_str() == Some("electron"))
+                    && values
+                        .iter()
+                        .any(|value| value.as_str() == Some("codesign"))
+            }));
+    }
+
+    #[test]
+    fn durable_init_source_only_wails_promotes_to_source_derivation() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/my-wails-app\n",
+        )
+        .expect("write go.mod");
+        fs::write(
+            dir.path().join("go.sum"),
+            "example.com/pkg v1.0.0 h1:demo\n",
+        )
+        .expect("write go.sum");
+        fs::write(dir.path().join("wails.json"), "{}\n").expect("write wails config");
+        write_macos_app_bundle(&dir.path().join("build/bin/my-wails-app.app"));
+
+        let materialized = execute_init_from_source_only(dir.path(), reporter(), true)
+            .expect("materialize wails workspace");
+        let lock = load_materialized_lock(&materialized.lock_path);
+
+        let delivery = lock
+            .contract
+            .entries
+            .get("delivery")
+            .expect("contract.delivery");
+        let closure = lock
+            .resolution
+            .entries
+            .get("closure")
+            .expect("resolution.closure");
+        let environment = closure
+            .get("build_environment")
+            .and_then(Value::as_object)
+            .expect("build_environment");
+
+        assert_eq!(
+            delivery.get("mode").and_then(Value::as_str),
+            Some("source-derivation")
+        );
+        assert_eq!(
+            delivery
+                .get("artifact")
+                .and_then(|value| value.get("framework"))
+                .and_then(Value::as_str),
+            Some("wails")
+        );
+        assert_eq!(
+            closure.get("kind").and_then(Value::as_str),
+            Some("build_closure")
+        );
+        assert!(environment
+            .get("toolchains")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("go"))));
+        assert!(environment
+            .get("package_managers")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("go"))));
+        assert!(environment
+            .get("helper_tools")
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                values.iter().any(|value| value.as_str() == Some("wails"))
+                    && values
+                        .iter()
+                        .any(|value| value.as_str() == Some("codesign"))
+            }));
+    }
+
+    #[test]
+    fn durable_init_source_only_appimage_becomes_artifact_import() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("dist")).expect("create dist");
+        fs::write(dir.path().join("dist/MyApp.AppImage"), "appimage").expect("write appimage");
+
+        let materialized = execute_init_from_source_only(dir.path(), reporter(), true)
+            .expect("materialize artifact-import workspace");
+        let lock = load_materialized_lock(&materialized.lock_path);
+
+        let delivery = lock
+            .contract
+            .entries
+            .get("delivery")
+            .expect("contract.delivery");
+        let closure = lock
+            .resolution
+            .entries
+            .get("closure")
+            .expect("resolution.closure");
+
+        assert_eq!(
+            delivery.get("mode").and_then(Value::as_str),
+            Some("artifact-import")
+        );
+        assert_eq!(
+            delivery
+                .get("artifact")
+                .and_then(|value| value.get("artifact_type"))
+                .and_then(Value::as_str),
+            Some("appimage")
+        );
+        assert_eq!(
+            delivery
+                .get("artifact")
+                .and_then(|value| value.get("provenance_limited"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            closure.get("kind").and_then(Value::as_str),
+            Some("imported_artifact_closure")
+        );
+        assert_eq!(
+            closure
+                .get("artifact")
+                .and_then(|value| value.get("artifact_type"))
+                .and_then(Value::as_str),
+            Some("appimage")
+        );
+    }
+
+    #[test]
+    fn durable_init_source_only_windows_executable_becomes_artifact_import() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("dist")).expect("create dist");
+        fs::write(dir.path().join("dist/MyApp.exe"), "exe").expect("write exe");
+
+        let materialized = execute_init_from_source_only(dir.path(), reporter(), true)
+            .expect("materialize artifact-import workspace");
+        let lock = load_materialized_lock(&materialized.lock_path);
+
+        let delivery = lock
+            .contract
+            .entries
+            .get("delivery")
+            .expect("contract.delivery");
+        let closure = lock
+            .resolution
+            .entries
+            .get("closure")
+            .expect("resolution.closure");
+
+        assert_eq!(
+            delivery.get("mode").and_then(Value::as_str),
+            Some("artifact-import")
+        );
+        assert_eq!(
+            delivery
+                .get("artifact")
+                .and_then(|value| value.get("artifact_type"))
+                .and_then(Value::as_str),
+            Some("windows_executable")
+        );
+        assert_eq!(
+            delivery
+                .get("artifact")
+                .and_then(|value| value.get("provenance_limited"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            closure.get("kind").and_then(Value::as_str),
+            Some("imported_artifact_closure")
+        );
+        assert_eq!(
+            closure
+                .get("artifact")
+                .and_then(|value| value.get("artifact_type"))
+                .and_then(Value::as_str),
+            Some("windows_executable")
+        );
+    }
+
+    #[test]
+    fn run_materialization_source_only_tauri_routes_native_dev_command() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"my-tauri-app","version":"1.2.3","scripts":{"dev":"tauri dev"}}"#,
+        )
+        .expect("write package json");
+        fs::write(dir.path().join("package-lock.json"), "{}\n").expect("write package lock");
+        fs::write(dir.path().join("Cargo.lock"), "version = 3\n").expect("write cargo lock");
+        fs::create_dir_all(dir.path().join("src-tauri")).expect("create src-tauri");
+        fs::write(
+            dir.path().join("src-tauri/Cargo.toml"),
+            "[package]\nname = \"my-tauri-app\"\nversion = \"1.2.3\"\n",
+        )
+        .expect("write Cargo.toml");
+        fs::write(dir.path().join("src-tauri/tauri.conf.json"), "{}\n")
+            .expect("write tauri config");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: None,
+        };
+        let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
+            .expect("materialize run");
+        let routed = capsule_core::router::route_lock(
+            &materialized.lock_path,
+            &materialized.lock,
+            &materialized.project_root,
+            capsule_core::router::ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route lock");
+
+        assert_eq!(routed.plan.execution_driver().as_deref(), Some("native"));
+        assert_eq!(routed.plan.selected_target_label(), "desktop");
+        assert_eq!(routed.plan.execution_entrypoint().as_deref(), Some("npm"));
+        assert_eq!(routed.plan.targets_oci_cmd(), vec!["run", "dev"]);
+    }
+
+    #[test]
+    fn run_materialization_source_only_app_bundle_routes_inner_executable() {
+        let dir = tempdir().expect("tempdir");
+        write_macos_app_bundle(&dir.path().join("dist/MyApp.app"));
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: None,
+        };
+        let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
+            .expect("materialize run");
+        let routed = capsule_core::router::route_lock(
+            &materialized.lock_path,
+            &materialized.lock,
+            &materialized.project_root,
+            capsule_core::router::ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route lock");
+
+        assert_eq!(routed.plan.execution_driver().as_deref(), Some("native"));
+        assert_eq!(routed.plan.selected_target_label(), "desktop");
+        assert_eq!(
+            routed.plan.execution_entrypoint().as_deref(),
+            Some("dist/MyApp.app/Contents/MacOS/app")
+        );
+    }
+
+    #[test]
+    fn run_materialization_source_only_appimage_routes_native_artifact() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("dist")).expect("create dist");
+        fs::write(dir.path().join("dist/MyApp.AppImage"), "appimage").expect("write appimage");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: None,
+        };
+        let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
+            .expect("materialize run");
+        let routed = capsule_core::router::route_lock(
+            &materialized.lock_path,
+            &materialized.lock,
+            &materialized.project_root,
+            capsule_core::router::ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route lock");
+
+        assert_eq!(routed.plan.execution_driver().as_deref(), Some("native"));
+        assert_eq!(routed.plan.selected_target_label(), "desktop");
+        assert_eq!(
+            routed.plan.execution_entrypoint().as_deref(),
+            Some("dist/MyApp.AppImage")
         );
     }
 
