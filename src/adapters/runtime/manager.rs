@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::{env, ffi::OsString};
 
 use anyhow::{bail, Context, Result};
+use capsule_core::bootstrap::{BootstrapBoundary, BootstrapSubjectKind};
+use capsule_core::common::paths::runtime_cache_dir;
 use capsule_core::lockfile::{
     parse_lockfile_text, resolve_existing_lockfile_path, CapsuleLock, RuntimeArtifact,
     RuntimeEntry, ToolArtifact, CAPSULE_LOCK_FILE_NAME,
@@ -40,7 +42,7 @@ impl RuntimeManager {
         let lockfile: CapsuleLock = parse_lockfile_text(&lockfile_raw, &lockfile_path)
             .with_context(|| format!("Failed to parse {}", lockfile_path.display()))?;
         let (target_triple, platform_key) = current_platform_keys()?;
-        let cache_root = runtime_cache_root()?;
+        let cache_root = runtime_cache_dir()?;
         Ok(Self {
             lockfile,
             target_triple,
@@ -261,11 +263,10 @@ pub fn ensure_deno_binary_with_authority(
     authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
 ) -> Result<PathBuf> {
     if authoritative_lock.is_some() {
-        return find_runtime_on_path(&["deno"]).ok_or_else(|| {
-            anyhow::anyhow!(
-                "lock-derived source execution requires a host-local 'deno' runtime on PATH"
-            )
-        });
+        return ensure_host_capability_for_authoritative_lock(
+            BootstrapBoundary::host_runtime("deno"),
+            &["deno"],
+        );
     }
     ensure_deno_binary(plan)
 }
@@ -284,11 +285,10 @@ pub fn ensure_python_binary_with_authority(
         } else {
             &["python3", "python"]
         };
-        return find_runtime_on_path(candidates).ok_or_else(|| {
-            anyhow::anyhow!(
-                "lock-derived source execution requires a host-local 'python' runtime on PATH"
-            )
-        });
+        return ensure_host_capability_for_authoritative_lock(
+            BootstrapBoundary::host_runtime("python"),
+            candidates,
+        );
     }
     ensure_python_binary(plan)
 }
@@ -307,11 +307,10 @@ pub fn ensure_node_binary_with_authority(
         } else {
             &["node"]
         };
-        return find_runtime_on_path(candidates).ok_or_else(|| {
-            anyhow::anyhow!(
-                "lock-derived source execution requires a host-local 'node' runtime on PATH"
-            )
-        });
+        return ensure_host_capability_for_authoritative_lock(
+            BootstrapBoundary::host_runtime("node"),
+            candidates,
+        );
     }
     ensure_node_binary(plan)
 }
@@ -330,13 +329,24 @@ pub fn ensure_uv_binary_with_authority(
         } else {
             &["uv"]
         };
-        return find_runtime_on_path(candidates).ok_or_else(|| {
-            anyhow::anyhow!(
-                "lock-derived source execution requires a host-local 'uv' runtime on PATH"
-            )
-        });
+        return ensure_host_capability_for_authoritative_lock(
+            BootstrapBoundary::host_tool("uv"),
+            candidates,
+        );
     }
     ensure_uv_binary(plan)
+}
+
+fn ensure_host_capability_for_authoritative_lock(
+    boundary: BootstrapBoundary,
+    candidates: &[&str],
+) -> Result<PathBuf> {
+    debug_assert!(matches!(
+        boundary.subject_kind,
+        BootstrapSubjectKind::Runtime | BootstrapSubjectKind::Tool
+    ));
+    find_runtime_on_path(candidates)
+        .ok_or_else(|| anyhow::anyhow!(boundary.missing_on_path_message()))
 }
 
 fn find_runtime_on_path(candidates: &[&str]) -> Option<PathBuf> {
@@ -458,12 +468,6 @@ fn select_tool_artifact<'a>(
     targets
         .get(target_triple)
         .or_else(|| targets.get(platform_key))
-}
-
-fn runtime_cache_root() -> Result<PathBuf> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to determine home directory"))?;
-    Ok(home.join(".ato").join("runtimes"))
 }
 
 fn current_platform_keys() -> Result<(String, String)> {
@@ -634,6 +638,7 @@ fn find_binary_recursive(root: &Path, candidates: &[&str]) -> Result<Option<Path
 #[cfg(test)]
 mod tests {
     use super::*;
+    use capsule_core::bootstrap::{BootstrapAuthorityKind, BootstrapClosureRole};
     use std::collections::HashMap;
 
     #[test]
@@ -688,5 +693,31 @@ mod tests {
             select_runtime_artifact(&targets, "x86_64-unknown-linux-gnu", "linux-x86_64")
                 .expect("linux runtime artifact");
         assert!(artifact.url.contains("x86_64-unknown-linux-gnu"));
+    }
+
+    #[test]
+    fn authoritative_lock_requires_host_runtime_boundary_for_node() {
+        let boundary = BootstrapBoundary::host_runtime("node");
+        assert_eq!(
+            boundary.authority_kind,
+            BootstrapAuthorityKind::HostCapability
+        );
+        assert_eq!(boundary.closure_role, BootstrapClosureRole::HostCapability);
+        assert!(boundary
+            .missing_on_path_message()
+            .contains("host-local 'node' runtime on PATH"));
+    }
+
+    #[test]
+    fn authoritative_lock_requires_host_tool_boundary_for_uv() {
+        let boundary = BootstrapBoundary::host_tool("uv");
+        assert_eq!(
+            boundary.authority_kind,
+            BootstrapAuthorityKind::HostCapability
+        );
+        assert_eq!(boundary.closure_role, BootstrapClosureRole::HostCapability);
+        assert!(boundary
+            .missing_on_path_message()
+            .contains("host-local 'uv' tool on PATH"));
     }
 }

@@ -1,4 +1,5 @@
 pub mod ato_lock;
+pub mod bootstrap;
 pub mod capsule_v3;
 pub mod common;
 pub mod config;

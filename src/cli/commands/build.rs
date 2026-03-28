@@ -127,6 +127,7 @@ pub fn execute_pack_command_with_injected_manifest(
         None
     };
 
+    let authoritative_lock_present = authoritative_input.is_some();
     let mut temporary_manifest: Option<TemporaryManifestGuard> = None;
     if !manifest.exists() {
         let stdin_is_tty = std::io::stdin().is_terminal();
@@ -217,8 +218,12 @@ pub fn execute_pack_command_with_injected_manifest(
     };
     let loaded_manifest =
         capsule_core::manifest::load_manifest_with_validation_mode(&manifest, validation_mode)?;
-    let raw_manifest: toml::Value = toml::from_str(&loaded_manifest.raw_text)
-        .context("Failed to parse manifest TOML for IPC validation")?;
+    let raw_manifest = manifest_for_build_validation(
+        authoritative_lock_present,
+        &decision.plan.manifest,
+        &loaded_manifest.raw_text,
+        loaded_manifest.raw.clone(),
+    )?;
     let capsule_name = loaded_manifest.model.name.clone();
     let capsule_version = loaded_manifest.model.version.clone();
     if !synthesized_producer_manifest {
@@ -530,6 +535,22 @@ pub fn execute_pack_command_with_injected_manifest(
     emit_timings(reporter.clone(), timings, &timing_entries)?;
 
     Ok(result)
+}
+
+fn manifest_for_build_validation(
+    authoritative_lock_present: bool,
+    routed_manifest: &toml::Value,
+    raw_manifest_text: &str,
+    fallback_manifest: toml::Value,
+) -> Result<toml::Value> {
+    if authoritative_lock_present {
+        return Ok(routed_manifest.clone());
+    }
+
+    match toml::from_str(raw_manifest_text) {
+        Ok(parsed) => Ok(parsed),
+        Err(_) => Ok(fallback_manifest),
+    }
 }
 
 fn record_timing(entries: &mut Vec<(String, Duration)>, label: &str, elapsed: Duration) {
@@ -1324,8 +1345,8 @@ fn sign_if_requested(
 #[cfg(test)]
 mod tests {
     use super::{
-        execute_pack_command_with_injected_manifest, plan_v03_build_provision_command,
-        run_v03_build_lifecycle_steps,
+        execute_pack_command_with_injected_manifest, manifest_for_build_validation,
+        plan_v03_build_provision_command, run_v03_build_lifecycle_steps,
     };
     use capsule_core::router::{ExecutionProfile, ManifestData};
     use std::ffi::OsString;
@@ -1500,6 +1521,29 @@ port = 18080
         assert!(result.ok);
         assert_eq!(result.build_strategy, "web");
         assert!(result.artifact.as_ref().is_some_and(|path| path.exists()));
+    }
+
+    #[test]
+    fn authoritative_build_validation_prefers_routed_manifest() {
+        let routed = toml::from_str::<toml::Value>(
+            r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+"#,
+        )
+        .expect("parse routed manifest");
+
+        let manifest = manifest_for_build_validation(
+            true,
+            &routed,
+            "not valid toml = ",
+            toml::Value::String("fallback".to_string()),
+        )
+        .expect("use routed manifest");
+
+        assert_eq!(manifest, routed);
     }
 
     fn manifest_with_schema_and_target(

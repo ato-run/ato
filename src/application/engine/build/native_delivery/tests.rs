@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::*;
+use capsule_core::bootstrap::{BootstrapAuthorityKind, BootstrapClosureRole};
 use tempfile::tempdir;
 
 #[cfg(unix)]
@@ -276,6 +277,20 @@ fn build_environment_skeleton_captures_native_delivery_inputs() -> Result<()> {
         .iter()
         .any(|value| value.as_str() == Some("codesign")));
     Ok(())
+}
+
+#[test]
+fn finalize_helper_boundary_is_host_local_but_recorded_as_build_environment_claim() {
+    let boundary = finalize_helper_boundary("codesign");
+    assert_eq!(
+        boundary.authority_kind,
+        BootstrapAuthorityKind::HostCapability
+    );
+    assert_eq!(
+        boundary.closure_role,
+        BootstrapClosureRole::BuildEnvironmentClaim
+    );
+    assert_eq!(boundary.subject_name, "codesign");
 }
 
 #[test]
