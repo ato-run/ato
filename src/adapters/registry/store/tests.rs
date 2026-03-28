@@ -1,4 +1,5 @@
 use super::*;
+use crate::application::ports::publish::{PublishArtifactIdentityClass, PublishArtifactMetadata};
 use std::io::Cursor;
 use std::io::Write;
 
@@ -458,6 +459,7 @@ fn gc_tick_keeps_retention_pinned_release_chunks() {
                 capsule.len() as u64,
                 None,
                 None,
+                None,
                 &capsule,
                 &format!("2026-03-05T00:00:0{}Z", idx),
             )
@@ -517,6 +519,7 @@ fn publish_registry_release_persists_lock_metadata() {
             capsule.len() as u64,
             Some(lock_id),
             Some(closure_digest),
+            None,
             &capsule,
             "2026-03-25T00:00:00Z",
         )
@@ -535,6 +538,49 @@ fn publish_registry_release_persists_lock_metadata() {
         .expect("resolved release");
     assert_eq!(resolved.lock_id.as_deref(), Some(lock_id));
     assert_eq!(resolved.closure_digest.as_deref(), Some(closure_digest));
+}
+
+#[test]
+fn publish_registry_release_persists_publish_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = RegistryStore::open(temp.path()).expect("open store");
+    let capsule = build_capsule_bytes(&manifest("2.0.0"));
+    let publish_metadata = PublishArtifactMetadata {
+        identity_class: PublishArtifactIdentityClass::ImportedThirdPartyArtifact,
+        delivery_mode: Some("artifact-import".to_string()),
+        provenance_limited: true,
+    };
+
+    store
+        .publish_registry_release(
+            "koh0920",
+            "desktop-demo",
+            "desktop-demo",
+            "desktop demo",
+            "2.0.0",
+            "desktop-demo-2.0.0.capsule",
+            "sha256:abc",
+            "blake3:def",
+            capsule.len() as u64,
+            None,
+            None,
+            Some(&publish_metadata),
+            &capsule,
+            "2026-03-28T00:00:00Z",
+        )
+        .expect("publish release");
+
+    let release = store
+        .find_registry_release("koh0920", "desktop-demo", "2.0.0")
+        .expect("find release")
+        .expect("stored release");
+    assert_eq!(release.publish_metadata.as_ref(), Some(&publish_metadata));
+
+    let resolved = store
+        .resolve_release_version("koh0920", "desktop-demo", "2.0.0")
+        .expect("resolve version")
+        .expect("resolved release");
+    assert_eq!(resolved.publish_metadata.as_ref(), Some(&publish_metadata));
 }
 
 #[test]

@@ -71,7 +71,7 @@ pub struct NativeBuildCommand {
 pub struct NativeBuildPlan {
     pub workspace_root: PathBuf,
     #[serde(skip_serializing)]
-    pub compat_manifest: Option<CompatManifestBridge>,
+    pub legacy_manifest_bridge: Option<CompatManifestBridge>,
     pub package_name: String,
     pub package_version: String,
     pub delivery_config_path: Option<PathBuf>,
@@ -438,7 +438,7 @@ pub(crate) fn detect_build_strategy(manifest_dir: &Path) -> Result<Option<Native
 
     Ok(Some(NativeBuildPlan {
         workspace_root: manifest_dir.to_path_buf(),
-        compat_manifest: Some(compat_manifest),
+        legacy_manifest_bridge: Some(compat_manifest),
         package_name: manifest.name.clone(),
         package_version: manifest.version.clone(),
         delivery_config_path: None,
@@ -501,7 +501,7 @@ pub(crate) fn detect_build_strategy_from_descriptor(
 
     Ok(Some(NativeBuildPlan {
         workspace_root: descriptor.workspace_root.clone(),
-        compat_manifest: Some(bridge.clone()),
+        legacy_manifest_bridge: Some(bridge.clone()),
         package_name: descriptor
             .runtime_model
             .metadata
@@ -566,10 +566,10 @@ where
     validate_native_bundle_directory(&plan.source_app_path)?;
     ensure_native_artifact_kind_supported(&plan.source_app_path, "build")?;
     let manifest = plan
-        .compat_manifest
+        .legacy_manifest_bridge
         .as_ref()
         .map(|bridge| bridge.manifest_model().clone())
-        .context("native delivery build requires compat manifest bridge")?;
+        .context("native delivery build requires legacy manifest bridge")?;
 
     let artifact_path = output_path.map(Path::to_path_buf).unwrap_or_else(|| {
         default_native_artifact_path(

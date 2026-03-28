@@ -112,10 +112,7 @@ pub fn diagnose_official(cwd: &Path, registry_url: &str) -> OfficialPublishDiagn
         Ok(authoritative_input) => {
             capsule_name = authoritative_input.semantic_package_name().ok();
             version = Some(authoritative_input.semantic_package_version());
-            manifest_repo = authoritative_input
-                .compat_manifest
-                .as_ref()
-                .and_then(|bridge| bridge.repository());
+            manifest_repo = authoritative_input.compatibility_input_repository();
 
             match evaluate_authoritative_preflight(&authoritative_input) {
                 Ok(_) => true,
@@ -302,7 +299,7 @@ pub fn diagnose_official(cwd: &Path, registry_url: &str) -> OfficialPublishDiagn
 fn evaluate_authoritative_preflight(
     authoritative_input: &ProducerAuthoritativeInput,
 ) -> Result<()> {
-    authoritative_input.validate_compat_bridge()?;
+    authoritative_input.validate_legacy_producer_bridge()?;
     let execution_plan = derive::compile_execution_plan_from_lock(
         &authoritative_input.descriptor.lock,
         &authoritative_input.descriptor.runtime_model,

@@ -6,7 +6,8 @@ use serde::Serialize;
 
 use crate::application::pipeline::producer::PublishDryRunStageResult;
 use crate::application::ports::publish::{
-    DestinationSpec, PublishableArtifact, PublishedLocation, SharedDestinationPort,
+    DestinationSpec, PublishArtifactIdentityClass, PublishArtifactMetadata, PublishableArtifact,
+    PublishedLocation, SharedDestinationPort,
 };
 use crate::application::producer_input::{
     resolve_producer_authoritative_input, ProducerAuthoritativeInput,
@@ -26,6 +27,8 @@ pub struct PrivatePublishResult {
     #[serde(default)]
     pub already_existed: bool,
     pub registry_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_metadata: Option<PublishArtifactMetadata>,
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +46,7 @@ struct PreparedPrivatePublishArtifact {
     version: String,
     lock_id: Option<String>,
     closure_digest: Option<String>,
+    publish_metadata: Option<PublishArtifactMetadata>,
 }
 
 #[derive(Debug)]
@@ -52,6 +56,7 @@ enum ResolvedPrivatePublishInput {
         authoritative_input: ProducerAuthoritativeInput,
         lock_id: Option<String>,
         closure_digest: Option<String>,
+        publish_metadata: Option<PublishArtifactMetadata>,
         name: String,
         version: String,
         scoped_id: String,
@@ -73,6 +78,7 @@ pub struct PrivatePublishRequest {
     pub allow_existing: bool,
     pub lock_id: Option<String>,
     pub closure_digest: Option<String>,
+    pub publish_metadata: Option<PublishArtifactMetadata>,
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +169,7 @@ pub async fn run_private_publish_phase_async(
             force_large_payload: request.force_large_payload,
             lock_id: prepared.lock_id,
             closure_digest: prepared.closure_digest,
+            publish_metadata: prepared.publish_metadata,
         },
         artifact_bytes,
     )
@@ -180,6 +187,7 @@ fn prepare_private_publish_artifact(
             scoped_id,
             lock_id,
             closure_digest,
+            publish_metadata,
         } => {
             let artifact_path = crate::publish_ci::build_capsule_artifact(
                 &name,
@@ -195,6 +203,7 @@ fn prepare_private_publish_artifact(
                 version,
                 lock_id,
                 closure_digest,
+                publish_metadata,
             })
         }
         ResolvedPrivatePublishInput::Artifact {
@@ -207,6 +216,7 @@ fn prepare_private_publish_artifact(
             version,
             lock_id: request.lock_id.clone(),
             closure_digest: request.closure_digest.clone(),
+            publish_metadata: request.publish_metadata.clone(),
         }),
     }
 }
@@ -239,7 +249,7 @@ fn resolve_private_publish_input(
     )?;
     let lock_id = resolved.lock_id.clone();
     let closure_digest = resolved.closure_digest.clone();
-    let compat_manifest = resolved.compat_manifest.clone();
+    let publish_metadata = resolved.publish_metadata();
     let metadata = &resolved.descriptor.runtime_model.metadata;
     let name = metadata
         .name
@@ -249,8 +259,10 @@ fn resolve_private_publish_input(
     let version = metadata.version.clone().unwrap_or_default();
 
     let slug = manifest_slug(&name)?;
-    let publisher =
-        resolve_private_publisher(request.publisher_hint.as_deref(), compat_manifest.as_ref());
+    let publisher = resolve_private_publisher(
+        request.publisher_hint.as_deref(),
+        resolved.compatibility_input_repository().as_deref(),
+    );
     let scoped_id = format!("{}/{}", publisher, slug);
     let version = resolve_manifest_publish_version(&version);
 
@@ -258,6 +270,7 @@ fn resolve_private_publish_input(
         authoritative_input: resolved,
         lock_id,
         closure_digest,
+        publish_metadata,
         name,
         version,
         scoped_id,
@@ -323,13 +336,13 @@ fn resolve_scoped_id_for_artifact(
 
 fn resolve_private_publisher(
     publisher_hint: Option<&str>,
-    compat_manifest: Option<&capsule_core::router::CompatManifestBridge>,
+    compatibility_repository: Option<&str>,
 ) -> String {
     if let Some(publisher_hint) = publisher_hint {
         return publisher_hint.to_string();
     }
 
-    if let Some(repo_owner) = compat_manifest.and_then(manifest_repository_owner) {
+    if let Some(repo_owner) = compatibility_repository.and_then(repository_owner) {
         return repo_owner;
     }
 
@@ -347,10 +360,7 @@ fn resolve_private_publisher(
     "local".to_string()
 }
 
-fn manifest_repository_owner(
-    compat_manifest: &capsule_core::router::CompatManifestBridge,
-) -> Option<String> {
-    let raw = compat_manifest.repository()?;
+fn repository_owner(raw: &str) -> Option<String> {
     let normalized = crate::publish_preflight::normalize_repository_value(&raw).ok()?;
     let (owner, _) = normalized.split_once('/')?;
     let owner = normalize_segment(owner);
@@ -407,6 +417,7 @@ pub struct DirectPublishRequest {
     pub force_large_payload: bool,
     pub lock_id: Option<String>,
     pub closure_digest: Option<String>,
+    pub publish_metadata: Option<PublishArtifactMetadata>,
 }
 
 #[allow(dead_code)]
@@ -434,6 +445,10 @@ async fn run_direct_publish_phase_async(
     let phase = PublishPhase::new(Arc::new(
         crate::adapters::publish::destination::remote_api::RemoteRegistryDestination,
     ));
+    let publish_metadata = request
+        .publish_metadata
+        .clone()
+        .or_else(|| infer_publish_metadata_from_capsule_bytes(&artifact_bytes));
     let published = phase
         .execute(&PublishPhaseRequest {
             artifact: PublishableArtifact {
@@ -444,6 +459,7 @@ async fn run_direct_publish_phase_async(
                 content_hash: request.content_hash.clone(),
                 lock_id: request.lock_id.clone(),
                 closure_digest: request.closure_digest.clone(),
+                publish_metadata,
             },
             destination: DestinationSpec::RemoteRegistry {
                 registry_url: request.registry_url.clone(),
@@ -468,7 +484,19 @@ async fn run_direct_publish_phase_async(
         size_bytes: metadata.size_bytes,
         already_existed: metadata.already_existed,
         registry_url: request.registry_url.clone(),
+        publish_metadata: metadata.publish_metadata,
     })
+}
+
+fn infer_publish_metadata_from_capsule_bytes(bytes: &[u8]) -> Option<PublishArtifactMetadata> {
+    crate::build::native_delivery::detect_install_requires_local_derivation(bytes)
+        .ok()
+        .flatten()
+        .map(|_| PublishArtifactMetadata {
+            identity_class: PublishArtifactIdentityClass::ImportedThirdPartyArtifact,
+            delivery_mode: Some("artifact-import".to_string()),
+            provenance_limited: true,
+        })
 }
 
 pub fn run_official_publish_phase(
@@ -652,6 +680,7 @@ fn probe_registry_reachability(registry_url: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
     use std::io::Write;
     use std::path::Path;
     use std::sync::Arc;
@@ -660,11 +689,13 @@ mod tests {
     use tar::Builder;
 
     use super::{
-        normalize_segment, prepare_private_publish_artifact, resolve_private_publisher,
-        summarize_private_publish, PrivatePublishRequest, PublishPhase, PublishPhaseRequest,
+        infer_publish_metadata_from_capsule_bytes, normalize_segment,
+        prepare_private_publish_artifact, resolve_private_publisher, summarize_private_publish,
+        PrivatePublishRequest, PublishPhase, PublishPhaseRequest,
     };
     use crate::application::ports::publish::{
-        DestinationPort, DestinationSpec, PublishableArtifact, PublishedLocation,
+        DestinationPort, DestinationSpec, PublishArtifactIdentityClass, PublishableArtifact,
+        PublishedLocation,
     };
 
     struct CwdGuard {
@@ -726,6 +757,70 @@ entrypoint = "main.ts"
         file.write_all(&bytes).expect("write artifact");
     }
 
+    fn build_native_test_artifact_bytes() -> Vec<u8> {
+        let manifest = r#"schema_version = "0.2"
+name = "demo-native"
+version = "0.1.0"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source"
+driver = "native"
+entrypoint = "Demo.app"
+"#;
+        let delivery = r#"schema_version = "0.1"
+
+[artifact]
+framework = "tauri"
+stage = "unsigned"
+target = "darwin/arm64"
+input = "Demo.app"
+
+[finalize]
+tool = "codesign"
+args = ["--deep", "--force", "--sign", "-", "Demo.app"]
+"#;
+        let mut payload_tar = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut payload_tar);
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o644);
+            header.set_size(delivery.len() as u64);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "ato.delivery.toml", delivery.as_bytes())
+                .expect("append delivery config");
+            builder.finish().expect("finish payload tar");
+        }
+        let payload_tar_zst =
+            zstd::stream::encode_all(Cursor::new(payload_tar), 3).expect("encode payload");
+        let mut artifact = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut artifact);
+            let mut manifest_header = tar::Header::new_gnu();
+            manifest_header.set_mode(0o644);
+            manifest_header.set_size(manifest.len() as u64);
+            manifest_header.set_cksum();
+            builder
+                .append_data(&mut manifest_header, "capsule.toml", manifest.as_bytes())
+                .expect("append manifest");
+            let mut payload_header = tar::Header::new_gnu();
+            payload_header.set_mode(0o644);
+            payload_header.set_size(payload_tar_zst.len() as u64);
+            payload_header.set_cksum();
+            builder
+                .append_data(
+                    &mut payload_header,
+                    "payload.tar.zst",
+                    payload_tar_zst.as_slice(),
+                )
+                .expect("append payload");
+            builder.finish().expect("finish artifact tar");
+        }
+        artifact
+    }
+
     #[derive(Debug)]
     struct StubDestination;
 
@@ -757,6 +852,7 @@ entrypoint = "main.ts"
                 content_hash: "blake3:demo".to_string(),
                 lock_id: None,
                 closure_digest: None,
+                publish_metadata: None,
             },
             destination: DestinationSpec::RemoteRegistry {
                 registry_url: "https://example.invalid".to_string(),
@@ -793,6 +889,7 @@ entrypoint = "main.ts"
             allow_existing: true,
             lock_id: None,
             closure_digest: None,
+            publish_metadata: None,
         })
         .expect("summarize");
 
@@ -817,6 +914,7 @@ entrypoint = "main.ts"
             allow_existing: false,
             lock_id: None,
             closure_digest: None,
+            publish_metadata: None,
         })
         .expect("summarize");
 
@@ -843,6 +941,7 @@ entrypoint = "main.ts"
             allow_existing: false,
             lock_id: None,
             closure_digest: None,
+            publish_metadata: None,
         })
         .expect("summarize");
 
@@ -864,6 +963,7 @@ entrypoint = "main.ts"
             allow_existing: false,
             lock_id: None,
             closure_digest: None,
+            publish_metadata: None,
         })
         .expect_err("must reject mismatched publisher hint");
 
@@ -902,6 +1002,7 @@ entrypoint = "main.ts"
             allow_existing: false,
             lock_id: None,
             closure_digest: None,
+            publish_metadata: None,
         })
         .expect("summarize");
 
@@ -935,61 +1036,41 @@ entrypoint = "main.ts"
             allow_existing: false,
             lock_id: None,
             closure_digest: None,
+            publish_metadata: None,
         });
 
         assert!(!tmp.path().join("capsule.toml").exists());
     }
 
     #[test]
-    fn resolve_private_publisher_uses_publisher_hint_before_repository_owner() {
-        let manifest_raw = r#"
-schema_version = "0.2"
-name = "demo-app"
-version = "1.2.3"
-type = "app"
-default_target = "cli"
+    fn infer_publish_metadata_from_native_capsule_marks_imported_artifact() {
+        let bytes = build_native_test_artifact_bytes();
 
-[metadata]
-repository = "https://github.com/another-owner/demo-app"
-
-[targets.cli]
-runtime = "source"
-driver = "deno"
-"#;
-
-        let bridge = capsule_core::router::CompatManifestBridge::from_manifest_value(
-            &toml::from_str(manifest_raw).expect("manifest value"),
-        )
-        .expect("bridge");
+        let metadata =
+            infer_publish_metadata_from_capsule_bytes(&bytes).expect("native publish metadata");
         assert_eq!(
-            resolve_private_publisher(Some("koh0920"), Some(&bridge)),
+            metadata.identity_class,
+            PublishArtifactIdentityClass::ImportedThirdPartyArtifact
+        );
+        assert_eq!(metadata.delivery_mode.as_deref(), Some("artifact-import"));
+        assert!(metadata.provenance_limited);
+    }
+
+    #[test]
+    fn resolve_private_publisher_uses_publisher_hint_before_repository_owner() {
+        assert_eq!(
+            resolve_private_publisher(
+                Some("koh0920"),
+                Some("https://github.com/another-owner/demo-app"),
+            ),
             "koh0920"
         );
     }
 
     #[test]
     fn resolve_private_publisher_falls_back_to_repository_owner_without_hint() {
-        let manifest_raw = r#"
-schema_version = "0.2"
-name = "demo-app"
-version = "1.2.3"
-type = "app"
-default_target = "cli"
-
-[metadata]
-repository = "https://github.com/another-owner/demo-app"
-
-[targets.cli]
-runtime = "source"
-driver = "deno"
-"#;
-
-        let bridge = capsule_core::router::CompatManifestBridge::from_manifest_value(
-            &toml::from_str(manifest_raw).expect("manifest value"),
-        )
-        .expect("bridge");
         assert_eq!(
-            resolve_private_publisher(None, Some(&bridge)),
+            resolve_private_publisher(None, Some("https://github.com/another-owner/demo-app")),
             "another-owner"
         );
     }

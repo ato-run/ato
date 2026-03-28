@@ -99,7 +99,6 @@ pub async fn execute(
     let authoritative_input = resolve_producer_authoritative_input(&cwd, reporter.clone(), false)?;
     let (manifest_name, manifest_version) =
         semantic_publish_identity(&authoritative_input.descriptor)?;
-    let compat_manifest = authoritative_input.compat_manifest.as_ref();
 
     let tag = github.r#ref.strip_prefix("refs/tags/").unwrap_or_default();
     let resolved_version = normalize_tag_version(tag)?;
@@ -111,8 +110,8 @@ pub async fn execute(
         );
     }
 
-    let source_repo = compat_manifest
-        .and_then(|bridge| bridge.repository())
+    let source_repo = authoritative_input
+        .compatibility_input_repository()
         .and_then(|v| normalize_source_repo(&v).ok())
         .unwrap_or_else(|| github.repository.clone());
     if source_repo != github.repository {
@@ -161,9 +160,7 @@ pub async fn execute(
         .map(|v| v.to_string())
         .context("Failed to derive artifact file name")?;
 
-    let request_playground = compat_manifest
-        .map(|bridge| bridge.store_playground_enabled())
-        .unwrap_or(false);
+    let request_playground = authoritative_input.compatibility_store_playground_enabled();
     let metadata = CiMetadataPayload {
         capsule_slug: manifest_name.clone(),
         version: resolved_version.clone(),
@@ -376,7 +373,7 @@ pub(crate) fn build_capsule_artifact(
     manifest_path: Option<&Path>,
 ) -> Result<PathBuf> {
     let (decision, manifest_dir) = if let Some(authoritative_input) = authoritative_input {
-        authoritative_input.validate_compat_bridge()?;
+        authoritative_input.validate_legacy_producer_bridge()?;
         (
             capsule_core::router::RuntimeDecision {
                 kind: match authoritative_input
