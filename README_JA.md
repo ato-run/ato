@@ -202,6 +202,7 @@ cargo build -p ato-cli
 デフォルト動作: Prepare から Publish まですべてのステージを実行します。
 
 ポイント:
+
 - `--artifact <file>` を使えば再ビルドをスキップできます。すでにビルド済みのファイルをそのままアップロードできます。
 - `--scoped-id` は未指定時に `<ハンドル>/<スラッグ>` が自動設定されます。
 - Dock のページは `/d/<ハンドル>` にあります。これは UI ページであり、レジストリのエンドポイントではありません。
@@ -215,6 +216,7 @@ cargo build -p ato-cli
 デフォルト動作: Prepare から Publish まですべてのステージを実行して、直接アップロードします。
 
 ポイント:
+
 - `--artifact <file>` はここでも使えます。ローカルの project manifest がなくても公開できます。
 - `--allow-existing` は最終の Publish ステージでのみ使えます。
 
@@ -224,19 +226,21 @@ cargo build -p ato-cli
 
 `--prepare`・`--build`・`--deploy` は「ここで止まる」を指定するフラグです。個別のステージを選ぶトグルではありません。
 
-| フラグ | 停止タイミング | 補足 |
-|--------|--------------|------|
-| `--prepare` | Prepare 後 | |
-| `--build` | Verify 後 | source 入力: Build → Verify を実行。`--artifact` 指定: Verify のみ実行 |
-| `--deploy` | Publish 後 | 公式: handoff のみ。private/local: 自動解決、または `--artifact` で Verify → Publish |
-| `--artifact <file>` | *(start 変更)* | Prepare・Build をスキップして Verify から開始 |
+| フラグ              | 停止タイミング | 補足                                                                                 |
+| ------------------- | -------------- | ------------------------------------------------------------------------------------ |
+| `--prepare`         | Prepare 後     |                                                                                      |
+| `--build`           | Verify 後      | source 入力: Build → Verify を実行。`--artifact` 指定: Verify のみ実行               |
+| `--deploy`          | Publish 後     | 公式: handoff のみ。private/local: 自動解決、または `--artifact` で Verify → Publish |
+| `--artifact <file>` | _(start 変更)_ | Prepare・Build をスキップして Verify から開始                                        |
 
 注意点:
+
 - `--ci` / `--dry-run` とステージフラグは同時に使えません。
 - `--artifact --prepare` は無効です（start が stop より後になるため）。
 - `--legacy-full-publish`（official 専用）は旧デフォルト動作への一時的な互換フラグです。**非推奨** — 次回メジャーリリースで削除予定です。
 
 公式レジストリ向け補助コマンド:
+
 - `ato gen-ci` — OIDC 公開用の GitHub Actions ワークフローを生成します。
 - `ato publish --fix` — workflow の問題を一度だけ自動修正し、再度 diagnostics を実行します。
 - `ato publish --no-tui` — 対話 UI を出さずに CI 向けの出力を直接表示します。
@@ -381,6 +385,7 @@ capsule の実行に必要なものを機械可読な形式で返します。シ
 - `ato inspect remediation [path] [--json]` — 修正方法を提案します。可能な場合はソースの場所も示します
 
 補足:
+
 - 要件は常に project manifest から読み込まれます（lock ファイルからではありません）。
 - ローカルパスと `publisher/slug` のリモート参照は、同じ JSON 形式で返ります。
 - state 関連の要件は `requirements.state` に含まれます（`storage` ではありません）。
@@ -438,6 +443,7 @@ ato build --strict-v3
 dashboard・API・worker などの複数のサービスを1つのカプセルにまとめるには、`[services]` を使います。
 
 カプセルを起動すると `ato run` は次の動作をします:
+
 - 依存関係の順番（DAG 順）でサービスを起動する
 - 各サービスの readiness probe が通るまで待つ
 - すべてのログにサービス名のプレフィックスを付ける
@@ -459,7 +465,7 @@ default_target = "default"
 
 [pack]
 include = [
-  "project-manifest.toml",
+  "capsule.toml",
   "capsule.lock.json",
   "apps/dashboard/.next/standalone/**",
   "apps/dashboard/.next/static/**",
@@ -513,6 +519,7 @@ ato run <publisher>/<slug> --registry http://127.0.0.1:18787
 ```
 
 注意点:
+
 - Next.js standalone を使う場合は、`ato build` 前に `.next/static`（必要なら `public` も）を standalone の出力先にコピーしてください。
 - `required_env` のキーが未設定だと、`ato run` は起動前に停止します。
 - `services.main` は必須です。`PORT=<targets.<label>.port>` を受け取ります。
@@ -523,16 +530,16 @@ ato run <publisher>/<slug> --registry http://127.0.0.1:18787
 
 runtime ごとに必要な条件と隔離レベルが異なります:
 
-| ランタイム | Tier | 必要なもの |
-|-----------|------|---------|
-| `web/static` | Tier1 | `driver = "static"` + port の設定（`capsule.lock.json` 不要）|
-| `web/deno` | Tier1 | `capsule.lock.json` + `deno.lock` または `package-lock.json` |
-| `web/node` | Tier1 | `capsule.lock.json` + `package-lock.json`（Deno compat で実行）|
-| `web/python` | Tier2 | `uv.lock`・`--sandbox` 推奨 |
-| `source/deno` | Tier1 | `capsule.lock.json` + `deno.lock` または `package-lock.json` |
-| `source/node` | Tier1 | `capsule.lock.json` + `package-lock.json`（Deno compat で実行）|
-| `source/python` | Tier2 | `uv.lock`・`--sandbox` 推奨 |
-| `source/native` | Tier2 | `--sandbox` 推奨 |
+| ランタイム      | Tier  | 必要なもの                                                      |
+| --------------- | ----- | --------------------------------------------------------------- |
+| `web/static`    | Tier1 | `driver = "static"` + port の設定（`capsule.lock.json` 不要）   |
+| `web/deno`      | Tier1 | `capsule.lock.json` + `deno.lock` または `package-lock.json`    |
+| `web/node`      | Tier1 | `capsule.lock.json` + `package-lock.json`（Deno compat で実行） |
+| `web/python`    | Tier2 | `uv.lock`・`--sandbox` 推奨                                     |
+| `source/deno`   | Tier1 | `capsule.lock.json` + `deno.lock` または `package-lock.json`    |
+| `source/node`   | Tier1 | `capsule.lock.json` + `package-lock.json`（Deno compat で実行） |
+| `source/python` | Tier2 | `uv.lock`・`--sandbox` 推奨                                     |
+| `source/native` | Tier2 | `--sandbox` 推奨                                                |
 
 **Tier1** は特別なフラグなしで動きます。Node は Tier1 なので `--unsafe` は不要です。
 
@@ -545,6 +552,7 @@ ato run --nacelle ...   # 実行時にパスを渡す
 ```
 
 その他:
+
 - `--unsafe`・`--unsafe-bypass-sandbox` は旧互換フラグとして残っていますが、使用は推奨しません。
 - 非対応・逸脱が起きてもサイレントなフォールバックはしません。エラーで停止します。
 - `runtime=web` には `driver` の指定が必須です（`static`・`node`・`deno`・`python`）。
@@ -583,13 +591,13 @@ ato run --nacelle ...   # 実行時にパスを渡す
 
 ## 環境変数リファレンス（主要）
 
-| 変数 | 説明 | デフォルト |
-|------|------|----------|
-| `CAPSULE_WATCH_DEBOUNCE_MS` | `run --watch` のデバウンス間隔（ミリ秒） | `300` |
-| `CAPSULE_ALLOW_UNSAFE` | `1` に設定すると `--dangerously-skip-permissions` が使えます | — |
-| `ATO_TOKEN` | ローカル・私設レジストリへの publish 認証トークン。CI セッションにも使います | — |
-| `ATO_STORE_API_URL` | `ato search` / install で使う API の URL | `https://api.ato.run` |
-| `ATO_STORE_SITE_URL` | ストア Web の URL | `https://store.ato.run` |
+| 変数                        | 説明                                                                         | デフォルト              |
+| --------------------------- | ---------------------------------------------------------------------------- | ----------------------- |
+| `CAPSULE_WATCH_DEBOUNCE_MS` | `run --watch` のデバウンス間隔（ミリ秒）                                     | `300`                   |
+| `CAPSULE_ALLOW_UNSAFE`      | `1` に設定すると `--dangerously-skip-permissions` が使えます                 | —                       |
+| `ATO_TOKEN`                 | ローカル・私設レジストリへの publish 認証トークン。CI セッションにも使います | —                       |
+| `ATO_STORE_API_URL`         | `ato search` / install で使う API の URL                                     | `https://api.ato.run`   |
+| `ATO_STORE_SITE_URL`        | ストア Web の URL                                                            | `https://store.ato.run` |
 
 ## 検索・認証
 
