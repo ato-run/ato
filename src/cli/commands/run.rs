@@ -1387,7 +1387,9 @@ run_command = "node server.js"
             lock_path: None,
             workspace_root: tmp.path().to_path_buf(),
             effective_state: None,
-            bridge_manifest: toml::Value::Table(toml::map::Map::new()),
+            bridge_manifest: crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
+                toml::Value::Table(toml::map::Map::new()),
+            ),
             validation_mode: capsule_core::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,

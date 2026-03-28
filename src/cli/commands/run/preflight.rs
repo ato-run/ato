@@ -7,9 +7,7 @@ use capsule_core::importer::{
     probe_required_cargo_lockfile, probe_required_node_lockfile, probe_required_python_lockfile,
     ImportedEvidence, ImporterId, ProbeResult,
 };
-use capsule_core::lockfile::{
-    lockfile_output_path, parse_lockfile_text, resolve_existing_lockfile_path,
-};
+use capsule_core::lockfile::parse_lockfile_text;
 
 pub(crate) fn preflight_native_sandbox(
     nacelle_override: Option<PathBuf>,
@@ -454,27 +452,12 @@ fn preflight_glibc_compat(
     prepared: &PreparedRunContext,
 ) -> Result<()> {
     let required_from_elf = detect_required_glibc_from_entrypoint(plan)?;
-
-    let lock_path = match prepared
+    let required_from_lock = prepared
         .compatibility_legacy_lock
         .as_ref()
-        .map(|legacy| legacy.path.clone())
-        .or_else(|| resolve_existing_lockfile_path(&prepared.workspace_root))
-    {
-        Some(path) => path,
-        None => match plan.manifest_path.parent() {
-            Some(parent) => resolve_existing_lockfile_path(parent)
-                .unwrap_or_else(|| lockfile_output_path(parent)),
-            None => {
-                if required_from_elf.is_none() {
-                    return Ok(());
-                }
-                PathBuf::from(CAPSULE_LOCK_FILE_NAME)
-            }
-        },
-    };
-
-    let required_from_lock = detect_required_glibc_from_lock(&lock_path)?;
+        .map(|legacy| detect_required_glibc_from_lock(&legacy.path))
+        .transpose()?
+        .flatten();
     let required_raw = match required_from_elf.or(required_from_lock) {
         Some(value) => value,
         None => return Ok(()),
@@ -877,7 +860,9 @@ pub(super) fn resolve_python_dependency_lock_path(manifest_dir: &Path) -> Option
 
 #[cfg(test)]
 mod tests {
-    use super::detect_required_glibc_from_lock;
+    use super::{detect_required_glibc_from_lock, preflight_glibc_compat};
+    use crate::application::pipeline::phases::run::DerivedBridgeManifest;
+    use crate::application::pipeline::phases::run::PreparedRunContext;
     use std::fs;
     use tempfile::tempdir;
 
@@ -906,5 +891,63 @@ mod tests {
 
         let detected = detect_required_glibc_from_lock(&lock_path).expect("detect glibc");
         assert_eq!(detected.as_deref(), Some("glibc-999.0"));
+    }
+
+    #[test]
+    fn preflight_glibc_ignores_stray_legacy_lock_without_compatibility_context() {
+        let dir = tempdir().expect("tempdir");
+        let manifest_dir = dir.path().to_path_buf();
+        let lock_path = dir.path().join("capsule.lock.json");
+        fs::write(
+            &lock_path,
+            r#"{
+  "version": "1",
+  "meta": {
+    "created_at": "2026-02-23T00:00:00Z",
+    "manifest_hash": "blake3:test"
+  },
+  "targets": {
+    "x86_64-unknown-linux-gnu": {
+      "constraints": {
+        "glibc": "glibc-999.0"
+      }
+    }
+  }
+}"#,
+        )
+        .expect("write lock");
+
+        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+            toml::from_str::<toml::Value>(
+                r#"
+name = "demo"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "native"
+entrypoint = "demo.sh"
+"#,
+            )
+            .expect("parse manifest"),
+            manifest_dir.join("capsule.toml"),
+            manifest_dir.clone(),
+            capsule_core::router::ExecutionProfile::Dev,
+            Some("default"),
+            std::collections::HashMap::new(),
+        )
+        .expect("execution descriptor");
+        let prepared = PreparedRunContext {
+            authoritative_lock: None,
+            lock_path: None,
+            workspace_root: manifest_dir,
+            effective_state: None,
+            bridge_manifest: DerivedBridgeManifest::new(toml::Value::Table(toml::map::Map::new())),
+            validation_mode: capsule_core::types::ValidationMode::Strict,
+            engine_override_declared: false,
+            compatibility_legacy_lock: None,
+        };
+
+        preflight_glibc_compat(&plan, &prepared).expect("ignore stray legacy lock");
     }
 }

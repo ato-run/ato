@@ -70,10 +70,32 @@ pub(crate) struct PreparedRunContext {
     pub(crate) lock_path: Option<PathBuf>,
     pub(crate) workspace_root: PathBuf,
     pub(crate) effective_state: Option<EffectiveLockState>,
-    pub(crate) bridge_manifest: toml::Value,
+    pub(crate) bridge_manifest: DerivedBridgeManifest,
     pub(crate) validation_mode: capsule_core::types::ValidationMode,
     pub(crate) engine_override_declared: bool,
     pub(crate) compatibility_legacy_lock: Option<CompatibilityLegacyLockContext>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DerivedBridgeManifest {
+    value: toml::Value,
+}
+
+impl DerivedBridgeManifest {
+    pub(crate) fn new(value: toml::Value) -> Self {
+        Self { value }
+    }
+
+    pub(crate) fn as_toml(&self) -> &toml::Value {
+        &self.value
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedDerivedExecution {
+    pub(crate) execution_plan: capsule_core::execution_plan::model::ExecutionPlan,
+    pub(crate) tier: capsule_core::execution_plan::model::ExecutionTier,
+    pub(crate) guard_result: capsule_core::execution_plan::guard::RuntimeGuardResult,
 }
 
 impl PreparedRunContext {
@@ -104,7 +126,7 @@ impl PreparedRunContext {
                 .map(|input| input.workspace_root.clone())
                 .unwrap_or_else(|| workspace_root.to_path_buf()),
             effective_state: authoritative_input.map(|input| input.effective_state.clone()),
-            bridge_manifest,
+            bridge_manifest: DerivedBridgeManifest::new(bridge_manifest),
             validation_mode,
             engine_override_declared: routed_manifest
                 .as_ref()
@@ -125,7 +147,7 @@ impl PreparedRunContext {
             lock_path: self.lock_path.clone(),
             workspace_root: self.workspace_root.clone(),
             effective_state: self.effective_state.clone(),
-            bridge_manifest,
+            bridge_manifest: DerivedBridgeManifest::new(bridge_manifest),
             validation_mode,
             engine_override_declared,
             compatibility_legacy_lock: self.compatibility_legacy_lock.clone(),
@@ -171,9 +193,7 @@ pub(crate) struct RunPipelineState {
     pub(crate) launch_ctx: crate::executors::launch_context::RuntimeLaunchContext,
     pub(crate) external_capsules: Option<crate::external_capsule::ExternalCapsuleGuard>,
     pub(crate) agent_attempted: bool,
-    pub(crate) execution_plan: Option<capsule_core::execution_plan::model::ExecutionPlan>,
-    pub(crate) tier: Option<capsule_core::execution_plan::model::ExecutionTier>,
-    pub(crate) guard_result: Option<capsule_core::execution_plan::guard::RuntimeGuardResult>,
+    pub(crate) derived_execution: Option<PreparedDerivedExecution>,
     pub(crate) compatibility_host_mode: Option<CompatibilityHostMode>,
     pub(crate) native_nacelle: Option<PathBuf>,
 }
@@ -299,8 +319,10 @@ where
             &manifest_path,
             validation_mode,
         )?;
-        prepared.bridge_manifest = toml::from_str(&loaded_manifest.raw_text)
-            .unwrap_or_else(|_| loaded_manifest.raw.clone());
+        prepared.bridge_manifest = DerivedBridgeManifest::new(
+            toml::from_str(&loaded_manifest.raw_text)
+                .unwrap_or_else(|_| loaded_manifest.raw.clone()),
+        );
         prepared.engine_override_declared = loaded_manifest.raw.get("engine").is_some();
         let manifest = loaded_manifest.model.clone();
         if manifest.schema_version.trim() == "0.3" && manifest.capsule_type == CapsuleType::Library
@@ -332,11 +354,12 @@ where
 
     let external_dependencies = if prepared
         .bridge_manifest
+        .as_toml()
         .get("targets")
         .and_then(|value| value.as_table())
         .is_some()
     {
-        manifest_external_capsule_dependencies(&prepared.bridge_manifest)?
+        manifest_external_capsule_dependencies(prepared.bridge_manifest.as_toml())?
     } else {
         Vec::new()
     };
@@ -477,9 +500,7 @@ where
         launch_ctx,
         external_capsules,
         agent_attempted,
-        execution_plan: None,
-        tier: None,
-        guard_result: None,
+        derived_execution: None,
         compatibility_host_mode: None,
         native_nacelle: None,
     })
@@ -610,10 +631,12 @@ where
         }
     };
 
-    state.execution_plan = Some(prepared.execution_plan);
+    state.derived_execution = Some(PreparedDerivedExecution {
+        execution_plan: prepared.execution_plan,
+        tier: prepared.tier,
+        guard_result: prepared.guard_result,
+    });
     state.decision = prepared.runtime_decision;
-    state.tier = Some(prepared.tier);
-    state.guard_result = Some(prepared.guard_result);
     state.launch_ctx = prepared.launch_ctx;
 
     if state.use_progressive_ui {
@@ -661,8 +684,9 @@ where
     }
 
     let guard_result = state
-        .guard_result
+        .derived_execution
         .as_ref()
+        .map(|derived| &derived.guard_result)
         .context("run pipeline verify phase did not resolve an execution guard result")?;
     let compatibility_host_mode = resolve_compatibility_host_mode(
         guard_result.executor_kind,
@@ -770,9 +794,7 @@ where
         launch_ctx,
         mut external_capsules,
         agent_attempted: _,
-        execution_plan,
-        tier,
-        guard_result,
+        derived_execution,
         compatibility_host_mode,
         native_nacelle,
     } = state;
@@ -828,17 +850,17 @@ where
         return Ok(());
     }
 
-    let execution_plan =
-        execution_plan.context("run pipeline execute phase requires a prepared execution plan")?;
-    let guard_result = guard_result
-        .context("run pipeline execute phase requires a verified execution guard result")?;
+    let derived_execution = derived_execution
+        .context("run pipeline execute phase requires lock-derived execution artifacts")?;
+    let execution_plan = derived_execution.execution_plan;
+    let guard_result = derived_execution.guard_result;
     let compatibility_host_mode = compatibility_host_mode
         .context("run pipeline execute phase requires compatibility host mode")?;
 
     debug!(
         runtime = execution_plan.target.runtime.as_str(),
         driver = execution_plan.target.driver.as_str(),
-        ?tier,
+        ?derived_execution.tier,
         executor = ?guard_result.executor_kind,
         requires_sandbox_opt_in = guard_result.requires_sandbox_opt_in,
         dangerously_skip_permissions = request.dangerously_skip_permissions,
@@ -1536,7 +1558,7 @@ fn build_target_launch_options(
 
 #[cfg(test)]
 mod tests {
-    use super::PreparedRunContext;
+    use super::{DerivedBridgeManifest, PreparedRunContext};
     use capsule_core::ato_lock::AtoLock;
     use std::path::PathBuf;
 
@@ -1549,7 +1571,7 @@ mod tests {
             effective_state: Some(
                 crate::application::workspace::state::EffectiveLockState::default(),
             ),
-            bridge_manifest: toml::Value::String("old".to_string()),
+            bridge_manifest: DerivedBridgeManifest::new(toml::Value::String("old".to_string())),
             validation_mode: capsule_core::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
@@ -1566,8 +1588,8 @@ mod tests {
         assert_eq!(rerouted.workspace_root, PathBuf::from("."));
         assert!(rerouted.effective_state.is_some());
         assert_eq!(
-            rerouted.bridge_manifest,
-            toml::Value::String("new".to_string())
+            rerouted.bridge_manifest.as_toml(),
+            &toml::Value::String("new".to_string())
         );
         assert_eq!(
             rerouted.validation_mode,
