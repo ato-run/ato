@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::router::{ExecutionDescriptor, RuntimeDecision, RuntimeKind};
 use capsule_core::types::ValidationMode;
 use capsule_core::CapsuleReporter;
 use serde::Serialize;
@@ -48,6 +49,21 @@ pub struct BuildResult {
 #[error("Smoke test failed: {report}")]
 pub struct InferredManifestSmokeFailure {
     pub report: capsule_core::smoke::SmokeFailureReport,
+}
+
+fn runtime_kind_from_plan(plan: &ExecutionDescriptor) -> Result<RuntimeKind> {
+    match plan
+        .execution_runtime()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "source" | "native" => Ok(RuntimeKind::Source),
+        "web" => Ok(RuntimeKind::Web),
+        "wasm" => Ok(RuntimeKind::Wasm),
+        "oci" | "docker" | "youki" | "runc" => Ok(RuntimeKind::Oci),
+        other => anyhow::bail!("Unsupported runtime '{other}'"),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -125,7 +141,7 @@ pub fn execute_pack_command_with_injected_manifest(
     // and injected-manifest flows. Keep this temporary write isolated until packers
     // can consume lock-derived producer input directly.
     let mut temporary_manifest: Option<TemporaryManifestGuard> = None;
-    if !manifest.exists() {
+    if authoritative_input.is_none() && !manifest.exists() {
         let stdin_is_tty = std::io::stdin().is_terminal();
         if init_if_missing {
             if !stdin_is_tty {
@@ -169,15 +185,11 @@ pub fn execute_pack_command_with_injected_manifest(
         }
     }
 
-    if !manifest.exists() {
+    if authoritative_input.is_none() && !manifest.exists() {
         anyhow::bail!("capsule.toml not found after initialization");
     }
 
     let _temporary_manifest_guard = temporary_manifest;
-    if let Some(authoritative_input) = authoritative_input.as_ref() {
-        authoritative_input.validate_bridge_manifest()?;
-    }
-    let _authoritative_input_guard = authoritative_input;
     let validation_mode = if injected_manifest.is_some() {
         ValidationMode::Preview
     } else {
@@ -185,33 +197,60 @@ pub fn execute_pack_command_with_injected_manifest(
     };
 
     let validation_started = Instant::now();
-    let decision = capsule_core::router::route_manifest_with_validation_mode(
-        &manifest,
-        capsule_core::router::ExecutionProfile::Release,
-        None,
-        validation_mode,
-    )?;
-    let loaded_manifest =
-        capsule_core::manifest::load_manifest_with_validation_mode(&manifest, validation_mode)?;
-    let raw_manifest: toml::Value = toml::from_str(&loaded_manifest.raw_text)
-        .context("Failed to parse manifest TOML for IPC validation")?;
-    let capsule_name = loaded_manifest.model.name.clone();
-    let capsule_version = loaded_manifest.model.version.clone();
-    capsule_core::diagnostics::manifest::validate_manifest_for_build_with_mode(
-        &manifest,
-        decision.plan.selected_target_label(),
-        validation_mode,
-    )?;
-    let ipc_diagnostics =
-        crate::ipc::validate::validate_manifest(&raw_manifest, &loaded_manifest.dir).map_err(
-            |err| {
-                AtoExecutionError::execution_contract_invalid(
-                    format!("IPC validation failed: {err}"),
-                    None,
-                    None,
-                )
+    let (decision, raw_manifest, capsule_name, capsule_version) = if let Some(authoritative_input) =
+        authoritative_input.as_ref()
+    {
+        authoritative_input.validate_compat_bridge()?;
+        let kind = runtime_kind_from_plan(&authoritative_input.descriptor)?;
+        let raw_manifest = authoritative_input
+            .compat_manifest
+            .as_ref()
+            .and_then(|bridge| bridge.raw_value().ok())
+            .unwrap_or_else(|| authoritative_input.descriptor.manifest.clone());
+        (
+            RuntimeDecision {
+                kind,
+                reason: format!(
+                    "lock target {}",
+                    authoritative_input.descriptor.selected_target_label()
+                ),
+                plan: authoritative_input.descriptor.clone(),
             },
+            raw_manifest,
+            authoritative_input.manifest.name.clone(),
+            authoritative_input.manifest.version.clone(),
+        )
+    } else {
+        let decision = capsule_core::router::route_manifest_with_validation_mode(
+            &manifest,
+            capsule_core::router::ExecutionProfile::Release,
+            None,
+            validation_mode,
         )?;
+        let loaded_manifest =
+            capsule_core::manifest::load_manifest_with_validation_mode(&manifest, validation_mode)?;
+        let raw_manifest: toml::Value = toml::from_str(&loaded_manifest.raw_text)
+            .context("Failed to parse manifest TOML for IPC validation")?;
+        capsule_core::diagnostics::manifest::validate_manifest_for_build_with_mode(
+            &manifest,
+            decision.plan.selected_target_label(),
+            validation_mode,
+        )?;
+        (
+            decision,
+            raw_manifest,
+            loaded_manifest.model.name.clone(),
+            loaded_manifest.model.version.clone(),
+        )
+    };
+    let ipc_diagnostics =
+        crate::ipc::validate::validate_manifest(&raw_manifest, &dir).map_err(|err| {
+            AtoExecutionError::execution_contract_invalid(
+                format!("IPC validation failed: {err}"),
+                None,
+                None,
+            )
+        })?;
     if crate::ipc::validate::has_errors(&ipc_diagnostics) {
         return Err(AtoExecutionError::execution_contract_invalid(
             crate::ipc::validate::format_diagnostics(&ipc_diagnostics),
@@ -293,8 +332,6 @@ pub fn execute_pack_command_with_injected_manifest(
         capsule_core::router::RuntimeKind::Source => {
             let artifact_path = pack_source_bundle(
                 &decision.plan,
-                &manifest,
-                &manifest_dir,
                 &enforcement,
                 standalone,
                 strict_manifest,
@@ -448,8 +485,8 @@ pub fn execute_pack_command_with_injected_manifest(
                 capsule_core::packers::web::pack(
                     &decision.plan,
                     capsule_core::packers::web::WebPackOptions {
-                        manifest_path: manifest.clone(),
-                        manifest_dir: manifest_dir.clone(),
+                        compat_manifest: decision.plan.compat_manifest.clone(),
+                        workspace_root: decision.plan.workspace_root.clone(),
                         output: None,
                     },
                     reporter.clone(),
@@ -457,8 +494,6 @@ pub fn execute_pack_command_with_injected_manifest(
             } else {
                 let artifact = pack_source_bundle(
                     &decision.plan,
-                    &manifest,
-                    &manifest_dir,
                     &enforcement,
                     standalone,
                     strict_manifest,
@@ -530,8 +565,6 @@ fn emit_timings(
 #[allow(clippy::too_many_arguments)]
 fn pack_source_bundle(
     plan: &capsule_core::router::ManifestData,
-    manifest: &Path,
-    manifest_dir: &Path,
     enforcement: &str,
     standalone: bool,
     strict_manifest: bool,
@@ -542,8 +575,8 @@ fn pack_source_bundle(
     progress_label: &str,
 ) -> Result<PathBuf> {
     let prepare_started = Instant::now();
-    let prepared_config = capsule_core::packers::source::prepare_source_config(
-        manifest,
+    let prepared_config = capsule_core::packers::source::prepare_source_config_from_descriptor(
+        plan,
         enforcement.to_string(),
         standalone,
     )?;
@@ -557,8 +590,8 @@ fn pack_source_bundle(
     let artifact = capsule_core::packers::source::pack(
         plan,
         capsule_core::packers::source::SourcePackOptions {
-            manifest_path: manifest.to_path_buf(),
-            manifest_dir: manifest_dir.to_path_buf(),
+            compat_manifest: plan.compat_manifest.clone(),
+            workspace_root: plan.workspace_root.clone(),
             config_json: prepared_config.config_json.clone(),
             config_path: prepared_config.config_path.clone(),
             output: None,
@@ -1555,8 +1588,14 @@ port = 18080
         let runtime_model = capsule_core::lock_runtime::resolve_lock_runtime_model(&lock, None)
             .expect("resolve test runtime model");
 
+        let manifest_value = toml::Value::Table(manifest);
+        let compat_manifest =
+            capsule_core::router::CompatManifestBridge::from_manifest_value(&manifest_value)
+                .expect("compat manifest bridge");
+
         ManifestData {
-            manifest: toml::Value::Table(manifest),
+            manifest: manifest_value,
+            compat_manifest: Some(compat_manifest),
             manifest_path: manifest_dir.join("capsule.toml"),
             manifest_dir,
             lock,

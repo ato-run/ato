@@ -205,6 +205,25 @@ pub fn generate_config(
     Ok(config)
 }
 
+pub fn generate_config_from_parts(
+    workspace_root: &Path,
+    manifest: &toml::Value,
+    manifest_raw: &str,
+    enforcement_override: Option<String>,
+    standalone: bool,
+) -> Result<ConfigJson> {
+    let synthetic_manifest_path = workspace_root.join("capsule.toml");
+    let config = build_config_json(
+        &synthetic_manifest_path,
+        manifest,
+        manifest_raw,
+        enforcement_override,
+        standalone,
+    )?;
+    validate_config_json(&config)?;
+    Ok(config)
+}
+
 pub fn generate_config_from_lock(
     lock: &AtoLock,
     resolved: &ResolvedLockRuntimeModel,
@@ -264,7 +283,11 @@ pub fn write_config(manifest_path: &Path, config: &ConfigJson) -> Result<PathBuf
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    let output_path = manifest_dir.join("config.json");
+    write_config_in_dir(&manifest_dir, config)
+}
+
+pub fn write_config_in_dir(output_dir: &Path, config: &ConfigJson) -> Result<PathBuf> {
+    let output_path = output_dir.join("config.json");
 
     let json = to_stable_json_pretty(config)?;
     std::fs::write(&output_path, json)

@@ -320,11 +320,7 @@ fn validate_delivery_value(lock: &AtoLock, value: &Value) -> std::result::Result
                         expected_status, mode
                     ));
                 }
-                if build
-                    .get("requires_build_closure")
-                    .and_then(Value::as_bool)
-                    != Some(true)
-                {
+                if build.get("requires_build_closure").and_then(Value::as_bool) != Some(true) {
                     errors.push(
                         "contract.delivery.build.requires_build_closure must be true for source delivery"
                             .to_string(),
@@ -456,9 +452,13 @@ mod tests {
 
     fn lock_with_delivery(delivery: Value, closure: Option<Value>) -> AtoLock {
         let mut lock = AtoLock::default();
-        lock.contract.entries.insert("delivery".to_string(), delivery);
+        lock.contract
+            .entries
+            .insert("delivery".to_string(), delivery);
         if let Some(closure) = closure {
-            lock.resolution.entries.insert("closure".to_string(), closure);
+            lock.resolution
+                .entries
+                .insert("closure".to_string(), closure);
         }
         lock
     }

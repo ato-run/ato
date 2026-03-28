@@ -338,6 +338,24 @@ pub async fn ensure_lockfile(
     Ok(generated)
 }
 
+pub async fn ensure_lockfile_in_dir(
+    manifest_dir: &Path,
+    manifest_raw: &toml::Value,
+    manifest_text: &str,
+    reporter: Arc<dyn CapsuleReporter + 'static>,
+    timings: bool,
+) -> Result<PathBuf> {
+    let synthetic_manifest_path = manifest_dir.join("capsule.toml");
+    ensure_lockfile(
+        &synthetic_manifest_path,
+        manifest_raw,
+        manifest_text,
+        reporter,
+        timings,
+    )
+    .await
+}
+
 pub fn verify_lockfile_manifest(manifest_path: &Path, lockfile_path: &Path) -> Result<()> {
     let mut manifest_file = fs::File::open(manifest_path)
         .map_err(|e| CapsuleError::Config(format!("Failed to read manifest: {}", e)))?;
