@@ -101,7 +101,7 @@ pub struct NativeArtifactSpec {
     pub finalize_tool: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FinalizeResult {
     pub fetched_dir: PathBuf,
     pub output_dir: PathBuf,
@@ -110,6 +110,13 @@ pub struct FinalizeResult {
     pub parent_digest: String,
     pub derived_digest: String,
     pub schema_version: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FinalizedPublishArtifactResult {
+    pub artifact_path: PathBuf,
+    pub identity_class: &'static str,
+    pub finalize: FinalizeResult,
 }
 
 #[derive(Debug, Clone)]
@@ -539,21 +546,37 @@ pub(crate) fn build_native_artifact(
     plan: &NativeBuildPlan,
     output_path: Option<&Path>,
 ) -> Result<NativeBuildResult> {
-    if !host_supports_finalize() {
-        bail!("native delivery build currently supports macOS and Windows hosts only");
-    }
+    build_native_artifact_with_distribution_lock(plan, output_path, None)
+}
+
+pub(crate) fn build_native_artifact_with_distribution_lock(
+    plan: &NativeBuildPlan,
+    output_path: Option<&Path>,
+    capsule_lock_json: Option<&str>,
+) -> Result<NativeBuildResult> {
+    ensure_current_host_delivery_target(&plan.target, "native delivery build")?;
 
     let config = staged_delivery_config(plan)?;
     let runner = FinalizeRunner::for_tool(&config.finalize.tool);
-    build_native_artifact_with_strip(plan, output_path, |artifact_path| {
-        runner.strip_existing_signature(artifact_path)
-    })
+    build_native_artifact_with_strip(
+        plan,
+        output_path,
+        |artifact_path| {
+            if host_supports_finalize() {
+                runner.strip_existing_signature(artifact_path)
+            } else {
+                Ok(())
+            }
+        },
+        capsule_lock_json,
+    )
 }
 
 fn build_native_artifact_with_strip<F>(
     plan: &NativeBuildPlan,
     output_path: Option<&Path>,
     strip_signature: F,
+    capsule_lock_json: Option<&str>,
 ) -> Result<NativeBuildResult>
 where
     F: Fn(&Path) -> Result<()>,
@@ -610,7 +633,8 @@ where
         let payload_tar = create_payload_tar_from_directory(&payload_root)?;
         let payload_tar_zst = zstd::stream::encode_all(Cursor::new(&payload_tar), 3)
             .context("Failed to encode native payload.tar.zst")?;
-        let capsule_bytes = build_capsule_archive(&manifest, &payload_tar_zst, &payload_tar)?;
+        let capsule_bytes =
+            build_capsule_archive(&manifest, &payload_tar_zst, &payload_tar, capsule_lock_json)?;
         fs::write(&artifact_path, &capsule_bytes)
             .with_context(|| format!("Failed to write {}", artifact_path.display()))?;
 
@@ -625,6 +649,97 @@ where
 
     let _ = fs::remove_dir_all(&staging_root);
     result
+}
+
+pub(crate) fn finalize_capsule_artifact_for_publish(
+    unsigned_artifact_path: &Path,
+    scoped_id: &str,
+    version: &str,
+    source_lock_json: Option<&str>,
+    allow_external_finalize: bool,
+) -> Result<FinalizedPublishArtifactResult> {
+    let artifact_bytes = fs::read(unsigned_artifact_path).with_context(|| {
+        format!(
+            "Failed to read unsigned artifact for finalize: {}",
+            unsigned_artifact_path.display()
+        )
+    })?;
+    let fetch_result = materialize_fetch_cache_from_artifact(
+        scoped_id,
+        version,
+        "local-source-publish",
+        &artifact_bytes,
+    )?;
+    let output_root = unsigned_artifact_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let finalize = execute_finalize(
+        &fetch_result.cache_dir,
+        &output_root,
+        allow_external_finalize,
+    )?;
+
+    let delivery_config_path = fetch_result.artifact_dir.join(DELIVERY_CONFIG_FILE);
+    let delivery_config = load_delivery_config(&delivery_config_path)?;
+    let rebased_delivery =
+        rebase_delivery_config_for_finalize(&delivery_config, &finalize.derived_app_path)?;
+
+    let staging_root = create_temp_subdir(&output_root, "native-publish-finalize")?;
+    let payload_root = staging_root.join("payload");
+    fs::create_dir_all(&payload_root)
+        .with_context(|| format!("Failed to create {}", payload_root.display()))?;
+
+    let artifact_name = finalize
+        .derived_app_path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("finalized app path has no terminal name"))?;
+    let staged_artifact = payload_root.join(artifact_name);
+    copy_recursively(&finalize.derived_app_path, &staged_artifact)?;
+    fs::write(
+        payload_root.join(DELIVERY_CONFIG_FILE),
+        serialize_delivery_config(&rebased_delivery)?,
+    )
+    .context("Failed to stage finalized native delivery metadata")?;
+    fs::copy(
+        &finalize.provenance_path,
+        payload_root.join(PROVENANCE_FILE),
+    )
+    .with_context(|| {
+        format!(
+            "Failed to stage finalized provenance from {}",
+            finalize.provenance_path.display()
+        )
+    })?;
+
+    let payload_tar = create_payload_tar_from_directory(&payload_root)?;
+    let payload_tar_zst = zstd::stream::encode_all(Cursor::new(&payload_tar), 3)
+        .context("Failed to encode finalized native payload.tar.zst")?;
+    let manifest = extract_capsule_manifest_from_archive(&artifact_bytes)?;
+    let finalized_name = unsigned_artifact_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(|value| format!("{value}-signed.capsule"))
+        .unwrap_or_else(|| format!("{}-{}-signed.capsule", manifest.name, manifest.version));
+    let finalized_artifact_path = unsigned_artifact_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(finalized_name);
+    let capsule_bytes =
+        build_capsule_archive(&manifest, &payload_tar_zst, &payload_tar, source_lock_json)?;
+    fs::write(&finalized_artifact_path, capsule_bytes).with_context(|| {
+        format!(
+            "Failed to write finalized publish artifact: {}",
+            finalized_artifact_path.display()
+        )
+    })?;
+    let _ = fs::remove_dir_all(&staging_root);
+
+    Ok(FinalizedPublishArtifactResult {
+        artifact_path: finalized_artifact_path,
+        identity_class: "locally_finalized_signed_bundle",
+        finalize,
+    })
 }
 
 pub async fn execute_fetch(
@@ -1931,6 +2046,47 @@ fn rebase_delivery_config_for_finalize(
     Ok(derived_config)
 }
 
+pub(crate) fn ensure_current_host_delivery_target(target: &str, action: &str) -> Result<()> {
+    let Some(target_os) = delivery_target_os_family(target) else {
+        bail!(
+            "{} requires a normalized delivery target (got '{}')",
+            action,
+            target
+        );
+    };
+    let Some(host_os) = host_projection_os_family() else {
+        bail!("{} is not supported on this host platform", action);
+    };
+    if target_os != host_os {
+        bail!(
+            "{} requires current-host target alignment (target='{}', host_os='{}')",
+            action,
+            target,
+            host_os
+        );
+    }
+
+    let target_arch = target
+        .split('/')
+        .nth(1)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
+    if !target_arch.is_empty() {
+        let host_arch = normalized_host_delivery_arch();
+        if !delivery_arch_matches_host(target_arch, host_arch) {
+            bail!(
+                "{} requires current-host arch alignment (target='{}', host_arch='{}')",
+                action,
+                target_arch,
+                host_arch
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn ensure_native_artifact_kind_supported(path: &Path, action: &str) -> Result<NativeArtifactKind> {
     let kind = NativeArtifactKind::from_path(path);
     if kind == NativeArtifactKind::File && !path_has_extension(path, "exe") {
@@ -1948,6 +2104,25 @@ fn delivery_target_os_family(target: &str) -> Option<&str> {
         .split('/')
         .next()
         .filter(|value| !value.trim().is_empty())
+}
+
+fn normalized_host_delivery_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        "x86" | "i386" | "i586" | "i686" => "x86",
+        other => other,
+    }
+}
+
+fn delivery_arch_matches_host(target_arch: &str, host_arch: &str) -> bool {
+    let normalized_target = match target_arch {
+        "x86_64" | "amd64" | "x64" => "x64",
+        "aarch64" | "arm64" => "arm64",
+        "x86" | "ia32" | "i386" | "i686" => "x86",
+        other => other,
+    };
+    normalized_target == host_arch
 }
 
 fn supports_projection_target(target: &str) -> bool {
@@ -1971,6 +2146,35 @@ fn host_projection_os_family() -> Option<&'static str> {
 
 fn host_supports_projection_target(target: &str) -> bool {
     delivery_target_os_family(target) == host_projection_os_family()
+}
+
+fn extract_capsule_manifest_from_archive(
+    bytes: &[u8],
+) -> Result<capsule_core::types::CapsuleManifest> {
+    let mut archive = tar::Archive::new(Cursor::new(bytes));
+    let entries = archive
+        .entries()
+        .context("Failed to read finalized source artifact")?;
+    for entry in entries {
+        let mut entry = entry.context("Invalid finalized source artifact entry")?;
+        if entry
+            .path()
+            .ok()
+            .and_then(|path| path.to_str().map(|value| value.to_string()))
+            .as_deref()
+            != Some("capsule.toml")
+        {
+            continue;
+        }
+        let mut manifest = String::new();
+        entry
+            .read_to_string(&mut manifest)
+            .context("Failed to read capsule.toml from source artifact")?;
+        return capsule_core::types::CapsuleManifest::from_toml(&manifest).map_err(|err| {
+            anyhow::anyhow!("Failed to parse capsule.toml from source artifact: {err}")
+        });
+    }
+    bail!("source artifact is missing capsule.toml")
 }
 
 fn resolve_native_build_working_dir(

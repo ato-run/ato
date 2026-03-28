@@ -556,6 +556,19 @@ pub(crate) enum Commands {
         #[arg(
             long,
             default_value_t = false,
+            conflicts_with = "artifact",
+            help = "Finalize a desktop source build locally, then publish the signed artifact"
+        )]
+        finalize_local: bool,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Allow host-local finalize steps that invoke external signing/finalize tools"
+        )]
+        allow_external_finalize: bool,
+        #[arg(
+            long,
+            default_value_t = false,
             conflicts_with_all = ["ci", "dry_run"],
             help = "Apply the official workflow fix, then rerun Publish diagnostics"
         )]

@@ -97,6 +97,14 @@ pub async fn execute(
 
     let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
     let authoritative_input = resolve_producer_authoritative_input(&cwd, reporter.clone(), false)?;
+    if authoritative_input
+        .desktop_source_publish_contract()
+        .is_some()
+    {
+        anyhow::bail!(
+            "--ci publish does not yet support Tauri/Electron/Wails source publish. Use private/local registry publish first."
+        );
+    }
     let (manifest_name, manifest_version) =
         semantic_publish_identity(&authoritative_input.descriptor)?;
 
@@ -422,8 +430,14 @@ pub(crate) fn build_capsule_artifact(
         crate::build::native_delivery::detect_build_strategy_with_legacy_fallback(&decision.plan)?;
 
     if let Some(plan) = native_plan {
-        let result =
-            crate::build::native_delivery::build_native_artifact(&plan, Some(&artifact_path))?;
+        let lock_json = authoritative_input
+            .map(crate::application::producer_input::ProducerAuthoritativeInput::serialized_lock_json)
+            .transpose()?;
+        let result = crate::build::native_delivery::build_native_artifact_with_distribution_lock(
+            &plan,
+            Some(&artifact_path),
+            lock_json.as_deref(),
+        )?;
         return Ok(result.artifact_path);
     }
 
