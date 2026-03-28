@@ -533,7 +533,7 @@ pub fn execute_pack_command_with_injected_manifest(
                 capsule_core::packers::web::pack(
                     &decision.plan,
                     capsule_core::packers::web::WebPackOptions {
-                        compat_manifest: decision.plan.compat_manifest.clone(),
+                        compat_input: decision.plan.compat_project_input()?,
                         workspace_root: decision.plan.workspace_root.clone(),
                         output: None,
                     },
@@ -638,7 +638,7 @@ fn pack_source_bundle(
     let artifact = capsule_core::packers::source::pack(
         plan,
         capsule_core::packers::source::SourcePackOptions {
-            compat_manifest: plan.compat_manifest.clone(),
+            compat_input: plan.compat_project_input()?,
             workspace_root: plan.workspace_root.clone(),
             config_json: prepared_config.config_json.clone(),
             config_path: prepared_config.config_path.clone(),

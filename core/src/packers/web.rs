@@ -14,11 +14,11 @@ use crate::packers::payload::{
     build_distribution_manifest, normalize_relative_utf8_path, reconstruct_from_chunks,
 };
 use crate::packers::sbom::{generate_embedded_sbom, SBOM_PATH};
-use crate::router::{CompatManifestBridge, ManifestData};
+use crate::router::{CompatProjectInput, ManifestData};
 
 #[derive(Debug, Clone)]
 pub struct WebPackOptions {
-    pub compat_manifest: Option<CompatManifestBridge>,
+    pub compat_input: Option<CompatProjectInput>,
     pub workspace_root: PathBuf,
     pub output: Option<PathBuf>,
 }
@@ -52,9 +52,10 @@ pub fn pack(
         )));
     }
 
-    let bridge = opts.compat_manifest.as_ref().ok_or_else(|| {
-        CapsuleError::Pack("web pack requires compat manifest bridge".to_string())
-    })?;
+    let compat_input = opts
+        .compat_input
+        .as_ref()
+        .ok_or_else(|| CapsuleError::Pack("web pack requires compat manifest input".to_string()))?;
     let entrypoint = plan
         .execution_entrypoint()
         .filter(|v| !v.trim().is_empty())
@@ -81,7 +82,7 @@ pub fn pack(
     drop(payload_builder);
     let payload_tar_bytes = fs::read(&payload_tar_path).map_err(CapsuleError::Io)?;
     let (distribution_manifest, manifest_toml_bytes) =
-        build_distribution_manifest(&bridge.manifest, &payload_tar_bytes)?;
+        build_distribution_manifest(compat_input.manifest(), &payload_tar_bytes)?;
     let rebuilt_payload = reconstruct_from_chunks(
         &payload_tar_bytes,
         &distribution_manifest
@@ -107,7 +108,7 @@ pub fn pack(
     let _ = zst_encoder.finish().map_err(CapsuleError::Io)?;
 
     let output_path = opts.output.unwrap_or_else(|| {
-        let name = bridge.manifest.name.replace('\"', "-");
+        let name = compat_input.package_name().replace('\"', "-");
         opts.workspace_root.join(format!("{}.capsule", name))
     });
 
@@ -115,14 +116,7 @@ pub fn pack(
     let mut outer = Builder::new(&mut capsule_file);
     let manifest_tmp = temp_dir.path().join("capsule.toml");
     fs::write(&manifest_tmp, &manifest_toml_bytes).map_err(CapsuleError::Io)?;
-    let lockfile_path = ensure_lockfile(
-        &opts.workspace_root,
-        &bridge
-            .raw_value()
-            .map_err(|err| CapsuleError::Pack(err.to_string()))?,
-        &bridge.raw_toml,
-        reporter.clone(),
-    )?;
+    let lockfile_path = ensure_lockfile(compat_input, reporter.clone())?;
     append_regular_file_normalized(
         &mut outer,
         &manifest_tmp,
@@ -140,7 +134,7 @@ pub fn pack(
         reproducible_mtime_epoch(),
     )?;
 
-    let sbom = generate_embedded_sbom(&bridge.manifest.name, &sbom_files)?;
+    let sbom = generate_embedded_sbom(compat_input.package_name(), &sbom_files)?;
     let sbom_tmp = temp_dir.path().join(SBOM_PATH);
     fs::write(&sbom_tmp, sbom.document).map_err(CapsuleError::Io)?;
     append_regular_file_normalized(&mut outer, &sbom_tmp, SBOM_PATH, reproducible_mtime_epoch())?;
@@ -187,17 +181,13 @@ pub fn pack(
 }
 
 fn ensure_lockfile(
-    manifest_dir: &Path,
-    manifest_raw: &toml::Value,
-    manifest_text: &str,
+    compat_input: &CompatProjectInput,
     reporter: Arc<dyn crate::reporter::CapsuleReporter + 'static>,
 ) -> Result<PathBuf> {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         return tokio::task::block_in_place(|| {
-            handle.block_on(lockfile::ensure_lockfile_in_dir(
-                manifest_dir,
-                manifest_raw,
-                manifest_text,
+            handle.block_on(lockfile::ensure_lockfile_for_compat_input(
+                compat_input,
                 reporter,
                 false,
             ))
@@ -205,10 +195,8 @@ fn ensure_lockfile(
     }
 
     let rt = tokio::runtime::Runtime::new().map_err(CapsuleError::Io)?;
-    rt.block_on(lockfile::ensure_lockfile_in_dir(
-        manifest_dir,
-        manifest_raw,
-        manifest_text,
+    rt.block_on(lockfile::ensure_lockfile_for_compat_input(
+        compat_input,
         reporter,
         false,
     ))
@@ -519,7 +507,7 @@ port = 8080
         let out = pack(
             &decision.plan,
             WebPackOptions {
-                compat_manifest: decision.plan.compat_manifest.clone(),
+                compat_input: decision.plan.compat_project_input().expect("compat input"),
                 workspace_root: tmp.path().to_path_buf(),
                 output: Some(output_path.clone()),
             },
@@ -527,6 +515,12 @@ port = 8080
         )
         .expect("pack");
         assert_eq!(out, output_path);
+        assert!(!tmp
+            .path()
+            .join(".tmp")
+            .join("compat-manifest-bridge")
+            .join("capsule.toml")
+            .exists());
 
         let mut outer = tar::Archive::new(fs::File::open(&out).expect("open capsule"));
         let mut has_capsule_toml = false;
@@ -647,7 +641,7 @@ port = 8080
         let err = pack(
             &decision.plan,
             WebPackOptions {
-                compat_manifest: decision.plan.compat_manifest.clone(),
+                compat_input: decision.plan.compat_project_input().expect("compat input"),
                 workspace_root: tmp.path().to_path_buf(),
                 output: Some(tmp.path().join("web-static-pack.capsule")),
             },
@@ -701,7 +695,7 @@ port = 8080
         pack(
             &decision.plan,
             WebPackOptions {
-                compat_manifest: decision.plan.compat_manifest.clone(),
+                compat_input: decision.plan.compat_project_input().expect("compat input"),
                 workspace_root: tmp.path().to_path_buf(),
                 output: Some(out1.clone()),
             },
@@ -712,7 +706,7 @@ port = 8080
         pack(
             &decision.plan,
             WebPackOptions {
-                compat_manifest: decision.plan.compat_manifest.clone(),
+                compat_input: decision.plan.compat_project_input().expect("compat input"),
                 workspace_root: tmp.path().to_path_buf(),
                 output: Some(out2.clone()),
             },
