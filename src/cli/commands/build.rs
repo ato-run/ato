@@ -336,15 +336,7 @@ pub fn execute_pack_command_with_injected_manifest(
         reason = %decision.reason,
         "Build runtime routed"
     );
-    let manifest_dir = decision.plan.workspace_root.clone();
-
-    let native_plan = if let Some(plan) =
-        native_delivery::detect_build_strategy_from_descriptor(&decision.plan)?
-    {
-        Some(plan)
-    } else {
-        native_delivery::detect_build_strategy(&manifest_dir)?
-    };
+    let native_plan = native_delivery::detect_build_strategy_with_legacy_fallback(&decision.plan)?;
 
     if let Some(plan) = native_plan {
         let build_started = Instant::now();

@@ -1362,9 +1362,9 @@ fn maybe_promote_native_build_closure(result: &mut SourceInferenceResult) -> Res
         return Ok(false);
     };
 
-    let mut imported_evidence = observed_closure_evidence(&plan.manifest_dir);
+    let mut imported_evidence = observed_closure_evidence(&plan.workspace_root);
     imported_evidence.extend(
-        probe_native_framework_evidence(&plan.manifest_dir)?
+        probe_native_framework_evidence(&plan.workspace_root)?
             .into_iter()
             .filter(|evidence| evidence.importer_id.as_str() == plan.framework.as_str()),
     );
@@ -1400,7 +1400,7 @@ fn maybe_promote_native_build_closure(result: &mut SourceInferenceResult) -> Res
     result.provenance.push(SourceInferenceProvenance {
         field: "resolution.closure".to_string(),
         kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
-        source_path: Some(plan.manifest_path),
+        source_path: Some(plan.workspace_root.join("capsule.toml")),
         importer_id: None,
         evidence_kind: None,
         source_field: Some("[artifact]/[finalize]".to_string()),
@@ -1419,7 +1419,7 @@ fn maybe_promote_native_build_closure(result: &mut SourceInferenceResult) -> Res
     result.provenance.push(SourceInferenceProvenance {
         field: "contract.delivery".to_string(),
         kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
-        source_path: Some(plan.manifest_dir.join("capsule.toml")),
+        source_path: Some(plan.workspace_root.join("capsule.toml")),
         importer_id: None,
         evidence_kind: None,
         source_field: Some("[artifact]/[finalize]".to_string()),
