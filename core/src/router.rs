@@ -31,12 +31,22 @@ pub enum ExecutionProfile {
 
 #[derive(Debug, Clone)]
 pub struct CompatManifestBridge {
-    pub raw_toml: String,
-    pub manifest: CapsuleManifest,
-    pub sha256: String,
+    pub(crate) raw_toml: String,
+    pub(crate) manifest: CapsuleManifest,
+    pub(crate) sha256: String,
 }
 
 impl CompatManifestBridge {
+    pub fn from_normalized_toml(raw_toml: String) -> Result<Self> {
+        let parsed =
+            CapsuleManifest::from_toml(&raw_toml).map_err(|err| anyhow!(err.to_string()))?;
+        Ok(Self {
+            raw_toml: raw_toml.clone(),
+            manifest: parsed,
+            sha256: sha256_hex(raw_toml.as_bytes()),
+        })
+    }
+
     pub fn toml_value(&self) -> Result<toml::Value> {
         toml::from_str(&self.raw_toml).map_err(|err| anyhow!("parse compat manifest bridge: {err}"))
     }
@@ -55,6 +65,18 @@ impl CompatManifestBridge {
 
     pub fn from_lock(lock: &AtoLock, runtime_model: &ResolvedLockRuntimeModel) -> Result<Self> {
         Self::from_manifest_value(&synthesize_manifest_from_lock(lock, runtime_model))
+    }
+
+    pub fn manifest_text(&self) -> &str {
+        self.raw_toml.as_str()
+    }
+
+    pub fn manifest_model(&self) -> &CapsuleManifest {
+        &self.manifest
+    }
+
+    pub fn manifest_sha256(&self) -> &str {
+        self.sha256.as_str()
     }
 
     pub fn raw_value(&self) -> Result<toml::Value> {
@@ -157,15 +179,11 @@ impl CompatProjectInput {
     }
 
     pub fn manifest_text(&self) -> &str {
-        self.bridge.raw_toml.as_str()
-    }
-
-    pub fn bridge(&self) -> &CompatManifestBridge {
-        &self.bridge
+        self.bridge.manifest_text()
     }
 
     pub fn manifest(&self) -> &CapsuleManifest {
-        &self.bridge.manifest
+        self.bridge.manifest_model()
     }
 
     pub fn package_name(&self) -> &str {
@@ -177,7 +195,7 @@ impl CompatProjectInput {
     }
 
     pub fn sha256(&self) -> &str {
-        self.bridge.sha256.as_str()
+        self.bridge.manifest_sha256()
     }
 
     pub fn ipc_section(&self) -> Result<Option<toml::Value>> {
@@ -190,7 +208,7 @@ impl CompatProjectInput {
 
     pub fn source_digest(&self) -> Option<&str> {
         self.bridge
-            .manifest
+            .manifest_model()
             .targets
             .as_ref()
             .and_then(|targets| targets.source_digest.as_deref())
@@ -875,7 +893,7 @@ impl ExecutionDescriptor {
     pub fn typed_manifest(&self) -> Result<CapsuleManifest> {
         self.compat_manifest
             .as_ref()
-            .map(|bridge| bridge.manifest.clone())
+            .map(|bridge| bridge.manifest_model().clone())
             .ok_or_else(|| anyhow!("compat manifest bridge is unavailable"))
     }
 

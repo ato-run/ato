@@ -11,6 +11,60 @@
 
 ---
 
+## Progress Roadmap
+
+### Phase A: lock-first authority の導入
+
+- [x] authoritative input / canonical lock precedence
+- [x] lock-derived execution descriptor / runtime model
+- [x] build/private publish/CI publish の主経路を lock-native 化
+- [x] official publish preflight の descriptor-native 化
+
+### Phase B: temporary manifest bridge の隔離
+
+- [x] `CompatManifestBridge` 導入
+- [x] build/publish で project root に temporary `capsule.toml` を書かない経路
+- [x] injected manifest / inferred manifest fallback の in-memory bridge 化
+- [x] native delivery descriptor 経路の source-location dependency 縮小
+
+### Phase C: core 下層の compat input 整理
+
+- [x] `CompatProjectInput` 導入
+- [x] `r3_config` の workspace-root + compat input 入口
+- [x] `lockfile` の compat input 入口と bridge temp write 除去
+- [x] source/web packer の compat input 化
+- [x] bundle/capsule packer の compat input 化
+- [x] engine の compat manifest 読み取り helper 集約
+- [x] `CompatManifestBridge` の public exposure を更に縮小
+- [x] `r3_config::generate_config_from_parts` の compatibility wrapper を縮退または削除
+
+### Phase D: build/publish 完了条件の固定
+
+- [x] build/private publish/CI publish の no-materialization regression
+- [x] official publish/CI publish の source-location 非依存 focused test
+- [ ] build/publish helper 単位の no-materialization 証跡拡充
+
+### Phase E: 残る manifest-path 互換面の整理
+
+- [ ] run/install/runtime executor 側の manifest-path 互換面を別マイルストーンで切り出す
+- [ ] bundle/capsule を含む compat helper の raw TOML 依存をさらに圧縮する
+- [ ] `ExecutionDescriptor.manifest_path` / `manifest_dir` の run/install 限定化
+- [ ] `ProducerAuthoritativeInput` の compat-only 面をさらに縮退する
+
+### Phase F: native-delivery / closure / bootstrap の締め
+
+- [ ] desktop native-delivery の completion coverage を validator/impl/spec で一致させる
+- [ ] closure digest の publish/install/run/build surface 整合を完了させる
+- [ ] bootstrap trust boundary を typed overlay / 共通 policy モデルへ収束させる
+
+### Phase G: E2E と TODO の締め
+
+- [ ] source-location を壊しても build/publish が動く focused regression を追加
+- [ ] native-delivery / closure / bootstrap の広めの E2E を拡充
+- [ ] この TODO の未完了項目を再評価して `[x]` に戻す
+
+---
+
 ## 前提
 
 - `ato.lock.json` を canonical input にする方針自体は採用済み

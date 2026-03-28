@@ -186,7 +186,7 @@ pub fn pack(
             PackBundleArgs {
                 manifest_path: None,
                 workspace_root: opts.workspace_root.clone(),
-                compat_manifest: Some(compat_input.bridge().clone()),
+                compat_input: Some(compat_input.clone()),
                 runtime_path: opts.runtime.clone(),
                 output: opts.output.clone(),
                 nacelle_path: Some(nacelle),
@@ -209,7 +209,7 @@ pub fn pack(
         let artifact_path = block_on_runtime(capsule_packer::pack(
             plan,
             capsule_packer::CapsulePackOptions {
-                compat_manifest: Some(compat_input.bridge().clone()),
+                compat_input: Some(compat_input.clone()),
                 workspace_root: opts.workspace_root.clone(),
                 output: opts.output.clone(),
                 config_json: opts.config_json,
@@ -363,11 +363,8 @@ fn validate_entrypoint_compat(
 fn validate_entrypoint(manifest_path: &Path, manifest_dir: &Path) -> Result<()> {
     let loaded = crate::manifest::load_manifest(manifest_path)
         .map_err(|err| CapsuleError::Pack(err.to_string()))?;
-    let bridge = CompatManifestBridge {
-        raw_toml: loaded.raw_text,
-        manifest: loaded.model,
-        sha256: String::new(),
-    };
+    let bridge = CompatManifestBridge::from_normalized_toml(loaded.raw_text)
+        .map_err(|err| CapsuleError::Pack(err.to_string()))?;
     let decision = crate::router::route_manifest(
         manifest_path,
         crate::router::ExecutionProfile::Release,

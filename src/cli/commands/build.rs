@@ -79,17 +79,9 @@ fn build_decision_from_manifest_text(
     let normalized_manifest_text = parsed_manifest
         .to_toml()
         .map_err(|err| anyhow::anyhow!("Failed to normalize manifest bridge: {err}"))?;
-    let bridge = CompatManifestBridge {
-        raw_toml: normalized_manifest_text.clone(),
-        manifest: parsed_manifest,
-        sha256: {
-            let mut hasher = Sha256::new();
-            hasher.update(normalized_manifest_text.as_bytes());
-            format!("{:x}", hasher.finalize())
-        },
-    };
+    let bridge = CompatManifestBridge::from_normalized_toml(normalized_manifest_text.clone())?;
     bridge
-        .manifest
+        .manifest_model()
         .validate_for_mode(validation_mode)
         .map_err(|errors| {
             anyhow::anyhow!(
@@ -101,7 +93,8 @@ fn build_decision_from_manifest_text(
                     .join("; ")
             )
         })?;
-    let raw: toml::Value = toml::from_str(&normalized_manifest_text)
+    let raw = bridge
+        .toml_value()
         .context("Failed to parse raw manifest bridge TOML")?;
     let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
         raw,
