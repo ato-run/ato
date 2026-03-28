@@ -189,13 +189,17 @@ pub fn pack(
         debug!("Phase 3: building self-extracting bundle");
         let nacelle = engine::discover_nacelle(engine::EngineRequest {
             explicit_path: opts.nacelle_override,
-            manifest_path: Some(opts.workspace_root.join("capsule.toml")),
+            manifest_path: None,
+            workspace_root: Some(opts.workspace_root.clone()),
+            compat_manifest: opts.compat_manifest.clone(),
         })?;
 
         let bundle_started = Instant::now();
         let bundle_path = block_on_runtime(build_bundle(
             PackBundleArgs {
-                manifest_path: opts.workspace_root.join("capsule.toml"),
+                manifest_path: None,
+                workspace_root: opts.workspace_root.clone(),
+                compat_manifest: opts.compat_manifest.clone(),
                 runtime_path: opts.runtime.clone(),
                 output: opts.output.clone(),
                 nacelle_path: Some(nacelle),

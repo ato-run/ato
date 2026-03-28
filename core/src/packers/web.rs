@@ -519,8 +519,8 @@ port = 8080
         let out = pack(
             &decision.plan,
             WebPackOptions {
-                manifest_path: manifest_path.clone(),
-                manifest_dir: tmp.path().to_path_buf(),
+                compat_manifest: decision.plan.compat_manifest.clone(),
+                workspace_root: tmp.path().to_path_buf(),
                 output: Some(output_path.clone()),
             },
             Arc::new(NoOpReporter),
@@ -647,8 +647,8 @@ port = 8080
         let err = pack(
             &decision.plan,
             WebPackOptions {
-                manifest_path,
-                manifest_dir: tmp.path().to_path_buf(),
+                compat_manifest: decision.plan.compat_manifest.clone(),
+                workspace_root: tmp.path().to_path_buf(),
                 output: Some(tmp.path().join("web-static-pack.capsule")),
             },
             Arc::new(NoOpReporter),
@@ -701,8 +701,8 @@ port = 8080
         pack(
             &decision.plan,
             WebPackOptions {
-                manifest_path: manifest_path.clone(),
-                manifest_dir: tmp.path().to_path_buf(),
+                compat_manifest: decision.plan.compat_manifest.clone(),
+                workspace_root: tmp.path().to_path_buf(),
                 output: Some(out1.clone()),
             },
             Arc::new(NoOpReporter),
@@ -712,8 +712,8 @@ port = 8080
         pack(
             &decision.plan,
             WebPackOptions {
-                manifest_path,
-                manifest_dir: tmp.path().to_path_buf(),
+                compat_manifest: decision.plan.compat_manifest.clone(),
+                workspace_root: tmp.path().to_path_buf(),
                 output: Some(out2.clone()),
             },
             Arc::new(NoOpReporter),

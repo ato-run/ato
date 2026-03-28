@@ -9,12 +9,16 @@ use super::runtime_fetcher::RuntimeFetcher;
 use crate::error::{CapsuleError, Result};
 use crate::lockfile::{resolve_existing_lockfile_path, CAPSULE_LOCK_FILE_NAME};
 use crate::packers::pack_filter::load_pack_filter_from_path;
+use crate::router::CompatManifestBridge;
+use crate::types::CapsuleManifest;
 
 /// Magic bytes to identify self-extracting v2 bundles.
 const BUNDLE_MAGIC: &[u8] = b"NACELLE_V2_BUNDLE";
 
 pub struct PackBundleArgs {
-    pub manifest_path: PathBuf,
+    pub manifest_path: Option<PathBuf>,
+    pub workspace_root: PathBuf,
+    pub compat_manifest: Option<CompatManifestBridge>,
     pub runtime_path: Option<PathBuf>,
     pub output: Option<PathBuf>,
     pub nacelle_path: Option<PathBuf>,
@@ -37,23 +41,35 @@ pub async fn build_bundle(
     args: PackBundleArgs,
     reporter: Arc<dyn crate::reporter::CapsuleReporter + 'static>,
 ) -> Result<PathBuf> {
-    let manifest_path = args.manifest_path.canonicalize()?;
-    let source_dir = manifest_path
-        .parent()
-        .ok_or_else(|| CapsuleError::Pack("Failed to determine source directory".to_string()))?;
+    let source_dir = args.workspace_root.canonicalize()?;
+    let manifest_path = args
+        .manifest_path
+        .as_ref()
+        .and_then(|path| path.canonicalize().ok());
+    let compat_manifest = args.compat_manifest.as_ref();
+    let manifest = compat_manifest.map(|bridge| bridge.manifest.clone());
 
     let output_path = args
         .output
         .unwrap_or_else(|| source_dir.join("nacelle-bundle"));
 
-    let source_target_hint = read_manifest_source_target_hint(&manifest_path)?;
-    let manifest_entrypoint =
-        read_manifest_entrypoint(&manifest_path, source_target_hint.as_ref())?
-            .unwrap_or_else(|| "".to_string());
+    let source_target_hint = if let Some(manifest) = manifest.as_ref() {
+        source_target_hint_from_manifest(manifest)
+    } else if let Some(manifest_path) = manifest_path.as_ref() {
+        read_manifest_source_target_hint(manifest_path)?
+    } else {
+        None
+    };
+    let manifest_entrypoint = if let Some(manifest) = manifest.as_ref() {
+        manifest_entrypoint_from_manifest(manifest, source_target_hint.as_ref()).unwrap_or_default()
+    } else if let Some(manifest_path) = manifest_path.as_ref() {
+        read_manifest_entrypoint(manifest_path, source_target_hint.as_ref())?.unwrap_or_default()
+    } else {
+        String::new()
+    };
 
     let runtime_to_bundle = decide_runtime_to_bundle(
-        &manifest_path,
-        source_dir,
+        &source_dir,
         &manifest_entrypoint,
         source_target_hint.as_ref(),
     )?;
@@ -154,10 +170,24 @@ pub async fn build_bundle(
     reporter
         .notify("✓ Creating bundle archive...".to_string())
         .await?;
-    let build_excludes = read_build_exclude_patterns(&manifest_path)?;
-    let source_ignore = load_capsuleignore(source_dir, &build_excludes)?;
-    let pack_filter = load_pack_filter_from_path(&manifest_path)?;
-    let _node_modules_guard = NodeModulesGuard::new(source_dir, source_ignore.as_ref())?;
+    let build_excludes = if let Some(manifest) = manifest.as_ref() {
+        build_exclude_patterns_from_manifest(manifest)
+    } else if let Some(manifest_path) = manifest_path.as_ref() {
+        read_build_exclude_patterns(manifest_path)?
+    } else {
+        Vec::new()
+    };
+    let source_ignore = load_capsuleignore(&source_dir, &build_excludes)?;
+    let pack_filter = if let Some(manifest) = manifest.as_ref() {
+        crate::packers::pack_filter::PackFilter::from_manifest(manifest)?
+    } else if let Some(manifest_path) = manifest_path.as_ref() {
+        load_pack_filter_from_path(manifest_path)?
+    } else {
+        return Err(CapsuleError::Pack(
+            "bundle creation requires compat manifest bridge or manifest path".to_string(),
+        ));
+    };
+    let _node_modules_guard = NodeModulesGuard::new(&source_dir, source_ignore.as_ref())?;
     let config_path = source_dir.join("config.json");
     let config_ref = if config_path.exists() {
         Some(config_path.as_path())
@@ -166,7 +196,7 @@ pub async fn build_bundle(
     };
     let archive_data = create_bundle_archive(
         &runtime_dir,
-        source_dir,
+        &source_dir,
         source_ignore.as_ref(),
         &pack_filter,
         config_ref,
@@ -236,7 +266,6 @@ pub async fn build_bundle(
 }
 
 fn decide_runtime_to_bundle(
-    manifest_path: &Path,
     source_dir: &Path,
     entrypoint: &str,
     source_target: Option<&SourceTargetHint>,
@@ -257,10 +286,7 @@ fn decide_runtime_to_bundle(
         return Ok(None);
     }
 
-    let manifest_dir = manifest_path
-        .parent()
-        .ok_or_else(|| CapsuleError::Pack("Failed to resolve manifest directory".to_string()))?;
-    let entry_path = resolve_entrypoint_path(entrypoint, manifest_dir, source_dir);
+    let entry_path = resolve_entrypoint_path(entrypoint, source_dir, source_dir);
 
     let ext = entry_path
         .extension()
@@ -285,6 +311,74 @@ fn decide_runtime_to_bundle(
     }
 
     Ok(None)
+}
+
+fn source_target_hint_from_manifest(manifest: &CapsuleManifest) -> Option<SourceTargetHint> {
+    let target = manifest.targets.as_ref().and_then(|targets| {
+        targets
+            .source
+            .as_ref()
+            .map(|source| {
+                (
+                    source.language.clone(),
+                    source.version.clone(),
+                    Some(source.entrypoint.clone()),
+                )
+            })
+            .or_else(|| {
+                targets
+                    .named
+                    .get("source")
+                    .or_else(|| targets.named.get(&manifest.default_target))
+                    .and_then(|target| {
+                        if target.runtime.trim() != "source" {
+                            return None;
+                        }
+                        target.language.clone().map(|language| {
+                            (
+                                language,
+                                target.runtime_version.clone(),
+                                Some(target.entrypoint.clone()),
+                            )
+                        })
+                    })
+            })
+    })?;
+
+    Some(SourceTargetHint {
+        language: target.0,
+        version: target.1,
+        entrypoint: target.2,
+    })
+}
+
+fn manifest_entrypoint_from_manifest(
+    manifest: &CapsuleManifest,
+    source_target: Option<&SourceTargetHint>,
+) -> Option<String> {
+    if let Some(target) = source_target {
+        if let Some(entrypoint) = &target.entrypoint {
+            let trimmed = entrypoint.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    let trimmed = manifest.execution.entrypoint.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn build_exclude_patterns_from_manifest(manifest: &CapsuleManifest) -> Vec<String> {
+    manifest
+        .build
+        .as_ref()
+        .map(|build| build.exclude_libs.clone())
+        .unwrap_or_default()
 }
 
 fn read_manifest_source_target_hint(manifest_path: &Path) -> Result<Option<SourceTargetHint>> {
@@ -832,7 +926,9 @@ entrypoint = "hello.sh"
             .unwrap()
             .block_on(build_bundle(
                 PackBundleArgs {
-                    manifest_path,
+                    manifest_path: Some(manifest_path),
+                    workspace_root: root.to_path_buf(),
+                    compat_manifest: None,
                     runtime_path: None,
                     output: Some(output.clone()),
                     nacelle_path: Some(nacelle_stub),

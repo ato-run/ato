@@ -345,7 +345,22 @@ pub async fn ensure_lockfile_in_dir(
     reporter: Arc<dyn CapsuleReporter + 'static>,
     timings: bool,
 ) -> Result<PathBuf> {
-    let synthetic_manifest_path = manifest_dir.join("capsule.toml");
+    let bridge_dir = manifest_dir.join(".tmp").join("compat-manifest-bridge");
+    fs::create_dir_all(&bridge_dir).map_err(|e| {
+        CapsuleError::Config(format!(
+            "Failed to create compat manifest bridge directory {}: {}",
+            bridge_dir.display(),
+            e
+        ))
+    })?;
+    let synthetic_manifest_path = bridge_dir.join("capsule.toml");
+    fs::write(&synthetic_manifest_path, manifest_text).map_err(|e| {
+        CapsuleError::Config(format!(
+            "Failed to write compat manifest bridge {}: {}",
+            synthetic_manifest_path.display(),
+            e
+        ))
+    })?;
     ensure_lockfile(
         &synthetic_manifest_path,
         manifest_raw,

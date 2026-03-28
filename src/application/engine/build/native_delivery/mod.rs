@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use capsule_core::bootstrap::BootstrapBoundary;
+use capsule_core::router::{CompatManifestBridge, ExecutionDescriptor};
 use chrono::{SecondsFormat, Utc};
 use goblin::Object;
 use serde::{Deserialize, Serialize};
@@ -70,6 +71,10 @@ pub struct NativeBuildCommand {
 pub struct NativeBuildPlan {
     pub manifest_path: PathBuf,
     pub manifest_dir: PathBuf,
+    #[serde(skip_serializing)]
+    pub compat_manifest: Option<CompatManifestBridge>,
+    pub package_name: String,
+    pub package_version: String,
     pub delivery_config_path: Option<PathBuf>,
     pub staged_delivery_config_toml: String,
     pub source_app_path: PathBuf,
@@ -426,9 +431,89 @@ pub(crate) fn detect_build_strategy(manifest_dir: &Path) -> Result<Option<Native
         validate_native_bundle_directory(&source_app_path)?;
     }
 
+    let compat_manifest = CompatManifestBridge::from_manifest_value(
+        &toml::from_str(&manifest_raw)
+            .with_context(|| format!("Failed to parse {} as TOML", manifest_path.display()))?,
+    )?;
+
+    Ok(Some(NativeBuildPlan {
+        manifest_path: manifest_path.clone(),
+        manifest_dir: manifest_dir.to_path_buf(),
+        compat_manifest: Some(compat_manifest),
+        package_name: manifest.name.clone(),
+        package_version: manifest.version.clone(),
+        delivery_config_path: None,
+        staged_delivery_config_toml: serialize_delivery_config(&config)?,
+        source_app_path,
+        input_relative,
+        build_command,
+        framework: config.artifact.framework,
+        target: config.artifact.target,
+    }))
+}
+
+pub(crate) fn detect_build_strategy_from_descriptor(
+    descriptor: &ExecutionDescriptor,
+) -> Result<Option<NativeBuildPlan>> {
+    let manifest_path = descriptor.workspace_root.join("capsule.toml");
+    let delivery_config_path = descriptor.workspace_root.join(DELIVERY_CONFIG_FILE);
+    let Some(bridge) = descriptor.compat_manifest.as_ref() else {
+        return Ok(None);
+    };
+    let Ok(target) = bridge.manifest.resolve_default_target() else {
+        return Ok(None);
+    };
+
+    if delivery_config_path.exists() {
+        bail!(
+            "{} is no longer accepted in source projects. Move native delivery metadata into capsule.toml [artifact] and [finalize].",
+            delivery_config_path.display()
+        );
+    }
+
+    let canonical_config = detect_native_manifest_contract(target)?;
+    let inline_config = load_inline_delivery_config(&bridge.raw_toml, &manifest_path)?;
+    let has_explicit_delivery_config = inline_config.is_some();
+    let config = match inline_config {
+        Some(inline) => inline,
+        None => match canonical_config.clone() {
+            Some(config) => config,
+            None => return Ok(None),
+        },
+    };
+    if let Some(canonical) = &canonical_config {
+        ensure_delivery_config_matches_context(&config, canonical, &manifest_path)?;
+    }
+
+    let input_relative = PathBuf::from(config.artifact.input.trim());
+    validate_relative_input_path(&input_relative)?;
+    let source_app_path = descriptor.workspace_root.join(&input_relative);
+    let build_command = detect_native_build_command(
+        target,
+        &descriptor.workspace_root,
+        has_explicit_delivery_config || canonical_config.is_none(),
+    )?;
+    if build_command.is_none() {
+        validate_native_bundle_directory(&source_app_path)?;
+    }
+
     Ok(Some(NativeBuildPlan {
         manifest_path,
-        manifest_dir: manifest_dir.to_path_buf(),
+        manifest_dir: descriptor.workspace_root.clone(),
+        compat_manifest: Some(bridge.clone()),
+        package_name: descriptor
+            .runtime_model
+            .metadata
+            .name
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .context("authoritative lock metadata is missing package name")?,
+        package_version: descriptor
+            .runtime_model
+            .metadata
+            .version
+            .clone()
+            .unwrap_or_default(),
         delivery_config_path: None,
         staged_delivery_config_toml: serialize_delivery_config(&config)?,
         source_app_path,
@@ -469,19 +554,18 @@ where
 
     validate_native_bundle_directory(&plan.source_app_path)?;
     ensure_native_artifact_kind_supported(&plan.source_app_path, "build")?;
-    let manifest_raw = fs::read_to_string(&plan.manifest_path).with_context(|| {
-        format!(
-            "Failed to read capsule manifest for native build: {}",
-            plan.manifest_path.display()
-        )
-    })?;
-    let manifest =
-        capsule_core::types::CapsuleManifest::from_toml(&manifest_raw).map_err(|err| {
-            anyhow::anyhow!("Failed to parse {}: {}", plan.manifest_path.display(), err)
-        })?;
+    let manifest = plan
+        .compat_manifest
+        .as_ref()
+        .map(|bridge| bridge.manifest.clone())
+        .context("native delivery build requires compat manifest bridge")?;
 
     let artifact_path = output_path.map(Path::to_path_buf).unwrap_or_else(|| {
-        default_native_artifact_path(&plan.manifest_dir, &manifest.name, &manifest.version)
+        default_native_artifact_path(
+            &plan.manifest_dir,
+            &plan.package_name,
+            &plan.package_version,
+        )
     });
     if let Some(parent) = artifact_path.parent() {
         fs::create_dir_all(parent)

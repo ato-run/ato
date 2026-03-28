@@ -2097,11 +2097,11 @@ fn test_publish_json_source_only_rust_workspace_uses_diagnostic_envelope() {
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(value["schema_version"], "1");
     assert_eq!(value["status"], "error");
-    assert_eq!(value["error"]["code"], "E999");
+    assert_eq!(value["error"]["code"], "E102");
     assert!(value["error"]["message"]
         .as_str()
         .expect("message string")
-        .contains("unsupported driver 'rust'"));
+        .contains("LockDraft is not ready to finalize locally"));
 }
 
 #[test]

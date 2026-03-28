@@ -234,13 +234,22 @@ impl ProducerAuthoritativeInput {
             None,
         )?;
         let compat_manifest = Some(
-            CompatManifestBridge::from_lock(&sanitized_lock, &lock_decision.plan.runtime_model)
-                .with_context(|| {
+            if let Some(raw_manifest) = materialized.raw_manifest.as_ref() {
+                CompatManifestBridge::from_manifest_value(raw_manifest).with_context(|| {
                     format!(
-                        "Failed to build lock-derived producer manifest bridge {}",
+                        "Failed to build producer manifest bridge from compatibility manifest {}",
                         manifest_path.display()
                     )
-                })?,
+                })?
+            } else {
+                CompatManifestBridge::from_lock(&sanitized_lock, &lock_decision.plan.runtime_model)
+                    .with_context(|| {
+                        format!(
+                            "Failed to build lock-derived producer manifest bridge {}",
+                            manifest_path.display()
+                        )
+                    })?
+            },
         );
         let run_state_dir = materialized
             .lock_path
