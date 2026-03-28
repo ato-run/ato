@@ -226,8 +226,8 @@ entrypoint = "dist/MyApp.exe"
 fn build_environment_skeleton_captures_native_delivery_inputs() -> Result<()> {
     let tmp = tempdir()?;
     let plan = sample_native_build_plan(tmp.path(), 0o755)?;
-    fs::write(plan.manifest_dir.join("Cargo.lock"), "version = 3\n")?;
-    fs::write(plan.manifest_dir.join("package-lock.json"), "{}")?;
+    fs::write(plan.workspace_root.join("Cargo.lock"), "version = 3\n")?;
+    fs::write(plan.workspace_root.join("package-lock.json"), "{}")?;
 
     let skeleton = native_delivery_build_environment_skeleton(&plan);
     assert_json_object_has_keys(

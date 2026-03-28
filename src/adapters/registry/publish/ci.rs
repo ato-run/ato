@@ -421,13 +421,8 @@ pub(crate) fn build_capsule_artifact(
         .with_context(|| format!("Failed to create {}", artifact_dir.display()))?;
     let artifact_path = artifact_dir.join(format!("{}-{}.capsule", name, version));
 
-    let native_plan = if let Some(plan) =
-        crate::build::native_delivery::detect_build_strategy_from_descriptor(&decision.plan)?
-    {
-        Some(plan)
-    } else {
-        crate::build::native_delivery::detect_build_strategy(&manifest_dir)?
-    };
+    let native_plan =
+        crate::build::native_delivery::detect_build_strategy_with_legacy_fallback(&decision.plan)?;
 
     if let Some(plan) = native_plan {
         let result =
@@ -603,6 +598,47 @@ mod tests {
             semantic_publish_identity(&authoritative_input.descriptor).expect("identity");
 
         let _outcome = build_capsule_artifact(&name, &version, Some(&authoritative_input), None);
+        assert!(!tmp.path().join("capsule.toml").exists());
+    }
+
+    #[test]
+    fn authoritative_ci_build_ignores_transitional_manifest_paths() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"demo","version":"0.1.0","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("package.json");
+        std::fs::write(
+            tmp.path().join("package-lock.json"),
+            r#"{"name":"demo","version":"0.1.0","lockfileVersion":3,"packages":{}}"#,
+        )
+        .expect("package-lock.json");
+        std::fs::write(tmp.path().join("index.js"), "console.log('demo');\n").expect("index.js");
+
+        let mut authoritative_input = resolve_producer_authoritative_input(
+            tmp.path(),
+            Arc::new(CliReporter::new(false)),
+            false,
+        )
+        .expect("authoritative input");
+        authoritative_input.descriptor.manifest_path = tmp.path().join("missing-capsule.toml");
+        authoritative_input.descriptor.manifest_dir = tmp.path().join("missing-manifest-dir");
+
+        let (name, version) =
+            semantic_publish_identity(&authoritative_input.descriptor).expect("identity");
+        let outcome = build_capsule_artifact(&name, &version, Some(&authoritative_input), None);
+        if let Err(err) = &outcome {
+            let message = err.to_string();
+            assert!(
+                !message.contains("missing-capsule.toml"),
+                "build must not consult transitional manifest_path: {message}"
+            );
+            assert!(
+                !message.contains("missing-manifest-dir"),
+                "build must not consult transitional manifest_dir: {message}"
+            );
+        }
         assert!(!tmp.path().join("capsule.toml").exists());
     }
 }
