@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::router::{ExecutionDescriptor, RuntimeDecision, RuntimeKind};
+use capsule_core::router::{
+    CompatManifestBridge, ExecutionDescriptor, RuntimeDecision, RuntimeKind,
+};
+use capsule_core::types::CapsuleManifest;
 use capsule_core::types::ValidationMode;
 use capsule_core::CapsuleReporter;
 use serde::Serialize;
@@ -66,6 +69,59 @@ fn runtime_kind_from_plan(plan: &ExecutionDescriptor) -> Result<RuntimeKind> {
     }
 }
 
+fn build_decision_from_manifest_text(
+    workspace_root: &Path,
+    manifest_text: &str,
+    validation_mode: ValidationMode,
+) -> Result<(RuntimeDecision, CompatManifestBridge)> {
+    let parsed_manifest = CapsuleManifest::from_toml(manifest_text)
+        .map_err(|err| anyhow::anyhow!("Failed to parse manifest bridge: {err}"))?;
+    let normalized_manifest_text = parsed_manifest
+        .to_toml()
+        .map_err(|err| anyhow::anyhow!("Failed to normalize manifest bridge: {err}"))?;
+    let bridge = CompatManifestBridge {
+        raw_toml: normalized_manifest_text.clone(),
+        manifest: parsed_manifest,
+        sha256: {
+            let mut hasher = Sha256::new();
+            hasher.update(normalized_manifest_text.as_bytes());
+            format!("{:x}", hasher.finalize())
+        },
+    };
+    bridge
+        .manifest
+        .validate_for_mode(validation_mode)
+        .map_err(|errors| {
+            anyhow::anyhow!(
+                "Manifest validation failed: {}",
+                errors
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        })?;
+    let raw: toml::Value = toml::from_str(&normalized_manifest_text)
+        .context("Failed to parse raw manifest bridge TOML")?;
+    let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+        raw,
+        workspace_root.join("capsule.toml"),
+        workspace_root.to_path_buf(),
+        capsule_core::router::ExecutionProfile::Release,
+        None,
+        std::collections::HashMap::new(),
+    )?;
+    let kind = runtime_kind_from_plan(&plan)?;
+    Ok((
+        RuntimeDecision {
+            kind,
+            reason: format!("compat target {}", plan.selected_target_label()),
+            plan,
+        },
+        bridge,
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn execute_pack_command(
     dir: PathBuf,
@@ -125,23 +181,18 @@ pub fn execute_pack_command_with_injected_manifest(
         anyhow::bail!("Target is not a directory: {}", dir.display());
     }
 
-    let mut manifest = dir.join("capsule.toml");
+    let manifest = dir.join("capsule.toml");
     let authoritative_input = if injected_manifest.is_none() {
         let resolved = resolve_producer_authoritative_input(&dir, reporter.clone(), false)?;
         for advisory in &resolved.advisories {
             futures::executor::block_on(reporter.warn(advisory.clone()))?;
         }
-        manifest = resolved.manifest_path.clone();
         Some(resolved)
     } else {
         None
     };
 
-    // Build still relies on a manifest-shaped compatibility bridge for source-only
-    // and injected-manifest flows. Keep this temporary write isolated until packers
-    // can consume lock-derived producer input directly.
-    let mut temporary_manifest: Option<TemporaryManifestGuard> = None;
-    if authoritative_input.is_none() && !manifest.exists() {
+    let fallback_manifest_text = if authoritative_input.is_none() && !manifest.exists() {
         let stdin_is_tty = std::io::stdin().is_terminal();
         if init_if_missing {
             if !stdin_is_tty {
@@ -151,6 +202,7 @@ pub fn execute_pack_command_with_injected_manifest(
                 anyhow::bail!("--init cannot be used with --json output");
             }
             init::write_legacy_detected_manifest(Some(dir.clone()), reporter.clone())?;
+            None
         } else if let Some(manifest_text) = injected_manifest {
             if !suppress_injected_manifest_warning
                 && crate::progressive_ui::can_use_progressive_ui(cli_json)
@@ -163,33 +215,21 @@ pub fn execute_pack_command_with_injected_manifest(
                     "No `capsule.toml` found. Using draft returned by ato store for this GitHub repository.".to_string(),
                 ))?;
             }
-            std::fs::write(&manifest, manifest_text).with_context(|| {
-                format!("Failed to write temporary manifest: {}", manifest.display())
-            })?;
-            temporary_manifest = Some(TemporaryManifestGuard::new(
-                manifest.clone(),
-                !keep_failed_artifacts,
-            ));
+            Some(manifest_text.to_string())
         } else {
             futures::executor::block_on(reporter.warn(
                 "No `capsule.toml` found. Using defaults. Run `ato init` to materialize `ato.lock.json`, or `ato build --init` to create an inferred compatibility `capsule.toml`.".to_string(),
             ))?;
-            let inferred = infer_zero_config_manifest(&dir)?;
-            std::fs::write(&manifest, inferred).with_context(|| {
-                format!("Failed to write temporary manifest: {}", manifest.display())
-            })?;
-            temporary_manifest = Some(TemporaryManifestGuard::new(
-                manifest.clone(),
-                !keep_failed_artifacts,
-            ));
+            Some(infer_zero_config_manifest(&dir)?)
         }
-    }
+    } else {
+        None
+    };
 
-    if authoritative_input.is_none() && !manifest.exists() {
+    if authoritative_input.is_none() && !manifest.exists() && fallback_manifest_text.is_none() {
         anyhow::bail!("capsule.toml not found after initialization");
     }
 
-    let _temporary_manifest_guard = temporary_manifest;
     let validation_mode = if injected_manifest.is_some() {
         ValidationMode::Preview
     } else {
@@ -202,6 +242,13 @@ pub fn execute_pack_command_with_injected_manifest(
     {
         authoritative_input.validate_compat_bridge()?;
         let kind = runtime_kind_from_plan(&authoritative_input.descriptor)?;
+        let metadata = &authoritative_input.descriptor.runtime_model.metadata;
+        let capsule_name = metadata
+            .name
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .context("authoritative lock metadata is missing package name")?;
+        let capsule_version = metadata.version.clone().unwrap_or_default();
         let raw_manifest = authoritative_input
             .compat_manifest
             .as_ref()
@@ -217,8 +264,19 @@ pub fn execute_pack_command_with_injected_manifest(
                 plan: authoritative_input.descriptor.clone(),
             },
             raw_manifest,
-            authoritative_input.manifest.name.clone(),
-            authoritative_input.manifest.version.clone(),
+            capsule_name,
+            capsule_version,
+        )
+    } else if let Some(manifest_text) = fallback_manifest_text.as_deref() {
+        let (decision, bridge) =
+            build_decision_from_manifest_text(&dir, manifest_text, validation_mode)?;
+        (
+            decision,
+            bridge
+                .raw_value()
+                .context("Failed to parse fallback manifest bridge")?,
+            bridge.manifest.name.clone(),
+            bridge.manifest.version.clone(),
         )
     } else {
         let decision = capsule_core::router::route_manifest_with_validation_mode(
@@ -285,12 +343,17 @@ pub fn execute_pack_command_with_injected_manifest(
         reason = %decision.reason,
         "Build runtime routed"
     );
-    let manifest_dir = manifest
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
+    let manifest_dir = decision.plan.workspace_root.clone();
 
-    if let Some(plan) = native_delivery::detect_build_strategy(&manifest_dir)? {
+    let native_plan = if let Some(plan) =
+        native_delivery::detect_build_strategy_from_descriptor(&decision.plan)?
+    {
+        Some(plan)
+    } else {
+        native_delivery::detect_build_strategy(&manifest_dir)?
+    };
+
+    if let Some(plan) = native_plan {
         let build_started = Instant::now();
         let result = native_delivery::build_native_artifact(&plan, None)?;
         record_timing(&mut timing_entries, "build.pack", build_started.elapsed());
@@ -641,28 +704,6 @@ fn finalize_built_artifact(
     Ok(())
 }
 
-struct TemporaryManifestGuard {
-    path: PathBuf,
-    cleanup_on_drop: bool,
-}
-
-impl TemporaryManifestGuard {
-    fn new(path: PathBuf, cleanup_on_drop: bool) -> Self {
-        Self {
-            path,
-            cleanup_on_drop,
-        }
-    }
-}
-
-impl Drop for TemporaryManifestGuard {
-    fn drop(&mut self) {
-        if self.cleanup_on_drop {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
-}
-
 fn infer_zero_config_manifest(dir: &Path) -> Result<String> {
     let raw_name = dir
         .file_name()
@@ -833,7 +874,10 @@ fn plan_v03_build_provision_command(
     let runtime = runtime.trim().to_ascii_lowercase();
     let driver = driver.trim().to_ascii_lowercase();
     let manifest_dir = plan.manifest_dir.clone();
-    let execution_working_directory = plan.execution_working_directory();
+    let execution_working_directory = plan
+        .compat_target_working_dir(plan.selected_target_label())
+        .map(|value| plan.workspace_root.join(value))
+        .unwrap_or_else(|| plan.execution_working_directory());
 
     if runtime == "web" && driver == "static" {
         debug!(
@@ -1331,8 +1375,8 @@ fn sign_if_requested(
 #[cfg(test)]
 mod tests {
     use super::{
-        execute_pack_command_with_injected_manifest, plan_v03_build_provision_command,
-        run_v03_build_lifecycle_steps,
+        execute_pack_command, execute_pack_command_with_injected_manifest,
+        plan_v03_build_provision_command, run_v03_build_lifecycle_steps,
     };
     use capsule_core::router::{ExecutionProfile, ManifestData};
     use std::ffi::OsString;
@@ -1474,16 +1518,21 @@ mod tests {
     #[test]
     fn injected_v03_web_static_manifest_builds_from_root_index_html() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(tmp.path().join("index.html"), "<h1>hello</h1>").expect("write index.html");
+        let site_dir = tmp.path().join("site");
+        std::fs::create_dir_all(&site_dir).expect("site dir");
+        std::fs::write(site_dir.join("index.html"), "<h1>hello</h1>").expect("write index.html");
         let reporter = std::sync::Arc::new(crate::reporters::CliReporter::new(true));
         let manifest = r#"
-schema_version = "0.3"
+schema_version = "0.2"
 name = "hello-capsule"
 version = "0.1.0"
 type = "app"
-runtime = "web/static"
-run = "index.html"
-port = 18080
+default_target = "web"
+
+[targets.web]
+runtime = "web"
+driver = "static"
+entrypoint = "site"
 "#;
 
         let result = execute_pack_command_with_injected_manifest(
@@ -1507,6 +1556,171 @@ port = 18080
         assert!(result.ok);
         assert_eq!(result.build_strategy, "web");
         assert!(result.artifact.as_ref().is_some_and(|path| path.exists()));
+        assert!(!tmp.path().join("capsule.toml").exists());
+    }
+
+    #[test]
+    fn source_only_authoritative_build_does_not_materialize_capsule_toml() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"demo","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("package.json");
+        std::fs::write(
+            tmp.path().join("package-lock.json"),
+            r#"{"name":"demo","lockfileVersion":3,"packages":{}}"#,
+        )
+        .expect("package-lock.json");
+        std::fs::write(tmp.path().join("index.js"), "console.log('demo');\n").expect("index.js");
+
+        let reporter = std::sync::Arc::new(crate::reporters::CliReporter::new(true));
+        let _error = execute_pack_command(
+            tmp.path().to_path_buf(),
+            false,
+            None,
+            false,
+            false,
+            true,
+            false,
+            "strict".to_string(),
+            reporter,
+            false,
+            true,
+            None,
+        )
+        .expect_err("source-only build should still avoid manifest materialization on failure");
+        assert!(!tmp.path().join("capsule.toml").exists());
+    }
+
+    #[test]
+    fn injected_source_standalone_build_does_not_materialize_capsule_toml() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"bundle-demo","version":"0.1.0"}"#,
+        )
+        .expect("package.json");
+        std::fs::write(
+            tmp.path().join("package-lock.json"),
+            r#"{"name":"bundle-demo","version":"0.1.0","lockfileVersion":3,"packages":{}}"#,
+        )
+        .expect("package-lock.json");
+        std::fs::write(tmp.path().join("main.js"), "console.log('bundle');\n").expect("main.js");
+
+        let nacelle = tmp.path().join("nacelle");
+        std::fs::write(&nacelle, "#!/bin/sh\nexit 0\n").expect("nacelle");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&nacelle).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&nacelle, perms).expect("chmod");
+        }
+
+        let reporter = std::sync::Arc::new(crate::reporters::CliReporter::new(true));
+        let manifest = r#"
+schema_version = "0.2"
+name = "bundle-demo"
+version = "0.1.0"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "node"
+language = "node"
+runtime_version = "20.11.0"
+entrypoint = "main.js"
+"#;
+
+        let error = execute_pack_command_with_injected_manifest(
+            tmp.path().to_path_buf(),
+            false,
+            None,
+            true,
+            false,
+            true,
+            false,
+            "strict".to_string(),
+            reporter,
+            false,
+            true,
+            Some(nacelle),
+            Some(manifest),
+            true,
+        )
+        .expect_err("standalone source build may fail but must not materialize manifest");
+
+        assert!(!error.to_string().is_empty());
+        assert!(!tmp.path().join("capsule.toml").exists());
+    }
+
+    #[test]
+    fn injected_native_delivery_build_does_not_materialize_capsule_toml() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let app_dir = tmp.path().join("MyApp.app/Contents/MacOS");
+        std::fs::create_dir_all(&app_dir).expect("app dir");
+        std::fs::write(app_dir.join("MyApp"), "#!/bin/sh\necho native\n").expect("app binary");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let binary = app_dir.join("MyApp");
+            let mut perms = std::fs::metadata(&binary).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(binary, perms).expect("chmod");
+        }
+
+        let reporter = std::sync::Arc::new(crate::reporters::CliReporter::new(true));
+        let manifest = r#"
+schema_version = "0.2"
+name = "native-demo"
+version = "0.1.0"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "native"
+entrypoint = "MyApp.app"
+
+[artifact]
+framework = "tauri"
+stage = "unsigned"
+target = "darwin/arm64"
+input = "MyApp.app"
+
+[finalize]
+tool = "codesign"
+args = ["--force", "--sign", "-", "MyApp.app"]
+"#;
+
+        let result = execute_pack_command_with_injected_manifest(
+            tmp.path().to_path_buf(),
+            false,
+            None,
+            false,
+            false,
+            true,
+            false,
+            "strict".to_string(),
+            reporter,
+            false,
+            true,
+            None,
+            Some(manifest),
+            true,
+        )
+        .expect("build native delivery artifact without materializing manifest");
+
+        assert!(result.ok);
+        assert_eq!(result.build_strategy, "native-delivery");
+        assert!(result.artifact.as_ref().is_some_and(|path| path.exists()));
+        assert!(!tmp.path().join("capsule.toml").exists());
     }
 
     fn manifest_with_schema_and_target(
@@ -1538,6 +1752,11 @@ port = 18080
             toml::Value::String(schema_version.to_string()),
         );
         manifest.insert("name".to_string(), toml::Value::String("demo".to_string()));
+        manifest.insert(
+            "version".to_string(),
+            toml::Value::String("0.1.0".to_string()),
+        );
+        manifest.insert("type".to_string(), toml::Value::String("app".to_string()));
         manifest.insert(
             "default_target".to_string(),
             toml::Value::String("default".to_string()),
@@ -1582,6 +1801,14 @@ port = 18080
                 "driver": driver,
                 "entrypoint": entrypoint,
             }]),
+        );
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            serde_json::json!({
+                "status": "complete",
+                "kind": "metadata_only",
+                "digestable": false
+            }),
         );
         let lock_path = manifest_dir.join("ato.lock.json");
         let workspace_root = manifest_dir.clone();

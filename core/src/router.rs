@@ -1017,6 +1017,10 @@ impl ExecutionDescriptor {
         Some(self.manifest_path.as_path())
     }
 
+    pub fn compat_target_working_dir(&self, target_label: &str) -> Option<String> {
+        self.compat_str(&["targets", target_label, "working_dir"])
+    }
+
     fn runtime_for_target(&self, target_label: &str) -> Option<&ResolvedTargetRuntime> {
         self.runtime_model
             .services

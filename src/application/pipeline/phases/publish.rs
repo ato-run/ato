@@ -50,7 +50,6 @@ struct PreparedPrivatePublishArtifact {
 enum ResolvedPrivatePublishInput {
     Build {
         authoritative_input: ProducerAuthoritativeInput,
-        manifest_path: PathBuf,
         lock_id: Option<String>,
         closure_digest: Option<String>,
         name: String,
@@ -176,7 +175,6 @@ fn prepare_private_publish_artifact(
     match resolve_private_publish_input(request)? {
         ResolvedPrivatePublishInput::Build {
             authoritative_input,
-            manifest_path,
             name,
             version,
             scoped_id,
@@ -184,10 +182,10 @@ fn prepare_private_publish_artifact(
             closure_digest,
         } => {
             let artifact_path = crate::publish_ci::build_capsule_artifact(
-                &manifest_path,
                 &name,
                 &version,
                 Some(&authoritative_input),
+                None,
             )
             .with_context(|| "Failed to build artifact for private registry publish")?;
 
@@ -239,23 +237,28 @@ fn resolve_private_publish_input(
         Arc::new(crate::reporters::CliReporter::new(false)),
         false,
     )?;
-    let manifest_path = resolved.manifest_path.clone();
-    let manifest_raw = resolved.manifest_raw.clone();
-    let manifest = resolved.manifest.clone();
     let lock_id = resolved.lock_id.clone();
     let closure_digest = resolved.closure_digest.clone();
+    let compat_manifest = resolved.compat_manifest.clone();
+    let metadata = &resolved.descriptor.runtime_model.metadata;
+    let name = metadata
+        .name
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .context("authoritative lock metadata is missing package name")?;
+    let version = metadata.version.clone().unwrap_or_default();
 
-    let slug = manifest_slug(&manifest.name)?;
-    let publisher = resolve_private_publisher(request.publisher_hint.as_deref(), &manifest_raw);
+    let slug = manifest_slug(&name)?;
+    let publisher =
+        resolve_private_publisher(request.publisher_hint.as_deref(), compat_manifest.as_ref());
     let scoped_id = format!("{}/{}", publisher, slug);
-    let version = resolve_manifest_publish_version(&manifest.version);
+    let version = resolve_manifest_publish_version(&version);
 
     Ok(ResolvedPrivatePublishInput::Build {
         authoritative_input: resolved,
-        manifest_path,
         lock_id,
         closure_digest,
-        name: manifest.name,
+        name,
         version,
         scoped_id,
     })
@@ -318,12 +321,15 @@ fn resolve_scoped_id_for_artifact(
     Ok(format!("{}/{}", publisher, slug))
 }
 
-fn resolve_private_publisher(publisher_hint: Option<&str>, manifest_raw: &str) -> String {
+fn resolve_private_publisher(
+    publisher_hint: Option<&str>,
+    compat_manifest: Option<&capsule_core::router::CompatManifestBridge>,
+) -> String {
     if let Some(publisher_hint) = publisher_hint {
         return publisher_hint.to_string();
     }
 
-    if let Some(repo_owner) = manifest_repository_owner(manifest_raw) {
+    if let Some(repo_owner) = compat_manifest.and_then(manifest_repository_owner) {
         return repo_owner;
     }
 
@@ -341,8 +347,10 @@ fn resolve_private_publisher(publisher_hint: Option<&str>, manifest_raw: &str) -
     "local".to_string()
 }
 
-fn manifest_repository_owner(manifest_raw: &str) -> Option<String> {
-    let raw = crate::publish_preflight::find_manifest_repository(manifest_raw)?;
+fn manifest_repository_owner(
+    compat_manifest: &capsule_core::router::CompatManifestBridge,
+) -> Option<String> {
+    let raw = compat_manifest.repository()?;
     let normalized = crate::publish_preflight::normalize_repository_value(&raw).ok()?;
     let (owner, _) = normalized.split_once('/')?;
     let owner = normalize_segment(owner);
@@ -652,8 +660,8 @@ mod tests {
     use tar::Builder;
 
     use super::{
-        normalize_segment, resolve_private_publisher, summarize_private_publish,
-        PrivatePublishRequest, PublishPhase, PublishPhaseRequest,
+        normalize_segment, prepare_private_publish_artifact, resolve_private_publisher,
+        summarize_private_publish, PrivatePublishRequest, PublishPhase, PublishPhaseRequest,
     };
     use crate::application::ports::publish::{
         DestinationPort, DestinationSpec, PublishableArtifact, PublishedLocation,
@@ -902,6 +910,37 @@ entrypoint = "main.ts"
     }
 
     #[test]
+    #[serial_test::serial]
+    fn private_publish_build_does_not_materialize_project_manifest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"demo","version":"0.1.0","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("package.json");
+        std::fs::write(
+            tmp.path().join("package-lock.json"),
+            r#"{"name":"demo","version":"0.1.0","lockfileVersion":3,"packages":{}}"#,
+        )
+        .expect("package-lock.json");
+        std::fs::write(tmp.path().join("index.js"), "console.log('demo');\n").expect("index.js");
+
+        let _cwd_guard = CwdGuard::set_to(tmp.path());
+        let _result = prepare_private_publish_artifact(&PrivatePublishRequest {
+            registry_url: "https://example.invalid".to_string(),
+            publisher_hint: Some("koh0920".to_string()),
+            artifact_path: None,
+            force_large_payload: false,
+            scoped_id: None,
+            allow_existing: false,
+            lock_id: None,
+            closure_digest: None,
+        });
+
+        assert!(!tmp.path().join("capsule.toml").exists());
+    }
+
+    #[test]
     fn resolve_private_publisher_uses_publisher_hint_before_repository_owner() {
         let manifest_raw = r#"
 schema_version = "0.2"
@@ -918,8 +957,12 @@ runtime = "source"
 driver = "deno"
 "#;
 
+        let bridge = capsule_core::router::CompatManifestBridge::from_manifest_value(
+            &toml::from_str(manifest_raw).expect("manifest value"),
+        )
+        .expect("bridge");
         assert_eq!(
-            resolve_private_publisher(Some("koh0920"), manifest_raw),
+            resolve_private_publisher(Some("koh0920"), Some(&bridge)),
             "koh0920"
         );
     }
@@ -941,8 +984,12 @@ runtime = "source"
 driver = "deno"
 "#;
 
+        let bridge = capsule_core::router::CompatManifestBridge::from_manifest_value(
+            &toml::from_str(manifest_raw).expect("manifest value"),
+        )
+        .expect("bridge");
         assert_eq!(
-            resolve_private_publisher(None, manifest_raw),
+            resolve_private_publisher(None, Some(&bridge)),
             "another-owner"
         );
     }
