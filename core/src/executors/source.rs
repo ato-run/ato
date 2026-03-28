@@ -36,7 +36,7 @@ pub fn execute(plan: &ManifestData, nacelle_override: Option<PathBuf>) -> Result
             PackBundleArgs {
                 manifest_path: Some(plan.manifest_path.clone()),
                 workspace_root: plan.manifest_dir.clone(),
-                compat_manifest: None,
+                compat_input: None,
                 runtime_path: None,
                 output: Some(output),
                 nacelle_path: Some(nacelle),

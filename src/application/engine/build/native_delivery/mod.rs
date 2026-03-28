@@ -458,7 +458,7 @@ pub(crate) fn detect_build_strategy_from_descriptor(
     let Some(bridge) = descriptor.compat_manifest.as_ref() else {
         return Ok(None);
     };
-    let Ok(target) = bridge.manifest.resolve_default_target() else {
+    let Ok(target) = bridge.manifest_model().resolve_default_target() else {
         return Ok(None);
     };
 
@@ -474,7 +474,7 @@ pub(crate) fn detect_build_strategy_from_descriptor(
         "compatibility manifest bridge for {}",
         descriptor.workspace_root.display()
     );
-    let inline_config = load_inline_delivery_config(&bridge.raw_toml, &source_label)?;
+    let inline_config = load_inline_delivery_config(bridge.manifest_text(), &source_label)?;
     let has_explicit_delivery_config = inline_config.is_some();
     let config = match inline_config {
         Some(inline) => inline,
@@ -568,7 +568,7 @@ where
     let manifest = plan
         .compat_manifest
         .as_ref()
-        .map(|bridge| bridge.manifest.clone())
+        .map(|bridge| bridge.manifest_model().clone())
         .context("native delivery build requires compat manifest bridge")?;
 
     let artifact_path = output_path.map(Path::to_path_buf).unwrap_or_else(|| {
