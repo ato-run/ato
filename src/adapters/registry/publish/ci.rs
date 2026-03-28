@@ -61,31 +61,6 @@ struct DidSignaturePayload {
     signed_at: i64,
 }
 
-#[derive(Debug)]
-struct TemporaryManifestGuard {
-    path: PathBuf,
-    original_contents: Option<Vec<u8>>,
-}
-
-impl TemporaryManifestGuard {
-    fn new(path: PathBuf, original_contents: Option<Vec<u8>>) -> Self {
-        Self {
-            path,
-            original_contents,
-        }
-    }
-}
-
-impl Drop for TemporaryManifestGuard {
-    fn drop(&mut self) {
-        if let Some(original_contents) = self.original_contents.as_ref() {
-            let _ = fs::write(&self.path, original_contents);
-        } else {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
 #[derive(Debug, Serialize)]
 struct CiMetadataPayload {
     capsule_slug: String,
@@ -399,6 +374,10 @@ pub(crate) fn build_capsule_artifact(
     version: &str,
     authoritative_input: Option<&crate::application::producer_input::ProducerAuthoritativeInput>,
 ) -> Result<PathBuf> {
+    if let Some(authoritative_input) = authoritative_input {
+        authoritative_input.validate_bridge_manifest()?;
+    }
+
     let manifest_dir = manifest_path.parent().ok_or_else(|| {
         anyhow::anyhow!("Manifest path has no parent: {}", manifest_path.display())
     })?;
@@ -413,53 +392,14 @@ pub(crate) fn build_capsule_artifact(
         return Ok(result.artifact_path);
     }
 
-    let mut temporary_manifest = None;
-    let decision = if let Some(authoritative_input) = authoritative_input {
-        let mut decision = capsule_core::router::route_lock(
-            &authoritative_input.lock_path,
-            &authoritative_input.lock,
-            &authoritative_input.workspace_root,
-            capsule_core::router::ExecutionProfile::Release,
-            None,
-        )?;
-        let manifest_raw = toml::to_string(&decision.plan.manifest)
-            .with_context(|| "Failed to serialize lock-derived manifest for publish")?;
-        let original_contents = if authoritative_input.manifest_path.exists() {
-            Some(
-                fs::read(&authoritative_input.manifest_path).with_context(|| {
-                    format!(
-                        "Failed to read existing manifest before publish override at {}",
-                        authoritative_input.manifest_path.display()
-                    )
-                })?,
-            )
-        } else {
-            None
-        };
-        fs::write(&authoritative_input.manifest_path, manifest_raw).with_context(|| {
-            format!(
-                "Failed to write temporary publish manifest at {}",
-                authoritative_input.manifest_path.display()
-            )
-        })?;
-        temporary_manifest = Some(TemporaryManifestGuard::new(
-            authoritative_input.manifest_path.clone(),
-            original_contents,
-        ));
-        decision.plan.manifest_dir = authoritative_input.workspace_root.clone();
-        decision.plan.manifest_path = authoritative_input.manifest_path.clone();
-        decision
-    } else {
-        capsule_core::router::route_manifest(
-            manifest_path,
-            capsule_core::router::ExecutionProfile::Release,
-            None,
-        )?
-    };
-    let _temporary_manifest_guard = temporary_manifest;
+    let decision = capsule_core::router::route_manifest(
+        manifest_path,
+        capsule_core::router::ExecutionProfile::Release,
+        None,
+    )?;
 
-    let reporter: std::sync::Arc<dyn capsule_core::reporter::CapsuleReporter + 'static> =
-        std::sync::Arc::new(capsule_core::reporter::NoOpReporter);
+    let reporter = std::sync::Arc::new(capsule_core::reporter::NoOpReporter)
+        as std::sync::Arc<dyn capsule_core::reporter::CapsuleReporter + 'static>;
 
     match decision.kind {
         capsule_core::router::RuntimeKind::Source => {

@@ -203,6 +203,7 @@ pub(crate) struct SourceInferenceDiagnostic {
 #[derive(Debug, Clone)]
 pub(crate) struct RunMaterialization {
     pub(crate) project_root: PathBuf,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) raw_manifest: Option<toml::Value>,
     pub(crate) lock: AtoLock,
     pub(crate) lock_path: PathBuf,
