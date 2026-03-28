@@ -6,19 +6,18 @@ use std::time::Instant;
 use crate::engine;
 use crate::error::{CapsuleError, Result};
 use crate::lockfile;
-use crate::manifest;
 use crate::packers::bundle::{build_bundle, PackBundleArgs};
 use crate::packers::capsule as capsule_packer;
 use crate::r3_config;
 use crate::resource::cas::create_cas_client_from_env;
-use crate::router::ManifestData;
+use crate::router::{CompatManifestBridge, ManifestData};
 use crate::validation;
 use tracing::debug;
 
 #[derive(Debug, Clone)]
 pub struct SourcePackOptions {
-    pub manifest_path: PathBuf,
-    pub manifest_dir: PathBuf,
+    pub compat_manifest: Option<CompatManifestBridge>,
+    pub workspace_root: PathBuf,
     pub config_json: Arc<r3_config::ConfigJson>,
     pub config_path: PathBuf,
     pub output: Option<PathBuf>,
@@ -55,6 +54,31 @@ pub fn prepare_source_config(
     })
 }
 
+pub fn prepare_source_config_from_descriptor(
+    plan: &ManifestData,
+    enforcement: String,
+    standalone: bool,
+) -> Result<PreparedSourceConfig> {
+    let bridge = plan.compat_manifest().ok_or_else(|| {
+        CapsuleError::Pack("source pack requires compat manifest bridge".to_string())
+    })?;
+    let raw = bridge
+        .raw_value()
+        .map_err(|err| CapsuleError::Pack(err.to_string()))?;
+    let config_json = Arc::new(r3_config::generate_config_from_parts(
+        &plan.workspace_root,
+        &raw,
+        &bridge.raw_toml,
+        Some(enforcement),
+        standalone,
+    )?);
+    let config_path = r3_config::write_config_in_dir(&plan.workspace_root, config_json.as_ref())?;
+    Ok(PreparedSourceConfig {
+        config_json,
+        config_path,
+    })
+}
+
 pub fn pack(
     plan: &ManifestData,
     opts: SourcePackOptions,
@@ -62,9 +86,14 @@ pub fn pack(
 ) -> Result<PathBuf> {
     let strict_manifest = opts.strict_manifest || strict_manifest_from_env()?;
 
-    let loaded = manifest::load_manifest(&opts.manifest_path)?;
-    let source_digest = loaded
-        .model
+    let bridge = opts.compat_manifest.as_ref().ok_or_else(|| {
+        CapsuleError::Pack("source pack requires compat manifest bridge".to_string())
+    })?;
+    let loaded_raw = bridge
+        .raw_value()
+        .map_err(|err| CapsuleError::Pack(err.to_string()))?;
+    let source_digest = bridge
+        .manifest
         .targets
         .as_ref()
         .and_then(|targets| targets.source_digest.as_deref());
@@ -94,7 +123,7 @@ pub fn pack(
 
     if !opts.skip_validation && !opts.skip_l1 {
         debug!("Phase 1: L1 source policy scan");
-        let source_dir = opts.manifest_dir.join("source");
+        let source_dir = opts.workspace_root.join("source");
         if source_dir.exists() {
             let scan_extensions = &["py", "sh", "js", "ts", "go", "rs"];
             match validation::source_policy::scan_source_directory(&source_dir, scan_extensions) {
@@ -125,7 +154,7 @@ pub fn pack(
 
     if !opts.skip_validation {
         debug!("Phase 1b: entrypoint validation");
-        validate_entrypoint(&opts.manifest_path, &opts.manifest_dir)?;
+        validate_entrypoint_bridge(plan, bridge, &opts.workspace_root)?;
         debug!("Entrypoint validation passed");
     }
 
@@ -140,10 +169,10 @@ pub fn pack(
     debug!("config.json ready: {}", opts.config_path.display());
 
     let lockfile_started = Instant::now();
-    let lockfile_path = block_on_runtime(lockfile::ensure_lockfile(
-        &opts.manifest_path,
-        &loaded.raw,
-        &loaded.raw_text,
+    let lockfile_path = block_on_runtime(lockfile::ensure_lockfile_in_dir(
+        &opts.workspace_root,
+        &loaded_raw,
+        &bridge.raw_toml,
         config_reporter,
         opts.timings,
     ))?;
@@ -160,13 +189,13 @@ pub fn pack(
         debug!("Phase 3: building self-extracting bundle");
         let nacelle = engine::discover_nacelle(engine::EngineRequest {
             explicit_path: opts.nacelle_override,
-            manifest_path: Some(opts.manifest_path.clone()),
+            manifest_path: Some(opts.workspace_root.join("capsule.toml")),
         })?;
 
         let bundle_started = Instant::now();
         let bundle_path = block_on_runtime(build_bundle(
             PackBundleArgs {
-                manifest_path: opts.manifest_path.clone(),
+                manifest_path: opts.workspace_root.join("capsule.toml"),
                 runtime_path: opts.runtime.clone(),
                 output: opts.output.clone(),
                 nacelle_path: Some(nacelle),
@@ -189,8 +218,8 @@ pub fn pack(
         let artifact_path = block_on_runtime(capsule_packer::pack(
             plan,
             capsule_packer::CapsulePackOptions {
-                manifest_path: opts.manifest_path.clone(),
-                manifest_dir: opts.manifest_dir.clone(),
+                compat_manifest: opts.compat_manifest.clone(),
+                workspace_root: opts.workspace_root.clone(),
                 output: opts.output.clone(),
                 config_json: opts.config_json,
                 config_path: opts.config_path,
@@ -249,17 +278,16 @@ fn parse_bool_env(key: &str, raw: &str) -> Result<bool> {
     }
 }
 
-fn validate_entrypoint(manifest_path: &Path, manifest_dir: &Path) -> Result<()> {
-    let manifest = manifest::load_manifest(manifest_path)
-        .map_err(|err| CapsuleError::Pack(err.to_string()))?
-        .raw;
+fn validate_entrypoint_bridge(
+    plan: &ManifestData,
+    bridge: &CompatManifestBridge,
+    manifest_dir: &Path,
+) -> Result<()> {
+    let manifest = bridge
+        .raw_value()
+        .map_err(|err| CapsuleError::Pack(err.to_string()))?;
 
-    let default_target = manifest
-        .get("default_target")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| CapsuleError::Pack("default_target is required".to_string()))?;
+    let default_target = plan.selected_target_label();
 
     let target = manifest
         .get("targets")
@@ -340,6 +368,24 @@ fn validate_entrypoint(manifest_path: &Path, manifest_dir: &Path) -> Result<()> 
     }
 
     Ok(())
+}
+
+#[allow(dead_code)]
+fn validate_entrypoint(manifest_path: &Path, manifest_dir: &Path) -> Result<()> {
+    let loaded = crate::manifest::load_manifest(manifest_path)
+        .map_err(|err| CapsuleError::Pack(err.to_string()))?;
+    let bridge = CompatManifestBridge {
+        raw_toml: loaded.raw_text,
+        manifest: loaded.model,
+        sha256: String::new(),
+    };
+    let decision = crate::router::route_manifest(
+        manifest_path,
+        crate::router::ExecutionProfile::Release,
+        None,
+    )
+    .map_err(|err| CapsuleError::Pack(err.to_string()))?;
+    validate_entrypoint_bridge(&decision.plan, &bridge, manifest_dir)
 }
 
 #[cfg(test)]
