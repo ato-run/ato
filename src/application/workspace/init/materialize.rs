@@ -424,6 +424,8 @@ mod tests {
                 field: "contract.process".to_string(),
                 kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
                 source_path: Some(PathBuf::from(".")),
+                importer_id: None,
+                evidence_kind: None,
                 source_field: Some("package.json".to_string()),
                 note: Some("detected start script".to_string()),
             }],

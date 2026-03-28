@@ -9,6 +9,7 @@ pub mod error;
 pub mod execution_plan;
 pub mod executors;
 pub mod hardware;
+pub mod importer;
 pub mod input_resolver;
 pub mod isolation;
 pub mod launch_spec;

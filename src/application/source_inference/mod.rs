@@ -25,6 +25,9 @@ use capsule_core::ato_lock::{
     self, closure_info, normalize_lock_closure, AtoLock, UnresolvedReason, UnresolvedValue,
 };
 use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::importer::{
+    probe_ecosystem_lockfile_evidence, probe_native_framework_evidence, ImportedEvidence,
+};
 use capsule_core::input_resolver::{
     ResolvedCanonicalLock, ResolvedCompatibilityProject, ResolvedSingleScript, ResolvedSourceOnly,
     SingleScriptLanguage, ATO_LOCK_FILE_NAME,
@@ -35,19 +38,6 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 const RUN_SOURCE_INFERENCE_DIR: &str = ".tmp/source-inference";
-const OBSERVED_CLOSURE_LOCKFILES: &[&str] = &[
-    "package-lock.json",
-    "deno.lock",
-    "pnpm-lock.yaml",
-    "yarn.lock",
-    "bun.lockb",
-    "Cargo.lock",
-    "poetry.lock",
-    "requirements.txt",
-    "go.sum",
-    "Gemfile.lock",
-];
-
 #[derive(Debug, Clone)]
 pub(crate) enum SourceInferenceInput {
     SourceEvidence(SourceEvidenceInput),
@@ -172,6 +162,7 @@ pub(crate) enum SourceInferenceProvenanceKind {
     CompatibilityImport,
     CanonicalInput,
     DeterministicHeuristic,
+    ImporterObservation,
     MetadataObservation,
     SelectionGate,
     ApprovalGate,
@@ -183,6 +174,10 @@ pub(crate) struct SourceInferenceProvenance {
     pub(crate) kind: SourceInferenceProvenanceKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) source_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) importer_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) evidence_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) source_field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -903,6 +898,8 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         field: "contract.metadata".to_string(),
         kind: SourceInferenceProvenanceKind::ExplicitArtifact,
         source_path: Some(input.project_root.clone()),
+        importer_id: None,
+        evidence_kind: None,
         source_field: Some("project_root".to_string()),
         note: Some("source-only workspace analyzed for shared inference".to_string()),
     }];
@@ -956,6 +953,8 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         field: "resolution.runtime".to_string(),
         kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
         source_path: Some(input.project_root.clone()),
+        importer_id: None,
+        evidence_kind: None,
         source_field: Some("project_type".to_string()),
         note: Some(format!(
             "runtime resolved from deterministic project-type inference{}",
@@ -966,6 +965,13 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
                 .unwrap_or_default()
         )),
     });
+    for evidence in observed_closure_evidence(&input.project_root) {
+        provenance.push(importer_observation_provenance(
+            "resolution.closure",
+            &evidence,
+            "importer evidence observed while building metadata-only closure state",
+        ));
+    }
 
     if process_candidates.is_empty() {
         lock.contract
@@ -1019,6 +1025,8 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
             field: "contract.process".to_string(),
             kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
             source_path: Some(input.project_root.clone()),
+            importer_id: None,
+            evidence_kind: None,
             source_field: Some(candidate.label.clone()),
             note: Some(candidate.rationale.clone()),
         });
@@ -1087,6 +1095,8 @@ fn infer_from_canonical_lock(input: CanonicalLockInput) -> Result<SourceInferenc
         field: "root".to_string(),
         kind: SourceInferenceProvenanceKind::CanonicalInput,
         source_path: Some(input.canonical_path),
+        importer_id: None,
+        evidence_kind: None,
         source_field: Some(ATO_LOCK_FILE_NAME.to_string()),
         note: Some("persisted canonical lock reused as shared source inference input".to_string()),
     }];
@@ -1101,6 +1111,8 @@ fn infer_from_canonical_lock(input: CanonicalLockInput) -> Result<SourceInferenc
         field: "contract.process".to_string(),
         kind: SourceInferenceProvenanceKind::CanonicalInput,
         source_path: Some(input.project_root),
+        importer_id: None,
+        evidence_kind: None,
         source_field: Some("ato.lock.json".to_string()),
         note: Some(
             "canonical lock drives run/init materialization without re-inferring semantics"
@@ -1143,6 +1155,8 @@ fn promote_draft_execution_resolution(
                 field: "resolution.runtime".to_string(),
                 kind: SourceInferenceProvenanceKind::CompatibilityImport,
                 source_path: Some(project_root.to_path_buf()),
+                importer_id: None,
+                evidence_kind: None,
                 source_field: Some("resolution.target_selection".to_string()),
                 note: Some(
                     "draft compatibility target hints promoted into an execution-ready runtime"
@@ -1160,12 +1174,21 @@ fn promote_draft_execution_resolution(
             field: "resolution.closure".to_string(),
             kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
             source_path: Some(project_root.to_path_buf()),
+            importer_id: None,
+            evidence_kind: None,
             source_field: Some("project_root".to_string()),
             note: Some(
                 "dependency closure remained unresolved in the draft lock, so run uses metadata-only/incomplete observed lockfile state"
                     .to_string(),
             ),
         });
+        for evidence in observed_closure_evidence(project_root) {
+            provenance.push(importer_observation_provenance(
+                "resolution.closure",
+                &evidence,
+                "importer evidence observed while promoting draft closure state",
+            ));
+        }
     }
 }
 
@@ -1336,16 +1359,22 @@ fn maybe_promote_native_build_closure(result: &mut SourceInferenceResult) -> Res
         return Ok(false);
     };
 
-    let inputs = observed_closure_lockfiles(&plan.manifest_dir)
-        .into_iter()
-        .map(|name| {
-            Ok(json!({
-                "kind": "lockfile",
-                "name": name,
-                "digest": digest_observed_lockfile(&plan.manifest_dir, &name)?,
-            }))
+    let mut imported_evidence = observed_closure_evidence(&plan.manifest_dir);
+    imported_evidence.extend(
+        probe_native_framework_evidence(&plan.manifest_dir)?
+            .into_iter()
+            .filter(|evidence| evidence.importer_id.as_str() == plan.framework.as_str()),
+    );
+    let inputs = imported_evidence
+        .iter()
+        .map(|evidence| {
+            json!({
+                "kind": evidence.evidence_kind.as_str(),
+                "name": evidence.importer_id.as_str(),
+                "digest": evidence.digest,
+            })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Vec<_>>();
 
     result.lock.resolution.entries.insert(
         "closure".to_string(),
@@ -1369,16 +1398,27 @@ fn maybe_promote_native_build_closure(result: &mut SourceInferenceResult) -> Res
         field: "resolution.closure".to_string(),
         kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
         source_path: Some(plan.manifest_path),
+        importer_id: None,
+        evidence_kind: None,
         source_field: Some("[artifact]/[finalize]".to_string()),
         note: Some(
             "native delivery build plan resolved into build_closure using observed lockfiles and build-environment skeleton"
                 .to_string(),
         ),
     });
+    for evidence in &imported_evidence {
+        result.provenance.push(importer_observation_provenance(
+            "resolution.closure",
+            evidence,
+            "importer evidence promoted into build_closure input",
+        ));
+    }
     result.provenance.push(SourceInferenceProvenance {
         field: "contract.delivery".to_string(),
         kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
         source_path: Some(plan.manifest_dir.join("capsule.toml")),
+        importer_id: None,
+        evidence_kind: None,
         source_field: Some("[artifact]/[finalize]".to_string()),
         note: Some(
             "native delivery contract promoted from source-draft to source-derivation after build_closure resolved"
@@ -1679,6 +1719,8 @@ fn apply_selection(
             field: field.to_string(),
             kind: SourceInferenceProvenanceKind::SelectionGate,
             source_path: None,
+            importer_id: None,
+            evidence_kind: None,
             source_field: Some(selection.label.clone()),
             note: Some("interactive selection resolved equal-ranked process ambiguity".to_string()),
         });
@@ -2065,9 +2107,9 @@ fn inferred_filesystem_contract(detected: &DetectedProject) -> Value {
 }
 
 fn inferred_closure_state(project_root: &Path) -> Value {
-    let explicit_locks = observed_closure_lockfiles(project_root)
+    let explicit_locks = observed_closure_evidence(project_root)
         .into_iter()
-        .map(|name| json!(name))
+        .map(|evidence| json!(evidence.importer_id.as_str()))
         .collect::<Vec<_>>();
 
     json!({
@@ -2077,19 +2119,24 @@ fn inferred_closure_state(project_root: &Path) -> Value {
     })
 }
 
-fn observed_closure_lockfiles(project_root: &Path) -> Vec<String> {
-    OBSERVED_CLOSURE_LOCKFILES
-        .iter()
-        .filter(|name| project_root.join(name).exists())
-        .map(|name| (*name).to_string())
-        .collect()
+fn observed_closure_evidence(project_root: &Path) -> Vec<ImportedEvidence> {
+    probe_ecosystem_lockfile_evidence(project_root).unwrap_or_default()
 }
 
-fn digest_observed_lockfile(project_root: &Path, relative: &str) -> Result<String> {
-    let path = project_root.join(relative);
-    let bytes = fs::read(&path)
-        .with_context(|| format!("failed to read observed lockfile {}", path.display()))?;
-    Ok(format!("blake3:{}", blake3::hash(&bytes).to_hex()))
+fn importer_observation_provenance(
+    field: &str,
+    evidence: &ImportedEvidence,
+    note: &str,
+) -> SourceInferenceProvenance {
+    SourceInferenceProvenance {
+        field: field.to_string(),
+        kind: SourceInferenceProvenanceKind::ImporterObservation,
+        source_path: Some(evidence.primary_path.clone()),
+        importer_id: Some(evidence.importer_id.as_str().to_string()),
+        evidence_kind: Some(evidence.evidence_kind.as_str().to_string()),
+        source_field: Some(evidence.importer_id.as_str().to_string()),
+        note: Some(note.to_string()),
+    }
 }
 
 fn source_metadata(detected: &DetectedProject, project_root: &Path) -> Value {
@@ -2306,6 +2353,8 @@ fn convert_compatibility_provenance(
             }
         },
         source_path: record.source_path.clone(),
+        importer_id: None,
+        evidence_kind: None,
         source_field: record.source_field.clone(),
         note: record.note.clone(),
     }
@@ -3298,14 +3347,16 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
             .expect("closure inputs");
         assert_eq!(inputs.len(), 2);
         assert!(inputs.iter().any(|value| {
-            value.get("name").and_then(Value::as_str) == Some("Cargo.lock")
+            value.get("name").and_then(Value::as_str) == Some("cargo")
+                && value.get("kind").and_then(Value::as_str) == Some("lockfile")
                 && value
                     .get("digest")
                     .and_then(Value::as_str)
                     .is_some_and(|digest| digest.starts_with("blake3:"))
         }));
         assert!(inputs.iter().any(|value| {
-            value.get("name").and_then(Value::as_str) == Some("package-lock.json")
+            value.get("name").and_then(Value::as_str) == Some("npm")
+                && value.get("kind").and_then(Value::as_str) == Some("lockfile")
                 && value
                     .get("digest")
                     .and_then(Value::as_str)
