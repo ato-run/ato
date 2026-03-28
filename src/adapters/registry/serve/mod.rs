@@ -26,6 +26,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 
+use crate::application::ports::publish::{PublishArtifactIdentityClass, PublishArtifactMetadata};
 use crate::artifact_hash::{
     compute_blake3_label as compute_blake3, compute_sha256_label as compute_sha256, equals_hash,
 };
@@ -125,6 +126,8 @@ struct StoredRelease {
     lock_id: Option<String>,
     #[serde(default)]
     closure_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    publish_metadata: Option<PublishArtifactMetadata>,
     #[serde(default)]
     payload_v3: Option<StoredPayloadV3>,
 }
@@ -289,6 +292,8 @@ struct UploadResponse {
     lock_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     closure_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    publish_metadata: Option<PublishArtifactMetadata>,
 }
 
 #[derive(Debug, Serialize)]
@@ -476,6 +481,8 @@ struct CapsuleReleaseRow {
     lock_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     closure_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    publish_metadata: Option<PublishArtifactMetadata>,
     content_hash: String,
     signature_status: String,
     is_current: bool,
@@ -499,6 +506,38 @@ struct ArtifactMeta {
     name: String,
     version: String,
     description: String,
+}
+
+fn parse_publish_metadata_headers(
+    headers: &HeaderMap,
+) -> std::result::Result<Option<PublishArtifactMetadata>, String> {
+    let Some(identity_class) = get_optional_header(headers, "x-ato-publish-identity-class") else {
+        return Ok(None);
+    };
+    let identity_class = PublishArtifactIdentityClass::parse(&identity_class).ok_or_else(|| {
+        format!(
+            "unsupported x-ato-publish-identity-class '{}'",
+            identity_class
+        )
+    })?;
+    let delivery_mode = get_optional_header(headers, "x-ato-publish-delivery-mode");
+    let provenance_limited =
+        match get_optional_header(headers, "x-ato-publish-provenance-limited").as_deref() {
+            Some(value) if value.eq_ignore_ascii_case("true") => true,
+            Some(value) if value.eq_ignore_ascii_case("false") => false,
+            Some(value) => {
+                return Err(format!(
+                    "x-ato-publish-provenance-limited must be 'true' or 'false' (got '{}')",
+                    value
+                ))
+            }
+            None => false,
+        };
+    Ok(Some(PublishArtifactMetadata {
+        identity_class,
+        delivery_mode,
+        provenance_limited,
+    }))
 }
 
 pub async fn serve(config: RegistryServerConfig) -> Result<()> {
@@ -742,6 +781,7 @@ async fn handle_get_capsule(
                     manifest_hash,
                     lock_id: release.lock_id.clone(),
                     closure_digest: release.closure_digest.clone(),
+                    publish_metadata: release.publish_metadata.clone(),
                     content_hash: release.blake3.clone(),
                     signature_status: release.signature_status.clone(),
                     is_current,
@@ -1698,6 +1738,10 @@ async fn handle_put_local_capsule(
     };
     let lock_id = get_optional_header(&headers, "x-ato-lock-id");
     let closure_digest = get_optional_header(&headers, "x-ato-closure-digest");
+    let publish_metadata = match parse_publish_metadata_headers(&headers) {
+        Ok(value) => value,
+        Err(err) => return json_error(StatusCode::BAD_REQUEST, "invalid_publish_metadata", &err),
+    };
 
     let actual_sha = compute_sha256(&body);
     if !equals_hash(&expected_sha, &actual_sha) {
@@ -1783,6 +1827,7 @@ async fn handle_put_local_capsule(
                         already_existed: true,
                         lock_id: existing_release.lock_id.clone(),
                         closure_digest: existing_release.closure_digest.clone(),
+                        publish_metadata: existing_release.publish_metadata.clone(),
                     }),
                 )
                     .into_response();
@@ -1824,6 +1869,7 @@ async fn handle_put_local_capsule(
         body.len() as u64,
         lock_id.as_deref(),
         closure_digest.as_deref(),
+        publish_metadata.as_ref(),
         &body,
         &now,
     ) {
@@ -1863,6 +1909,7 @@ async fn handle_put_local_capsule(
             already_existed: false,
             lock_id,
             closure_digest,
+            publish_metadata,
         }),
     )
         .into_response()
