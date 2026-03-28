@@ -69,8 +69,7 @@ pub struct NativeBuildCommand {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct NativeBuildPlan {
-    pub manifest_path: PathBuf,
-    pub manifest_dir: PathBuf,
+    pub workspace_root: PathBuf,
     #[serde(skip_serializing)]
     pub compat_manifest: Option<CompatManifestBridge>,
     pub package_name: String,
@@ -406,7 +405,8 @@ pub(crate) fn detect_build_strategy(manifest_dir: &Path) -> Result<Option<Native
     }
 
     let canonical_config = detect_native_manifest_contract(target)?;
-    let inline_config = load_inline_delivery_config(&manifest_raw, &manifest_path)?;
+    let source_label = manifest_path.display().to_string();
+    let inline_config = load_inline_delivery_config(&manifest_raw, &source_label)?;
     let has_explicit_delivery_config = inline_config.is_some();
     let config = match inline_config {
         Some(inline) => inline,
@@ -416,7 +416,7 @@ pub(crate) fn detect_build_strategy(manifest_dir: &Path) -> Result<Option<Native
         },
     };
     if let Some(canonical) = &canonical_config {
-        ensure_delivery_config_matches_context(&config, canonical, &manifest_path)?;
+        ensure_delivery_config_matches_context(&config, canonical, &source_label)?;
     }
 
     let input_relative = PathBuf::from(config.artifact.input.trim());
@@ -437,8 +437,7 @@ pub(crate) fn detect_build_strategy(manifest_dir: &Path) -> Result<Option<Native
     )?;
 
     Ok(Some(NativeBuildPlan {
-        manifest_path: manifest_path.clone(),
-        manifest_dir: manifest_dir.to_path_buf(),
+        workspace_root: manifest_dir.to_path_buf(),
         compat_manifest: Some(compat_manifest),
         package_name: manifest.name.clone(),
         package_version: manifest.version.clone(),
@@ -455,7 +454,6 @@ pub(crate) fn detect_build_strategy(manifest_dir: &Path) -> Result<Option<Native
 pub(crate) fn detect_build_strategy_from_descriptor(
     descriptor: &ExecutionDescriptor,
 ) -> Result<Option<NativeBuildPlan>> {
-    let manifest_path = descriptor.workspace_root.join("capsule.toml");
     let delivery_config_path = descriptor.workspace_root.join(DELIVERY_CONFIG_FILE);
     let Some(bridge) = descriptor.compat_manifest.as_ref() else {
         return Ok(None);
@@ -472,7 +470,11 @@ pub(crate) fn detect_build_strategy_from_descriptor(
     }
 
     let canonical_config = detect_native_manifest_contract(target)?;
-    let inline_config = load_inline_delivery_config(&bridge.raw_toml, &manifest_path)?;
+    let source_label = format!(
+        "compatibility manifest bridge for {}",
+        descriptor.workspace_root.display()
+    );
+    let inline_config = load_inline_delivery_config(&bridge.raw_toml, &source_label)?;
     let has_explicit_delivery_config = inline_config.is_some();
     let config = match inline_config {
         Some(inline) => inline,
@@ -482,7 +484,7 @@ pub(crate) fn detect_build_strategy_from_descriptor(
         },
     };
     if let Some(canonical) = &canonical_config {
-        ensure_delivery_config_matches_context(&config, canonical, &manifest_path)?;
+        ensure_delivery_config_matches_context(&config, canonical, &source_label)?;
     }
 
     let input_relative = PathBuf::from(config.artifact.input.trim());
@@ -498,8 +500,7 @@ pub(crate) fn detect_build_strategy_from_descriptor(
     }
 
     Ok(Some(NativeBuildPlan {
-        manifest_path,
-        manifest_dir: descriptor.workspace_root.clone(),
+        workspace_root: descriptor.workspace_root.clone(),
         compat_manifest: Some(bridge.clone()),
         package_name: descriptor
             .runtime_model
@@ -522,6 +523,16 @@ pub(crate) fn detect_build_strategy_from_descriptor(
         framework: config.artifact.framework,
         target: config.artifact.target,
     }))
+}
+
+pub(crate) fn detect_build_strategy_with_legacy_fallback(
+    descriptor: &ExecutionDescriptor,
+) -> Result<Option<NativeBuildPlan>> {
+    if descriptor.compat_manifest.is_some() {
+        return detect_build_strategy_from_descriptor(descriptor);
+    }
+
+    detect_build_strategy(&descriptor.workspace_root)
 }
 
 pub(crate) fn build_native_artifact(
@@ -562,7 +573,7 @@ where
 
     let artifact_path = output_path.map(Path::to_path_buf).unwrap_or_else(|| {
         default_native_artifact_path(
-            &plan.manifest_dir,
+            &plan.workspace_root,
             &plan.package_name,
             &plan.package_version,
         )
@@ -574,7 +585,7 @@ where
 
     validate_minimal_native_artifact_permissions(&plan.source_app_path)?;
 
-    let tmp_root = plan.manifest_dir.join(".tmp");
+    let tmp_root = plan.workspace_root.join(".tmp");
     fs::create_dir_all(&tmp_root)
         .with_context(|| format!("Failed to create {}", tmp_root.display()))?;
     let staging_root = create_temp_subdir(&tmp_root, "native-build")?;
@@ -904,7 +915,7 @@ fn delivery_config_from_input(input: &str) -> DeliveryConfig {
 }
 
 pub(crate) fn native_delivery_build_environment_skeleton(plan: &NativeBuildPlan) -> Value {
-    let package_managers = detect_build_environment_package_managers(&plan.manifest_dir);
+    let package_managers = detect_build_environment_package_managers(&plan.workspace_root);
     let mut toolchains = Vec::new();
     let mut sdks = Vec::new();
     let mut helper_tools = Vec::new();
@@ -1258,7 +1269,7 @@ fn detect_native_build_command(
 fn ensure_delivery_config_matches_context(
     actual: &DeliveryConfig,
     expected: &DeliveryConfig,
-    manifest_path: &Path,
+    source_label: &str,
 ) -> Result<()> {
     if actual.artifact.framework != expected.artifact.framework
         || actual.artifact.stage != expected.artifact.stage
@@ -1269,7 +1280,7 @@ fn ensure_delivery_config_matches_context(
     {
         bail!(
             "{} native delivery config conflicts with the default target contract",
-            manifest_path.display()
+            source_label
         );
     }
     Ok(())
@@ -1584,10 +1595,10 @@ fn load_delivery_config(path: &Path) -> Result<DeliveryConfig> {
 
 fn load_inline_delivery_config(
     manifest_raw: &str,
-    manifest_path: &Path,
+    source_label: &str,
 ) -> Result<Option<DeliveryConfig>> {
     let parsed: toml::Value = toml::from_str(manifest_raw)
-        .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
+        .with_context(|| format!("Failed to parse {}", source_label))?;
     let artifact = parsed.get("artifact").cloned();
     let finalize = parsed.get("finalize").cloned();
 
@@ -1595,27 +1606,21 @@ fn load_inline_delivery_config(
         (None, None) => Ok(None),
         (Some(_), None) => bail!(
             "{} defines [artifact] without [finalize] for native delivery",
-            manifest_path.display()
+            source_label
         ),
         (None, Some(_)) => bail!(
             "{} defines [finalize] without [artifact] for native delivery",
-            manifest_path.display()
+            source_label
         ),
         (Some(artifact), Some(finalize)) => {
             let config = DeliveryConfig {
                 schema_version: DELIVERY_SCHEMA_VERSION_STABLE.to_string(),
-                artifact: artifact.try_into().with_context(|| {
-                    format!(
-                        "Failed to parse [artifact] from {}",
-                        manifest_path.display()
-                    )
-                })?,
-                finalize: finalize.try_into().with_context(|| {
-                    format!(
-                        "Failed to parse [finalize] from {}",
-                        manifest_path.display()
-                    )
-                })?,
+                artifact: artifact
+                    .try_into()
+                    .with_context(|| format!("Failed to parse [artifact] from {}", source_label))?,
+                finalize: finalize
+                    .try_into()
+                    .with_context(|| format!("Failed to parse [finalize] from {}", source_label))?,
             };
             validate_delivery_config(&config)?;
             Ok(Some(config))
