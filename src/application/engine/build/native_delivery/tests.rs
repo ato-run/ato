@@ -1382,6 +1382,44 @@ fn configure_native_build_process_rehomes_nested_cargo_outputs() {
 }
 
 #[test]
+fn lock_native_build_command_object_accepts_flattened_shape() {
+    let build = serde_json::json!({
+        "kind": "native-delivery",
+        "program": "cargo",
+        "args": ["build", "--release"],
+        "working_dir": "."
+    });
+
+    let command = lock_native_build_command_object(build.as_object().expect("build object"))
+        .expect("flattened command object");
+
+    assert_eq!(
+        command.get("program").and_then(|value| value.as_str()),
+        Some("cargo")
+    );
+}
+
+#[test]
+fn lock_native_build_command_object_accepts_nested_shape() {
+    let build = serde_json::json!({
+        "kind": "native-delivery",
+        "build_command": {
+            "program": "cargo",
+            "args": ["build", "--release"],
+            "working_dir": "."
+        }
+    });
+
+    let command = lock_native_build_command_object(build.as_object().expect("build object"))
+        .expect("nested command object");
+
+    assert_eq!(
+        command.get("program").and_then(|value| value.as_str()),
+        Some("cargo")
+    );
+}
+
+#[test]
 fn build_native_artifact_preserves_source_and_payload_executable_mode() -> Result<()> {
     let tmp = tempdir()?;
     let plan = sample_native_build_plan(tmp.path(), 0o755)?;
