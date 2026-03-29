@@ -9,6 +9,7 @@ use super::runtime_fetcher::RuntimeFetcher;
 use crate::error::{CapsuleError, Result};
 use crate::lockfile::{resolve_existing_lockfile_path, CAPSULE_LOCK_FILE_NAME};
 use crate::packers::pack_filter::load_pack_filter_from_path;
+use crate::r3_config::resolve_existing_config_path;
 use crate::router::CompatProjectInput;
 use crate::types::CapsuleManifest;
 
@@ -188,12 +189,8 @@ pub async fn build_bundle(
         ));
     };
     let _node_modules_guard = NodeModulesGuard::new(&source_dir, source_ignore.as_ref())?;
-    let config_path = source_dir.join("config.json");
-    let config_ref = if config_path.exists() {
-        Some(config_path.as_path())
-    } else {
-        None
-    };
+    let resolved_config_path = resolve_existing_config_path(&source_dir);
+    let config_ref = resolved_config_path.as_deref();
     let archive_data = create_bundle_archive(
         &runtime_dir,
         &source_dir,

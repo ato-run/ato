@@ -427,6 +427,7 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
 fn materialize_desktop_sample(sample_name: &str, project_dir: &Path) -> Result<()> {
     let sample_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("samples")
+        .join("source")
         .join("native-desktop")
         .join(sample_name);
     if !sample_root.is_dir() {

@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::ato_lock::AtoLock;
+use crate::common::paths::workspace_derived_dir;
 use crate::lock_runtime::{LockCompilerOverlay, LockServiceUnit, ResolvedLockRuntimeModel};
 use crate::manifest;
 use crate::policy::egress_resolver::{resolve_egress_policy, EgressRule};
@@ -12,6 +13,7 @@ use crate::router::{self, CompatProjectInput, ExecutionProfile};
 use crate::types::{ResolvedService, ResolvedServiceRuntime, ResolvedTargetRuntime};
 
 const CONFIG_VERSION: &str = "1.0.0";
+const CONFIG_FILE_NAME: &str = "config.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -279,13 +281,34 @@ pub fn write_config(manifest_path: &Path, config: &ConfigJson) -> Result<PathBuf
 }
 
 pub fn write_config_in_dir(output_dir: &Path, config: &ConfigJson) -> Result<PathBuf> {
-    let output_path = output_dir.join("config.json");
+    let derived_dir = workspace_derived_dir(output_dir);
+    std::fs::create_dir_all(&derived_dir).with_context(|| {
+        format!(
+            "Failed to create derived config dir: {}",
+            derived_dir.display()
+        )
+    })?;
+    let output_path = derived_dir.join(CONFIG_FILE_NAME);
 
     let json = to_stable_json_pretty(config)?;
     std::fs::write(&output_path, json)
         .with_context(|| format!("Failed to write config.json: {}", output_path.display()))?;
 
     Ok(output_path)
+}
+
+pub fn config_output_path(workspace_root: &Path) -> PathBuf {
+    workspace_derived_dir(workspace_root).join(CONFIG_FILE_NAME)
+}
+
+pub fn resolve_existing_config_path(workspace_root: &Path) -> Option<PathBuf> {
+    let primary = config_output_path(workspace_root);
+    if primary.exists() {
+        return Some(primary);
+    }
+
+    let legacy = workspace_root.join(CONFIG_FILE_NAME);
+    legacy.exists().then_some(legacy)
 }
 
 fn to_stable_json_pretty<T: Serialize>(value: &T) -> Result<String> {
@@ -1590,6 +1613,32 @@ egress_allow = ["1.1.1.1"]
             config.services["main"].env.as_ref().unwrap()["PORT"],
             "8080"
         );
+    }
+
+    #[test]
+    fn generated_config_is_written_under_workspace_derived_dir() {
+        let tmp = tempdir().unwrap();
+        let manifest_path = tmp.path().join("capsule.toml");
+
+        let manifest = r#"
+    schema_version = "0.2"
+    name = "static-demo"
+    version = "0.1.0"
+    type = "app"
+    default_target = "site"
+
+    [targets.site]
+    runtime = "web"
+    driver = "static"
+    entrypoint = "dist"
+    port = 4173
+    "#;
+
+        std::fs::write(&manifest_path, manifest).unwrap();
+
+        let config_path = generate_and_write_config(&manifest_path, None, false).unwrap();
+        assert!(config_path.ends_with(".ato/derived/config.json"));
+        assert!(!tmp.path().join("config.json").exists());
     }
 
     #[test]
