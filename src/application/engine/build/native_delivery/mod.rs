@@ -2485,9 +2485,8 @@ fn format_native_build_command(command: &NativeBuildCommand) -> String {
 
 fn run_native_build_command(command: &NativeBuildCommand) -> Result<()> {
     let mut process = Command::new(&command.program);
-    process
-        .args(&command.args)
-        .current_dir(&command.working_dir);
+    process.args(&command.args);
+    configure_native_build_process(&mut process, command);
     let output = run_captured_command(&mut process, || {
         format!(
             "Failed to execute native delivery build command '{}' in {}",
@@ -2510,6 +2509,61 @@ fn run_native_build_command(command: &NativeBuildCommand) -> Result<()> {
             format!("\n{}", details)
         }
     );
+}
+
+fn configure_native_build_process(process: &mut Command, command: &NativeBuildCommand) {
+    process.current_dir(&command.working_dir);
+
+    if let Some(target_dir) = cargo_native_build_target_dir(command) {
+        process.env_remove("CARGO_BUILD_TARGET");
+        process.env("CARGO_TARGET_DIR", target_dir);
+    }
+}
+
+fn cargo_native_build_target_dir(command: &NativeBuildCommand) -> Option<PathBuf> {
+    if !is_cargo_program(&command.program) {
+        return None;
+    }
+
+    let manifest_dir = cargo_manifest_path_from_args(&command.args)
+        .map(|manifest_path| {
+            if manifest_path.is_absolute() {
+                manifest_path
+            } else {
+                command.working_dir.join(manifest_path)
+            }
+        })
+        .and_then(|manifest_path| manifest_path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| command.working_dir.clone());
+    Some(manifest_dir.join("target"))
+}
+
+fn is_cargo_program(program: &str) -> bool {
+    let file_name = Path::new(program)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(program);
+    file_name.eq_ignore_ascii_case("cargo") || file_name.eq_ignore_ascii_case("cargo.exe")
+}
+
+fn cargo_manifest_path_from_args(args: &[String]) -> Option<PathBuf> {
+    let mut arguments = args.iter();
+    while let Some(argument) = arguments.next() {
+        if let Some(value) = argument.strip_prefix("--manifest-path=") {
+            if !value.trim().is_empty() {
+                return Some(PathBuf::from(value));
+            }
+            continue;
+        }
+        if argument == "--manifest-path" {
+            let value = arguments.next()?.trim();
+            if value.is_empty() {
+                return None;
+            }
+            return Some(PathBuf::from(value));
+        }
+    }
+    None
 }
 
 fn staged_delivery_config(plan: &NativeBuildPlan) -> Result<DeliveryConfig> {
