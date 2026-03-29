@@ -1348,6 +1348,10 @@ pub(crate) fn native_delivery_draft_contract_from_manifest(
     let finalize = parsed.get("finalize");
     let canonical = detect_native_manifest_contract(target)?;
 
+    if canonical.is_none() && artifact.is_none() && finalize.is_none() {
+        return Ok(None);
+    }
+
     let mut artifact_value = serde_json::Map::new();
     artifact_value.insert(
         "kind".to_string(),
