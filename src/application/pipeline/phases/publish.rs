@@ -361,7 +361,7 @@ fn resolve_private_publisher(
 }
 
 fn repository_owner(raw: &str) -> Option<String> {
-    let normalized = crate::publish_preflight::normalize_repository_value(&raw).ok()?;
+    let normalized = crate::publish_preflight::normalize_repository_value(raw).ok()?;
     let (owner, _) = normalized.split_once('/')?;
     let owner = normalize_segment(owner);
     if owner.is_empty() {

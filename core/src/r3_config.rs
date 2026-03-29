@@ -297,11 +297,11 @@ pub fn write_config_in_dir(output_dir: &Path, config: &ConfigJson) -> Result<Pat
     Ok(output_path)
 }
 
-pub fn config_output_path(workspace_root: &Path) -> PathBuf {
+fn config_output_path(workspace_root: &Path) -> PathBuf {
     workspace_derived_dir(workspace_root).join(CONFIG_FILE_NAME)
 }
 
-pub fn resolve_existing_config_path(workspace_root: &Path) -> Option<PathBuf> {
+pub(crate) fn resolve_existing_config_path(workspace_root: &Path) -> Option<PathBuf> {
     let primary = config_output_path(workspace_root);
     if primary.exists() {
         return Some(primary);
