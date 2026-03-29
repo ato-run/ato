@@ -1418,6 +1418,82 @@ fn lock_native_build_command_object_accepts_nested_shape() {
         Some("cargo")
     );
 }
+#[test]
+fn native_delivery_draft_contract_skips_generic_native_targets_without_delivery_metadata(
+) -> Result<()> {
+    let tmp = tempdir()?;
+    let manifest_path = tmp.path().join("capsule.toml");
+    fs::write(
+        &manifest_path,
+        r#"schema_version = "0.2"
+name = "strict-v3-ci-check"
+version = "0.1.0"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "native"
+entrypoint = "source/main.py"
+"#,
+    )?;
+
+    let delivery = native_delivery_draft_contract_from_manifest(&manifest_path)?;
+
+    assert!(delivery.is_none());
+    Ok(())
+}
+
+#[test]
+fn native_delivery_draft_contract_keeps_explicit_desktop_metadata() -> Result<()> {
+    let tmp = tempdir()?;
+    let manifest_path = tmp.path().join("capsule.toml");
+    fs::write(
+        &manifest_path,
+        r#"schema_version = "0.2"
+name = "desktop-demo"
+version = "0.1.0"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source"
+driver = "native"
+entrypoint = "cargo"
+cmd = ["build", "--release"]
+working_dir = "."
+
+[artifact]
+framework = "tauri"
+stage = "unsigned"
+target = "windows/x86_64"
+input = "src-tauri/target/release/demo.exe"
+
+[finalize]
+tool = "powershell.exe"
+args = ["-Command", "Write-Output demo.exe"]
+"#,
+    )?;
+
+    let delivery = native_delivery_draft_contract_from_manifest(&manifest_path)?
+        .expect("desktop native draft contract");
+
+    assert_eq!(
+        delivery
+            .get("artifact")
+            .and_then(|value| value.get("framework"))
+            .and_then(|value| value.as_str()),
+        Some("tauri")
+    );
+    assert_eq!(
+        delivery
+            .get("build")
+            .and_then(|value| value.get("program"))
+            .and_then(|value| value.as_str()),
+        Some("cargo")
+    );
+    Ok(())
+}
 
 #[test]
 fn build_native_artifact_preserves_source_and_payload_executable_mode() -> Result<()> {
