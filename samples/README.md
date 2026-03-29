@@ -1,16 +1,29 @@
 # samples
 
-This directory stores hand-authored sample projects and fixtures used by smoke tests, import detection, and future compatibility coverage.
+This directory stores hand-authored, testable source fixtures used to expand real-world coverage for ato init, ato run, and ato publish.
+
+These are fixtures first, not polished example applications. They exist to preserve project shape, command contracts, and compatibility behavior in a reviewable form.
 
 ## Purpose
 
-- Keep stable, reviewable fixture source trees in the repository.
-- Exercise real project shapes without committing machine-local build outputs.
+- Keep stable, reviewable hand-authored fixture trees in the repository.
+- Expand real-world command coverage for ato init, ato run, and ato publish.
+- Exercise import detection, source inference, build bridging, diagnostics, and compatibility behavior without committing generated machine-local state.
+- Preserve unsupported or intentionally unresolved project shapes as explicit fixtures.
 - Provide a predictable place to add future fixtures for web, mobile, wasm, and container flows.
+
+## Fixture Model
+
+This directory may contain two logical kinds of data.
+
+- source fixtures: hand-authored source trees used as command inputs
+- expectations: reviewed outputs such as expected lock snapshots, diagnostics, preview payloads, or publish dry-run snapshots
+
+Source fixtures are the primary checked-in inputs. Expectations are optional and should exist only when a test needs reviewed output data.
 
 ## Scope
 
-Checked-in fixtures may represent source projects for:
+Checked-in fixtures may represent minimal but realistic source inputs for:
 
 - native desktop apps such as Tauri, Electron, and Wails
 - web apps and static sites
@@ -18,39 +31,120 @@ Checked-in fixtures may represent source projects for:
 - wasm projects
 - container and docker-based apps
 
-The fixture tree should describe the minimum source layout needed for detection, init, build bridging, publish, and install smoke coverage.
+Fixtures should be just large enough to exercise the intended behavior for detection, init, build bridging, publish, install, unsupported-case handling, or diagnostics.
+
+## Command Coverage
+
+Every new fixture should have a clear command intent. A fixture should exist to protect one or more of the following:
+
+- ato init contract coverage
+- ato run contract coverage
+- ato publish contract coverage
+- unsupported or unresolved diagnostics coverage
+- compatibility or regression coverage for a known project shape
+
+If the intended command path is not clear, the fixture is probably too vague.
 
 ## Layout
 
-Use family-first directories so new fixture types stay discoverable.
-
-Example layout:
+The repository now uses an explicit split between checked-in source inputs and reviewed generated expectations:
 
 ```text
 samples/
-  native-desktop/
-    tauri/
-    electron/
-    wails/
-  web/
-  mobile/
-  wasm/
-  containers/
+  source/
+    native-desktop/
+    web/
+    mobile/
+    wasm/
+    containers/
+  expectations/
+    native-desktop/
+    web/
+    mobile/
+    wasm/
+    containers/
 ```
 
-Each fixture directory should be a clean source tree that a contributor can inspect without generated noise.
+- source stores hand-authored fixture trees
+- expectations stores expected lock, diagnostics, preview, or publish snapshots when needed
+- tests must copy source fixtures into a temporary workspace before mutating anything
+
+Current checked-in source fixtures live under source/native-desktop.
+
+The other source and expectations families exist so new fixtures can be added without redesigning the tree again.
+
+## Native Desktop Guidance
+
+For native desktop coverage, organize fixtures so the intended delivery mode is obvious.
+
+Framework-first organization is acceptable for a small set of fixtures, but mode-first organization is preferred as coverage grows.
+
+Examples:
+
+```text
+samples/source/native-desktop/
+  source-derived/
+    tauri-minimal/
+    electron-minimal/
+    wails-minimal/
+  artifact-import/
+    macos-app-bundle-shape/
+    linux-appimage-shape/
+```
+
+This matters because ato behavior is often defined more by delivery mode than by framework name alone.
+
+Seed fixtures currently added for gradual coverage expansion:
+
+```text
+samples/source/native-desktop/
+  tauri/
+    minimal/
+    with-lockfiles/
+    ambiguous/
+  electron/
+    minimal/
+  wails/
+    minimal/
+  artifact-import/
+    macos-app-bundle-shape/
+
+samples/expectations/native-desktop/
+  tauri/
+    minimal/
+    with-lockfiles/
+    ambiguous/
+  electron/
+    minimal/
+  wails/
+    minimal/
+  artifact-import/
+    macos-app-bundle-shape/
+```
+
+These directories are starting points for future init diagnostics, preview, inspect, and publish dry-run expectations. They do not imply that every expectation snapshot already exists.
 
 ## Required Rules
 
-- Commit only hand-authored source files and minimal metadata needed for fixture detection.
-- Keep fixtures small. Include only files that change detection, lock generation, build bridging, or publish behavior.
-- Prefer minimal lockfiles or manifest metadata only when they are required to make the fixture shape valid.
-- Write fixtures so tests can copy them into a temporary workspace and generate artifacts there.
-- Keep names stable and explicit so test failures are easy to trace back to a fixture.
+- Commit only hand-authored source files and explicit project evidence needed for the intended behavior.
+- Keep fixtures small, but valid enough to exercise the targeted command path.
+- Keep names stable and explicit so failures are easy to trace back to a fixture.
+- Tests must materialize fixtures into a temporary workspace instead of mutating the checked-in copy.
+- Source fixtures must remain clean enough for a contributor to inspect without generated noise.
+
+## Allowed Evidence
+
+Some files are generated by ecosystems but still count as deliberate fixture evidence. These are allowed when they are the behavior under test or are required to make the fixture shape valid.
+
+- ecosystem lockfiles such as Cargo.lock, package-lock.json, pnpm-lock.yaml, uv.lock, or go.sum
+- framework metadata such as tauri.conf.json, electron-builder.json, or wails.json
+- minimal hand-authored stubs that make a fixture shape unambiguous
+
+Ecosystem lockfiles are allowed when they are themselves the evidence being tested.
 
 ## Forbidden Files
 
-Do not commit machine-local or generated state under samples.
+Do not commit machine-local or generated state under source fixtures.
 
 - dependency installation outputs such as node_modules, vendor, .venv, or build cache directories
 - generated artifacts such as dist, build outputs, packaged apps, binaries, images, or archives
@@ -60,18 +154,40 @@ Do not commit machine-local or generated state under samples.
 
 If a workflow needs these files, tests must generate them inside a temporary directory at runtime.
 
+## Expectations Rules
+
+- Do not place ato.lock.json or other generated Ato state inside a source fixture tree.
+- If a reviewed generated output must be committed, place it under expectations, not under the source fixture.
+- Expectations should be used for explicit command outputs such as lock snapshots, diagnostics, preview payloads, or publish dry-run responses.
+
+## Fixture Metadata
+
+If fixture intent becomes hard to infer from directory names alone, add small hand-authored metadata near the fixture, such as fixture.json, to record:
+
+- fixture id
+- category and mode
+- framework when relevant
+- intended commands
+- expected success, unsupported, or unresolved behavior
+- any deliberate omissions or constraints
+
+Do this when it reduces ambiguity. Do not add metadata files by default if directory naming is already sufficient.
+
 ## Adding A Fixture
 
 When adding a new fixture:
 
 1. Create the smallest source tree that still triggers the intended product behavior.
-2. Put it under the correct family directory.
-3. Verify tests materialize the fixture into a temp workspace instead of mutating the checked-in copy.
-4. Avoid adding real installed dependencies or generated ato lockfiles.
-5. Document any non-obvious fixture constraint in the test that consumes it.
+2. Choose a directory name that makes the command intent and mode obvious.
+3. Put the fixture under the correct family or mode directory.
+4. Verify tests materialize the fixture into a temporary workspace before mutating it.
+5. Avoid committing real installed dependencies, generated artifacts, or generated Ato lockfiles under the source fixture.
+6. If expected generated outputs need review, place them under expectations.
+7. Document any non-obvious fixture constraint in the consuming test or fixture metadata.
 
 ## Maintenance
 
-- Update fixtures when product detection rules or build bridge assumptions change.
+- Update fixtures when product detection rules, source inference behavior, or build bridge assumptions change.
 - Prefer editing an existing fixture over adding near-duplicates.
-- If a fixture must intentionally omit files to preserve cleanliness, keep that omission deliberate and let tests synthesize the missing generated state.
+- Keep unsupported and unresolved cases explicit instead of collapsing them into generic fixtures.
+- If a fixture intentionally omits files to stay clean, keep that omission deliberate and let tests synthesize the missing generated state.
