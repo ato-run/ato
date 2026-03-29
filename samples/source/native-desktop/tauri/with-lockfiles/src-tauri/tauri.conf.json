@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "tauri-with-lockfiles",
+  "version": "0.1.0",
+  "identifier": "dev.ato.samples.tauri.with-lockfiles",
+  "build": {
+    "frontendDist": "../dist"
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all"
+  }
+}

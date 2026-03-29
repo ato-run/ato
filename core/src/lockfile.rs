@@ -21,7 +21,7 @@ use tempfile::TempDir;
 use tracing::debug;
 use url::form_urlencoded::byte_serialize;
 
-use crate::common::paths::{nacelle_home_dir, toolchain_cache_dir};
+use crate::common::paths::{nacelle_home_dir, toolchain_cache_dir, workspace_derived_dir};
 use crate::error::{CapsuleError, Result};
 use crate::packers::payload;
 use crate::packers::runtime_fetcher::RuntimeFetcher;
@@ -273,7 +273,16 @@ pub async fn generate_and_write_lockfile(
         timings,
     )
     .await?;
-    let output_path = manifest_dir.join(CAPSULE_LOCK_FILE_NAME);
+    let output_path = lockfile_output_path(&manifest_dir);
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            CapsuleError::Pack(format!(
+                "Failed to create lockfile output dir {}: {}",
+                parent.display(),
+                e
+            ))
+        })?;
+    }
     let content = serde_jcs::to_vec(&lockfile).map_err(|e| {
         CapsuleError::Pack(format!(
             "Failed to serialize {}: {}",
@@ -301,7 +310,7 @@ pub async fn ensure_lockfile(
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    let lock_path = manifest_dir.join(CAPSULE_LOCK_FILE_NAME);
+    let lock_path = lockfile_output_path(&manifest_dir);
     let mut inputs = open_lockfile_inputs(manifest_path, &manifest_dir, manifest_raw)?;
     let manifest_hash = manifest_hash_from_open_inputs(&mut inputs, manifest_path)?;
 
@@ -379,7 +388,7 @@ pub async fn ensure_lockfile_for_compat_input(
 ) -> Result<PathBuf> {
     let ensure_started = Instant::now();
     let manifest_dir = compat_input.workspace_root();
-    let lock_path = manifest_dir.join(CAPSULE_LOCK_FILE_NAME);
+    let lock_path = lockfile_output_path(manifest_dir);
     let inputs =
         open_lockfile_inputs_for_compat_input(manifest_dir, compat_input.manifest_value())?;
     let manifest_hash = semantic_manifest_hash_from_text(compat_input.manifest_text())?;
@@ -410,6 +419,15 @@ pub async fn ensure_lockfile_for_compat_input(
             CAPSULE_LOCK_FILE_NAME, e
         ))
     })?;
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            CapsuleError::Pack(format!(
+                "Failed to create lockfile output dir {}: {}",
+                parent.display(),
+                e
+            ))
+        })?;
+    }
     write_atomic_bytes_with_os_lock(
         &lock_path,
         &content,
@@ -489,13 +507,18 @@ fn read_lockfile(path: &Path) -> Result<CapsuleLock> {
 }
 
 pub fn lockfile_output_path(manifest_dir: &Path) -> PathBuf {
-    manifest_dir.join(CAPSULE_LOCK_FILE_NAME)
+    workspace_derived_dir(manifest_dir).join(CAPSULE_LOCK_FILE_NAME)
 }
 
 pub fn resolve_existing_lockfile_path(manifest_dir: &Path) -> Option<PathBuf> {
     let primary = lockfile_output_path(manifest_dir);
     if primary.exists() {
         return Some(primary);
+    }
+
+    let legacy_root = manifest_dir.join(CAPSULE_LOCK_FILE_NAME);
+    if legacy_root.exists() {
+        return Some(legacy_root);
     }
 
     let legacy = manifest_dir.join(LEGACY_CAPSULE_LOCK_FILE_NAME);
@@ -646,7 +669,7 @@ fn manifest_hash_from_open_file(file: &mut fs::File) -> Result<String> {
 }
 
 fn lockfile_inputs_snapshot_path(manifest_dir: &Path) -> PathBuf {
-    manifest_dir.join(LOCKFILE_INPUT_SNAPSHOT_NAME)
+    workspace_derived_dir(manifest_dir).join(LOCKFILE_INPUT_SNAPSHOT_NAME)
 }
 
 fn write_lockfile_inputs_snapshot(
@@ -663,6 +686,15 @@ fn write_lockfile_inputs_snapshot(
         CapsuleError::Config(format!("Failed to serialize lockfile input snapshot: {e}"))
     })?;
     let snapshot_path = lockfile_inputs_snapshot_path(manifest_dir);
+    if let Some(parent) = snapshot_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            CapsuleError::Config(format!(
+                "Failed to create lockfile input snapshot dir {}: {}",
+                parent.display(),
+                e
+            ))
+        })?;
+    }
     write_atomic_bytes_with_os_lock(
         &snapshot_path,
         &raw,

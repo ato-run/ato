@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const ENV_ATO_HOME: &str = "ATO_HOME";
+const WORKSPACE_DERIVED_DIR: &str = ".ato/derived";
 
 /// Returns the best-effort user home directory without falling back to `/tmp`.
 pub fn home_dir_or_workspace_tmp() -> PathBuf {
@@ -50,4 +51,9 @@ pub fn runtime_cache_dir() -> Result<PathBuf> {
 /// Layout: `~/.ato/engines`
 pub fn engine_cache_dir() -> Result<PathBuf> {
     Ok(nacelle_home_dir()?.join("engines"))
+}
+
+/// Returns the workspace-local directory for generated compatibility artifacts.
+pub fn workspace_derived_dir(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(WORKSPACE_DERIVED_DIR)
 }

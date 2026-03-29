@@ -790,7 +790,7 @@ entrypoint = "source/main.sh"
     let second_lock = read_lockfile(&second).unwrap();
 
     assert_eq!(first_lock.meta.created_at, second_lock.meta.created_at);
-    assert!(temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
+    assert!(lockfile_inputs_snapshot_path(temp.path()).exists());
 }
 
 #[test]
@@ -824,7 +824,10 @@ entrypoint = "main.sh"
         ))
         .unwrap();
 
+    assert_eq!(lock_path, lockfile_output_path(temp.path()));
     assert!(lock_path.exists());
+    assert!(!temp.path().join(CAPSULE_LOCK_FILE_NAME).exists());
+    assert!(!temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
     assert!(!temp.path().join("capsule.toml").exists());
     assert!(!temp
         .path()
@@ -872,8 +875,11 @@ entrypoint = "main.ts"
         ))
         .unwrap();
 
+    assert_eq!(lock_path, lockfile_output_path(temp.path()));
     assert!(lock_path.exists());
-    assert!(temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
+    assert!(lockfile_inputs_snapshot_path(temp.path()).exists());
+    assert!(!temp.path().join(CAPSULE_LOCK_FILE_NAME).exists());
+    assert!(!temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
 }
 
 #[test]
@@ -918,8 +924,11 @@ dependencies = "requirements.txt"
         ))
         .unwrap();
 
+    assert_eq!(lock_path, lockfile_output_path(temp.path()));
     assert!(lock_path.exists());
-    assert!(temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
+    assert!(lockfile_inputs_snapshot_path(temp.path()).exists());
+    assert!(!temp.path().join(CAPSULE_LOCK_FILE_NAME).exists());
+    assert!(!temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
 }
 
 #[test]
@@ -967,8 +976,11 @@ include = ["src/**", "fixtures/db.json", "package.json", "pnpm-lock.yaml"]
         ))
         .unwrap();
 
+    assert_eq!(lock_path, lockfile_output_path(temp.path()));
     assert!(lock_path.exists());
-    assert!(temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
+    assert!(lockfile_inputs_snapshot_path(temp.path()).exists());
+    assert!(!temp.path().join(CAPSULE_LOCK_FILE_NAME).exists());
+    assert!(!temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
 }
 
 #[test]
