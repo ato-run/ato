@@ -461,6 +461,10 @@ pub(crate) fn detect_build_strategy(manifest_dir: &Path) -> Result<Option<Native
 pub(crate) fn detect_build_strategy_from_descriptor(
     descriptor: &ExecutionDescriptor,
 ) -> Result<Option<NativeBuildPlan>> {
+    if let Some(plan) = detect_build_strategy_from_lock_delivery(descriptor)? {
+        return Ok(Some(plan));
+    }
+
     let delivery_config_path = descriptor.workspace_root.join(DELIVERY_CONFIG_FILE);
     let Some(bridge) = descriptor.compat_manifest.as_ref() else {
         return Ok(None);
@@ -530,6 +534,178 @@ pub(crate) fn detect_build_strategy_from_descriptor(
         framework: config.artifact.framework,
         target: config.artifact.target,
     }))
+}
+
+fn detect_build_strategy_from_lock_delivery(
+    descriptor: &ExecutionDescriptor,
+) -> Result<Option<NativeBuildPlan>> {
+    let Some(delivery) = descriptor
+        .lock
+        .contract
+        .entries
+        .get("delivery")
+        .and_then(Value::as_object)
+    else {
+        return Ok(None);
+    };
+
+    let mode = delivery
+        .get("mode")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if !matches!(mode, "source-draft" | "source-derivation") {
+        return Ok(None);
+    }
+
+    let Some(artifact) = delivery.get("artifact").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    if artifact.get("kind").and_then(Value::as_str) != Some("desktop-native") {
+        return Ok(None);
+    }
+
+    let framework = artifact
+        .get("framework")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("desktop-native delivery artifact.framework is missing")?
+        .to_string();
+    let target = artifact
+        .get("target")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("desktop-native delivery artifact.target is missing")?
+        .to_string();
+    let input = artifact
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("desktop-native delivery artifact.path is missing")?
+        .to_string();
+
+    let finalize = delivery
+        .get("finalize")
+        .and_then(Value::as_object)
+        .context("desktop-native delivery.finalize is missing")?;
+    let finalize_tool = finalize
+        .get("tool")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("desktop-native delivery.finalize.tool is missing")?
+        .to_string();
+    let finalize_args = finalize
+        .get("args")
+        .and_then(Value::as_array)
+        .context("desktop-native delivery.finalize.args is missing")?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .context("desktop-native delivery.finalize.args must contain only strings")
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let config = DeliveryConfig {
+        schema_version: DELIVERY_SCHEMA_VERSION_STABLE.to_string(),
+        artifact: DeliveryArtifact {
+            framework: framework.clone(),
+            stage: DELIVERY_STAGE.to_string(),
+            target: target.clone(),
+            input: input.clone(),
+        },
+        finalize: DeliveryFinalize {
+            tool: finalize_tool,
+            args: finalize_args,
+        },
+    };
+    validate_delivery_config(&config)?;
+
+    let input_relative = PathBuf::from(&input);
+    validate_relative_input_path(&input_relative)?;
+    let source_app_path = descriptor.workspace_root.join(&input_relative);
+    let build_command = delivery
+        .get("build")
+        .and_then(Value::as_object)
+        .and_then(|build| build.get("build_command"))
+        .and_then(Value::as_object)
+        .map(|command| parse_lock_native_build_command(command, &descriptor.workspace_root))
+        .transpose()?;
+    if build_command.is_none() {
+        validate_native_bundle_directory(&source_app_path)?;
+    }
+
+    Ok(Some(NativeBuildPlan {
+        workspace_root: descriptor.workspace_root.clone(),
+        legacy_manifest_bridge: descriptor.compat_manifest.clone(),
+        package_name: descriptor
+            .runtime_model
+            .metadata
+            .name
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .context("authoritative lock metadata is missing package name")?,
+        package_version: descriptor
+            .runtime_model
+            .metadata
+            .version
+            .clone()
+            .unwrap_or_default(),
+        delivery_config_path: None,
+        staged_delivery_config_toml: serialize_delivery_config(&config)?,
+        source_app_path,
+        input_relative,
+        build_command,
+        framework,
+        target,
+    }))
+}
+
+fn parse_lock_native_build_command(
+    command: &serde_json::Map<String, Value>,
+    workspace_root: &Path,
+) -> Result<NativeBuildCommand> {
+    let program = command
+        .get("program")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("desktop-native delivery.build.build_command.program is missing")?
+        .to_string();
+    let args = command
+        .get("args")
+        .and_then(Value::as_array)
+        .context("desktop-native delivery.build.build_command.args is missing")?
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_string).context(
+                "desktop-native delivery.build.build_command.args must contain only strings",
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let working_dir_raw = command
+        .get("working_dir")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("desktop-native delivery.build.build_command.working_dir is missing")?;
+    let working_dir_path = PathBuf::from(working_dir_raw);
+    let working_dir = if working_dir_path.is_absolute() {
+        working_dir_path
+    } else {
+        workspace_root.join(working_dir_path)
+    };
+
+    Ok(NativeBuildCommand {
+        program,
+        args,
+        working_dir,
+    })
 }
 
 pub(crate) fn detect_build_strategy_with_legacy_fallback(
