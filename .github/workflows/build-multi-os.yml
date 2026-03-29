@@ -444,6 +444,8 @@ jobs:
 
       - name: Run Windows native delivery E2E
         shell: bash
+        env:
+          ATO_E2E_TIMEOUT_SECS: "600"
         run: |
           set -euo pipefail
           cargo test -p ato-cli --test native_delivery_e2e e2e_native_delivery_windows_build_publish_install_run -- --test-threads=1 --nocapture
@@ -465,6 +467,8 @@ jobs:
 
       - name: Run Windows native delivery E2E
         shell: bash
+        env:
+          ATO_E2E_TIMEOUT_SECS: "600"
         run: |
           set -euo pipefail
           cargo test -p ato-cli --test native_delivery_e2e e2e_native_delivery_windows_build_publish_install_run -- --test-threads=1 --nocapture
