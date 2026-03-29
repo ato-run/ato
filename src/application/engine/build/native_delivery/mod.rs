@@ -632,8 +632,7 @@ fn detect_build_strategy_from_lock_delivery(
     let build_command = delivery
         .get("build")
         .and_then(Value::as_object)
-        .and_then(|build| build.get("build_command"))
-        .and_then(Value::as_object)
+        .and_then(lock_native_build_command_object)
         .map(|command| parse_lock_native_build_command(command, &descriptor.workspace_root))
         .transpose()?;
     if build_command.is_none() {
@@ -706,6 +705,23 @@ fn parse_lock_native_build_command(
         args,
         working_dir,
     })
+}
+
+fn lock_native_build_command_object(
+    build: &serde_json::Map<String, Value>,
+) -> Option<&serde_json::Map<String, Value>> {
+    if let Some(command) = build.get("build_command").and_then(Value::as_object) {
+        return Some(command);
+    }
+
+    let has_flattened_command = build.contains_key("program")
+        || build.contains_key("args")
+        || build.contains_key("working_dir");
+    if has_flattened_command {
+        Some(build)
+    } else {
+        None
+    }
 }
 
 pub(crate) fn detect_build_strategy_with_legacy_fallback(
