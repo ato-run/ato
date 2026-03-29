@@ -1323,6 +1323,65 @@ fn native_delivery_documented_json_contract_fields_are_present() -> Result<()> {
 }
 
 #[test]
+fn cargo_native_build_target_dir_uses_manifest_parent_target_dir() {
+    let command = NativeBuildCommand {
+        program: "cargo".to_string(),
+        args: vec![
+            "build".to_string(),
+            "--manifest-path".to_string(),
+            "src-tauri/Cargo.toml".to_string(),
+            "--release".to_string(),
+        ],
+        working_dir: PathBuf::from("/workspace/app"),
+    };
+
+    let target_dir = cargo_native_build_target_dir(&command).expect("cargo target dir");
+
+    assert_eq!(target_dir, PathBuf::from("/workspace/app/src-tauri/target"));
+}
+
+#[test]
+fn cargo_native_build_target_dir_defaults_to_working_dir() {
+    let command = NativeBuildCommand {
+        program: "cargo.exe".to_string(),
+        args: vec!["build".to_string(), "--release".to_string()],
+        working_dir: PathBuf::from("/workspace/app/src-tauri"),
+    };
+
+    let target_dir = cargo_native_build_target_dir(&command).expect("cargo target dir");
+
+    assert_eq!(target_dir, PathBuf::from("/workspace/app/src-tauri/target"));
+}
+
+#[test]
+fn configure_native_build_process_rehomes_nested_cargo_outputs() {
+    let command = NativeBuildCommand {
+        program: "cargo".to_string(),
+        args: vec![
+            "build".to_string(),
+            "--manifest-path=src-tauri/Cargo.toml".to_string(),
+            "--release".to_string(),
+        ],
+        working_dir: PathBuf::from("/workspace/app"),
+    };
+    let mut process = std::process::Command::new("cargo");
+
+    configure_native_build_process(&mut process, &command);
+
+    let envs = process
+        .get_envs()
+        .map(|(key, value)| (key.to_os_string(), value.map(|entry| entry.to_os_string())))
+        .collect::<Vec<_>>();
+    assert!(envs
+        .iter()
+        .any(|(key, value)| { key == "CARGO_BUILD_TARGET" && value.is_none() }));
+    assert!(envs.iter().any(|(key, value)| {
+        key == "CARGO_TARGET_DIR"
+            && value.as_ref() == Some(&std::ffi::OsString::from("/workspace/app/src-tauri/target"))
+    }));
+}
+
+#[test]
 fn build_native_artifact_preserves_source_and_payload_executable_mode() -> Result<()> {
     let tmp = tempdir()?;
     let plan = sample_native_build_plan(tmp.path(), 0o755)?;
