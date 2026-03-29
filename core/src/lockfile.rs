@@ -506,7 +506,7 @@ fn read_lockfile(path: &Path) -> Result<CapsuleLock> {
     parse_lockfile_text(&raw, path)
 }
 
-pub fn lockfile_output_path(manifest_dir: &Path) -> PathBuf {
+pub(crate) fn lockfile_output_path(manifest_dir: &Path) -> PathBuf {
     workspace_derived_dir(manifest_dir).join(CAPSULE_LOCK_FILE_NAME)
 }
 

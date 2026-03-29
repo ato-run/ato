@@ -54,6 +54,6 @@ pub fn engine_cache_dir() -> Result<PathBuf> {
 }
 
 /// Returns the workspace-local directory for generated compatibility artifacts.
-pub fn workspace_derived_dir(workspace_root: &Path) -> PathBuf {
+pub(crate) fn workspace_derived_dir(workspace_root: &Path) -> PathBuf {
     workspace_root.join(WORKSPACE_DERIVED_DIR)
 }
