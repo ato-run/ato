@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "tauri-private-publish",
+  "version": "1.0.0",
+  "identifier": "dev.ato.samples.tauri",
+  "build": {
+    "frontendDist": "../dist"
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all"
+  }
+}
