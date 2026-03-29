@@ -2,6 +2,18 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
+## [0.7.0] - 2026-03-29
+
+### What Changed
+
+#### Breaking Changes
+
+- Rename public packer option fields from manifest-path-first to workspace/compat-input-first wiring used by lock-first packaging flows
+
+#### Bug Fixes
+
+- Keep generated compatibility artifacts under .ato/derived instead of scattering capsule.lock.json, config.json, and lock input snapshots at the workspace root
+
 ## [0.6.0] - 2026-03-27
 
 ### What Changed
