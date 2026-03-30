@@ -173,6 +173,7 @@ pub(crate) async fn build_github_repository_checkout(
             None,
             false,
             false,
+            false,
             keep_failed_artifacts,
             false,
             EnforcementMode::Strict.as_str().to_string(),
@@ -1290,10 +1291,8 @@ pub(crate) fn backup_invalid_manifest(manifest_path: &Path) -> Result<PathBuf> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let backup_dir = parent
-        .join(".tmp")
-        .join("ato")
-        .join("run-invalid-manifests");
+    let backup_dir =
+        capsule_core::common::paths::workspace_tmp_dir(parent).join("run-invalid-manifests");
     std::fs::create_dir_all(&backup_dir).with_context(|| {
         format!(
             "failed to create invalid manifest backup directory {}",

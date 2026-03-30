@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+use crate::common::paths::workspace_artifacts_dir;
 use crate::error::CapsuleError;
 use crate::isolation::HostIsolationContext;
 
@@ -799,7 +800,12 @@ fn resolve_bundled_uv_cache_dir(root: &Path, service: &MainService) -> Option<St
     }
 
     let cwd_path = resolve_path(root, &service.cwd);
-    for base in [cwd_path.join("artifacts"), root.join("artifacts")] {
+    for base in [
+        workspace_artifacts_dir(&cwd_path),
+        cwd_path.join("artifacts"),
+        workspace_artifacts_dir(root),
+        root.join("artifacts"),
+    ] {
         let Ok(entries) = std::fs::read_dir(&base) else {
             continue;
         };
@@ -1189,7 +1195,9 @@ startup_timeout_ms = 0
     fn apply_isolated_command_env_prefers_bundled_uv_cache() {
         let temp = tempfile::tempdir().expect("tempdir");
         let source_dir = temp.path().join("source");
-        let cache_dir = source_dir.join("artifacts").join("app").join("uv-cache");
+        let cache_dir = workspace_artifacts_dir(&source_dir)
+            .join("app")
+            .join("uv-cache");
         fs::create_dir_all(&cache_dir).expect("mkdir uv-cache");
 
         let service = MainService {

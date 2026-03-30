@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use capsule_core::common::paths::workspace_tmp_dir;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,9 +31,7 @@ pub fn build_manual_manifest_path(base_dir: &Path, repository: &str, attempt_id:
             })
         });
 
-    base_dir
-        .join(".tmp")
-        .join("ato")
+    workspace_tmp_dir(base_dir)
         .join("inference")
         .join(repo_path)
         .join(attempt_id)
