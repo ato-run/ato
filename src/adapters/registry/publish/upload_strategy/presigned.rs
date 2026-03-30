@@ -15,11 +15,13 @@ pub(crate) struct PresignedUploadSession {
     pub(crate) capsule_id: String,
     pub(crate) version: String,
     pub(crate) upload_url: String,
+    pub(crate) already_existed: bool,
 }
 
 pub(crate) struct PresignedTransferArtifactResponse {
     pub(crate) capsule_id: String,
     pub(crate) version: String,
+    pub(crate) already_existed: bool,
 }
 
 #[derive(Debug, Default)]
@@ -63,6 +65,7 @@ impl UploadStrategy for PresignedUploadStrategy {
             capsule_id,
             version: release.version,
             upload_url: release.upload_url,
+            already_existed: release.already_existed,
         }))
     }
 
@@ -96,6 +99,7 @@ impl UploadStrategy for PresignedUploadStrategy {
             PresignedTransferArtifactResponse {
                 capsule_id: session.capsule_id,
                 version: session.version,
+                already_existed: session.already_existed,
             },
         ))
     }
@@ -138,7 +142,7 @@ impl UploadStrategy for PresignedUploadStrategy {
             sha256: request.artifact.sha256.clone(),
             blake3: request.artifact.blake3.clone(),
             size_bytes: request.artifact.size_bytes,
-            already_existed: false,
+            already_existed: transfer.already_existed,
             lock_id: request.artifact.lock_id.clone(),
             closure_digest: request.artifact.closure_digest.clone(),
             publish_metadata: request.artifact.publish_metadata.clone(),
@@ -166,6 +170,8 @@ struct CreateCapsuleResponse {
 struct CreateReleaseResponse {
     version: String,
     upload_url: String,
+    #[serde(default)]
+    already_existed: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -182,6 +188,7 @@ struct CreateCapsuleRequest {
 struct CreateReleaseRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     version: Option<String>,
+    allow_existing: bool,
     content_hash: String,
     size_bytes: u64,
     manifest: serde_json::Value,
@@ -356,6 +363,7 @@ fn create_release(
     let signature = signing_key.sign(artifact.blake3.as_bytes()).to_bytes();
     let body = CreateReleaseRequest {
         version: normalize_release_version(&artifact.version),
+        allow_existing: artifact.allow_existing,
         content_hash: artifact.blake3.clone(),
         size_bytes: artifact.size_bytes,
         manifest: build_release_manifest(artifact),
@@ -483,6 +491,8 @@ mod tests {
         uploaded_bytes: Option<Vec<u8>>,
         upload_auth_header: Option<String>,
         finalize_auth_header: Option<String>,
+        last_allow_existing: Option<bool>,
+        create_release_already_existed: bool,
     }
 
     #[derive(Clone, Default)]
@@ -500,6 +510,7 @@ mod tests {
     #[derive(Debug, Deserialize)]
     struct MockCreateReleaseRequest {
         version: Option<String>,
+        allow_existing: bool,
         content_hash: String,
         size_bytes: u64,
         signature: CreateReleaseSignature,
@@ -544,6 +555,10 @@ mod tests {
     ) -> Json<serde_json::Value> {
         assert_eq!(id, "capsule_ulid_demo");
         assert_eq!(body.version.as_deref(), Some("1.0.0"));
+        {
+            let mut guard = state.inner.lock().expect("lock state");
+            guard.last_allow_existing = Some(body.allow_existing);
+        }
         assert_eq!(body.content_hash, "blake3:demo");
         assert_eq!(body.size_bytes, 4);
         assert_eq!(body.signature.algorithm, "Ed25519");
@@ -555,6 +570,7 @@ mod tests {
         Json(json!({
             "version": "1.0.0",
             "upload_url": format!("http://{}/upload/{}/1.0.0", host, guard.capsule_id.clone().unwrap_or_default()),
+            "already_existed": guard.create_release_already_existed,
         }))
     }
 
@@ -682,6 +698,86 @@ mod tests {
         );
         assert_eq!(result.scoped_id, "pub-test/demo-app");
         assert_eq!(result.version, "1.0.0");
+        assert_eq!(guard.last_allow_existing, Some(false));
+
+        handle.abort();
+        let _ = runtime.block_on(handle);
+        drop(runtime);
+
+        if let Some(value) = previous_home {
+            std::env::set_var("HOME", value);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(value) = previous_token {
+            std::env::set_var("ATO_TOKEN", value);
+        } else {
+            std::env::remove_var("ATO_TOKEN");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn presigned_strategy_preserves_allow_existing_and_already_existed() {
+        let home = tempdir().expect("tempdir");
+        let previous_home = std::env::var("HOME").ok();
+        let previous_token = std::env::var("ATO_TOKEN").ok();
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("ATO_TOKEN", "test-session-token");
+
+        let key = write_test_signing_key(home.path());
+        let did = key.did().expect("did");
+        let state = MockServerState {
+            did,
+            inner: Arc::new(Mutex::new(MockServerData {
+                create_release_already_existed: true,
+                ..MockServerData::default()
+            })),
+        };
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let (base_url, handle) = runtime.block_on(start_mock_server(state.clone()));
+        let strategy = PresignedUploadStrategy;
+        let artifact = super::super::UploadArtifactDescriptor {
+            publisher: "pub-test".to_string(),
+            slug: "demo-app".to_string(),
+            version: "1.0.0".to_string(),
+            file_name: "demo-app-1.0.0.capsule".to_string(),
+            sha256: "sha256:demo".to_string(),
+            blake3: "blake3:demo".to_string(),
+            size_bytes: 4,
+            allow_existing: true,
+            lock_id: None,
+            closure_digest: None,
+            publish_metadata: None,
+        };
+
+        let session = strategy
+            .start_upload(&StartUploadRequest {
+                registry_url: base_url.clone(),
+                artifact: artifact.clone(),
+                force_large_payload: false,
+                paid_large_payload: false,
+            })
+            .expect("start upload");
+        let transfer = strategy
+            .transfer(TransferArtifactRequest {
+                registry_url: base_url.clone(),
+                session,
+                artifact_bytes: vec![1, 2, 3, 4],
+            })
+            .expect("transfer");
+        let result = strategy
+            .finalize_upload(FinalizeUploadRequest {
+                registry_url: base_url,
+                artifact,
+                transfer,
+                v3_sync_payload: None,
+            })
+            .expect("finalize");
+
+        let guard = state.inner.lock().expect("lock state");
+        assert_eq!(guard.last_allow_existing, Some(true));
+        assert!(result.already_existed);
 
         handle.abort();
         let _ = runtime.block_on(handle);

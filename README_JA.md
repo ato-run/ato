@@ -211,8 +211,10 @@ cargo build -p ato-cli
 P1 の移行用 experimental path:
 
 - `ATO_PUBLISH_UPLOAD_STRATEGY=presigned` を設定すると、互換 registry に対して新しい presigned upload strategy を明示 opt-in できます。
-- default は引き続き `direct` です。registry capability discovery と unverified Personal Dock parity が揃うまで自動切替はしません。
+- Managed Store の capability discovery は現在 `presigned` を default upload strategy として advertise しており、ato-cli は explicit override が無い限りそちらを選びます。
 - presigned strategy には、認証済み publisher session と、publisher onboarding で作成された local publisher signing key が必要です。
+- Managed Store の presigned publish は、`--allow-existing` parity と、registered だが未検証の publisher account を使う flow にも対応しました。
+- Managed Store の direct upload は現在、explicit な rollback/debug path としてだけ残しています。custom/private registry では direct upload を通常経路として引き続き使えます。
 
 ポイント:
 
