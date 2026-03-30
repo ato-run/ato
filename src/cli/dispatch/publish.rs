@@ -32,6 +32,7 @@ pub(crate) use crate::application::pipeline::producer::{
 pub(crate) fn execute_publish_ci_command(
     json_output: bool,
     force_large_payload: bool,
+    paid_large_payload: bool,
     reporter: Reporter,
 ) -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
@@ -40,6 +41,7 @@ pub(crate) fn execute_publish_ci_command(
             crate::publish_ci::PublishCiArgs {
                 json_output,
                 force_large_payload,
+                paid_large_payload,
             },
             reporter.clone(),
         )
@@ -134,6 +136,7 @@ pub(crate) struct PublishCommandArgs {
     pub(crate) deploy: bool,
     pub(crate) legacy_full_publish: bool,
     pub(crate) force_large_payload: bool,
+    pub(crate) paid_large_payload: bool,
     pub(crate) finalize_local: bool,
     pub(crate) allow_external_finalize: bool,
     pub(crate) fix: bool,
@@ -829,6 +832,7 @@ impl<'a> PublishCommandExecution<'a> {
                 publisher_hint: self.resolved_target.publisher_handle.clone(),
                 artifact_path: Some(publish_artifact),
                 force_large_payload: self.args.force_large_payload,
+                paid_large_payload: self.args.paid_large_payload,
                 scoped_id,
                 allow_existing: self.args.allow_existing,
                 lock_id: source_lock_metadata.0,
@@ -908,11 +912,12 @@ pub(crate) fn execute_publish_command(
     ci: bool,
     dry_run: bool,
     force_large_payload: bool,
+    paid_large_payload: bool,
     json: bool,
     reporter: Reporter,
 ) -> Result<()> {
     if ci {
-        execute_publish_ci_command(json, force_large_payload, reporter)
+        execute_publish_ci_command(json, force_large_payload, paid_large_payload, reporter)
     } else if dry_run {
         execute_publish_dry_run_command(args, reporter)
     } else {
@@ -975,6 +980,7 @@ fn execute_publish_pipeline(
                 publisher_hint: resolved_target.publisher_handle.clone(),
                 artifact_path: args.artifact.clone(),
                 force_large_payload: args.force_large_payload,
+                paid_large_payload: args.paid_large_payload,
                 scoped_id: args.scoped_id.clone(),
                 allow_existing: args.allow_existing,
                 lock_id: None,
@@ -1392,6 +1398,7 @@ mod tests {
             deploy: false,
             legacy_full_publish: false,
             force_large_payload: false,
+            paid_large_payload: false,
             finalize_local: false,
             allow_external_finalize: false,
             fix: false,

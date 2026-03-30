@@ -20,7 +20,7 @@ use crate::executors::launch_context::RuntimeLaunchContext;
 use crate::reporters::CliReporter;
 
 const AGENT_MODEL_DEFAULT: &str = "gpt-5-mini";
-const AGENT_ARTIFACT_SUBDIR: &str = ".tmp/ato/agent/runs";
+const AGENT_ARTIFACT_SUBDIR: &str = ".ato/tmp/agent/runs";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1518,7 +1518,7 @@ mod tests {
     }
 
     #[test]
-    fn session_store_uses_tmp_ato_agent_and_skips_tmp_copy() {
+    fn session_store_uses_ato_tmp_agent_and_skips_tmp_copy() {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(tmp.path().join("capsule.toml"), "name = 'demo'").expect("manifest");
         std::fs::write(tmp.path().join("package.json"), "{}").expect("package json");
@@ -1532,7 +1532,7 @@ mod tests {
         assert!(store
             .artifact_dir()
             .to_string_lossy()
-            .contains(".tmp/ato/agent/runs/run-"));
+            .contains(".ato/tmp/agent/runs/run-"));
         assert!(store.workspace_dir().join("package.json").exists());
         assert!(!store.workspace_dir().join(".tmp").exists());
     }

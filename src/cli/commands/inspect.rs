@@ -208,7 +208,7 @@ pub fn try_emit_json_error(err: &AnyhowError) -> bool {
 }
 
 const INSPECT_SCHEMA_VERSION: &str = "1";
-const RUN_SOURCE_INFERENCE_DIR: &str = ".tmp/source-inference";
+const RUN_SOURCE_INFERENCE_DIR: &str = ".ato/tmp/source-inference";
 const WORKSPACE_SOURCE_INFERENCE_DIR: &str = ".ato/source-inference";
 const WORKSPACE_BINDING_SEED_PATH: &str = ".ato/binding/seed.json";
 
