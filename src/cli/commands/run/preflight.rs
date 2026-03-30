@@ -57,6 +57,7 @@ fn resolve_nacelle_for_tier2(
     let request = capsule_core::engine::EngineRequest {
         explicit_path: nacelle_override.clone(),
         manifest_path: Some(plan.manifest_path.clone()),
+        compat_input: None,
     };
 
     match capsule_core::engine::discover_nacelle(request) {

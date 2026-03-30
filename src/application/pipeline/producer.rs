@@ -9,20 +9,13 @@ use crate::application::pipeline::hourglass::{
     HourglassFlow, HourglassPhase, HourglassPhaseSelection,
 };
 
-const PRODUCER_PHASE_SEQUENCE: &[HourglassPhase] = &[
-    HourglassPhase::Prepare,
-    HourglassPhase::Build,
-    HourglassPhase::Verify,
-    HourglassPhase::Install,
-    HourglassPhase::DryRun,
-    HourglassPhase::Publish,
-];
-
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct PublishPhaseOptions {
     pub(crate) fix: bool,
     pub(crate) legacy_full_publish: bool,
     pub(crate) allow_existing: bool,
+    pub(crate) finalize_local: bool,
+    pub(crate) allow_external_finalize: bool,
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PublishPipelineRequest {
@@ -32,6 +25,7 @@ pub(crate) struct PublishPipelineRequest {
     pub(crate) deploy: bool,
     pub(crate) is_official: bool,
     pub(crate) has_artifact: bool,
+    pub(crate) finalize_local: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -177,10 +171,15 @@ impl ProducerPipeline {
         R: HourglassPhaseRunner,
     {
         let mut attempt = PipelineAttemptContext::default();
+        let phases = self.selection.flow.phases();
+        let stop_index = phase_index(self.selection.flow, stop_point)
+            .unwrap_or_else(|| panic!("missing stop phase {}", stop_point.as_str()));
 
-        for phase in PRODUCER_PHASE_SEQUENCE {
+        for phase in phases {
             attempt.enter_phase(*phase);
-            let result = if *phase > stop_point {
+            let phase_index = phase_index(self.selection.flow, *phase)
+                .unwrap_or_else(|| panic!("missing phase {}", phase.as_str()));
+            let result = if phase_index > stop_index {
                 runner.skip_phase(*phase, &mut attempt).await
             } else if self.selection.runs(*phase) {
                 runner.run_phase(*phase, &mut attempt).await
@@ -203,7 +202,7 @@ pub(crate) fn build_publish_pipeline_plan(
     options: PublishPhaseOptions,
 ) -> Result<PublishPipelinePlan> {
     let selection = if request.top_level_dry_run {
-        select_publish_dry_run_phases(request.has_artifact)
+        select_publish_dry_run_phases(request.has_artifact, request.finalize_local)
     } else {
         select_publish_phases(
             request.prepare,
@@ -212,6 +211,7 @@ pub(crate) fn build_publish_pipeline_plan(
             request.is_official,
             options.legacy_full_publish,
             request.has_artifact,
+            request.finalize_local,
         )
     };
     validate_publish_phase_options(options, selection, request.is_official)?;
@@ -226,9 +226,16 @@ pub(crate) fn build_publish_pipeline_plan(
     })
 }
 
-pub(crate) fn select_publish_dry_run_phases(has_artifact: bool) -> HourglassPhaseSelection {
+pub(crate) fn select_publish_dry_run_phases(
+    has_artifact: bool,
+    finalize_local: bool,
+) -> HourglassPhaseSelection {
     HourglassPhaseSelection {
-        flow: HourglassFlow::ProducerPublish,
+        flow: if finalize_local && !has_artifact {
+            HourglassFlow::ProducerPublishFinalize
+        } else {
+            HourglassFlow::ProducerPublish
+        },
         start: if has_artifact {
             HourglassPhase::Verify
         } else {
@@ -246,6 +253,7 @@ pub(crate) fn select_publish_phases(
     is_official: bool,
     legacy_full_publish: bool,
     has_artifact: bool,
+    finalize_local: bool,
 ) -> HourglassPhaseSelection {
     let explicit_filter = prepare || build || deploy;
     let stop = if explicit_filter {
@@ -274,7 +282,11 @@ pub(crate) fn select_publish_phases(
     };
 
     HourglassPhaseSelection {
-        flow: HourglassFlow::ProducerPublish,
+        flow: if finalize_local && !has_artifact && !is_official {
+            HourglassFlow::ProducerPublishFinalize
+        } else {
+            HourglassFlow::ProducerPublish
+        },
         start,
         stop,
         explicit_filter,
@@ -302,7 +314,25 @@ pub(crate) fn validate_publish_phase_options(
         anyhow::bail!("--allow-existing is only available for private registry deploy phase");
     }
 
-    if selection.start > selection.stop {
+    if options.finalize_local && !options.allow_external_finalize {
+        anyhow::bail!("--finalize-local requires --allow-external-finalize");
+    }
+
+    if options.finalize_local && is_official {
+        anyhow::bail!("--finalize-local is not available with --ci/official publish");
+    }
+
+    if options.finalize_local && !selection.runs_build() {
+        anyhow::bail!("--finalize-local is only available for source publish, not --artifact");
+    }
+
+    if phase_index(selection.flow, selection.start).is_none()
+        || phase_index(selection.flow, selection.stop).is_none()
+    {
+        anyhow::bail!("The selected publish phase range is invalid for the active publish flow.");
+    }
+
+    if phase_index(selection.flow, selection.start) > phase_index(selection.flow, selection.stop) {
         anyhow::bail!(
             "The selected publish phase range is invalid. `--artifact` cannot be combined with stop points that end before Verify."
         );
@@ -394,6 +424,12 @@ pub(crate) fn should_warn_legacy_full_publish(
     options.legacy_full_publish && is_official && !selection.explicit_filter
 }
 
+fn phase_index(flow: HourglassFlow, phase: HourglassPhase) -> Option<usize> {
+    flow.phases()
+        .iter()
+        .position(|candidate| *candidate == phase)
+}
+
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
@@ -406,7 +442,7 @@ mod tests {
     };
     use crate::application::pipeline::cleanup::PipelineAttemptContext;
     use crate::application::pipeline::executor::HourglassPhaseRunner;
-    use crate::application::pipeline::hourglass::HourglassPhase;
+    use crate::application::pipeline::hourglass::{HourglassFlow, HourglassPhase};
 
     #[derive(Default)]
     struct Recorder {
@@ -436,7 +472,7 @@ mod tests {
 
     #[test]
     fn private_deploy_runs_install_and_dry_run() {
-        let selected = select_publish_phases(false, false, true, false, false, false);
+        let selected = select_publish_phases(false, false, true, false, false, false, false);
         assert!(selected.runs_prepare());
         assert!(selected.runs_build());
         assert!(selected.runs_verify());
@@ -447,21 +483,21 @@ mod tests {
 
     #[test]
     fn official_default_is_publish_only() {
-        let selected = select_publish_phases(false, false, false, true, false, false);
+        let selected = select_publish_phases(false, false, false, true, false, false, false);
         assert_eq!(selected.start, HourglassPhase::Publish);
         assert_eq!(selected.stop, HourglassPhase::Publish);
     }
 
     #[test]
     fn dry_run_with_artifact_starts_at_verify() {
-        let selected = select_publish_dry_run_phases(true);
+        let selected = select_publish_dry_run_phases(true, false);
         assert_eq!(selected.start, HourglassPhase::Verify);
         assert_eq!(selected.stop, HourglassPhase::DryRun);
     }
 
     #[test]
     fn validation_rejects_allow_existing_without_publish() {
-        let selected = select_publish_phases(false, true, false, false, false, false);
+        let selected = select_publish_phases(false, true, false, false, false, false, false);
         let err = validate_publish_phase_options(
             PublishPhaseOptions {
                 allow_existing: true,
@@ -476,7 +512,7 @@ mod tests {
 
     #[test]
     fn legacy_warning_only_applies_to_official_default() {
-        let selected = select_publish_phases(false, false, false, true, true, false);
+        let selected = select_publish_phases(false, false, false, true, true, false, false);
         assert!(should_warn_legacy_full_publish(
             PublishPhaseOptions {
                 legacy_full_publish: true,
@@ -497,6 +533,7 @@ mod tests {
                 deploy: false,
                 is_official: true,
                 has_artifact: false,
+                finalize_local: false,
             },
             PublishPhaseOptions {
                 legacy_full_publish: true,
@@ -513,7 +550,7 @@ mod tests {
     #[tokio::test]
     async fn producer_pipeline_runs_publish_phases_in_publish_order() {
         let pipeline = ProducerPipeline::new(select_publish_phases(
-            false, false, true, false, false, false,
+            false, false, true, false, false, false, false,
         ));
         let mut recorder = Recorder::default();
 
@@ -538,7 +575,7 @@ mod tests {
     #[tokio::test]
     async fn producer_pipeline_run_until_skips_after_stop_point() {
         let pipeline = ProducerPipeline::new(select_publish_phases(
-            false, false, true, false, false, false,
+            false, false, true, false, false, false, false,
         ));
         let mut recorder = Recorder::default();
 
@@ -556,6 +593,70 @@ mod tests {
                 (HourglassPhase::Install, "run"),
                 (HourglassPhase::DryRun, "skip"),
                 (HourglassPhase::Publish, "skip"),
+            ]
+        );
+    }
+
+    #[test]
+    fn finalize_local_uses_finalize_flow() {
+        let selected = select_publish_phases(false, false, true, false, false, false, true);
+        assert_eq!(selected.flow, HourglassFlow::ProducerPublishFinalize);
+        assert!(selected.runs_finalize());
+    }
+
+    #[test]
+    fn validation_rejects_finalize_without_external_permission() {
+        let selected = select_publish_phases(false, false, true, false, false, false, true);
+        let err = validate_publish_phase_options(
+            PublishPhaseOptions {
+                finalize_local: true,
+                ..PublishPhaseOptions::default()
+            },
+            selected,
+            false,
+        )
+        .expect_err("validation should fail");
+        assert!(err.to_string().contains("--allow-external-finalize"));
+    }
+
+    #[test]
+    fn validation_rejects_finalize_for_artifact_publish() {
+        let selected = select_publish_phases(false, false, true, false, false, true, true);
+        let err = validate_publish_phase_options(
+            PublishPhaseOptions {
+                finalize_local: true,
+                allow_external_finalize: true,
+                ..PublishPhaseOptions::default()
+            },
+            selected,
+            false,
+        )
+        .expect_err("validation should fail");
+        assert!(err.to_string().contains("--artifact"));
+    }
+
+    #[tokio::test]
+    async fn producer_pipeline_runs_finalize_publish_phases_in_order() {
+        let pipeline = ProducerPipeline::new(select_publish_phases(
+            false, false, true, false, false, false, true,
+        ));
+        let mut recorder = Recorder::default();
+
+        pipeline
+            .run_until(HourglassPhase::Publish, &mut recorder)
+            .await
+            .expect("run pipeline");
+
+        assert_eq!(
+            recorder.entries,
+            vec![
+                (HourglassPhase::Prepare, "run"),
+                (HourglassPhase::Build, "run"),
+                (HourglassPhase::Install, "run"),
+                (HourglassPhase::Finalize, "run"),
+                (HourglassPhase::Verify, "run"),
+                (HourglassPhase::DryRun, "run"),
+                (HourglassPhase::Publish, "run"),
             ]
         );
     }

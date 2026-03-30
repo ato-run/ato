@@ -671,7 +671,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     emit_run_phase_failure(self.args, HourglassPhase::Execute, err);
                 })
             }
-            HourglassPhase::Publish => anyhow::bail!(
+            HourglassPhase::Finalize | HourglassPhase::Publish => anyhow::bail!(
                 "unsupported run pipeline phase {} in run command",
                 phase.as_str()
             ),
@@ -698,6 +698,9 @@ fn run_phase_detail(boundary: HourglassPhase) -> &'static str {
         HourglassPhase::Install => "target resolution and install",
         HourglassPhase::Prepare => "manifest and launch context resolution",
         HourglassPhase::Build => "build and lifecycle hooks",
+        HourglassPhase::Finalize => {
+            panic!("unsupported run phase {}", boundary.as_str())
+        }
         HourglassPhase::Verify => "execution plan verification",
         HourglassPhase::DryRun => "runtime preflight",
         HourglassPhase::Execute => "capsule execution",
@@ -761,6 +764,33 @@ async fn normalize_run_target_after_install(
         return Ok(NormalizedRunTarget {
             target,
             authoritative_input: None,
+        });
+    }
+
+    if resolved_target.is_file()
+        && resolved_target
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| {
+                value.eq_ignore_ascii_case("exe") || value.eq_ignore_ascii_case("AppImage")
+            })
+            .unwrap_or(false)
+    {
+        let mut cleanup_scope = attempt.map(|attempt| attempt.cleanup_scope());
+        let materialized = source_inference::materialize_run_from_explicit_native_artifact(
+            resolved_target,
+            cleanup_scope.as_mut(),
+            args.reporter.clone(),
+            args.assume_yes,
+        )?;
+        let target = materialized.project_root.clone();
+        return Ok(NormalizedRunTarget {
+            target,
+            authoritative_input: Some(authoritative_input_from_materialization(
+                materialized,
+                &args.state_bindings,
+                None,
+            )?),
         });
     }
 
@@ -1486,6 +1516,61 @@ run_command = "node server.js"
         assert!(normalized.authoritative_input.is_some());
         assert_eq!(normalized.target, tmp.path().canonicalize().unwrap());
         assert!(normalized.target.exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn normalize_run_target_accepts_direct_appimage_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let appimage_path = tmp.path().join("dist").join("MyApp.AppImage");
+        std::fs::create_dir_all(appimage_path.parent().expect("dist parent")).expect("create dist");
+        std::fs::write(&appimage_path, "appimage").expect("write appimage");
+
+        let args = RunArgs {
+            target: appimage_path.clone(),
+            target_label: None,
+            watch: false,
+            background: false,
+            nacelle: None,
+            registry: None,
+            enforcement: "best_effort".to_string(),
+            sandbox_mode: false,
+            dangerously_skip_permissions: false,
+            compatibility_fallback: None,
+            assume_yes: true,
+            agent_mode: crate::RunAgentMode::Off,
+            agent_local_root: Some(tmp.path().to_path_buf()),
+            keep_failed_artifacts: false,
+            auto_fix_mode: None,
+            allow_unverified: false,
+            state_bindings: Vec::new(),
+            inject_bindings: Vec::new(),
+            reporter: Arc::new(CliReporter::new(true)),
+            preview_mode: false,
+        };
+
+        let normalized = normalize_run_target_after_install(&args, &appimage_path, None)
+            .await
+            .expect("normalize target");
+        let authoritative = normalized
+            .authoritative_input
+            .as_ref()
+            .expect("authoritative input");
+        let routed = capsule_core::router::route_lock(
+            &authoritative.lock_path,
+            &authoritative.lock,
+            &authoritative.workspace_root,
+            capsule_core::router::ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route lock");
+
+        assert_eq!(normalized.target, tmp.path().join("dist"));
+        assert_eq!(routed.plan.execution_driver().as_deref(), Some("native"));
+        assert_eq!(routed.plan.selected_target_label(), "desktop");
+        assert_eq!(
+            routed.plan.execution_entrypoint().as_deref(),
+            Some("MyApp.AppImage")
+        );
     }
 
     #[test]

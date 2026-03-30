@@ -8,7 +8,7 @@ use crate::application::pipeline::cleanup::PipelineAttemptContext;
 use crate::application::pipeline::executor::HourglassPhaseRunner;
 use crate::application::pipeline::hourglass::{
     self, phase_is_ok, phase_mark_failed, phase_mark_ok, phase_mark_skipped, phase_mut,
-    HourglassFlow, HourglassPhaseState,
+    HourglassPhaseState,
 };
 use crate::application::pipeline::phases::install as install_phase;
 use crate::application::pipeline::phases::publish as publish_phase;
@@ -132,6 +132,8 @@ pub(crate) struct PublishCommandArgs {
     pub(crate) deploy: bool,
     pub(crate) legacy_full_publish: bool,
     pub(crate) force_large_payload: bool,
+    pub(crate) finalize_local: bool,
+    pub(crate) allow_external_finalize: bool,
     pub(crate) fix: bool,
     pub(crate) no_tui: bool,
     pub(crate) json: bool,
@@ -152,6 +154,8 @@ pub(crate) fn validate_publish_phase_options(
             fix: args.fix,
             legacy_full_publish: args.legacy_full_publish,
             allow_existing: args.allow_existing,
+            finalize_local: args.finalize_local,
+            allow_external_finalize: args.allow_external_finalize,
         },
         selection,
         is_official,
@@ -172,6 +176,7 @@ struct PublishCommandExecution<'a> {
     pipeline_preview: Option<publish_phase::PrivatePublishSummary>,
     private_result: Option<publish_phase::PrivatePublishResult>,
     official_result: Option<publish_phase::OfficialPublishOutcome>,
+    authoritative_input: Option<crate::application::producer_input::ProducerAuthoritativeInput>,
 }
 
 impl<'a> PublishCommandExecution<'a> {
@@ -185,6 +190,7 @@ impl<'a> PublishCommandExecution<'a> {
         phases: Vec<PublishPhaseResult>,
         cwd: PathBuf,
         pipeline_preview: Option<publish_phase::PrivatePublishSummary>,
+        authoritative_input: Option<crate::application::producer_input::ProducerAuthoritativeInput>,
     ) -> Self {
         let state = if let Some(preview) = pipeline_preview.as_ref() {
             PublishPipelineState::default()
@@ -204,6 +210,7 @@ impl<'a> PublishCommandExecution<'a> {
             pipeline_preview,
             private_result: None,
             official_result: None,
+            authoritative_input,
         }
     }
 
@@ -315,7 +322,17 @@ impl<'a> PublishCommandExecution<'a> {
             return Ok(());
         }
 
-        let artifact_path = build_capsule_artifact_for_publish(&self.cwd)?;
+        let authoritative_input = self
+            .authoritative_input
+            .as_ref()
+            .context("build phase requires authoritative source input")?;
+        if self.args.finalize_local {
+            authoritative_input.ensure_finalize_local_publish_ready()?;
+        } else {
+            authoritative_input.ensure_desktop_source_publish_ready()?;
+        }
+        let artifact_path =
+            build_capsule_artifact_for_publish(&self.cwd, Some(authoritative_input))?;
         let elapsed = started.elapsed().as_millis() as u64;
         let message = format!("artifact built: {}", artifact_path.display());
         phase_mark_ok(
@@ -404,10 +421,7 @@ impl<'a> PublishCommandExecution<'a> {
             .state
             .artifact_path()
             .context("install phase requires a verified artifact")?;
-        let verification = self
-            .state
-            .verified_artifact()
-            .context("install phase requires verified artifact metadata")?;
+        let verification = self.state.verified_artifact();
         let install_result = install_phase::run_publish_install_phase_async(
             artifact_path,
             preview,
@@ -429,6 +443,51 @@ impl<'a> PublishCommandExecution<'a> {
             &message,
         );
         self.state.record_install_result(install_result);
+        Ok(())
+    }
+
+    fn run_finalize_phase(&mut self) -> Result<()> {
+        hourglass::print_phase_line(
+            self.args.json,
+            PublishPhaseBoundary::Finalize,
+            HourglassPhaseState::Run,
+            "local finalize and repack",
+        );
+        let started = std::time::Instant::now();
+        let authoritative_input = self
+            .authoritative_input
+            .as_ref()
+            .context("finalize phase requires authoritative source input")?;
+        authoritative_input.ensure_finalize_local_publish_ready()?;
+        let preview = self
+            .pipeline_preview
+            .as_ref()
+            .context("missing publish pipeline preview for finalize stage")?;
+        let unsigned_artifact = self.state.artifact_path().context(
+            "finalize phase requires an unsigned artifact built earlier in the pipeline",
+        )?;
+        let lock_json = authoritative_input.serialized_lock_json()?;
+        let signed = crate::build::native_delivery::finalize_capsule_artifact_for_publish(
+            unsigned_artifact,
+            &preview.scoped_id,
+            &preview.version,
+            Some(lock_json.as_str()),
+            self.args.allow_external_finalize,
+        )?;
+        let message = format!("finalized {}", signed.artifact_path.display());
+        phase_mark_ok(
+            phase_mut(&mut self.phases, PublishPhaseBoundary::Finalize),
+            started.elapsed().as_millis() as u64,
+            message.clone(),
+            Some(signed.identity_class.to_string()),
+        );
+        self.state.record_built_artifact(signed.artifact_path);
+        hourglass::print_phase_line(
+            self.args.json,
+            PublishPhaseBoundary::Finalize,
+            HourglassPhaseState::Ok,
+            &message,
+        );
         Ok(())
     }
 
@@ -695,11 +754,19 @@ impl<'a> PublishCommandExecution<'a> {
             Some(preview.scoped_id.clone())
         };
         let source_lock_metadata = if source_is_artifact {
-            (None, None)
+            (None, None, None)
         } else {
-            let resolved =
-                resolve_producer_authoritative_input(&self.cwd, self.reporter.clone(), false)?;
-            (resolved.lock_id, resolved.closure_digest)
+            let resolved = self
+                .authoritative_input
+                .as_ref()
+                .context("publish phase requires authoritative source input")?;
+            let publish_metadata =
+                resolved.publish_metadata_for_source_artifact(self.args.finalize_local);
+            (
+                resolved.lock_id.clone(),
+                resolved.closure_digest.clone(),
+                publish_metadata,
+            )
         };
         let upload_result =
             publish_phase::run_private_publish_phase_async(publish_phase::PrivatePublishRequest {
@@ -711,6 +778,7 @@ impl<'a> PublishCommandExecution<'a> {
                 allow_existing: self.args.allow_existing,
                 lock_id: source_lock_metadata.0,
                 closure_digest: source_lock_metadata.1,
+                publish_metadata: source_lock_metadata.2,
             })
             .await;
         if !self.args.json {
@@ -746,6 +814,7 @@ impl HourglassPhaseRunner for PublishCommandExecution<'_> {
         match phase {
             PublishPhaseBoundary::Prepare => self.run_prepare_phase(),
             PublishPhaseBoundary::Build => self.run_build_phase(),
+            PublishPhaseBoundary::Finalize => self.run_finalize_phase(),
             PublishPhaseBoundary::Verify => self.run_verify_phase(),
             PublishPhaseBoundary::Install => self.run_install_phase(attempt).await,
             PublishPhaseBoundary::DryRun => self.run_dry_run_phase().await,
@@ -764,6 +833,7 @@ impl HourglassPhaseRunner for PublishCommandExecution<'_> {
         match phase {
             PublishPhaseBoundary::Prepare
             | PublishPhaseBoundary::Build
+            | PublishPhaseBoundary::Finalize
             | PublishPhaseBoundary::Verify
             | PublishPhaseBoundary::Install
             | PublishPhaseBoundary::DryRun
@@ -810,21 +880,34 @@ fn execute_publish_pipeline(
             deploy: args.deploy,
             is_official,
             has_artifact: args.artifact.is_some(),
+            finalize_local: args.finalize_local,
         },
         PublishPhaseOptions {
             fix: args.fix,
             legacy_full_publish: args.legacy_full_publish,
             allow_existing: args.allow_existing,
+            finalize_local: args.finalize_local,
+            allow_external_finalize: args.allow_external_finalize,
         },
     )?;
     let selection = plan.selection;
-    ensure_publish_source_manifest_ready(&args)?;
+    let authoritative_input = resolve_publish_source_authoritative_input(&args)?;
+    if is_official
+        && authoritative_input
+            .as_ref()
+            .and_then(|input| input.desktop_source_publish_contract())
+            .is_some()
+    {
+        anyhow::bail!(
+            "official/CI publish does not yet support Tauri/Electron/Wails source publish; use private/local registry publish first"
+        );
+    }
     if resolved_target.mode.is_personal_dock() && selection.runs_publish() {
         let _ = crate::auth::require_session_token()?;
     }
     maybe_warn_legacy_full_publish(plan.warn_legacy_full_publish);
     let _ = args.no_tui;
-    let phases = hourglass::new_phase_results(HourglassFlow::ProducerPublish, selection);
+    let phases = hourglass::new_phase_results(selection.flow, selection);
 
     let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
     let pipeline_preview = if selection.runs_install()
@@ -841,6 +924,7 @@ fn execute_publish_pipeline(
                 allow_existing: args.allow_existing,
                 lock_id: None,
                 closure_digest: None,
+                publish_metadata: None,
             },
         )?)
     } else {
@@ -857,6 +941,7 @@ fn execute_publish_pipeline(
         phases,
         cwd,
         pipeline_preview,
+        authoritative_input,
     );
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => tokio::task::block_in_place(|| {
@@ -1014,26 +1099,40 @@ fn maybe_warn_legacy_full_publish(should_warn: bool) {
     }
 }
 
-fn build_capsule_artifact_for_publish(cwd: &Path) -> Result<PathBuf> {
-    let authoritative_input = resolve_producer_authoritative_input(
-        cwd,
-        std::sync::Arc::new(crate::reporters::CliReporter::new(false)),
-        false,
-    )?;
-    let manifest_path = authoritative_input.manifest_path.clone();
-    let manifest = authoritative_input.manifest.clone();
-    let version = if manifest.version.trim().is_empty() {
+fn build_capsule_artifact_for_publish(
+    cwd: &Path,
+    authoritative_input: Option<&crate::application::producer_input::ProducerAuthoritativeInput>,
+) -> Result<PathBuf> {
+    let owned_input;
+    let authoritative_input = if let Some(authoritative_input) = authoritative_input {
+        authoritative_input
+    } else {
+        owned_input = resolve_producer_authoritative_input(
+            cwd,
+            std::sync::Arc::new(crate::reporters::CliReporter::new(false)),
+            false,
+        )?;
+        &owned_input
+    };
+    let metadata = &authoritative_input.descriptor.runtime_model.metadata;
+    let name = metadata
+        .name
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .context("authoritative lock metadata is missing package name")?;
+    let version = if metadata
+        .version
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
         "auto"
     } else {
-        manifest.version.trim()
+        metadata.version.as_deref().unwrap_or_default().trim()
     };
-    crate::publish_ci::build_capsule_artifact(
-        &manifest_path,
-        &manifest.name,
-        version,
-        Some(&authoritative_input),
-    )
-    .with_context(|| "Failed to build artifact for publish")
+    crate::publish_ci::build_capsule_artifact(&name, version, Some(authoritative_input), None)
+        .with_context(|| "Failed to build artifact for publish")
 }
 
 fn emit_publish_json_output(
@@ -1132,9 +1231,11 @@ fn resolve_publish_target(cli_registry: Option<String>) -> Result<ResolvedPublis
     producer::resolve_publish_target_from_sources(None, None, publisher_handle.as_deref())
 }
 
-fn ensure_publish_source_manifest_ready(args: &PublishCommandArgs) -> Result<()> {
+fn resolve_publish_source_authoritative_input(
+    args: &PublishCommandArgs,
+) -> Result<Option<crate::application::producer_input::ProducerAuthoritativeInput>> {
     if args.artifact.is_some() {
-        return Ok(());
+        return Ok(None);
     }
 
     let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
@@ -1143,7 +1244,7 @@ fn ensure_publish_source_manifest_ready(args: &PublishCommandArgs) -> Result<()>
         std::sync::Arc::new(crate::reporters::CliReporter::new(false)),
         false,
     )
-    .map(|_| ())
+    .map(Some)
 }
 
 fn discover_manifest_publish_registry() -> Result<Option<String>> {
@@ -1156,19 +1257,110 @@ fn discover_manifest_publish_registry() -> Result<Option<String>> {
         Ok(value) => value,
         Err(_) => return Ok(None),
     };
-    let parsed: toml::Value =
-        toml::from_str(&authoritative_input.manifest_raw).with_context(|| {
-            format!(
-                "Failed to parse {}",
-                authoritative_input.manifest_path.display()
-            )
-        })?;
+    Ok(authoritative_input.compatibility_publish_registry())
+}
 
-    Ok(parsed
-        .get("store")
-        .and_then(|v| v.get("registry"))
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(ToOwned::to_owned))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct CwdGuard {
+        original: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn set_to(path: &Path) -> Self {
+            let original = std::env::current_dir().expect("cwd");
+            std::env::set_current_dir(path).expect("set cwd");
+            Self { original }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
+    #[test]
+    fn build_capsule_artifact_for_publish_does_not_materialize_capsule_toml() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"demo","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("package.json");
+        std::fs::write(
+            tmp.path().join("package-lock.json"),
+            r#"{"name":"demo","lockfileVersion":3,"packages":{}}"#,
+        )
+        .expect("package-lock.json");
+        std::fs::write(tmp.path().join("index.js"), "console.log('demo');\n").expect("index.js");
+        let _guard = CwdGuard::set_to(tmp.path());
+
+        let error = build_capsule_artifact_for_publish(tmp.path(), None)
+            .expect_err("publish build may fail but must not materialize manifest");
+        assert!(!error.to_string().is_empty());
+        assert!(!tmp.path().join("capsule.toml").exists());
+    }
+
+    #[test]
+    fn resolve_publish_source_authoritative_input_does_not_materialize_capsule_toml() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"demo","version":"0.1.0","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("package.json");
+        std::fs::write(
+            tmp.path().join("package-lock.json"),
+            r#"{"name":"demo","version":"0.1.0","lockfileVersion":3,"packages":{}}"#,
+        )
+        .expect("package-lock.json");
+        std::fs::write(tmp.path().join("index.js"), "console.log('demo');\n").expect("index.js");
+        let _guard = CwdGuard::set_to(tmp.path());
+
+        resolve_publish_source_authoritative_input(&PublishCommandArgs {
+            registry: None,
+            artifact: None,
+            scoped_id: None,
+            allow_existing: false,
+            prepare: false,
+            build: false,
+            deploy: false,
+            legacy_full_publish: false,
+            force_large_payload: false,
+            finalize_local: false,
+            allow_external_finalize: false,
+            fix: false,
+            no_tui: true,
+            json: true,
+        })
+        .expect("authoritative publish source should resolve without manifest write")
+        .expect("source authoritative input");
+
+        assert!(!tmp.path().join("capsule.toml").exists());
+    }
+
+    #[test]
+    fn discover_manifest_publish_registry_does_not_materialize_capsule_toml() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"demo","version":"0.1.0","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("package.json");
+        std::fs::write(
+            tmp.path().join("package-lock.json"),
+            r#"{"name":"demo","version":"0.1.0","lockfileVersion":3,"packages":{}}"#,
+        )
+        .expect("package-lock.json");
+        std::fs::write(tmp.path().join("index.js"), "console.log('demo');\n").expect("index.js");
+        let _guard = CwdGuard::set_to(tmp.path());
+
+        let registry = discover_manifest_publish_registry().expect("discover publish registry");
+
+        assert!(registry.is_none());
+        assert!(!tmp.path().join("capsule.toml").exists());
+    }
 }
