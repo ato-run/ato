@@ -181,6 +181,8 @@ Important rules:
 - if a local directory or local manifest path does not resolve to a valid capsule.toml, ato pauses normal execution and offers to generate a new capsule.toml through the existing init flow
 - if consent is granted or -y is passed, the generated manifest is written to the local project root before the run pipeline continues
 - if an invalid capsule.toml already exists, ato first backs it up under `.tmp/ato/run-invalid-manifests/` before regeneration
+- when `ato run publisher/slug` resolves to an installed desktop-native capsule that has already completed host-local derivation, Execute launches the locally derived app bundle through the platform launcher instead of supervising the extracted runtime-tree bundle as a long-running service
+- for that desktop-native open-only path, `--background` records the launch request and returns success without waiting for service-style readiness events
 
 Current lock-first contract:
 
@@ -245,6 +247,7 @@ Current contract:
 - install remains verification-first and lock-first for artifact semantics
 - launcher projection, preview/manual recovery, and some persistence paths still retain transitional `source_manifest_path` plumbing during migration
 - those transitional paths are compatibility surfaces for install/projection workflows and are not intended to redefine canonical execution semantics
+- for desktop-native installs that require host-local derivation, the launchable surface is the derived app under `~/.ato/apps/.../derived-*`, not the immutable `.capsule` under `~/.ato/store`
 
 ### init
 
@@ -320,6 +323,13 @@ Internal Pipeline Phases (Producer Flow):
 4. Install: unpacks the verified artifact into a temporary test sandbox so later producer phases validate the installable result; this is not the public `ato install` command
 5. Dry-run: simulates registry communication, permission checks, and upload readiness without external side effects
 6. Publish: deploys the verified artifact to the selected destination such as Local CAS, Store, or a remote registry
+
+Current prepare-stage behavior for source-backed publish:
+
+- lockfile-backed dependency resolution belongs to `Prepare`, not `Build`
+- `Prepare` may run one or more dependency materialization steps such as `npm ci`, `yarn install --frozen-lockfile`, `pnpm install --frozen-lockfile`, `bun install --frozen-lockfile`, `uv sync --frozen`, `cargo fetch --locked`, or `cargo generate-lockfile` when native source evidence is present but `Cargo.lock` is still missing
+- when both ecosystems are present, such as Tauri source with Node and Cargo lockfiles, `Prepare` may execute multiple dependency-resolution steps before any explicit prepare lifecycle hook
+- explicit lifecycle prepare hooks such as `build.lifecycle.prepare` or `package.json` `scripts["capsule:prepare"]` run after lockfile-backed dependency resolution
 
 Phase selection rules:
 
