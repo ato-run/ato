@@ -1956,28 +1956,17 @@ fn infer_source_native_build_command(
     framework: capsule_core::importer::ImporterId,
 ) -> Option<NativeBuildCommand> {
     if let Some(node) = detected.node.as_ref() {
+        if matches!(framework, capsule_core::importer::ImporterId::Tauri) && node.scripts.has_tauri
+        {
+            return Some(tauri_build_command(project_root, node.package_manager));
+        }
+
         if node.scripts.has_build {
-            let (program, args) = match node.package_manager {
-                NodePackageManager::Bun => (
-                    "bun".to_string(),
-                    vec!["run".to_string(), "build".to_string()],
-                ),
-                NodePackageManager::Deno => (
-                    "deno".to_string(),
-                    vec!["task".to_string(), "build".to_string()],
-                ),
-                NodePackageManager::Pnpm => ("pnpm".to_string(), vec!["build".to_string()]),
-                NodePackageManager::Yarn => ("yarn".to_string(), vec!["build".to_string()]),
-                NodePackageManager::Npm | NodePackageManager::Unknown => (
-                    "npm".to_string(),
-                    vec!["run".to_string(), "build".to_string()],
-                ),
-            };
-            return Some(NativeBuildCommand {
-                program,
-                args,
-                working_dir: project_root.to_path_buf(),
-            });
+            return Some(node_script_build_command(
+                project_root,
+                node.package_manager,
+                "build",
+            ));
         }
     }
 
@@ -2004,6 +1993,68 @@ fn infer_source_native_build_command(
             })
         }
         _ => None,
+    }
+}
+
+fn node_script_build_command(
+    project_root: &Path,
+    package_manager: NodePackageManager,
+    script_name: &str,
+) -> NativeBuildCommand {
+    let (program, args) = node_script_command(package_manager, script_name, &[]);
+    NativeBuildCommand {
+        program,
+        args,
+        working_dir: project_root.to_path_buf(),
+    }
+}
+
+fn tauri_build_command(
+    project_root: &Path,
+    package_manager: NodePackageManager,
+) -> NativeBuildCommand {
+    let (program, args) = node_script_command(package_manager, "tauri", &["build"]);
+    NativeBuildCommand {
+        program,
+        args,
+        working_dir: project_root.to_path_buf(),
+    }
+}
+
+fn node_script_command(
+    package_manager: NodePackageManager,
+    script_name: &str,
+    trailing_args: &[&str],
+) -> (String, Vec<String>) {
+    match package_manager {
+        NodePackageManager::Bun => {
+            let mut args = vec!["run".to_string(), script_name.to_string()];
+            args.extend(trailing_args.iter().map(|value| (*value).to_string()));
+            ("bun".to_string(), args)
+        }
+        NodePackageManager::Deno => {
+            let mut args = vec!["task".to_string(), script_name.to_string()];
+            args.extend(trailing_args.iter().map(|value| (*value).to_string()));
+            ("deno".to_string(), args)
+        }
+        NodePackageManager::Pnpm => {
+            let mut args = vec![script_name.to_string()];
+            args.extend(trailing_args.iter().map(|value| (*value).to_string()));
+            ("pnpm".to_string(), args)
+        }
+        NodePackageManager::Yarn => {
+            let mut args = vec![script_name.to_string()];
+            args.extend(trailing_args.iter().map(|value| (*value).to_string()));
+            ("yarn".to_string(), args)
+        }
+        NodePackageManager::Npm | NodePackageManager::Unknown => {
+            let mut args = vec!["run".to_string(), script_name.to_string()];
+            if !trailing_args.is_empty() {
+                args.push("--".to_string());
+                args.extend(trailing_args.iter().map(|value| (*value).to_string()));
+            }
+            ("npm".to_string(), args)
+        }
     }
 }
 
@@ -4348,6 +4399,87 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
                         .iter()
                         .any(|value| value.as_str() == Some("codesign"))
             }));
+    }
+
+    #[test]
+    fn durable_init_source_only_tauri_promotes_with_nested_cargo_lock() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+                dir.path().join("package.json"),
+                r#"{"name":"my-tauri-app","version":"1.2.3","scripts":{"build":"npm run tauri build"}}"#,
+            )
+            .expect("write package json");
+        fs::write(dir.path().join("package-lock.json"), "{}\n").expect("write package lock");
+        fs::create_dir_all(dir.path().join("src-tauri")).expect("create src-tauri");
+        fs::write(dir.path().join("src-tauri/Cargo.lock"), "version = 3\n")
+            .expect("write nested cargo lock");
+        fs::write(
+            dir.path().join("src-tauri/Cargo.toml"),
+            "[package]\nname = \"my-tauri-app\"\nversion = \"1.2.3\"\n",
+        )
+        .expect("write Cargo.toml");
+        fs::write(dir.path().join("src-tauri/tauri.conf.json"), "{}\n")
+            .expect("write tauri config");
+        write_macos_app_bundle(
+            &dir.path()
+                .join("src-tauri/target/release/bundle/macos/my-tauri-app.app"),
+        );
+
+        let materialized = execute_init_from_source_only(dir.path(), reporter(), true)
+            .expect("materialize tauri workspace");
+        let lock = load_materialized_lock(&materialized.lock_path);
+
+        let delivery = lock
+            .contract
+            .entries
+            .get("delivery")
+            .expect("contract.delivery");
+        let environment = lock
+            .resolution
+            .entries
+            .get("closure")
+            .and_then(|value| value.get("build_environment"))
+            .and_then(Value::as_object)
+            .expect("build_environment");
+
+        assert_eq!(
+            delivery.get("mode").and_then(Value::as_str),
+            Some("source-derivation")
+        );
+        assert!(environment
+            .get("package_managers")
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                values.iter().any(|value| value.as_str() == Some("cargo"))
+                    && values.iter().any(|value| value.as_str() == Some("npm"))
+            }));
+    }
+
+    #[test]
+    fn infer_source_native_build_command_prefers_tauri_script_over_generic_build() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"my-tauri-app","version":"1.2.3","scripts":{"build":"tsc && vite build","tauri":"tauri"},"packageManager":"npm@10.0.0"}"#,
+        )
+        .expect("write package json");
+        fs::create_dir_all(dir.path().join("src-tauri")).expect("create src-tauri");
+        fs::write(
+            dir.path().join("src-tauri/Cargo.toml"),
+            "[package]\nname = \"my-tauri-app\"\nversion = \"1.2.3\"\n",
+        )
+        .expect("write Cargo.toml");
+
+        let detected = detect_project(dir.path()).expect("detect project");
+        let command = infer_source_native_build_command(
+            dir.path(),
+            &detected,
+            capsule_core::importer::ImporterId::Tauri,
+        )
+        .expect("build command");
+
+        assert_eq!(command.program, "npm");
+        assert_eq!(command.args, vec!["run", "tauri", "--", "build"]);
     }
 
     #[test]
