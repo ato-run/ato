@@ -378,6 +378,7 @@ fn build_consumer_run_request(args: &RunArgs) -> run_phase::ConsumerRunRequest {
         target: args.target.clone(),
         target_label: args.target_label.clone(),
         authoritative_input: None,
+        desktop_open_path: None,
         background: args.background,
         nacelle: args.nacelle.clone(),
         enforcement: args.enforcement.clone(),
@@ -403,11 +404,13 @@ fn build_consumer_run_request_with_target(
     target: &Path,
     agent_local_root: Option<PathBuf>,
     authoritative_input: Option<run_phase::RunAuthoritativeInput>,
+    desktop_open_path: Option<PathBuf>,
 ) -> run_phase::ConsumerRunRequest {
     let mut request = build_consumer_run_request(args);
     request.target = target.to_path_buf();
     request.agent_local_root = agent_local_root;
     request.authoritative_input = authoritative_input;
+    request.desktop_open_path = desktop_open_path;
     request
 }
 
@@ -415,6 +418,7 @@ fn build_consumer_run_request_with_target(
 struct NormalizedRunTarget {
     target: PathBuf,
     authoritative_input: Option<run_phase::RunAuthoritativeInput>,
+    desktop_open_path: Option<PathBuf>,
 }
 
 fn authoritative_input_from_materialization(
@@ -463,6 +467,7 @@ impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
         runtime: String,
         scoped_id: Option<String>,
         ready_without_events: bool,
+        desktop_open_only: bool,
         compatibility_host_mode: CompatibilityHostMode,
         reporter: &Arc<CliReporter>,
     ) -> Result<()> {
@@ -471,8 +476,11 @@ impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
             plan,
             runtime,
             scoped_id,
-            ready_without_events,
-            compatibility_host_mode,
+            BackgroundCompletionOptions {
+                ready_without_events,
+                desktop_open_only,
+                compatibility_host_mode,
+            },
             reporter,
         )
         .await
@@ -484,6 +492,7 @@ impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
         reporter: Arc<CliReporter>,
         sandbox_initialized: bool,
         ipc_socket_mapped: bool,
+        desktop_open_only: bool,
         use_progressive_ui: bool,
     ) -> Result<i32> {
         complete_foreground_source_process(
@@ -491,6 +500,7 @@ impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
             reporter,
             sandbox_initialized,
             ipc_socket_mapped,
+            desktop_open_only,
             use_progressive_ui,
         )
         .await
@@ -540,6 +550,7 @@ struct ConsumerRunPhaseRunner<'a> {
     state: Option<RunPipelineState>,
     target: Option<PathBuf>,
     authoritative_input: Option<run_phase::RunAuthoritativeInput>,
+    desktop_open_path: Option<PathBuf>,
     agent_local_root: Option<PathBuf>,
     should_stop_after_install: bool,
 }
@@ -586,6 +597,9 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                 })?;
                 self.target = Some(normalized.target);
                 self.authoritative_input = normalized.authoritative_input;
+                self.desktop_open_path = normalized
+                    .desktop_open_path
+                    .or(install.resolved_target.desktop_open_path);
                 self.agent_local_root = install.resolved_target.agent_local_root;
                 self.should_stop_after_install = matches!(
                     install.manifest_outcome,
@@ -599,6 +613,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     self.resolved_target(),
                     self.agent_local_root.clone(),
                     self.authoritative_input.clone(),
+                    self.desktop_open_path.clone(),
                     Some(attempt),
                 )
                 .await
@@ -615,6 +630,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     self.resolved_target(),
                     self.agent_local_root.clone(),
                     self.authoritative_input.clone(),
+                    self.desktop_open_path.clone(),
                     input,
                 )
                 .await
@@ -631,6 +647,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     self.resolved_target(),
                     self.agent_local_root.clone(),
                     self.authoritative_input.clone(),
+                    self.desktop_open_path.clone(),
                     input,
                 )
                 .await
@@ -647,6 +664,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     self.resolved_target(),
                     self.agent_local_root.clone(),
                     self.authoritative_input.clone(),
+                    self.desktop_open_path.clone(),
                     input,
                 )
                 .await
@@ -663,6 +681,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     self.resolved_target(),
                     self.agent_local_root.clone(),
                     self.authoritative_input.clone(),
+                    self.desktop_open_path.clone(),
                     input,
                     Some(attempt),
                 )
@@ -686,6 +705,7 @@ async fn execute_normal_mode(args: RunArgs) -> Result<()> {
         state: None,
         target: None,
         authoritative_input: None,
+        desktop_open_path: None,
         agent_local_root: args.agent_local_root.clone(),
         should_stop_after_install: false,
     };
@@ -764,6 +784,7 @@ async fn normalize_run_target_after_install(
         return Ok(NormalizedRunTarget {
             target,
             authoritative_input: None,
+            desktop_open_path: None,
         });
     }
 
@@ -791,6 +812,7 @@ async fn normalize_run_target_after_install(
                 &args.state_bindings,
                 None,
             )?),
+            desktop_open_path: None,
         });
     }
 
@@ -826,6 +848,7 @@ async fn normalize_run_target_after_install(
                         &args.state_bindings,
                         None,
                     )?),
+                    desktop_open_path: None,
                 })
             }
             ResolvedInput::CompatibilityProject { project, .. } => {
@@ -851,6 +874,7 @@ async fn normalize_run_target_after_install(
                         &args.state_bindings,
                         compatibility_legacy_lock,
                     )?),
+                    desktop_open_path: None,
                 })
             }
             ResolvedInput::SourceOnly { source, .. } => {
@@ -869,6 +893,7 @@ async fn normalize_run_target_after_install(
                         &args.state_bindings,
                         None,
                     )?),
+                    desktop_open_path: None,
                 })
             }
         };
@@ -877,6 +902,7 @@ async fn normalize_run_target_after_install(
     Ok(NormalizedRunTarget {
         target: resolved_target.to_path_buf(),
         authoritative_input: None,
+        desktop_open_path: None,
     })
 }
 
@@ -891,10 +917,16 @@ async fn run_prepare_phase(
     target: &Path,
     agent_local_root: Option<PathBuf>,
     authoritative_input: Option<run_phase::RunAuthoritativeInput>,
+    desktop_open_path: Option<PathBuf>,
     attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<RunPipelineState> {
-    let request =
-        build_consumer_run_request_with_target(args, target, agent_local_root, authoritative_input);
+    let request = build_consumer_run_request_with_target(
+        args,
+        target,
+        agent_local_root,
+        authoritative_input,
+        desktop_open_path,
+    );
     let progress = RunProgress { args };
     run_phase::run_prepare_phase(&request, &progress, attempt).await
 }
@@ -904,10 +936,16 @@ async fn run_build_phase(
     target: &Path,
     agent_local_root: Option<PathBuf>,
     authoritative_input: Option<run_phase::RunAuthoritativeInput>,
+    desktop_open_path: Option<PathBuf>,
     state: RunPipelineState,
 ) -> Result<RunPipelineState> {
-    let request =
-        build_consumer_run_request_with_target(args, target, agent_local_root, authoritative_input);
+    let request = build_consumer_run_request_with_target(
+        args,
+        target,
+        agent_local_root,
+        authoritative_input,
+        desktop_open_path,
+    );
     let progress = RunProgress { args };
     run_phase::run_build_phase(&request, &progress, state).await
 }
@@ -917,10 +955,16 @@ async fn run_verify_phase(
     target: &Path,
     agent_local_root: Option<PathBuf>,
     authoritative_input: Option<run_phase::RunAuthoritativeInput>,
+    desktop_open_path: Option<PathBuf>,
     state: RunPipelineState,
 ) -> Result<RunPipelineState> {
-    let request =
-        build_consumer_run_request_with_target(args, target, agent_local_root, authoritative_input);
+    let request = build_consumer_run_request_with_target(
+        args,
+        target,
+        agent_local_root,
+        authoritative_input,
+        desktop_open_path,
+    );
     let progress = RunProgress { args };
     run_phase::run_verify_phase(&request, &progress, state).await
 }
@@ -930,10 +974,16 @@ async fn run_dry_run_phase(
     target: &Path,
     agent_local_root: Option<PathBuf>,
     authoritative_input: Option<run_phase::RunAuthoritativeInput>,
+    desktop_open_path: Option<PathBuf>,
     state: RunPipelineState,
 ) -> Result<RunPipelineState> {
-    let request =
-        build_consumer_run_request_with_target(args, target, agent_local_root, authoritative_input);
+    let request = build_consumer_run_request_with_target(
+        args,
+        target,
+        agent_local_root,
+        authoritative_input,
+        desktop_open_path,
+    );
     let progress = RunProgress { args };
     run_phase::run_dry_run_phase(&request, &progress, state).await
 }
@@ -943,11 +993,17 @@ async fn run_execute_phase(
     target: &Path,
     agent_local_root: Option<PathBuf>,
     authoritative_input: Option<run_phase::RunAuthoritativeInput>,
+    desktop_open_path: Option<PathBuf>,
     state: RunPipelineState,
     attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<()> {
-    let request =
-        build_consumer_run_request_with_target(args, target, agent_local_root, authoritative_input);
+    let request = build_consumer_run_request_with_target(
+        args,
+        target,
+        agent_local_root,
+        authoritative_input,
+        desktop_open_path,
+    );
     let progress = RunProgress { args };
     run_phase::run_execute_phase(&request, &progress, state, attempt, &RunExecuteHooks).await
 }
@@ -1343,10 +1399,27 @@ mod tests {
 
     #[test]
     fn compatibility_host_mode_changes_ready_copy() {
-        let message = background_ready_message("capsule-42", CompatibilityHostMode::Enabled);
+        let message = background_ready_message("capsule-42", CompatibilityHostMode::Enabled, false);
         assert_eq!(
             message,
             "✔ Capsule is ready (Host Fallback, ID: capsule-42)"
+        );
+    }
+
+    #[test]
+    fn desktop_open_only_changes_ready_copy() {
+        let message = background_ready_message("capsule-42", CompatibilityHostMode::Disabled, true);
+        assert_eq!(
+            message,
+            "🚀 Desktop app launch requested in background (ID: capsule-42)"
+        );
+    }
+
+    #[test]
+    fn foreground_desktop_open_spinner_copy_matches_expected() {
+        assert_eq!(
+            super::foreground_run_spinner_labels(true),
+            ("Opening desktop app...", "Desktop app launch requested.")
         );
     }
 
