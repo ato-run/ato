@@ -4,6 +4,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use capsule_core::common::paths::workspace_tmp_dir;
 use capsule_core::router::ManifestData;
 use toml::Value;
 use walkdir::WalkDir;
@@ -31,8 +32,7 @@ pub fn prepare_shadow_workspace(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let root_dir = manifest_dir
-        .join(".tmp")
+    let root_dir = workspace_tmp_dir(manifest_dir)
         .join("ato-auto-provision")
         .join(format!("run-{}", run_id));
     fs::create_dir_all(&root_dir)

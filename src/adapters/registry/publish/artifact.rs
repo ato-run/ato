@@ -12,6 +12,10 @@ use crate::application::producer_input::publish_metadata_from_lock;
 use crate::artifact_hash::{
     compute_blake3_label as compute_blake3, compute_sha256_label as compute_sha256,
 };
+use crate::publish::upload_strategy::{
+    self, FinalizeUploadRequest, StartUploadRequest, TransferArtifactRequest,
+    UploadArtifactDescriptor,
+};
 
 #[derive(Debug, Clone)]
 pub struct PublishArtifactBytesArgs {
@@ -19,6 +23,7 @@ pub struct PublishArtifactBytesArgs {
     pub scoped_id: String,
     pub registry_url: String,
     pub force_large_payload: bool,
+    pub paid_large_payload: bool,
     pub allow_existing: bool,
     pub lock_id: Option<String>,
     pub closure_digest: Option<String>,
@@ -57,7 +62,7 @@ struct ArtifactPayload {
 }
 
 #[derive(Debug, Clone)]
-struct V3SyncPayload {
+pub(crate) struct V3SyncPayload {
     publisher: String,
     slug: String,
     version: String,
@@ -147,6 +152,19 @@ pub(crate) struct SyncCommitResponse {
 pub enum PublishArtifactError {
     #[error("Artifact upload conflict (409 version_exists): {message}")]
     VersionExists { message: String },
+    #[error("Managed Store direct publish cannot accept artifacts larger than the current conservative limit for {registry_url}: artifact is {size_bytes} bytes, limit is {limit_bytes} bytes")]
+    ManagedStoreDirectPayloadLimitExceeded {
+        registry_url: String,
+        size_bytes: u64,
+        limit_bytes: u64,
+    },
+    #[error("Managed Store direct publish does not support large payload override flags for {registry_url}: {message}")]
+    ManagedStoreLargePayloadOverrideUnsupported {
+        registry_url: String,
+        message: String,
+    },
+    #[error("Artifact upload rejected as payload too large ({status}): {message}")]
+    PayloadTooLarge { status: u16, message: String },
     #[error("Artifact upload failed ({status}): {message}")]
     UploadFailed { status: u16, message: String },
 }
@@ -156,17 +174,37 @@ pub fn publish_artifact_bytes(args: PublishArtifactBytesArgs) -> Result<PublishA
     crate::payload_guard::ensure_payload_bytes_size(
         args.artifact_bytes.len() as u64,
         args.force_large_payload,
+        args.paid_large_payload,
         "--force-large-payload",
     )?;
     let payload = load_artifact_payload_from_bytes(&args.artifact_bytes, &args.scoped_id)?;
-    upload_artifact_payload(
-        &base_url,
-        payload,
+    let strategy = upload_strategy::select_upload_strategy(&base_url);
+    let descriptor = build_upload_artifact_descriptor(
+        &payload,
         args.allow_existing,
-        args.lock_id.as_deref(),
-        args.closure_digest.as_deref(),
-        args.publish_metadata.as_ref(),
-    )
+        args.lock_id,
+        args.closure_digest,
+        args.publish_metadata,
+    );
+    let v3_sync_payload = payload.v3_sync_payload();
+    let session = strategy.start_upload(&StartUploadRequest {
+        registry_url: base_url.clone(),
+        artifact: descriptor.clone(),
+        force_large_payload: args.force_large_payload,
+        paid_large_payload: args.paid_large_payload,
+    })?;
+    let transfer = strategy.transfer(TransferArtifactRequest {
+        registry_url: base_url.clone(),
+        session,
+        artifact_bytes: payload.bytes,
+    })?;
+
+    strategy.finalize_upload(FinalizeUploadRequest {
+        registry_url: base_url,
+        artifact: descriptor,
+        transfer,
+        v3_sync_payload,
+    })
 }
 
 pub fn inspect_artifact_manifest(path: &Path) -> Result<ArtifactManifestInfo> {
@@ -249,7 +287,7 @@ pub fn infer_publish_metadata_from_capsule_bytes(
     Ok(None)
 }
 
-fn build_upload_endpoint(
+pub(crate) fn build_upload_endpoint(
     base_url: &str,
     publisher: &str,
     slug: &str,
@@ -277,94 +315,84 @@ fn build_upload_endpoint(
     endpoint
 }
 
-fn upload_artifact_payload(
-    base_url: &str,
-    payload: ArtifactPayload,
+fn build_upload_artifact_descriptor(
+    payload: &ArtifactPayload,
     allow_existing: bool,
-    lock_id: Option<&str>,
-    closure_digest: Option<&str>,
-    publish_metadata: Option<&PublishArtifactMetadata>,
-) -> Result<PublishArtifactResult> {
-    let v3_sync_payload = payload.v3_sync_payload();
-    let endpoint = build_upload_endpoint(
-        base_url,
-        &payload.publisher,
-        &payload.slug,
-        &payload.version,
-        if payload.file_name.is_empty() {
-            None
-        } else {
-            Some(payload.file_name.as_str())
-        },
+    lock_id: Option<String>,
+    closure_digest: Option<String>,
+    publish_metadata: Option<PublishArtifactMetadata>,
+) -> UploadArtifactDescriptor {
+    UploadArtifactDescriptor {
+        publisher: payload.publisher.clone(),
+        slug: payload.slug.clone(),
+        version: payload.version.clone(),
+        file_name: payload.file_name.clone(),
+        sha256: payload.sha256.clone(),
+        blake3: payload.blake3.clone(),
+        size_bytes: payload.bytes.len() as u64,
         allow_existing,
-    );
+        lock_id,
+        closure_digest,
+        publish_metadata,
+    }
+}
 
-    let request = crate::registry::http::blocking_client_builder(base_url)
-        .build()
-        .context("Failed to create registry upload client")?
-        .put(&endpoint)
-        .header("content-type", "application/octet-stream")
-        .header("x-ato-sha256", &payload.sha256)
-        .header("x-ato-blake3", &payload.blake3);
-
-    let request = if let Some(lock_id) = lock_id.filter(|value| !value.trim().is_empty()) {
-        request.header("x-ato-lock-id", lock_id)
-    } else {
-        request
-    };
-    let request =
-        if let Some(closure_digest) = closure_digest.filter(|value| !value.trim().is_empty()) {
-            request.header("x-ato-closure-digest", closure_digest)
-        } else {
-            request
-        };
-    let request = if let Some(metadata) = publish_metadata {
-        let request = request.header(
-            "x-ato-publish-identity-class",
-            metadata.identity_class.as_str(),
-        );
-        let request = if let Some(delivery_mode) = metadata
+pub(crate) fn build_direct_upload_headers(
+    artifact: &UploadArtifactDescriptor,
+) -> Vec<(String, String)> {
+    let mut headers = vec![
+        (
+            "content-type".to_string(),
+            "application/octet-stream".to_string(),
+        ),
+        ("x-ato-sha256".to_string(), artifact.sha256.clone()),
+        ("x-ato-blake3".to_string(), artifact.blake3.clone()),
+    ];
+    if let Some(lock_id) = artifact
+        .lock_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        headers.push(("x-ato-lock-id".to_string(), lock_id.to_string()));
+    }
+    if let Some(closure_digest) = artifact
+        .closure_digest
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        headers.push((
+            "x-ato-closure-digest".to_string(),
+            closure_digest.to_string(),
+        ));
+    }
+    if let Some(metadata) = artifact.publish_metadata.as_ref() {
+        headers.push((
+            "x-ato-publish-identity-class".to_string(),
+            metadata.identity_class.as_str().to_string(),
+        ));
+        if let Some(delivery_mode) = metadata
             .delivery_mode
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            request.header("x-ato-publish-delivery-mode", delivery_mode)
-        } else {
-            request
-        };
-        request.header(
-            "x-ato-publish-provenance-limited",
+            headers.push((
+                "x-ato-publish-delivery-mode".to_string(),
+                delivery_mode.to_string(),
+            ));
+        }
+        headers.push((
+            "x-ato-publish-provenance-limited".to_string(),
             if metadata.provenance_limited {
-                "true"
+                "true".to_string()
             } else {
-                "false"
+                "false".to_string()
             },
-        )
-    } else {
-        request
-    };
-
-    let request = crate::registry::http::with_blocking_ato_token(request);
-
-    let response = request
-        .body(payload.bytes)
-        .send()
-        .map_err(|err| anyhow::anyhow!("Failed to upload artifact to {}: {}", endpoint, err))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().unwrap_or_default();
-        let error = classify_upload_failure(status, &body);
-        return Err(error.into());
+        ));
     }
-
-    let result = response
-        .json::<PublishArtifactResult>()
-        .context("Invalid local registry upload response")?;
-    sync_v3_chunks_if_present(base_url, v3_sync_payload.as_ref())
-        .with_context(|| "Failed to finalize payload v3 metadata for uploaded release")?;
-    Ok(result)
+    headers
 }
 
 fn load_artifact_payload_from_bytes(bytes: &[u8], scoped_id: &str) -> Result<ArtifactPayload> {
@@ -539,7 +567,10 @@ fn extract_payload_v3_manifest_from_capsule(
     Ok(None)
 }
 
-fn sync_v3_chunks_if_present(base_url: &str, payload: Option<&V3SyncPayload>) -> Result<()> {
+pub(crate) fn sync_v3_chunks_if_present(
+    base_url: &str,
+    payload: Option<&V3SyncPayload>,
+) -> Result<()> {
     let Some(payload) = payload else {
         return Ok(());
     };
@@ -696,7 +727,7 @@ fn is_sync_not_supported_status(status: StatusCode) -> bool {
     )
 }
 
-fn classify_upload_failure(status: StatusCode, body: &str) -> PublishArtifactError {
+pub(crate) fn classify_upload_failure(status: StatusCode, body: &str) -> PublishArtifactError {
     let parsed = serde_json::from_str::<RegistryErrorPayload>(body).ok();
     if is_version_exists_conflict(status, parsed.as_ref(), body) {
         let message = parsed
@@ -707,6 +738,13 @@ fn classify_upload_failure(status: StatusCode, body: &str) -> PublishArtifactErr
             .unwrap_or("same version is already published")
             .to_string();
         return PublishArtifactError::VersionExists { message };
+    }
+
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        return PublishArtifactError::PayloadTooLarge {
+            status: status.as_u16(),
+            message: summarize_payload_too_large_message(parsed.as_ref(), body),
+        };
     }
 
     let message = parsed
@@ -721,6 +759,89 @@ fn classify_upload_failure(status: StatusCode, body: &str) -> PublishArtifactErr
         status: status.as_u16(),
         message,
     }
+}
+
+// Temporary conservative gate for the current managed Store direct-upload path.
+// This is intentionally lower than the observed failure size and is not a
+// remote acceptance guarantee. Replace it with capability-based or presigned
+// upload negotiation once the managed publish path no longer relies on single
+// PUT upload through the edge request-body path.
+pub(crate) const MANAGED_STORE_DIRECT_CONSERVATIVE_LIMIT_BYTES: u64 = 95 * 1024 * 1024;
+
+pub(crate) fn enforce_managed_store_direct_upload_policy(
+    registry_url: &str,
+    size_bytes: u64,
+    force_large_payload: bool,
+    paid_large_payload: bool,
+) -> Result<()> {
+    if !is_managed_store_direct_registry(registry_url) {
+        return Ok(());
+    }
+
+    if size_bytes > MANAGED_STORE_DIRECT_CONSERVATIVE_LIMIT_BYTES {
+        return Err(
+            PublishArtifactError::ManagedStoreDirectPayloadLimitExceeded {
+                registry_url: registry_url.to_string(),
+                size_bytes,
+                limit_bytes: MANAGED_STORE_DIRECT_CONSERVATIVE_LIMIT_BYTES,
+            }
+            .into(),
+        );
+    }
+
+    if !force_large_payload && !paid_large_payload {
+        return Ok(());
+    }
+
+    let mut disabled_flags = Vec::new();
+    if force_large_payload {
+        disabled_flags.push("--force-large-payload");
+    }
+    if paid_large_payload {
+        disabled_flags.push("--paid-large-payload");
+    }
+
+    Err(PublishArtifactError::ManagedStoreLargePayloadOverrideUnsupported {
+        registry_url: registry_url.to_string(),
+        message: format!(
+            "{} cannot be used with the managed Store direct upload path. This registry still uploads via a single PUT through the edge path; use a private/local registry for large direct uploads until presigned upload is available.",
+            disabled_flags.join(" and ")
+        ),
+    }
+    .into())
+}
+
+pub(crate) fn is_managed_store_direct_registry(registry_url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(registry_url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("api.ato.run") || host.eq_ignore_ascii_case("staging.api.ato.run")
+}
+
+fn summarize_payload_too_large_message(
+    parsed: Option<&RegistryErrorPayload>,
+    raw_body: &str,
+) -> String {
+    let parsed_message = parsed
+        .and_then(|value| value.message.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(message) = parsed_message {
+        return message.to_string();
+    }
+
+    let raw = raw_body.trim();
+    if raw.is_empty() {
+        return "managed Store direct upload rejected the request body as too large before the registry accepted it".to_string();
+    }
+    if raw.starts_with('<') || raw.to_ascii_lowercase().contains("<html") {
+        return "managed Store direct upload rejected the request body as too large at the edge before the registry accepted it".to_string();
+    }
+
+    raw.to_string()
 }
 
 fn is_version_exists_conflict(
@@ -1385,5 +1506,60 @@ args = ["--deep", "--force", "--sign", "-", "Demo.app"]
             r#"{"error":"other","message":"same version is already published"}"#,
         );
         assert!(matches!(err, PublishArtifactError::VersionExists { .. }));
+    }
+
+    #[test]
+    fn managed_store_large_payload_override_is_disabled() {
+        let err = enforce_managed_store_direct_upload_policy(
+            "https://api.ato.run",
+            MANAGED_STORE_DIRECT_CONSERVATIVE_LIMIT_BYTES,
+            true,
+            false,
+        )
+        .expect_err("managed store should reject override flags");
+
+        assert!(err.to_string().contains("--force-large-payload"));
+        assert!(err.to_string().contains("managed Store direct upload path"));
+    }
+
+    #[test]
+    fn custom_registry_still_allows_large_payload_override_flags() {
+        enforce_managed_store_direct_upload_policy(
+            "http://127.0.0.1:8787",
+            MANAGED_STORE_DIRECT_CONSERVATIVE_LIMIT_BYTES + 1,
+            true,
+            true,
+        )
+        .expect("custom registry should keep override support");
+    }
+
+    #[test]
+    fn managed_store_large_payload_is_rejected_before_upload() {
+        let err = enforce_managed_store_direct_upload_policy(
+            "https://api.ato.run",
+            MANAGED_STORE_DIRECT_CONSERVATIVE_LIMIT_BYTES + 1,
+            false,
+            false,
+        )
+        .expect_err("managed store should reject over-limit payloads");
+
+        assert!(matches!(
+            err.downcast_ref::<PublishArtifactError>(),
+            Some(PublishArtifactError::ManagedStoreDirectPayloadLimitExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn classify_upload_failure_maps_413_html_to_payload_too_large() {
+        let err = classify_upload_failure(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "<html>413 Payload Too Large</html>",
+        );
+
+        assert!(matches!(
+            err,
+            PublishArtifactError::PayloadTooLarge { status: 413, .. }
+        ));
+        assert!(err.to_string().contains("too large at the edge"));
     }
 }

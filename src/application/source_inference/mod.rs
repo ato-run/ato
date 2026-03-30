@@ -26,6 +26,7 @@ use anyhow::{Context, Result};
 use capsule_core::ato_lock::{
     self, closure_info, normalize_lock_closure, AtoLock, UnresolvedReason, UnresolvedValue,
 };
+use capsule_core::common::paths::workspace_tmp_dir;
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::importer::{
     probe_ecosystem_lockfile_evidence, probe_native_framework_evidence, ImportedEvidence,
@@ -36,11 +37,11 @@ use capsule_core::input_resolver::{
 };
 use capsule_core::CapsuleReporter;
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use walkdir::WalkDir;
 
-const RUN_SOURCE_INFERENCE_DIR: &str = ".tmp/source-inference";
+const RUN_SOURCE_INFERENCE_DIR: &str = ".ato/tmp/source-inference";
 #[derive(Debug, Clone)]
 pub(crate) enum SourceInferenceInput {
     SourceEvidence(SourceEvidenceInput),
@@ -131,6 +132,18 @@ struct DesktopExecutionOverride {
     resolved_target: Value,
     provenance_note: String,
     source_field: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ElectronBuilderDirectoriesConfig {
+    output: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ElectronBuilderConfig {
+    #[serde(rename = "productName")]
+    product_name: Option<String>,
+    directories: Option<ElectronBuilderDirectoriesConfig>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -364,7 +377,7 @@ fn prepare_python_single_script_workspace(
         .path
         .parent()
         .context("single-file script path must have a parent directory")?;
-    let temp_root = parent.join(".tmp").join(format!(
+    let temp_root = workspace_tmp_dir(parent).join(format!(
         "ato-single-python-{}-{}",
         script
             .path
@@ -456,7 +469,7 @@ fn prepare_deno_single_script_workspace(
         .path
         .parent()
         .context("single-file script path must have a parent directory")?;
-    let temp_root = parent.join(".tmp").join(format!(
+    let temp_root = workspace_tmp_dir(parent).join(format!(
         "ato-single-ts-{}-{}",
         script
             .path
@@ -1801,7 +1814,7 @@ fn infer_source_native_delivery_plan(
 
     let framework_name = framework.as_str().to_string();
     let artifact_relative = detect_framework_artifact_relative(project_root, *framework)
-        .unwrap_or_else(|| default_framework_artifact_relative(detected, *framework));
+        .unwrap_or_else(|| default_framework_artifact_relative(project_root, detected, *framework));
     let target = inferred_delivery_target(&artifact_relative);
     let staged_delivery_config_toml =
         inferred_delivery_config_toml(&framework_name, &target, &artifact_relative);
@@ -1872,6 +1885,7 @@ fn detect_framework_artifact_relative(
 }
 
 fn default_framework_artifact_relative(
+    project_root: &Path,
     detected: &DetectedProject,
     framework: capsule_core::importer::ImporterId,
 ) -> PathBuf {
@@ -1894,13 +1908,77 @@ fn default_framework_artifact_relative(
             )),
         },
         capsule_core::importer::ImporterId::Electron => {
-            PathBuf::from(format!("dist/{}", file_name))
+            default_electron_artifact_relative(project_root, detected, &file_name)
         }
         capsule_core::importer::ImporterId::Wails => {
             PathBuf::from(format!("build/bin/{}", file_name))
         }
         _ => PathBuf::from(file_name),
     }
+}
+
+fn default_electron_artifact_relative(
+    project_root: &Path,
+    detected: &DetectedProject,
+    default_file_name: &str,
+) -> PathBuf {
+    let builder_config = read_electron_builder_config(project_root);
+    let output_root = builder_config
+        .as_ref()
+        .and_then(|config| config.directories.as_ref())
+        .and_then(|directories| directories.output.as_deref())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("dist");
+
+    let product_name = builder_config
+        .as_ref()
+        .and_then(|config| config.product_name.as_deref())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&detected.name);
+
+    match std::env::consts::OS {
+        "windows" => PathBuf::from(output_root).join(default_file_name),
+        "linux" => PathBuf::from(output_root).join(default_file_name),
+        _ => PathBuf::from(output_root)
+            .join(electron_builder_macos_output_dir())
+            .join(format!("{}.app", product_name)),
+    }
+}
+
+fn electron_builder_macos_output_dir() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "mac",
+        _ => "mac-arm64",
+    }
+}
+
+fn read_electron_builder_config(project_root: &Path) -> Option<ElectronBuilderConfig> {
+    let yaml_candidates = [
+        project_root.join("electron-builder.yml"),
+        project_root.join("electron-builder.yaml"),
+    ];
+
+    for path in yaml_candidates {
+        let Ok(raw) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Ok(parsed) = serde_yaml::from_str::<ElectronBuilderConfig>(&raw) {
+            return Some(parsed);
+        }
+    }
+
+    let json_path = project_root.join("electron-builder.json");
+    if let Ok(raw) = fs::read_to_string(json_path) {
+        if let Ok(parsed) = serde_json::from_str::<ElectronBuilderConfig>(&raw) {
+            return Some(parsed);
+        }
+    }
+
+    let package_json_path = project_root.join("package.json");
+    let raw = fs::read_to_string(package_json_path).ok()?;
+    let parsed = serde_json::from_str::<Value>(&raw).ok()?;
+    let build = parsed.get("build")?.clone();
+    serde_json::from_value::<ElectronBuilderConfig>(build).ok()
 }
 
 fn inferred_delivery_target(artifact_relative: &Path) -> String {
@@ -1961,6 +2039,16 @@ fn infer_source_native_build_command(
             return Some(tauri_build_command(project_root, node.package_manager));
         }
 
+        if matches!(framework, capsule_core::importer::ImporterId::Electron) {
+            if let Some(script_name) = preferred_electron_packaged_build_script(project_root) {
+                return Some(node_script_build_command(
+                    project_root,
+                    node.package_manager,
+                    &script_name,
+                ));
+            }
+        }
+
         if node.scripts.has_build {
             return Some(node_script_build_command(
                 project_root,
@@ -1994,6 +2082,52 @@ fn infer_source_native_build_command(
         }
         _ => None,
     }
+}
+
+fn preferred_electron_packaged_build_script(project_root: &Path) -> Option<String> {
+    let package_json_path = project_root.join("package.json");
+    let raw = fs::read_to_string(&package_json_path).ok()?;
+    let parsed = serde_json::from_str::<Value>(&raw).ok()?;
+    let scripts = parsed.get("scripts")?.as_object()?;
+
+    let candidates: Vec<&str> = match std::env::consts::OS {
+        "macos" => vec!["build:mac", "build:darwin", "build:desktop", "build:unpack"],
+        "linux" => vec!["build:linux", "build:desktop", "build:unpack"],
+        "windows" => vec![
+            "build:win",
+            "build:windows",
+            "build:desktop",
+            "build:unpack",
+        ],
+        _ => vec!["build:desktop", "build:unpack", "build:mac", "build:linux"],
+    };
+
+    for candidate in candidates {
+        if scripts
+            .get(candidate)
+            .and_then(Value::as_str)
+            .is_some_and(script_looks_like_electron_packaging)
+        {
+            return Some(candidate.to_string());
+        }
+    }
+
+    if scripts
+        .get("build")
+        .and_then(Value::as_str)
+        .is_some_and(script_looks_like_electron_packaging)
+    {
+        return Some("build".to_string());
+    }
+
+    None
+}
+
+fn script_looks_like_electron_packaging(script: &str) -> bool {
+    let normalized = script.trim().to_ascii_lowercase();
+    normalized.contains("electron-builder")
+        || normalized.contains("electron-forge make")
+        || normalized.contains("electron-packager")
 }
 
 fn node_script_build_command(
@@ -4548,6 +4682,64 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
                         .iter()
                         .any(|value| value.as_str() == Some("codesign"))
             }));
+    }
+
+    #[test]
+    fn infer_source_native_build_command_prefers_electron_packaged_script_over_generic_build() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"sample-project","version":"1.0.0","scripts":{"build":"electron-vite build","build:mac":"electron-vite build && electron-builder --mac"},"packageManager":"bun@1.1.6"}"#,
+        )
+        .expect("write package json");
+        fs::write(dir.path().join("bun.lockb"), "lock").expect("write bun lock");
+        fs::write(
+            dir.path().join("electron-builder.yml"),
+            "productName: sample-project\n",
+        )
+        .expect("write electron builder config");
+
+        let detected = detect_project(dir.path()).expect("detect project");
+        let command = infer_source_native_build_command(
+            dir.path(),
+            &detected,
+            capsule_core::importer::ImporterId::Electron,
+        )
+        .expect("build command");
+
+        assert_eq!(command.program, "bun");
+        assert_eq!(command.args, vec!["run", "build:mac"]);
+    }
+
+    #[test]
+    fn durable_init_source_only_electron_uses_builder_product_name_for_expected_app_path() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"tsugy-electron-app","version":"1.0.0","scripts":{"build":"electron-vite build","build:mac":"electron-vite build && electron-builder --mac"},"packageManager":"bun@1.1.6"}"#,
+        )
+        .expect("write package json");
+        fs::write(dir.path().join("bun.lockb"), "lock").expect("write bun lock");
+        fs::write(
+            dir.path().join("electron-builder.yml"),
+            "productName: sample-project\ndirectories:\n  output: dist\n",
+        )
+        .expect("write electron builder config");
+
+        let materialized = execute_init_from_source_only(dir.path(), reporter(), true)
+            .expect("materialize electron workspace");
+        let lock = load_materialized_lock(&materialized.lock_path);
+
+        let artifact_path = lock
+            .contract
+            .entries
+            .get("delivery")
+            .and_then(|value| value.get("artifact"))
+            .and_then(|value| value.get("path"))
+            .and_then(Value::as_str)
+            .expect("delivery artifact path");
+
+        assert_eq!(artifact_path, "dist/mac-arm64/sample-project.app");
     }
 
     #[test]

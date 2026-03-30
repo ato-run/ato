@@ -64,6 +64,12 @@ pub(super) fn is_manual_intervention_issue(message: &str) -> bool {
         .contains("manual intervention required")
 }
 
+pub(super) fn is_distributable_artifact_missing(message: &str) -> bool {
+    message.contains("Native delivery build input is not a .app directory")
+        || message.contains("Native delivery build input is not a file")
+        || message.contains("Native delivery build input must be a directory")
+}
+
 pub(super) fn detect_field(message: &str) -> Option<&'static str> {
     if message.contains("default_target") {
         Some("default_target")
