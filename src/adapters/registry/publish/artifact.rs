@@ -178,7 +178,7 @@ pub fn publish_artifact_bytes(args: PublishArtifactBytesArgs) -> Result<PublishA
         "--force-large-payload",
     )?;
     let payload = load_artifact_payload_from_bytes(&args.artifact_bytes, &args.scoped_id)?;
-    let strategy = upload_strategy::select_upload_strategy(&base_url);
+    let strategy = upload_strategy::resolve_upload_strategy(&base_url);
     let descriptor = build_upload_artifact_descriptor(
         &payload,
         args.allow_existing,
