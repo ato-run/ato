@@ -36,7 +36,7 @@ tmp/
 
 # Backup files
 *.bak
-.archives/
+.archives/*.md
 
 # Ignore npm/node_modules if any (not typical for Rust projects)
 node_modules/
