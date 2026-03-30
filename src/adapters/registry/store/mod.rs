@@ -17,6 +17,8 @@ use capsule_core::packers::payload as manifest_payload;
 use capsule_core::types::identity::public_key_to_did;
 use capsule_core::types::{CapsuleManifest, EpochPointer};
 
+use crate::application::ports::publish::{PublishArtifactIdentityClass, PublishArtifactMetadata};
+
 mod local_registry;
 mod maintenance;
 mod types;
@@ -44,6 +46,7 @@ const SCHEMA_MIGRATION_0007: &str = "2026-03-10-0007-persistent-state-kind-colum
 const SCHEMA_MIGRATION_0008: &str = "2026-03-10-0008-service-binding-registry";
 const SCHEMA_MIGRATION_0009: &str = "2026-03-10-0009-service-binding-allowed-callers";
 const SCHEMA_MIGRATION_0010: &str = "2026-03-25-0010-registry-release-lock-metadata";
+const SCHEMA_MIGRATION_0011: &str = "2026-03-28-0011-registry-release-publish-metadata";
 
 fn manifest_distribution(
     manifest: &CapsuleManifest,
@@ -54,6 +57,28 @@ fn manifest_distribution(
             crate::error_codes::ATO_ERR_INTEGRITY_FAILURE
         )
     })
+}
+
+fn decode_publish_metadata(
+    identity_class: Option<String>,
+    delivery_mode: Option<String>,
+    provenance_limited: Option<i64>,
+) -> rusqlite::Result<Option<PublishArtifactMetadata>> {
+    let Some(identity_class) = identity_class else {
+        return Ok(None);
+    };
+    let identity_class = PublishArtifactIdentityClass::parse(&identity_class).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            Type::Text,
+            format!("unknown publish identity class '{identity_class}'").into(),
+        )
+    })?;
+    Ok(Some(PublishArtifactMetadata {
+        identity_class,
+        delivery_mode,
+        provenance_limited: provenance_limited.unwrap_or(0) != 0,
+    }))
 }
 
 #[derive(Debug, Clone)]
@@ -177,7 +202,7 @@ impl RegistryStore {
         let scoped_id = format!("{}/{}", publisher, slug);
         let conn = self.connect()?;
         conn.query_row(
-            "SELECT version, manifest_hash, lock_id, closure_digest, file_name, sha256, blake3, size_bytes, signature_status, created_at
+            "SELECT version, manifest_hash, lock_id, closure_digest, publish_identity_class, publish_delivery_mode, publish_provenance_limited, file_name, sha256, blake3, size_bytes, signature_status, created_at
              FROM registry_releases
              WHERE scoped_id=?1 AND version=?2",
             params![scoped_id, version],
@@ -195,7 +220,7 @@ impl RegistryStore {
     ) -> Result<Option<RegistryVersionResolveRecord>> {
         let conn = self.connect()?;
         conn.query_row(
-            "SELECT p.scoped_id, r.version, r.manifest_hash, r.lock_id, r.closure_digest, m.yanked_at
+            "SELECT p.scoped_id, r.version, r.manifest_hash, r.lock_id, r.closure_digest, r.publish_identity_class, r.publish_delivery_mode, r.publish_provenance_limited, m.yanked_at
              FROM registry_packages p
              JOIN registry_releases r ON r.scoped_id = p.scoped_id
              JOIN manifests m ON m.manifest_hash = r.manifest_hash
@@ -208,7 +233,12 @@ impl RegistryStore {
                     manifest_hash: row.get(2)?,
                     lock_id: row.get(3)?,
                     closure_digest: row.get(4)?,
-                    yanked_at: row.get(5)?,
+                    publish_metadata: decode_publish_metadata(
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    )?,
+                    yanked_at: row.get(8)?,
                 })
             },
         )
@@ -230,6 +260,7 @@ impl RegistryStore {
         size_bytes: u64,
         lock_id: Option<&str>,
         closure_digest: Option<&str>,
+        publish_metadata: Option<&PublishArtifactMetadata>,
         capsule_bytes: &[u8],
         issued_at: &str,
     ) -> Result<EpochResolveResponse> {
@@ -261,6 +292,7 @@ impl RegistryStore {
             &manifest_hash,
             lock_id,
             closure_digest,
+            publish_metadata,
             file_name,
             sha256,
             blake3,
@@ -424,12 +456,13 @@ impl RegistryStore {
             manifest_hash: row.get(1)?,
             lock_id: row.get(2)?,
             closure_digest: row.get(3)?,
-            file_name: row.get(4)?,
-            sha256: row.get(5)?,
-            blake3: row.get(6)?,
-            size_bytes: row.get::<_, i64>(7)? as u64,
-            signature_status: row.get(8)?,
-            created_at: row.get(9)?,
+            publish_metadata: decode_publish_metadata(row.get(4)?, row.get(5)?, row.get(6)?)?,
+            file_name: row.get(7)?,
+            sha256: row.get(8)?,
+            blake3: row.get(9)?,
+            size_bytes: row.get::<_, i64>(10)? as u64,
+            signature_status: row.get(11)?,
+            created_at: row.get(12)?,
         })
     }
 
@@ -439,7 +472,7 @@ impl RegistryStore {
         scoped_id: &str,
     ) -> Result<Vec<RegistryReleaseRecord>> {
         let mut stmt = conn.prepare(
-            "SELECT version, manifest_hash, lock_id, closure_digest, file_name, sha256, blake3, size_bytes, signature_status, created_at
+            "SELECT version, manifest_hash, lock_id, closure_digest, publish_identity_class, publish_delivery_mode, publish_provenance_limited, file_name, sha256, blake3, size_bytes, signature_status, created_at
              FROM registry_releases
              WHERE scoped_id=?1",
         )?;
@@ -458,7 +491,7 @@ impl RegistryStore {
         scoped_id: &str,
     ) -> Result<Vec<RegistryReleaseRecord>> {
         let mut stmt = tx.prepare(
-            "SELECT version, manifest_hash, lock_id, closure_digest, file_name, sha256, blake3, size_bytes, signature_status, created_at
+            "SELECT version, manifest_hash, lock_id, closure_digest, publish_identity_class, publish_delivery_mode, publish_provenance_limited, file_name, sha256, blake3, size_bytes, signature_status, created_at
              FROM registry_releases
              WHERE scoped_id=?1",
         )?;
@@ -484,6 +517,7 @@ impl RegistryStore {
         manifest_hash: &str,
         lock_id: Option<&str>,
         closure_digest: Option<&str>,
+        publish_metadata: Option<&PublishArtifactMetadata>,
         file_name: &str,
         sha256: &str,
         blake3: &str,
@@ -543,14 +577,17 @@ impl RegistryStore {
         )?;
         tx.execute(
             "INSERT INTO registry_releases(
-                scoped_id, version, manifest_hash, lock_id, closure_digest, file_name, sha256, blake3, size_bytes, signature_status, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'verified', ?10)",
+                scoped_id, version, manifest_hash, lock_id, closure_digest, publish_identity_class, publish_delivery_mode, publish_provenance_limited, file_name, sha256, blake3, size_bytes, signature_status, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'verified', ?13)",
             params![
                 scoped_id,
                 version,
                 manifest_hash,
                 lock_id,
                 closure_digest,
+                publish_metadata.map(|value| value.identity_class.as_str()),
+                publish_metadata.and_then(|value| value.delivery_mode.as_deref()),
+                publish_metadata.map(|value| i64::from(value.provenance_limited)),
                 file_name,
                 normalize_hash(sha256),
                 normalize_hash(blake3),
@@ -1388,8 +1425,11 @@ impl RegistryStore {
               scoped_id TEXT NOT NULL,
               version TEXT NOT NULL,
               manifest_hash TEXT NOT NULL,
-                            lock_id TEXT,
-                            closure_digest TEXT,
+              lock_id TEXT,
+              closure_digest TEXT,
+              publish_identity_class TEXT,
+              publish_delivery_mode TEXT,
+              publish_provenance_limited INTEGER,
               file_name TEXT NOT NULL,
               sha256 TEXT NOT NULL,
               blake3 TEXT NOT NULL,
@@ -1627,6 +1667,28 @@ impl RegistryStore {
                 [],
             )?;
             self.mark_migration_applied(conn, SCHEMA_MIGRATION_0010)?;
+        }
+
+        if !self.is_migration_applied(conn, SCHEMA_MIGRATION_0011)? {
+            if !self.column_exists(conn, "registry_releases", "publish_identity_class")? {
+                conn.execute(
+                    "ALTER TABLE registry_releases ADD COLUMN publish_identity_class TEXT",
+                    [],
+                )?;
+            }
+            if !self.column_exists(conn, "registry_releases", "publish_delivery_mode")? {
+                conn.execute(
+                    "ALTER TABLE registry_releases ADD COLUMN publish_delivery_mode TEXT",
+                    [],
+                )?;
+            }
+            if !self.column_exists(conn, "registry_releases", "publish_provenance_limited")? {
+                conn.execute(
+                    "ALTER TABLE registry_releases ADD COLUMN publish_provenance_limited INTEGER",
+                    [],
+                )?;
+            }
+            self.mark_migration_applied(conn, SCHEMA_MIGRATION_0011)?;
         }
 
         Ok(())

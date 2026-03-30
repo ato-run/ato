@@ -35,6 +35,8 @@ paths = [
 regexes = [
   '''ghp_test123''',
   '''ghp_legacy123''',
+  '''"github_token"\s*:\s*"ghp_[A-Za-z0-9_]+"''',
   '''did:key:z6MkLegacy''',
   '''did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK''',
+  '''did:key:[A-Za-z0-9]+''',
 ]

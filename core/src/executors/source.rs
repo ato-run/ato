@@ -16,6 +16,7 @@ pub fn execute(plan: &ManifestData, nacelle_override: Option<PathBuf>) -> Result
     let nacelle = engine::discover_nacelle(engine::EngineRequest {
         explicit_path: nacelle_override.clone(),
         manifest_path: Some(plan.manifest_path.clone()),
+        compat_input: None,
     })?;
 
     r3_config::generate_and_write_config(
@@ -33,7 +34,9 @@ pub fn execute(plan: &ManifestData, nacelle_override: Option<PathBuf>) -> Result
 
         runtime.block_on(build_bundle(
             PackBundleArgs {
-                manifest_path: plan.manifest_path.clone(),
+                manifest_path: Some(plan.manifest_path.clone()),
+                workspace_root: plan.manifest_dir.clone(),
+                compat_input: None,
                 runtime_path: None,
                 output: Some(output),
                 nacelle_path: Some(nacelle),

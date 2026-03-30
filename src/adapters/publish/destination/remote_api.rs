@@ -36,6 +36,7 @@ impl DestinationPort for RemoteRegistryDestination {
                 allow_existing: *allow_existing,
                 lock_id: artifact.lock_id.clone(),
                 closure_digest: artifact.closure_digest.clone(),
+                publish_metadata: artifact.publish_metadata.clone(),
             };
             move || crate::publish_artifact::publish_artifact_bytes(args)
         })
@@ -52,6 +53,7 @@ impl DestinationPort for RemoteRegistryDestination {
                 blake3: published.blake3,
                 size_bytes: published.size_bytes,
                 already_existed: published.already_existed,
+                publish_metadata: published.publish_metadata,
             }),
         })
     }
