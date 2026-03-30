@@ -26,7 +26,11 @@ pub(super) fn process_runtime_label(
 pub(super) fn background_ready_message(
     id: &str,
     compatibility_host_mode: CompatibilityHostMode,
+    desktop_open_only: bool,
 ) -> String {
+    if desktop_open_only {
+        return format!("🚀 Desktop app launch requested in background (ID: {id})");
+    }
     if matches!(compatibility_host_mode, CompatibilityHostMode::Enabled) {
         return format!("✔ Capsule is ready (Host Fallback, ID: {id})");
     }
@@ -108,6 +112,7 @@ pub(super) async fn complete_background_source_process(
     runtime: String,
     scoped_id: Option<String>,
     ready_without_events: bool,
+    desktop_open_only: bool,
     compatibility_host_mode: CompatibilityHostMode,
     reporter: &Arc<CliReporter>,
 ) -> Result<()> {
@@ -141,6 +146,7 @@ pub(super) async fn complete_background_source_process(
                 .notify(background_ready_message(
                     &process_id,
                     compatibility_host_mode,
+                    desktop_open_only,
                 ))
                 .await?;
             Ok(())
@@ -180,10 +186,12 @@ pub(super) async fn complete_foreground_source_process(
     reporter: Arc<CliReporter>,
     sandbox_initialized: bool,
     ipc_socket_mapped: bool,
+    desktop_open_only: bool,
     use_progressive_ui: bool,
 ) -> Result<i32> {
+    let (run_label, stop_label) = foreground_run_spinner_labels(desktop_open_only);
     let run_spinner = if use_progressive_ui {
-        Some(crate::progressive_ui::start_spinner("Running Preview..."))
+        Some(crate::progressive_ui::start_spinner(run_label))
     } else {
         None
     };
@@ -199,10 +207,20 @@ pub(super) async fn complete_foreground_source_process(
         let _ = handle.join();
     }
     if let Some(progress) = run_spinner {
-        progress.stop("Preview stopped.");
+        progress.stop(stop_label);
     }
     cleanup_process_artifacts(&process.cleanup_paths);
     Ok(exit_code)
+}
+
+pub(super) fn foreground_run_spinner_labels(
+    desktop_open_only: bool,
+) -> (&'static str, &'static str) {
+    if desktop_open_only {
+        ("Opening desktop app...", "Desktop app launch requested.")
+    } else {
+        ("Running Preview...", "Preview stopped.")
+    }
 }
 
 pub(super) fn spawn_foreground_native_event_reporter(

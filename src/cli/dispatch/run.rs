@@ -147,6 +147,7 @@ mod tests {
         let resolved = ResolvedRunTarget {
             path: tmp.path().to_path_buf(),
             agent_local_root: Some(tmp.path().to_path_buf()),
+            desktop_open_path: None,
         };
         let reporter = Arc::new(crate::reporters::CliReporter::new(true));
 
@@ -188,6 +189,7 @@ mod tests {
         let resolved = ResolvedRunTarget {
             path: tmp.path().join("ato.lock.json"),
             agent_local_root: Some(tmp.path().to_path_buf()),
+            desktop_open_path: None,
         };
         let reporter = Arc::new(crate::reporters::CliReporter::new(true));
 

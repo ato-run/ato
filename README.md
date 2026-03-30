@@ -85,6 +85,8 @@ For `.app`-style entrypoints, `ato` derives these defaults internally so you don
 - Local finalize stops immediately on any error (fail-closed).
 - On macOS, projection creates a `~/Applications` symlink. On Linux, it creates a `.desktop` launcher and a `~/.local/bin` symlink.
 
+When you run an installed desktop-native capsule, `ato run <publisher>/<slug>` opens the locally derived app bundle from `~/.ato/apps/.../derived-*` and returns once the platform launch request succeeds. It does not treat the GUI app as a service that must emit readiness events.
+
 **For command-driven targets:**
 
 If your target is command-driven (`entrypoint = "sh"` with `cmd = [...]`), you need to write explicit delivery metadata in `[artifact]` and `[finalize]`. Partial configs are rejected. Source-side `ato.delivery.toml` is always rejected — write everything in the project manifest.
