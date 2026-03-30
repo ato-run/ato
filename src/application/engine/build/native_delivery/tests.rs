@@ -733,7 +733,7 @@ fn build_accepts_windows_single_file_native_artifacts() -> Result<()> {
     let artifact_path = tmp.path().join("out/my-app-0.1.0.capsule");
 
     let result =
-        build_native_artifact_with_strip(&plan, Some(&artifact_path), |_path| Ok(()), None)?;
+        build_native_artifact_with_strip(&plan, Some(&artifact_path), |_path| Ok(()), None, false)?;
 
     assert_eq!(result.artifact_path, artifact_path);
     assert_eq!(result.derived_from, plan.source_app_path);
@@ -1503,7 +1503,7 @@ fn build_native_artifact_preserves_source_and_payload_executable_mode() -> Resul
     let artifact_path = tmp.path().join("out/my-app-0.1.0.capsule");
 
     let result =
-        build_native_artifact_with_strip(&plan, Some(&artifact_path), |_app| Ok(()), None)?;
+        build_native_artifact_with_strip(&plan, Some(&artifact_path), |_app| Ok(()), None, false)?;
 
     assert_eq!(result.build_strategy, "native-delivery");
     assert_eq!(
@@ -1549,7 +1549,8 @@ fn test_build_rejects_non_executable_without_mutation() -> Result<()> {
     let source_digest_before = compute_tree_digest(&plan.source_app_path)?;
     let artifact_path = tmp.path().join("out/my-app-0.1.0.capsule");
 
-    let result = build_native_artifact_with_strip(&plan, Some(&artifact_path), |_app| Ok(()), None);
+    let result =
+        build_native_artifact_with_strip(&plan, Some(&artifact_path), |_app| Ok(()), None, false);
 
     if cfg!(unix) {
         let err = result.expect_err("build must fail closed when executable bit is missing");

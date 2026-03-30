@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use capsule_core::ato_lock::{compute_closure_digest, compute_lock_id};
 use capsule_core::input_resolver::{
-    resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
+    resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ResolvedSourceOnly,
 };
 use capsule_core::lock_runtime::resolve_lock_runtime_model;
 use capsule_core::router::{CompatManifestBridge, ExecutionDescriptor};
@@ -67,6 +67,19 @@ pub(crate) fn resolve_producer_authoritative_input(
 ) -> Result<ProducerAuthoritativeInput> {
     let resolved = resolve_authoritative_input(project_root, ResolveInputOptions::default())?;
     producer_authoritative_input_from_resolved(resolved, reporter, assume_yes)
+}
+
+pub(crate) fn rematerialize_source_authoritative_input(
+    project_root: &Path,
+    reporter: Arc<CliReporter>,
+    assume_yes: bool,
+) -> Result<ProducerAuthoritativeInput> {
+    let source = ResolvedSourceOnly {
+        project_root: project_root.to_path_buf(),
+        single_script: None,
+    };
+    let materialized = materialize_run_from_source_only(&source, None, reporter, assume_yes)?;
+    ProducerAuthoritativeInput::from_materialized(materialized, Vec::new())
 }
 
 fn producer_authoritative_input_from_resolved(
