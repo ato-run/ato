@@ -201,6 +201,19 @@ cargo build -p ato-cli
 
 デフォルト動作: Prepare から Publish まですべてのステージを実行します。
 
+現在の managed direct upload 制限:
+
+- Personal Dock の direct upload は現在 managed Store の direct-upload path を使います。
+- artifact が現在の conservative preflight limit である 95 MB を超える場合は、upload 前に reject されます。
+- `--force-large-payload` と `--paid-large-payload` はこの path では使えません。
+- 現時点でより大きい direct upload が必要なら、custom/private registry を使ってください。
+
+P1 の移行用 experimental path:
+
+- `ATO_PUBLISH_UPLOAD_STRATEGY=presigned` を設定すると、互換 registry に対して新しい presigned upload strategy を明示 opt-in できます。
+- default は引き続き `direct` です。registry capability discovery と unverified Personal Dock parity が揃うまで自動切替はしません。
+- presigned strategy には、認証済み publisher session と、publisher onboarding で作成された local publisher signing key が必要です。
+
 ポイント:
 
 - `--artifact <file>` を使えば再ビルドをスキップできます。すでにビルド済みのファイルをそのままアップロードできます。
@@ -219,6 +232,7 @@ cargo build -p ato-cli
 
 - `--artifact <file>` はここでも使えます。ローカルの project manifest がなくても公開できます。
 - `--allow-existing` は最終の Publish ステージでのみ使えます。
+- `--force-large-payload` と `--paid-large-payload` は、managed Store direct-upload policy の対象外である custom/private direct registry では引き続き使えます。
 
 ---
 
@@ -244,6 +258,23 @@ cargo build -p ato-cli
 - `ato gen-ci` — OIDC 公開用の GitHub Actions ワークフローを生成します。
 - `ato publish --fix` — workflow の問題を一度だけ自動修正し、再度 diagnostics を実行します。
 - `ato publish --no-tui` — 対話 UI を出さずに CI 向けの出力を直接表示します。
+
+### Publish payload limitation (`E212`)
+
+`E212` は、managed Store publish path が現在の payload 構成を受け付けなかった、または禁止したことを意味します。
+
+典型的な原因:
+
+- artifact が managed direct upload の current conservative preflight limit を超えている
+- `--force-large-payload` または `--paid-large-payload` を managed direct-upload path で使った
+- remote managed upload path が `413 Payload Too Large` を返した
+
+推奨アクション:
+
+- artifact size を下げる
+- 今すぐ direct upload が必要なら custom/private registry に publish する
+- official Store には CI-first の publish flow を使う
+- より大きい payload が必要なら managed presigned upload 対応を待つ
 
 ### Migration Notes
 

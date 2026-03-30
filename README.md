@@ -194,6 +194,19 @@ If you've run `ato login`, `ato publish` automatically uploads to your Dock.
 
 Default behavior: runs all stages from Prepare through Publish.
 
+Current managed direct-upload limitation:
+
+- Personal Dock direct upload currently uses the managed Store direct-upload path.
+- Artifacts larger than the current conservative preflight limit of 95 MB are rejected before upload.
+- `--force-large-payload` and `--paid-large-payload` are not available on this path.
+- If you need a larger direct upload today, use a custom/private registry instead.
+
+Experimental P1 migration path:
+
+- `ATO_PUBLISH_UPLOAD_STRATEGY=presigned` opts into the new presigned upload strategy for compatible registries.
+- The default remains `direct` until registry capability discovery and unverified Personal Dock parity are in place.
+- The presigned strategy requires an authenticated publisher session and the local publisher signing key created during publisher onboarding.
+
 Tips:
 
 - Use `--artifact <file>` to skip rebuilding. Upload a file you've already built.
@@ -212,6 +225,7 @@ Tips:
 
 - `--artifact <file>` works here too. You can publish without a local project manifest.
 - `--allow-existing` is available for the final Publish stage only.
+- `--force-large-payload` and `--paid-large-payload` remain available here because custom/private direct registries are not forced onto the managed Store direct-upload policy.
 
 ---
 
@@ -236,6 +250,23 @@ Official registry helpers:
 
 - `ato publish --fix` — fixes a broken workflow once, then reruns diagnostics.
 - `ato publish --no-tui` — skips the interactive UI and prints CI output directly.
+
+### Publish payload limitation (E212)
+
+`E212` means the managed Store publish path rejected or disallowed the current payload configuration.
+
+Typical causes:
+
+- the artifact is larger than the current conservative preflight limit for managed direct upload
+- `--force-large-payload` or `--paid-large-payload` was used with the managed direct-upload path
+- the remote managed upload path returned `413 Payload Too Large`
+
+Suggested next actions:
+
+- reduce artifact size
+- publish to a custom/private registry if direct upload is required now
+- use the official CI-first flow for the official Store
+- wait for managed presigned upload support for larger artifacts
 
 ### Migration Notes
 

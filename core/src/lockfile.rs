@@ -21,7 +21,10 @@ use tempfile::TempDir;
 use tracing::debug;
 use url::form_urlencoded::byte_serialize;
 
-use crate::common::paths::{nacelle_home_dir, toolchain_cache_dir, workspace_derived_dir};
+use crate::common::paths::{
+    nacelle_home_dir, toolchain_cache_dir, workspace_artifacts_dir, workspace_derived_dir,
+    workspace_tmp_dir,
+};
 use crate::error::{CapsuleError, Result};
 use crate::packers::payload;
 use crate::packers::runtime_fetcher::RuntimeFetcher;
@@ -355,7 +358,7 @@ pub async fn ensure_lockfile_in_dir(
     reporter: Arc<dyn CapsuleReporter + 'static>,
     timings: bool,
 ) -> Result<PathBuf> {
-    let bridge_dir = manifest_dir.join(".tmp").join("compat-manifest-bridge");
+    let bridge_dir = workspace_tmp_dir(manifest_dir).join("compat-manifest-bridge");
     fs::create_dir_all(&bridge_dir).map_err(|e| {
         CapsuleError::Config(format!(
             "Failed to create compat manifest bridge directory {}: {}",
@@ -2060,7 +2063,7 @@ fn sha256_dir(root: &Path) -> Result<String> {
 }
 
 fn artifact_root(manifest_dir: &Path, target_key: &str) -> PathBuf {
-    manifest_dir.join("artifacts").join(target_key)
+    workspace_artifacts_dir(manifest_dir).join(target_key)
 }
 
 fn reset_dir(path: &Path) -> Result<()> {

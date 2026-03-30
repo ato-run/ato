@@ -80,6 +80,75 @@ fn maps_publish_version_exists_from_error_type_to_e202() {
 }
 
 #[test]
+fn maps_managed_store_large_payload_override_policy_to_e212() {
+    let err = anyhow!(
+        crate::publish_artifact::PublishArtifactError::ManagedStoreLargePayloadOverrideUnsupported {
+            registry_url: "https://api.ato.run".to_string(),
+            message: "--force-large-payload cannot be used with the managed Store direct upload path".to_string(),
+        }
+    );
+    let diagnostic = from_anyhow(&err, CommandContext::Publish);
+    assert_eq!(diagnostic.code, CliDiagnosticCode::E212);
+    assert!(diagnostic
+        .hint
+        .as_deref()
+        .unwrap_or_default()
+        .contains("large payload override"));
+}
+
+#[test]
+fn maps_managed_store_conservative_preflight_limit_to_e212() {
+    let err = anyhow!(
+        crate::publish_artifact::PublishArtifactError::ManagedStoreDirectPayloadLimitExceeded {
+            registry_url: "https://api.ato.run".to_string(),
+            size_bytes: 187_371_520,
+            limit_bytes: crate::publish_artifact::MANAGED_STORE_DIRECT_CONSERVATIVE_LIMIT_BYTES,
+        }
+    );
+    let diagnostic = from_anyhow(&err, CommandContext::Publish);
+    assert_eq!(diagnostic.code, CliDiagnosticCode::E212);
+    assert!(diagnostic.message.contains("conservative preflight limit"));
+    assert!(diagnostic.message.contains("187371520"));
+}
+
+#[test]
+fn maps_publish_payload_too_large_to_e212() {
+    let err = anyhow!(crate::publish_artifact::PublishArtifactError::PayloadTooLarge {
+        status: 413,
+        message: "managed Store direct upload rejected the request body as too large at the edge before the registry accepted it".to_string(),
+    });
+    let diagnostic = from_anyhow(&err, CommandContext::Publish);
+    assert_eq!(diagnostic.code, CliDiagnosticCode::E212);
+    assert!(diagnostic.message.contains("too large"));
+}
+
+#[test]
+fn maps_missing_distributable_artifact_to_e102_with_specific_message() {
+    let err = anyhow!("Failed to build artifact for publish").context(
+        "Native delivery build input is not a .app directory: dist/sample-project.app\nFound nearby .app bundle candidates: dist/mac-arm64/sample-project.app\nHint: update [artifact].input to the correct path.",
+    );
+
+    let diagnostic = from_anyhow(&err, CommandContext::Publish);
+
+    assert_eq!(diagnostic.code, CliDiagnosticCode::E102);
+    assert!(diagnostic
+        .message
+        .contains("Native delivery build input is not a .app directory"));
+    assert!(diagnostic
+        .message
+        .contains("dist/mac-arm64/sample-project.app"));
+    assert_eq!(
+        diagnostic.field.as_deref(),
+        Some("contract.delivery.artifact.path")
+    );
+    assert!(diagnostic
+        .hint
+        .as_deref()
+        .unwrap_or_default()
+        .contains("配布可能な成果物が見つかりません"));
+}
+
+#[test]
 fn maps_execution_contract_error_to_e302() {
     let err = anyhow!(AtoExecutionError::execution_contract_invalid(
         "IPC validation failed",

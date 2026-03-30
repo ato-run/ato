@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tar::{Builder, EntryType, Header};
 
 use super::runtime_fetcher::RuntimeFetcher;
+use crate::common::paths::workspace_artifacts_dir;
 use crate::error::{CapsuleError, Result};
 use crate::lockfile::{resolve_existing_lockfile_path, CAPSULE_LOCK_FILE_NAME};
 use crate::packers::pack_filter::load_pack_filter_from_path;
@@ -608,9 +609,15 @@ fn create_bundle_archive(
             append_dir(&mut builder, &locks_dir, "locks", None, None)?;
         }
 
-        let artifacts_dir = source_dir.join("artifacts");
-        if artifacts_dir.exists() {
-            append_dir(&mut builder, &artifacts_dir, "artifacts", None, None)?;
+        let artifacts_dirs = [
+            workspace_artifacts_dir(source_dir),
+            source_dir.join("artifacts"),
+        ];
+        for artifacts_dir in artifacts_dirs {
+            if artifacts_dir.exists() {
+                append_dir(&mut builder, &artifacts_dir, "artifacts", None, None)?;
+                break;
+            }
         }
 
         builder.finish()?;

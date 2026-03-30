@@ -296,6 +296,8 @@ pub(crate) enum Commands {
         #[arg(long, default_value_t = false)]
         force_large_payload: bool,
         #[arg(long, default_value_t = false)]
+        paid_large_payload: bool,
+        #[arg(long, default_value_t = false)]
         keep_failed_artifacts: bool,
         #[arg(long, default_value_t = false)]
         timings: bool,
@@ -553,6 +555,12 @@ pub(crate) enum Commands {
         legacy_full_publish: bool,
         #[arg(long, default_value_t = false)]
         force_large_payload: bool,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Raise the large-payload threshold from 200 MB to 1 GB for paid-plan uploads"
+        )]
+        paid_large_payload: bool,
         #[arg(
             long,
             default_value_t = false,

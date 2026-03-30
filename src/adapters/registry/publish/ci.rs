@@ -20,6 +20,7 @@ const OIDC_AUDIENCE: &str = "api.ato.run";
 pub struct PublishCiArgs {
     pub json_output: bool,
     pub force_large_payload: bool,
+    pub paid_large_payload: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +155,7 @@ pub async fn execute(
     crate::payload_guard::ensure_payload_size(
         &artifact_path,
         args.force_large_payload,
+        args.paid_large_payload,
         "--force-large-payload",
     )?;
     let artifact_bytes = fs::read(&artifact_path)
@@ -431,7 +433,8 @@ pub(crate) fn build_capsule_artifact_with_output(
             manifest_dir.to_path_buf(),
         )
     };
-    let artifact_dir = manifest_dir.join(".tmp").join("ato-ci-artifacts");
+    let artifact_dir =
+        capsule_core::common::paths::workspace_tmp_dir(&manifest_dir).join("ato-ci-artifacts");
     fs::create_dir_all(&artifact_dir)
         .with_context(|| format!("Failed to create {}", artifact_dir.display()))?;
     let artifact_path = artifact_dir.join(format!("{}-{}.capsule", name, version));

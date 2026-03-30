@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use capsule_core::bootstrap::BootstrapBoundary;
+use capsule_core::common::paths::workspace_tmp_dir;
 use capsule_core::router::{CompatManifestBridge, ExecutionDescriptor};
 use chrono::{SecondsFormat, Utc};
 use goblin::Object;
@@ -789,8 +790,9 @@ where
         run_native_build_command(build_command, stream_output)?;
     }
 
-    validate_native_bundle_directory(&plan.source_app_path)?;
-    ensure_native_artifact_kind_supported(&plan.source_app_path, "build")?;
+    let source_app_path = resolve_native_build_artifact_path(&plan.source_app_path);
+    validate_native_bundle_directory(&source_app_path)?;
+    ensure_native_artifact_kind_supported(&source_app_path, "build")?;
     let manifest = plan
         .legacy_manifest_bridge
         .as_ref()
@@ -809,9 +811,9 @@ where
             .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
 
-    validate_minimal_native_artifact_permissions(&plan.source_app_path)?;
+    validate_minimal_native_artifact_permissions(&source_app_path)?;
 
-    let tmp_root = plan.workspace_root.join(".tmp");
+    let tmp_root = workspace_tmp_dir(&plan.workspace_root);
     fs::create_dir_all(&tmp_root)
         .with_context(|| format!("Failed to create {}", tmp_root.display()))?;
     let staging_root = create_temp_subdir(&tmp_root, "native-build")?;
@@ -823,7 +825,7 @@ where
             fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create {}", parent.display()))?;
         }
-        copy_recursively(&plan.source_app_path, &staged_app_path)?;
+        copy_recursively(&source_app_path, &staged_app_path)?;
         strip_signature(&staged_app_path)?;
         validate_minimal_native_artifact_permissions(&staged_app_path)?;
 
@@ -845,7 +847,7 @@ where
             artifact_path: artifact_path.clone(),
             build_strategy: "native-delivery".to_string(),
             target: plan.target.clone(),
-            derived_from: plan.source_app_path.clone(),
+            derived_from: source_app_path.clone(),
             schema_version: DELIVERY_SCHEMA_VERSION.to_string(),
         })
     })();
@@ -2508,6 +2510,17 @@ fn format_nearby_native_artifact_candidates(
     )
 }
 
+fn resolve_native_build_artifact_path(expected_path: &Path) -> PathBuf {
+    if expected_path.exists() {
+        return expected_path.to_path_buf();
+    }
+
+    match discover_nearby_native_artifacts(expected_path, 6).as_slice() {
+        [candidate] => candidate.clone(),
+        _ => expected_path.to_path_buf(),
+    }
+}
+
 fn format_native_build_command(command: &NativeBuildCommand) -> String {
     std::iter::once(command.program.as_str())
         .chain(command.args.iter().map(String::as_str))
@@ -2573,6 +2586,53 @@ fn configure_native_build_process(process: &mut Command, command: &NativeBuildCo
         process.env_remove("CARGO_BUILD_TARGET");
         process.env("CARGO_TARGET_DIR", target_dir);
     }
+
+    if command_uses_electron_builder(command) {
+        process.env("CSC_IDENTITY_AUTO_DISCOVERY", "false");
+    }
+}
+
+fn command_uses_electron_builder(command: &NativeBuildCommand) -> bool {
+    let program_name = Path::new(&command.program)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(command.program.as_str())
+        .to_ascii_lowercase();
+    if program_name == "electron-builder"
+        || command
+            .args
+            .iter()
+            .any(|arg| arg.contains("electron-builder"))
+    {
+        return true;
+    }
+
+    if !has_electron_builder_config(&command.working_dir) {
+        return false;
+    }
+
+    command.args.iter().any(|arg| {
+        matches!(
+            arg.to_ascii_lowercase().as_str(),
+            "build:mac"
+                | "build:darwin"
+                | "build:linux"
+                | "build:win"
+                | "build:windows"
+                | "build:desktop"
+                | "build:unpack"
+        )
+    })
+}
+
+fn has_electron_builder_config(working_dir: &Path) -> bool {
+    [
+        "electron-builder.json",
+        "electron-builder.yml",
+        "electron-builder.yaml",
+    ]
+    .into_iter()
+    .any(|name| working_dir.join(name).is_file())
 }
 
 fn cargo_native_build_target_dir(command: &NativeBuildCommand) -> Option<PathBuf> {
