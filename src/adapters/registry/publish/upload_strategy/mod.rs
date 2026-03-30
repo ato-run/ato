@@ -1,3 +1,4 @@
+use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -155,6 +156,14 @@ fn parse_upload_strategy_kind(raw: &str) -> Option<UploadStrategyKind> {
 }
 
 fn discover_upload_strategy_kind(registry_url: &str) -> Option<UploadStrategySelection> {
+    let registry_url = registry_url.to_string();
+    thread::spawn(move || discover_upload_strategy_kind_blocking(&registry_url))
+        .join()
+        .ok()
+        .flatten()
+}
+
+fn discover_upload_strategy_kind_blocking(registry_url: &str) -> Option<UploadStrategySelection> {
     let client = crate::registry::http::blocking_client_builder(registry_url)
         .timeout(Duration::from_secs(2))
         .build()
@@ -321,6 +330,36 @@ mod tests {
         assert_eq!(
             selection.reason,
             UploadStrategySelectionReason::CustomRegistryDefaultDirect
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resolved_selector_is_safe_inside_async_context() {
+        let app = Router::new().route(
+            "/v1/publish/capabilities",
+            get(|| async {
+                Json(serde_json::json!({
+                    "default_upload_strategy": "presigned",
+                    "supported_upload_strategies": ["direct", "presigned"],
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+
+        let selection = resolve_upload_strategy_kind(&format!("http://{}", addr));
+
+        handle.abort();
+        let _ = handle.await;
+        assert_eq!(selection.kind, UploadStrategyKind::Presigned);
+        assert_eq!(
+            selection.reason,
+            UploadStrategySelectionReason::RegistryCapabilityDiscovery
         );
     }
 }
