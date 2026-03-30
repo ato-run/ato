@@ -166,7 +166,7 @@ fn ensure_fake_runtime_shims(home_dir: &Path) -> Result<std::ffi::OsString> {
     let shims_dir = home_dir.join(".test-runtime-shims");
     std::fs::create_dir_all(&shims_dir)?;
 
-    for binary in ["node", "bun", "python", "python3", "uv"] {
+    for binary in ["node", "bun", "python", "python3", "uv", "cargo", "wails"] {
         #[cfg(windows)]
         let shim_path = shims_dir.join(format!("{binary}.cmd"));
         #[cfg(not(windows))]
@@ -183,6 +183,47 @@ fn ensure_fake_runtime_shims(home_dir: &Path) -> Result<std::ffi::OsString> {
                 permissions.set_mode(0o755);
                 std::fs::set_permissions(&shim_path, permissions)?;
             }
+        }
+    }
+
+    #[cfg(windows)]
+    let npm_path = shims_dir.join("npm.cmd");
+    #[cfg(not(windows))]
+    let npm_path = shims_dir.join("npm");
+    if !npm_path.exists() {
+        #[cfg(windows)]
+        std::fs::write(&npm_path, "@echo off\r\nexit /B 0\r\n")?;
+        #[cfg(not(windows))]
+        {
+            std::fs::write(
+                &npm_path,
+                r#"#!/bin/sh
+set -eu
+if [ "${1:-}" = "run" ] && [ "${2:-}" = "build" ]; then
+  name="$(sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' package.json | head -n 1)"
+  if [ -z "${name}" ]; then
+    name="desktop-app"
+  fi
+  if [ -f "src-tauri/Cargo.toml" ]; then
+    out="src-tauri/target/release/bundle/macos/${name}.app"
+  elif [ -f "electron-builder.json" ]; then
+    out="dist/${name}.app"
+  elif [ -f "wails.json" ]; then
+    out="build/bin/${name}.app"
+  else
+    out="dist/${name}.app"
+  fi
+  mkdir -p "${out}/Contents/MacOS"
+  printf '#!/bin/sh\necho %s\n' "${name}" > "${out}/Contents/MacOS/${name}"
+  chmod 755 "${out}/Contents/MacOS/${name}"
+fi
+exit 0
+"#,
+            )?;
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&npm_path)?.permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&npm_path, permissions)?;
         }
     }
 
@@ -332,6 +373,143 @@ fn publish_artifact_with_scoped_id(
         "publish failed: {}",
         String::from_utf8_lossy(&publish.stderr)
     );
+    Ok(())
+}
+
+fn command_on_path(command: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths).any(|dir| {
+                let candidate = dir.join(command);
+                if candidate.is_file() {
+                    return true;
+                }
+                #[cfg(windows)]
+                {
+                    let candidate = dir.join(format!("{command}.exe"));
+                    if candidate.is_file() {
+                        return true;
+                    }
+                }
+                false
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src).with_context(|| format!("read dir {}", src.display()))? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_dir_recursive(&source_path, &dest_path)?;
+        } else if file_type.is_file() {
+            std::fs::copy(&source_path, &dest_path).with_context(|| {
+                format!(
+                    "copy sample fixture {} -> {}",
+                    source_path.display(),
+                    dest_path.display()
+                )
+            })?;
+        } else {
+            anyhow::bail!(
+                "unsupported entry in sample fixture: {}",
+                source_path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn materialize_desktop_sample(sample_name: &str, project_dir: &Path) -> Result<()> {
+    let sample_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("samples")
+        .join("source")
+        .join("native-desktop")
+        .join(sample_name);
+    if !sample_root.is_dir() {
+        anyhow::bail!(
+            "desktop sample fixture is missing: {}",
+            sample_root.display()
+        );
+    }
+    copy_dir_recursive(&sample_root, project_dir)
+}
+
+fn assert_source_desktop_private_publish(
+    ato: &Path,
+    base_url: &str,
+    workspace_root: &Path,
+    home_dir: &Path,
+    framework: &str,
+    extra_publish_args: &[&str],
+    expected_identity_class: &str,
+) -> Result<()> {
+    let mut publish_args = vec!["publish", "--registry", base_url, "--json"];
+    publish_args.extend_from_slice(extra_publish_args);
+    let publish = run_ato_with_home(ato, &publish_args, workspace_root, home_dir)?;
+    assert!(
+        publish.status.success(),
+        "{framework} publish failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&publish.stdout),
+        String::from_utf8_lossy(&publish.stderr)
+    );
+
+    let publish_json: serde_json::Value =
+        serde_json::from_slice(&publish.stdout).context("parse publish json")?;
+    assert_eq!(
+        publish_json
+            .get("publish_metadata")
+            .and_then(|value| value.get("identity_class"))
+            .and_then(|value| value.as_str()),
+        Some(expected_identity_class),
+        "{framework} publish json missing source-derived metadata: {publish_json}"
+    );
+    let scoped_id = publish_json
+        .get("scoped_id")
+        .and_then(|value| value.as_str())
+        .context("publish json missing scoped_id")?;
+    let mut scoped_parts = scoped_id.splitn(2, '/');
+    let publisher = scoped_parts
+        .next()
+        .context("missing publisher in scoped_id")?;
+    let slug = scoped_parts.next().context("missing slug in scoped_id")?;
+
+    let detail: serde_json::Value = reqwest::blocking::get(format!(
+        "{}/v1/manifest/capsules/by/{}/{}",
+        base_url, publisher, slug
+    ))
+    .with_context(|| format!("fetch detail for {framework}"))?
+    .json()
+    .with_context(|| format!("parse detail json for {framework}"))?;
+    let releases = detail
+        .get("releases")
+        .and_then(|value| value.as_array())
+        .with_context(|| format!("releases array missing for desktop source publish: {detail}"))?;
+    let release = releases
+        .iter()
+        .find(|value| value.get("version").and_then(|entry| entry.as_str()) == Some("1.0.0"))
+        .context("desktop source publish release missing")?;
+    assert_eq!(
+        release
+            .get("publish_metadata")
+            .and_then(|value| value.get("identity_class"))
+            .and_then(|value| value.as_str()),
+        Some(expected_identity_class),
+        "{framework} release metadata missing identity class: {release}"
+    );
+    assert_eq!(
+        release
+            .get("publish_metadata")
+            .and_then(|value| value.get("provenance_limited"))
+            .and_then(|value| value.as_bool()),
+        Some(false),
+        "{framework} release metadata should not be provenance-limited: {release}"
+    );
+
     Ok(())
 }
 
@@ -691,6 +869,246 @@ prepare = "echo prepare"
     );
 
     Ok(())
+}
+
+#[test]
+#[serial_test::serial]
+fn e2e_local_registry_private_publish_source_tauri() -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        eprintln!("skipping e2e_local_registry_private_publish_source_tauri: macOS only");
+        return Ok(());
+    }
+
+    let ato = assert_cmd::cargo::cargo_bin("ato");
+    let tmp = TempDir::new().context("create temp dir")?;
+    let home_dir = tmp.path().join("home");
+    std::fs::create_dir_all(&home_dir)?;
+    let data_dir = tmp.path().join("registry-data");
+    let project_dir = tmp.path().join("tauri-private-publish");
+    materialize_desktop_sample("tauri", &project_dir)?;
+
+    let Some((_guard, base_url)) = start_local_registry_or_skip(
+        &ato,
+        &data_dir,
+        "e2e_local_registry_private_publish_source_tauri",
+    )?
+    else {
+        return Ok(());
+    };
+
+    assert_source_desktop_private_publish(
+        &ato,
+        &base_url,
+        &project_dir,
+        &home_dir,
+        "tauri",
+        &[],
+        "source_derived_unsigned_bundle",
+    )
+}
+
+#[test]
+#[serial_test::serial]
+fn e2e_local_registry_private_publish_source_electron() -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        eprintln!("skipping e2e_local_registry_private_publish_source_electron: macOS only");
+        return Ok(());
+    }
+
+    let ato = assert_cmd::cargo::cargo_bin("ato");
+    let tmp = TempDir::new().context("create temp dir")?;
+    let home_dir = tmp.path().join("home");
+    std::fs::create_dir_all(&home_dir)?;
+    let data_dir = tmp.path().join("registry-data");
+    let project_dir = tmp.path().join("electron-private-publish");
+    materialize_desktop_sample("electron", &project_dir)?;
+
+    let Some((_guard, base_url)) = start_local_registry_or_skip(
+        &ato,
+        &data_dir,
+        "e2e_local_registry_private_publish_source_electron",
+    )?
+    else {
+        return Ok(());
+    };
+
+    assert_source_desktop_private_publish(
+        &ato,
+        &base_url,
+        &project_dir,
+        &home_dir,
+        "electron",
+        &[],
+        "source_derived_unsigned_bundle",
+    )
+}
+
+#[test]
+#[serial_test::serial]
+fn e2e_local_registry_private_publish_source_wails() -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        eprintln!("skipping e2e_local_registry_private_publish_source_wails: macOS only");
+        return Ok(());
+    }
+
+    let ato = assert_cmd::cargo::cargo_bin("ato");
+    let tmp = TempDir::new().context("create temp dir")?;
+    let home_dir = tmp.path().join("home");
+    std::fs::create_dir_all(&home_dir)?;
+    let data_dir = tmp.path().join("registry-data");
+    let project_dir = tmp.path().join("wails-private-publish");
+    materialize_desktop_sample("wails", &project_dir)?;
+
+    let Some((_guard, base_url)) = start_local_registry_or_skip(
+        &ato,
+        &data_dir,
+        "e2e_local_registry_private_publish_source_wails",
+    )?
+    else {
+        return Ok(());
+    };
+
+    assert_source_desktop_private_publish(
+        &ato,
+        &base_url,
+        &project_dir,
+        &home_dir,
+        "wails",
+        &[],
+        "source_derived_unsigned_bundle",
+    )
+}
+
+#[test]
+#[serial_test::serial]
+fn e2e_local_registry_private_publish_source_tauri_finalize_local() -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "skipping e2e_local_registry_private_publish_source_tauri_finalize_local: macOS only"
+        );
+        return Ok(());
+    }
+    if !command_on_path("codesign") {
+        eprintln!(
+            "skipping e2e_local_registry_private_publish_source_tauri_finalize_local: codesign unavailable"
+        );
+        return Ok(());
+    }
+
+    let ato = assert_cmd::cargo::cargo_bin("ato");
+    let tmp = TempDir::new().context("create temp dir")?;
+    let home_dir = tmp.path().join("home");
+    std::fs::create_dir_all(&home_dir)?;
+    let data_dir = tmp.path().join("registry-data");
+    let project_dir = tmp.path().join("tauri-private-publish");
+    materialize_desktop_sample("tauri", &project_dir)?;
+
+    let Some((_guard, base_url)) = start_local_registry_or_skip(
+        &ato,
+        &data_dir,
+        "e2e_local_registry_private_publish_source_tauri_finalize_local",
+    )?
+    else {
+        return Ok(());
+    };
+
+    assert_source_desktop_private_publish(
+        &ato,
+        &base_url,
+        &project_dir,
+        &home_dir,
+        "tauri",
+        &["--finalize-local", "--allow-external-finalize"],
+        "locally_finalized_signed_bundle",
+    )
+}
+
+#[test]
+#[serial_test::serial]
+fn e2e_local_registry_private_publish_source_electron_finalize_local() -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "skipping e2e_local_registry_private_publish_source_electron_finalize_local: macOS only"
+        );
+        return Ok(());
+    }
+    if !command_on_path("codesign") {
+        eprintln!(
+            "skipping e2e_local_registry_private_publish_source_electron_finalize_local: codesign unavailable"
+        );
+        return Ok(());
+    }
+
+    let ato = assert_cmd::cargo::cargo_bin("ato");
+    let tmp = TempDir::new().context("create temp dir")?;
+    let home_dir = tmp.path().join("home");
+    std::fs::create_dir_all(&home_dir)?;
+    let data_dir = tmp.path().join("registry-data");
+    let project_dir = tmp.path().join("electron-private-publish");
+    materialize_desktop_sample("electron", &project_dir)?;
+
+    let Some((_guard, base_url)) = start_local_registry_or_skip(
+        &ato,
+        &data_dir,
+        "e2e_local_registry_private_publish_source_electron_finalize_local",
+    )?
+    else {
+        return Ok(());
+    };
+
+    assert_source_desktop_private_publish(
+        &ato,
+        &base_url,
+        &project_dir,
+        &home_dir,
+        "electron",
+        &["--finalize-local", "--allow-external-finalize"],
+        "locally_finalized_signed_bundle",
+    )
+}
+
+#[test]
+#[serial_test::serial]
+fn e2e_local_registry_private_publish_source_wails_finalize_local() -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "skipping e2e_local_registry_private_publish_source_wails_finalize_local: macOS only"
+        );
+        return Ok(());
+    }
+    if !command_on_path("codesign") {
+        eprintln!(
+            "skipping e2e_local_registry_private_publish_source_wails_finalize_local: codesign unavailable"
+        );
+        return Ok(());
+    }
+
+    let ato = assert_cmd::cargo::cargo_bin("ato");
+    let tmp = TempDir::new().context("create temp dir")?;
+    let home_dir = tmp.path().join("home");
+    std::fs::create_dir_all(&home_dir)?;
+    let data_dir = tmp.path().join("registry-data");
+    let project_dir = tmp.path().join("wails-private-publish");
+    materialize_desktop_sample("wails", &project_dir)?;
+
+    let Some((_guard, base_url)) = start_local_registry_or_skip(
+        &ato,
+        &data_dir,
+        "e2e_local_registry_private_publish_source_wails_finalize_local",
+    )?
+    else {
+        return Ok(());
+    };
+
+    assert_source_desktop_private_publish(
+        &ato,
+        &base_url,
+        &project_dir,
+        &home_dir,
+        "wails",
+        &["--finalize-local", "--allow-external-finalize"],
+        "locally_finalized_signed_bundle",
+    )
 }
 
 #[test]

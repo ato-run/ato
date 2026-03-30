@@ -1,0 +1,5 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "wails-private-publish",
+  "outputfilename": "wails-private-publish"
+}

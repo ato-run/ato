@@ -790,7 +790,51 @@ entrypoint = "source/main.sh"
     let second_lock = read_lockfile(&second).unwrap();
 
     assert_eq!(first_lock.meta.created_at, second_lock.meta.created_at);
-    assert!(temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
+    assert!(lockfile_inputs_snapshot_path(temp.path()).exists());
+}
+
+#[test]
+fn ensure_lockfile_for_compat_input_does_not_materialize_bridge_manifest() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("main.sh"), "echo demo\n").unwrap();
+
+    let manifest_text = r#"
+schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "default"
+[targets.default]
+runtime = "source"
+driver = "native"
+entrypoint = "main.sh"
+"#;
+    let manifest_raw: toml::Value = toml::from_str(manifest_text).unwrap();
+    let bridge = crate::router::CompatManifestBridge::from_manifest_value(&manifest_raw).unwrap();
+    let compat_input =
+        crate::router::CompatProjectInput::from_bridge(temp.path().to_path_buf(), bridge).unwrap();
+    let reporter: Arc<dyn CapsuleReporter + 'static> = Arc::new(crate::reporter::NoOpReporter);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    let lock_path = rt
+        .block_on(ensure_lockfile_for_compat_input(
+            &compat_input,
+            reporter,
+            false,
+        ))
+        .unwrap();
+
+    assert_eq!(lock_path, lockfile_output_path(temp.path()));
+    assert!(lock_path.exists());
+    assert!(!temp.path().join(CAPSULE_LOCK_FILE_NAME).exists());
+    assert!(!temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
+    assert!(!temp.path().join("capsule.toml").exists());
+    assert!(!temp
+        .path()
+        .join(".tmp")
+        .join("compat-manifest-bridge")
+        .join("capsule.toml")
+        .exists());
 }
 
 #[test]
@@ -831,8 +875,11 @@ entrypoint = "main.ts"
         ))
         .unwrap();
 
+    assert_eq!(lock_path, lockfile_output_path(temp.path()));
     assert!(lock_path.exists());
-    assert!(temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
+    assert!(lockfile_inputs_snapshot_path(temp.path()).exists());
+    assert!(!temp.path().join(CAPSULE_LOCK_FILE_NAME).exists());
+    assert!(!temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
 }
 
 #[test]
@@ -877,8 +924,11 @@ dependencies = "requirements.txt"
         ))
         .unwrap();
 
+    assert_eq!(lock_path, lockfile_output_path(temp.path()));
     assert!(lock_path.exists());
-    assert!(temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
+    assert!(lockfile_inputs_snapshot_path(temp.path()).exists());
+    assert!(!temp.path().join(CAPSULE_LOCK_FILE_NAME).exists());
+    assert!(!temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
 }
 
 #[test]
@@ -926,8 +976,11 @@ include = ["src/**", "fixtures/db.json", "package.json", "pnpm-lock.yaml"]
         ))
         .unwrap();
 
+    assert_eq!(lock_path, lockfile_output_path(temp.path()));
     assert!(lock_path.exists());
-    assert!(temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
+    assert!(lockfile_inputs_snapshot_path(temp.path()).exists());
+    assert!(!temp.path().join(CAPSULE_LOCK_FILE_NAME).exists());
+    assert!(!temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
 }
 
 #[test]

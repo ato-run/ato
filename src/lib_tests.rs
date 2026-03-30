@@ -501,6 +501,8 @@ fn test_publish_args() -> publish_command_dispatch::PublishCommandArgs {
         deploy: false,
         legacy_full_publish: false,
         force_large_payload: false,
+        finalize_local: false,
+        allow_external_finalize: false,
         fix: false,
         no_tui: false,
         json: true,
@@ -509,8 +511,9 @@ fn test_publish_args() -> publish_command_dispatch::PublishCommandArgs {
 
 #[test]
 fn publish_phase_selection_defaults_to_all_for_private() {
-    let selected =
-        publish_command_dispatch::select_publish_phases(false, false, false, false, false, false);
+    let selected = publish_command_dispatch::select_publish_phases(
+        false, false, false, false, false, false, false,
+    );
     assert_eq!(
         selected.start,
         publish_command_dispatch::PublishPhaseBoundary::Prepare
@@ -524,8 +527,9 @@ fn publish_phase_selection_defaults_to_all_for_private() {
 
 #[test]
 fn publish_phase_selection_respects_filter_flags() {
-    let selected =
-        publish_command_dispatch::select_publish_phases(true, false, true, true, false, false);
+    let selected = publish_command_dispatch::select_publish_phases(
+        true, false, true, true, false, false, false,
+    );
     assert_eq!(
         selected.start,
         publish_command_dispatch::PublishPhaseBoundary::Prepare
@@ -539,8 +543,9 @@ fn publish_phase_selection_respects_filter_flags() {
 
 #[test]
 fn publish_phase_selection_defaults_to_deploy_for_official() {
-    let selected =
-        publish_command_dispatch::select_publish_phases(false, false, false, true, false, false);
+    let selected = publish_command_dispatch::select_publish_phases(
+        false, false, false, true, false, false, false,
+    );
     assert_eq!(
         selected.start,
         publish_command_dispatch::PublishPhaseBoundary::Publish
@@ -554,8 +559,9 @@ fn publish_phase_selection_defaults_to_deploy_for_official() {
 
 #[test]
 fn publish_phase_selection_legacy_full_publish_keeps_all_for_official() {
-    let selected =
-        publish_command_dispatch::select_publish_phases(false, false, false, true, true, false);
+    let selected = publish_command_dispatch::select_publish_phases(
+        false, false, false, true, true, false, false,
+    );
     assert_eq!(
         selected.start,
         publish_command_dispatch::PublishPhaseBoundary::Prepare
@@ -569,8 +575,9 @@ fn publish_phase_selection_legacy_full_publish_keeps_all_for_official() {
 
 #[test]
 fn publish_phase_selection_artifact_build_is_verify_only() {
-    let selected =
-        publish_command_dispatch::select_publish_phases(false, true, false, false, false, true);
+    let selected = publish_command_dispatch::select_publish_phases(
+        false, true, false, false, false, true, false,
+    );
     assert_eq!(
         selected.start,
         publish_command_dispatch::PublishPhaseBoundary::Verify
@@ -587,8 +594,9 @@ fn publish_phase_selection_artifact_build_is_verify_only() {
 
 #[test]
 fn publish_phase_selection_official_deploy_only_keeps_publish_only_even_with_artifact() {
-    let selected =
-        publish_command_dispatch::select_publish_phases(false, false, true, true, false, true);
+    let selected = publish_command_dispatch::select_publish_phases(
+        false, false, true, true, false, true, false,
+    );
     assert_eq!(
         selected.start,
         publish_command_dispatch::PublishPhaseBoundary::Publish
@@ -604,8 +612,9 @@ fn publish_phase_selection_official_deploy_only_keeps_publish_only_even_with_art
 
 #[test]
 fn publish_phase_selection_private_deploy_runs_install_and_dry_run() {
-    let selected =
-        publish_command_dispatch::select_publish_phases(false, false, true, false, false, false);
+    let selected = publish_command_dispatch::select_publish_phases(
+        false, false, true, false, false, false, false,
+    );
     assert!(selected.runs_prepare());
     assert!(selected.runs_build());
     assert!(selected.runs_verify());
@@ -616,8 +625,9 @@ fn publish_phase_selection_private_deploy_runs_install_and_dry_run() {
 
 #[test]
 fn publish_phase_selection_official_default_skips_install_and_dry_run() {
-    let selected =
-        publish_command_dispatch::select_publish_phases(false, false, false, true, false, false);
+    let selected = publish_command_dispatch::select_publish_phases(
+        false, false, false, true, false, false, false,
+    );
     assert!(!selected.runs_prepare());
     assert!(!selected.runs_build());
     assert!(!selected.runs_verify());
@@ -710,8 +720,9 @@ fn is_legacy_dock_publish_registry_detects_dock_path_prefix() {
 fn publish_validate_rejects_allow_existing_without_deploy() {
     let mut args = test_publish_args();
     args.allow_existing = true;
-    let selected =
-        publish_command_dispatch::select_publish_phases(false, true, false, false, false, false);
+    let selected = publish_command_dispatch::select_publish_phases(
+        false, true, false, false, false, false, false,
+    );
     let err = publish_command_dispatch::validate_publish_phase_options(&args, selected, false)
         .expect_err("must fail closed");
     assert!(err.to_string().contains("--allow-existing"));
@@ -721,8 +732,9 @@ fn publish_validate_rejects_allow_existing_without_deploy() {
 fn publish_validate_rejects_fix_for_private_registry() {
     let mut args = test_publish_args();
     args.fix = true;
-    let selected =
-        publish_command_dispatch::select_publish_phases(false, false, true, false, false, false);
+    let selected = publish_command_dispatch::select_publish_phases(
+        false, false, true, false, false, false, false,
+    );
     let err = publish_command_dispatch::validate_publish_phase_options(&args, selected, false)
         .expect_err("must fail closed");
     assert!(err.to_string().contains("--fix"));
@@ -731,8 +743,9 @@ fn publish_validate_rejects_fix_for_private_registry() {
 #[test]
 fn publish_validate_allows_private_deploy_from_source() {
     let args = test_publish_args();
-    let selected =
-        publish_command_dispatch::select_publish_phases(false, false, true, false, false, false);
+    let selected = publish_command_dispatch::select_publish_phases(
+        false, false, true, false, false, false, false,
+    );
     publish_command_dispatch::validate_publish_phase_options(&args, selected, false)
         .expect("source deploy should auto-resolve earlier phases");
 }
@@ -742,8 +755,9 @@ fn publish_validate_rejects_artifact_prepare_stop_point() {
     let mut args = test_publish_args();
     args.artifact = Some(std::path::PathBuf::from("demo.capsule"));
     args.prepare = true;
-    let selected =
-        publish_command_dispatch::select_publish_phases(true, false, false, false, false, true);
+    let selected = publish_command_dispatch::select_publish_phases(
+        true, false, false, false, false, true, false,
+    );
     let err = publish_command_dispatch::validate_publish_phase_options(&args, selected, false)
         .expect_err("artifact + prepare must fail closed");
     assert!(err.to_string().contains("cannot be combined"));

@@ -20,6 +20,7 @@ use crate::packers::payload::{
 };
 use crate::packers::sbom::{generate_embedded_sbom_from_inputs_async, SbomFileInput, SBOM_PATH};
 use crate::r3_config;
+use crate::router::CompatProjectInput;
 
 const README_CANDIDATES: [&str; 4] = ["README.md", "README.mdx", "README.txt", "README"];
 
@@ -36,8 +37,8 @@ const README_CANDIDATES: [&str; 4] = ["README.md", "README.mdx", "README.txt", "
 
 #[derive(Debug, Clone)]
 pub struct CapsulePackOptions {
-    pub manifest_path: PathBuf,
-    pub manifest_dir: PathBuf,
+    pub compat_input: Option<CompatProjectInput>,
+    pub workspace_root: PathBuf,
     pub output: Option<PathBuf>,
     pub config_json: Arc<r3_config::ConfigJson>,
     pub config_path: PathBuf,
@@ -158,8 +159,10 @@ pub async fn pack(
 ) -> CapsuleResult<PathBuf> {
     debug!("Creating capsule archive (.capsule format)");
 
-    let loaded = crate::manifest::load_manifest(&opts.manifest_path)?;
-    let pack_filter = PackFilter::from_manifest(&loaded.model)?;
+    let compat_input = opts.compat_input.as_ref().ok_or_else(|| {
+        CapsuleError::Pack("capsule pack requires compat manifest input".to_string())
+    })?;
+    let pack_filter = PackFilter::from_manifest(compat_input.manifest())?;
 
     // config/lockfile are prepared by the caller once and injected into this packer.
     debug!(
@@ -183,7 +186,7 @@ pub async fn pack(
     }
 
     // Step 2: Resolve source payload input
-    let payload_roots = select_payload_roots(plan, &opts.manifest_dir)?;
+    let payload_roots = select_payload_roots(plan, &opts.workspace_root)?;
     for root in &payload_roots {
         if let Some(message) = root.warning {
             reporter
@@ -246,7 +249,7 @@ pub async fn pack(
     debug!("Compressed payload size: {}", format_bytes(compressed_size));
     let payload_tar_bytes = read_payload_tar_bytes_from_zst(&payload_zst_path)?;
     let (distribution_manifest, manifest_toml_bytes) =
-        build_distribution_manifest(&loaded.model, &payload_tar_bytes)?;
+        build_distribution_manifest(compat_input.manifest(), &payload_tar_bytes)?;
     let rebuilt_payload = reconstruct_from_chunks(
         &payload_tar_bytes,
         &distribution_manifest
@@ -270,8 +273,8 @@ pub async fn pack(
     debug!("Phase 3: creating final .capsule archive");
 
     let output_path = opts.output.clone().unwrap_or_else(|| {
-        let name_str = loaded.model.name.replace('\"', "-");
-        opts.manifest_dir.join(format!("{}.capsule", name_str))
+        let name_str = compat_input.package_name().replace('\"', "-");
+        opts.workspace_root.join(format!("{}.capsule", name_str))
     });
 
     let mut capsule_file = fs::File::create(&output_path)?;
@@ -297,8 +300,11 @@ pub async fn pack(
         reproducible_mtime_epoch(),
     )?;
 
-    let sbom =
-        generate_embedded_sbom_from_inputs_async(loaded.model.name.clone(), sbom_inputs).await?;
+    let sbom = generate_embedded_sbom_from_inputs_async(
+        compat_input.package_name().to_string(),
+        sbom_inputs,
+    )
+    .await?;
     let sbom_temp_path = temp_dir.path().join(SBOM_PATH);
     fs::write(&sbom_temp_path, &sbom.document)?;
     append_regular_file_normalized(
@@ -349,7 +355,7 @@ pub async fn pack(
         )?;
     }
 
-    if let Some((readme_path, archive_name)) = find_nearest_readme_candidate(&opts.manifest_dir) {
+    if let Some((readme_path, archive_name)) = find_nearest_readme_candidate(&opts.workspace_root) {
         append_regular_file_normalized(
             &mut outer_ar,
             &readme_path,
@@ -736,13 +742,7 @@ fn select_payload_roots(
     plan: &crate::router::ManifestData,
     manifest_dir: &Path,
 ) -> CapsuleResult<Vec<PayloadRoot>> {
-    let schema_version = plan
-        .manifest
-        .get("schema_version")
-        .and_then(toml::Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
-    if schema_version != "0.3" {
+    if !plan.is_schema_v03() {
         let (source_root, warning) = select_payload_source_root(manifest_dir);
         return Ok(vec![PayloadRoot {
             disk_root: source_root,
@@ -1115,8 +1115,8 @@ manifest_hash = "sha256:dummy"
         pack(
             &decision.plan,
             CapsulePackOptions {
-                manifest_path: manifest_path.clone(),
-                manifest_dir: tmp.path().to_path_buf(),
+                compat_input: decision.plan.compat_project_input().expect("compat input"),
+                workspace_root: tmp.path().to_path_buf(),
                 output: Some(out1.clone()),
                 config_json: config.clone(),
                 config_path: config_path.clone(),
@@ -1130,8 +1130,8 @@ manifest_hash = "sha256:dummy"
         pack(
             &decision.plan,
             CapsulePackOptions {
-                manifest_path: manifest_path.clone(),
-                manifest_dir: tmp.path().to_path_buf(),
+                compat_input: decision.plan.compat_project_input().expect("compat input"),
+                workspace_root: tmp.path().to_path_buf(),
                 output: Some(out2.clone()),
                 config_json: config,
                 config_path,
@@ -1195,8 +1195,8 @@ manifest_hash = "sha256:dummy"
         pack(
             &decision.plan,
             CapsulePackOptions {
-                manifest_path: manifest_path.clone(),
-                manifest_dir: tmp.path().to_path_buf(),
+                compat_input: decision.plan.compat_project_input().expect("compat input"),
+                workspace_root: tmp.path().to_path_buf(),
                 output: Some(out.clone()),
                 config_json: config,
                 config_path,

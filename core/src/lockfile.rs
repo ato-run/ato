@@ -21,11 +21,12 @@ use tempfile::TempDir;
 use tracing::debug;
 use url::form_urlencoded::byte_serialize;
 
-use crate::common::paths::{nacelle_home_dir, toolchain_cache_dir};
+use crate::common::paths::{nacelle_home_dir, toolchain_cache_dir, workspace_derived_dir};
 use crate::error::{CapsuleError, Result};
 use crate::packers::payload;
 use crate::packers::runtime_fetcher::RuntimeFetcher;
 use crate::reporter::CapsuleReporter;
+use crate::router::CompatProjectInput;
 use crate::types::{CapsuleManifest, ExternalCapsuleDependency};
 
 #[path = "lockfile_runtime.rs"]
@@ -272,7 +273,16 @@ pub async fn generate_and_write_lockfile(
         timings,
     )
     .await?;
-    let output_path = manifest_dir.join(CAPSULE_LOCK_FILE_NAME);
+    let output_path = lockfile_output_path(&manifest_dir);
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            CapsuleError::Pack(format!(
+                "Failed to create lockfile output dir {}: {}",
+                parent.display(),
+                e
+            ))
+        })?;
+    }
     let content = serde_jcs::to_vec(&lockfile).map_err(|e| {
         CapsuleError::Pack(format!(
             "Failed to serialize {}: {}",
@@ -300,7 +310,7 @@ pub async fn ensure_lockfile(
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    let lock_path = manifest_dir.join(CAPSULE_LOCK_FILE_NAME);
+    let lock_path = lockfile_output_path(&manifest_dir);
     let mut inputs = open_lockfile_inputs(manifest_path, &manifest_dir, manifest_raw)?;
     let manifest_hash = manifest_hash_from_open_inputs(&mut inputs, manifest_path)?;
 
@@ -336,6 +346,103 @@ pub async fn ensure_lockfile(
     )
     .await?;
     Ok(generated)
+}
+
+pub async fn ensure_lockfile_in_dir(
+    manifest_dir: &Path,
+    manifest_raw: &toml::Value,
+    manifest_text: &str,
+    reporter: Arc<dyn CapsuleReporter + 'static>,
+    timings: bool,
+) -> Result<PathBuf> {
+    let bridge_dir = manifest_dir.join(".tmp").join("compat-manifest-bridge");
+    fs::create_dir_all(&bridge_dir).map_err(|e| {
+        CapsuleError::Config(format!(
+            "Failed to create compat manifest bridge directory {}: {}",
+            bridge_dir.display(),
+            e
+        ))
+    })?;
+    let synthetic_manifest_path = bridge_dir.join("capsule.toml");
+    fs::write(&synthetic_manifest_path, manifest_text).map_err(|e| {
+        CapsuleError::Config(format!(
+            "Failed to write compat manifest bridge {}: {}",
+            synthetic_manifest_path.display(),
+            e
+        ))
+    })?;
+    ensure_lockfile(
+        &synthetic_manifest_path,
+        manifest_raw,
+        manifest_text,
+        reporter,
+        timings,
+    )
+    .await
+}
+
+pub async fn ensure_lockfile_for_compat_input(
+    compat_input: &CompatProjectInput,
+    reporter: Arc<dyn CapsuleReporter + 'static>,
+    timings: bool,
+) -> Result<PathBuf> {
+    let ensure_started = Instant::now();
+    let manifest_dir = compat_input.workspace_root();
+    let lock_path = lockfile_output_path(manifest_dir);
+    let inputs =
+        open_lockfile_inputs_for_compat_input(manifest_dir, compat_input.manifest_value())?;
+    let manifest_hash = semantic_manifest_hash_from_text(compat_input.manifest_text())?;
+
+    if lock_path.exists()
+        && verify_lockfile_manifest_hash(&lock_path, &manifest_hash).is_ok()
+        && lockfile_inputs_snapshot_matches(manifest_dir, &manifest_hash, &inputs)?
+        && existing_lockfile_has_required_platform_coverage(
+            &lock_path,
+            compat_input.manifest_value(),
+        )?
+    {
+        maybe_report_timing(
+            &reporter,
+            timings,
+            "lockfile.reuse_hit",
+            ensure_started.elapsed(),
+        )
+        .await?;
+        return Ok(lock_path);
+    }
+
+    let lockfile =
+        generate_lockfile_for_compat_input(compat_input, reporter.clone(), timings).await?;
+    let content = serde_jcs::to_vec(&lockfile).map_err(|e| {
+        CapsuleError::Pack(format!(
+            "Failed to serialize {}: {}",
+            CAPSULE_LOCK_FILE_NAME, e
+        ))
+    })?;
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            CapsuleError::Pack(format!(
+                "Failed to create lockfile output dir {}: {}",
+                parent.display(),
+                e
+            ))
+        })?;
+    }
+    write_atomic_bytes_with_os_lock(
+        &lock_path,
+        &content,
+        CAPSULE_LOCK_FILE_NAME,
+        capsule_error_pack,
+    )?;
+    write_lockfile_inputs_snapshot(manifest_dir, &manifest_hash, &inputs)?;
+    maybe_report_timing(
+        &reporter,
+        timings,
+        "lockfile.ensure_total",
+        ensure_started.elapsed(),
+    )
+    .await?;
+    Ok(lock_path)
 }
 
 pub fn verify_lockfile_manifest(manifest_path: &Path, lockfile_path: &Path) -> Result<()> {
@@ -399,14 +506,19 @@ fn read_lockfile(path: &Path) -> Result<CapsuleLock> {
     parse_lockfile_text(&raw, path)
 }
 
-pub fn lockfile_output_path(manifest_dir: &Path) -> PathBuf {
-    manifest_dir.join(CAPSULE_LOCK_FILE_NAME)
+pub(crate) fn lockfile_output_path(manifest_dir: &Path) -> PathBuf {
+    workspace_derived_dir(manifest_dir).join(CAPSULE_LOCK_FILE_NAME)
 }
 
 pub fn resolve_existing_lockfile_path(manifest_dir: &Path) -> Option<PathBuf> {
     let primary = lockfile_output_path(manifest_dir);
     if primary.exists() {
         return Some(primary);
+    }
+
+    let legacy_root = manifest_dir.join(CAPSULE_LOCK_FILE_NAME);
+    if legacy_root.exists() {
+        return Some(legacy_root);
     }
 
     let legacy = manifest_dir.join(LEGACY_CAPSULE_LOCK_FILE_NAME);
@@ -557,7 +669,7 @@ fn manifest_hash_from_open_file(file: &mut fs::File) -> Result<String> {
 }
 
 fn lockfile_inputs_snapshot_path(manifest_dir: &Path) -> PathBuf {
-    manifest_dir.join(LOCKFILE_INPUT_SNAPSHOT_NAME)
+    workspace_derived_dir(manifest_dir).join(LOCKFILE_INPUT_SNAPSHOT_NAME)
 }
 
 fn write_lockfile_inputs_snapshot(
@@ -574,6 +686,15 @@ fn write_lockfile_inputs_snapshot(
         CapsuleError::Config(format!("Failed to serialize lockfile input snapshot: {e}"))
     })?;
     let snapshot_path = lockfile_inputs_snapshot_path(manifest_dir);
+    if let Some(parent) = snapshot_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            CapsuleError::Config(format!(
+                "Failed to create lockfile input snapshot dir {}: {}",
+                parent.display(),
+                e
+            ))
+        })?;
+    }
     write_atomic_bytes_with_os_lock(
         &snapshot_path,
         &raw,
@@ -616,6 +737,21 @@ fn open_lockfile_inputs(
     manifest_dir: &Path,
     manifest_raw: &toml::Value,
 ) -> Result<Vec<OpenLockfileInput>> {
+    open_lockfile_inputs_inner(Some(manifest_path), manifest_dir, manifest_raw)
+}
+
+fn open_lockfile_inputs_for_compat_input(
+    manifest_dir: &Path,
+    manifest_raw: &toml::Value,
+) -> Result<Vec<OpenLockfileInput>> {
+    open_lockfile_inputs_inner(None, manifest_dir, manifest_raw)
+}
+
+fn open_lockfile_inputs_inner(
+    manifest_path: Option<&Path>,
+    manifest_dir: &Path,
+    manifest_raw: &toml::Value,
+) -> Result<Vec<OpenLockfileInput>> {
     let mut paths = collect_lockfile_input_paths(manifest_path, manifest_dir, manifest_raw);
     paths.sort();
     paths.dedup();
@@ -647,11 +783,13 @@ fn open_lockfile_inputs(
 }
 
 fn collect_lockfile_input_paths(
-    manifest_path: &Path,
+    manifest_path: Option<&Path>,
     manifest_dir: &Path,
     manifest_raw: &toml::Value,
 ) -> Vec<PathBuf> {
-    let mut paths = vec![manifest_path.to_path_buf()];
+    let mut paths = manifest_path
+        .map(|path| vec![path.to_path_buf()])
+        .unwrap_or_default();
     for name in [
         "package.json",
         "package-lock.json",
@@ -687,7 +825,7 @@ fn build_lock_draft_input(
     let mut file_text_map = std::collections::BTreeMap::new();
 
     if let (Some(manifest_dir), Some(manifest_path)) = (manifest_dir, manifest_path) {
-        for path in collect_lockfile_input_paths(manifest_path, manifest_dir, manifest_raw) {
+        for path in collect_lockfile_input_paths(Some(manifest_path), manifest_dir, manifest_raw) {
             if !path.exists() || !path.is_file() {
                 continue;
             }
@@ -733,6 +871,17 @@ fn evaluate_lock_draft_for_manifest(
         manifest_text,
         Some(manifest_dir),
         Some(manifest_path),
+    )?;
+    evaluate_lock_draft(&input)
+        .map_err(|err| CapsuleError::Config(format!("Failed to evaluate LockDraft: {}", err)))
+}
+
+fn evaluate_lock_draft_for_compat_input(compat_input: &CompatProjectInput) -> Result<LockDraft> {
+    let input = build_lock_draft_input(
+        compat_input.manifest_value(),
+        compat_input.manifest_text(),
+        Some(compat_input.workspace_root()),
+        None,
     )?;
     evaluate_lock_draft(&input)
         .map_err(|err| CapsuleError::Config(format!("Failed to evaluate LockDraft: {}", err)))
@@ -1019,31 +1168,75 @@ async fn generate_lockfile(
     reporter: Arc<dyn CapsuleReporter + 'static>,
     timings: bool,
 ) -> Result<CapsuleLock> {
-    let draft =
-        evaluate_lock_draft_for_manifest(manifest_raw, manifest_text, manifest_dir, manifest_path)?;
-    if draft.readiness != LockDraftReadiness::ReadyToFinalize {
-        let mut reasons = draft.blocking_issues.clone();
-        if !draft.missing_native_lockfiles.is_empty() {
-            reasons.push(format!(
-                "Missing native lockfile(s): {}",
-                draft.missing_native_lockfiles.join(", ")
-            ));
-        }
-        let mut message = if reasons.is_empty() {
-            "LockDraft is not ready to finalize locally.".to_string()
-        } else {
-            format!(
-                "LockDraft is not ready to finalize locally: {}",
-                reasons.join(" ")
-            )
-        };
-        if !draft.suggested_commands.is_empty() {
-            message.push_str(" Suggested remediation: ");
-            message.push_str(&draft.suggested_commands.join(" ; "));
-        }
-        return Err(CapsuleError::Pack(message));
+    let draft = validate_ready_lock_draft(evaluate_lock_draft_for_manifest(
+        manifest_raw,
+        manifest_text,
+        manifest_dir,
+        manifest_path,
+    )?)?;
+    finalize_lockfile_from_draft(
+        draft,
+        manifest_raw,
+        manifest_text,
+        manifest_dir,
+        reporter,
+        timings,
+    )
+    .await
+}
+
+async fn generate_lockfile_for_compat_input(
+    compat_input: &CompatProjectInput,
+    reporter: Arc<dyn CapsuleReporter + 'static>,
+    timings: bool,
+) -> Result<CapsuleLock> {
+    let draft = validate_ready_lock_draft(evaluate_lock_draft_for_compat_input(compat_input)?)?;
+    finalize_lockfile_from_draft(
+        draft,
+        compat_input.manifest_value(),
+        compat_input.manifest_text(),
+        compat_input.workspace_root(),
+        reporter,
+        timings,
+    )
+    .await
+}
+
+fn validate_ready_lock_draft(draft: LockDraft) -> Result<LockDraft> {
+    if draft.readiness == LockDraftReadiness::ReadyToFinalize {
+        return Ok(draft);
     }
 
+    let mut reasons = draft.blocking_issues.clone();
+    if !draft.missing_native_lockfiles.is_empty() {
+        reasons.push(format!(
+            "Missing native lockfile(s): {}",
+            draft.missing_native_lockfiles.join(", ")
+        ));
+    }
+    let mut message = if reasons.is_empty() {
+        "LockDraft is not ready to finalize locally.".to_string()
+    } else {
+        format!(
+            "LockDraft is not ready to finalize locally: {}",
+            reasons.join(" ")
+        )
+    };
+    if !draft.suggested_commands.is_empty() {
+        message.push_str(" Suggested remediation: ");
+        message.push_str(&draft.suggested_commands.join(" ; "));
+    }
+    Err(CapsuleError::Pack(message))
+}
+
+async fn finalize_lockfile_from_draft(
+    draft: LockDraft,
+    manifest_raw: &toml::Value,
+    manifest_text: &str,
+    manifest_dir: &Path,
+    reporter: Arc<dyn CapsuleReporter + 'static>,
+    timings: bool,
+) -> Result<CapsuleLock> {
     let allowlist = read_allowlist(manifest_raw);
     let target_key = platform_target_key()?;
     let runtime_platforms = runtime_platforms_from_draft(&draft)?;

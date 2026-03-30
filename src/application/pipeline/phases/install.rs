@@ -55,7 +55,7 @@ pub async fn install_local_artifact_into_test_sandbox(
 pub async fn run_publish_install_phase_async(
     artifact_path: &Path,
     preview: &crate::application::pipeline::phases::publish::PrivatePublishSummary,
-    verification: &crate::publish_artifact::VerifiedArtifactInfo,
+    verification: Option<&crate::publish_artifact::VerifiedArtifactInfo>,
     attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<PublishInstallResult> {
     let version = preview.version.trim();
@@ -77,12 +77,19 @@ pub async fn run_publish_install_phase_async(
 
     let phase = InstallPhase::new(Arc::new(LocalArtifactSource), Arc::new(TestSandboxTarget));
     let env = phase.execute(&request).await?;
+    let content_hash = if let Some(verification) = verification {
+        verification.blake3.clone()
+    } else {
+        let artifact_bytes = std::fs::read(artifact_path)
+            .with_context(|| format!("Failed to read artifact: {}", artifact_path.display()))?;
+        crate::artifact_hash::compute_blake3_label(&artifact_bytes)
+    };
 
     Ok(PublishInstallResult {
         scoped_id: preview.scoped_id.clone(),
         version: version.to_string(),
         path: env.root_dir,
-        content_hash: verification.blake3.clone(),
+        content_hash,
         install_kind: "test_sandbox",
     })
 }
@@ -91,7 +98,7 @@ pub async fn run_publish_install_phase_async(
 pub fn run_publish_install_phase(
     artifact_path: &Path,
     preview: &crate::application::pipeline::phases::publish::PrivatePublishSummary,
-    verification: &crate::publish_artifact::VerifiedArtifactInfo,
+    verification: Option<&crate::publish_artifact::VerifiedArtifactInfo>,
 ) -> Result<PublishInstallResult> {
     futures::executor::block_on(run_publish_install_phase_async(
         artifact_path,

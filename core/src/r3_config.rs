@@ -5,13 +5,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::ato_lock::AtoLock;
+use crate::common::paths::workspace_derived_dir;
 use crate::lock_runtime::{LockCompilerOverlay, LockServiceUnit, ResolvedLockRuntimeModel};
 use crate::manifest;
 use crate::policy::egress_resolver::{resolve_egress_policy, EgressRule};
-use crate::router::{self, ExecutionProfile};
+use crate::router::{self, CompatProjectInput, ExecutionProfile};
 use crate::types::{ResolvedService, ResolvedServiceRuntime, ResolvedTargetRuntime};
 
 const CONFIG_VERSION: &str = "1.0.0";
+const CONFIG_FILE_NAME: &str = "config.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -191,16 +193,27 @@ pub fn generate_config(
     standalone: bool,
 ) -> Result<ConfigJson> {
     let loaded = manifest::load_manifest(manifest_path)?;
-    let manifest_content = loaded.raw_text;
-    let manifest = loaded.raw;
-
-    let config = build_config_json(
-        manifest_path,
-        &manifest,
-        &manifest_content,
-        enforcement_override,
-        standalone,
+    let bridge = crate::router::CompatManifestBridge::from_normalized_toml(loaded.raw_text)?;
+    let workspace_root = manifest_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let compat_input = CompatProjectInput::from_bridge_with_label(
+        workspace_root,
+        manifest_path.display().to_string(),
+        bridge,
     )?;
+    let config = build_config_json(&compat_input, enforcement_override, standalone)?;
+    validate_config_json(&config)?;
+    Ok(config)
+}
+
+pub fn generate_config_from_compat_input(
+    compat_input: &CompatProjectInput,
+    enforcement_override: Option<String>,
+    standalone: bool,
+) -> Result<ConfigJson> {
+    let config = build_config_json(compat_input, enforcement_override, standalone)?;
     validate_config_json(&config)?;
     Ok(config)
 }
@@ -264,13 +277,38 @@ pub fn write_config(manifest_path: &Path, config: &ConfigJson) -> Result<PathBuf
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    let output_path = manifest_dir.join("config.json");
+    write_config_in_dir(&manifest_dir, config)
+}
+
+pub fn write_config_in_dir(output_dir: &Path, config: &ConfigJson) -> Result<PathBuf> {
+    let derived_dir = workspace_derived_dir(output_dir);
+    std::fs::create_dir_all(&derived_dir).with_context(|| {
+        format!(
+            "Failed to create derived config dir: {}",
+            derived_dir.display()
+        )
+    })?;
+    let output_path = derived_dir.join(CONFIG_FILE_NAME);
 
     let json = to_stable_json_pretty(config)?;
     std::fs::write(&output_path, json)
         .with_context(|| format!("Failed to write config.json: {}", output_path.display()))?;
 
     Ok(output_path)
+}
+
+fn config_output_path(workspace_root: &Path) -> PathBuf {
+    workspace_derived_dir(workspace_root).join(CONFIG_FILE_NAME)
+}
+
+pub(crate) fn resolve_existing_config_path(workspace_root: &Path) -> Option<PathBuf> {
+    let primary = config_output_path(workspace_root);
+    if primary.exists() {
+        return Some(primary);
+    }
+
+    let legacy = workspace_root.join(CONFIG_FILE_NAME);
+    legacy.exists().then_some(legacy)
 }
 
 fn to_stable_json_pretty<T: Serialize>(value: &T) -> Result<String> {
@@ -304,12 +342,11 @@ fn sort_json_object_keys(value: &mut serde_json::Value) {
 }
 
 fn build_config_json(
-    manifest_path: &Path,
-    manifest: &toml::Value,
-    manifest_raw: &str,
+    compat_input: &CompatProjectInput,
     enforcement_override: Option<String>,
     standalone: bool,
 ) -> Result<ConfigJson> {
+    let manifest = compat_input.manifest_value();
     let mut services = HashMap::new();
     let manifest_services = manifest
         .get("services")
@@ -325,7 +362,7 @@ fn build_config_json(
         .unwrap_or_default();
 
     if uses_target_based_services(&manifest_services) {
-        services = build_target_based_services(manifest_path, standalone)?;
+        services = build_target_based_services(compat_input, standalone)?;
     } else {
         let (executable, args, env, signals) = if let Some(run_command) = read_run_command(manifest)
         {
@@ -415,7 +452,10 @@ fn build_config_json(
             .map(|s| s.to_string()),
         generated_at: None,
         generated_by: Some(format!("ato-cli v{}", env!("CARGO_PKG_VERSION"))),
-        source_manifest: Some(format!("sha256:{}", sha256_hex(manifest_raw.as_bytes()))),
+        source_manifest: Some(format!(
+            "sha256:{}",
+            sha256_hex(compat_input.manifest_text().as_bytes())
+        )),
     };
 
     let sidecar = build_sidecar_config(manifest, &allow_domains)?;
@@ -441,11 +481,24 @@ fn uses_target_based_services(services: &HashMap<String, ManifestService>) -> bo
 }
 
 fn build_target_based_services(
-    manifest_path: &Path,
+    compat_input: &CompatProjectInput,
     standalone: bool,
 ) -> Result<HashMap<String, ServiceSpec>> {
-    let decision = router::route_manifest(manifest_path, ExecutionProfile::Release, None)?;
-    let orchestration = decision.plan.resolve_services()?;
+    let decision = router::execution_descriptor_from_manifest_parts(
+        compat_input.manifest_value().clone(),
+        compat_input.workspace_root().to_path_buf(),
+        compat_input.workspace_root().to_path_buf(),
+        ExecutionProfile::Release,
+        None,
+        HashMap::new(),
+    )
+    .with_context(|| {
+        format!(
+            "Failed to resolve target-based services from {}",
+            compat_input.logical_source_label()
+        )
+    })?;
+    let orchestration = decision.resolve_services()?;
     let mut services = HashMap::new();
 
     for service in orchestration.services {
@@ -1563,6 +1616,32 @@ egress_allow = ["1.1.1.1"]
     }
 
     #[test]
+    fn generated_config_is_written_under_workspace_derived_dir() {
+        let tmp = tempdir().unwrap();
+        let manifest_path = tmp.path().join("capsule.toml");
+
+        let manifest = r#"
+    schema_version = "0.2"
+    name = "static-demo"
+    version = "0.1.0"
+    type = "app"
+    default_target = "site"
+
+    [targets.site]
+    runtime = "web"
+    driver = "static"
+    entrypoint = "dist"
+    port = 4173
+    "#;
+
+        std::fs::write(&manifest_path, manifest).unwrap();
+
+        let config_path = generate_and_write_config(&manifest_path, None, false).unwrap();
+        assert!(config_path.ends_with(".ato/derived/config.json"));
+        assert!(!tmp.path().join("config.json").exists());
+    }
+
+    #[test]
     fn test_python_app_config_generation_thin() {
         let tmp = tempdir().unwrap();
         let manifest_path = tmp.path().join("capsule.toml");
@@ -2090,5 +2169,42 @@ port = 3000
             .and_then(|value| value.rules)
             .unwrap_or_default();
         assert!(!rules.is_empty());
+    }
+
+    #[test]
+    fn generate_config_from_compat_input_does_not_require_manifest_path() {
+        let workspace = tempdir().expect("tempdir");
+        let manifest_raw = r#"
+schema_version = "0.2"
+name = "compat-demo"
+version = "0.1.0"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "node"
+entrypoint = "index.js"
+"#;
+        let manifest_value: toml::Value = toml::from_str(manifest_raw).expect("manifest value");
+        let bridge = crate::router::CompatManifestBridge::from_manifest_value(&manifest_value)
+            .expect("bridge");
+        let compat_input = crate::router::CompatProjectInput::from_bridge_with_label(
+            workspace.path().to_path_buf(),
+            "in-memory compat input".to_string(),
+            bridge,
+        )
+        .expect("compat input");
+
+        let config =
+            generate_config_from_compat_input(&compat_input, Some("strict".to_string()), false)
+                .expect("config");
+
+        assert_eq!(config.services["main"].executable, "node");
+        assert_eq!(config.services["main"].cwd.as_deref(), Some("source"));
+        assert!(
+            !workspace.path().join("capsule.toml").exists(),
+            "compat input must not materialize a synthetic manifest path"
+        );
     }
 }

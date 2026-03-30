@@ -256,6 +256,7 @@ fn duplicate_version_is_detected() {
             created_at: now.clone(),
             lock_id: None,
             closure_digest: None,
+            publish_metadata: None,
             payload_v3: None,
         },
         &now,
@@ -288,6 +289,7 @@ fn delete_capsule_from_index_removes_requested_version_only() {
             created_at: now.clone(),
             lock_id: None,
             closure_digest: None,
+            publish_metadata: None,
             payload_v3: None,
         },
         &now,
@@ -308,6 +310,7 @@ fn delete_capsule_from_index_removes_requested_version_only() {
             created_at: now.clone(),
             lock_id: None,
             closure_digest: None,
+            publish_metadata: None,
             payload_v3: None,
         },
         &now,
@@ -354,6 +357,7 @@ fn delete_capsule_from_index_removes_capsule_when_last_release_deleted() {
             created_at: now.clone(),
             lock_id: None,
             closure_digest: None,
+            publish_metadata: None,
             payload_v3: None,
         },
         &now,
@@ -387,6 +391,7 @@ fn delete_capsule_from_index_reports_version_not_found() {
             created_at: now.clone(),
             lock_id: None,
             closure_digest: None,
+            publish_metadata: None,
             payload_v3: None,
         },
         &now,
@@ -411,6 +416,7 @@ fn existing_release_outcome_requires_opt_in() {
         created_at: Utc::now().to_rfc3339(),
         lock_id: None,
         closure_digest: None,
+        publish_metadata: None,
         payload_v3: None,
     };
 
@@ -433,6 +439,7 @@ fn existing_release_outcome_reuses_when_sha256_matches() {
         created_at: Utc::now().to_rfc3339(),
         lock_id: None,
         closure_digest: None,
+        publish_metadata: None,
         payload_v3: None,
     };
 
@@ -452,6 +459,7 @@ fn existing_release_outcome_conflicts_when_sha256_differs() {
         created_at: Utc::now().to_rfc3339(),
         lock_id: None,
         closure_digest: None,
+        publish_metadata: None,
         payload_v3: None,
     };
 
@@ -483,6 +491,7 @@ fn search_cursor_paginates() {
                 created_at: now.clone(),
                 lock_id: None,
                 closure_digest: None,
+                publish_metadata: None,
                 payload_v3: None,
             },
             &now,
@@ -699,6 +708,7 @@ repository = "koh0920/sample"
             created_at: Utc::now().to_rfc3339(),
             lock_id: None,
             closure_digest: None,
+            publish_metadata: None,
             payload_v3: None,
         }],
         downloads: 0,
@@ -894,6 +904,7 @@ async fn version_resolve_returns_manifest_hash_for_release() {
             capsule.len() as u64,
             None,
             None,
+            None,
             &capsule,
             "2026-03-05T00:00:00Z",
         )
@@ -946,6 +957,7 @@ async fn version_resolve_returns_gone_for_yanked_release() {
             "sha256:abc",
             "blake3:def",
             capsule.len() as u64,
+            None,
             None,
             None,
             &capsule,
