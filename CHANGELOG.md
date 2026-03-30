@@ -2,6 +2,15 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
+## [0.4.33] - 2026-03-30
+
+### What Changed
+
+#### CI
+
+- Bump the patch release after `v0.4.32` was already tagged and published
+- Unblock `Release PR` by stopping `.archives/` from being both tracked and ignored
+
 ## [0.4.32] - 2026-03-26
 
 ### What Changed
