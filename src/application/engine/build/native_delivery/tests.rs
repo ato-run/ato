@@ -226,8 +226,8 @@ entrypoint = "dist/MyApp.exe"
 fn build_environment_skeleton_captures_native_delivery_inputs() -> Result<()> {
     let tmp = tempdir()?;
     let plan = sample_native_build_plan(tmp.path(), 0o755)?;
-    fs::write(plan.manifest_dir.join("Cargo.lock"), "version = 3\n")?;
-    fs::write(plan.manifest_dir.join("package-lock.json"), "{}")?;
+    fs::write(plan.workspace_root.join("Cargo.lock"), "version = 3\n")?;
+    fs::write(plan.workspace_root.join("package-lock.json"), "{}")?;
 
     let skeleton = native_delivery_build_environment_skeleton(&plan);
     assert_json_object_has_keys(
@@ -732,7 +732,8 @@ fn build_accepts_windows_single_file_native_artifacts() -> Result<()> {
     let plan = sample_file_native_build_plan(tmp.path())?;
     let artifact_path = tmp.path().join("out/my-app-0.1.0.capsule");
 
-    let result = build_native_artifact_with_strip(&plan, Some(&artifact_path), |_path| Ok(()))?;
+    let result =
+        build_native_artifact_with_strip(&plan, Some(&artifact_path), |_path| Ok(()), None)?;
 
     assert_eq!(result.artifact_path, artifact_path);
     assert_eq!(result.derived_from, plan.source_app_path);
@@ -1322,13 +1323,187 @@ fn native_delivery_documented_json_contract_fields_are_present() -> Result<()> {
 }
 
 #[test]
+fn cargo_native_build_target_dir_uses_manifest_parent_target_dir() {
+    let command = NativeBuildCommand {
+        program: "cargo".to_string(),
+        args: vec![
+            "build".to_string(),
+            "--manifest-path".to_string(),
+            "src-tauri/Cargo.toml".to_string(),
+            "--release".to_string(),
+        ],
+        working_dir: PathBuf::from("/workspace/app"),
+    };
+
+    let target_dir = cargo_native_build_target_dir(&command).expect("cargo target dir");
+
+    assert_eq!(target_dir, PathBuf::from("/workspace/app/src-tauri/target"));
+}
+
+#[test]
+fn cargo_native_build_target_dir_defaults_to_working_dir() {
+    let command = NativeBuildCommand {
+        program: "cargo.exe".to_string(),
+        args: vec!["build".to_string(), "--release".to_string()],
+        working_dir: PathBuf::from("/workspace/app/src-tauri"),
+    };
+
+    let target_dir = cargo_native_build_target_dir(&command).expect("cargo target dir");
+
+    assert_eq!(target_dir, PathBuf::from("/workspace/app/src-tauri/target"));
+}
+
+#[test]
+fn configure_native_build_process_rehomes_nested_cargo_outputs() {
+    let command = NativeBuildCommand {
+        program: "cargo".to_string(),
+        args: vec![
+            "build".to_string(),
+            "--manifest-path=src-tauri/Cargo.toml".to_string(),
+            "--release".to_string(),
+        ],
+        working_dir: PathBuf::from("/workspace/app"),
+    };
+    let mut process = std::process::Command::new("cargo");
+
+    configure_native_build_process(&mut process, &command);
+
+    let envs = process
+        .get_envs()
+        .map(|(key, value)| (key.to_os_string(), value.map(|entry| entry.to_os_string())))
+        .collect::<Vec<_>>();
+    assert!(envs
+        .iter()
+        .any(|(key, value)| { key == "CARGO_BUILD_TARGET" && value.is_none() }));
+    assert!(envs.iter().any(|(key, value)| {
+        key == "CARGO_TARGET_DIR"
+            && value.as_ref() == Some(&std::ffi::OsString::from("/workspace/app/src-tauri/target"))
+    }));
+}
+
+#[test]
+fn lock_native_build_command_object_accepts_flattened_shape() {
+    let build = serde_json::json!({
+        "kind": "native-delivery",
+        "program": "cargo",
+        "args": ["build", "--release"],
+        "working_dir": "."
+    });
+
+    let command = lock_native_build_command_object(build.as_object().expect("build object"))
+        .expect("flattened command object");
+
+    assert_eq!(
+        command.get("program").and_then(|value| value.as_str()),
+        Some("cargo")
+    );
+}
+
+#[test]
+fn lock_native_build_command_object_accepts_nested_shape() {
+    let build = serde_json::json!({
+        "kind": "native-delivery",
+        "build_command": {
+            "program": "cargo",
+            "args": ["build", "--release"],
+            "working_dir": "."
+        }
+    });
+
+    let command = lock_native_build_command_object(build.as_object().expect("build object"))
+        .expect("nested command object");
+
+    assert_eq!(
+        command.get("program").and_then(|value| value.as_str()),
+        Some("cargo")
+    );
+}
+#[test]
+fn native_delivery_draft_contract_skips_generic_native_targets_without_delivery_metadata(
+) -> Result<()> {
+    let tmp = tempdir()?;
+    let manifest_path = tmp.path().join("capsule.toml");
+    fs::write(
+        &manifest_path,
+        r#"schema_version = "0.2"
+name = "strict-v3-ci-check"
+version = "0.1.0"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "native"
+entrypoint = "source/main.py"
+"#,
+    )?;
+
+    let delivery = native_delivery_draft_contract_from_manifest(&manifest_path)?;
+
+    assert!(delivery.is_none());
+    Ok(())
+}
+
+#[test]
+fn native_delivery_draft_contract_keeps_explicit_desktop_metadata() -> Result<()> {
+    let tmp = tempdir()?;
+    let manifest_path = tmp.path().join("capsule.toml");
+    fs::write(
+        &manifest_path,
+        r#"schema_version = "0.2"
+name = "desktop-demo"
+version = "0.1.0"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source"
+driver = "native"
+entrypoint = "cargo"
+cmd = ["build", "--release"]
+working_dir = "."
+
+[artifact]
+framework = "tauri"
+stage = "unsigned"
+target = "windows/x86_64"
+input = "src-tauri/target/release/demo.exe"
+
+[finalize]
+tool = "powershell.exe"
+args = ["-Command", "Write-Output demo.exe"]
+"#,
+    )?;
+
+    let delivery = native_delivery_draft_contract_from_manifest(&manifest_path)?
+        .expect("desktop native draft contract");
+
+    assert_eq!(
+        delivery
+            .get("artifact")
+            .and_then(|value| value.get("framework"))
+            .and_then(|value| value.as_str()),
+        Some("tauri")
+    );
+    assert_eq!(
+        delivery
+            .get("build")
+            .and_then(|value| value.get("program"))
+            .and_then(|value| value.as_str()),
+        Some("cargo")
+    );
+    Ok(())
+}
+
+#[test]
 fn build_native_artifact_preserves_source_and_payload_executable_mode() -> Result<()> {
     let tmp = tempdir()?;
     let plan = sample_native_build_plan(tmp.path(), 0o755)?;
     let source_digest_before = compute_tree_digest(&plan.source_app_path)?;
     let artifact_path = tmp.path().join("out/my-app-0.1.0.capsule");
 
-    let result = build_native_artifact_with_strip(&plan, Some(&artifact_path), |_app| Ok(()))?;
+    let result =
+        build_native_artifact_with_strip(&plan, Some(&artifact_path), |_app| Ok(()), None)?;
 
     assert_eq!(result.build_strategy, "native-delivery");
     assert_eq!(
@@ -1374,7 +1549,7 @@ fn test_build_rejects_non_executable_without_mutation() -> Result<()> {
     let source_digest_before = compute_tree_digest(&plan.source_app_path)?;
     let artifact_path = tmp.path().join("out/my-app-0.1.0.capsule");
 
-    let result = build_native_artifact_with_strip(&plan, Some(&artifact_path), |_app| Ok(()));
+    let result = build_native_artifact_with_strip(&plan, Some(&artifact_path), |_app| Ok(()), None);
 
     if cfg!(unix) {
         let err = result.expect_err("build must fail closed when executable bit is missing");

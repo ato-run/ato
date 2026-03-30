@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use capsule_core::bootstrap::BootstrapBoundary;
+use capsule_core::router::{CompatManifestBridge, ExecutionDescriptor};
 use chrono::{SecondsFormat, Utc};
 use goblin::Object;
 use serde::{Deserialize, Serialize};
@@ -68,8 +69,11 @@ pub struct NativeBuildCommand {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct NativeBuildPlan {
-    pub manifest_path: PathBuf,
-    pub manifest_dir: PathBuf,
+    pub workspace_root: PathBuf,
+    #[serde(skip_serializing)]
+    pub legacy_manifest_bridge: Option<CompatManifestBridge>,
+    pub package_name: String,
+    pub package_version: String,
     pub delivery_config_path: Option<PathBuf>,
     pub staged_delivery_config_toml: String,
     pub source_app_path: PathBuf,
@@ -97,7 +101,7 @@ pub struct NativeArtifactSpec {
     pub finalize_tool: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FinalizeResult {
     pub fetched_dir: PathBuf,
     pub output_dir: PathBuf,
@@ -106,6 +110,13 @@ pub struct FinalizeResult {
     pub parent_digest: String,
     pub derived_digest: String,
     pub schema_version: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FinalizedPublishArtifactResult {
+    pub artifact_path: PathBuf,
+    pub identity_class: &'static str,
+    pub finalize: FinalizeResult,
 }
 
 #[derive(Debug, Clone)]
@@ -401,7 +412,8 @@ pub(crate) fn detect_build_strategy(manifest_dir: &Path) -> Result<Option<Native
     }
 
     let canonical_config = detect_native_manifest_contract(target)?;
-    let inline_config = load_inline_delivery_config(&manifest_raw, &manifest_path)?;
+    let source_label = manifest_path.display().to_string();
+    let inline_config = load_inline_delivery_config(&manifest_raw, &source_label)?;
     let has_explicit_delivery_config = inline_config.is_some();
     let config = match inline_config {
         Some(inline) => inline,
@@ -411,7 +423,7 @@ pub(crate) fn detect_build_strategy(manifest_dir: &Path) -> Result<Option<Native
         },
     };
     if let Some(canonical) = &canonical_config {
-        ensure_delivery_config_matches_context(&config, canonical, &manifest_path)?;
+        ensure_delivery_config_matches_context(&config, canonical, &source_label)?;
     }
 
     let input_relative = PathBuf::from(config.artifact.input.trim());
@@ -426,9 +438,16 @@ pub(crate) fn detect_build_strategy(manifest_dir: &Path) -> Result<Option<Native
         validate_native_bundle_directory(&source_app_path)?;
     }
 
+    let compat_manifest = CompatManifestBridge::from_manifest_value(
+        &toml::from_str(&manifest_raw)
+            .with_context(|| format!("Failed to parse {} as TOML", manifest_path.display()))?,
+    )?;
+
     Ok(Some(NativeBuildPlan {
-        manifest_path,
-        manifest_dir: manifest_dir.to_path_buf(),
+        workspace_root: manifest_dir.to_path_buf(),
+        legacy_manifest_bridge: Some(compat_manifest),
+        package_name: manifest.name.clone(),
+        package_version: manifest.version.clone(),
         delivery_config_path: None,
         staged_delivery_config_toml: serialize_delivery_config(&config)?,
         source_app_path,
@@ -439,25 +458,317 @@ pub(crate) fn detect_build_strategy(manifest_dir: &Path) -> Result<Option<Native
     }))
 }
 
+pub(crate) fn detect_build_strategy_from_descriptor(
+    descriptor: &ExecutionDescriptor,
+) -> Result<Option<NativeBuildPlan>> {
+    if let Some(plan) = detect_build_strategy_from_lock_delivery(descriptor)? {
+        return Ok(Some(plan));
+    }
+
+    let delivery_config_path = descriptor.workspace_root.join(DELIVERY_CONFIG_FILE);
+    let Some(bridge) = descriptor.compat_manifest.as_ref() else {
+        return Ok(None);
+    };
+    let Ok(target) = bridge.manifest_model().resolve_default_target() else {
+        return Ok(None);
+    };
+
+    if delivery_config_path.exists() {
+        bail!(
+            "{} is no longer accepted in source projects. Move native delivery metadata into capsule.toml [artifact] and [finalize].",
+            delivery_config_path.display()
+        );
+    }
+
+    let canonical_config = detect_native_manifest_contract(target)?;
+    let source_label = format!(
+        "compatibility manifest bridge for {}",
+        descriptor.workspace_root.display()
+    );
+    let inline_config = load_inline_delivery_config(bridge.manifest_text(), &source_label)?;
+    let has_explicit_delivery_config = inline_config.is_some();
+    let config = match inline_config {
+        Some(inline) => inline,
+        None => match canonical_config.clone() {
+            Some(config) => config,
+            None => return Ok(None),
+        },
+    };
+    if let Some(canonical) = &canonical_config {
+        ensure_delivery_config_matches_context(&config, canonical, &source_label)?;
+    }
+
+    let input_relative = PathBuf::from(config.artifact.input.trim());
+    validate_relative_input_path(&input_relative)?;
+    let source_app_path = descriptor.workspace_root.join(&input_relative);
+    let build_command = detect_native_build_command(
+        target,
+        &descriptor.workspace_root,
+        has_explicit_delivery_config || canonical_config.is_none(),
+    )?;
+    if build_command.is_none() {
+        validate_native_bundle_directory(&source_app_path)?;
+    }
+
+    Ok(Some(NativeBuildPlan {
+        workspace_root: descriptor.workspace_root.clone(),
+        legacy_manifest_bridge: Some(bridge.clone()),
+        package_name: descriptor
+            .runtime_model
+            .metadata
+            .name
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .context("authoritative lock metadata is missing package name")?,
+        package_version: descriptor
+            .runtime_model
+            .metadata
+            .version
+            .clone()
+            .unwrap_or_default(),
+        delivery_config_path: None,
+        staged_delivery_config_toml: serialize_delivery_config(&config)?,
+        source_app_path,
+        input_relative,
+        build_command,
+        framework: config.artifact.framework,
+        target: config.artifact.target,
+    }))
+}
+
+fn detect_build_strategy_from_lock_delivery(
+    descriptor: &ExecutionDescriptor,
+) -> Result<Option<NativeBuildPlan>> {
+    let Some(delivery) = descriptor
+        .lock
+        .contract
+        .entries
+        .get("delivery")
+        .and_then(Value::as_object)
+    else {
+        return Ok(None);
+    };
+
+    let mode = delivery
+        .get("mode")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if !matches!(mode, "source-draft" | "source-derivation") {
+        return Ok(None);
+    }
+
+    let Some(artifact) = delivery.get("artifact").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    if artifact.get("kind").and_then(Value::as_str) != Some("desktop-native") {
+        return Ok(None);
+    }
+
+    let framework = artifact
+        .get("framework")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("desktop-native delivery artifact.framework is missing")?
+        .to_string();
+    let target = artifact
+        .get("target")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("desktop-native delivery artifact.target is missing")?
+        .to_string();
+    let input = artifact
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("desktop-native delivery artifact.path is missing")?
+        .to_string();
+
+    let finalize = delivery
+        .get("finalize")
+        .and_then(Value::as_object)
+        .context("desktop-native delivery.finalize is missing")?;
+    let finalize_tool = finalize
+        .get("tool")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("desktop-native delivery.finalize.tool is missing")?
+        .to_string();
+    let finalize_args = finalize
+        .get("args")
+        .and_then(Value::as_array)
+        .context("desktop-native delivery.finalize.args is missing")?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .context("desktop-native delivery.finalize.args must contain only strings")
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let config = DeliveryConfig {
+        schema_version: DELIVERY_SCHEMA_VERSION_STABLE.to_string(),
+        artifact: DeliveryArtifact {
+            framework: framework.clone(),
+            stage: DELIVERY_STAGE.to_string(),
+            target: target.clone(),
+            input: input.clone(),
+        },
+        finalize: DeliveryFinalize {
+            tool: finalize_tool,
+            args: finalize_args,
+        },
+    };
+    validate_delivery_config(&config)?;
+
+    let input_relative = PathBuf::from(&input);
+    validate_relative_input_path(&input_relative)?;
+    let source_app_path = descriptor.workspace_root.join(&input_relative);
+    let build_command = delivery
+        .get("build")
+        .and_then(Value::as_object)
+        .and_then(lock_native_build_command_object)
+        .map(|command| parse_lock_native_build_command(command, &descriptor.workspace_root))
+        .transpose()?;
+    if build_command.is_none() {
+        validate_native_bundle_directory(&source_app_path)?;
+    }
+
+    Ok(Some(NativeBuildPlan {
+        workspace_root: descriptor.workspace_root.clone(),
+        legacy_manifest_bridge: descriptor.compat_manifest.clone(),
+        package_name: descriptor
+            .runtime_model
+            .metadata
+            .name
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .context("authoritative lock metadata is missing package name")?,
+        package_version: descriptor
+            .runtime_model
+            .metadata
+            .version
+            .clone()
+            .unwrap_or_default(),
+        delivery_config_path: None,
+        staged_delivery_config_toml: serialize_delivery_config(&config)?,
+        source_app_path,
+        input_relative,
+        build_command,
+        framework,
+        target,
+    }))
+}
+
+fn parse_lock_native_build_command(
+    command: &serde_json::Map<String, Value>,
+    workspace_root: &Path,
+) -> Result<NativeBuildCommand> {
+    let program = command
+        .get("program")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("desktop-native delivery.build.build_command.program is missing")?
+        .to_string();
+    let args = command
+        .get("args")
+        .and_then(Value::as_array)
+        .context("desktop-native delivery.build.build_command.args is missing")?
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_string).context(
+                "desktop-native delivery.build.build_command.args must contain only strings",
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let working_dir_raw = command
+        .get("working_dir")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("desktop-native delivery.build.build_command.working_dir is missing")?;
+    let working_dir_path = PathBuf::from(working_dir_raw);
+    let working_dir = if working_dir_path.is_absolute() {
+        working_dir_path
+    } else {
+        workspace_root.join(working_dir_path)
+    };
+
+    Ok(NativeBuildCommand {
+        program,
+        args,
+        working_dir,
+    })
+}
+
+fn lock_native_build_command_object(
+    build: &serde_json::Map<String, Value>,
+) -> Option<&serde_json::Map<String, Value>> {
+    if let Some(command) = build.get("build_command").and_then(Value::as_object) {
+        return Some(command);
+    }
+
+    let has_flattened_command = build.contains_key("program")
+        || build.contains_key("args")
+        || build.contains_key("working_dir");
+    if has_flattened_command {
+        Some(build)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn detect_build_strategy_with_legacy_fallback(
+    descriptor: &ExecutionDescriptor,
+) -> Result<Option<NativeBuildPlan>> {
+    if descriptor.compat_manifest.is_some() {
+        return detect_build_strategy_from_descriptor(descriptor);
+    }
+
+    detect_build_strategy(&descriptor.workspace_root)
+}
+
 pub(crate) fn build_native_artifact(
     plan: &NativeBuildPlan,
     output_path: Option<&Path>,
 ) -> Result<NativeBuildResult> {
-    if !host_supports_finalize() {
-        bail!("native delivery build currently supports macOS and Windows hosts only");
-    }
+    build_native_artifact_with_distribution_lock(plan, output_path, None)
+}
+
+pub(crate) fn build_native_artifact_with_distribution_lock(
+    plan: &NativeBuildPlan,
+    output_path: Option<&Path>,
+    capsule_lock_json: Option<&str>,
+) -> Result<NativeBuildResult> {
+    ensure_current_host_delivery_target(&plan.target, "native delivery build")?;
 
     let config = staged_delivery_config(plan)?;
     let runner = FinalizeRunner::for_tool(&config.finalize.tool);
-    build_native_artifact_with_strip(plan, output_path, |artifact_path| {
-        runner.strip_existing_signature(artifact_path)
-    })
+    build_native_artifact_with_strip(
+        plan,
+        output_path,
+        |artifact_path| {
+            if host_supports_finalize() {
+                runner.strip_existing_signature(artifact_path)
+            } else {
+                Ok(())
+            }
+        },
+        capsule_lock_json,
+    )
 }
 
 fn build_native_artifact_with_strip<F>(
     plan: &NativeBuildPlan,
     output_path: Option<&Path>,
     strip_signature: F,
+    capsule_lock_json: Option<&str>,
 ) -> Result<NativeBuildResult>
 where
     F: Fn(&Path) -> Result<()>,
@@ -469,19 +780,18 @@ where
 
     validate_native_bundle_directory(&plan.source_app_path)?;
     ensure_native_artifact_kind_supported(&plan.source_app_path, "build")?;
-    let manifest_raw = fs::read_to_string(&plan.manifest_path).with_context(|| {
-        format!(
-            "Failed to read capsule manifest for native build: {}",
-            plan.manifest_path.display()
-        )
-    })?;
-    let manifest =
-        capsule_core::types::CapsuleManifest::from_toml(&manifest_raw).map_err(|err| {
-            anyhow::anyhow!("Failed to parse {}: {}", plan.manifest_path.display(), err)
-        })?;
+    let manifest = plan
+        .legacy_manifest_bridge
+        .as_ref()
+        .map(|bridge| bridge.manifest_model().clone())
+        .context("native delivery build requires legacy manifest bridge")?;
 
     let artifact_path = output_path.map(Path::to_path_buf).unwrap_or_else(|| {
-        default_native_artifact_path(&plan.manifest_dir, &manifest.name, &manifest.version)
+        default_native_artifact_path(
+            &plan.workspace_root,
+            &plan.package_name,
+            &plan.package_version,
+        )
     });
     if let Some(parent) = artifact_path.parent() {
         fs::create_dir_all(parent)
@@ -490,7 +800,7 @@ where
 
     validate_minimal_native_artifact_permissions(&plan.source_app_path)?;
 
-    let tmp_root = plan.manifest_dir.join(".tmp");
+    let tmp_root = plan.workspace_root.join(".tmp");
     fs::create_dir_all(&tmp_root)
         .with_context(|| format!("Failed to create {}", tmp_root.display()))?;
     let staging_root = create_temp_subdir(&tmp_root, "native-build")?;
@@ -515,7 +825,8 @@ where
         let payload_tar = create_payload_tar_from_directory(&payload_root)?;
         let payload_tar_zst = zstd::stream::encode_all(Cursor::new(&payload_tar), 3)
             .context("Failed to encode native payload.tar.zst")?;
-        let capsule_bytes = build_capsule_archive(&manifest, &payload_tar_zst, &payload_tar)?;
+        let capsule_bytes =
+            build_capsule_archive(&manifest, &payload_tar_zst, &payload_tar, capsule_lock_json)?;
         fs::write(&artifact_path, &capsule_bytes)
             .with_context(|| format!("Failed to write {}", artifact_path.display()))?;
 
@@ -530,6 +841,97 @@ where
 
     let _ = fs::remove_dir_all(&staging_root);
     result
+}
+
+pub(crate) fn finalize_capsule_artifact_for_publish(
+    unsigned_artifact_path: &Path,
+    scoped_id: &str,
+    version: &str,
+    source_lock_json: Option<&str>,
+    allow_external_finalize: bool,
+) -> Result<FinalizedPublishArtifactResult> {
+    let artifact_bytes = fs::read(unsigned_artifact_path).with_context(|| {
+        format!(
+            "Failed to read unsigned artifact for finalize: {}",
+            unsigned_artifact_path.display()
+        )
+    })?;
+    let fetch_result = materialize_fetch_cache_from_artifact(
+        scoped_id,
+        version,
+        "local-source-publish",
+        &artifact_bytes,
+    )?;
+    let output_root = unsigned_artifact_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let finalize = execute_finalize(
+        &fetch_result.cache_dir,
+        &output_root,
+        allow_external_finalize,
+    )?;
+
+    let delivery_config_path = fetch_result.artifact_dir.join(DELIVERY_CONFIG_FILE);
+    let delivery_config = load_delivery_config(&delivery_config_path)?;
+    let rebased_delivery =
+        rebase_delivery_config_for_finalize(&delivery_config, &finalize.derived_app_path)?;
+
+    let staging_root = create_temp_subdir(&output_root, "native-publish-finalize")?;
+    let payload_root = staging_root.join("payload");
+    fs::create_dir_all(&payload_root)
+        .with_context(|| format!("Failed to create {}", payload_root.display()))?;
+
+    let artifact_name = finalize
+        .derived_app_path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("finalized app path has no terminal name"))?;
+    let staged_artifact = payload_root.join(artifact_name);
+    copy_recursively(&finalize.derived_app_path, &staged_artifact)?;
+    fs::write(
+        payload_root.join(DELIVERY_CONFIG_FILE),
+        serialize_delivery_config(&rebased_delivery)?,
+    )
+    .context("Failed to stage finalized native delivery metadata")?;
+    fs::copy(
+        &finalize.provenance_path,
+        payload_root.join(PROVENANCE_FILE),
+    )
+    .with_context(|| {
+        format!(
+            "Failed to stage finalized provenance from {}",
+            finalize.provenance_path.display()
+        )
+    })?;
+
+    let payload_tar = create_payload_tar_from_directory(&payload_root)?;
+    let payload_tar_zst = zstd::stream::encode_all(Cursor::new(&payload_tar), 3)
+        .context("Failed to encode finalized native payload.tar.zst")?;
+    let manifest = extract_capsule_manifest_from_archive(&artifact_bytes)?;
+    let finalized_name = unsigned_artifact_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(|value| format!("{value}-signed.capsule"))
+        .unwrap_or_else(|| format!("{}-{}-signed.capsule", manifest.name, manifest.version));
+    let finalized_artifact_path = unsigned_artifact_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(finalized_name);
+    let capsule_bytes =
+        build_capsule_archive(&manifest, &payload_tar_zst, &payload_tar, source_lock_json)?;
+    fs::write(&finalized_artifact_path, capsule_bytes).with_context(|| {
+        format!(
+            "Failed to write finalized publish artifact: {}",
+            finalized_artifact_path.display()
+        )
+    })?;
+    let _ = fs::remove_dir_all(&staging_root);
+
+    Ok(FinalizedPublishArtifactResult {
+        artifact_path: finalized_artifact_path,
+        identity_class: "locally_finalized_signed_bundle",
+        finalize,
+    })
 }
 
 pub async fn execute_fetch(
@@ -820,7 +1222,7 @@ fn delivery_config_from_input(input: &str) -> DeliveryConfig {
 }
 
 pub(crate) fn native_delivery_build_environment_skeleton(plan: &NativeBuildPlan) -> Value {
-    let package_managers = detect_build_environment_package_managers(&plan.manifest_dir);
+    let package_managers = detect_build_environment_package_managers(&plan.workspace_root);
     let mut toolchains = Vec::new();
     let mut sdks = Vec::new();
     let mut helper_tools = Vec::new();
@@ -849,6 +1251,9 @@ pub(crate) fn native_delivery_build_environment_skeleton(plan: &NativeBuildPlan)
     if package_managers.iter().any(|manager| manager == "cargo") {
         push_unique(&mut toolchains, "rust");
         push_unique(&mut toolchains, "cargo");
+    }
+    if package_managers.iter().any(|manager| manager == "go") {
+        push_unique(&mut toolchains, "go");
     }
 
     match delivery_target_os_family(&plan.target) {
@@ -942,6 +1347,10 @@ pub(crate) fn native_delivery_draft_contract_from_manifest(
     let artifact = parsed.get("artifact");
     let finalize = parsed.get("finalize");
     let canonical = detect_native_manifest_contract(target)?;
+
+    if canonical.is_none() && artifact.is_none() && finalize.is_none() {
+        return Ok(None);
+    }
 
     let mut artifact_value = serde_json::Map::new();
     artifact_value.insert(
@@ -1085,6 +1494,34 @@ pub(crate) fn imported_native_artifact_delivery_contract(
     })
 }
 
+pub(crate) fn imported_native_artifact_closure(
+    artifact_path: &Path,
+    artifact_type: &str,
+) -> Result<Value> {
+    Ok(json!({
+        "kind": "imported_artifact_closure",
+        "status": "complete",
+        "artifact": {
+            "artifact_type": artifact_type,
+            "digest": compute_tree_digest(artifact_path)?,
+            "provenance_limited": true,
+        }
+    }))
+}
+
+pub(crate) fn imported_native_artifact_type(artifact_path: &Path) -> Option<&'static str> {
+    if artifact_path.is_dir() && path_has_extension(artifact_path, "app") {
+        return Some("macos_app_bundle");
+    }
+    if artifact_path.is_file() && path_has_extension(artifact_path, "exe") {
+        return Some("windows_executable");
+    }
+    if artifact_path.is_file() && path_has_extension(artifact_path, "AppImage") {
+        return Some("appimage");
+    }
+    None
+}
+
 fn toml_to_json(value: &toml::Value) -> Value {
     serde_json::to_value(value).expect("toml value should serialize into json")
 }
@@ -1093,6 +1530,7 @@ fn detect_build_environment_package_managers(manifest_dir: &Path) -> Vec<String>
     let mut package_managers = Vec::new();
     let candidates = [
         ("Cargo.lock", "cargo"),
+        ("go.sum", "go"),
         ("package-lock.json", "npm"),
         ("pnpm-lock.yaml", "pnpm"),
         ("yarn.lock", "yarn"),
@@ -1174,7 +1612,7 @@ fn detect_native_build_command(
 fn ensure_delivery_config_matches_context(
     actual: &DeliveryConfig,
     expected: &DeliveryConfig,
-    manifest_path: &Path,
+    source_label: &str,
 ) -> Result<()> {
     if actual.artifact.framework != expected.artifact.framework
         || actual.artifact.stage != expected.artifact.stage
@@ -1185,7 +1623,7 @@ fn ensure_delivery_config_matches_context(
     {
         bail!(
             "{} native delivery config conflicts with the default target contract",
-            manifest_path.display()
+            source_label
         );
     }
     Ok(())
@@ -1500,10 +1938,10 @@ fn load_delivery_config(path: &Path) -> Result<DeliveryConfig> {
 
 fn load_inline_delivery_config(
     manifest_raw: &str,
-    manifest_path: &Path,
+    source_label: &str,
 ) -> Result<Option<DeliveryConfig>> {
     let parsed: toml::Value = toml::from_str(manifest_raw)
-        .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
+        .with_context(|| format!("Failed to parse {}", source_label))?;
     let artifact = parsed.get("artifact").cloned();
     let finalize = parsed.get("finalize").cloned();
 
@@ -1511,27 +1949,21 @@ fn load_inline_delivery_config(
         (None, None) => Ok(None),
         (Some(_), None) => bail!(
             "{} defines [artifact] without [finalize] for native delivery",
-            manifest_path.display()
+            source_label
         ),
         (None, Some(_)) => bail!(
             "{} defines [finalize] without [artifact] for native delivery",
-            manifest_path.display()
+            source_label
         ),
         (Some(artifact), Some(finalize)) => {
             let config = DeliveryConfig {
                 schema_version: DELIVERY_SCHEMA_VERSION_STABLE.to_string(),
-                artifact: artifact.try_into().with_context(|| {
-                    format!(
-                        "Failed to parse [artifact] from {}",
-                        manifest_path.display()
-                    )
-                })?,
-                finalize: finalize.try_into().with_context(|| {
-                    format!(
-                        "Failed to parse [finalize] from {}",
-                        manifest_path.display()
-                    )
-                })?,
+                artifact: artifact
+                    .try_into()
+                    .with_context(|| format!("Failed to parse [artifact] from {}", source_label))?,
+                finalize: finalize
+                    .try_into()
+                    .with_context(|| format!("Failed to parse [finalize] from {}", source_label))?,
             };
             validate_delivery_config(&config)?;
             Ok(Some(config))
@@ -1810,6 +2242,47 @@ fn rebase_delivery_config_for_finalize(
     Ok(derived_config)
 }
 
+pub(crate) fn ensure_current_host_delivery_target(target: &str, action: &str) -> Result<()> {
+    let Some(target_os) = delivery_target_os_family(target) else {
+        bail!(
+            "{} requires a normalized delivery target (got '{}')",
+            action,
+            target
+        );
+    };
+    let Some(host_os) = host_projection_os_family() else {
+        bail!("{} is not supported on this host platform", action);
+    };
+    if target_os != host_os {
+        bail!(
+            "{} requires current-host target alignment (target='{}', host_os='{}')",
+            action,
+            target,
+            host_os
+        );
+    }
+
+    let target_arch = target
+        .split('/')
+        .nth(1)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
+    if !target_arch.is_empty() {
+        let host_arch = normalized_host_delivery_arch();
+        if !delivery_arch_matches_host(target_arch, host_arch) {
+            bail!(
+                "{} requires current-host arch alignment (target='{}', host_arch='{}')",
+                action,
+                target_arch,
+                host_arch
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn ensure_native_artifact_kind_supported(path: &Path, action: &str) -> Result<NativeArtifactKind> {
     let kind = NativeArtifactKind::from_path(path);
     if kind == NativeArtifactKind::File && !path_has_extension(path, "exe") {
@@ -1827,6 +2300,25 @@ fn delivery_target_os_family(target: &str) -> Option<&str> {
         .split('/')
         .next()
         .filter(|value| !value.trim().is_empty())
+}
+
+fn normalized_host_delivery_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        "x86" | "i386" | "i586" | "i686" => "x86",
+        other => other,
+    }
+}
+
+fn delivery_arch_matches_host(target_arch: &str, host_arch: &str) -> bool {
+    let normalized_target = match target_arch {
+        "x86_64" | "amd64" | "x64" => "x64",
+        "aarch64" | "arm64" => "arm64",
+        "x86" | "ia32" | "i386" | "i686" => "x86",
+        other => other,
+    };
+    normalized_target == host_arch
 }
 
 fn supports_projection_target(target: &str) -> bool {
@@ -1850,6 +2342,35 @@ fn host_projection_os_family() -> Option<&'static str> {
 
 fn host_supports_projection_target(target: &str) -> bool {
     delivery_target_os_family(target) == host_projection_os_family()
+}
+
+fn extract_capsule_manifest_from_archive(
+    bytes: &[u8],
+) -> Result<capsule_core::types::CapsuleManifest> {
+    let mut archive = tar::Archive::new(Cursor::new(bytes));
+    let entries = archive
+        .entries()
+        .context("Failed to read finalized source artifact")?;
+    for entry in entries {
+        let mut entry = entry.context("Invalid finalized source artifact entry")?;
+        if entry
+            .path()
+            .ok()
+            .and_then(|path| path.to_str().map(|value| value.to_string()))
+            .as_deref()
+            != Some("capsule.toml")
+        {
+            continue;
+        }
+        let mut manifest = String::new();
+        entry
+            .read_to_string(&mut manifest)
+            .context("Failed to read capsule.toml from source artifact")?;
+        return capsule_core::types::CapsuleManifest::from_toml(&manifest).map_err(|err| {
+            anyhow::anyhow!("Failed to parse capsule.toml from source artifact: {err}")
+        });
+    }
+    bail!("source artifact is missing capsule.toml")
 }
 
 fn resolve_native_build_working_dir(
@@ -1984,9 +2505,8 @@ fn format_native_build_command(command: &NativeBuildCommand) -> String {
 
 fn run_native_build_command(command: &NativeBuildCommand) -> Result<()> {
     let mut process = Command::new(&command.program);
-    process
-        .args(&command.args)
-        .current_dir(&command.working_dir);
+    process.args(&command.args);
+    configure_native_build_process(&mut process, command);
     let output = run_captured_command(&mut process, || {
         format!(
             "Failed to execute native delivery build command '{}' in {}",
@@ -2009,6 +2529,61 @@ fn run_native_build_command(command: &NativeBuildCommand) -> Result<()> {
             format!("\n{}", details)
         }
     );
+}
+
+fn configure_native_build_process(process: &mut Command, command: &NativeBuildCommand) {
+    process.current_dir(&command.working_dir);
+
+    if let Some(target_dir) = cargo_native_build_target_dir(command) {
+        process.env_remove("CARGO_BUILD_TARGET");
+        process.env("CARGO_TARGET_DIR", target_dir);
+    }
+}
+
+fn cargo_native_build_target_dir(command: &NativeBuildCommand) -> Option<PathBuf> {
+    if !is_cargo_program(&command.program) {
+        return None;
+    }
+
+    let manifest_dir = cargo_manifest_path_from_args(&command.args)
+        .map(|manifest_path| {
+            if manifest_path.is_absolute() {
+                manifest_path
+            } else {
+                command.working_dir.join(manifest_path)
+            }
+        })
+        .and_then(|manifest_path| manifest_path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| command.working_dir.clone());
+    Some(manifest_dir.join("target"))
+}
+
+fn is_cargo_program(program: &str) -> bool {
+    let file_name = Path::new(program)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(program);
+    file_name.eq_ignore_ascii_case("cargo") || file_name.eq_ignore_ascii_case("cargo.exe")
+}
+
+fn cargo_manifest_path_from_args(args: &[String]) -> Option<PathBuf> {
+    let mut arguments = args.iter();
+    while let Some(argument) = arguments.next() {
+        if let Some(value) = argument.strip_prefix("--manifest-path=") {
+            if !value.trim().is_empty() {
+                return Some(PathBuf::from(value));
+            }
+            continue;
+        }
+        if argument == "--manifest-path" {
+            let value = arguments.next()?.trim();
+            if value.is_empty() {
+                return None;
+            }
+            return Some(PathBuf::from(value));
+        }
+    }
+    None
 }
 
 fn staged_delivery_config(plan: &NativeBuildPlan) -> Result<DeliveryConfig> {

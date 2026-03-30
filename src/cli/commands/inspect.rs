@@ -641,6 +641,7 @@ fn load_inspection_snapshot(path: &Path) -> Result<InspectionSnapshot> {
             let result = source_inference::execute_shared_engine(
                 SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
                     project_root: source.project_root.clone(),
+                    explicit_native_artifact: None,
                 }),
                 MaterializationMode::InitWorkspace,
                 true,

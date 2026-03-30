@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use crate::config;
+use crate::router::CompatProjectInput;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -13,6 +14,7 @@ use std::os::unix::fs::PermissionsExt;
 pub struct EngineRequest {
     pub explicit_path: Option<PathBuf>,
     pub manifest_path: Option<PathBuf>,
+    pub compat_input: Option<CompatProjectInput>,
 }
 
 pub fn discover_nacelle(req: EngineRequest) -> Result<PathBuf> {
@@ -29,13 +31,20 @@ pub fn discover_nacelle(req: EngineRequest) -> Result<PathBuf> {
     }
 
     // 3) Project manifest (capsule.toml)
+    if let Some(compat_input) = req.compat_input {
+        if let Some(path) = resolve_from_compat_input(&compat_input)? {
+            return validate_engine_path(path);
+        }
+    }
+
+    // 4) Project manifest (capsule.toml)
     if let Some(manifest_path) = req.manifest_path {
         if let Some(path) = resolve_from_manifest(&manifest_path)? {
             return validate_engine_path(path);
         }
     }
 
-    // 4) User registry (~/.ato/config.toml)
+    // 5) User registry (~/.ato/config.toml)
     {
         let cfg = config::load_config()?;
         if let Some(default_name) = cfg.default_engine.as_deref() {
@@ -50,7 +59,7 @@ pub fn discover_nacelle(req: EngineRequest) -> Result<PathBuf> {
         }
     }
 
-    // 5) Portable mode: look next to capsule binary
+    // 6) Portable mode: look next to capsule binary
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let candidate = dir.join("nacelle");
@@ -140,6 +149,26 @@ fn resolve_from_manifest(manifest_path: &Path) -> Result<Option<PathBuf>> {
         .and_then(|t| t.get("source"))
         .and_then(|v| v.as_str())
     {
+        let cfg = config::load_config()?;
+        if let Some(entry) = cfg.engines.get(alias) {
+            return Ok(Some(PathBuf::from(&entry.path)));
+        }
+        anyhow::bail!(
+            "Engine alias '{}' not registered. Run: ato engine register --name {} --path /abs/path/to/nacelle",
+            alias,
+            alias
+        );
+    }
+
+    Ok(None)
+}
+
+fn resolve_from_compat_input(compat_input: &CompatProjectInput) -> Result<Option<PathBuf>> {
+    if let Some(path) = compat_input.engine_nacelle_path() {
+        return Ok(Some(path));
+    }
+
+    if let Some(alias) = compat_input.engine_source_alias() {
         let cfg = config::load_config()?;
         if let Some(entry) = cfg.engines.get(alias) {
             return Ok(Some(PathBuf::from(&entry.path)));
@@ -321,6 +350,7 @@ mod tests {
         let discovered = discover_nacelle(EngineRequest {
             explicit_path: None,
             manifest_path: Some(project.path().to_path_buf()),
+            compat_input: None,
         })
         .expect("discover nacelle");
 
@@ -363,6 +393,7 @@ mod tests {
         let discovered = discover_nacelle(EngineRequest {
             explicit_path: None,
             manifest_path: Some(shadow_manifest),
+            compat_input: None,
         })
         .expect("discover nacelle");
 

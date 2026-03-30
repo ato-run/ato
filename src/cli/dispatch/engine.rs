@@ -17,6 +17,7 @@ pub(super) fn execute_engine_command(
                 capsule_core::engine::discover_nacelle(capsule_core::engine::EngineRequest {
                     explicit_path: nacelle_override,
                     manifest_path: None,
+                    compat_input: None,
                 })?;
             let payload = json!({ "spec_version": "0.1.0" });
             let resp = capsule_core::engine::run_internal(&nacelle, "features", &payload)?;
@@ -41,6 +42,7 @@ pub(super) fn execute_engine_command(
                 capsule_core::engine::discover_nacelle(capsule_core::engine::EngineRequest {
                     explicit_path: Some(resolved_path),
                     manifest_path: None,
+                    compat_input: None,
                 })?;
 
             let mut cfg = capsule_core::config::load_config()?;

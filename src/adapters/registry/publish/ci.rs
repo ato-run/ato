@@ -61,31 +61,6 @@ struct DidSignaturePayload {
     signed_at: i64,
 }
 
-#[derive(Debug)]
-struct TemporaryManifestGuard {
-    path: PathBuf,
-    original_contents: Option<Vec<u8>>,
-}
-
-impl TemporaryManifestGuard {
-    fn new(path: PathBuf, original_contents: Option<Vec<u8>>) -> Self {
-        Self {
-            path,
-            original_contents,
-        }
-    }
-}
-
-impl Drop for TemporaryManifestGuard {
-    fn drop(&mut self) {
-        if let Some(original_contents) = self.original_contents.as_ref() {
-            let _ = fs::write(&self.path, original_contents);
-        } else {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
 #[derive(Debug, Serialize)]
 struct CiMetadataPayload {
     capsule_slug: String,
@@ -122,21 +97,29 @@ pub async fn execute(
 
     let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
     let authoritative_input = resolve_producer_authoritative_input(&cwd, reporter.clone(), false)?;
-    let manifest_path = authoritative_input.manifest_path.clone();
-    let manifest_raw = authoritative_input.manifest_raw.clone();
-    let manifest = authoritative_input.manifest.clone();
+    if authoritative_input
+        .desktop_source_publish_contract()
+        .is_some()
+    {
+        anyhow::bail!(
+            "--ci publish does not yet support Tauri/Electron/Wails source publish. Use private/local registry publish first."
+        );
+    }
+    let (manifest_name, manifest_version) =
+        semantic_publish_identity(&authoritative_input.descriptor)?;
 
     let tag = github.r#ref.strip_prefix("refs/tags/").unwrap_or_default();
     let resolved_version = normalize_tag_version(tag)?;
-    if !manifest.version.trim().is_empty() && manifest.version.trim() != resolved_version {
+    if !manifest_version.trim().is_empty() && manifest_version.trim() != resolved_version {
         anyhow::bail!(
             "Tag/version mismatch: expected version {} from capsule.toml, got tag {}",
-            manifest.version,
+            manifest_version,
             github.r#ref
         );
     }
 
-    let source_repo = find_manifest_repository(&manifest_raw)
+    let source_repo = authoritative_input
+        .compatibility_input_repository()
         .and_then(|v| normalize_source_repo(&v).ok())
         .unwrap_or_else(|| github.repository.clone());
     if source_repo != github.repository {
@@ -156,10 +139,10 @@ pub async fn execute(
             .await?;
     }
     let artifact_path = build_capsule_artifact(
-        &manifest_path,
-        &manifest.name,
+        &manifest_name,
         &resolved_version,
         Some(&authoritative_input),
+        None,
     );
     if !args.json_output {
         reporter.progress_finish(None).await?;
@@ -185,9 +168,9 @@ pub async fn execute(
         .map(|v| v.to_string())
         .context("Failed to derive artifact file name")?;
 
-    let request_playground = manifest_store_playground_enabled(&manifest_raw);
+    let request_playground = authoritative_input.compatibility_store_playground_enabled();
     let metadata = CiMetadataPayload {
-        capsule_slug: manifest.name.clone(),
+        capsule_slug: manifest_name.clone(),
         version: resolved_version.clone(),
         source_repo: source_repo.clone(),
         source_commit: github.sha.clone(),
@@ -337,27 +320,6 @@ fn normalize_tag_version(tag: &str) -> Result<String> {
     Ok(without_prefix.to_string())
 }
 
-fn find_manifest_repository(manifest_raw: &str) -> Option<String> {
-    let parsed = toml::from_str::<toml::Value>(manifest_raw).ok()?;
-    parsed
-        .get("metadata")
-        .and_then(|v| v.get("repository"))
-        .and_then(|v| v.as_str())
-        .or_else(|| parsed.get("repository").and_then(|v| v.as_str()))
-        .map(|v| v.to_string())
-}
-
-fn manifest_store_playground_enabled(manifest_raw: &str) -> bool {
-    let Ok(parsed) = toml::from_str::<toml::Value>(manifest_raw) else {
-        return false;
-    };
-    parsed
-        .get("store")
-        .and_then(|v| v.get("playground"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-}
-
 fn normalize_source_repo(raw: &str) -> Result<String> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -393,86 +355,108 @@ fn normalize_source_repo(raw: &str) -> Result<String> {
     Ok(format!("{}/{}", owner, repo))
 }
 
+fn semantic_publish_identity(
+    descriptor: &capsule_core::router::ExecutionDescriptor,
+) -> Result<(String, String)> {
+    let name = descriptor
+        .runtime_model
+        .metadata
+        .name
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .context("authoritative lock metadata is missing package name")?;
+    let version = descriptor
+        .runtime_model
+        .metadata
+        .version
+        .clone()
+        .unwrap_or_default();
+    Ok((name, version))
+}
+
 pub(crate) fn build_capsule_artifact(
-    manifest_path: &Path,
     name: &str,
     version: &str,
     authoritative_input: Option<&crate::application::producer_input::ProducerAuthoritativeInput>,
+    manifest_path: Option<&Path>,
 ) -> Result<PathBuf> {
-    let manifest_dir = manifest_path.parent().ok_or_else(|| {
-        anyhow::anyhow!("Manifest path has no parent: {}", manifest_path.display())
-    })?;
-    let artifact_dir = std::env::temp_dir().join("ato-ci-artifacts");
+    let (decision, manifest_dir) = if let Some(authoritative_input) = authoritative_input {
+        authoritative_input.validate_legacy_producer_bridge()?;
+        (
+            capsule_core::router::RuntimeDecision {
+                kind: match authoritative_input
+                    .descriptor
+                    .execution_runtime()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+                    .as_str()
+                {
+                    "source" | "native" => capsule_core::router::RuntimeKind::Source,
+                    "web" => capsule_core::router::RuntimeKind::Web,
+                    "wasm" => capsule_core::router::RuntimeKind::Wasm,
+                    "oci" | "docker" | "youki" | "runc" => capsule_core::router::RuntimeKind::Oci,
+                    other => anyhow::bail!("Unsupported runtime '{other}'"),
+                },
+                reason: format!(
+                    "lock target {}",
+                    authoritative_input.descriptor.selected_target_label()
+                ),
+                plan: authoritative_input.descriptor.clone(),
+            },
+            authoritative_input.descriptor.workspace_root.clone(),
+        )
+    } else {
+        let manifest_path = manifest_path.context(
+            "manifest path is required when building a publish artifact without authoritative input",
+        )?;
+        let manifest_dir = manifest_path.parent().ok_or_else(|| {
+            anyhow::anyhow!("Manifest path has no parent: {}", manifest_path.display())
+        })?;
+        (
+            capsule_core::router::route_manifest(
+                manifest_path,
+                capsule_core::router::ExecutionProfile::Release,
+                None,
+            )?,
+            manifest_dir.to_path_buf(),
+        )
+    };
+    let artifact_dir = manifest_dir.join(".tmp").join("ato-ci-artifacts");
     fs::create_dir_all(&artifact_dir)
         .with_context(|| format!("Failed to create {}", artifact_dir.display()))?;
     let artifact_path = artifact_dir.join(format!("{}-{}.capsule", name, version));
 
-    if let Some(plan) = crate::build::native_delivery::detect_build_strategy(manifest_dir)? {
-        let result =
-            crate::build::native_delivery::build_native_artifact(&plan, Some(&artifact_path))?;
+    let native_plan =
+        crate::build::native_delivery::detect_build_strategy_with_legacy_fallback(&decision.plan)?;
+
+    if let Some(plan) = native_plan {
+        let lock_json = authoritative_input
+            .map(crate::application::producer_input::ProducerAuthoritativeInput::serialized_lock_json)
+            .transpose()?;
+        let result = crate::build::native_delivery::build_native_artifact_with_distribution_lock(
+            &plan,
+            Some(&artifact_path),
+            lock_json.as_deref(),
+        )?;
         return Ok(result.artifact_path);
     }
 
-    let mut temporary_manifest = None;
-    let decision = if let Some(authoritative_input) = authoritative_input {
-        let mut decision = capsule_core::router::route_lock(
-            &authoritative_input.lock_path,
-            &authoritative_input.lock,
-            &authoritative_input.workspace_root,
-            capsule_core::router::ExecutionProfile::Release,
-            None,
-        )?;
-        let manifest_raw = toml::to_string(&decision.plan.manifest)
-            .with_context(|| "Failed to serialize lock-derived manifest for publish")?;
-        let original_contents = if authoritative_input.manifest_path.exists() {
-            Some(
-                fs::read(&authoritative_input.manifest_path).with_context(|| {
-                    format!(
-                        "Failed to read existing manifest before publish override at {}",
-                        authoritative_input.manifest_path.display()
-                    )
-                })?,
-            )
-        } else {
-            None
-        };
-        fs::write(&authoritative_input.manifest_path, manifest_raw).with_context(|| {
-            format!(
-                "Failed to write temporary publish manifest at {}",
-                authoritative_input.manifest_path.display()
-            )
-        })?;
-        temporary_manifest = Some(TemporaryManifestGuard::new(
-            authoritative_input.manifest_path.clone(),
-            original_contents,
-        ));
-        decision.plan.manifest_dir = authoritative_input.workspace_root.clone();
-        decision.plan.manifest_path = authoritative_input.manifest_path.clone();
-        decision
-    } else {
-        capsule_core::router::route_manifest(
-            manifest_path,
-            capsule_core::router::ExecutionProfile::Release,
-            None,
-        )?
-    };
-    let _temporary_manifest_guard = temporary_manifest;
-
-    let reporter: std::sync::Arc<dyn capsule_core::reporter::CapsuleReporter + 'static> =
-        std::sync::Arc::new(capsule_core::reporter::NoOpReporter);
+    let reporter = std::sync::Arc::new(capsule_core::reporter::NoOpReporter)
+        as std::sync::Arc<dyn capsule_core::reporter::CapsuleReporter + 'static>;
 
     match decision.kind {
         capsule_core::router::RuntimeKind::Source => {
-            let prepared_config = capsule_core::packers::source::prepare_source_config(
-                &decision.plan.manifest_path,
-                "strict".to_string(),
-                false,
-            )?;
+            let prepared_config =
+                capsule_core::packers::source::prepare_source_config_from_descriptor(
+                    &decision.plan,
+                    "strict".to_string(),
+                    false,
+                )?;
             capsule_core::packers::source::pack(
                 &decision.plan,
                 capsule_core::packers::source::SourcePackOptions {
-                    manifest_path: decision.plan.manifest_path.clone(),
-                    manifest_dir: decision.plan.manifest_dir.clone(),
+                    compat_input: decision.plan.compat_project_input()?,
+                    workspace_root: decision.plan.workspace_root.clone(),
                     config_json: prepared_config.config_json.clone(),
                     config_path: prepared_config.config_path.clone(),
                     output: Some(artifact_path.clone()),
@@ -497,23 +481,24 @@ pub(crate) fn build_capsule_artifact(
                 capsule_core::packers::web::pack(
                     &decision.plan,
                     capsule_core::packers::web::WebPackOptions {
-                        manifest_path: decision.plan.manifest_path.clone(),
-                        manifest_dir: decision.plan.manifest_dir.clone(),
+                        compat_input: decision.plan.compat_project_input()?,
+                        workspace_root: decision.plan.workspace_root.clone(),
                         output: Some(artifact_path.clone()),
                     },
                     reporter,
                 )?;
             } else {
-                let prepared_config = capsule_core::packers::source::prepare_source_config(
-                    &decision.plan.manifest_path,
-                    "strict".to_string(),
-                    false,
-                )?;
+                let prepared_config =
+                    capsule_core::packers::source::prepare_source_config_from_descriptor(
+                        &decision.plan,
+                        "strict".to_string(),
+                        false,
+                    )?;
                 capsule_core::packers::source::pack(
                     &decision.plan,
                     capsule_core::packers::source::SourcePackOptions {
-                        manifest_path: decision.plan.manifest_path.clone(),
-                        manifest_dir: decision.plan.manifest_dir.clone(),
+                        compat_input: decision.plan.compat_project_input()?,
+                        workspace_root: decision.plan.workspace_root.clone(),
                         config_json: prepared_config.config_json.clone(),
                         config_path: prepared_config.config_path.clone(),
                         output: Some(artifact_path.clone()),
@@ -583,7 +568,11 @@ Deploy latest ato-store (OIDC multipart CI publish), or point ATO_STORE_API_URL 
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_tag_version;
+    use std::sync::Arc;
+
+    use super::{build_capsule_artifact, normalize_tag_version, semantic_publish_identity};
+    use crate::application::producer_input::resolve_producer_authoritative_input;
+    use crate::reporters::CliReporter;
 
     #[test]
     fn normalize_tag_version_strips_v_prefix() {
@@ -593,5 +582,74 @@ mod tests {
     #[test]
     fn normalize_tag_version_rejects_empty_tag() {
         assert!(normalize_tag_version("").is_err());
+    }
+
+    #[test]
+    fn authoritative_ci_build_does_not_materialize_project_manifest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"demo","version":"0.1.0","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("package.json");
+        std::fs::write(
+            tmp.path().join("package-lock.json"),
+            r#"{"name":"demo","version":"0.1.0","lockfileVersion":3,"packages":{}}"#,
+        )
+        .expect("package-lock.json");
+        std::fs::write(tmp.path().join("index.js"), "console.log('demo');\n").expect("index.js");
+
+        let authoritative_input = resolve_producer_authoritative_input(
+            tmp.path(),
+            Arc::new(CliReporter::new(false)),
+            false,
+        )
+        .expect("authoritative input");
+        let (name, version) =
+            semantic_publish_identity(&authoritative_input.descriptor).expect("identity");
+
+        let _outcome = build_capsule_artifact(&name, &version, Some(&authoritative_input), None);
+        assert!(!tmp.path().join("capsule.toml").exists());
+    }
+
+    #[test]
+    fn authoritative_ci_build_ignores_transitional_manifest_paths() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"demo","version":"0.1.0","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("package.json");
+        std::fs::write(
+            tmp.path().join("package-lock.json"),
+            r#"{"name":"demo","version":"0.1.0","lockfileVersion":3,"packages":{}}"#,
+        )
+        .expect("package-lock.json");
+        std::fs::write(tmp.path().join("index.js"), "console.log('demo');\n").expect("index.js");
+
+        let mut authoritative_input = resolve_producer_authoritative_input(
+            tmp.path(),
+            Arc::new(CliReporter::new(false)),
+            false,
+        )
+        .expect("authoritative input");
+        authoritative_input.descriptor.manifest_path = tmp.path().join("missing-capsule.toml");
+        authoritative_input.descriptor.manifest_dir = tmp.path().join("missing-manifest-dir");
+
+        let (name, version) =
+            semantic_publish_identity(&authoritative_input.descriptor).expect("identity");
+        let outcome = build_capsule_artifact(&name, &version, Some(&authoritative_input), None);
+        if let Err(err) = &outcome {
+            let message = err.to_string();
+            assert!(
+                !message.contains("missing-capsule.toml"),
+                "build must not consult transitional manifest_path: {message}"
+            );
+            assert!(
+                !message.contains("missing-manifest-dir"),
+                "build must not consult transitional manifest_dir: {message}"
+            );
+        }
+        assert!(!tmp.path().join("capsule.toml").exists());
     }
 }

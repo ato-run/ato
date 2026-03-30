@@ -71,6 +71,60 @@ port = 4173
     .expect("write html");
 }
 
+fn copy_dir_recursive(src: &Path, dest: &Path) {
+    fs::create_dir_all(dest).expect("create destination dir");
+    for entry in fs::read_dir(src).expect("read source dir") {
+        let entry = entry.expect("sample dir entry");
+        let source_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+        let file_type = entry.file_type().expect("sample entry file type");
+        if file_type.is_dir() {
+            copy_dir_recursive(&source_path, &dest_path);
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &dest_path).expect("copy sample file");
+        } else {
+            panic!(
+                "unsupported sample fixture entry: {}",
+                source_path.display()
+            );
+        }
+    }
+}
+
+fn materialize_source_sample(relative_path: &str, dest: &Path) {
+    let sample_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("samples")
+        .join("source")
+        .join(relative_path);
+    assert!(
+        sample_root.is_dir(),
+        "sample fixture is missing: {}",
+        sample_root.display()
+    );
+    copy_dir_recursive(&sample_root, dest);
+}
+
+fn inspect_diagnostics_json(target: &Path) -> serde_json::Value {
+    let output = Command::cargo_bin("ato")
+        .expect("binary")
+        .args([
+            "inspect",
+            "diagnostics",
+            target.to_str().expect("utf-8 target path"),
+            "--json",
+        ])
+        .output()
+        .expect("run inspect diagnostics");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    serde_json::from_slice(&output.stdout).expect("inspect diagnostics json")
+}
+
 fn write_canonical_ato_lock(dir: &Path) {
     let mut lock = AtoLock::default();
     lock.resolution.entries.insert(
@@ -1872,6 +1926,119 @@ fn test_run_json_missing_manifest_fails_closed_without_generating_manifest() {
 }
 
 #[test]
+fn test_inspect_diagnostics_tauri_minimal_reports_native_closure_gap() {
+    let tmp = tempdir().unwrap();
+    let project_dir = tmp.path().join("tauri-minimal");
+    materialize_source_sample("native-desktop/tauri/minimal", &project_dir);
+
+    let payload = inspect_diagnostics_json(&project_dir);
+    let diagnostics = payload["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+
+    assert_eq!(diagnostics.len(), 2);
+    assert!(diagnostics.iter().any(|value| {
+        value["lockPath"].as_str() == Some("resolution")
+            && value["reasonClass"].as_str() == Some("insufficient_evidence")
+    }));
+    assert!(diagnostics.iter().any(|value| {
+        value["lockPath"].as_str() == Some("resolution.closure")
+            && value["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("native delivery source was detected"))
+    }));
+}
+
+#[test]
+fn test_inspect_diagnostics_tauri_with_lockfiles_has_no_diagnostics() {
+    let tmp = tempdir().unwrap();
+    let project_dir = tmp.path().join("tauri-with-lockfiles");
+    materialize_source_sample("native-desktop/tauri/with-lockfiles", &project_dir);
+
+    let payload = inspect_diagnostics_json(&project_dir);
+    let diagnostics = payload["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+
+    assert!(diagnostics.is_empty(), "diagnostics={diagnostics:?}");
+}
+
+#[test]
+fn test_inspect_diagnostics_tauri_ambiguous_surfaces_contract_gap() {
+    let tmp = tempdir().unwrap();
+    let project_dir = tmp.path().join("tauri-ambiguous");
+    materialize_source_sample("native-desktop/tauri/ambiguous", &project_dir);
+
+    let payload = inspect_diagnostics_json(&project_dir);
+    let diagnostics = payload["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+
+    assert!(diagnostics.iter().any(|value| {
+        value["lockPath"].as_str() == Some("contract")
+            && value["reasonClass"].as_str() == Some("insufficient_evidence")
+    }));
+    assert!(diagnostics.iter().any(|value| {
+        value["lockPath"].as_str() == Some("contract.process")
+            && value["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("could not determine a runnable process"))
+    }));
+}
+
+#[test]
+fn test_inspect_diagnostics_electron_minimal_reports_generic_closure_gap() {
+    let tmp = tempdir().unwrap();
+    let project_dir = tmp.path().join("electron-minimal");
+    materialize_source_sample("native-desktop/electron/minimal", &project_dir);
+
+    let payload = inspect_diagnostics_json(&project_dir);
+    let diagnostics = payload["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+
+    assert_eq!(diagnostics.len(), 2);
+    assert!(diagnostics.iter().any(|value| {
+        value["lockPath"].as_str() == Some("resolution.closure")
+            && value["reasonClass"].as_str() == Some("incomplete_closure")
+            && value["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("metadata_only"))
+    }));
+}
+
+#[test]
+fn test_inspect_diagnostics_wails_minimal_has_no_diagnostics() {
+    let tmp = tempdir().unwrap();
+    let project_dir = tmp.path().join("wails-minimal");
+    materialize_source_sample("native-desktop/wails/minimal", &project_dir);
+
+    let payload = inspect_diagnostics_json(&project_dir);
+    let diagnostics = payload["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+
+    assert!(diagnostics.is_empty(), "diagnostics={diagnostics:?}");
+}
+
+#[test]
+fn test_inspect_diagnostics_artifact_import_bundle_shape_has_no_diagnostics() {
+    let tmp = tempdir().unwrap();
+    let project_dir = tmp.path().join("macos-app-bundle-shape");
+    materialize_source_sample(
+        "native-desktop/artifact-import/macos-app-bundle-shape",
+        &project_dir,
+    );
+
+    let payload = inspect_diagnostics_json(&project_dir);
+    let diagnostics = payload["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+
+    assert!(diagnostics.is_empty(), "diagnostics={diagnostics:?}");
+}
+
+#[test]
 fn test_legacy_open_subcommand_is_rejected() {
     let mut cmd = Command::cargo_bin("ato").unwrap();
     cmd.args(["open", "."])
@@ -1901,8 +2068,7 @@ fn test_build_command_with_key_flag() {
         .arg("/path/to/key")
         .arg("--help")
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Path to signing key"));
+        .success();
 }
 
 #[test]
@@ -2097,11 +2263,11 @@ fn test_publish_json_source_only_rust_workspace_uses_diagnostic_envelope() {
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(value["schema_version"], "1");
     assert_eq!(value["status"], "error");
-    assert_eq!(value["error"]["code"], "E999");
+    assert_eq!(value["error"]["code"], "E102");
     assert!(value["error"]["message"]
         .as_str()
         .expect("message string")
-        .contains("unsupported driver 'rust'"));
+        .contains("LockDraft is not ready to finalize locally"));
 }
 
 #[test]

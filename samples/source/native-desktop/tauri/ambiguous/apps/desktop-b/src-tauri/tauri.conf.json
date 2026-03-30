@@ -1,0 +1,6 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "tauri-ambiguous-b",
+  "version": "0.1.0",
+  "identifier": "dev.ato.samples.tauri.ambiguous.b"
+}

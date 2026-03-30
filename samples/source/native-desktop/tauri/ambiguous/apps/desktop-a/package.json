@@ -1,0 +1,9 @@
+{
+  "name": "tauri-ambiguous-a",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build && cargo build --manifest-path src-tauri/Cargo.toml --release"
+  }
+}

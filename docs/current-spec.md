@@ -5,13 +5,14 @@ It is the canonical target spec for the unified run/publish pipeline; implementa
 
 - Scope: target product surface after bidirectional hourglass pipeline unification
 - Baseline: derived from the ato-cli 0.4.30 product surface
-- Canonical manifest: capsule.toml
+- Canonical input: `ato.lock.json`
+- Compatibility authoring/input: `capsule.toml`, `capsule.lock.json`, source-only directories, ecosystem lockfiles, framework metadata
 - Canonical binary: ato
 - Security posture: Zero-Trust, fail-closed by default
 
 ## 1. Product Summary
 
-ato is a meta-CLI that interprets capsule.toml to execute, package, publish, install, and inspect capsules.
+ato is a meta-CLI that executes, packages, publishes, installs, and inspects applications through a lock-first model centered on `ato.lock.json`.
 This specification is intentionally normative for the next pipeline model, not a strict snapshot of the current implementation.
 
 The target product surface is organized around these flows:
@@ -35,20 +36,17 @@ Core behavior is intentionally fail-closed:
 
 ### 2.1 Capsule
 
-A capsule is the unit of execution and distribution. It is described by capsule.toml and may be built into an immutable .capsule archive.
+A capsule is the unit of execution and distribution. It may be represented by authoritative lock state, compatibility manifest input, or an immutable `.capsule` archive depending on the command entry path.
 
-### 2.2 Manifest Canonicality
+### 2.2 Canonical Input And Compatibility Inputs
 
-capsule.toml is the source of truth for project input.
+`ato.lock.json` is the only canonical input for execution semantics.
 
-- Current canonical authoring and generation format: schema_version = "1"
-- Deprecated compatibility input: schema_version = "0.2"
-- Compatibility input: schema_version = "0.3"
-- Parser accepts schema versions 0.2, 0.3, and 1
-- Some CHML-like manifests without schema_version are also normalized internally
-- Legacy [execution] is rejected in schema_version=0.2 parsing
-
-When schema_version is empty after load, ato normalizes it through the compatibility path before downstream consumers use the manifest.
+- when `ato.lock.json` exists, it is the authoritative source of `contract` and `resolution`
+- `capsule.toml`, legacy `capsule.lock.json`, source-only directories, ecosystem lockfiles, and framework metadata are compatibility or importer inputs
+- compatibility inputs may be used to synthesize canonical lock-shaped state, but they must not override an authoritative `ato.lock.json`
+- parser compatibility for schema versions 0.2, 0.3, and 1 remains relevant only inside compatibility import and normalization paths
+- some CHML-like manifests without `schema_version` are still normalized internally through that same compatibility path
 
 ### 2.3 Security Model
 
@@ -131,6 +129,23 @@ Current boundary rules:
 - native-delivery finalize helpers such as `codesign` and `signtool` are `host_capability`, but they may still appear in `build_environment.helper_tools` as build-environment claims rather than as canonical closure artifacts
 - durable bootstrap caches live under `~/.ato/runtimes`, `~/.ato/toolchains`, and `~/.ato/engines`; transient download/extract staging remains under `.downloads` and `.tmp` inside those durable roots
 
+### 2.7 Command-Level Reproducibility Contract
+
+ato evaluates lock-first behavior command by command rather than by architecture purity alone.
+
+| Command   | Must be fixed before success                                                                                                                                                                                      | May remain unresolved                                                                        | Host-local / non-canonical state                                                        | Provenance / diagnostics requirement                                                                                            |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `run`     | immutable execution input, runtime selection, process entry, required closure materialization, expected network/binding contract, security gate verdict                                                           | descriptive metadata, optional hints, non-required env/config hints                          | actual host ports, secret values, local paths, approval results, binding selections     | unresolved fields must indicate whether they block execute; import, fallback, and host-local influence must be machine-readable |
+| `init`    | durable `ato.lock.json`, runtime/toolchain baseline, resolved target selection or explicit unresolved marker, executable process contract or explicit unresolved marker, delivery build contract where applicable | partially resolved fields that still support deterministic re-validation                     | workspace-local binding seed, policy bundle, attestations store, approval results       | fallback, importer evidence, observation, and user-confirmed information must remain inspectable after generation               |
+| `publish` | build closure, artifact identity class, publish metadata, provenance linkage, source-derived build/verify/publish path                                                                                            | optional descriptive metadata that does not change artifact identity or verification outcome | local finalize credentials, local projection/install state, registry session/auth state | metadata must preserve whether the artifact is source-derived unsigned, locally finalized signed, or imported third-party input |
+
+Shared rules:
+
+- authoritative `ato.lock.json` must prevent downstream manifest or ad hoc source heuristics from changing command semantics
+- unresolved state must carry explicit reason classes rather than disappearing into fallback
+- import, fallback, and host-local overlays must remain inspectable through machine-readable surfaces such as `inspect`, `validate`, and diagnostics
+- `closure_digest` and `lock_id` must not be used to claim more reproducibility than the resolved `resolution.closure.kind/status` envelope supports
+
 ## 3. Supported CLI Surface
 
 ## 3.1 Primary Commands
@@ -166,6 +181,19 @@ Important rules:
 - if a local directory or local manifest path does not resolve to a valid capsule.toml, ato pauses normal execution and offers to generate a new capsule.toml through the existing init flow
 - if consent is granted or -y is passed, the generated manifest is written to the local project root before the run pipeline continues
 - if an invalid capsule.toml already exists, ato first backs it up under `.tmp/ato/run-invalid-manifests/` before regeneration
+
+Current lock-first contract:
+
+- source-started run must synthesize attempt-local canonical lock-shaped state before Execute
+- once immutable execution input is materialized for the attempt, active execution semantics must not continue consulting ad hoc source heuristics
+- process entry, selected runtime, target compatibility, required closure materialization, security-sensitive capability decisions, and expected network/binding contract are execute-blocking fields
+- host-local selections such as actual bound ports, secret values, local paths, and approval results remain outside canonical lock identity
+- imported desktop artifacts may run through a provenance-limited `artifact-import` path, but that path does not claim reproducible rebuild semantics
+
+Migration note:
+
+- `run` still retains transitional manifest-path surfaces for process records, shadow workspaces, and preview-session compatibility
+- these surfaces are not intended to override authoritative lock semantics, but they have not yet been fully removed from run/install-adjacent plumbing
 
 Important flags:
 
@@ -212,6 +240,12 @@ Important flags:
 - --no-project
 - --json
 
+Current contract:
+
+- install remains verification-first and lock-first for artifact semantics
+- launcher projection, preview/manual recovery, and some persistence paths still retain transitional `source_manifest_path` plumbing during migration
+- those transitional paths are compatibility surfaces for install/projection workflows and are not intended to redefine canonical execution semantics
+
 ### init
 
 Materializes a durable workspace baseline.
@@ -230,7 +264,9 @@ Current contract:
 - compatibility import may emit `imported_artifact_closure` for an existing native artifact such as a `.app` bundle; this remains provenance-limited and distinct from source-derived build closure
 - canonical lock identity remains `schema_version + resolution + contract`; embedded `binding`, `policy`, `attestations`, and `signatures` do not affect `lock_id`
 - may persist partially resolved output, but unresolved state must remain inspectable through first-class markers and provenance metadata
-- legacy manifest-first helpers remain available through `ato init --legacy prompt` and `ato init --legacy manual`
+- top-level `ato init` only materializes durable `ato.lock.json` workspace state; compatibility `capsule.toml` scaffolding remains on `ato build --init` and local manifest recovery paths
+- `ato init` is the primary command for desktop native-delivery toml レス化; `run` and `publish` should consume its durable baseline rather than rediscovering source semantics
+- fallback, importer evidence, observation, and user-confirmed information must survive as inspectable provenance rather than staying implicit in heuristics
 
 ### build
 
@@ -268,6 +304,13 @@ Implementation status during migration:
 - application::pipeline::phases::publish already owns the wrapper APIs for summarize_private_publish, run_private_publish_phase, and run_official_publish_phase
 - private remote registry upload is now driven through DestinationPort in the main publish path
 - build-backed private publish now resolves source vs artifact input in application::pipeline::phases::publish before handing off to that same upload boundary
+
+Current lock-first contract:
+
+- source input must enter publish through lock-derived build / verify / publish planning rather than ad hoc source semantics
+- artifact identity must distinguish source-derived unsigned bundles, locally finalized signed bundles, and imported third-party artifacts
+- publish metadata and provenance must preserve that identity class instead of collapsing all desktop artifacts into one bucket
+- imported artifact publish remains provenance-limited and must not claim source-derived rebuild reproducibility
 
 Internal Pipeline Phases (Producer Flow):
 
@@ -934,32 +977,9 @@ Native delivery is experimental.
 Current product stance:
 
 - primary user surface remains build, publish, and install
-- capsule.toml is the only supported authored source manifest for native delivery; ato.delivery.toml remains artifact-internal metadata
+- `ato init` is the primary command for turning desktop source or imported artifacts into durable lock-first input
+- `run` and `publish` should consume lock-derived desktop state rather than treat manifest authoring as the main contract boundary
 - local finalize currently targets macOS darwin/arm64 with codesign
-
-Current canonical native target form:
-
-```toml
-schema_version = "1"
-name = "my-app"
-version = "0.1.0"
-type = "app"
-default_target = "desktop"
-
-[targets.desktop]
-runtime = "source"
-driver = "native"
-entrypoint = "MyApp.app"
-```
-
-For .app entrypoint native delivery, ato currently derives these defaults internally:
-
-- artifact.framework = "tauri"
-- artifact.stage = "unsigned"
-- artifact.target = "darwin/arm64"
-- artifact.input = <targets.<default>.entrypoint>
-- finalize.tool = "codesign"
-- finalize.args = ["--deep", "--force", "--sign", "-", <artifact.input>]
 
 Current metadata policy:
 
@@ -977,6 +997,23 @@ Current canonical lock contract policy for desktop native delivery:
 - `.app`, `.exe`, AppImage, and `.dmg` are never treated as canonical build inputs; they are build outputs or imported artifacts, so `contract.delivery.artifact.canonical_build_input` remains `false`
 - `contract.delivery` is organized into `artifact`, `build`, `finalize`, `install`, and `projection` logical sections
 - `local_derivation` and `projection` remain host-local execution/install metadata; they do not participate in canonical lock identity
+
+Supported input matrix for the current roadmap:
+
+| Input             | `init` | `run`  | `publish` | Notes                                                   |
+| ----------------- | ------ | ------ | --------- | ------------------------------------------------------- |
+| Tauri source      | target | target | target    | highest priority source-derived desktop path            |
+| Electron source   | target | target | target    | second priority                                         |
+| Wails source      | target | target | target    | third priority                                          |
+| built `.app`      | target | target | target    | handled as `artifact-import`, not canonical build input |
+| built `.AppImage` | target | target | target    | handled as `artifact-import`, not canonical build input |
+| built `.exe`      | target | target | target    | handled as `artifact-import`, not canonical build input |
+
+Command-first roadmap:
+
+- Phase A: `ato init` learns to compile desktop source or imported artifacts into durable `ato.lock.json`
+- Phase B: `ato run` and `ato publish` consume that lock-derived desktop state as lock-first consumers
+- Phase C: compatibility manifest bridges and temporary manifest writes are pushed back into compatibility-only paths for build/publish; run/install may still retain transitional manifest-path surfaces during migration
 
 Stable machine-readable contract fields for schema_version = "0.1" native JSON envelopes:
 

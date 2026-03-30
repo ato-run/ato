@@ -30,8 +30,221 @@ pub enum ExecutionProfile {
 }
 
 #[derive(Debug, Clone)]
+pub struct CompatManifestBridge {
+    pub(crate) raw_toml: String,
+    pub(crate) manifest: CapsuleManifest,
+    pub(crate) sha256: String,
+}
+
+impl CompatManifestBridge {
+    pub fn from_normalized_toml(raw_toml: String) -> Result<Self> {
+        let parsed =
+            CapsuleManifest::from_toml(&raw_toml).map_err(|err| anyhow!(err.to_string()))?;
+        Ok(Self {
+            raw_toml: raw_toml.clone(),
+            manifest: parsed,
+            sha256: sha256_hex(raw_toml.as_bytes()),
+        })
+    }
+
+    pub fn toml_value(&self) -> Result<toml::Value> {
+        toml::from_str(&self.raw_toml).map_err(|err| anyhow!("parse compat manifest bridge: {err}"))
+    }
+
+    pub fn from_manifest_value(manifest: &toml::Value) -> Result<Self> {
+        let raw_toml =
+            toml::to_string(manifest).map_err(|err| anyhow!("serialize manifest bridge: {err}"))?;
+        let parsed =
+            CapsuleManifest::from_toml(&raw_toml).map_err(|err| anyhow!(err.to_string()))?;
+        Ok(Self {
+            raw_toml: raw_toml.clone(),
+            manifest: parsed,
+            sha256: sha256_hex(raw_toml.as_bytes()),
+        })
+    }
+
+    pub fn from_lock(lock: &AtoLock, runtime_model: &ResolvedLockRuntimeModel) -> Result<Self> {
+        Self::from_manifest_value(&synthesize_manifest_from_lock(lock, runtime_model))
+    }
+
+    pub fn manifest_text(&self) -> &str {
+        self.raw_toml.as_str()
+    }
+
+    pub fn manifest_model(&self) -> &CapsuleManifest {
+        &self.manifest
+    }
+
+    pub fn manifest_sha256(&self) -> &str {
+        self.sha256.as_str()
+    }
+
+    pub fn raw_value(&self) -> Result<toml::Value> {
+        self.toml_value()
+    }
+
+    pub fn package_name(&self) -> &str {
+        self.manifest.name.as_str()
+    }
+
+    pub fn package_version(&self) -> &str {
+        self.manifest.version.as_str()
+    }
+
+    pub fn repository(&self) -> Option<String> {
+        self.toml_value().ok().and_then(|parsed| {
+            parsed
+                .get("metadata")
+                .and_then(|value| value.get("repository"))
+                .and_then(|value| value.as_str())
+                .or_else(|| parsed.get("repository").and_then(|value| value.as_str()))
+                .map(str::to_string)
+        })
+    }
+
+    pub fn store_playground_enabled(&self) -> bool {
+        self.toml_value()
+            .ok()
+            .and_then(|parsed| {
+                parsed
+                    .get("store")
+                    .and_then(|value| value.get("playground"))
+                    .and_then(|value| value.as_bool())
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn is_schema_v03(&self) -> bool {
+        self.manifest.schema_version.trim() == "0.3"
+    }
+
+    pub fn ipc_section(&self) -> Result<Option<toml::Value>> {
+        Ok(self.toml_value()?.get("ipc").cloned())
+    }
+
+    pub fn publish_registry(&self) -> Option<String> {
+        self.toml_value().ok().and_then(|parsed| {
+            parsed
+                .get("store")
+                .and_then(|value| value.get("registry"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CompatProjectInput {
+    workspace_root: PathBuf,
+    logical_source_label: String,
+    manifest_value: toml::Value,
+    bridge: CompatManifestBridge,
+}
+
+impl CompatProjectInput {
+    pub fn from_bridge(workspace_root: PathBuf, bridge: CompatManifestBridge) -> Result<Self> {
+        let logical_source_label = format!(
+            "compatibility manifest bridge for {}",
+            workspace_root.display()
+        );
+        Self::from_bridge_with_label(workspace_root, logical_source_label, bridge)
+    }
+
+    pub fn from_bridge_with_label(
+        workspace_root: PathBuf,
+        logical_source_label: impl Into<String>,
+        bridge: CompatManifestBridge,
+    ) -> Result<Self> {
+        let manifest_value = bridge.toml_value()?;
+        Ok(Self {
+            workspace_root,
+            logical_source_label: logical_source_label.into(),
+            manifest_value,
+            bridge,
+        })
+    }
+
+    pub fn workspace_root(&self) -> &Path {
+        self.workspace_root.as_path()
+    }
+
+    pub fn logical_source_label(&self) -> &str {
+        self.logical_source_label.as_str()
+    }
+
+    pub fn manifest_value(&self) -> &toml::Value {
+        &self.manifest_value
+    }
+
+    pub fn manifest_text(&self) -> &str {
+        self.bridge.manifest_text()
+    }
+
+    pub fn manifest(&self) -> &CapsuleManifest {
+        self.bridge.manifest_model()
+    }
+
+    pub fn package_name(&self) -> &str {
+        self.bridge.package_name()
+    }
+
+    pub fn package_version(&self) -> &str {
+        self.bridge.package_version()
+    }
+
+    pub fn sha256(&self) -> &str {
+        self.bridge.manifest_sha256()
+    }
+
+    pub fn ipc_section(&self) -> Result<Option<toml::Value>> {
+        self.bridge.ipc_section()
+    }
+
+    pub fn publish_registry(&self) -> Option<String> {
+        self.bridge.publish_registry()
+    }
+
+    pub fn source_digest(&self) -> Option<&str> {
+        self.bridge
+            .manifest_model()
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.source_digest.as_deref())
+    }
+
+    pub fn engine_nacelle_path(&self) -> Option<PathBuf> {
+        self.manifest_value
+            .get("engine")
+            .and_then(|table| table.get("nacelle_path"))
+            .and_then(|value| value.as_str())
+            .map(PathBuf::from)
+            .map(|path| {
+                if path.is_absolute() {
+                    path
+                } else {
+                    self.workspace_root.join(path)
+                }
+            })
+    }
+
+    pub fn engine_source_alias(&self) -> Option<&str> {
+        self.manifest_value
+            .get("engine")
+            .and_then(|table| table.get("source"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ExecutionDescriptor {
+    // Transitional compatibility surface retained for run/install-oriented APIs.
     pub manifest: toml::Value,
+    pub compat_manifest: Option<CompatManifestBridge>,
+    // Transitional source-location metadata; build/publish semantic authority must not depend on these.
     pub manifest_path: PathBuf,
     pub manifest_dir: PathBuf,
     pub lock: AtoLock,
@@ -157,7 +370,8 @@ pub fn execution_descriptor_from_manifest_parts(
     let runtime_model = synthesize_runtime_model_from_manifest(&manifest, &selected_target)?;
 
     Ok(ExecutionDescriptor {
-        manifest,
+        manifest: manifest.clone(),
+        compat_manifest: Some(CompatManifestBridge::from_manifest_value(&manifest)?),
         manifest_path,
         manifest_dir: workspace_root.clone(),
         lock: AtoLock::default(),
@@ -205,8 +419,11 @@ pub fn route_lock_with_state_overrides(
             runtime_model.selected.target_label
         )
     })?;
+    let compat_manifest = CompatManifestBridge::from_lock(lock, &runtime_model)?;
+    let manifest = compat_manifest.raw_value()?;
     let plan = ExecutionDescriptor {
-        manifest: synthesize_manifest_from_lock(lock, &runtime_model),
+        manifest,
+        compat_manifest: Some(compat_manifest),
         manifest_path: lock_path.to_path_buf(),
         manifest_dir: workspace_root.to_path_buf(),
         lock: lock.clone(),
@@ -463,54 +680,57 @@ impl ExecutionDescriptor {
         cloned
     }
 
+    pub fn compat_project_input(&self) -> Result<Option<CompatProjectInput>> {
+        self.compat_manifest
+            .clone()
+            .map(|bridge| CompatProjectInput::from_bridge(self.workspace_root.clone(), bridge))
+            .transpose()
+    }
+
     pub fn execution_entrypoint(&self) -> Option<String> {
         self.runtime_for_target(&self.selected_target)
             .map(|runtime| runtime.entrypoint.clone())
             .filter(|value| !value.trim().is_empty())
-            .or_else(|| self.get_str(&["targets", &self.selected_target, "entrypoint"]))
     }
 
     pub fn execution_runtime(&self) -> Option<String> {
         self.runtime_for_target(&self.selected_target)
             .map(|runtime| runtime.runtime.clone())
             .filter(|value| !value.trim().is_empty())
-            .or_else(|| self.get_str(&["targets", &self.selected_target, "runtime"]))
     }
 
     pub fn execution_driver(&self) -> Option<String> {
         self.runtime_for_target(&self.selected_target)
             .and_then(|runtime| runtime.driver.clone())
             .filter(|value| !value.trim().is_empty())
-            .or_else(|| self.get_str(&["targets", &self.selected_target, "driver"]))
     }
 
     pub fn execution_run_command(&self) -> Option<String> {
         self.runtime_for_target(&self.selected_target)
             .and_then(|runtime| runtime.run_command.clone())
             .filter(|value| !value.trim().is_empty())
-            .or_else(|| self.get_str(&["targets", &self.selected_target, "run_command"]))
     }
 
     pub fn execution_package_type(&self) -> Option<String> {
-        self.get_str(&["targets", &self.selected_target, "package_type"])
+        self.compat_str(&["targets", &self.selected_target, "package_type"])
     }
 
     pub fn execution_runtime_version(&self) -> Option<String> {
         self.resolved_target_string(&self.selected_target, "runtime_version")
-            .or_else(|| self.get_str(&["targets", &self.selected_target, "runtime_version"]))
+            .or_else(|| self.compat_str(&["targets", &self.selected_target, "runtime_version"]))
     }
 
     pub fn execution_runtime_tool_version(&self, tool: &str) -> Option<String> {
         self.resolved_target_nested_string(&self.selected_target, &["runtime_tools", tool])
-            .or_else(|| self.get_str(&["targets", &self.selected_target, "runtime_tools", tool]))
+            .or_else(|| self.compat_str(&["targets", &self.selected_target, "runtime_tools", tool]))
     }
 
     pub fn execution_language(&self) -> Option<String> {
-        self.get_str(&["targets", &self.selected_target, "language"])
+        self.compat_str(&["targets", &self.selected_target, "language"])
     }
 
     pub fn execution_image(&self) -> Option<String> {
-        self.get_str(&["targets", &self.selected_target, "image"])
+        self.compat_str(&["targets", &self.selected_target, "image"])
     }
 
     pub fn execution_env(&self) -> HashMap<String, String> {
@@ -518,8 +738,8 @@ impl ExecutionDescriptor {
             .map(|runtime| runtime.env.clone())
             .filter(|env| !env.is_empty())
             .unwrap_or_else(|| {
-                self.get_table(&["targets", &self.selected_target, "env"])
-                    .map(table_to_map)
+                self.compat_table(&["targets", &self.selected_target, "env"])
+                    .map(|table| table_to_map(&table))
                     .unwrap_or_default()
             })
     }
@@ -528,9 +748,10 @@ impl ExecutionDescriptor {
         let mut ordered = Vec::new();
         let mut seen = HashSet::new();
 
-        if let Some(required) = self.get_array(&["targets", &self.selected_target, "required_env"])
+        if let Some(required) =
+            self.compat_array(&["targets", &self.selected_target, "required_env"])
         {
-            for value in required {
+            for value in &required {
                 if let Some(name) = value.as_str() {
                     let trimmed = name.trim();
                     if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
@@ -562,7 +783,7 @@ impl ExecutionDescriptor {
     }
 
     pub fn target_package_dependencies(&self, target_label: &str) -> Vec<String> {
-        self.get_array(&["targets", target_label, "package_dependencies"])
+        self.compat_array(&["targets", target_label, "package_dependencies"])
             .map(|values| {
                 values
                     .iter()
@@ -577,7 +798,7 @@ impl ExecutionDescriptor {
 
     pub fn selected_target_package_order(&self) -> Result<Vec<String>> {
         let targets = self
-            .get_table(&["targets"])
+            .compat_table(&["targets"])
             .ok_or_else(|| anyhow!("Missing required [targets] table"))?;
 
         let mut closure = HashSet::new();
@@ -606,10 +827,14 @@ impl ExecutionDescriptor {
     }
 
     pub fn selected_target_external_injection(&self) -> HashMap<String, ExternalInjectionSpec> {
-        self.manifest
-            .get("targets")
-            .and_then(|targets| targets.get(&self.selected_target))
-            .cloned()
+        self.compat_manifest
+            .as_ref()
+            .and_then(|bridge| bridge.raw_value().ok())
+            .and_then(|raw| {
+                raw.get("targets")
+                    .and_then(|targets| targets.get(&self.selected_target))
+                    .cloned()
+            })
             .and_then(|value| value.try_into::<NamedTarget>().ok())
             .map(|target| target.external_injection)
             .unwrap_or_default()
@@ -621,18 +846,10 @@ impl ExecutionDescriptor {
             .iter()
             .find(|service| service.target_label == self.selected_target)
             .and_then(|service| service.readiness_probe.clone())
-            .or_else(|| {
-                self.manifest
-                    .get("targets")
-                    .and_then(|targets| targets.get(&self.selected_target))
-                    .cloned()
-                    .and_then(|value| value.try_into::<NamedTarget>().ok())
-                    .and_then(|target| target.readiness_probe)
-            })
     }
 
     pub fn services(&self) -> HashMap<String, ServiceSpec> {
-        self.get_table(&["services"])
+        self.compat_table(&["services"])
             .map(|services| {
                 services
                     .iter()
@@ -670,25 +887,18 @@ impl ExecutionDescriptor {
     }
 
     pub fn manifest_name(&self) -> Option<String> {
-        self.runtime_model
-            .metadata
-            .name
-            .clone()
-            .or_else(|| self.get_str(&["name"]))
+        self.runtime_model.metadata.name.clone()
     }
 
     pub fn typed_manifest(&self) -> Result<CapsuleManifest> {
-        let manifest_toml =
-            toml::to_string(&self.manifest).map_err(|err| anyhow!("serialize manifest: {err}"))?;
-        CapsuleManifest::from_toml(&manifest_toml).map_err(|err| anyhow!(err.to_string()))
+        self.compat_manifest
+            .as_ref()
+            .map(|bridge| bridge.manifest_model().clone())
+            .ok_or_else(|| anyhow!("compat manifest bridge is unavailable"))
     }
 
     pub fn manifest_version(&self) -> Option<String> {
-        self.runtime_model
-            .metadata
-            .version
-            .clone()
-            .or_else(|| self.get_str(&["version"]))
+        self.runtime_model.metadata.version.clone()
     }
 
     pub fn execution_port(&self) -> Option<u16> {
@@ -700,24 +910,24 @@ impl ExecutionDescriptor {
     }
 
     pub fn build_lifecycle_build(&self) -> Option<String> {
-        self.get_str(&["targets", &self.selected_target, "build_command"])
-            .or_else(|| self.get_str(&["build", "lifecycle", "build"]))
+        self.compat_str(&["targets", &self.selected_target, "build_command"])
+            .or_else(|| self.compat_str(&["build", "lifecycle", "build"]))
     }
 
     pub fn build_cache_outputs(&self) -> Vec<String> {
-        self.get_array(&["targets", &self.selected_target, "outputs"])
-            .map(|values| array_to_vec(values))
+        self.compat_array(&["targets", &self.selected_target, "outputs"])
+            .map(|values| array_to_vec(&values))
             .unwrap_or_default()
     }
 
     pub fn build_cache_env(&self) -> Vec<String> {
-        self.get_array(&["targets", &self.selected_target, "build_env"])
-            .map(|values| array_to_vec(values))
+        self.compat_array(&["targets", &self.selected_target, "build_env"])
+            .map(|values| array_to_vec(&values))
             .unwrap_or_default()
     }
 
     pub fn execution_preference(&self) -> Option<Vec<RuntimeKind>> {
-        let pref = self.get_array(&["targets", "preference"])?;
+        let pref = self.compat_array(&["targets", "preference"])?;
 
         let mut out = Vec::new();
         for value in pref {
@@ -768,21 +978,21 @@ impl ExecutionDescriptor {
         if !runtime.eq_ignore_ascii_case("wasm") {
             return None;
         }
-        self.get_str(&["targets", &self.selected_target, "component"])
-            .or_else(|| self.get_str(&["targets", &self.selected_target, "path"]))
+        self.compat_str(&["targets", &self.selected_target, "component"])
+            .or_else(|| self.compat_str(&["targets", &self.selected_target, "path"]))
             .or_else(|| self.execution_entrypoint())
     }
 
     pub fn targets_wasm_args(&self) -> Vec<String> {
-        self.get_array(&["targets", &self.selected_target, "args"])
-            .or_else(|| self.get_array(&["targets", &self.selected_target, "cmd"]))
-            .map(|a| array_to_vec(a))
+        self.compat_array(&["targets", &self.selected_target, "args"])
+            .or_else(|| self.compat_array(&["targets", &self.selected_target, "cmd"]))
+            .map(|a| array_to_vec(&a))
             .unwrap_or_default()
     }
 
     pub fn targets_web_public(&self) -> Vec<String> {
-        self.get_array(&["targets", &self.selected_target, "public"])
-            .map(|a| array_to_vec(a))
+        self.compat_array(&["targets", &self.selected_target, "public"])
+            .map(|a| array_to_vec(&a))
             .unwrap_or_default()
     }
 
@@ -795,41 +1005,40 @@ impl ExecutionDescriptor {
             .metadata
             .default_target
             .clone()
-            .or_else(|| self.get_str(&["default_target"]))
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow!("Missing required field: default_target"))
     }
 
     pub fn build_gpu(&self) -> bool {
-        self.get_value(&["build", "gpu"])
+        self.compat_value(&["build", "gpu"])
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
     }
 
     pub fn build_context(&self) -> Option<String> {
-        self.get_str(&["build", "context"])
+        self.compat_str(&["build", "context"])
     }
 
     pub fn build_dockerfile(&self) -> Option<String> {
-        self.get_str(&["build", "dockerfile"])
+        self.compat_str(&["build", "dockerfile"])
     }
 
     pub fn build_image(&self) -> Option<String> {
-        self.get_str(&["build", "image"])
+        self.compat_str(&["build", "image"])
     }
 
     pub fn build_tag(&self) -> Option<String> {
-        self.get_str(&["build", "tag"])
+        self.compat_str(&["build", "tag"])
     }
 
     pub fn build_target(&self) -> Option<String> {
-        self.get_str(&["build", "target"])
+        self.compat_str(&["build", "target"])
     }
 
     #[allow(dead_code)]
     pub fn requirements_vram_min(&self) -> Option<String> {
-        self.get_str(&["requirements", "vram_min"])
+        self.compat_str(&["requirements", "vram_min"])
     }
 
     pub fn resolve_path(&self, raw: &str) -> PathBuf {
@@ -845,32 +1054,28 @@ impl ExecutionDescriptor {
         self.runtime_for_target(target_label)
             .map(|runtime| runtime.runtime.clone())
             .filter(|value| !value.trim().is_empty())
-            .or_else(|| self.get_str(&["targets", target_label, "runtime"]))
     }
 
     pub fn target_driver(&self, target_label: &str) -> Option<String> {
         self.runtime_for_target(target_label)
             .and_then(|runtime| runtime.driver.clone())
             .filter(|value| !value.trim().is_empty())
-            .or_else(|| self.get_str(&["targets", target_label, "driver"]))
     }
 
     pub fn target_entrypoint(&self, target_label: &str) -> Option<String> {
         self.runtime_for_target(target_label)
             .map(|runtime| runtime.entrypoint.clone())
             .filter(|value| !value.trim().is_empty())
-            .or_else(|| self.get_str(&["targets", target_label, "entrypoint"]))
     }
 
     pub fn target_run_command(&self, target_label: &str) -> Option<String> {
         self.runtime_for_target(target_label)
             .and_then(|runtime| runtime.run_command.clone())
             .filter(|value| !value.trim().is_empty())
-            .or_else(|| self.get_str(&["targets", target_label, "run_command"]))
     }
 
     pub fn target_image(&self, target_label: &str) -> Option<String> {
-        self.get_str(&["targets", target_label, "image"])
+        self.compat_str(&["targets", target_label, "image"])
             .or_else(|| self.target_entrypoint(target_label))
     }
 
@@ -880,8 +1085,8 @@ impl ExecutionDescriptor {
                 return runtime.cmd.clone();
             }
         }
-        if let Some(values) = self.get_array(&["targets", target_label, "cmd"]) {
-            return array_to_vec(values);
+        if let Some(values) = self.compat_array(&["targets", target_label, "cmd"]) {
+            return array_to_vec(&values);
         }
 
         let is_oci = self
@@ -906,8 +1111,8 @@ impl ExecutionDescriptor {
             .map(|runtime| runtime.env.clone())
             .filter(|env| !env.is_empty())
             .unwrap_or_else(|| {
-                self.get_table(&["targets", target_label, "env"])
-                    .map(table_to_map)
+                self.compat_table(&["targets", target_label, "env"])
+                    .map(|table| table_to_map(&table))
                     .unwrap_or_default()
             })
     }
@@ -921,7 +1126,7 @@ impl ExecutionDescriptor {
         let mut ordered = Vec::new();
         let mut seen = HashSet::new();
 
-        if let Some(required) = self.get_array(&["targets", target_label, "required_env"]) {
+        if let Some(required) = self.compat_array(&["targets", target_label, "required_env"]) {
             for value in required {
                 if let Some(name) = value.as_str() {
                     let trimmed = name.trim();
@@ -939,8 +1144,8 @@ impl ExecutionDescriptor {
         self.runtime_for_target(target_label)
             .and_then(|runtime| runtime.port)
             .or_else(|| {
-                self.get_value(&["targets", target_label, "port"])
-                    .or_else(|| self.get_value(&["port"]))
+                self.compat_value(&["targets", target_label, "port"])
+                    .or_else(|| self.compat_value(&["port"]))
                     .and_then(|v| v.as_integer())
                     .and_then(|v| u16::try_from(v).ok())
             })
@@ -950,7 +1155,29 @@ impl ExecutionDescriptor {
         self.runtime_for_target(target_label)
             .and_then(|runtime| runtime.working_dir.clone())
             .filter(|value| !value.trim().is_empty())
-            .or_else(|| self.get_str(&["targets", target_label, "working_dir"]))
+    }
+
+    pub fn compat_manifest(&self) -> Option<&CompatManifestBridge> {
+        self.compat_manifest.as_ref()
+    }
+
+    pub fn is_schema_v03(&self) -> bool {
+        self.compat_manifest
+            .as_ref()
+            .map(CompatManifestBridge::is_schema_v03)
+            .unwrap_or(false)
+    }
+
+    pub fn compat_manifest_dir(&self) -> &Path {
+        self.manifest_dir.as_path()
+    }
+
+    pub fn compat_manifest_path(&self) -> Option<&Path> {
+        Some(self.manifest_path.as_path())
+    }
+
+    pub fn compat_target_working_dir(&self, target_label: &str) -> Option<String> {
+        self.compat_str(&["targets", target_label, "working_dir"])
     }
 
     fn runtime_for_target(&self, target_label: &str) -> Option<&ResolvedTargetRuntime> {
@@ -1016,41 +1243,50 @@ impl ExecutionDescriptor {
     }
 
     fn target_named(&self, service_name: &str, target_label: &str) -> Result<NamedTarget> {
-        let value = self.get_value(&["targets", target_label]).ok_or_else(|| {
-            anyhow!(
-                "services.{}.target '{}' does not exist",
-                service_name,
-                target_label
-            )
-        })?;
+        let value = self
+            .compat_value(&["targets", target_label])
+            .ok_or_else(|| {
+                anyhow!(
+                    "services.{}.target '{}' does not exist",
+                    service_name,
+                    target_label
+                )
+            })?;
         value
             .clone()
             .try_into()
             .map_err(|_| anyhow!("targets.{} is not a valid target table", target_label))
     }
 
-    fn get_value<'a>(&'a self, path: &[&str]) -> Option<&'a toml::Value> {
-        let mut current = &self.manifest;
+    fn compat_value(&self, path: &[&str]) -> Option<toml::Value> {
+        let mut current = self.compat_manifest.as_ref()?.raw_value().ok()?;
         for key in path {
             let table = current.as_table()?;
-            current = table.get(*key)?;
+            current = table.get(*key)?.clone();
         }
         Some(current)
     }
 
-    fn get_table<'a>(&'a self, path: &[&str]) -> Option<&'a toml::value::Table> {
-        self.get_value(path)?.as_table()
+    fn compat_table(&self, path: &[&str]) -> Option<toml::value::Table> {
+        self.compat_value(path)?.as_table().cloned()
     }
 
-    fn get_array<'a>(&'a self, path: &[&str]) -> Option<&'a Vec<toml::Value>> {
-        self.get_value(path)?.as_array()
+    fn compat_array(&self, path: &[&str]) -> Option<Vec<toml::Value>> {
+        self.compat_value(path)?.as_array().cloned()
     }
 
-    fn get_str(&self, path: &[&str]) -> Option<String> {
-        self.get_value(path)
-            .and_then(|v| v.as_str())
-            .map(|v| v.to_string())
+    fn compat_str(&self, path: &[&str]) -> Option<String> {
+        self.compat_value(path)
+            .and_then(|v| v.as_str().map(str::to_string))
     }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }
 
 fn synthesize_runtime_model_from_manifest(

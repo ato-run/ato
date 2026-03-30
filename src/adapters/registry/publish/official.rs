@@ -2,12 +2,17 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::Result;
-use capsule_core::execution_plan::{derive, guard};
-use capsule_core::router::ExecutionProfile;
+use capsule_core::execution_plan::{
+    derive::{self, PlatformSnapshot},
+    guard::{self, RuntimeGuardMode},
+};
+use capsule_core::lock_runtime::LockCompilerOverlay;
 use serde::Serialize;
 
-use crate::application::producer_input::resolve_producer_authoritative_input;
-use crate::publish_preflight::{self, find_manifest_repository, CI_WORKFLOW_REL_PATH};
+use crate::application::producer_input::{
+    resolve_producer_authoritative_input, ProducerAuthoritativeInput,
+};
+use crate::publish_preflight::{self, CI_WORKFLOW_REL_PATH};
 
 const MAIN_BRANCH: &str = "main";
 
@@ -105,34 +110,12 @@ pub fn diagnose_official(cwd: &Path, registry_url: &str) -> OfficialPublishDiagn
         false,
     ) {
         Ok(authoritative_input) => {
-            let manifest_path = authoritative_input.manifest_path.clone();
-            let manifest_raw = authoritative_input.manifest_raw.clone();
-            let manifest = authoritative_input.manifest.clone();
-            capsule_name = Some(manifest.name.clone());
-            version = Some(manifest.version.clone());
-            manifest_repo = find_manifest_repository(&manifest_raw);
+            capsule_name = authoritative_input.semantic_package_name().ok();
+            version = Some(authoritative_input.semantic_package_version());
+            manifest_repo = authoritative_input.compatibility_input_repository();
 
-            let compiled =
-                derive::compile_execution_plan(&manifest_path, ExecutionProfile::Release, None);
-            match compiled {
-                Ok(compiled) => {
-                    if let Err(err) = guard::evaluate(
-                        &compiled.execution_plan,
-                        &compiled.runtime_decision.plan.manifest_dir,
-                        "strict",
-                        true,
-                        false,
-                    ) {
-                        issues.push(DiagnoseIssue {
-                            stage: "preflight",
-                            message: err.to_string(),
-                            action: Some("ato build .".to_string()),
-                        });
-                        false
-                    } else {
-                        true
-                    }
-                }
+            match evaluate_authoritative_preflight(&authoritative_input) {
+                Ok(_) => true,
                 Err(err) => {
                     issues.push(DiagnoseIssue {
                         stage: "preflight",
@@ -313,6 +296,30 @@ pub fn diagnose_official(cwd: &Path, registry_url: &str) -> OfficialPublishDiagn
     }
 }
 
+fn evaluate_authoritative_preflight(
+    authoritative_input: &ProducerAuthoritativeInput,
+) -> Result<()> {
+    authoritative_input.validate_legacy_producer_bridge()?;
+    let execution_plan = derive::compile_execution_plan_from_lock(
+        &authoritative_input.descriptor.lock,
+        &authoritative_input.descriptor.runtime_model,
+        &LockCompilerOverlay::default(),
+        &PlatformSnapshot::current(),
+    )
+    .map_err(anyhow::Error::from)?;
+    guard::evaluate_for_mode_with_authority(
+        &execution_plan,
+        &authoritative_input.descriptor.workspace_root,
+        "strict",
+        true,
+        false,
+        RuntimeGuardMode::Strict,
+        true,
+    )
+    .map(|_| ())
+    .map_err(anyhow::Error::from)
+}
+
 fn resolve_expected_tag(version: Option<&str>) -> Option<String> {
     if let Some(version) = version.map(str::trim).filter(|value| !value.is_empty()) {
         return Some(format!("v{}", version));
@@ -376,7 +383,11 @@ fn infer_git_fix_action(message: String, manifest_repo: Option<&str>) -> Option<
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::application::producer_input::resolve_producer_authoritative_input;
+    use crate::reporters::CliReporter;
 
     #[test]
     fn route_for_registry_classifies_official_hosts() {
@@ -416,5 +427,33 @@ mod tests {
 
         let actions = collect_issue_actions(&issues);
         assert_eq!(actions, vec!["cmd1".to_string(), "cmd2".to_string()]);
+    }
+
+    #[test]
+    fn authoritative_official_preflight_ignores_transitional_manifest_paths() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"demo","version":"0.1.0","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("package.json");
+        std::fs::write(
+            tmp.path().join("package-lock.json"),
+            r#"{"name":"demo","version":"0.1.0","lockfileVersion":3,"packages":{}}"#,
+        )
+        .expect("package-lock.json");
+        std::fs::write(tmp.path().join("index.js"), "console.log('demo');\n").expect("index.js");
+
+        let mut authoritative_input = resolve_producer_authoritative_input(
+            tmp.path(),
+            Arc::new(CliReporter::new(false)),
+            false,
+        )
+        .expect("authoritative input");
+        authoritative_input.descriptor.manifest_path = tmp.path().join("missing-capsule.toml");
+        authoritative_input.descriptor.manifest_dir = tmp.path().join("missing-manifest-dir");
+
+        evaluate_authoritative_preflight(&authoritative_input)
+            .expect("descriptor-native preflight");
     }
 }

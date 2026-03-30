@@ -59,6 +59,7 @@ pub fn execute(
     let nacelle = engine::discover_nacelle(engine::EngineRequest {
         explicit_path: nacelle_override,
         manifest_path: Some(plan.manifest_path.clone()),
+        compat_input: None,
     })?;
 
     if let Some(lock) = authoritative_lock {
