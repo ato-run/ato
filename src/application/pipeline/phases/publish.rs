@@ -74,6 +74,7 @@ pub struct PrivatePublishRequest {
     pub publisher_hint: Option<String>,
     pub artifact_path: Option<PathBuf>,
     pub force_large_payload: bool,
+    pub paid_large_payload: bool,
     pub scoped_id: Option<String>,
     pub allow_existing: bool,
     pub lock_id: Option<String>,
@@ -167,6 +168,7 @@ pub async fn run_private_publish_phase_async(
             content_hash: crate::artifact_hash::compute_blake3_label(&artifact_bytes),
             allow_existing: request.allow_existing,
             force_large_payload: request.force_large_payload,
+            paid_large_payload: request.paid_large_payload,
             lock_id: prepared.lock_id,
             closure_digest: prepared.closure_digest,
             publish_metadata: prepared.publish_metadata,
@@ -415,6 +417,7 @@ pub struct DirectPublishRequest {
     pub content_hash: String,
     pub allow_existing: bool,
     pub force_large_payload: bool,
+    pub paid_large_payload: bool,
     pub lock_id: Option<String>,
     pub closure_digest: Option<String>,
     pub publish_metadata: Option<PublishArtifactMetadata>,
@@ -437,9 +440,11 @@ async fn run_direct_publish_phase_async(
     request: &DirectPublishRequest,
     artifact_bytes: Vec<u8>,
 ) -> Result<PrivatePublishResult> {
+    enforce_direct_publish_preflight(request, artifact_bytes.len() as u64)?;
     crate::payload_guard::ensure_payload_bytes_size(
         artifact_bytes.len() as u64,
         request.force_large_payload,
+        request.paid_large_payload,
         "--force-large-payload",
     )?;
     let phase = PublishPhase::new(Arc::new(
@@ -468,6 +473,7 @@ async fn run_direct_publish_phase_async(
                 version: request.version.clone(),
                 allow_existing: request.allow_existing,
                 force_large_payload: request.force_large_payload,
+                paid_large_payload: request.paid_large_payload,
             },
         })
         .await?;
@@ -487,6 +493,20 @@ async fn run_direct_publish_phase_async(
         registry_url: request.registry_url.clone(),
         publish_metadata: metadata.publish_metadata,
     })
+}
+
+fn enforce_direct_publish_preflight(
+    request: &DirectPublishRequest,
+    artifact_size_bytes: u64,
+) -> Result<()> {
+    crate::publish::upload_strategy::enforce_upload_preflight(
+        &crate::publish::upload_strategy::UploadPreflightRequest {
+            registry_url: request.registry_url.clone(),
+            artifact_size_bytes,
+            force_large_payload: request.force_large_payload,
+            paid_large_payload: request.paid_large_payload,
+        },
+    )
 }
 
 pub fn run_official_publish_phase(
@@ -672,15 +692,16 @@ fn probe_registry_reachability(registry_url: &str) -> Result<()> {
 mod tests {
     use std::io::Cursor;
     use std::io::Write;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use async_trait::async_trait;
     use tar::Builder;
 
     use super::{
-        normalize_segment, prepare_private_publish_artifact, resolve_private_publisher,
-        summarize_private_publish, PrivatePublishRequest, PublishPhase, PublishPhaseRequest,
+        enforce_direct_publish_preflight, normalize_segment, prepare_private_publish_artifact,
+        resolve_private_publisher, summarize_private_publish, DirectPublishRequest,
+        PrivatePublishRequest, PublishPhase, PublishPhaseRequest,
     };
     use crate::application::ports::publish::{
         DestinationPort, DestinationSpec, PublishArtifactIdentityClass, PublishableArtifact,
@@ -849,6 +870,7 @@ args = ["--deep", "--force", "--sign", "-", "Demo.app"]
                 version: "0.1.0".to_string(),
                 allow_existing: false,
                 force_large_payload: false,
+                paid_large_payload: false,
             },
         };
 
@@ -874,6 +896,7 @@ args = ["--deep", "--force", "--sign", "-", "Demo.app"]
             publisher_hint: None,
             artifact_path: Some(artifact_path),
             force_large_payload: false,
+            paid_large_payload: false,
             scoped_id: None,
             allow_existing: true,
             lock_id: None,
@@ -899,6 +922,7 @@ args = ["--deep", "--force", "--sign", "-", "Demo.app"]
             publisher_hint: None,
             artifact_path: Some(artifact_path),
             force_large_payload: false,
+            paid_large_payload: false,
             scoped_id: Some("team-x/demo-app".to_string()),
             allow_existing: false,
             lock_id: None,
@@ -926,6 +950,7 @@ args = ["--deep", "--force", "--sign", "-", "Demo.app"]
             publisher_hint: Some("koh0920".to_string()),
             artifact_path: Some(artifact_path),
             force_large_payload: false,
+            paid_large_payload: false,
             scoped_id: None,
             allow_existing: false,
             lock_id: None,
@@ -948,6 +973,7 @@ args = ["--deep", "--force", "--sign", "-", "Demo.app"]
             publisher_hint: Some("koh0920".to_string()),
             artifact_path: Some(artifact_path),
             force_large_payload: false,
+            paid_large_payload: false,
             scoped_id: Some("other-team/demo-app".to_string()),
             allow_existing: false,
             lock_id: None,
@@ -987,6 +1013,7 @@ entrypoint = "main.ts"
             publisher_hint: Some("koh0920".to_string()),
             artifact_path: None,
             force_large_payload: false,
+            paid_large_payload: false,
             scoped_id: None,
             allow_existing: false,
             lock_id: None,
@@ -1021,6 +1048,7 @@ entrypoint = "main.ts"
             publisher_hint: Some("koh0920".to_string()),
             artifact_path: None,
             force_large_payload: false,
+            paid_large_payload: false,
             scoped_id: None,
             allow_existing: false,
             lock_id: None,
@@ -1044,6 +1072,35 @@ entrypoint = "main.ts"
         );
         assert_eq!(metadata.delivery_mode.as_deref(), Some("artifact-import"));
         assert!(metadata.provenance_limited);
+    }
+
+    #[test]
+    fn direct_publish_phase_rejects_managed_store_payloads_over_conservative_limit() {
+        let request = DirectPublishRequest {
+            artifact_path: PathBuf::from("demo.capsule"),
+            registry_url: "https://api.ato.run".to_string(),
+            scoped_id: "koh0920/demo-app".to_string(),
+            version: "1.0.0".to_string(),
+            normalized_file_name: "demo-app-1.0.0.capsule".to_string(),
+            content_hash: "blake3:demo".to_string(),
+            allow_existing: false,
+            force_large_payload: false,
+            paid_large_payload: false,
+            lock_id: None,
+            closure_digest: None,
+            publish_metadata: None,
+        };
+
+        let err = enforce_direct_publish_preflight(
+            &request,
+            crate::publish_artifact::MANAGED_STORE_DIRECT_CONSERVATIVE_LIMIT_BYTES + 1,
+        )
+        .expect_err("managed store should fail fast before upload");
+
+        assert!(matches!(
+            err.downcast_ref::<crate::publish_artifact::PublishArtifactError>(),
+            Some(crate::publish_artifact::PublishArtifactError::ManagedStoreDirectPayloadLimitExceeded { .. })
+        ));
     }
 
     #[test]

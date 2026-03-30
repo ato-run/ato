@@ -501,6 +501,7 @@ fn test_publish_args() -> publish_command_dispatch::PublishCommandArgs {
         deploy: false,
         legacy_full_publish: false,
         force_large_payload: false,
+        paid_large_payload: false,
         finalize_local: false,
         allow_external_finalize: false,
         fix: false,

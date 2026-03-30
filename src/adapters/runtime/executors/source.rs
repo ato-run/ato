@@ -12,6 +12,7 @@ use std::thread;
 use std::time::Duration;
 use tracing::debug;
 
+use capsule_core::common::paths::{workspace_artifacts_dir, workspace_tmp_dir};
 use capsule_core::runtime::native::NativeHandle;
 use capsule_core::{RuntimeMetadata, SessionRunner, SessionRunnerConfig};
 
@@ -244,7 +245,7 @@ fn apply_host_isolation(
     launch_port: Option<u16>,
     launch_ctx: &RuntimeLaunchContext,
 ) -> Result<()> {
-    let isolation_root = plan.manifest_dir.join(".tmp");
+    let isolation_root = workspace_tmp_dir(&plan.manifest_dir);
     fs::create_dir_all(&isolation_root).with_context(|| {
         format!(
             "Failed to create host isolation root: {}",
@@ -754,12 +755,15 @@ fn has_local_uv_cache(plan: &ManifestData) -> bool {
         plan.manifest_dir.join("source"),
     ];
     roots.into_iter().any(|root| {
-        let artifacts_dir = root.join("artifacts");
-        fs::read_dir(&artifacts_dir)
-            .ok()
+        [workspace_artifacts_dir(&root), root.join("artifacts")]
             .into_iter()
-            .flat_map(|entries| entries.filter_map(Result::ok))
-            .any(|entry| entry.path().join("uv-cache").is_dir())
+            .any(|artifacts_dir| {
+                fs::read_dir(&artifacts_dir)
+                    .ok()
+                    .into_iter()
+                    .flat_map(|entries| entries.filter_map(Result::ok))
+                    .any(|entry| entry.path().join("uv-cache").is_dir())
+            })
     })
 }
 

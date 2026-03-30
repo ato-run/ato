@@ -1382,6 +1382,33 @@ fn configure_native_build_process_rehomes_nested_cargo_outputs() {
 }
 
 #[test]
+fn configure_native_build_process_disables_electron_builder_codesign_for_packaged_scripts() {
+    let dir = tempdir().expect("tempdir");
+    fs::write(
+        dir.path().join("electron-builder.yml"),
+        "productName: sample-project\n",
+    )
+    .expect("write electron builder config");
+    let command = NativeBuildCommand {
+        program: "bun".to_string(),
+        args: vec!["run".to_string(), "build:mac".to_string()],
+        working_dir: dir.path().to_path_buf(),
+    };
+    let mut process = std::process::Command::new("bun");
+
+    configure_native_build_process(&mut process, &command);
+
+    let envs = process
+        .get_envs()
+        .map(|(key, value)| (key.to_os_string(), value.map(|entry| entry.to_os_string())))
+        .collect::<Vec<_>>();
+    assert!(envs.iter().any(|(key, value)| {
+        key == "CSC_IDENTITY_AUTO_DISCOVERY"
+            && value.as_ref() == Some(&std::ffi::OsString::from("false"))
+    }));
+}
+
+#[test]
 fn lock_native_build_command_object_accepts_flattened_shape() {
     let build = serde_json::json!({
         "kind": "native-delivery",
