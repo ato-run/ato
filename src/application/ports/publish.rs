@@ -78,6 +78,7 @@ pub enum DestinationSpec {
         version: String,
         allow_existing: bool,
         force_large_payload: bool,
+        paid_large_payload: bool,
     },
 }
 

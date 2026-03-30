@@ -3,8 +3,8 @@ use super::*;
 pub(crate) fn github_checkout_root() -> Result<PathBuf> {
     let root = std::env::current_dir()
         .with_context(|| "Failed to resolve current directory for temporary checkout")?
-        .join(".tmp")
-        .join("ato")
+        .join(".ato")
+        .join("tmp")
         .join("gh-install");
     std::fs::create_dir_all(&root).with_context(|| {
         format!(

@@ -744,12 +744,14 @@ fn select_payload_roots(
 ) -> CapsuleResult<Vec<PayloadRoot>> {
     if !plan.is_schema_v03() {
         let (source_root, warning) = select_payload_source_root(manifest_dir);
-        return Ok(vec![PayloadRoot {
+        let mut roots = vec![PayloadRoot {
             disk_root: source_root,
             archive_prefix: "source".to_string(),
             filter_prefix: None,
             warning,
-        }]);
+        }];
+        append_workspace_artifacts_root(&mut roots, manifest_dir);
+        return Ok(roots);
     }
 
     let mut roots = plan
@@ -802,9 +804,23 @@ fn select_payload_roots(
             warning,
         });
     }
+    append_workspace_artifacts_root(&mut deduped, manifest_dir);
     Ok(deduped)
 }
 
+fn append_workspace_artifacts_root(roots: &mut Vec<PayloadRoot>, manifest_dir: &Path) {
+    let artifacts_root = crate::common::paths::workspace_artifacts_dir(manifest_dir);
+    if !artifacts_root.exists() {
+        return;
+    }
+
+    roots.push(PayloadRoot {
+        disk_root: artifacts_root,
+        archive_prefix: "source/artifacts".to_string(),
+        filter_prefix: None,
+        warning: None,
+    });
+}
 fn has_next_standalone_node_modules(root: &Path) -> bool {
     if root.join(".next/standalone/node_modules").is_dir() {
         return true;
@@ -1311,9 +1327,7 @@ dependencies = "requirements.txt"
             "version = 1\nrevision = 1\nrequires-python = \">=3.11\"\n",
         )
         .unwrap();
-        let uv_cache = tmp
-            .path()
-            .join("artifacts")
+        let uv_cache = crate::common::paths::workspace_artifacts_dir(tmp.path())
             .join("macos-arm64")
             .join("uv-cache");
         std::fs::create_dir_all(&uv_cache).unwrap();

@@ -6,9 +6,9 @@ use crate::application::pipeline::cleanup::PipelineAttemptError;
 use crate::error_codes;
 
 use super::heuristics::{
-    collect_causes, detect_field, is_entrypoint_issue, is_manifest_parse,
-    is_manual_intervention_issue, is_publish_version_exists_conflict, is_required_field_issue,
-    is_source_registration_issue, json_string_field,
+    collect_causes, detect_field, is_distributable_artifact_missing, is_entrypoint_issue,
+    is_manifest_parse, is_manual_intervention_issue, is_publish_version_exists_conflict,
+    is_required_field_issue, is_source_registration_issue, json_string_field,
 };
 use super::types::{CliDiagnostic, CliDiagnosticCode, CommandContext};
 
@@ -53,6 +53,21 @@ pub fn from_anyhow(err: &AnyhowError, command_context: CommandContext) -> CliDia
     }
 
     let message = err.to_string();
+    if let Some(artifact_message) = distributable_artifact_missing_message(err) {
+        return CliDiagnostic::new(
+            CliDiagnosticCode::E102,
+            artifact_message,
+            Some(
+                "配布可能な成果物が見つかりません。packaged build script が .app / .exe / .AppImage を生成するか確認し、必要なら contract.delivery.artifact.path を実際の出力先に合わせて更新してください。",
+            ),
+            None,
+            Some("contract.delivery.artifact.path"),
+            None,
+            false,
+            true,
+            causes,
+        );
+    }
     if message.contains(error_codes::ATO_ERR_AUTH_REQUIRED) {
         return CliDiagnostic::new(
             CliDiagnosticCode::E201,
@@ -202,6 +217,70 @@ pub fn from_anyhow(err: &AnyhowError, command_context: CommandContext) -> CliDia
             );
         }
 
+        if let Some(crate::publish_artifact::PublishArtifactError::ManagedStoreLargePayloadOverrideUnsupported { message, .. }) =
+            err.downcast_ref::<crate::publish_artifact::PublishArtifactError>()
+        {
+            return CliDiagnostic::new(
+                CliDiagnosticCode::E212,
+                message.clone(),
+                Some(
+                    "managed Store direct publish では large payload override は使えません。private/local registry を使うか、presigned upload 対応後に再試行してください。",
+                ),
+                None,
+                None,
+                None,
+                false,
+                false,
+                causes,
+            );
+        }
+
+        if let Some(
+            crate::publish_artifact::PublishArtifactError::ManagedStoreDirectPayloadLimitExceeded {
+                registry_url,
+                size_bytes,
+                limit_bytes,
+            },
+        ) = err.downcast_ref::<crate::publish_artifact::PublishArtifactError>()
+        {
+            return CliDiagnostic::new(
+                CliDiagnosticCode::E212,
+                format!(
+                    "managed Store direct publish currently rejects artifacts larger than the conservative preflight limit: artifact is {} bytes, limit is {} bytes, destination is {}",
+                    size_bytes, limit_bytes, registry_url
+                ),
+                Some(
+                    "artifact を小さくするか、private/local registry を使ってください。official direct upload path は presigned upload 対応までこの制限を維持します。",
+                ),
+                None,
+                None,
+                None,
+                false,
+                false,
+                causes,
+            );
+        }
+
+        if let Some(crate::publish_artifact::PublishArtifactError::PayloadTooLarge {
+            message,
+            ..
+        }) = err.downcast_ref::<crate::publish_artifact::PublishArtifactError>()
+        {
+            return CliDiagnostic::new(
+                CliDiagnosticCode::E212,
+                message.clone(),
+                Some(
+                    "artifact が managed Store direct upload path の上限を超えました。private/local registry を使うか、presigned upload 対応後に再試行してください。",
+                ),
+                None,
+                None,
+                None,
+                true,
+                false,
+                causes,
+            );
+        }
+
         if is_publish_version_exists_conflict(&message) {
             return CliDiagnostic::new(
                 CliDiagnosticCode::E202,
@@ -232,6 +311,12 @@ pub fn from_anyhow(err: &AnyhowError, command_context: CommandContext) -> CliDia
     )
 }
 
+fn distributable_artifact_missing_message(err: &AnyhowError) -> Option<String> {
+    err.chain()
+        .map(|cause| cause.to_string())
+        .find(|message| is_distributable_artifact_missing(message))
+}
+
 pub fn map_exit_code(diagnostic: &CliDiagnostic, err: &AnyhowError) -> i32 {
     if let Some(core_err) = err.downcast_ref::<capsule_core::CapsuleError>() {
         return match core_err {
@@ -257,6 +342,7 @@ pub fn map_exit_code(diagnostic: &CliDiagnostic, err: &AnyhowError) -> i32 {
 fn code_to_exit(code: CliDiagnosticCode) -> i32 {
     match code {
         CliDiagnosticCode::E305 => error_codes::EXIT_RUNTIME_ERROR,
+        CliDiagnosticCode::E212 => error_codes::EXIT_USER_ERROR,
         CliDiagnosticCode::E999 => error_codes::EXIT_SYSTEM_ERROR,
         _ => error_codes::EXIT_USER_ERROR,
     }

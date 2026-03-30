@@ -146,6 +146,19 @@ Shared rules:
 - import, fallback, and host-local overlays must remain inspectable through machine-readable surfaces such as `inspect`, `validate`, and diagnostics
 - `closure_digest` and `lock_id` must not be used to claim more reproducibility than the resolved `resolution.closure.kind/status` envelope supports
 
+### 2.8 Publish Upload Strategy Boundary
+
+The publish pipeline separates upload execution into a strategy boundary so transport changes do not leak into CLI orchestration.
+
+- upload execution is modeled as three explicit stages: `start_upload`, `transfer`, and `finalize_upload`
+- `start_upload` selects or prepares the transport-specific upload target and any required request metadata
+- `transfer` performs the byte movement for the chosen strategy
+- `finalize_upload` commits or confirms the remote publish result and any metadata synchronization needed after transfer
+- the current selector is centralized and hides transport policy behind a single strategy selection point
+- current behavior still defaults to direct upload for both managed Store hosts and custom registries
+- a presigned upload strategy may exist as a non-default skeleton before the remote capability is enabled in production
+- host-based selection is transitional; the target end-state is capability-based discovery rather than hard-coded host behavior
+
 ## 3. Supported CLI Surface
 
 ## 3.1 Primary Commands
@@ -1135,9 +1148,23 @@ Current diagnostic code families include:
 
 - E001-E003 for manifest issues
 - E101-E107 for inference and validation issues
-- E201-E211 for provisioning and install issues
+- E201-E212 for provisioning, install, and managed publish payload limitation issues
 - E301-E305 for execution issues
 - E999 for internal errors
+
+Current publish payload limitation contract:
+
+- E212 means the managed Store publish path rejected or disallowed the current payload configuration
+- E212 currently covers three cases: conservative preflight limit exceeded on the managed direct-upload path, large-payload override flags used on that path, or remote `413 Payload Too Large` returned by the managed upload path
+- the current conservative preflight limit is 95MB and is a temporary fail-fast policy, not a remote acceptance guarantee
+
+Current publish strategy contract:
+
+- ato-cli now has a strategy boundary between direct upload and presigned upload
+- the current default remains direct upload for all registries
+- `ATO_PUBLISH_UPLOAD_STRATEGY=presigned` explicitly opts into the presigned strategy for compatible registries during P1
+- the presigned strategy resolves or creates the capsule, starts a release, uploads the artifact to the presigned URL without `Authorization`, then finalizes the release through the registry API
+- automatic capability-based selection is not enabled yet; host-based defaults remain in place until registry capability discovery and Dock parity are available
 
 Current remediation contract:
 
