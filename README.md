@@ -204,8 +204,10 @@ Current managed direct-upload limitation:
 Experimental P1 migration path:
 
 - `ATO_PUBLISH_UPLOAD_STRATEGY=presigned` opts into the new presigned upload strategy for compatible registries.
-- The default remains `direct` until registry capability discovery and unverified Personal Dock parity are in place.
+- Managed Store capability discovery now advertises `presigned` as the default upload strategy, so ato-cli resolves to presigned there unless an explicit override forces `direct`.
 - The presigned strategy requires an authenticated publisher session and the local publisher signing key created during publisher onboarding.
+- Managed Store presigned publish now supports `--allow-existing` parity and registered-but-unverified publisher accounts.
+- Managed Store direct upload remains only as an explicit rollback/debug path. Custom/private registries may continue to use direct upload as their normal path.
 
 Tips:
 

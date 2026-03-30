@@ -1161,10 +1161,13 @@ Current publish payload limitation contract:
 Current publish strategy contract:
 
 - ato-cli now has a strategy boundary between direct upload and presigned upload
-- the current default remains direct upload for all registries
+- ato-cli resolves strategy in this order: explicit environment override, registry capability discovery, then host fallback
+- the current managed Store server-advertised default is now presigned upload
 - `ATO_PUBLISH_UPLOAD_STRATEGY=presigned` explicitly opts into the presigned strategy for compatible registries during P1
 - the presigned strategy resolves or creates the capsule, starts a release, uploads the artifact to the presigned URL without `Authorization`, then finalizes the release through the registry API
-- automatic capability-based selection is not enabled yet; host-based defaults remain in place until registry capability discovery and Dock parity are available
+- managed Store registries expose `GET /v1/publish/capabilities`; when discovery is missing or inconsistent, ato-cli falls back to host-based defaults
+- managed Store presigned publish now supports allow-existing overwrite parity and registered-but-unverified publisher flows
+- managed Store direct upload is now a rollback/debug path only; custom/private registries remain free to use direct upload as their normal strategy
 
 Current remediation contract:
 
