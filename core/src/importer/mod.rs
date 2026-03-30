@@ -167,7 +167,9 @@ pub fn probe_ecosystem_lockfile_evidence(project_root: &Path) -> Result<Vec<Impo
         EvidenceKind::Lockfile,
         &[
             PathBuf::from("Cargo.lock"),
+            PathBuf::from("src-tauri/Cargo.lock"),
             PathBuf::from("source/Cargo.lock"),
+            PathBuf::from("source/src-tauri/Cargo.lock"),
         ],
         Some("cargo importer observed an existing lockfile"),
     )?;
@@ -419,5 +421,19 @@ mod tests {
 
         let result = probe_required_python_lockfile(tmp.path()).expect("probe");
         assert!(matches!(result, ProbeResult::Missing(_)));
+    }
+
+    #[test]
+    fn probes_nested_tauri_cargo_lock() {
+        let tmp = tempdir().expect("tempdir");
+        fs::create_dir_all(tmp.path().join("src-tauri")).expect("create src-tauri");
+        fs::write(tmp.path().join("src-tauri/Cargo.lock"), "version = 3\n")
+            .expect("write nested cargo lock");
+
+        let evidence = probe_ecosystem_lockfile_evidence(tmp.path()).expect("probe");
+        assert!(evidence.iter().any(|value| {
+            value.importer_id == ImporterId::Cargo
+                && value.primary_path == tmp.path().join("src-tauri/Cargo.lock")
+        }));
     }
 }

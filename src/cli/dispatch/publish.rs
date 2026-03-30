@@ -16,7 +16,9 @@ use crate::application::pipeline::producer::{
     self, ProducerPipeline, PublishDryRunStageResult, PublishInstallResult, PublishPhaseOptions,
     PublishPipelineRequest, PublishPipelineState,
 };
-use crate::application::producer_input::resolve_producer_authoritative_input;
+use crate::application::producer_input::{
+    rematerialize_source_authoritative_input, resolve_producer_authoritative_input,
+};
 
 use super::Reporter;
 
@@ -234,15 +236,23 @@ impl<'a> PublishCommandExecution<'a> {
             self.args.json,
             PublishPhaseBoundary::Prepare,
             HourglassPhaseState::Run,
-            "prepare command detection",
+            "prepare dependency resolution",
         );
         let started = std::time::Instant::now();
-        let prepare_spec = crate::publish_prepare::detect_prepare_command(&self.cwd)?;
-        match prepare_spec {
-            Some(spec) => {
+        let execution_working_directory = self
+            .authoritative_input
+            .as_ref()
+            .map(|input| input.descriptor.execution_working_directory())
+            .unwrap_or_else(|| self.cwd.clone());
+        let prepare_specs =
+            crate::publish_prepare::detect_prepare_specs(&self.cwd, &execution_working_directory)?;
+        match prepare_specs.as_slice() {
+            [spec] => {
                 let message = format!("running {}", spec.source.as_label());
-                crate::publish_prepare::run_prepare_command(&spec, &self.cwd, self.args.json)
-                    .context("Failed to run publish prepare command")?;
+                crate::publish_prepare::run_prepare_command(spec, self.args.json).with_context(
+                    || format!("Failed to run publish prepare step: {}", spec.command),
+                )?;
+                self.refresh_authoritative_input_after_prepare()?;
                 phase_mark_ok(
                     phase_mut(&mut self.phases, PublishPhaseBoundary::Prepare),
                     started.elapsed().as_millis() as u64,
@@ -257,27 +267,51 @@ impl<'a> PublishCommandExecution<'a> {
                 );
                 Ok(())
             }
-            None => {
-                let skipped_reason = "no prepare command configured".to_string();
+            [_, _, ..] => {
+                let specs = prepare_specs.as_slice();
+                for spec in specs {
+                    crate::publish_prepare::run_prepare_command(spec, self.args.json)
+                        .with_context(|| {
+                            format!("Failed to run publish prepare step: {}", spec.command)
+                        })?;
+                }
+                self.refresh_authoritative_input_after_prepare()?;
+                let message = format!("ran {} prepare steps", specs.len());
+                phase_mark_ok(
+                    phase_mut(&mut self.phases, PublishPhaseBoundary::Prepare),
+                    started.elapsed().as_millis() as u64,
+                    message.clone(),
+                    None,
+                );
+                hourglass::print_phase_line(
+                    self.args.json,
+                    PublishPhaseBoundary::Prepare,
+                    HourglassPhaseState::Ok,
+                    &message,
+                );
+                Ok(())
+            }
+            [] => {
+                let skipped_reason = "no prepare step configured".to_string();
                 if self.args.prepare {
-                    let fix = "capsule.toml に [build.lifecycle].prepare を設定するか package.json scripts[\"capsule:prepare\"] を追加して再実行してください。".to_string();
+                    let fix = "lockfile に基づく依存解決を用意するか、capsule.toml に [build.lifecycle].prepare を設定するか、package.json scripts[\"capsule:prepare\"] を追加して再実行してください。".to_string();
                     phase_mark_failed(
                         phase_mut(&mut self.phases, PublishPhaseBoundary::Prepare),
                         started.elapsed().as_millis() as u64,
-                        "--prepare was selected but no prepare command was found".to_string(),
+                        "--prepare was selected but no prepare step was found".to_string(),
                         Some(fix.clone()),
                     );
                     hourglass::print_phase_line(
                         self.args.json,
                         PublishPhaseBoundary::Prepare,
                         HourglassPhaseState::Fail,
-                        "prepare command not found",
+                        "prepare step not found",
                     );
                     if !self.args.json {
                         println!("👉 次に打つコマンド: {}", fix);
                     }
                     anyhow::bail!(
-                        "--prepare was selected but no prepare command was found. Set `build.lifecycle.prepare` in capsule.toml or add package.json scripts[\"capsule:prepare\"]."
+                        "--prepare was selected but no prepare step was found. Add lockfile-backed dependency resolution, set `build.lifecycle.prepare` in capsule.toml, or add package.json scripts[\"capsule:prepare\"]."
                     );
                 }
                 phase_mark_skipped(
@@ -331,8 +365,11 @@ impl<'a> PublishCommandExecution<'a> {
         } else {
             authoritative_input.ensure_desktop_source_publish_ready()?;
         }
-        let artifact_path =
-            build_capsule_artifact_for_publish(&self.cwd, Some(authoritative_input))?;
+        let artifact_path = build_capsule_artifact_for_publish(
+            &self.cwd,
+            Some(authoritative_input),
+            !self.args.json,
+        )?;
         let elapsed = started.elapsed().as_millis() as u64;
         let message = format!("artifact built: {}", artifact_path.display());
         phase_mark_ok(
@@ -348,6 +385,24 @@ impl<'a> PublishCommandExecution<'a> {
             HourglassPhaseState::Ok,
             &message,
         );
+        Ok(())
+    }
+
+    fn refresh_authoritative_input_after_prepare(&mut self) -> Result<()> {
+        let should_refresh = self
+            .authoritative_input
+            .as_ref()
+            .and_then(|input| input.desktop_source_publish_contract())
+            .is_some();
+        if !should_refresh {
+            return Ok(());
+        }
+
+        self.authoritative_input = Some(rematerialize_source_authoritative_input(
+            &self.cwd,
+            std::sync::Arc::new(crate::reporters::CliReporter::new(false)),
+            false,
+        )?);
         Ok(())
     }
 
@@ -1102,6 +1157,7 @@ fn maybe_warn_legacy_full_publish(should_warn: bool) {
 fn build_capsule_artifact_for_publish(
     cwd: &Path,
     authoritative_input: Option<&crate::application::producer_input::ProducerAuthoritativeInput>,
+    stream_output: bool,
 ) -> Result<PathBuf> {
     let owned_input;
     let authoritative_input = if let Some(authoritative_input) = authoritative_input {
@@ -1131,8 +1187,14 @@ fn build_capsule_artifact_for_publish(
     } else {
         metadata.version.as_deref().unwrap_or_default().trim()
     };
-    crate::publish_ci::build_capsule_artifact(&name, version, Some(authoritative_input), None)
-        .with_context(|| "Failed to build artifact for publish")
+    crate::publish_ci::build_capsule_artifact_with_output(
+        &name,
+        version,
+        Some(authoritative_input),
+        None,
+        stream_output,
+    )
+    .with_context(|| "Failed to build artifact for publish")
 }
 
 fn emit_publish_json_output(
@@ -1298,7 +1360,7 @@ mod tests {
         std::fs::write(tmp.path().join("index.js"), "console.log('demo');\n").expect("index.js");
         let _guard = CwdGuard::set_to(tmp.path());
 
-        let error = build_capsule_artifact_for_publish(tmp.path(), None)
+        let error = build_capsule_artifact_for_publish(tmp.path(), None, false)
             .expect_err("publish build may fail but must not materialize manifest");
         assert!(!error.to_string().is_empty());
         assert!(!tmp.path().join("capsule.toml").exists());
