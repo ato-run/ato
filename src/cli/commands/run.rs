@@ -476,9 +476,11 @@ impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
             plan,
             runtime,
             scoped_id,
-            ready_without_events,
-            desktop_open_only,
-            compatibility_host_mode,
+            BackgroundCompletionOptions {
+                ready_without_events,
+                desktop_open_only,
+                compatibility_host_mode,
+            },
             reporter,
         )
         .await

@@ -65,6 +65,12 @@ pub(super) fn background_failure_prefix(
     format!("Background capsule failed before readiness (ID: {id})")
 }
 
+pub(super) struct BackgroundCompletionOptions {
+    pub ready_without_events: bool,
+    pub desktop_open_only: bool,
+    pub compatibility_host_mode: CompatibilityHostMode,
+}
+
 fn background_process_name(plan: &capsule_core::router::ManifestData) -> String {
     plan.manifest_path
         .file_stem()
@@ -111,9 +117,7 @@ pub(super) async fn complete_background_source_process(
     plan: &capsule_core::router::ManifestData,
     runtime: String,
     scoped_id: Option<String>,
-    ready_without_events: bool,
-    desktop_open_only: bool,
-    compatibility_host_mode: CompatibilityHostMode,
+    options: BackgroundCompletionOptions,
     reporter: &Arc<CliReporter>,
 ) -> Result<()> {
     let process_id = format!("capsule-{}", process.child.id());
@@ -123,13 +127,13 @@ pub(super) async fn complete_background_source_process(
         &process_id,
         runtime,
         scoped_id,
-        ready_without_events,
+        options.ready_without_events,
     );
 
     let process_manager = crate::runtime::process::ProcessManager::new()?;
     process_manager.write_pid(&info)?;
 
-    let (startup_outcome, event_rx) = if ready_without_events {
+    let (startup_outcome, event_rx) = if options.ready_without_events {
         (BackgroundStartupOutcome::Ready, None)
     } else {
         wait_for_background_native_startup(&mut process, &process_manager, &process_id)?
@@ -145,8 +149,8 @@ pub(super) async fn complete_background_source_process(
             reporter
                 .notify(background_ready_message(
                     &process_id,
-                    compatibility_host_mode,
-                    desktop_open_only,
+                    options.compatibility_host_mode,
+                    options.desktop_open_only,
                 ))
                 .await?;
             Ok(())
@@ -158,14 +162,15 @@ pub(super) async fn complete_background_source_process(
             reporter
                 .warn(background_timeout_message(
                     &process_id,
-                    compatibility_host_mode,
+                    options.compatibility_host_mode,
                 ))
                 .await?;
             Ok(())
         }
         BackgroundStartupOutcome::FailedBeforeReady => {
             let state = process_manager.read_pid(&process_id).ok();
-            let mut message = background_failure_prefix(&process_id, compatibility_host_mode);
+            let mut message =
+                background_failure_prefix(&process_id, options.compatibility_host_mode);
             if let Some(state) = state {
                 if let Some(error) = state.last_error {
                     message.push_str(&format!(": {}", error));
