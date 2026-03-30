@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde_json::Value;
+
 use crate::execution_plan::derive::derive_tier;
 use crate::execution_plan::error::AtoExecutionError;
 use crate::execution_plan::model::{
@@ -137,12 +139,13 @@ pub fn evaluate_for_mode_with_authority(
         Some(RequiredLock::CapsuleLock) | None => {}
     }
 
-    let requires_sandbox_opt_in = matches!(
-        (runtime, driver),
-        (ExecutionRuntime::Source, ExecutionDriver::Native)
-            | (ExecutionRuntime::Source, ExecutionDriver::Python)
-            | (ExecutionRuntime::Web, ExecutionDriver::Python)
-    );
+    let requires_sandbox_opt_in =
+        matches!(
+            (runtime, driver),
+            (ExecutionRuntime::Source, ExecutionDriver::Native)
+                | (ExecutionRuntime::Source, ExecutionDriver::Python)
+                | (ExecutionRuntime::Web, ExecutionDriver::Python)
+        ) && !is_desktop_native_delivery_runtime(manifest_dir, runtime, driver);
 
     if requires_sandbox_opt_in
         && !(sandbox_mode || dangerously_skip_permissions)
@@ -223,6 +226,40 @@ fn resolve_required_lock(
 fn resolve_capsule_lock_path(manifest_dir: &Path) -> PathBuf {
     resolve_existing_lockfile_path(manifest_dir)
         .unwrap_or_else(|| lockfile_output_path(manifest_dir))
+}
+
+fn is_desktop_native_delivery_runtime(
+    manifest_dir: &Path,
+    runtime: ExecutionRuntime,
+    driver: ExecutionDriver,
+) -> bool {
+    if !matches!(
+        (runtime, driver),
+        (ExecutionRuntime::Source, ExecutionDriver::Native)
+    ) {
+        return false;
+    }
+
+    let lock_path = manifest_dir.join(CAPSULE_LOCK_FILE_NAME);
+    let Ok(bytes) = std::fs::read(&lock_path) else {
+        return false;
+    };
+    let Ok(lock): Result<Value, _> = serde_json::from_slice(&bytes) else {
+        return false;
+    };
+
+    lock.get("contract")
+        .and_then(|value| value.get("delivery"))
+        .and_then(|value| value.get("artifact"))
+        .and_then(Value::as_object)
+        .is_some_and(|artifact| {
+            artifact.get("kind").and_then(Value::as_str) == Some("desktop-native")
+                && artifact
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .is_some_and(|path| !path.is_empty())
+        })
 }
 
 fn requires_capsule_lock(runtime: ExecutionRuntime, driver: ExecutionDriver) -> bool {
@@ -394,6 +431,32 @@ mod tests {
 
         let result = evaluate(&plan, tmp.path(), "strict", false, true).expect("guard pass");
         assert!(result.requires_sandbox_opt_in);
+        assert_eq!(result.executor_kind, ExecutorKind::Native);
+    }
+
+    #[test]
+    fn desktop_native_delivery_runtime_skips_source_native_opt_in_requirement() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join(CAPSULE_LOCK_FILE_NAME),
+            r#"{
+    "contract": {
+        "delivery": {
+            "artifact": {
+                "kind": "desktop-native",
+                "path": "MyApp.app/Contents/MacOS/MyApp"
+            }
+        }
+    }
+}"#,
+        )
+        .expect("write delivery lock");
+        let plan = sample_plan(ExecutionRuntime::Source, ExecutionDriver::Native);
+
+        let result = evaluate(&plan, tmp.path(), "strict", false, false)
+            .expect("desktop-native delivery should bypass explicit opt-in");
+
+        assert!(!result.requires_sandbox_opt_in);
         assert_eq!(result.executor_kind, ExecutorKind::Native);
     }
 

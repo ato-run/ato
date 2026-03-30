@@ -721,6 +721,7 @@ pub(crate) fn enforce_sandbox_mode_flags(
 pub(crate) struct ResolvedRunTarget {
     pub(crate) path: PathBuf,
     pub(crate) agent_local_root: Option<PathBuf>,
+    pub(crate) desktop_open_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -758,6 +759,7 @@ pub(crate) async fn resolve_run_target_or_install(
         return Ok(ResolvedRunTarget {
             agent_local_root: agent_local_root_for_path(&expanded_local),
             path: expanded_local,
+            desktop_open_path: None,
         });
     }
 
@@ -805,9 +807,11 @@ pub(crate) async fn resolve_run_target_or_install(
             auto_fix_mode,
         )
         .await?;
+        let desktop_open_path = launchable_desktop_open_path(&install_result);
         return Ok(ResolvedRunTarget {
             path: install_result.path,
             agent_local_root: None,
+            desktop_open_path,
         });
     }
 
@@ -853,6 +857,9 @@ pub(crate) async fn resolve_run_target_or_install(
                             "Using installed capsule matching registry current version"
                         );
                         return Ok(ResolvedRunTarget {
+                            desktop_open_path: detect_desktop_open_path_for_installed_capsule(
+                                &installed_capsule,
+                            ),
                             path: installed_capsule,
                             agent_local_root: None,
                         });
@@ -869,6 +876,9 @@ pub(crate) async fn resolve_run_target_or_install(
                         "Falling back to installed capsule after registry detail lookup failed"
                     );
                     return Ok(ResolvedRunTarget {
+                        desktop_open_path: detect_desktop_open_path_for_installed_capsule(
+                            &installed_capsule,
+                        ),
                         path: installed_capsule,
                         agent_local_root: None,
                     });
@@ -882,6 +892,7 @@ pub(crate) async fn resolve_run_target_or_install(
             "Using installed capsule"
         );
         return Ok(ResolvedRunTarget {
+            desktop_open_path: detect_desktop_open_path_for_installed_capsule(&installed_capsule),
             path: installed_capsule,
             agent_local_root: None,
         });
@@ -948,10 +959,106 @@ pub(crate) async fn resolve_run_target_or_install(
             ),
     )
     .await?;
+    let desktop_open_path = launchable_desktop_open_path(&install_result);
     Ok(ResolvedRunTarget {
         path: install_result.path,
         agent_local_root: None,
+        desktop_open_path,
     })
+}
+
+fn launchable_desktop_open_path(install_result: &install::InstallResult) -> Option<PathBuf> {
+    match install_result.launchable.as_ref() {
+        Some(install::LaunchableTarget::DerivedApp { path }) => Some(path.clone()),
+        _ => None,
+    }
+}
+
+fn detect_desktop_open_path_for_installed_capsule(capsule_path: &Path) -> Option<PathBuf> {
+    let version = capsule_path.parent()?.file_name()?.to_str()?.to_string();
+    let slug = capsule_path
+        .parent()?
+        .parent()?
+        .file_name()?
+        .to_str()?
+        .to_string();
+    let publisher = capsule_path
+        .parent()?
+        .parent()?
+        .parent()?
+        .file_name()?
+        .to_str()?
+        .to_string();
+    let scoped_id = format!("{publisher}/{slug}");
+
+    let apps_root = dirs::home_dir()?
+        .join(".ato")
+        .join("apps")
+        .join(&publisher)
+        .join(&slug);
+    let content_dirs = std::fs::read_dir(apps_root)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+
+    let mut derived_dirs = Vec::new();
+    for content_dir in content_dirs {
+        let entries = std::fs::read_dir(content_dir).ok()?;
+        derived_dirs.extend(
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.is_dir()
+                        && path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .map(|name| name.starts_with("derived-"))
+                            .unwrap_or(false)
+                }),
+        );
+    }
+    derived_dirs.sort();
+    derived_dirs.reverse();
+
+    for derived_dir in derived_dirs {
+        let provenance_path = derived_dir.join("local-derivation.json");
+        if !provenance_path.is_file() {
+            continue;
+        }
+        let provenance = std::fs::read_to_string(&provenance_path).ok()?;
+        let provenance = serde_json::from_str::<serde_json::Value>(&provenance).ok()?;
+        let version_matches = provenance
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            == Some(version.as_str());
+        let scoped_matches = provenance
+            .get("scoped_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            == Some(scoped_id.as_str());
+        if !version_matches || !scoped_matches {
+            continue;
+        }
+
+        let app_path = std::fs::read_dir(&derived_dir)
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.extension()
+                    .map(|ext| ext.to_string_lossy().eq_ignore_ascii_case("app"))
+                    .unwrap_or(false)
+            });
+        if app_path.is_some() {
+            return app_path;
+        }
+    }
+
+    None
 }
 
 pub(crate) fn agent_local_root_for_path(path: &Path) -> Option<PathBuf> {
