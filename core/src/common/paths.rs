@@ -2,6 +2,9 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 const ENV_ATO_HOME: &str = "ATO_HOME";
+const WORKSPACE_STATE_DIR: &str = ".ato";
+const WORKSPACE_TMP_DIR: &str = ".ato/tmp";
+const WORKSPACE_ARTIFACTS_DIR: &str = ".ato/artifacts";
 const WORKSPACE_DERIVED_DIR: &str = ".ato/derived";
 
 /// Returns the best-effort user home directory without falling back to `/tmp`.
@@ -56,4 +59,19 @@ pub fn engine_cache_dir() -> Result<PathBuf> {
 /// Returns the workspace-local directory for generated compatibility artifacts.
 pub(crate) fn workspace_derived_dir(workspace_root: &Path) -> PathBuf {
     workspace_root.join(WORKSPACE_DERIVED_DIR)
+}
+
+/// Returns the workspace-local root for mutable ato state.
+pub fn workspace_state_dir(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(WORKSPACE_STATE_DIR)
+}
+
+/// Returns the workspace-local root for temporary ato state.
+pub fn workspace_tmp_dir(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(WORKSPACE_TMP_DIR)
+}
+
+/// Returns the workspace-local root for generated runtime artifacts.
+pub fn workspace_artifacts_dir(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(WORKSPACE_ARTIFACTS_DIR)
 }
