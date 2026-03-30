@@ -49,6 +49,7 @@ pub struct NodeScripts {
     pub has_dev: bool,
     pub has_start: bool,
     pub has_build: bool,
+    pub has_tauri: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -179,6 +180,7 @@ fn detect_node(dir: &Path) -> Result<DetectedNode> {
         has_dev: false,
         has_start: false,
         has_build: false,
+        has_tauri: false,
     };
     let mut main: Option<String> = None;
     let mut has_hono = false;
@@ -206,6 +208,7 @@ fn detect_node(dir: &Path) -> Result<DetectedNode> {
             scripts.has_start = s.get("start").is_some();
             scripts.has_dev = s.get("dev").is_some();
             scripts.has_build = s.get("build").is_some();
+            scripts.has_tauri = s.get("tauri").is_some();
         }
 
         main = pkg
@@ -285,11 +288,13 @@ fn detect_deno(dir: &Path) -> Result<DetectedNode> {
             has_dev: tasks.get("dev").is_some(),
             has_start: tasks.get("start").is_some(),
             has_build: tasks.get("build").is_some(),
+            has_tauri: false,
         })
         .unwrap_or(NodeScripts {
             has_dev: false,
             has_start: false,
             has_build: false,
+            has_tauri: false,
         });
 
     Ok(DetectedNode {
