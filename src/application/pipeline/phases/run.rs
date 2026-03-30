@@ -160,6 +160,7 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) target: PathBuf,
     pub(crate) target_label: Option<String>,
     pub(crate) authoritative_input: Option<RunAuthoritativeInput>,
+    pub(crate) desktop_open_path: Option<PathBuf>,
     pub(crate) background: bool,
     pub(crate) nacelle: Option<PathBuf>,
     pub(crate) enforcement: String,
@@ -729,6 +730,7 @@ pub(crate) trait ConsumerRunExecuteHooks {
         runtime: String,
         scoped_id: Option<String>,
         ready_without_events: bool,
+        desktop_open_only: bool,
         compatibility_host_mode: CompatibilityHostMode,
         reporter: &Arc<CliReporter>,
     ) -> Result<()>;
@@ -739,6 +741,7 @@ pub(crate) trait ConsumerRunExecuteHooks {
         reporter: Arc<CliReporter>,
         sandbox_initialized: bool,
         ipc_socket_mapped: bool,
+        desktop_open_only: bool,
         use_progressive_ui: bool,
     ) -> Result<i32>;
 
@@ -981,7 +984,8 @@ where
     }
 
     let host_fallback_requested = matches!(compatibility_host_mode, CompatibilityHostMode::Enabled);
-    if use_progressive_ui {
+    let desktop_native_open_only = request.desktop_open_path.is_some();
+    if use_progressive_ui && !desktop_native_open_only {
         if host_fallback_requested {
             crate::progressive_ui::render_host_fallback_warning()?;
         } else {
@@ -1056,15 +1060,21 @@ where
 
     match guard_result.executor_kind {
         ExecutorKind::Native => {
-            let host_execution = request.dangerously_skip_permissions || host_fallback_requested;
+            let host_execution = request.dangerously_skip_permissions
+                || host_fallback_requested
+                || desktop_native_open_only;
             let process = if host_execution {
-                crate::executors::source::execute_host(
-                    &decision.plan,
-                    prepared.authoritative_lock.as_ref(),
-                    request.reporter.clone(),
-                    mode,
-                    &launch_ctx,
-                )?
+                if let Some(app_path) = request.desktop_open_path.as_ref() {
+                    crate::executors::source::execute_open_path(app_path, mode)?
+                } else {
+                    crate::executors::source::execute_host(
+                        &decision.plan,
+                        prepared.authoritative_lock.as_ref(),
+                        request.reporter.clone(),
+                        mode,
+                        &launch_ctx,
+                    )?
+                }
             } else {
                 let nacelle = match native_nacelle {
                     Some(path) => path,
@@ -1090,7 +1100,7 @@ where
             if request.background {
                 let runtime = hooks.process_runtime_label(
                     &decision.plan,
-                    request.dangerously_skip_permissions,
+                    request.dangerously_skip_permissions || desktop_native_open_only,
                     compatibility_host_mode,
                 );
                 let ready_without_events = host_execution && process.event_rx.is_none();
@@ -1101,6 +1111,7 @@ where
                         runtime,
                         run_scoped_id.clone(),
                         ready_without_events,
+                        desktop_native_open_only,
                         compatibility_host_mode,
                         &request.reporter,
                     )
@@ -1108,7 +1119,11 @@ where
                 sidecar_cleanup.stop_now();
                 progress.ok(
                     HourglassPhase::Execute,
-                    "background native execution started",
+                    if desktop_native_open_only {
+                        "background desktop app launch requested"
+                    } else {
+                        "background native execution started"
+                    },
                 );
                 return Ok(());
             }
@@ -1122,6 +1137,7 @@ where
                         .socket_paths()
                         .map(|paths| !paths.is_empty())
                         .unwrap_or(false),
+                    desktop_native_open_only,
                     use_progressive_ui,
                 )
                 .await?;
@@ -1154,6 +1170,7 @@ where
                         runtime,
                         run_scoped_id.clone(),
                         ready_without_events,
+                        false,
                         compatibility_host_mode,
                         &request.reporter,
                     )
@@ -1175,6 +1192,7 @@ where
                         .socket_paths()
                         .map(|paths| !paths.is_empty())
                         .unwrap_or(false),
+                    false,
                     use_progressive_ui,
                 )
                 .await?;
@@ -1285,7 +1303,14 @@ where
         }
     }
 
-    progress.ok(HourglassPhase::Execute, "capsule execution completed");
+    progress.ok(
+        HourglassPhase::Execute,
+        if request.desktop_open_path.is_some() {
+            "desktop app launch requested"
+        } else {
+            "capsule execution completed"
+        },
+    );
 
     Ok(())
 }

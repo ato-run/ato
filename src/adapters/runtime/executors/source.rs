@@ -111,6 +111,7 @@ pub fn execute_host(
     launch_ctx: &RuntimeLaunchContext,
 ) -> Result<CapsuleProcess> {
     let launch_spec = derive_launch_spec(plan)?;
+    let desktop_open_bundle = desktop_native_open_bundle_path(plan, authoritative_lock);
     let force_python_no_bytecode =
         is_python_launch_spec(plan, &launch_spec.command, launch_spec.language.as_deref());
     let force_node_runtime =
@@ -119,7 +120,9 @@ pub fn execute_host(
         runtime_overrides::override_port(launch_spec.port).map(|port| port.to_string());
     let readiness_port = runtime_overrides::override_port(launch_spec.port);
 
-    let mut cmd = if force_python_no_bytecode {
+    let mut cmd = if let Some(bundle_path) = desktop_open_bundle.as_ref() {
+        build_desktop_open_command(bundle_path, &launch_spec.args)
+    } else if force_python_no_bytecode {
         let python_bin = resolve_host_managed_runtime_binary(
             plan,
             authoritative_lock,
@@ -145,21 +148,23 @@ pub fn execute_host(
     };
 
     cmd.current_dir(&launch_spec.working_dir);
-    apply_host_isolation(
-        &mut cmd,
-        plan,
-        &launch_spec.env_vars,
-        launch_spec.port,
-        launch_ctx,
-    )?;
-    apply_python_runtime_hardening(&mut cmd, force_python_no_bytecode);
+    if desktop_open_bundle.is_none() {
+        apply_host_isolation(
+            &mut cmd,
+            plan,
+            &launch_spec.env_vars,
+            launch_spec.port,
+            launch_ctx,
+        )?;
+        apply_python_runtime_hardening(&mut cmd, force_python_no_bytecode);
 
-    if let Some(port) = injected_port {
-        cmd.env("PORT", port);
-    }
+        if let Some(port) = injected_port {
+            cmd.env("PORT", port);
+        }
 
-    if !launch_spec.args.is_empty() {
-        cmd.args(&launch_spec.args);
+        if !launch_spec.args.is_empty() {
+            cmd.args(&launch_spec.args);
+        }
     }
 
     match mode {
@@ -183,12 +188,50 @@ pub fn execute_host(
     let child = cmd
         .spawn()
         .context("Failed to execute host process with --dangerously-skip-permissions")?;
-    let event_rx = Some(spawn_host_lifecycle_events(child.id(), readiness_port));
+    let event_rx = if desktop_open_bundle.is_some() {
+        None
+    } else {
+        Some(spawn_host_lifecycle_events(child.id(), readiness_port))
+    };
 
     Ok(CapsuleProcess {
         child,
         cleanup_paths: Vec::new(),
         event_rx,
+        workload_pid: None,
+        log_path: None,
+    })
+}
+
+pub fn execute_open_path(app_path: &Path, mode: ExecuteMode) -> Result<CapsuleProcess> {
+    let mut cmd = build_desktop_open_command(app_path, &[]);
+
+    match mode {
+        ExecuteMode::Foreground => {
+            cmd.stdin(Stdio::inherit());
+            cmd.stdout(Stdio::inherit());
+            cmd.stderr(Stdio::inherit());
+        }
+        ExecuteMode::Background => {
+            cmd.stdin(Stdio::null());
+            cmd.stdout(Stdio::null());
+            cmd.stderr(Stdio::null());
+        }
+        ExecuteMode::Piped => {
+            cmd.stdin(Stdio::null());
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+        }
+    }
+
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("Failed to open desktop app: {}", app_path.display()))?;
+
+    Ok(CapsuleProcess {
+        child,
+        cleanup_paths: Vec::new(),
+        event_rx: None,
         workload_pid: None,
         log_path: None,
     })
@@ -339,6 +382,104 @@ fn executable_extensions() -> Vec<String> {
             .unwrap_or_else(|| vec![".exe".to_string(), ".cmd".to_string(), ".bat".to_string()])
     } else {
         Vec::new()
+    }
+}
+
+#[allow(dead_code)]
+pub fn should_launch_desktop_native_with_host_open(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+) -> bool {
+    desktop_native_open_bundle_path(plan, authoritative_lock).is_some()
+}
+
+fn desktop_native_open_bundle_path(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        desktop_native_open_bundle_path_from_runtime_lock(&plan.manifest_dir).or_else(|| {
+            desktop_native_open_bundle_path_from_authoritative_lock(plan, authoritative_lock)
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = plan;
+        let _ = authoritative_lock;
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn desktop_native_open_bundle_path_from_runtime_lock(manifest_dir: &Path) -> Option<PathBuf> {
+    let lock_path = manifest_dir.join("capsule.lock.json");
+    let lock = serde_json::from_slice::<serde_json::Value>(&fs::read(lock_path).ok()?).ok()?;
+    desktop_native_bundle_path_from_value(manifest_dir, &lock)
+}
+
+#[cfg(target_os = "macos")]
+fn desktop_native_open_bundle_path_from_authoritative_lock(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+) -> Option<PathBuf> {
+    let mut root = serde_json::Map::new();
+    let mut contract = serde_json::Map::new();
+    contract.insert(
+        "delivery".to_string(),
+        authoritative_lock?
+            .contract
+            .entries
+            .get("delivery")?
+            .clone(),
+    );
+    root.insert("contract".to_string(), serde_json::Value::Object(contract));
+    desktop_native_bundle_path_from_value(&plan.manifest_dir, &serde_json::Value::Object(root))
+}
+
+#[cfg(target_os = "macos")]
+fn desktop_native_bundle_path_from_value(
+    manifest_dir: &Path,
+    lock: &serde_json::Value,
+) -> Option<PathBuf> {
+    let artifact_path = lock
+        .get("contract")
+        .and_then(|value| value.get("delivery"))
+        .and_then(|value| value.get("artifact"))
+        .and_then(serde_json::Value::as_object)
+        .filter(|artifact| {
+            artifact.get("kind").and_then(serde_json::Value::as_str) == Some("desktop-native")
+        })
+        .and_then(|artifact| artifact.get("path"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let bundle_path = manifest_dir.join(artifact_path);
+    bundle_path
+        .extension()
+        .map(|extension| extension.to_string_lossy().eq_ignore_ascii_case("app"))
+        .filter(|is_app| *is_app)
+        .map(|_| bundle_path)
+}
+
+fn build_desktop_open_command(bundle_path: &Path, args: &[String]) -> Command {
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = Command::new("/usr/bin/open");
+        cmd.arg(bundle_path);
+        if !args.is_empty() {
+            cmd.arg("--args");
+            cmd.args(args);
+        }
+        cmd
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = bundle_path;
+        let _ = args;
+        unreachable!("desktop app open command is only used on macOS")
     }
 }
 
@@ -1002,5 +1143,45 @@ mod tests {
                 port: None,
             }
         );
+    }
+
+    #[test]
+    fn desktop_native_lock_uses_host_open_on_macos() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("Minimal.app")).expect("bundle dir");
+
+        let plan = plan_from_manifest(
+            &dir,
+            r#"
+            [targets.desktop]
+            runtime = "source"
+            driver = "native"
+            entrypoint = "./Minimal.app/Contents/MacOS/Minimal"
+            "#,
+            "desktop",
+        );
+
+        let mut lock = capsule_core::ato_lock::AtoLock::default();
+        lock.contract.entries.insert(
+            "delivery".to_string(),
+            json!({
+                "artifact": {
+                    "kind": "desktop-native",
+                    "path": "Minimal.app"
+                }
+            }),
+        );
+
+        #[cfg(target_os = "macos")]
+        assert!(should_launch_desktop_native_with_host_open(
+            &plan,
+            Some(&lock)
+        ));
+
+        #[cfg(not(target_os = "macos"))]
+        assert!(!should_launch_desktop_native_with_host_open(
+            &plan,
+            Some(&lock)
+        ));
     }
 }

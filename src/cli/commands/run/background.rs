@@ -26,7 +26,11 @@ pub(super) fn process_runtime_label(
 pub(super) fn background_ready_message(
     id: &str,
     compatibility_host_mode: CompatibilityHostMode,
+    desktop_open_only: bool,
 ) -> String {
+    if desktop_open_only {
+        return format!("🚀 Desktop app launch requested in background (ID: {id})");
+    }
     if matches!(compatibility_host_mode, CompatibilityHostMode::Enabled) {
         return format!("✔ Capsule is ready (Host Fallback, ID: {id})");
     }
@@ -59,6 +63,12 @@ pub(super) fn background_failure_prefix(
         );
     }
     format!("Background capsule failed before readiness (ID: {id})")
+}
+
+pub(super) struct BackgroundCompletionOptions {
+    pub ready_without_events: bool,
+    pub desktop_open_only: bool,
+    pub compatibility_host_mode: CompatibilityHostMode,
 }
 
 fn background_process_name(plan: &capsule_core::router::ManifestData) -> String {
@@ -107,8 +117,7 @@ pub(super) async fn complete_background_source_process(
     plan: &capsule_core::router::ManifestData,
     runtime: String,
     scoped_id: Option<String>,
-    ready_without_events: bool,
-    compatibility_host_mode: CompatibilityHostMode,
+    options: BackgroundCompletionOptions,
     reporter: &Arc<CliReporter>,
 ) -> Result<()> {
     let process_id = format!("capsule-{}", process.child.id());
@@ -118,13 +127,13 @@ pub(super) async fn complete_background_source_process(
         &process_id,
         runtime,
         scoped_id,
-        ready_without_events,
+        options.ready_without_events,
     );
 
     let process_manager = crate::runtime::process::ProcessManager::new()?;
     process_manager.write_pid(&info)?;
 
-    let (startup_outcome, event_rx) = if ready_without_events {
+    let (startup_outcome, event_rx) = if options.ready_without_events {
         (BackgroundStartupOutcome::Ready, None)
     } else {
         wait_for_background_native_startup(&mut process, &process_manager, &process_id)?
@@ -140,7 +149,8 @@ pub(super) async fn complete_background_source_process(
             reporter
                 .notify(background_ready_message(
                     &process_id,
-                    compatibility_host_mode,
+                    options.compatibility_host_mode,
+                    options.desktop_open_only,
                 ))
                 .await?;
             Ok(())
@@ -152,14 +162,15 @@ pub(super) async fn complete_background_source_process(
             reporter
                 .warn(background_timeout_message(
                     &process_id,
-                    compatibility_host_mode,
+                    options.compatibility_host_mode,
                 ))
                 .await?;
             Ok(())
         }
         BackgroundStartupOutcome::FailedBeforeReady => {
             let state = process_manager.read_pid(&process_id).ok();
-            let mut message = background_failure_prefix(&process_id, compatibility_host_mode);
+            let mut message =
+                background_failure_prefix(&process_id, options.compatibility_host_mode);
             if let Some(state) = state {
                 if let Some(error) = state.last_error {
                     message.push_str(&format!(": {}", error));
@@ -180,10 +191,12 @@ pub(super) async fn complete_foreground_source_process(
     reporter: Arc<CliReporter>,
     sandbox_initialized: bool,
     ipc_socket_mapped: bool,
+    desktop_open_only: bool,
     use_progressive_ui: bool,
 ) -> Result<i32> {
+    let (run_label, stop_label) = foreground_run_spinner_labels(desktop_open_only);
     let run_spinner = if use_progressive_ui {
-        Some(crate::progressive_ui::start_spinner("Running Preview..."))
+        Some(crate::progressive_ui::start_spinner(run_label))
     } else {
         None
     };
@@ -199,10 +212,20 @@ pub(super) async fn complete_foreground_source_process(
         let _ = handle.join();
     }
     if let Some(progress) = run_spinner {
-        progress.stop("Preview stopped.");
+        progress.stop(stop_label);
     }
     cleanup_process_artifacts(&process.cleanup_paths);
     Ok(exit_code)
+}
+
+pub(super) fn foreground_run_spinner_labels(
+    desktop_open_only: bool,
+) -> (&'static str, &'static str) {
+    if desktop_open_only {
+        ("Opening desktop app...", "Desktop app launch requested.")
+    } else {
+        ("Running Preview...", "Preview stopped.")
+    }
 }
 
 pub(super) fn spawn_foreground_native_event_reporter(

@@ -746,6 +746,15 @@ pub(crate) fn build_native_artifact_with_distribution_lock(
     output_path: Option<&Path>,
     capsule_lock_json: Option<&str>,
 ) -> Result<NativeBuildResult> {
+    build_native_artifact_with_distribution_lock_output(plan, output_path, capsule_lock_json, false)
+}
+
+pub(crate) fn build_native_artifact_with_distribution_lock_output(
+    plan: &NativeBuildPlan,
+    output_path: Option<&Path>,
+    capsule_lock_json: Option<&str>,
+    stream_output: bool,
+) -> Result<NativeBuildResult> {
     ensure_current_host_delivery_target(&plan.target, "native delivery build")?;
 
     let config = staged_delivery_config(plan)?;
@@ -761,6 +770,7 @@ pub(crate) fn build_native_artifact_with_distribution_lock(
             }
         },
         capsule_lock_json,
+        stream_output,
     )
 }
 
@@ -769,13 +779,14 @@ fn build_native_artifact_with_strip<F>(
     output_path: Option<&Path>,
     strip_signature: F,
     capsule_lock_json: Option<&str>,
+    stream_output: bool,
 ) -> Result<NativeBuildResult>
 where
     F: Fn(&Path) -> Result<()>,
 {
     let _config = staged_delivery_config(plan)?;
     if let Some(build_command) = &plan.build_command {
-        run_native_build_command(build_command)?;
+        run_native_build_command(build_command, stream_output)?;
     }
 
     validate_native_bundle_directory(&plan.source_app_path)?;
@@ -1530,6 +1541,7 @@ fn detect_build_environment_package_managers(manifest_dir: &Path) -> Vec<String>
     let mut package_managers = Vec::new();
     let candidates = [
         ("Cargo.lock", "cargo"),
+        ("src-tauri/Cargo.lock", "cargo"),
         ("go.sum", "go"),
         ("package-lock.json", "npm"),
         ("pnpm-lock.yaml", "pnpm"),
@@ -2503,10 +2515,33 @@ fn format_native_build_command(command: &NativeBuildCommand) -> String {
         .join(" ")
 }
 
-fn run_native_build_command(command: &NativeBuildCommand) -> Result<()> {
+fn run_native_build_command(command: &NativeBuildCommand, stream_output: bool) -> Result<()> {
     let mut process = Command::new(&command.program);
     process.args(&command.args);
     configure_native_build_process(&mut process, command);
+    if stream_output {
+        let status = process
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .with_context(|| {
+                format!(
+                    "Failed to execute native delivery build command '{}' in {}",
+                    format_native_build_command(command),
+                    command.working_dir.display()
+                )
+            })?;
+        if status.success() {
+            return Ok(());
+        }
+
+        bail!(
+            "Native delivery build command failed with status {}: {}",
+            exit_status_label(status.code()),
+            format_native_build_command(command),
+        );
+    }
     let output = run_captured_command(&mut process, || {
         format!(
             "Failed to execute native delivery build command '{}' in {}",
@@ -2670,6 +2705,11 @@ fn command_exit_status(output: &std::process::Output) -> String {
         .status
         .code()
         .map(|value| value.to_string())
+        .unwrap_or_else(|| "signal".to_string())
+}
+
+fn exit_status_label(code: Option<i32>) -> String {
+    code.map(|value| value.to_string())
         .unwrap_or_else(|| "signal".to_string())
 }
 

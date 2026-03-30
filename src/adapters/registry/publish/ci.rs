@@ -380,6 +380,16 @@ pub(crate) fn build_capsule_artifact(
     authoritative_input: Option<&crate::application::producer_input::ProducerAuthoritativeInput>,
     manifest_path: Option<&Path>,
 ) -> Result<PathBuf> {
+    build_capsule_artifact_with_output(name, version, authoritative_input, manifest_path, false)
+}
+
+pub(crate) fn build_capsule_artifact_with_output(
+    name: &str,
+    version: &str,
+    authoritative_input: Option<&crate::application::producer_input::ProducerAuthoritativeInput>,
+    manifest_path: Option<&Path>,
+    stream_output: bool,
+) -> Result<PathBuf> {
     let (decision, manifest_dir) = if let Some(authoritative_input) = authoritative_input {
         authoritative_input.validate_legacy_producer_bridge()?;
         (
@@ -433,11 +443,13 @@ pub(crate) fn build_capsule_artifact(
         let lock_json = authoritative_input
             .map(crate::application::producer_input::ProducerAuthoritativeInput::serialized_lock_json)
             .transpose()?;
-        let result = crate::build::native_delivery::build_native_artifact_with_distribution_lock(
-            &plan,
-            Some(&artifact_path),
-            lock_json.as_deref(),
-        )?;
+        let result =
+            crate::build::native_delivery::build_native_artifact_with_distribution_lock_output(
+                &plan,
+                Some(&artifact_path),
+                lock_json.as_deref(),
+                stream_output,
+            )?;
         return Ok(result.artifact_path);
     }
 
