@@ -22,6 +22,7 @@ impl DestinationPort for RemoteRegistryDestination {
             version: _,
             allow_existing,
             force_large_payload,
+            paid_large_payload,
         } = destination
         else {
             anyhow::bail!("remote registry destination requires DestinationSpec::RemoteRegistry")
@@ -33,6 +34,7 @@ impl DestinationPort for RemoteRegistryDestination {
                 scoped_id: scoped_id.clone(),
                 registry_url: registry_url.clone(),
                 force_large_payload: *force_large_payload,
+                paid_large_payload: *paid_large_payload,
                 allow_existing: *allow_existing,
                 lock_id: artifact.lock_id.clone(),
                 closure_digest: artifact.closure_digest.clone(),

@@ -122,6 +122,7 @@ pub fn execute_pack_command(
     key: Option<PathBuf>,
     standalone: bool,
     force_large_payload: bool,
+    paid_large_payload: bool,
     keep_failed_artifacts: bool,
     strict_manifest: bool,
     enforcement: String,
@@ -136,6 +137,7 @@ pub fn execute_pack_command(
         key,
         standalone,
         force_large_payload,
+        paid_large_payload,
         keep_failed_artifacts,
         strict_manifest,
         enforcement,
@@ -155,6 +157,7 @@ pub fn execute_pack_command_with_injected_manifest(
     key: Option<PathBuf>,
     standalone: bool,
     force_large_payload: bool,
+    paid_large_payload: bool,
     keep_failed_artifacts: bool,
     strict_manifest: bool,
     enforcement: String,
@@ -338,6 +341,7 @@ pub fn execute_pack_command_with_injected_manifest(
         crate::payload_guard::ensure_payload_size(
             &result.artifact_path,
             force_large_payload,
+            paid_large_payload,
             "--force-large-payload",
         )?;
         let _ = sign_if_requested(&result.artifact_path, key.as_ref(), reporter.clone())?;
@@ -429,6 +433,7 @@ pub fn execute_pack_command_with_injected_manifest(
             finalize_built_artifact(
                 &artifact_path,
                 force_large_payload,
+                paid_large_payload,
                 key.as_ref(),
                 reporter.clone(),
                 &mut timing_entries,
@@ -451,6 +456,7 @@ pub fn execute_pack_command_with_injected_manifest(
                 crate::payload_guard::ensure_payload_size(
                     path,
                     force_large_payload,
+                    paid_large_payload,
                     "--force-large-payload",
                 )?;
                 let _ = sign_if_requested(path, key.as_ref(), reporter.clone())?;
@@ -492,6 +498,7 @@ pub fn execute_pack_command_with_injected_manifest(
             crate::payload_guard::ensure_payload_size(
                 &result.artifact,
                 force_large_payload,
+                paid_large_payload,
                 "--force-large-payload",
             )?;
             let size = std::fs::metadata(&result.artifact)?.len();
@@ -559,6 +566,7 @@ pub fn execute_pack_command_with_injected_manifest(
             finalize_built_artifact(
                 &artifact_path,
                 force_large_payload,
+                paid_large_payload,
                 key.as_ref(),
                 reporter.clone(),
                 &mut timing_entries,
@@ -655,6 +663,7 @@ fn pack_source_bundle(
 fn finalize_built_artifact(
     artifact_path: &Path,
     force_large_payload: bool,
+    paid_large_payload: bool,
     key: Option<&PathBuf>,
     reporter: std::sync::Arc<reporters::CliReporter>,
     timing_entries: &mut Vec<(String, Duration)>,
@@ -663,6 +672,7 @@ fn finalize_built_artifact(
     crate::payload_guard::ensure_payload_size(
         artifact_path,
         force_large_payload,
+        paid_large_payload,
         "--force-large-payload",
     )?;
     record_timing(
@@ -1521,6 +1531,7 @@ entrypoint = "site"
             None,
             false,
             false,
+            false,
             true,
             false,
             "strict".to_string(),
@@ -1588,6 +1599,7 @@ entrypoint = "main.js"
             None,
             false,
             false,
+            false,
             true,
             false,
             "strict".to_string(),
@@ -1646,6 +1658,7 @@ entrypoint = "main.js"
             false,
             None,
             true,
+            false,
             false,
             true,
             false,
@@ -1710,6 +1723,7 @@ args = ["--force", "--sign", "-", "MyApp.app"]
             tmp.path().to_path_buf(),
             false,
             None,
+            false,
             false,
             false,
             true,
