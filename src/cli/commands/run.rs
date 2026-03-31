@@ -28,6 +28,7 @@ use crate::application::pipeline::phases::run as run_phase;
 use crate::application::ports::OutputPort;
 use crate::application::source_inference;
 use crate::application::workspace::state;
+use crate::install::support::ResolvedCliExportRequest;
 use crate::preview;
 #[cfg(test)]
 use crate::registry::store::RegistryStore;
@@ -63,6 +64,7 @@ type RunPipelineState = run_phase::RunPipelineState;
 pub struct RunArgs {
     pub target: PathBuf,
     pub target_label: Option<String>,
+    pub args: Vec<String>,
     pub watch: bool,
     pub background: bool,
     pub nacelle: Option<PathBuf>,
@@ -77,6 +79,7 @@ pub struct RunArgs {
     pub keep_failed_artifacts: bool,
     pub auto_fix_mode: Option<crate::GitHubAutoFixMode>,
     pub allow_unverified: bool,
+    pub export_request: Option<ResolvedCliExportRequest>,
     pub state_bindings: Vec<String>,
     pub inject_bindings: Vec<String>,
     pub reporter: Arc<CliReporter>,
@@ -105,6 +108,7 @@ async fn execute_watch_mode_with_install(args: RunArgs) -> Result<()> {
     execute_watch_mode(RunArgs {
         target: normalized.target,
         agent_local_root: install.resolved_target.agent_local_root,
+        export_request: install.resolved_target.export_request,
         ..args
     })
 }
@@ -377,6 +381,7 @@ fn build_consumer_run_request(args: &RunArgs) -> run_phase::ConsumerRunRequest {
     run_phase::ConsumerRunRequest {
         target: args.target.clone(),
         target_label: args.target_label.clone(),
+        args: args.args.clone(),
         authoritative_input: None,
         desktop_open_path: None,
         background: args.background,
@@ -392,6 +397,7 @@ fn build_consumer_run_request(args: &RunArgs) -> run_phase::ConsumerRunRequest {
         keep_failed_artifacts: args.keep_failed_artifacts,
         auto_fix_mode: args.auto_fix_mode,
         allow_unverified: args.allow_unverified,
+        export_request: args.export_request.clone(),
         state_bindings: args.state_bindings.clone(),
         inject_bindings: args.inject_bindings.clone(),
         reporter: args.reporter.clone(),
@@ -405,12 +411,14 @@ fn build_consumer_run_request_with_target(
     agent_local_root: Option<PathBuf>,
     authoritative_input: Option<run_phase::RunAuthoritativeInput>,
     desktop_open_path: Option<PathBuf>,
+    export_request: Option<ResolvedCliExportRequest>,
 ) -> run_phase::ConsumerRunRequest {
     let mut request = build_consumer_run_request(args);
     request.target = target.to_path_buf();
     request.agent_local_root = agent_local_root;
     request.authoritative_input = authoritative_input;
     request.desktop_open_path = desktop_open_path;
+    request.export_request = export_request;
     request
 }
 
@@ -552,6 +560,7 @@ struct ConsumerRunPhaseRunner<'a> {
     authoritative_input: Option<run_phase::RunAuthoritativeInput>,
     desktop_open_path: Option<PathBuf>,
     agent_local_root: Option<PathBuf>,
+    export_request: Option<ResolvedCliExportRequest>,
     should_stop_after_install: bool,
 }
 
@@ -601,6 +610,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     .desktop_open_path
                     .or(install.resolved_target.desktop_open_path);
                 self.agent_local_root = install.resolved_target.agent_local_root;
+                self.export_request = install.resolved_target.export_request;
                 self.should_stop_after_install = matches!(
                     install.manifest_outcome,
                     crate::install::support::LocalRunManifestPreparationOutcome::CreatedManualManifest
@@ -614,6 +624,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     self.agent_local_root.clone(),
                     self.authoritative_input.clone(),
                     self.desktop_open_path.clone(),
+                    self.export_request.clone(),
                     Some(attempt),
                 )
                 .await
@@ -631,6 +642,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     self.agent_local_root.clone(),
                     self.authoritative_input.clone(),
                     self.desktop_open_path.clone(),
+                    self.export_request.clone(),
                     input,
                 )
                 .await
@@ -648,6 +660,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     self.agent_local_root.clone(),
                     self.authoritative_input.clone(),
                     self.desktop_open_path.clone(),
+                    self.export_request.clone(),
                     input,
                 )
                 .await
@@ -665,6 +678,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     self.agent_local_root.clone(),
                     self.authoritative_input.clone(),
                     self.desktop_open_path.clone(),
+                    self.export_request.clone(),
                     input,
                 )
                 .await
@@ -682,6 +696,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     self.agent_local_root.clone(),
                     self.authoritative_input.clone(),
                     self.desktop_open_path.clone(),
+                    self.export_request.clone(),
                     input,
                     Some(attempt),
                 )
@@ -707,6 +722,7 @@ async fn execute_normal_mode(args: RunArgs) -> Result<()> {
         authoritative_input: None,
         desktop_open_path: None,
         agent_local_root: args.agent_local_root.clone(),
+        export_request: args.export_request.clone(),
         should_stop_after_install: false,
     };
 
@@ -918,6 +934,7 @@ async fn run_prepare_phase(
     agent_local_root: Option<PathBuf>,
     authoritative_input: Option<run_phase::RunAuthoritativeInput>,
     desktop_open_path: Option<PathBuf>,
+    export_request: Option<ResolvedCliExportRequest>,
     attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<RunPipelineState> {
     let request = build_consumer_run_request_with_target(
@@ -926,6 +943,7 @@ async fn run_prepare_phase(
         agent_local_root,
         authoritative_input,
         desktop_open_path,
+        export_request,
     );
     let progress = RunProgress { args };
     run_phase::run_prepare_phase(&request, &progress, attempt).await
@@ -937,6 +955,7 @@ async fn run_build_phase(
     agent_local_root: Option<PathBuf>,
     authoritative_input: Option<run_phase::RunAuthoritativeInput>,
     desktop_open_path: Option<PathBuf>,
+    export_request: Option<ResolvedCliExportRequest>,
     state: RunPipelineState,
 ) -> Result<RunPipelineState> {
     let request = build_consumer_run_request_with_target(
@@ -945,6 +964,7 @@ async fn run_build_phase(
         agent_local_root,
         authoritative_input,
         desktop_open_path,
+        export_request,
     );
     let progress = RunProgress { args };
     run_phase::run_build_phase(&request, &progress, state).await
@@ -956,6 +976,7 @@ async fn run_verify_phase(
     agent_local_root: Option<PathBuf>,
     authoritative_input: Option<run_phase::RunAuthoritativeInput>,
     desktop_open_path: Option<PathBuf>,
+    export_request: Option<ResolvedCliExportRequest>,
     state: RunPipelineState,
 ) -> Result<RunPipelineState> {
     let request = build_consumer_run_request_with_target(
@@ -964,6 +985,7 @@ async fn run_verify_phase(
         agent_local_root,
         authoritative_input,
         desktop_open_path,
+        export_request,
     );
     let progress = RunProgress { args };
     run_phase::run_verify_phase(&request, &progress, state).await
@@ -975,6 +997,7 @@ async fn run_dry_run_phase(
     agent_local_root: Option<PathBuf>,
     authoritative_input: Option<run_phase::RunAuthoritativeInput>,
     desktop_open_path: Option<PathBuf>,
+    export_request: Option<ResolvedCliExportRequest>,
     state: RunPipelineState,
 ) -> Result<RunPipelineState> {
     let request = build_consumer_run_request_with_target(
@@ -983,6 +1006,7 @@ async fn run_dry_run_phase(
         agent_local_root,
         authoritative_input,
         desktop_open_path,
+        export_request,
     );
     let progress = RunProgress { args };
     run_phase::run_dry_run_phase(&request, &progress, state).await
@@ -994,6 +1018,7 @@ async fn run_execute_phase(
     agent_local_root: Option<PathBuf>,
     authoritative_input: Option<run_phase::RunAuthoritativeInput>,
     desktop_open_path: Option<PathBuf>,
+    export_request: Option<ResolvedCliExportRequest>,
     state: RunPipelineState,
     attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<()> {
@@ -1003,6 +1028,7 @@ async fn run_execute_phase(
         agent_local_root,
         authoritative_input,
         desktop_open_path,
+        export_request,
     );
     let progress = RunProgress { args };
     run_phase::run_execute_phase(&request, &progress, state, attempt, &RunExecuteHooks).await
@@ -1490,6 +1516,7 @@ run_command = "node server.js"
             lock_path: None,
             workspace_root: tmp.path().to_path_buf(),
             effective_state: None,
+            execution_override: None,
             bridge_manifest: crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
                 toml::Value::Table(toml::map::Map::new()),
             ),
@@ -1562,6 +1589,7 @@ run_command = "node server.js"
         let args = RunArgs {
             target: lock_path.clone(),
             target_label: None,
+            args: Vec::new(),
             watch: false,
             background: false,
             nacelle: None,
@@ -1576,6 +1604,7 @@ run_command = "node server.js"
             keep_failed_artifacts: false,
             auto_fix_mode: None,
             allow_unverified: false,
+            export_request: None,
             state_bindings: Vec::new(),
             inject_bindings: Vec::new(),
             reporter: Arc::new(CliReporter::new(true)),
@@ -1601,6 +1630,7 @@ run_command = "node server.js"
         let args = RunArgs {
             target: appimage_path.clone(),
             target_label: None,
+            args: Vec::new(),
             watch: false,
             background: false,
             nacelle: None,
@@ -1615,6 +1645,7 @@ run_command = "node server.js"
             keep_failed_artifacts: false,
             auto_fix_mode: None,
             allow_unverified: false,
+            export_request: None,
             state_bindings: Vec::new(),
             inject_bindings: Vec::new(),
             reporter: Arc::new(CliReporter::new(true)),
@@ -1924,6 +1955,7 @@ target = "/var/lib/app"
             toml::Value::String(schema_version.to_string()),
         );
         manifest.insert("name".to_string(), toml::Value::String("demo".to_string()));
+        manifest.insert("type".to_string(), toml::Value::String("app".to_string()));
         manifest.insert(
             "default_target".to_string(),
             toml::Value::String("default".to_string()),

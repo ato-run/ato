@@ -111,7 +111,10 @@ pub fn execute_host(
     mode: ExecuteMode,
     launch_ctx: &RuntimeLaunchContext,
 ) -> Result<CapsuleProcess> {
-    let launch_spec = derive_launch_spec(plan)?;
+    let mut launch_spec = derive_launch_spec(plan)?;
+    launch_spec
+        .args
+        .extend(launch_ctx.command_args().iter().cloned());
     let desktop_open_bundle = desktop_native_open_bundle_path(plan, authoritative_lock);
     let force_python_no_bytecode =
         is_python_launch_spec(plan, &launch_spec.command, launch_spec.language.as_deref());

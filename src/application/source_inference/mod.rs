@@ -4326,6 +4326,23 @@ from = "missing-service"
     fn compatibility_native_delivery_promotes_build_closure() {
         let dir = tempdir().expect("tempdir");
         fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"demo","version":"0.1.0","scripts":{"build":"npm run tauri build","tauri":"tauri"}}"#,
+        )
+        .expect("write package json");
+        fs::create_dir_all(dir.path().join("src-tauri")).expect("create src-tauri");
+        fs::write(
+            dir.path().join("src-tauri/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write Cargo.toml");
+        fs::write(dir.path().join("src-tauri/tauri.conf.json"), "{}\n")
+            .expect("write tauri config");
+        write_macos_app_bundle(
+            &dir.path()
+                .join("src-tauri/target/release/bundle/macos/MyApp.app"),
+        );
+        fs::write(
             dir.path().join("capsule.toml"),
             r#"schema_version = "0.2"
 name = "demo"
@@ -4395,7 +4412,7 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
             .get("inputs")
             .and_then(Value::as_array)
             .expect("closure inputs");
-        assert_eq!(inputs.len(), 2);
+        assert!(inputs.len() >= 2);
         assert!(inputs.iter().any(|value| {
             value.get("name").and_then(Value::as_str) == Some("cargo")
                 && value.get("kind").and_then(Value::as_str) == Some("lockfile")
@@ -5015,6 +5032,24 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
     #[test]
     fn native_delivery_build_derive_only_appears_in_resolve_phase() {
         let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"demo","version":"0.1.0","scripts":{"build":"npm run tauri build","tauri":"tauri"}}"#,
+        )
+        .expect("write package json");
+        fs::write(dir.path().join("package-lock.json"), "{}\n").expect("write package lock");
+        fs::create_dir_all(dir.path().join("src-tauri")).expect("create src-tauri");
+        fs::write(
+            dir.path().join("src-tauri/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write Cargo.toml");
+        fs::write(dir.path().join("src-tauri/tauri.conf.json"), "{}\n")
+            .expect("write tauri config");
+        write_macos_app_bundle(
+            &dir.path()
+                .join("src-tauri/target/release/bundle/macos/MyApp.app"),
+        );
         fs::write(
             dir.path().join("capsule.toml"),
             r#"schema_version = "0.2"

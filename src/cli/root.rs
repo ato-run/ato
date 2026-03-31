@@ -68,7 +68,8 @@ pub(crate) struct Cli {
 pub(crate) enum Commands {
     #[command(
         next_help_heading = "Primary Commands",
-        about = "Run a capsule app or local project"
+        about = "Run a capsule app or local project",
+        trailing_var_arg = true
     )]
     Run {
         /// Local path (./, ../, ~/, /...), store scoped ID (publisher/slug), or GitHub repo (github.com/owner/repo). Default: current directory
@@ -170,6 +171,10 @@ pub(crate) enum Commands {
         /// Allow installing/running unverified signatures in non-production environments
         #[arg(long, default_value_t = false)]
         allow_unverified: bool,
+
+        /// Arguments passed through to an exported CLI tool after `--`
+        #[arg(allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     #[command(

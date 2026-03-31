@@ -924,6 +924,7 @@ mod tests {
             toml::from_str::<toml::Value>(
                 r#"
 name = "demo"
+type = "app"
 default_target = "default"
 
 [targets.default]
@@ -945,6 +946,7 @@ entrypoint = "demo.sh"
             lock_path: None,
             workspace_root: manifest_dir,
             effective_state: None,
+            execution_override: None,
             bridge_manifest: DerivedBridgeManifest::new(toml::Value::Table(toml::map::Map::new())),
             validation_mode: capsule_core::types::ValidationMode::Strict,
             engine_override_declared: false,

@@ -34,7 +34,7 @@ Here's how the different formats interact:
 ## Key Commands
 
 ```bash
-ato run [path|publisher/slug|github.com/owner/repo] [--registry <url>]
+ato run [path|publisher/slug|@publisher/tool|github.com/owner/repo] [--registry <url>]
 ato search [query]
 ato ps
 ato close --id <capsule-id> | --name <name> [--all] [--force]
@@ -50,6 +50,17 @@ ato inspect lock [path] [--json]
 ato inspect diagnostics [path] [--json]
 ato inspect remediation [path] [--json]
 ```
+
+### Phase 1: exported CLI entries
+
+Phase 1 adds one-shot exported CLI execution through `ato run @publisher/tool -- ...`.
+
+- The published capsule must define `exports.cli.<name>` in `capsule.toml`.
+- Phase 1 supports only `kind = "python-tool"`.
+- The export name must match the package slug. For `@publisher/tool`, the capsule slug and export name must both be `tool`.
+- The export must point at a `runtime = "source"` and `driver = "python"` target.
+- Export prefix args and user trailing args are both applied to consent, execution planning, and the final launch.
+- Persistent installed CLI shims are not part of Phase 1. This is one-shot execution only.
 
 ## Native Delivery (Experimental)
 

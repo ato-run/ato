@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::router::{
-    CompatManifestBridge, ExecutionDescriptor, RuntimeDecision, RuntimeKind,
+    CompatManifestBridge, CompatProjectInput, ExecutionDescriptor, RuntimeDecision, RuntimeKind,
 };
 use capsule_core::types::CapsuleManifest;
 use capsule_core::types::ValidationMode;
@@ -375,8 +375,14 @@ pub fn execute_pack_command_with_injected_manifest(
 
     let result = match decision.kind {
         capsule_core::router::RuntimeKind::Source => {
+            let compat_input = if let Some(authoritative_input) = authoritative_input.as_ref() {
+                authoritative_input.packaging_compat_project_input()?
+            } else {
+                decision.plan.compat_project_input()?
+            };
             let artifact_path = pack_source_bundle(
                 &decision.plan,
+                compat_input,
                 &enforcement,
                 standalone,
                 strict_manifest,
@@ -520,6 +526,11 @@ pub fn execute_pack_command_with_injected_manifest(
             }
         }
         capsule_core::router::RuntimeKind::Web => {
+            let compat_input = if let Some(authoritative_input) = authoritative_input.as_ref() {
+                authoritative_input.packaging_compat_project_input()?
+            } else {
+                decision.plan.compat_project_input()?
+            };
             let driver = decision
                 .plan
                 .execution_driver()
@@ -533,7 +544,7 @@ pub fn execute_pack_command_with_injected_manifest(
                 capsule_core::packers::web::pack(
                     &decision.plan,
                     capsule_core::packers::web::WebPackOptions {
-                        compat_input: decision.plan.compat_project_input()?,
+                        compat_input: compat_input.clone(),
                         workspace_root: decision.plan.workspace_root.clone(),
                         output: None,
                     },
@@ -542,6 +553,7 @@ pub fn execute_pack_command_with_injected_manifest(
             } else {
                 let artifact = pack_source_bundle(
                     &decision.plan,
+                    compat_input,
                     &enforcement,
                     standalone,
                     strict_manifest,
@@ -614,6 +626,7 @@ fn emit_timings(
 #[allow(clippy::too_many_arguments)]
 fn pack_source_bundle(
     plan: &capsule_core::router::ManifestData,
+    compat_input: Option<CompatProjectInput>,
     enforcement: &str,
     standalone: bool,
     strict_manifest: bool,
@@ -639,7 +652,7 @@ fn pack_source_bundle(
     let artifact = capsule_core::packers::source::pack(
         plan,
         capsule_core::packers::source::SourcePackOptions {
-            compat_input: plan.compat_project_input()?,
+            compat_input,
             workspace_root: plan.workspace_root.clone(),
             config_json: prepared_config.config_json.clone(),
             config_path: prepared_config.config_path.clone(),
