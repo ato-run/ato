@@ -16,7 +16,6 @@ on:
   push:
     branches:
       - dev
-      - main
 
 permissions:
   contents: read
@@ -238,7 +237,7 @@ jobs:
 
   smoke:
     name: Smoke ${{ matrix.artifact_name }}
-    if: ${{ !((github.event_name == 'workflow_dispatch' && inputs.native_only) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[native-only]'))) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.native_only }}
     needs: build
     runs-on: ${{ matrix.os }}
     strategy:

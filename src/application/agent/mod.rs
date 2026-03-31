@@ -1471,14 +1471,15 @@ fn should_skip_snapshot(relative: &Path) -> bool {
         .components()
         .map(|component| component.as_os_str().to_string_lossy().to_string())
         .collect::<Vec<_>>();
-    components.windows(2).any(|window| {
-        window[0].as_str() == ".ato" && window[1].as_str() == "tmp"
-    }) || components.iter().any(|name| {
-        matches!(
-            name.as_str(),
-            ".git" | ".tmp" | "target" | "node_modules" | ".venv"
-        )
-    })
+    components
+        .windows(2)
+        .any(|window| window[0].as_str() == ".ato" && window[1].as_str() == "tmp")
+        || components.iter().any(|name| {
+            matches!(
+                name.as_str(),
+                ".git" | ".tmp" | "target" | "node_modules" | ".venv"
+            )
+        })
 }
 
 #[cfg(test)]
