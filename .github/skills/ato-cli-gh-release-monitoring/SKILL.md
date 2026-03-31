@@ -90,17 +90,17 @@ env -u GH_TOKEN -u GITHUB_TOKEN gh pr create --base main --head dev --title "<ti
 env -u GH_TOKEN -u GITHUB_TOKEN gh pr view <pr> --json mergeable,mergeStateStatus,statusCheckRollup,url,headRefOid
 ```
 
-2. If required checks are still running, wait and re-check using `sleep`:
+2. If required checks are still running, start with short waits and only widen the interval when the remaining jobs are clearly long-running:
 
 ```bash
-sleep 120 && env -u GH_TOKEN -u GITHUB_TOKEN gh pr view <pr> --json mergeable,mergeStateStatus,statusCheckRollup,url,headRefOid
+sleep 60 && env -u GH_TOKEN -u GITHUB_TOKEN gh pr view <pr> --json mergeable,mergeStateStatus,statusCheckRollup,url,headRefOid
 ```
 
 3. Increase the wait window for slower matrix jobs:
 
-- 120 seconds for early setup
-- 240 seconds for mid-sized CI
-- 360 to 480 seconds for multi-OS builds, Windows native delivery E2E, release-plz, or smoke phases
+- 60 to 120 seconds for early setup and fast checks
+- 180 seconds once only matrix builds remain
+- 240 to 300 seconds only when you are waiting on known long-running artifact or release publication jobs
 
 4. Use `gh pr checks <pr>` for a compact summary once checks look close to done.
 5. Treat skipped release jobs in pull request mode as expected if `gh pr checks` reports all checks successful.
@@ -125,7 +125,7 @@ env -u GH_TOKEN -u GITHUB_TOKEN gh pr merge <pr> --merge --delete-branch=false -
 env -u GH_TOKEN -u GITHUB_TOKEN gh pr view <pr> --json mergedAt,mergeCommit,url,baseRefName,headRefName
 ```
 
-## Phase 4: Monitor Post-Merge main Workflows
+## Phase 4: Monitor Post-Merge main Workflows And Poll For release-plz Early
 
 1. Immediately list workflows for the merge commit:
 
@@ -133,34 +133,58 @@ env -u GH_TOKEN -u GITHUB_TOKEN gh pr view <pr> --json mergedAt,mergeCommit,url,
 env -u GH_TOKEN -u GITHUB_TOKEN gh run list --commit <merge-sha> --json databaseId,status,conclusion,workflowName,url
 ```
 
-2. Wait and re-check with `sleep` until all required workflows on `main` are complete and green:
+2. In parallel, poll for the release-plz PR instead of waiting for every main workflow to finish before looking for it:
 
 ```bash
-sleep 300 && env -u GH_TOKEN -u GITHUB_TOKEN gh run list --commit <merge-sha> --json databaseId,status,conclusion,workflowName,url
+until env -u GH_TOKEN -u GITHUB_TOKEN gh pr list --base main --state open --search 'chore: release in:title' --json number,url | jq -e 'length > 0' >/dev/null; do
+	echo "Waiting for release-plz PR..."
+	sleep 30
+done
 ```
 
-3. For ato-cli, the workflows to watch usually include:
+3. Wait and re-check with `sleep` until the required workflows on `main` are complete and green:
 
-- `Build (Multi OS)`
-- `V3 Parity Matrix`
+```bash
+sleep 120 && env -u GH_TOKEN -u GITHUB_TOKEN gh run list --commit <merge-sha> --json databaseId,status,conclusion,workflowName,url
+```
+
+4. For ato-cli, the workflows to watch on `main` in the shortened release path usually include:
+
 - `Security Audit`
 - `Release PR`
-- `Secret Scan (gitleaks)`
 
-4. Do not move to tagging until the release commit on `main` is fully green.
+`Build (Multi OS)`, `V3 Parity Matrix`, and `Secret Scan (gitleaks)` are expected to run from pull request or scheduled/manual paths rather than every `main` push.
+
+5. Once the release-plz PR exists, move to Phase 5 immediately while only the remaining `main` jobs continue in the background.
 
 ## Phase 5: Follow The release-plz PR
 
-1. Find the open release PR, typically titled `chore: release`.
-2. Inspect it directly:
+1. Find the open release PR, typically titled `chore: release`:
+
+```bash
+env -u GH_TOKEN -u GITHUB_TOKEN gh pr list --base main --state open --search 'chore: release in:title' --json number,title,url,headRefName,baseRefName
+```
+
+2. Before monitoring it to completion, extract the proposed version and check for collisions immediately:
+
+```bash
+env -u GH_TOKEN -u GITHUB_TOKEN gh pr diff <release-pr> --repo ato-run/ato-cli | rg '^\+version\s*=\s*"'
+git tag -l 'v<version>'
+env -u GH_TOKEN -u GITHUB_TOKEN gh release view v<version> --json tagName,publishedAt,url,isDraft,isPrerelease
+```
+
+If the proposed version already exists as a tag or published GitHub Release, do not merge the colliding release PR. Jump directly to the patch bump flow in Phase 7.
+
+3. Inspect it directly:
 
 ```bash
 env -u GH_TOKEN -u GITHUB_TOKEN gh pr view <release-pr> --json number,title,state,mergeable,mergeStateStatus,headRefName,baseRefName,statusCheckRollup,url
 ```
 
-3. Monitor it with `gh pr checks <release-pr>` and `sleep` exactly like the earlier change PR.
-4. Merge it once checks are green, again preferring normal merge first and `--admin` only if policy requires it.
-5. Capture the release PR merge commit SHA.
+4. Monitor it with `gh pr checks <release-pr>` and adaptive `sleep` exactly like the earlier change PR.
+5. In the current shortened workflow set, the release PR checks usually include `Build (Multi OS)`, `Security Audit`, and `Release/plan`.
+6. Merge it once checks are green, again preferring normal merge first and `--admin` only if policy requires it.
+7. Capture the release PR merge commit SHA.
 
 ## Phase 6: Confirm The Version Before Tagging
 
@@ -207,7 +231,8 @@ If a collision exists, the correct next step is a patch bump and a fresh release
 7. Merge it after checks are green, using `--admin` only if branch policy still blocks a green PR.
 8. Monitor the post-merge `main` workflows for the bump merge commit until green.
 9. Re-check whether release-plz opened a new `chore: release` PR for the bumped version.
-10. Follow that new release PR through the same monitoring and merge flow.
+10. If release-plz does not open a follow-up PR and `origin/main` already contains the bumped version, treat the bumped merge commit itself as the release commit and continue to tagging after its `main` workflows are green.
+11. Otherwise follow the new release PR through the same monitoring and merge flow.
 
 Useful commands for the bump PR path:
 
@@ -239,14 +264,21 @@ This tag push is what triggers the GitHub Release publication workflow for ato-c
 env -u GH_TOKEN -u GITHUB_TOKEN gh run list --limit 10 --json databaseId,status,conclusion,workflowName,displayTitle,url
 ```
 
-2. Wait and re-check with `sleep` until the Release workflow finishes.
-3. Confirm the final GitHub Release:
+2. The slow path inside `release.yml` is usually `build-local-artifacts`, then `build-global-artifacts`, then `host`. Poll job status directly when you want to know the real bottleneck instead of only checking the top-level run state:
+
+```bash
+env -u GH_TOKEN -u GITHUB_TOKEN gh api repos/ato-run/ato-cli/actions/runs/<run-id>/jobs --paginate --jq '.jobs[] | [.name, .status, (.conclusion // "")] | @tsv'
+```
+
+3. Wait and re-check with `sleep` until the Release workflow reaches `host` success and the GitHub Release entry appears.
+4. Confirm the final GitHub Release:
 
 ```bash
 env -u GH_TOKEN -u GITHUB_TOKEN gh release view v<version> --json name,tagName,isDraft,isPrerelease,url,assets,publishedAt
 ```
 
-4. Verify that expected assets are uploaded, not just the shell release entry.
+5. Verify that expected assets are uploaded, not just the shell release entry.
+6. You do not need to keep waiting on late signature/provenance uploads if the release entry exists and the expected primary archives are already attached, unless you explicitly need SBOM or sigstore completeness before stopping.
 
 ## Decision Points
 
