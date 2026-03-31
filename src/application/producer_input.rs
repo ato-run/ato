@@ -8,7 +8,7 @@ use capsule_core::input_resolver::{
     resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ResolvedSourceOnly,
 };
 use capsule_core::lock_runtime::resolve_lock_runtime_model;
-use capsule_core::router::{CompatManifestBridge, ExecutionDescriptor};
+use capsule_core::router::{CompatManifestBridge, CompatProjectInput, ExecutionDescriptor};
 use serde_json::Value;
 
 use crate::application::ports::publish::{PublishArtifactIdentityClass, PublishArtifactMetadata};
@@ -137,6 +137,18 @@ impl ProducerAuthoritativeInput {
         self.legacy_producer_bridge
             .as_ref()
             .and_then(|bridge| bridge.bridge.toml_value().ok())
+    }
+
+    pub(crate) fn packaging_compat_project_input(&self) -> Result<Option<CompatProjectInput>> {
+        self.legacy_producer_bridge
+            .as_ref()
+            .map(|bridge| {
+                CompatProjectInput::from_bridge(
+                    self.descriptor.workspace_root.clone(),
+                    bridge.bridge.clone(),
+                )
+            })
+            .transpose()
     }
 
     #[allow(dead_code)]

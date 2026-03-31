@@ -71,9 +71,11 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             auto_fix_src,
             auto_fix_all,
             allow_unverified,
+            args,
         } => run::execute_run_like_command(run::RunLikeCommandArgs {
             path,
             target,
+            args,
             watch,
             background,
             nacelle,

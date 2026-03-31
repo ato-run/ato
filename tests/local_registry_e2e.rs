@@ -249,6 +249,30 @@ fn run_ato_with_home(
         .with_context(|| format!("failed to run ato {:?}", args))
 }
 
+fn run_ato_with_home_allow_unsafe(
+    ato: &Path,
+    args: &[&str],
+    cwd: &Path,
+    home_dir: &Path,
+) -> Result<std::process::Output> {
+    let path = ensure_fake_runtime_shims(home_dir)?;
+    Command::new(ato)
+        .args(args)
+        .current_dir(cwd)
+        .env("HOME", home_dir)
+        .env("PATH", path)
+        .env("CAPSULE_ALLOW_UNSAFE", "1")
+        .output()
+        .with_context(|| format!("failed to run ato {:?}", args))
+}
+
+fn read_probe_json(path: &Path) -> Result<serde_json::Value> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("expected probe output at {}", path.display()))?;
+    serde_json::from_str(raw.trim())
+        .with_context(|| format!("expected JSON probe in {}: {}", path.display(), raw))
+}
+
 fn start_local_registry(ato: &Path, data_dir: &Path) -> Result<(ServerGuard, String)> {
     let port = reserve_port();
     let base_url = format!("http://127.0.0.1:{}", port);
@@ -406,6 +430,25 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
             copy_dir_recursive(&source_path, &dest_path)?;
+        } else if file_type.is_symlink() {
+            let metadata = std::fs::metadata(&source_path)
+                .with_context(|| format!("follow symlink {}", source_path.display()))?;
+            if metadata.is_dir() {
+                copy_dir_recursive(&source_path, &dest_path)?;
+            } else if metadata.is_file() {
+                std::fs::copy(&source_path, &dest_path).with_context(|| {
+                    format!(
+                        "copy symlinked sample fixture {} -> {}",
+                        source_path.display(),
+                        dest_path.display()
+                    )
+                })?;
+            } else {
+                anyhow::bail!(
+                    "unsupported symlinked sample fixture entry: {}",
+                    source_path.display()
+                );
+            }
         } else if file_type.is_file() {
             std::fs::copy(&source_path, &dest_path).with_context(|| {
                 format!(
@@ -548,10 +591,7 @@ prepare = "echo prepare"
         build_dir.join("main.ts"),
         r#"console.log("cwdless publish")"#,
     )?;
-    std::fs::write(
-        build_dir.join("deno.lock"),
-        r#"{"version":"5","specifiers":{},"packages":{}}"#,
-    )?;
+    seed_minimal_deno_lockfiles(&build_dir)?;
 
     let build = run_ato_with_home(&ato, &["build", "."], &build_dir, &home_dir)?;
     assert!(
@@ -1254,10 +1294,7 @@ entrypoint = "main.ts"
         project_dir.join("README.md"),
         "# Readme Phase Test\n\nThis README must be visible in the local registry UI.\n",
     )?;
-    std::fs::write(
-        project_dir.join("deno.lock"),
-        r#"{"version":"5","specifiers":{},"packages":{}}"#,
-    )?;
+    seed_minimal_deno_lockfiles(&project_dir)?;
 
     let Some((_guard, base_url)) = start_local_registry_or_skip(
         &ato,
@@ -1355,10 +1392,7 @@ entrypoint = "main.ts"
         project_dir.join("main.ts"),
         r#"console.log("hello monorepo readme");"#,
     )?;
-    std::fs::write(
-        project_dir.join("deno.lock"),
-        r#"{"version":"5","specifiers":{},"packages":{}}"#,
-    )?;
+    seed_minimal_deno_lockfiles(&project_dir)?;
 
     let Some((_guard, base_url)) = start_local_registry_or_skip(
         &ato,
@@ -2142,6 +2176,131 @@ entrypoint = "main.py"
             .contains("uv.lock is required for source/python execution"),
         "unexpected uv.lock error in --sandbox --yes python run; stderr={}",
         python_with_lock_unsafe_yes_stderr
+    );
+
+    Ok(())
+}
+
+#[test]
+#[serial_test::serial]
+fn e2e_local_registry_run_exported_python_cli_preserves_arg_order() -> Result<()> {
+    let ato = assert_cmd::cargo::cargo_bin("ato");
+    let tmp = TempDir::new().context("create temp dir")?;
+    let home_dir = tmp.path().join("home");
+    std::fs::create_dir_all(&home_dir)?;
+    let data_dir = tmp.path().join("registry-data");
+    let project_dir = tmp.path().join("tool-project");
+    let export_probe_path = tmp.path().join("export-probe.json");
+    std::fs::create_dir_all(&project_dir)?;
+
+    std::fs::write(
+        project_dir.join("capsule.toml"),
+        r#"schema_version = "0.2"
+name = "tool"
+version = "1.0.0"
+type = "app"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11.10"
+run_command = "python3 default.py --from-default"
+
+[targets.export]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11.10"
+run_command = "python3 tool.py --from-target"
+
+[exports.cli.tool]
+kind = "python-tool"
+target = "export"
+args = ["--from-export"]
+"#,
+    )?;
+    std::fs::write(project_dir.join("default.py"), "print('default')\n")?;
+    std::fs::write(
+        project_dir.join("tool.py"),
+        format!(
+            "import json, pathlib, sys\npathlib.Path({:?}).write_text(json.dumps({{\"marker\": \"export\", \"argv\": sys.argv[1:]}}))\n",
+            export_probe_path.display().to_string()
+        ),
+    )?;
+    std::fs::write(project_dir.join("uv.lock"), "# uv lock\n")?;
+
+    let Some((_guard, base_url)) = start_local_registry_or_skip(
+        &ato,
+        &data_dir,
+        "e2e_local_registry_run_exported_python_cli_preserves_arg_order",
+    )?
+    else {
+        return Ok(());
+    };
+
+    let artifact = build_capsule_artifact(&ato, &project_dir, "tool", &home_dir)?;
+    publish_artifact_with_scoped_id(
+        &ato,
+        &artifact,
+        "local/tool",
+        &base_url,
+        tmp.path(),
+        &home_dir,
+    )?;
+
+    let fresh_run = run_ato_with_home_allow_unsafe(
+        &ato,
+        &[
+            "run",
+            "@local/tool",
+            "--registry",
+            &base_url,
+            "--dangerously-skip-permissions",
+            "--yes",
+            "--",
+            "--help",
+            "--user-flag",
+        ],
+        tmp.path(),
+        &home_dir,
+    )?;
+    assert!(
+        fresh_run.status.success(),
+        "fresh exported run failed: {}",
+        String::from_utf8_lossy(&fresh_run.stderr)
+    );
+    let fresh_probe = read_probe_json(&export_probe_path)?;
+    assert_eq!(fresh_probe["marker"], "export");
+    assert_eq!(
+        fresh_probe["argv"],
+        serde_json::json!(["--from-target", "--from-export", "--help", "--user-flag"])
+    );
+
+    let installed_run = run_ato_with_home_allow_unsafe(
+        &ato,
+        &[
+            "run",
+            "@local/tool",
+            "--registry",
+            &base_url,
+            "--dangerously-skip-permissions",
+            "--yes",
+            "--",
+            "--help",
+        ],
+        tmp.path(),
+        &home_dir,
+    )?;
+    assert!(
+        installed_run.status.success(),
+        "installed exported run failed: {}",
+        String::from_utf8_lossy(&installed_run.stderr)
+    );
+    let installed_probe = read_probe_json(&export_probe_path)?;
+    assert_eq!(installed_probe["marker"], "export");
+    assert_eq!(
+        installed_probe["argv"],
+        serde_json::json!(["--from-target", "--from-export", "--help"])
     );
 
     Ok(())

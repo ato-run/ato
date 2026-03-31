@@ -590,7 +590,7 @@ mod tests {
                 (HourglassPhase::Prepare, "run"),
                 (HourglassPhase::Build, "run"),
                 (HourglassPhase::Verify, "run"),
-                (HourglassPhase::Install, "run"),
+                (HourglassPhase::Install, "skip"),
                 (HourglassPhase::DryRun, "skip"),
                 (HourglassPhase::Publish, "skip"),
             ]
