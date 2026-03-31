@@ -1467,10 +1467,15 @@ fn copy_workspace_snapshot(
 }
 
 fn should_skip_snapshot(relative: &Path) -> bool {
-    relative.components().any(|component| {
-        let name = component.as_os_str().to_string_lossy();
+    let components = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    components.windows(2).any(|window| {
+        window[0].as_str() == ".ato" && window[1].as_str() == "tmp"
+    }) || components.iter().any(|name| {
         matches!(
-            name.as_ref(),
+            name.as_str(),
             ".git" | ".tmp" | "target" | "node_modules" | ".venv"
         )
     })
@@ -1525,6 +1530,13 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join(".tmp").join("ignore")).expect("tmp");
         std::fs::write(tmp.path().join(".tmp").join("ignore").join("x"), "secret")
             .expect("tmp file");
+        std::fs::create_dir_all(tmp.path().join(".ato").join("tmp").join("ignore"))
+            .expect("ato tmp");
+        std::fs::write(
+            tmp.path().join(".ato").join("tmp").join("ignore").join("y"),
+            "secret",
+        )
+        .expect("ato tmp file");
 
         let store =
             AgentSessionStore::create(tmp.path(), tmp.path(), &tmp.path().join("capsule.toml"))
@@ -1535,6 +1547,7 @@ mod tests {
             .contains(".ato/tmp/agent/runs/run-"));
         assert!(store.workspace_dir().join("package.json").exists());
         assert!(!store.workspace_dir().join(".tmp").exists());
+        assert!(!store.workspace_dir().join(".ato").join("tmp").exists());
     }
 
     #[test]

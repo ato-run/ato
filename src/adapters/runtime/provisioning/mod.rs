@@ -176,6 +176,7 @@ mod tests {
             toml::from_str(
                 r#"
 name = "demo"
+type = "app"
 default_target = "app"
 
 [targets.app]

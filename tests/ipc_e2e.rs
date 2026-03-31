@@ -269,7 +269,7 @@ runtime_version = "1.46.3"
 entrypoint = "main.ts"
 
 [ipc.imports.greeter]
-from = "missing-service"
+from = "./missing-service"
 "#,
     );
     write_file(

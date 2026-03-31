@@ -2,6 +2,26 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
+## [Unreleased]
+
+### What Changed
+
+#### Features
+
+- Add Phase 1 exported CLI execution through `ato run @publisher/tool -- ...` for authored `exports.cli.<name>` entries backed by `python-tool`
+
+#### Bug Fixes
+
+- Preserve authored manifest `exports` through build and publish packaging so exported CLI metadata survives artifact round-trips
+
+## [0.4.35] - 2026-03-31
+
+### What Changed
+
+#### CI
+
+- Bump the patch release after `v0.4.34` was already tagged and published
+
 ## [0.4.34] - 2026-03-30
 
 ### What Changed

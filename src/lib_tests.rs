@@ -219,6 +219,45 @@ fn run_command_parses_agent_mode() {
 }
 
 #[test]
+fn run_command_parses_trailing_args_after_separator() {
+    let cli =
+        Cli::try_parse_from(["ato", "run", "@demo/tool", "--", "--help", "-v"]).expect("parse");
+
+    match cli.command {
+        Commands::Run { path, args, .. } => {
+            assert_eq!(path, PathBuf::from("@demo/tool"));
+            assert_eq!(args, vec!["--help".to_string(), "-v".to_string()]);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn run_command_parses_trailing_args_with_target_flag() {
+    let cli = Cli::try_parse_from([
+        "ato",
+        "run",
+        "--target",
+        "cli",
+        "@demo/tool",
+        "--",
+        "--help",
+    ])
+    .expect("parse");
+
+    match cli.command {
+        Commands::Run {
+            path, target, args, ..
+        } => {
+            assert_eq!(path, PathBuf::from("@demo/tool"));
+            assert_eq!(target.as_deref(), Some("cli"));
+            assert_eq!(args, vec!["--help".to_string()]);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
 fn init_command_defaults_to_durable_workspace_materialization() {
     let cli = Cli::try_parse_from(["ato", "init"]).expect("parse");
 

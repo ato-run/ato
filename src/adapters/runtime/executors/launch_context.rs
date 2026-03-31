@@ -18,6 +18,7 @@ pub struct RuntimeLaunchContext {
     ipc: Option<IpcContext>,
     injected_env: HashMap<String, String>,
     injected_mounts: Vec<InjectedMount>,
+    command_args: Vec<String>,
 }
 
 impl RuntimeLaunchContext {
@@ -31,6 +32,7 @@ impl RuntimeLaunchContext {
                 ipc: Some(ipc),
                 injected_env: HashMap::new(),
                 injected_mounts: Vec::new(),
+                command_args: Vec::new(),
             }
         } else {
             Self::empty()
@@ -44,6 +46,11 @@ impl RuntimeLaunchContext {
 
     pub fn with_injected_mounts(mut self, mounts: Vec<InjectedMount>) -> Self {
         self.injected_mounts.extend(mounts);
+        self
+    }
+
+    pub fn with_command_args(mut self, args: Vec<String>) -> Self {
+        self.command_args.extend(args);
         self
     }
 
@@ -65,6 +72,10 @@ impl RuntimeLaunchContext {
 
     pub fn injected_mounts(&self) -> &[InjectedMount] {
         &self.injected_mounts
+    }
+
+    pub fn command_args(&self) -> &[String] {
+        &self.command_args
     }
 
     pub fn merged_env(&self) -> HashMap<String, String> {

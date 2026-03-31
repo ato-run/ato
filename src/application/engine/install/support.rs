@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -19,6 +19,7 @@ use crate::install;
 use crate::preview;
 use crate::progressive_ui;
 use crate::reporters;
+use crate::runtime::tree as runtime_tree;
 use crate::tui;
 use crate::{
     CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, DEFAULT_RUN_REGISTRY_URL,
@@ -719,10 +720,20 @@ pub(crate) fn enforce_sandbox_mode_flags(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedCliExportRequest {
+    pub(crate) scoped_id: String,
+    pub(crate) export_name: String,
+    pub(crate) backend_kind: String,
+    pub(crate) target_label: String,
+    pub(crate) prefix_args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedRunTarget {
     pub(crate) path: PathBuf,
     pub(crate) agent_local_root: Option<PathBuf>,
     pub(crate) desktop_open_path: Option<PathBuf>,
+    pub(crate) export_request: Option<ResolvedCliExportRequest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -755,12 +766,14 @@ pub(crate) async fn resolve_run_target_or_install(
     reporter: Arc<reporters::CliReporter>,
 ) -> Result<ResolvedRunTarget> {
     let raw = path.to_string_lossy().to_string();
+    let export_invocation = raw.trim().starts_with('@');
     let expanded_local = crate::local_input::expand_local_path(&raw);
     if crate::local_input::should_treat_input_as_local(&raw, &expanded_local) {
         return Ok(ResolvedRunTarget {
             agent_local_root: agent_local_root_for_path(&expanded_local),
             path: expanded_local,
             desktop_open_path: None,
+            export_request: None,
         });
     }
 
@@ -813,6 +826,7 @@ pub(crate) async fn resolve_run_target_or_install(
             path: install_result.path,
             agent_local_root: None,
             desktop_open_path,
+            export_request: None,
         });
     }
 
@@ -861,8 +875,13 @@ pub(crate) async fn resolve_run_target_or_install(
                             desktop_open_path: detect_desktop_open_path_for_installed_capsule(
                                 &installed_capsule,
                             ),
-                            path: installed_capsule,
+                            path: installed_capsule.clone(),
                             agent_local_root: None,
+                            export_request: resolve_cli_export_request(
+                                export_invocation,
+                                &scoped_ref,
+                                &installed_capsule,
+                            )?,
                         });
                     }
                 }
@@ -880,8 +899,13 @@ pub(crate) async fn resolve_run_target_or_install(
                         desktop_open_path: detect_desktop_open_path_for_installed_capsule(
                             &installed_capsule,
                         ),
-                        path: installed_capsule,
+                        path: installed_capsule.clone(),
                         agent_local_root: None,
+                        export_request: resolve_cli_export_request(
+                            export_invocation,
+                            &scoped_ref,
+                            &installed_capsule,
+                        )?,
                     });
                 }
                 return Err(error);
@@ -894,8 +918,13 @@ pub(crate) async fn resolve_run_target_or_install(
         );
         return Ok(ResolvedRunTarget {
             desktop_open_path: detect_desktop_open_path_for_installed_capsule(&installed_capsule),
-            path: installed_capsule,
+            path: installed_capsule.clone(),
             agent_local_root: None,
+            export_request: resolve_cli_export_request(
+                export_invocation,
+                &scoped_ref,
+                &installed_capsule,
+            )?,
         });
     }
 
@@ -961,11 +990,131 @@ pub(crate) async fn resolve_run_target_or_install(
     )
     .await?;
     let desktop_open_path = launchable_desktop_open_path(&install_result);
+    let install_path = install_result.path.clone();
     Ok(ResolvedRunTarget {
-        path: install_result.path,
+        path: install_path.clone(),
         agent_local_root: None,
         desktop_open_path,
+        export_request: resolve_cli_export_request(export_invocation, &scoped_ref, &install_path)?,
     })
+}
+
+fn resolve_cli_export_request(
+    export_invocation: bool,
+    scoped_ref: &install::ScopedCapsuleRef,
+    capsule_path: &Path,
+) -> Result<Option<ResolvedCliExportRequest>> {
+    if !export_invocation {
+        return Ok(None);
+    }
+
+    let manifest = load_export_manifest(capsule_path).with_context(|| {
+        format!(
+            "Failed to load manifest for exported CLI '{}'.",
+            scoped_ref.scoped_id
+        )
+    })?;
+    let export_name = scoped_ref.slug.trim();
+    let export = manifest
+        .exports
+        .as_ref()
+        .and_then(|exports| exports.cli.get(export_name))
+        .with_context(|| {
+            format!(
+                "Capsule '{}' does not export CLI tool '{}'.",
+                scoped_ref.scoped_id, export_name
+            )
+        })?;
+
+    let target_label = export.target.trim();
+    let target = manifest
+        .targets
+        .as_ref()
+        .and_then(|targets| targets.named_target(target_label))
+        .with_context(|| {
+            format!(
+                "Export '{}.{}' references missing target '{}'.",
+                scoped_ref.scoped_id, export_name, target_label
+            )
+        })?;
+
+    if !target.runtime.eq_ignore_ascii_case("source") {
+        anyhow::bail!(
+            "Export '{}.{}' must reference a runtime=source target.",
+            scoped_ref.scoped_id,
+            export_name
+        );
+    }
+
+    if !target
+        .driver
+        .as_deref()
+        .map(|driver| driver.eq_ignore_ascii_case("python"))
+        .unwrap_or(false)
+    {
+        anyhow::bail!(
+            "Export '{}.{}' must reference a source/python target.",
+            scoped_ref.scoped_id,
+            export_name
+        );
+    }
+
+    Ok(Some(ResolvedCliExportRequest {
+        scoped_id: scoped_ref.scoped_id.clone(),
+        export_name: export_name.to_string(),
+        backend_kind: export.kind.trim().to_string(),
+        target_label: target_label.to_string(),
+        prefix_args: export.args.clone(),
+    }))
+}
+
+fn load_export_manifest(capsule_path: &Path) -> Result<capsule_core::types::CapsuleManifest> {
+    if let Some(manifest_path) = runtime_tree::prepare_store_runtime_for_capsule(capsule_path)? {
+        let manifest = capsule_core::manifest::load_manifest_with_validation_mode(
+            &manifest_path,
+            capsule_core::types::ValidationMode::Strict,
+        )?;
+        return Ok(manifest.model);
+    }
+
+    let file = std::fs::File::open(capsule_path)
+        .with_context(|| format!("Failed to open capsule archive: {}", capsule_path.display()))?;
+    let mut archive = tar::Archive::new(file);
+    let mut manifest_text = None;
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?;
+        if path.as_ref() == Path::new("capsule.toml") {
+            let mut raw = String::new();
+            entry.read_to_string(&mut raw)?;
+            manifest_text = Some(raw);
+            break;
+        }
+    }
+
+    let manifest_text = manifest_text.with_context(|| {
+        format!(
+            "Capsule archive does not contain capsule.toml: {}",
+            capsule_path.display()
+        )
+    })?;
+
+    let manifest = capsule_core::types::CapsuleManifest::from_toml_with_path(
+        &manifest_text,
+        Path::new("capsule.toml"),
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    manifest
+        .validate_for_mode(capsule_core::types::ValidationMode::Strict)
+        .map_err(|errors| {
+            anyhow::anyhow!(errors
+                .into_iter()
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+                .join("; "))
+        })?;
+    Ok(manifest)
 }
 
 fn launchable_desktop_open_path(install_result: &install::InstallResult) -> Option<PathBuf> {
@@ -1877,6 +2026,7 @@ pub(crate) async fn install_github_repository(
 pub(crate) fn execute_run_command(
     path: PathBuf,
     target: Option<String>,
+    args: Vec<String>,
     watch: bool,
     background: bool,
     nacelle: Option<PathBuf>,
@@ -1901,6 +2051,7 @@ pub(crate) fn execute_run_command(
     rt.block_on(commands::run::execute(commands::run::RunArgs {
         target: path,
         target_label: target,
+        args,
         watch,
         background,
         nacelle,
@@ -1915,6 +2066,7 @@ pub(crate) fn execute_run_command(
         keep_failed_artifacts,
         auto_fix_mode,
         allow_unverified,
+        export_request: None,
         state_bindings: state,
         inject_bindings: inject,
         reporter,
@@ -1977,4 +2129,288 @@ fn ensure_supported_github_auto_fix_mode(auto_fix_mode: Option<GitHubAutoFixMode
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+    use std::sync::Arc;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn write_installed_capsule(
+        home: &Path,
+        publisher: &str,
+        slug: &str,
+        version: &str,
+        manifest: &str,
+    ) {
+        let version_dir = home
+            .join(".ato")
+            .join("store")
+            .join(publisher)
+            .join(slug)
+            .join(version);
+        std::fs::create_dir_all(&version_dir).expect("create version dir");
+        let capsule_path = version_dir.join(format!("{slug}.capsule"));
+        let file = std::fs::File::create(&capsule_path).expect("create capsule file");
+        let mut builder = tar::Builder::new(file);
+        let mut header = tar::Header::new_gnu();
+        header.set_path("capsule.toml").expect("set capsule path");
+        header.set_mode(0o644);
+        header.set_size(manifest.len() as u64);
+        header.set_mtime(0);
+        header.set_cksum();
+        builder
+            .append_data(
+                &mut header,
+                "capsule.toml",
+                Cursor::new(manifest.as_bytes()),
+            )
+            .expect("append manifest");
+        builder.finish().expect("finish capsule");
+    }
+
+    async fn resolve_export_target(manifest: &str) -> Result<ResolvedRunTarget> {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = EnvVarGuard::set_path("HOME", home.path());
+        write_installed_capsule(home.path(), "team", "tool", "1.0.0", manifest);
+
+        resolve_run_target_or_install(
+            PathBuf::from("@team/tool"),
+            true,
+            false,
+            None,
+            false,
+            None,
+            Arc::new(reporters::CliReporter::new(false)),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn resolve_run_target_or_install_resolves_cli_export_from_installed_capsule() {
+        let resolved = resolve_export_target(
+            r#"
+schema_version = "0.2"
+name = "tool"
+version = "1.0.0"
+type = "app"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11"
+entrypoint = "default.py"
+
+[targets.export]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11"
+run_command = "python3 tool.py --from-target"
+
+[exports.cli.tool]
+kind = "python-tool"
+target = "export"
+args = ["--from-export"]
+"#,
+        )
+        .await
+        .expect("resolve export target");
+
+        let export = resolved.export_request.expect("export request");
+        assert_eq!(export.scoped_id, "team/tool");
+        assert_eq!(export.export_name, "tool");
+        assert_eq!(export.backend_kind, "python-tool");
+        assert_eq!(export.target_label, "export");
+        assert_eq!(export.prefix_args, vec!["--from-export".to_string()]);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn resolve_run_target_or_install_errors_when_export_missing() {
+        let err = resolve_export_target(
+            r#"
+schema_version = "0.2"
+name = "tool"
+version = "1.0.0"
+type = "app"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11"
+entrypoint = "default.py"
+"#,
+        )
+        .await
+        .expect_err("missing export must fail");
+
+        let details = err
+            .chain()
+            .map(|cause| cause.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            details.contains("does not export CLI tool 'tool'"),
+            "unexpected error chain: {details}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn resolve_run_target_or_install_errors_when_export_slug_mismatches() {
+        let err = resolve_export_target(
+            r#"
+schema_version = "0.2"
+name = "tool"
+version = "1.0.0"
+type = "app"
+default_target = "export"
+
+[targets.export]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11"
+entrypoint = "tool.py"
+
+[exports.cli.other-tool]
+kind = "python-tool"
+target = "export"
+"#,
+        )
+        .await
+        .expect_err("slug mismatch must fail");
+
+        let details = err
+            .chain()
+            .map(|cause| cause.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(details.contains("does not export CLI tool 'tool'"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn resolve_run_target_or_install_errors_when_export_backend_is_not_python_tool() {
+        let err = resolve_export_target(
+            r#"
+schema_version = "0.2"
+name = "tool"
+version = "1.0.0"
+type = "app"
+default_target = "export"
+
+[targets.export]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11"
+entrypoint = "tool.py"
+
+[exports.cli.tool]
+kind = "node-tool"
+target = "export"
+"#,
+        )
+        .await
+        .expect_err("unsupported export backend must fail");
+
+        let details = err
+            .chain()
+            .map(|cause| cause.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(details.contains("expected 'python-tool'"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn resolve_run_target_or_install_errors_when_export_target_missing() {
+        let err = resolve_export_target(
+            r#"
+schema_version = "0.2"
+name = "tool"
+version = "1.0.0"
+type = "app"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11"
+entrypoint = "default.py"
+
+[exports.cli.tool]
+kind = "python-tool"
+target = "missing"
+"#,
+        )
+        .await
+        .expect_err("missing export target must fail");
+
+        let details = err
+            .chain()
+            .map(|cause| cause.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(details.contains("references missing target 'missing'"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn resolve_run_target_or_install_errors_when_export_target_is_not_source_python() {
+        let err = resolve_export_target(
+            r#"
+schema_version = "0.2"
+name = "tool"
+version = "1.0.0"
+type = "app"
+default_target = "export"
+
+[targets.export]
+runtime = "source"
+driver = "node"
+runtime_version = "20"
+entrypoint = "tool.js"
+
+[exports.cli.tool]
+kind = "python-tool"
+target = "export"
+"#,
+        )
+        .await
+        .expect_err("non-python export target must fail");
+
+        let details = err
+            .chain()
+            .map(|cause| cause.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(details.contains("must reference a source/python target"));
+    }
 }

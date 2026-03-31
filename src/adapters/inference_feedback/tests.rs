@@ -92,7 +92,7 @@ fn manual_manifest_path_uses_repo_tmp_directory() {
     let path = build_manual_manifest_path(Path::new("/repo"), "koh0920/ato-cli", "attempt1");
     assert_eq!(
         path,
-        PathBuf::from("/repo/.tmp/ato/inference/github.com/koh0920/ato-cli/attempt1/capsule.toml")
+        PathBuf::from("/repo/.ato/tmp/inference/github.com/koh0920/ato-cli/attempt1/capsule.toml")
     );
 }
 
@@ -114,7 +114,7 @@ fn smoke_excerpt_is_capped_to_store_limit() {
 #[test]
 fn manual_intervention_message_includes_path_and_steps() {
     let message = build_manual_intervention_message(
-        Path::new("/repo/.tmp/ato/inference/github.com/koh0920/ato-cli/attempt1/capsule.toml"),
+        Path::new("/repo/.ato/tmp/inference/github.com/koh0920/ato-cli/attempt1/capsule.toml"),
         "DATABASE_URL is required",
         &[
             "Set DATABASE_URL before rerunning.".to_string(),
