@@ -2266,11 +2266,10 @@ fn test_publish_json_failure_uses_diagnostic_envelope() {
     assert_eq!(value["schema_version"], "1");
     assert_eq!(value["status"], "error");
     assert!(value["error"]["code"].as_str().is_some());
-    assert!(value["error"]["message"]
+    assert!(!value["error"]["message"]
         .as_str()
         .expect("message string")
-        .len()
-        > 0);
+        .is_empty());
 }
 
 #[test]
