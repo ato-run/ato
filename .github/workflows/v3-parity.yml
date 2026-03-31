@@ -8,14 +8,8 @@ on:
         required: false
         type: boolean
         default: false
-  push:
-    branches:
-      - dev
-      - main
-  pull_request:
-    branches:
-      - dev
-      - main
+  schedule:
+    - cron: "0 4 * * *"
 
 permissions:
   contents: read
@@ -31,7 +25,7 @@ concurrency:
 jobs:
   parity:
     name: Dual Build + Compatibility
-    if: ${{ !((github.event_name == 'workflow_dispatch' && inputs.native_only) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[native-only]'))) }}
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.native_only }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

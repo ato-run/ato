@@ -336,6 +336,7 @@ jobs:
             local bundle_path="$2"
             local max_attempts=5
             local attempt
+              local sleep_seconds
 
             for ((attempt = 1; attempt <= max_attempts; attempt++)); do
               rm -f "$bundle_path"
@@ -348,7 +349,13 @@ jobs:
                 return 1
               fi
 
-              local sleep_seconds=$((attempt * 10))
+              case "$attempt" in
+                1) sleep_seconds=2 ;;
+                2) sleep_seconds=5 ;;
+                3) sleep_seconds=10 ;;
+                4) sleep_seconds=20 ;;
+                *) sleep_seconds=30 ;;
+              esac
               echo "::warning::cosign sign-blob failed for $(basename "$input_path") on attempt ${attempt}/${max_attempts}; retrying in ${sleep_seconds}s"
               sleep "$sleep_seconds"
             done
