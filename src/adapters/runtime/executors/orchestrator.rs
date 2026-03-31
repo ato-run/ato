@@ -1543,6 +1543,7 @@ target = "db"
                 lock_path: None,
                 workspace_root: PathBuf::from("/tmp"),
                 effective_state: None,
+                execution_override: None,
                 bridge_manifest:
                     crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
                         plan.manifest.clone(),

@@ -14,6 +14,7 @@ use crate::{CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, Ru
 pub(crate) struct RunLikeCommandArgs {
     pub(crate) path: PathBuf,
     pub(crate) target: Option<String>,
+    pub(crate) args: Vec<String>,
     pub(crate) watch: bool,
     pub(crate) background: bool,
     pub(crate) nacelle: Option<PathBuf>,
@@ -52,6 +53,7 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
     execute_run_command(
         args.path,
         args.target,
+        args.args,
         args.watch,
         args.background,
         args.nacelle,
@@ -127,7 +129,7 @@ mod tests {
         assert!(backup_path.exists());
         assert_eq!(
             backup_path.parent().expect("parent"),
-            tmp.path().join(".tmp/ato/run-invalid-manifests")
+            tmp.path().join(".ato/tmp/run-invalid-manifests")
         );
         assert!(backup_path
             .file_name()
@@ -148,6 +150,7 @@ mod tests {
             path: tmp.path().to_path_buf(),
             agent_local_root: Some(tmp.path().to_path_buf()),
             desktop_open_path: None,
+            export_request: None,
         };
         let reporter = Arc::new(crate::reporters::CliReporter::new(true));
 
@@ -190,6 +193,7 @@ mod tests {
             path: tmp.path().join("ato.lock.json"),
             agent_local_root: Some(tmp.path().to_path_buf()),
             desktop_open_path: None,
+            export_request: None,
         };
         let reporter = Arc::new(crate::reporters::CliReporter::new(true));
 
