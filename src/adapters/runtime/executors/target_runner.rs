@@ -1,12 +1,13 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use capsule_core::execution_plan::derive::{self, PlatformSnapshot};
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::execution_plan::guard::{self, RuntimeGuardMode, RuntimeGuardResult};
 use capsule_core::execution_plan::model::{ExecutionPlan, ExecutionTier};
+use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::lock_runtime;
 use capsule_core::lockfile;
 use capsule_core::router::{ManifestData, RuntimeDecision};
@@ -71,7 +72,43 @@ pub async fn resolve_launch_context(
         reporter.warn(diagnostic.to_string()).await?;
     }
 
-    let ipc_ctx = IpcContext::from_manifest(prepared.bridge_manifest.as_toml())?;
+    let ipc_manifest_path = if prepared.bridge_manifest.as_toml().get("ipc").is_some() {
+        None
+    } else if plan.manifest_path.is_file()
+        && plan
+            .manifest_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("toml"))
+    {
+        Some(plan.manifest_path.clone())
+    } else {
+        let workspace_manifest = prepared.workspace_root.join("capsule.toml");
+        workspace_manifest.is_file().then_some(workspace_manifest)
+    };
+
+    let ipc_manifest = if let Some(path) = ipc_manifest_path {
+        Some(
+            toml::from_str::<toml::Value>(
+                &std::fs::read_to_string(&path)
+                    .with_context(|| format!("failed to read {}", path.display()))?,
+            )
+            .with_context(|| {
+                format!(
+                    "failed to parse manifest for IPC resolution: {}",
+                    path.display()
+                )
+            })?,
+        )
+    } else {
+        None
+    };
+
+    let ipc_ctx = IpcContext::from_manifest(
+        ipc_manifest
+            .as_ref()
+            .unwrap_or_else(|| prepared.bridge_manifest.as_toml()),
+    )?;
     if ipc_ctx.has_ipc() {
         debug!(
             resolved_services = ipc_ctx.resolved_count,
@@ -107,7 +144,7 @@ pub fn prepare_target_execution(
         RuntimeGuardMode::Strict
     };
 
-    let (execution_plan, runtime_decision, tier) =
+    let (mut execution_plan, runtime_decision, tier) =
         if let Some(lock) = prepared.authoritative_lock.as_ref() {
             let resolved =
                 lock_runtime::resolve_lock_runtime_model(lock, Some(plan.selected_target_label()))?;
@@ -167,6 +204,27 @@ pub fn prepare_target_execution(
                 compiled.tier,
             )
         };
+
+    let launch_ctx = if let Some(execution_override) = prepared.execution_override.as_ref() {
+        if execution_override.target_label != plan.selected_target_label() {
+            return Err(AtoExecutionError::execution_contract_invalid(
+                format!(
+                    "execution override target '{}' does not match selected target '{}'",
+                    execution_override.target_label,
+                    plan.selected_target_label()
+                ),
+                None,
+                Some(plan.selected_target_label()),
+            )
+            .into());
+        }
+        let mut effective_args = derive_launch_spec(plan)?.args;
+        effective_args.extend(execution_override.args.clone());
+        execution_plan.runtime.policy.args = effective_args;
+        launch_ctx.with_command_args(execution_override.args.clone())
+    } else {
+        launch_ctx
+    };
 
     if !options.defer_consent {
         let guard_manifest_dir = runtime_decision.plan.execution_working_directory();
@@ -308,15 +366,18 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        preflight_required_environment_variables, resolve_launch_context, verify_lockfile_integrity,
+        preflight_required_environment_variables, prepare_target_execution, resolve_launch_context,
+        verify_lockfile_integrity, TargetLaunchOptions,
     };
     use crate::application::pipeline::phases::run::{
-        CompatibilityLegacyLockContext, PreparedRunContext,
+        CompatibilityLegacyLockContext, DerivedBridgeManifest, PreparedRunContext,
+        RunExecutionOverride,
     };
     use crate::executors::launch_context::RuntimeLaunchContext;
     use crate::reporters::CliReporter;
+    use capsule_core::launch_spec::derive_launch_spec;
     use capsule_core::lockfile::{CapsuleLock, LockMeta};
-    use capsule_core::router::ExecutionProfile;
+    use capsule_core::router::{self, ExecutionProfile};
     use std::collections::HashMap;
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -325,6 +386,7 @@ mod tests {
     fn injected_env_satisfies_required_env() {
         let mut manifest = toml::map::Map::new();
         manifest.insert("name".to_string(), toml::Value::String("demo".to_string()));
+        manifest.insert("type".to_string(), toml::Value::String("app".to_string()));
         manifest.insert(
             "default_target".to_string(),
             toml::Value::String("default".to_string()),
@@ -383,6 +445,7 @@ mod tests {
         let raw_manifest = toml::from_str::<toml::Value>(
             r#"
 name = "demo"
+type = "app"
 default_target = "default"
 
 [targets.default]
@@ -407,6 +470,7 @@ entrypoint = "index.js"
             lock_path: None,
             workspace_root: manifest_dir,
             effective_state: None,
+            execution_override: None,
             bridge_manifest: crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
                 raw_manifest,
             ),
@@ -421,6 +485,212 @@ entrypoint = "index.js"
                 .expect("resolve launch context without reading manifest file");
 
         assert!(launch_ctx.ipc().is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_launch_context_falls_back_to_manifest_file_for_ipc_imports() {
+        let temp_dir = tempdir().expect("tempdir");
+        let manifest_path = temp_dir.path().join("capsule.toml");
+        std::fs::write(
+            &manifest_path,
+            r#"
+name = "demo"
+type = "app"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "node"
+entrypoint = "index.js"
+
+[ipc.imports.greeter]
+from = "./missing-service"
+"#,
+        )
+        .expect("write manifest");
+
+        let raw_manifest = toml::from_str::<toml::Value>(
+            &std::fs::read_to_string(&manifest_path).expect("read manifest"),
+        )
+        .expect("parse manifest");
+
+        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+            raw_manifest,
+            manifest_path.clone(),
+            temp_dir.path().to_path_buf(),
+            ExecutionProfile::Dev,
+            Some("default"),
+            HashMap::new(),
+        )
+        .expect("execution descriptor");
+        let prepared = PreparedRunContext {
+            authoritative_lock: None,
+            lock_path: None,
+            workspace_root: temp_dir.path().to_path_buf(),
+            effective_state: None,
+            execution_override: None,
+            bridge_manifest: crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
+                toml::Value::Table(toml::map::Map::new()),
+            ),
+            validation_mode: capsule_core::types::ValidationMode::Strict,
+            engine_override_declared: false,
+            compatibility_legacy_lock: None,
+        };
+
+        let err = resolve_launch_context(&plan, &prepared, &Arc::new(CliReporter::new(false)))
+            .await
+            .expect_err("missing required IPC import should fail");
+
+        assert!(err.to_string().contains("Required IPC import 'greeter'"));
+    }
+
+    #[test]
+    fn prepare_target_execution_keeps_policy_args_in_sync_with_launch_args() {
+        let temp_dir = tempdir().expect("tempdir");
+        let manifest_path = temp_dir.path().join("capsule.toml");
+        let manifest_text = r#"
+schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "export"
+
+[targets.export]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11"
+run_command = "python3 tool.py --from-target"
+"#;
+        std::fs::write(&manifest_path, manifest_text).expect("write manifest");
+        std::fs::write(temp_dir.path().join("uv.lock"), "# uv lock\n").expect("write uv.lock");
+
+        let decision = router::route_manifest_with_state_overrides_and_validation_mode(
+            &manifest_path,
+            ExecutionProfile::Dev,
+            Some("export"),
+            HashMap::new(),
+            capsule_core::types::ValidationMode::Strict,
+        )
+        .expect("route manifest");
+
+        let prepared = PreparedRunContext {
+            authoritative_lock: None,
+            lock_path: None,
+            workspace_root: temp_dir.path().to_path_buf(),
+            effective_state: None,
+            execution_override: Some(RunExecutionOverride {
+                target_label: "export".to_string(),
+                args: vec!["--from-export".to_string(), "--help".to_string()],
+            }),
+            bridge_manifest: DerivedBridgeManifest::new(
+                toml::from_str(manifest_text).expect("parse manifest toml"),
+            ),
+            validation_mode: capsule_core::types::ValidationMode::Strict,
+            engine_override_declared: false,
+            compatibility_legacy_lock: None,
+        };
+
+        let execution = prepare_target_execution(
+            &decision.plan,
+            &prepared,
+            RuntimeLaunchContext::empty(),
+            &TargetLaunchOptions {
+                enforcement: "audit".to_string(),
+                sandbox_mode: true,
+                dangerously_skip_permissions: true,
+                assume_yes: true,
+                preview_mode: false,
+                defer_consent: true,
+            },
+        )
+        .expect("prepare target execution");
+
+        assert_eq!(
+            execution.execution_plan.runtime.policy.args,
+            vec![
+                "--from-target".to_string(),
+                "--from-export".to_string(),
+                "--help".to_string()
+            ]
+        );
+        assert_eq!(
+            execution.launch_ctx.command_args(),
+            &["--from-export".to_string(), "--help".to_string()]
+        );
+    }
+
+    #[test]
+    fn prepare_target_execution_preserves_default_target_trailing_args() {
+        let temp_dir = tempdir().expect("tempdir");
+        let manifest_path = temp_dir.path().join("capsule.toml");
+        let manifest_text = r#"
+schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11"
+run_command = "python3 default.py --from-default"
+"#;
+        std::fs::write(&manifest_path, manifest_text).expect("write manifest");
+        std::fs::write(temp_dir.path().join("uv.lock"), "# uv lock\n").expect("write uv.lock");
+
+        let decision = router::route_manifest_with_state_overrides_and_validation_mode(
+            &manifest_path,
+            ExecutionProfile::Dev,
+            Some("default"),
+            HashMap::new(),
+            capsule_core::types::ValidationMode::Strict,
+        )
+        .expect("route manifest");
+
+        let prepared = PreparedRunContext {
+            authoritative_lock: None,
+            lock_path: None,
+            workspace_root: temp_dir.path().to_path_buf(),
+            effective_state: None,
+            execution_override: Some(RunExecutionOverride {
+                target_label: "default".to_string(),
+                args: vec!["--help".to_string()],
+            }),
+            bridge_manifest: DerivedBridgeManifest::new(
+                toml::from_str(manifest_text).expect("parse manifest toml"),
+            ),
+            validation_mode: capsule_core::types::ValidationMode::Strict,
+            engine_override_declared: false,
+            compatibility_legacy_lock: None,
+        };
+
+        let execution = prepare_target_execution(
+            &decision.plan,
+            &prepared,
+            RuntimeLaunchContext::empty(),
+            &TargetLaunchOptions {
+                enforcement: "audit".to_string(),
+                sandbox_mode: true,
+                dangerously_skip_permissions: true,
+                assume_yes: true,
+                preview_mode: false,
+                defer_consent: true,
+            },
+        )
+        .expect("prepare target execution");
+
+        assert_eq!(
+            execution.execution_plan.runtime.policy.args,
+            vec!["--from-default".to_string(), "--help".to_string()]
+        );
+        assert_eq!(execution.launch_ctx.command_args(), &["--help".to_string()]);
+        assert_eq!(
+            derive_launch_spec(&decision.plan)
+                .expect("derive launch spec")
+                .args,
+            vec!["--from-default".to_string()]
+        );
     }
 
     #[test]

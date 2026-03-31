@@ -45,6 +45,7 @@ fn cli_bindings_override_locked_dependency_bindings() {
     );
     let manifest = toml::Value::Table(toml::map::Map::from_iter([
         ("name".to_string(), toml::Value::String("demo".to_string())),
+        ("type".to_string(), toml::Value::String("app".to_string())),
         (
             "default_target".to_string(),
             toml::Value::String("default".to_string()),

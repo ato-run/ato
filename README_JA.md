@@ -42,6 +42,17 @@ ato registry serve --host 127.0.0.1 --port 18787 [--auth-token <token>]
 - `ato inspect diagnostics [path] [--json]` — lock 設定の問題点と、修正のためのコマンドを案内します
 - `ato inspect remediation [path] [--json]` — 修正方法を提案します。可能な場合はソースの場所も表示します
 
+### Phase 1: exported CLI エントリ
+
+Phase 1 では `ato run @publisher/tool -- ...` による one-shot exported CLI 実行を追加しています。
+
+- 公開された capsule は `capsule.toml` に `exports.cli.<name>` を定義している必要があります。
+- Phase 1 で対応する backend は `kind = "python-tool"` のみです。
+- export 名は package slug と一致している必要があります。`@publisher/tool` の場合、capsule の slug も export 名も `tool` でなければなりません。
+- export は `runtime = "source"` かつ `driver = "python"` の target を参照している必要があります。
+- export prefix args とユーザーの trailing args は、consent、execution plan、最終 launch のすべてに反映されます。
+- persistent な install 済み CLI shim は Phase 1 の対象外です。今回は one-shot 実行のみです。
+
 ## lock-native 入力モデル
 
 `ato.lock.json` が設定の基準（唯一の正本）です。このファイルがあれば、他の設定は無視されるか、参考情報として扱われます。

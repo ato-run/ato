@@ -119,6 +119,65 @@ impl CapsuleManifest {
             ));
         }
 
+        if let Some(exports) = self.exports.as_ref() {
+            for (export_name, export) in &exports.cli {
+                if !is_kebab_case(export_name) {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "exports.cli.{} must be kebab-case",
+                        export_name
+                    )));
+                }
+
+                let kind = export.kind.trim().to_ascii_lowercase();
+                if kind != "python-tool" {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "exports.cli.{} kind '{}' is not supported; expected 'python-tool'",
+                        export_name, export.kind
+                    )));
+                    continue;
+                }
+
+                let target_label = export.target.trim();
+                if target_label.is_empty() {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "exports.cli.{} target is required",
+                        export_name
+                    )));
+                    continue;
+                }
+
+                let Some(target) = named_targets.get(target_label) else {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "exports.cli.{} references missing target '{}'",
+                        export_name, target_label
+                    )));
+                    continue;
+                };
+
+                if !target.runtime.trim().eq_ignore_ascii_case("source") {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "exports.cli.{} must reference a runtime=source target",
+                        export_name
+                    )));
+                }
+
+                let driver = infer_source_driver(target, target.entrypoint.trim());
+                if driver.as_deref() != Some("python") {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "exports.cli.{} must reference a source/python target",
+                        export_name
+                    )));
+                }
+
+                if export.args.iter().any(|arg| arg.trim().is_empty()) {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "exports.cli.{} args must not contain empty values",
+                        export_name
+                    )));
+                }
+            }
+        }
+
         let has_services = self
             .services
             .as_ref()
