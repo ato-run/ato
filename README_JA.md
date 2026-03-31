@@ -30,9 +30,23 @@ ato run github.com/user/my-app
 # レジストリからパッケージをインストールなしで即時実行。
 ato run publisher/awesome-tool
 
+# exported CLI エントリを one-shot 実行。
+ato run @publisher/tool -- --help
+
 # 単一のスクリプトを、設定ゼロで安全に実行。
 ato run scrape.py
 ```
+
+### Phase 1: exported CLI エントリ
+
+Phase 1 では `ato run @publisher/tool -- ...` による one-shot exported CLI 実行を追加しています。
+
+- 公開された capsule は `capsule.toml` に `exports.cli.<name>` を定義している必要があります。
+- Phase 1 で対応する backend は `kind = "python-tool"` のみです。
+- export 名は package slug と一致している必要があります。`@publisher/tool` の場合、capsule の slug も export 名も `tool` でなければなりません。
+- export は `runtime = "source"` かつ `driver = "python"` の target を参照している必要があります。
+- export prefix args とユーザーの trailing args は、consent、execution plan、最終 launch のすべてに反映されます。
+- persistent な install 済み CLI shim は Phase 1 の対象外です。今回は one-shot 実行のみです。
 
 ### 2. 他人のリポジトリから、完璧な開発環境を1秒で錬成 (`ato init`)
 

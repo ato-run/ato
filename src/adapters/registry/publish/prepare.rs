@@ -287,7 +287,7 @@ fn shell_command_for(command: &str) -> Command {
 #[cfg(not(windows))]
 fn shell_command_for(command: &str) -> Command {
     let mut cmd = Command::new("sh");
-    cmd.arg("-lc").arg(command);
+    cmd.arg("-c").arg(command);
     cmd
 }
 

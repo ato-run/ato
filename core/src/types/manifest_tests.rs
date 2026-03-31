@@ -553,6 +553,89 @@ port = 3000
 }
 
 #[test]
+fn test_validate_cli_export_python_tool_target_is_ok() {
+    let toml = r#"
+schema_version = "0.2"
+name = "python-tool-demo"
+version = "0.1.0"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "python"
+entrypoint = "main.py"
+runtime_version = "3.11"
+
+[exports.cli.demo-tool]
+kind = "python-tool"
+target = "cli"
+args = ["--mode", "oneshot"]
+"#;
+
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse export manifest");
+    assert!(manifest.validate().is_ok());
+}
+
+#[test]
+fn test_validate_cli_export_rejects_missing_target() {
+    let toml = r#"
+schema_version = "0.2"
+name = "python-tool-demo"
+version = "0.1.0"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "python"
+entrypoint = "main.py"
+runtime_version = "3.11"
+
+[exports.cli.demo-tool]
+kind = "python-tool"
+target = "missing"
+"#;
+
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse export manifest");
+    let errors = manifest
+        .validate()
+        .expect_err("missing export target must fail");
+    assert!(errors.iter().any(|error| {
+        matches!(error, ValidationError::InvalidTarget(message) if message.contains("references missing target 'missing'"))
+    }));
+}
+
+#[test]
+fn test_validate_cli_export_rejects_non_python_target() {
+    let toml = r#"
+schema_version = "0.2"
+name = "node-tool-demo"
+version = "0.1.0"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "node"
+entrypoint = "main.js"
+runtime_version = "20"
+
+[exports.cli.demo-tool]
+kind = "python-tool"
+target = "cli"
+"#;
+
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse export manifest");
+    let errors = manifest
+        .validate()
+        .expect_err("non-python export target must fail");
+    assert!(errors.iter().any(|error| {
+        matches!(error, ValidationError::InvalidTarget(message) if message.contains("must reference a source/python target"))
+    }));
+}
+
+#[test]
 fn test_load_from_file_supports_v03_capsule_path_workspace_manifest() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root_manifest = tmp.path().join("capsule.toml");
