@@ -489,6 +489,10 @@ pub struct CapsuleManifest {
     #[serde(default)]
     pub targets: Option<TargetsConfig>,
 
+    /// Explicit exported surfaces such as one-shot CLI tools.
+    #[serde(default)]
+    pub exports: Option<CapsuleExports>,
+
     /// Supervisor Mode: Multi-service definition.
     ///
     /// Optional and dev-first: absence means single-process execution via `execution`.
@@ -1002,6 +1006,22 @@ pub struct TargetsConfig {
     /// Named target entries for v0.2 (e.g. [targets.cli], [targets.static]).
     #[serde(flatten)]
     pub named: HashMap<String, NamedTarget>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CapsuleExports {
+    #[serde(default)]
+    pub cli: HashMap<String, CliExportSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CliExportSpec {
+    pub kind: String,
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// v0.2 named target definition under [targets.<label>].

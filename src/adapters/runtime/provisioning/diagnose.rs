@@ -160,6 +160,7 @@ mod tests {
     fn manifest_data(target: toml::map::Map<String, toml::Value>) -> ManifestData {
         let mut manifest = toml::map::Map::new();
         manifest.insert("name".to_string(), toml::Value::String("demo".to_string()));
+        manifest.insert("type".to_string(), toml::Value::String("app".to_string()));
         manifest.insert(
             "default_target".to_string(),
             toml::Value::String("default".to_string()),

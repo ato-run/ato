@@ -17,7 +17,7 @@ use capsule_core::CapsuleReporter;
 use tracing::debug;
 
 use crate::application::engine::install::support::{
-    LocalRunManifestPreparationOutcome, ResolvedRunTarget,
+    LocalRunManifestPreparationOutcome, ResolvedCliExportRequest, ResolvedRunTarget,
 };
 use crate::application::pipeline::cleanup::PipelineAttemptContext;
 use crate::application::workspace::state::EffectiveLockState;
@@ -65,11 +65,18 @@ pub(crate) struct RunAuthoritativeInput {
 // validation context. Downstream phases may consume this data, but must not reinterpret
 // manifest semantics or discover new authority from disk.
 #[derive(Debug, Clone)]
+pub(crate) struct RunExecutionOverride {
+    pub(crate) target_label: String,
+    pub(crate) args: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct PreparedRunContext {
     pub(crate) authoritative_lock: Option<AtoLock>,
     pub(crate) lock_path: Option<PathBuf>,
     pub(crate) workspace_root: PathBuf,
     pub(crate) effective_state: Option<EffectiveLockState>,
+    pub(crate) execution_override: Option<RunExecutionOverride>,
     pub(crate) bridge_manifest: DerivedBridgeManifest,
     pub(crate) validation_mode: capsule_core::types::ValidationMode,
     pub(crate) engine_override_declared: bool,
@@ -103,6 +110,7 @@ impl PreparedRunContext {
         authoritative_input: Option<&RunAuthoritativeInput>,
         workspace_root: &Path,
         validation_mode: capsule_core::types::ValidationMode,
+        target_label: Option<&str>,
     ) -> Result<Self> {
         let routed_manifest = authoritative_input
             .map(|input| {
@@ -111,7 +119,7 @@ impl PreparedRunContext {
                     &input.lock,
                     &input.workspace_root,
                     router::ExecutionProfile::Dev,
-                    None,
+                    target_label,
                 )
             })
             .transpose()?;
@@ -126,6 +134,7 @@ impl PreparedRunContext {
                 .map(|input| input.workspace_root.clone())
                 .unwrap_or_else(|| workspace_root.to_path_buf()),
             effective_state: authoritative_input.map(|input| input.effective_state.clone()),
+            execution_override: None,
             bridge_manifest: DerivedBridgeManifest::new(bridge_manifest),
             validation_mode,
             engine_override_declared: routed_manifest
@@ -147,6 +156,7 @@ impl PreparedRunContext {
             lock_path: self.lock_path.clone(),
             workspace_root: self.workspace_root.clone(),
             effective_state: self.effective_state.clone(),
+            execution_override: self.execution_override.clone(),
             bridge_manifest: DerivedBridgeManifest::new(bridge_manifest),
             validation_mode,
             engine_override_declared,
@@ -159,6 +169,7 @@ impl PreparedRunContext {
 pub(crate) struct ConsumerRunRequest {
     pub(crate) target: PathBuf,
     pub(crate) target_label: Option<String>,
+    pub(crate) args: Vec<String>,
     pub(crate) authoritative_input: Option<RunAuthoritativeInput>,
     pub(crate) desktop_open_path: Option<PathBuf>,
     pub(crate) background: bool,
@@ -174,6 +185,7 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) keep_failed_artifacts: bool,
     pub(crate) auto_fix_mode: Option<crate::GitHubAutoFixMode>,
     pub(crate) allow_unverified: bool,
+    pub(crate) export_request: Option<ResolvedCliExportRequest>,
     pub(crate) state_bindings: Vec<String>,
     pub(crate) inject_bindings: Vec<String>,
     pub(crate) reporter: Arc<CliReporter>,
@@ -292,10 +304,16 @@ where
     }
 
     let validation_mode = run_validation_mode(preview_mode);
+    let effective_target_label = request
+        .export_request
+        .as_ref()
+        .map(|export| export.target_label.as_str())
+        .or(request.target_label.as_deref());
     let mut prepared = PreparedRunContext::from_authoritative_input(
         request.authoritative_input.as_ref(),
         &workspace_root,
         validation_mode,
+        effective_target_label,
     )?;
     let state_source_overrides =
         if let Some(authoritative_input) = request.authoritative_input.as_ref() {
@@ -312,7 +330,7 @@ where
             &authoritative_input.lock,
             &authoritative_input.workspace_root,
             router::ExecutionProfile::Dev,
-            request.target_label.as_deref(),
+            effective_target_label,
             state_source_overrides,
         )?
     } else {
@@ -337,11 +355,13 @@ where
         capsule_core::router::route_manifest_with_state_overrides_and_validation_mode(
             &manifest_path,
             router::ExecutionProfile::Dev,
-            request.target_label.as_deref(),
+            effective_target_label,
             state_source_overrides,
             validation_mode,
         )?
     };
+    prepared.execution_override =
+        build_execution_override(request, decision.plan.selected_target_label());
     if decision
         .plan
         .execution_package_type()
@@ -504,6 +524,27 @@ where
         derived_execution: None,
         compatibility_host_mode: None,
         native_nacelle: None,
+    })
+}
+
+fn build_execution_override(
+    request: &ConsumerRunRequest,
+    target_label: &str,
+) -> Option<RunExecutionOverride> {
+    let mut args = request
+        .export_request
+        .as_ref()
+        .map(|export| export.prefix_args.clone())
+        .unwrap_or_default();
+    args.extend(request.args.clone());
+
+    if args.is_empty() {
+        return None;
+    }
+
+    Some(RunExecutionOverride {
+        target_label: target_label.trim().to_string(),
+        args,
     })
 }
 
@@ -1596,6 +1637,7 @@ mod tests {
             effective_state: Some(
                 crate::application::workspace::state::EffectiveLockState::default(),
             ),
+            execution_override: None,
             bridge_manifest: DerivedBridgeManifest::new(toml::Value::String("old".to_string())),
             validation_mode: capsule_core::types::ValidationMode::Strict,
             engine_override_declared: false,

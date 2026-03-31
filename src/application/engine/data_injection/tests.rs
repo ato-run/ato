@@ -45,6 +45,7 @@ async fn resolves_string_injection_from_cli_binding() {
     );
     let manifest = toml::Value::Table(toml::map::Map::from_iter([
         ("name".to_string(), toml::Value::String("demo".to_string())),
+        ("type".to_string(), toml::Value::String("app".to_string())),
         (
             "default_target".to_string(),
             toml::Value::String("default".to_string()),
@@ -108,6 +109,7 @@ async fn resolves_directory_injection_from_file_uri() {
     );
     let manifest = toml::Value::Table(toml::map::Map::from_iter([
         ("name".to_string(), toml::Value::String("demo".to_string())),
+        ("type".to_string(), toml::Value::String("app".to_string())),
         (
             "default_target".to_string(),
             toml::Value::String("default".to_string()),
@@ -171,6 +173,7 @@ async fn resolves_oci_file_injection_as_mount() {
     );
     let manifest = toml::Value::Table(toml::map::Map::from_iter([
         ("name".to_string(), toml::Value::String("demo".to_string())),
+        ("type".to_string(), toml::Value::String("app".to_string())),
         (
             "default_target".to_string(),
             toml::Value::String("default".to_string()),

@@ -514,8 +514,15 @@ mod tests {
     fn test_plan(dir: &Path, target_manifest: &str) -> ManifestData {
         let manifest_path = dir.join("capsule.toml");
         std::fs::write(&manifest_path, target_manifest).expect("manifest");
+        let mut manifest: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&manifest_path).expect("read")).expect("parse");
+        manifest
+            .as_table_mut()
+            .expect("manifest table")
+            .entry("type".to_string())
+            .or_insert_with(|| toml::Value::String("app".to_string()));
         capsule_core::router::execution_descriptor_from_manifest_parts(
-            toml::from_str(&std::fs::read_to_string(&manifest_path).expect("read")).expect("parse"),
+            manifest,
             manifest_path,
             dir.to_path_buf(),
             ExecutionProfile::Dev,
@@ -630,6 +637,7 @@ run_command = "node server.js"
             toml::from_str(
                 r#"
 name = "demo"
+type = "app"
 default_target = "app"
 
 [targets.app]
