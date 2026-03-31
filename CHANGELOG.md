@@ -4,6 +4,8 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.36] - 2026-04-01
+
 ### What Changed
 
 #### Features
@@ -13,6 +15,10 @@ All notable changes to `ato-cli` will be documented in this file.
 #### Bug Fixes
 
 - Preserve authored manifest `exports` through build and publish packaging so exported CLI metadata survives artifact round-trips
+
+#### CI
+
+- Bump the patch release after `v0.4.35` was already tagged and published
 
 ## [0.4.35] - 2026-03-31
 
