@@ -458,6 +458,11 @@ pub(crate) fn build_capsule_artifact_with_output(
 
     let reporter = std::sync::Arc::new(capsule_core::reporter::NoOpReporter)
         as std::sync::Arc<dyn capsule_core::reporter::CapsuleReporter + 'static>;
+    let compat_input = if let Some(authoritative_input) = authoritative_input {
+        authoritative_input.packaging_compat_project_input()?
+    } else {
+        decision.plan.compat_project_input()?
+    };
 
     match decision.kind {
         capsule_core::router::RuntimeKind::Source => {
@@ -470,7 +475,7 @@ pub(crate) fn build_capsule_artifact_with_output(
             capsule_core::packers::source::pack(
                 &decision.plan,
                 capsule_core::packers::source::SourcePackOptions {
-                    compat_input: decision.plan.compat_project_input()?,
+                    compat_input: compat_input.clone(),
                     workspace_root: decision.plan.workspace_root.clone(),
                     config_json: prepared_config.config_json.clone(),
                     config_path: prepared_config.config_path.clone(),
@@ -496,7 +501,7 @@ pub(crate) fn build_capsule_artifact_with_output(
                 capsule_core::packers::web::pack(
                     &decision.plan,
                     capsule_core::packers::web::WebPackOptions {
-                        compat_input: decision.plan.compat_project_input()?,
+                        compat_input: compat_input.clone(),
                         workspace_root: decision.plan.workspace_root.clone(),
                         output: Some(artifact_path.clone()),
                     },
@@ -512,7 +517,7 @@ pub(crate) fn build_capsule_artifact_with_output(
                 capsule_core::packers::source::pack(
                     &decision.plan,
                     capsule_core::packers::source::SourcePackOptions {
-                        compat_input: decision.plan.compat_project_input()?,
+                        compat_input: compat_input.clone(),
                         workspace_root: decision.plan.workspace_root.clone(),
                         config_json: prepared_config.config_json.clone(),
                         config_path: prepared_config.config_path.clone(),
@@ -583,11 +588,27 @@ Deploy latest ato-store (OIDC multipart CI publish), or point ATO_STORE_API_URL 
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
     use std::sync::Arc;
 
     use super::{build_capsule_artifact, normalize_tag_version, semantic_publish_identity};
     use crate::application::producer_input::resolve_producer_authoritative_input;
     use crate::reporters::CliReporter;
+
+    fn read_artifact_manifest(path: &std::path::Path) -> String {
+        let bytes = std::fs::read(path).expect("read artifact");
+        let mut archive = tar::Archive::new(std::io::Cursor::new(bytes));
+        for entry in archive.entries().expect("entries") {
+            let mut entry = entry.expect("entry");
+            let entry_path = entry.path().expect("path").to_string_lossy().to_string();
+            if entry_path == "capsule.toml" {
+                let mut manifest = String::new();
+                entry.read_to_string(&mut manifest).expect("read manifest");
+                return manifest;
+            }
+        }
+        panic!("capsule.toml missing from artifact");
+    }
 
     #[test]
     fn normalize_tag_version_strips_v_prefix() {
@@ -666,5 +687,73 @@ mod tests {
             );
         }
         assert!(!tmp.path().join("capsule.toml").exists());
+    }
+
+    #[test]
+    fn authoritative_ci_build_preserves_exports_in_packaged_manifest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("capsule.toml"),
+            r#"
+schema_version = "0.2"
+name = "tool"
+version = "1.0.0"
+type = "app"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "python"
+runtime_version = "3.12"
+run_command = "python3 default.py"
+
+[targets.export]
+runtime = "source"
+driver = "python"
+runtime_version = "3.12"
+run_command = "python3 tool.py"
+
+[exports.cli.tool]
+kind = "python-tool"
+target = "export"
+args = ["--from-export"]
+"#,
+        )
+        .expect("capsule.toml");
+        std::fs::write(tmp.path().join("default.py"), "print('default')\n").expect("default.py");
+        std::fs::write(tmp.path().join("tool.py"), "print('tool')\n").expect("tool.py");
+        std::fs::write(
+            tmp.path().join("pyproject.toml"),
+            "[project]\nname='tool'\nversion='1.0.0'\n",
+        )
+        .expect("pyproject.toml");
+        std::fs::write(tmp.path().join("uv.lock"), "version = 1\n").expect("uv.lock");
+
+        let authoritative_input = resolve_producer_authoritative_input(
+            tmp.path(),
+            Arc::new(CliReporter::new(false)),
+            false,
+        )
+        .expect("authoritative input");
+        let (name, version) =
+            semantic_publish_identity(&authoritative_input.descriptor).expect("identity");
+
+        let artifact_path =
+            build_capsule_artifact(&name, &version, Some(&authoritative_input), None)
+                .expect("artifact");
+        let manifest = read_artifact_manifest(&artifact_path);
+
+        assert!(
+            manifest.contains("[exports.cli.tool]"),
+            "manifest was: {manifest}"
+        );
+        assert!(
+            manifest.contains("target = \"export\""),
+            "manifest was: {manifest}"
+        );
+        assert!(
+            manifest.contains("args = [\"--from-export\"]"),
+            "manifest was: {manifest}"
+        );
     }
 }

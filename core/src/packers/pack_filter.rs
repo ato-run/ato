@@ -190,6 +190,7 @@ mod tests {
             isolation: None,
             polymorphism: None,
             targets: None,
+            exports: None,
             services: None,
             distribution: None,
         })
@@ -228,6 +229,7 @@ mod tests {
             isolation: None,
             polymorphism: None,
             targets: None,
+            exports: None,
             services: None,
             distribution: None,
         })
@@ -262,6 +264,7 @@ mod tests {
             isolation: None,
             polymorphism: None,
             targets: None,
+            exports: None,
             services: None,
             distribution: None,
         };
@@ -302,6 +305,7 @@ mod tests {
             isolation: None,
             polymorphism: None,
             targets: None,
+            exports: None,
             services: None,
             distribution: None,
         };
@@ -340,6 +344,7 @@ mod tests {
             isolation: None,
             polymorphism: None,
             targets: None,
+            exports: None,
             services: None,
             distribution: None,
         };
@@ -385,6 +390,7 @@ mod tests {
             isolation: None,
             polymorphism: None,
             targets: None,
+            exports: None,
             services: None,
             distribution: None,
         };
