@@ -422,6 +422,28 @@ fn build_consumer_run_request_with_target(
     request
 }
 
+struct RunPhaseRequestInputs<'a> {
+    args: &'a RunArgs,
+    target: &'a Path,
+    agent_local_root: Option<PathBuf>,
+    authoritative_input: Option<run_phase::RunAuthoritativeInput>,
+    desktop_open_path: Option<PathBuf>,
+    export_request: Option<ResolvedCliExportRequest>,
+}
+
+impl RunPhaseRequestInputs<'_> {
+    fn into_request(self) -> run_phase::ConsumerRunRequest {
+        build_consumer_run_request_with_target(
+            self.args,
+            self.target,
+            self.agent_local_root,
+            self.authoritative_input,
+            self.desktop_open_path,
+            self.export_request,
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 struct NormalizedRunTarget {
     target: PathBuf,
@@ -691,12 +713,14 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
             HourglassPhase::Execute => {
                 let input = self.take_state(HourglassPhase::Execute)?;
                 run_execute_phase(
-                    self.args,
-                    self.resolved_target(),
-                    self.agent_local_root.clone(),
-                    self.authoritative_input.clone(),
-                    self.desktop_open_path.clone(),
-                    self.export_request.clone(),
+                    RunPhaseRequestInputs {
+                        args: self.args,
+                        target: self.resolved_target(),
+                        agent_local_root: self.agent_local_root.clone(),
+                        authoritative_input: self.authoritative_input.clone(),
+                        desktop_open_path: self.desktop_open_path.clone(),
+                        export_request: self.export_request.clone(),
+                    },
                     input,
                     Some(attempt),
                 )
@@ -1013,24 +1037,12 @@ async fn run_dry_run_phase(
 }
 
 async fn run_execute_phase(
-    args: &RunArgs,
-    target: &Path,
-    agent_local_root: Option<PathBuf>,
-    authoritative_input: Option<run_phase::RunAuthoritativeInput>,
-    desktop_open_path: Option<PathBuf>,
-    export_request: Option<ResolvedCliExportRequest>,
+    inputs: RunPhaseRequestInputs<'_>,
     state: RunPipelineState,
     attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<()> {
-    let request = build_consumer_run_request_with_target(
-        args,
-        target,
-        agent_local_root,
-        authoritative_input,
-        desktop_open_path,
-        export_request,
-    );
-    let progress = RunProgress { args };
+    let progress = RunProgress { args: inputs.args };
+    let request = inputs.into_request();
     run_phase::run_execute_phase(&request, &progress, state, attempt, &RunExecuteHooks).await
 }
 
