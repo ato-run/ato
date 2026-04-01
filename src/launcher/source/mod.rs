@@ -498,6 +498,7 @@ fn linux_capability_report(
     }
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn macos_capability_report(
     alcoholless_available: bool,
     seatbelt_available: bool,
