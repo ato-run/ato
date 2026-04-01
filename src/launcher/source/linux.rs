@@ -49,7 +49,7 @@ fn ensure_bwrap_dirs(cmd: &mut Command, path: &std::path::Path) {
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
-        if current == PathBuf::from("/") {
+        if current == std::path::Path::new("/") {
             continue;
         }
         cmd.args(["--dir", &current.display().to_string()]);
@@ -392,7 +392,7 @@ pub async fn launch_with_bubblewrap(
             let sandbox_entrypoint = sandbox_entrypoint_path(target);
             for arg in args {
                 if !entrypoint_rewritten && arg == &target.entrypoint {
-                    cmd.arg(&sandbox_entrypoint);
+                    cmd.arg(sandbox_entrypoint.clone());
                     entrypoint_rewritten = true;
                 } else {
                     cmd.arg(arg);
@@ -407,14 +407,14 @@ pub async fn launch_with_bubblewrap(
                 cmd.args(["-B", &sandbox_entrypoint_path(target)]);
             }
             "node" | "nodejs" => {
-                cmd.arg(&sandbox_entrypoint_path(target));
+                cmd.arg(sandbox_entrypoint_path(target));
             }
             "deno" => {
                 let sandbox_entrypoint = sandbox_entrypoint_path(target);
                 cmd.args(["run", "--allow-read=/app", &sandbox_entrypoint]);
             }
             _ => {
-                cmd.arg(&sandbox_entrypoint_path(target));
+                cmd.arg(sandbox_entrypoint_path(target));
             }
         }
 
@@ -559,10 +559,12 @@ mod tests {
             dependencies: None,
             args: vec![],
             source_dir: PathBuf::from("/app/my-capsule"),
+            requested_cwd: None,
             cmd: None,
             dev_mode: false,
             isolation: None, // no isolation config → default policy
             ipc_socket_paths: vec![],
+            injected_mounts: vec![],
         };
 
         let policy = generate_landlock_policy(&target);
@@ -582,6 +584,7 @@ mod tests {
             dependencies: None,
             args: vec![],
             source_dir: PathBuf::from("/app/project"),
+            requested_cwd: None,
             cmd: None,
             dev_mode: false,
             isolation: Some(IsolationPolicy {
@@ -592,6 +595,7 @@ mod tests {
                 egress_allow: vec![],
             }),
             ipc_socket_paths: vec![],
+            injected_mounts: vec![],
         };
 
         let policy = generate_landlock_policy(&target);
@@ -616,6 +620,7 @@ mod tests {
                 dependencies: None,
                 args: vec![],
                 source_dir: PathBuf::from("/app/proj"),
+                requested_cwd: None,
                 cmd: None,
                 dev_mode: false,
                 isolation: Some(IsolationPolicy {
@@ -626,6 +631,7 @@ mod tests {
                     egress_allow: vec![],
                 }),
                 ipc_socket_paths: vec![],
+                injected_mounts: vec![],
             };
 
             let policy = generate_landlock_policy(&target);
@@ -655,6 +661,7 @@ mod tests {
             dependencies: None,
             args: vec![],
             source_dir: PathBuf::from("/app/my-service"),
+            requested_cwd: None,
             cmd: None,
             dev_mode: false,
             isolation: Some(IsolationPolicy {
@@ -668,6 +675,7 @@ mod tests {
                 PathBuf::from("/tmp/capsule-ipc/greeter.sock"),
                 PathBuf::from("/tmp/capsule-ipc/db-service.sock"),
             ],
+            injected_mounts: vec![],
         };
 
         let policy = generate_landlock_policy(&target);
@@ -691,10 +699,12 @@ mod tests {
             dependencies: None,
             args: vec![],
             source_dir: PathBuf::from("/app/my-capsule"),
+            requested_cwd: None,
             cmd: None,
             dev_mode: false,
             isolation: None,
             ipc_socket_paths: vec![],
+            injected_mounts: vec![],
         };
 
         let policy = generate_landlock_policy(&target);
