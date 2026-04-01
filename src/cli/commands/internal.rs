@@ -346,7 +346,7 @@ fn capabilities_from_report(report: FeatureCapabilityReport) -> Capabilities {
 }
 
 fn parse_spec_version_from_raw(raw: &str) -> Option<String> {
-    let env: Envelope = serde_json::from_str(&raw).ok()?;
+    let env: Envelope = serde_json::from_str(raw).ok()?;
     Some(env.spec_version)
 }
 
@@ -847,7 +847,7 @@ fn convert_isolation_config(
 /// Handle exec command - launch a workload from manifest
 async fn handle_exec(raw: &str) -> Result<()> {
     let envelope: ExecEnvelope =
-        serde_json::from_str(&raw).context("Failed to parse exec request JSON")?;
+        serde_json::from_str(raw).context("Failed to parse exec request JSON")?;
     validate_spec_version(&envelope.spec_version).map_err(anyhow::Error::msg)?;
 
     info!("Received exec request: {:?}", envelope.workload);
