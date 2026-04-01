@@ -293,6 +293,28 @@ fn run_command_parses_sandbox_io_grants() {
 }
 
 #[test]
+fn run_command_parses_cwd_override() {
+    let cli = Cli::try_parse_from([
+        "ato",
+        "run",
+        "--cwd",
+        "./workspace",
+        "./tool.py",
+        "--",
+        "./input.txt",
+    ])
+    .expect("parse");
+
+    match cli.command {
+        Commands::Run { cwd, args, .. } => {
+            assert_eq!(cwd, Some(PathBuf::from("./workspace")));
+            assert_eq!(args, vec!["./input.txt".to_string()]);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
 fn init_command_defaults_to_durable_workspace_materialization() {
     let cli = Cli::try_parse_from(["ato", "init"]).expect("parse");
 
