@@ -10,7 +10,7 @@ use nacelle::internal_api::{validate_spec_version, NacelleEvent, CURRENT_SPEC_VE
 use nacelle::launcher::source::{
     NativeSandboxCapabilityReport, SourceRuntime, SourceRuntimeConfig,
 };
-use nacelle::launcher::{IsolationPolicy, LaunchRequest, Runtime, SourceTarget};
+use nacelle::launcher::{InjectedMount, IsolationPolicy, LaunchRequest, Runtime, SourceTarget};
 
 /// Minimal manifest structure for parsing capsule.toml
 #[derive(Debug, Deserialize)]
@@ -146,6 +146,20 @@ pub struct ExecEnvelope {
     /// Sandbox policy's read-write list.
     #[serde(default)]
     pub ipc_socket_paths: Option<Vec<String>>,
+    /// Requested working directory for the process.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Additional host mounts injected by ato-cli.
+    #[serde(default)]
+    pub mounts: Vec<ExecMount>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ExecMount {
+    pub source: String,
+    pub target: String,
+    #[serde(default)]
+    pub readonly: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -456,6 +470,15 @@ fn emit_service_exited(service: &str, status: &std::process::ExitStatus) {
     NacelleEvent::ServiceExited {
         service: service.to_string(),
         exit_code: status.code(),
+    }
+    .emit();
+}
+
+fn emit_service_ready(service: &str) {
+    NacelleEvent::IpcReady {
+        service: service.to_string(),
+        endpoint: "command://ready".to_string(),
+        port: None,
     }
     .emit();
 }
@@ -901,6 +924,24 @@ async fn handle_exec(raw: &str) -> Result<()> {
         );
     }
 
+    let requested_cwd = envelope.cwd.as_ref().map(PathBuf::from);
+    if let Some(cwd) = requested_cwd.as_ref() {
+        info!("Requested runtime cwd: {}", cwd.display());
+    }
+
+    let injected_mounts: Vec<InjectedMount> = envelope
+        .mounts
+        .iter()
+        .map(|mount| InjectedMount {
+            source: PathBuf::from(&mount.source),
+            target: PathBuf::from(&mount.target),
+            readonly: mount.readonly,
+        })
+        .collect();
+    if !injected_mounts.is_empty() {
+        info!("Injected sandbox mounts: {:?}", injected_mounts);
+    }
+
     let source_target = SourceTarget {
         language: resolution.language.unwrap_or_else(|| "generic".to_string()),
         version: manifest.language.as_ref().and_then(|l| l.version.clone()),
@@ -908,10 +949,12 @@ async fn handle_exec(raw: &str) -> Result<()> {
         dependencies: None,
         args: vec![],
         source_dir: source_dir.clone(),
+        requested_cwd,
         cmd: Some(resolution.full_command),
         dev_mode: is_dev_mode,
         isolation: Some(isolation_policy),
         ipc_socket_paths,
+        injected_mounts,
     };
 
     // Create runtime config
@@ -1009,6 +1052,11 @@ async fn handle_exec(raw: &str) -> Result<()> {
                     std::process::exit(status.code().unwrap_or(1));
                 }
             }
+        } else {
+            // One-shot and no-probe source jobs should be considered ready as soon as
+            // the launcher successfully hands back a child process. This avoids treating
+            // a clean exit as "before start confirmation" on the ato side.
+            emit_service_ready(&manifest.name);
         }
 
         let status = wait_for_child_exit(&mut child).await?;
