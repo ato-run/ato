@@ -634,6 +634,7 @@ impl NacelleExecAdapter {
                     "manifest": normalized_manifest_path.display().to_string(),
                 },
                 "env": env,
+                "cwd": runtime_cwd_payload(launch_ctx.effective_cwd()),
                 "mounts": launch_ctx
                     .injected_mounts()
                     .iter()
@@ -648,6 +649,15 @@ impl NacelleExecAdapter {
             }),
             cleanup_paths: vec![normalized_manifest_path],
         })
+    }
+}
+
+fn runtime_cwd_payload(effective_cwd: Option<&PathBuf>) -> Option<String> {
+    let cwd = effective_cwd?;
+    if cfg!(target_os = "linux") {
+        Some("/workspace".to_string())
+    } else {
+        Some(cwd.display().to_string())
     }
 }
 
