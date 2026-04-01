@@ -18,7 +18,8 @@ use aya::Pod;
 #[cfg(target_os = "linux")]
 use aya::{include_bytes_aligned, Ebpf};
 #[cfg(target_os = "linux")]
-const EMBEDDED_EBPF_OBJECT: &[u8] = include_bytes_aligned!(concat!(env!("OUT_DIR"), "/nacelle-ebpf"));
+const EMBEDDED_EBPF_OBJECT: &[u8] =
+    include_bytes_aligned!(concat!(env!("OUT_DIR"), "/nacelle-ebpf"));
 
 pub struct EgressEnforcerHandle {
     #[cfg(target_os = "linux")]
@@ -105,7 +106,13 @@ pub fn start_enforcer(
         )?;
 
         load_rules(&mut bpf, "IPV4_ALLOW", "IPV6_ALLOW", rules, true)?;
-        load_rules(&mut bpf, "DNS_IPV4_ALLOW", "DNS_IPV6_ALLOW", dns_rules, false)?;
+        load_rules(
+            &mut bpf,
+            "DNS_IPV4_ALLOW",
+            "DNS_IPV6_ALLOW",
+            dns_rules,
+            false,
+        )?;
 
         Ok(EgressEnforcerHandle { bpf, cgroup_path })
     }

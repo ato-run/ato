@@ -36,8 +36,7 @@ pub async fn run_services_from_config_with_events(
             "Strict sandbox enforcement is enabled but sandbox backend is not available. Hint: If you trust this code, rerun via ato-cli with --unsafe-bypass-sandbox"
                 .to_string()
         } else {
-            "Strict sandbox enforcement is enabled but sandbox backend is not available"
-                .to_string()
+            "Strict sandbox enforcement is enabled but sandbox backend is not available".to_string()
         };
         return Err(msg);
     }
