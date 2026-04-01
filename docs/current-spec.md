@@ -9,6 +9,7 @@ It is the canonical target spec for the unified run/publish pipeline; implementa
 - Compatibility authoring/input: `capsule.toml`, `capsule.lock.json`, source-only directories, ecosystem lockfiles, framework metadata
 - Canonical binary: ato
 - Security posture: Zero-Trust, fail-closed by default
+- Related ADRs: [docs/adr-ato-lock-json-canonical-input.md](docs/adr-ato-lock-json-canonical-input.md), [docs/adr-source-inference-model-for-run-init.md](docs/adr-source-inference-model-for-run-init.md), [docs/adr-sandboxed-one-shot-cli-contract.md](docs/adr-sandboxed-one-shot-cli-contract.md)
 
 ## 1. Product Summary
 
@@ -189,6 +190,7 @@ Important rules:
 - github.com/owner/repo is the canonical GitHub run syntax
 - https://github.com/... and other non-canonical GitHub URL forms are rejected for ato run and produce a corrective error
 - slug-only inputs are rejected; the CLI prompts toward publisher/slug
+- for sandboxed one-shot CLI execution, trailing target arguments are expressed as `ato run <target> -- <target-args...>` and the filesystem grant contract is defined in [docs/adr-sandboxed-one-shot-cli-contract.md](docs/adr-sandboxed-one-shot-cli-contract.md)
 - if a scoped capsule is not installed, ato can auto-install it
 - JSON mode requires -y for auto-installing missing capsules in non-interactive flows
 - if a local directory or local manifest path does not resolve to a valid capsule.toml, ato pauses normal execution and offers to generate a new capsule.toml through the existing init flow
@@ -643,6 +645,9 @@ If input is GitHub shorthand:
 - non-canonical GitHub URL forms are rejected with a corrective message
 
 If input is publisher/slug:
+
+- `@publisher/slug` is the canonical public form for registry-backed one-shot CLI references
+- bare-name remote lookup remains rejected fail-closed
 
 - ato prefers an installed matching capsule when possible
 - with explicit --registry, ato can compare against registry current version

@@ -27,9 +27,16 @@ pub(super) fn background_ready_message(
     id: &str,
     compatibility_host_mode: CompatibilityHostMode,
     desktop_open_only: bool,
+    is_one_shot: bool,
 ) -> String {
     if desktop_open_only {
         return format!("🚀 Desktop app launch requested in background (ID: {id})");
+    }
+    if is_one_shot {
+        if matches!(compatibility_host_mode, CompatibilityHostMode::Enabled) {
+            return format!("✔ Background command started (Host Fallback, ID: {id})");
+        }
+        return format!("🚀 Background command started (ID: {id})");
     }
     if matches!(compatibility_host_mode, CompatibilityHostMode::Enabled) {
         return format!("✔ Capsule is ready (Host Fallback, ID: {id})");
@@ -40,7 +47,20 @@ pub(super) fn background_ready_message(
 pub(super) fn background_timeout_message(
     id: &str,
     compatibility_host_mode: CompatibilityHostMode,
+    is_one_shot: bool,
 ) -> String {
+    if is_one_shot {
+        if matches!(compatibility_host_mode, CompatibilityHostMode::Enabled) {
+            return format!(
+                "⏳ Background command is still starting in compatibility mode (Host Fallback, ID: {}). Use `ato ps --all` to inspect status.",
+                id
+            );
+        }
+        return format!(
+            "⏳ Background command is still starting (ID: {}). Use `ato ps --all` to inspect status.",
+            id
+        );
+    }
     if matches!(compatibility_host_mode, CompatibilityHostMode::Enabled) {
         return format!(
             "⏳ Capsule is still starting in compatibility mode (Host Fallback, ID: {}). Use `ato ps --all` to inspect readiness.",
@@ -56,7 +76,16 @@ pub(super) fn background_timeout_message(
 pub(super) fn background_failure_prefix(
     id: &str,
     compatibility_host_mode: CompatibilityHostMode,
+    is_one_shot: bool,
 ) -> String {
+    if is_one_shot {
+        if matches!(compatibility_host_mode, CompatibilityHostMode::Enabled) {
+            return format!(
+                "Background command failed before start confirmation in compatibility mode (Host Fallback, ID: {id})"
+            );
+        }
+        return format!("Background command failed before start confirmation (ID: {id})");
+    }
     if matches!(compatibility_host_mode, CompatibilityHostMode::Enabled) {
         return format!(
             "Background capsule failed before readiness in compatibility mode (Host Fallback, ID: {id})"
@@ -66,6 +95,7 @@ pub(super) fn background_failure_prefix(
 }
 
 pub(super) struct BackgroundCompletionOptions {
+    pub is_one_shot: bool,
     pub ready_without_events: bool,
     pub desktop_open_only: bool,
     pub compatibility_host_mode: CompatibilityHostMode,
@@ -136,7 +166,12 @@ pub(super) async fn complete_background_source_process(
     let (startup_outcome, event_rx) = if options.ready_without_events {
         (BackgroundStartupOutcome::Ready, None)
     } else {
-        wait_for_background_native_startup(&mut process, &process_manager, &process_id)?
+        wait_for_background_native_startup(
+            &mut process,
+            &process_manager,
+            &process_id,
+            options.is_one_shot,
+        )?
     };
 
     cleanup_process_artifacts(&process.cleanup_paths);
@@ -151,6 +186,7 @@ pub(super) async fn complete_background_source_process(
                     &process_id,
                     options.compatibility_host_mode,
                     options.desktop_open_only,
+                    options.is_one_shot,
                 ))
                 .await?;
             Ok(())
@@ -163,14 +199,18 @@ pub(super) async fn complete_background_source_process(
                 .warn(background_timeout_message(
                     &process_id,
                     options.compatibility_host_mode,
+                    options.is_one_shot,
                 ))
                 .await?;
             Ok(())
         }
         BackgroundStartupOutcome::FailedBeforeReady => {
             let state = process_manager.read_pid(&process_id).ok();
-            let mut message =
-                background_failure_prefix(&process_id, options.compatibility_host_mode);
+            let mut message = background_failure_prefix(
+                &process_id,
+                options.compatibility_host_mode,
+                options.is_one_shot,
+            );
             if let Some(state) = state {
                 if let Some(error) = state.last_error {
                     message.push_str(&format!(": {}", error));
@@ -189,6 +229,7 @@ pub(super) async fn complete_background_source_process(
 pub(super) async fn complete_foreground_source_process(
     mut process: crate::executors::source::CapsuleProcess,
     reporter: Arc<CliReporter>,
+    is_one_shot: bool,
     sandbox_initialized: bool,
     ipc_socket_mapped: bool,
     desktop_open_only: bool,
@@ -206,6 +247,7 @@ pub(super) async fn complete_foreground_source_process(
         sandbox_initialized,
         ipc_socket_mapped,
         run_spinner.clone(),
+        is_one_shot,
     )?;
     let exit_code = crate::executors::source::wait_for_exit(&mut process.child).await?;
     if let Some(handle) = readiness_notifier {
@@ -234,6 +276,7 @@ pub(super) fn spawn_foreground_native_event_reporter(
     sandbox_initialized: bool,
     ipc_socket_mapped: bool,
     progress: Option<ProgressBar>,
+    is_one_shot: bool,
 ) -> Result<Option<JoinHandle<()>>> {
     let Some(event_rx) = event_rx else {
         return Ok(None);
@@ -250,7 +293,7 @@ pub(super) fn spawn_foreground_native_event_reporter(
     Ok(Some(std::thread::spawn(move || {
         let mut ready_reported = false;
         for event in event_rx {
-            for message in foreground_native_event_messages(&event, ready_reported) {
+            for message in foreground_native_event_messages(&event, ready_reported, is_one_shot) {
                 match message {
                     ForegroundEventMessage::Notify(message) => {
                         if let Some(progress) = progress.as_ref() {
@@ -284,6 +327,7 @@ pub(super) fn wait_for_background_native_startup(
     process: &mut crate::executors::source::CapsuleProcess,
     process_manager: &crate::runtime::process::ProcessManager,
     process_id: &str,
+    is_one_shot: bool,
 ) -> Result<(BackgroundStartupOutcome, Option<Receiver<LifecycleEvent>>)> {
     let Some(event_rx) = process.event_rx.take() else {
         return Ok((BackgroundStartupOutcome::TimedOut, None));
@@ -304,7 +348,11 @@ pub(super) fn wait_for_background_native_startup(
                 ) {
                     info.status = crate::runtime::process::ProcessStatus::Failed;
                     if info.last_error.is_none() {
-                        info.last_error = Some("process exited before readiness".to_string());
+                        info.last_error = Some(if is_one_shot {
+                            "command exited before start confirmation".to_string()
+                        } else {
+                            "process exited before readiness".to_string()
+                        });
                     }
                 } else if info.status.is_active() {
                     info.status = crate::runtime::process::ProcessStatus::Exited;
@@ -327,17 +375,20 @@ pub(super) fn wait_for_background_native_startup(
             .expect("event receiver should still be present during startup wait")
             .recv_timeout(wait_for)
         {
-            Ok(event) => {
-                match persist_background_native_event(process_manager, process_id, &event)? {
-                    BackgroundStartupOutcome::Ready => {
-                        return Ok((BackgroundStartupOutcome::Ready, event_rx));
-                    }
-                    BackgroundStartupOutcome::FailedBeforeReady => {
-                        return Ok((BackgroundStartupOutcome::FailedBeforeReady, event_rx));
-                    }
-                    BackgroundStartupOutcome::TimedOut => {}
+            Ok(event) => match persist_background_native_event(
+                process_manager,
+                process_id,
+                &event,
+                is_one_shot,
+            )? {
+                BackgroundStartupOutcome::Ready => {
+                    return Ok((BackgroundStartupOutcome::Ready, event_rx));
                 }
-            }
+                BackgroundStartupOutcome::FailedBeforeReady => {
+                    return Ok((BackgroundStartupOutcome::FailedBeforeReady, event_rx));
+                }
+                BackgroundStartupOutcome::TimedOut => {}
+            },
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => {
                 let _ = process_manager.update_pid(process_id, |info| {
@@ -346,8 +397,11 @@ pub(super) fn wait_for_background_native_startup(
                         crate::runtime::process::ProcessStatus::Starting
                     ) {
                         info.status = crate::runtime::process::ProcessStatus::Unknown;
-                        info.last_error =
-                            Some("event stream disconnected before readiness".to_string());
+                        info.last_error = Some(if is_one_shot {
+                            "event stream disconnected before start confirmation".to_string()
+                        } else {
+                            "event stream disconnected before readiness".to_string()
+                        });
                     }
                 });
                 return Ok((BackgroundStartupOutcome::TimedOut, None));
@@ -369,6 +423,7 @@ fn persist_background_native_event(
     process_manager: &crate::runtime::process::ProcessManager,
     process_id: &str,
     event: &LifecycleEvent,
+    is_one_shot: bool,
 ) -> Result<BackgroundStartupOutcome> {
     let now = SystemTime::now();
     let updated = process_manager.update_pid(process_id, |info| match event {
@@ -386,7 +441,11 @@ fn persist_background_native_event(
                 crate::runtime::process::ProcessStatus::Starting
             ) {
                 info.status = crate::runtime::process::ProcessStatus::Failed;
-                info.last_error = Some(format!("service '{}' exited before readiness", service));
+                info.last_error = Some(if is_one_shot {
+                    format!("command '{}' exited before start confirmation", service)
+                } else {
+                    format!("service '{}' exited before readiness", service)
+                });
             } else if info.status.is_active() {
                 info.status = crate::runtime::process::ProcessStatus::Exited;
             }
@@ -444,10 +503,17 @@ pub(super) fn initial_foreground_native_messages(
 pub(super) fn foreground_native_event_messages(
     event: &LifecycleEvent,
     ready_reported: bool,
+    is_one_shot: bool,
 ) -> Vec<ForegroundEventMessage> {
     match event {
         LifecycleEvent::Ready { service, .. } if !ready_reported => {
-            let ready_message = if service == "main" {
+            let ready_message = if is_one_shot {
+                if service == "main" {
+                    "[✓] Command started (ready event received)".to_string()
+                } else {
+                    format!("[✓] Command '{service}' started (ready event received)")
+                }
+            } else if service == "main" {
                 "[✓] Service is ready (ready event received)".to_string()
             } else {
                 format!("[✓] Service '{service}' is ready (ready event received)")
@@ -461,9 +527,18 @@ pub(super) fn foreground_native_event_messages(
             let exit_code = exit_code
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            vec![ForegroundEventMessage::Warn(format!(
-                "❌ Service '{service}' exited before readiness (exit code: {exit_code})"
-            ))]
+            let message = if is_one_shot {
+                if service == "main" {
+                    format!("❌ Command exited before start confirmation (exit code: {exit_code})")
+                } else {
+                    format!(
+                        "❌ Command '{service}' exited before start confirmation (exit code: {exit_code})"
+                    )
+                }
+            } else {
+                format!("❌ Service '{service}' exited before readiness (exit code: {exit_code})")
+            };
+            vec![ForegroundEventMessage::Warn(message)]
         }
         _ => Vec::new(),
     }

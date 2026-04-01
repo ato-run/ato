@@ -79,6 +79,10 @@ pub struct RunArgs {
     pub keep_failed_artifacts: bool,
     pub auto_fix_mode: Option<crate::GitHubAutoFixMode>,
     pub allow_unverified: bool,
+    pub read_grants: Vec<String>,
+    pub write_grants: Vec<String>,
+    pub read_write_grants: Vec<String>,
+    pub caller_cwd: PathBuf,
     pub export_request: Option<ResolvedCliExportRequest>,
     pub state_bindings: Vec<String>,
     pub inject_bindings: Vec<String>,
@@ -382,6 +386,10 @@ fn build_consumer_run_request(args: &RunArgs) -> run_phase::ConsumerRunRequest {
         target: args.target.clone(),
         target_label: args.target_label.clone(),
         args: args.args.clone(),
+        read_grants: args.read_grants.clone(),
+        write_grants: args.write_grants.clone(),
+        read_write_grants: args.read_write_grants.clone(),
+        caller_cwd: args.caller_cwd.clone(),
         authoritative_input: None,
         desktop_open_path: None,
         background: args.background,
@@ -496,6 +504,7 @@ impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
         plan: &capsule_core::router::ManifestData,
         runtime: String,
         scoped_id: Option<String>,
+        is_one_shot: bool,
         ready_without_events: bool,
         desktop_open_only: bool,
         compatibility_host_mode: CompatibilityHostMode,
@@ -507,6 +516,7 @@ impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
             runtime,
             scoped_id,
             BackgroundCompletionOptions {
+                is_one_shot,
                 ready_without_events,
                 desktop_open_only,
                 compatibility_host_mode,
@@ -520,6 +530,7 @@ impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
         &self,
         process: crate::executors::source::CapsuleProcess,
         reporter: Arc<CliReporter>,
+        is_one_shot: bool,
         sandbox_initialized: bool,
         ipc_socket_mapped: bool,
         desktop_open_only: bool,
@@ -528,6 +539,7 @@ impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
         complete_foreground_source_process(
             process,
             reporter,
+            is_one_shot,
             sandbox_initialized,
             ipc_socket_mapped,
             desktop_open_only,
@@ -1390,6 +1402,7 @@ mod tests {
                 port: None,
             },
             false,
+            false,
         );
 
         assert_eq!(
@@ -1410,6 +1423,7 @@ mod tests {
                 service: "main".to_string(),
                 exit_code: Some(42),
             },
+            false,
             false,
         );
 
@@ -1437,7 +1451,8 @@ mod tests {
 
     #[test]
     fn compatibility_host_mode_changes_ready_copy() {
-        let message = background_ready_message("capsule-42", CompatibilityHostMode::Enabled, false);
+        let message =
+            background_ready_message("capsule-42", CompatibilityHostMode::Enabled, false, false);
         assert_eq!(
             message,
             "✔ Capsule is ready (Host Fallback, ID: capsule-42)"
@@ -1446,11 +1461,38 @@ mod tests {
 
     #[test]
     fn desktop_open_only_changes_ready_copy() {
-        let message = background_ready_message("capsule-42", CompatibilityHostMode::Disabled, true);
+        let message =
+            background_ready_message("capsule-42", CompatibilityHostMode::Disabled, true, false);
         assert_eq!(
             message,
             "🚀 Desktop app launch requested in background (ID: capsule-42)"
         );
+    }
+
+    #[test]
+    fn foreground_native_one_shot_exit_uses_command_copy() {
+        let message = foreground_native_event_messages(
+            &LifecycleEvent::Exited {
+                service: "main".to_string(),
+                exit_code: Some(42),
+            },
+            false,
+            true,
+        );
+
+        assert_eq!(
+            message,
+            vec![ForegroundEventMessage::Warn(
+                "❌ Command exited before start confirmation (exit code: 42)".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn background_ready_message_uses_command_copy_for_one_shot() {
+        let message =
+            background_ready_message("capsule-42", CompatibilityHostMode::Disabled, false, true);
+        assert_eq!(message, "🚀 Background command started (ID: capsule-42)");
     }
 
     #[test]
@@ -1616,6 +1658,10 @@ run_command = "node server.js"
             keep_failed_artifacts: false,
             auto_fix_mode: None,
             allow_unverified: false,
+            read_grants: Vec::new(),
+            write_grants: Vec::new(),
+            read_write_grants: Vec::new(),
+            caller_cwd: tmp.path().to_path_buf(),
             export_request: None,
             state_bindings: Vec::new(),
             inject_bindings: Vec::new(),
@@ -1657,6 +1703,10 @@ run_command = "node server.js"
             keep_failed_artifacts: false,
             auto_fix_mode: None,
             allow_unverified: false,
+            read_grants: Vec::new(),
+            write_grants: Vec::new(),
+            read_write_grants: Vec::new(),
+            caller_cwd: tmp.path().to_path_buf(),
             export_request: None,
             state_bindings: Vec::new(),
             inject_bindings: Vec::new(),
