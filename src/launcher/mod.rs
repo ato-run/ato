@@ -53,6 +53,13 @@ pub struct LaunchRequest<'a> {
     pub socket_manager: Option<Arc<crate::manager::socket::SocketManager>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InjectedMount {
+    pub source: PathBuf,
+    pub target: PathBuf,
+    pub readonly: bool,
+}
+
 /// Source target configuration for Source runtime
 #[derive(Debug, Clone)]
 pub struct SourceTarget {
@@ -68,6 +75,8 @@ pub struct SourceTarget {
     pub args: Vec<String>,
     /// Source directory path
     pub source_dir: PathBuf,
+    /// Requested process current_dir in the runtime namespace.
+    pub requested_cwd: Option<PathBuf>,
     /// Explicit command (Generic Source Runtime)
     /// If specified, overrides language/entrypoint detection
     /// Example: ["ruby", "app.rb"] or ["deno", "run", "main.ts"]
@@ -80,6 +89,8 @@ pub struct SourceTarget {
     /// IPC socket paths injected by ato-cli (IPC Broker).
     /// Added to the Sandbox policy read-write allow-list.
     pub ipc_socket_paths: Vec<PathBuf>,
+    /// Additional bind mounts injected by ato-cli for one-shot sandbox jobs.
+    pub injected_mounts: Vec<InjectedMount>,
 }
 
 /// Isolation policy derived from capsule.toml [isolation] section

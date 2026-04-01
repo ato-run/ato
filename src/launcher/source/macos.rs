@@ -17,6 +17,34 @@ use crate::launcher::{LaunchRequest, LaunchResult, RuntimeError, SourceTarget};
 
 use super::SourceRuntime;
 
+fn requested_host_cwd(target: &SourceTarget) -> PathBuf {
+    target
+        .requested_cwd
+        .clone()
+        .unwrap_or_else(|| target.source_dir.clone())
+}
+
+fn source_entrypoint_host_path(target: &SourceTarget) -> PathBuf {
+    let entrypoint = PathBuf::from(&target.entrypoint);
+    if entrypoint.is_absolute() {
+        entrypoint
+    } else {
+        target.source_dir.join(entrypoint)
+    }
+}
+
+fn allowed_mount_host_path(mount: &crate::launcher::InjectedMount) -> PathBuf {
+    if mount.source.exists() || mount.source.is_dir() {
+        return mount.source.clone();
+    }
+
+    mount
+        .source
+        .parent()
+        .map(|parent| parent.to_path_buf())
+        .unwrap_or_else(|| mount.source.clone())
+}
+
 /// Alcoholless installation guide URL
 const ALCOHOLLESS_INSTALL_URL: &str = "https://github.com/AkihiroSuda/alcless#install";
 
@@ -50,7 +78,15 @@ async fn resolve_executable_and_args(
                 final_args.push("-B".to_string());
             }
 
-            final_args.extend(args.iter().cloned());
+            let mut entrypoint_rewritten = false;
+            for arg in args {
+                if !entrypoint_rewritten && arg == &target.entrypoint {
+                    final_args.push(source_entrypoint_host_path(target).display().to_string());
+                    entrypoint_rewritten = true;
+                } else {
+                    final_args.push(arg.clone());
+                }
+            }
 
             return Ok((executable, final_args));
         }
@@ -70,13 +106,16 @@ async fn resolve_executable_and_args(
         })?;
 
     let args = match target.language.to_lowercase().as_str() {
-        "python" | "python3" => vec!["-B".to_string(), target.entrypoint.clone()],
+        "python" | "python3" => vec![
+            "-B".to_string(),
+            source_entrypoint_host_path(target).display().to_string(),
+        ],
         "deno" => vec![
             "run".to_string(),
             "--allow-read=.".to_string(),
-            target.entrypoint.clone(),
+            source_entrypoint_host_path(target).display().to_string(),
         ],
-        _ => vec![target.entrypoint.clone()],
+        _ => vec![source_entrypoint_host_path(target).display().to_string()],
     };
 
     Ok((toolchain_path, args))
@@ -254,7 +293,7 @@ async fn launch_with_alcoholless(
     }
 
     // Set working directory to source
-    cmd.current_dir(&target.source_dir);
+    cmd.current_dir(requested_host_cwd(target));
 
     // Check if explicit cmd is provided (Generic Source Runtime)
     if let Some(ref explicit_cmd) = target.cmd {
@@ -482,11 +521,10 @@ async fn launch_with_sandbox_exec(
 
     // Set working directory (canonicalize for macOS symlink resolution)
     // e.g., /tmp -> /private/tmp
-    let canonical_source_dir = target
-        .source_dir
+    let canonical_cwd = requested_host_cwd(target)
         .canonicalize()
-        .unwrap_or_else(|_| target.source_dir.clone());
-    cmd.current_dir(&canonical_source_dir);
+        .unwrap_or_else(|_| requested_host_cwd(target));
+    cmd.current_dir(&canonical_cwd);
 
     // Apply user-provided environment variables
     if let Some(ref envs) = request.env {
@@ -583,7 +621,7 @@ async fn launch_direct(
     let mut cmd = TokioCommand::new(&executable);
 
     // Set working directory to source
-    cmd.current_dir(&target.source_dir);
+    cmd.current_dir(requested_host_cwd(target));
 
     // Add arguments
     cmd.args(&args);
@@ -791,6 +829,24 @@ fn generate_production_seatbelt_profile(
         profile.push('\n');
     }
 
+    if !target.injected_mounts.is_empty() {
+        profile.push_str("; Injected sandbox mounts\n");
+        for mount in &target.injected_mounts {
+            let allowed_path = allowed_mount_host_path(mount);
+            if let Some(escaped) = escape_path_for_sbpl(&allowed_path) {
+                if mount.readonly {
+                    profile.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", escaped));
+                } else {
+                    profile.push_str(&format!(
+                        "(allow file-read* file-write* (subpath \"{}\"))\n",
+                        escaped
+                    ));
+                }
+            }
+        }
+        profile.push('\n');
+    }
+
     // =========================================================================
     // CRITICAL: Deny access to sensitive user paths
     // Uses the shared sensitive_paths() from system::sandbox
@@ -849,10 +905,12 @@ mod tests {
             dependencies: None,
             args: vec![],
             source_dir: PathBuf::from("/Users/test/project"),
+            requested_cwd: None,
             cmd: None,
             dev_mode: true,
             isolation: None,
             ipc_socket_paths: vec![],
+            injected_mounts: vec![],
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
@@ -871,10 +929,12 @@ mod tests {
             dependencies: None,
             args: vec![],
             source_dir: PathBuf::from("/Users/test/project"),
+            requested_cwd: None,
             cmd: None,
             dev_mode: false,
             isolation: None,
             ipc_socket_paths: vec![],
+            injected_mounts: vec![],
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
@@ -909,6 +969,7 @@ mod tests {
             dependencies: None,
             args: vec![],
             source_dir: PathBuf::from("/Users/test/app"),
+            requested_cwd: None,
             cmd: Some(vec![
                 "npm".to_string(),
                 "run".to_string(),
@@ -917,6 +978,7 @@ mod tests {
             dev_mode: false,
             isolation: Some(isolation),
             ipc_socket_paths: vec![],
+            injected_mounts: vec![],
         };
         let toolchain = PathBuf::from("/usr/local/bin/node");
 
@@ -960,10 +1022,12 @@ mod tests {
             dependencies: None,
             args: vec![],
             source_dir: PathBuf::from("/Users/test/app"),
+            requested_cwd: None,
             cmd: None,
             dev_mode: false,
             isolation: Some(isolation),
             ipc_socket_paths: vec![],
+            injected_mounts: vec![],
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
@@ -986,10 +1050,12 @@ mod tests {
             dependencies: None,
             args: vec![],
             source_dir: PathBuf::from("/Users/test/app"),
+            requested_cwd: None,
             cmd: None,
             dev_mode: false,
             isolation: None,
             ipc_socket_paths: vec![socket_path.clone()],
+            injected_mounts: vec![],
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
