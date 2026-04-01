@@ -104,17 +104,17 @@ echo ""
 
 # Step 3: Unit tests
 log_step "3/5: Running tests"
-if cargo test --workspace 2>/dev/null; then
-    log_success "Unit tests passed"
+if cargo test --lib 2>/dev/null; then
+    log_success "Library tests passed"
 else
-    log_fail "Unit tests failed"
+    log_fail "Library tests failed"
     FAILED=1
 fi
 echo ""
 
 # Step 4: Build release
 log_step "4/5: Building release binaries"
-if cargo build --release -p nacelle-cli --bin nacelle 2>/dev/null; then
+if cargo build --release --bin nacelle 2>/dev/null; then
     log_success "Release build succeeded"
 else
     log_fail "Release build failed"

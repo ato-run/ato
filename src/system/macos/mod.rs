@@ -29,26 +29,28 @@ impl Default for MacosSandbox {
 
 #[async_trait]
 impl NetworkSandbox for MacosSandbox {
-    async fn prepare(&mut self, _rule: IsolationRule) -> Result<(), SystemError> {
+    async fn prepare(&mut self, rule: IsolationRule) -> Result<(), SystemError> {
         self.anchor = Some(pf::PfAnchor::create()?);
         self.group = Some(user_group::GroupIdentity::acquire_ephemeral()?);
-        Err(SystemError::Unsupported(
-            "macOS network sandbox not implemented".to_string(),
-        ))
-    }
 
-    fn apply_to_child(&self, _cmd: &mut Command) -> Result<(), SystemError> {
-        Err(SystemError::Unsupported(
-            "macOS network sandbox not implemented".to_string(),
-        ))
-    }
-
-    async fn update_rules(&mut self, _rule: IsolationRule) -> Result<(), SystemError> {
-        if let Some(anchor) = &self.anchor {
-            let _ = anchor.update_rules()?;
+        if let Some(anchor) = &mut self.anchor {
+            anchor.update_rules(&rule)?;
         }
-        Err(SystemError::Unsupported(
-            "macOS network sandbox not implemented".to_string(),
-        ))
+
+        Ok(())
+    }
+
+    fn apply_to_child(&self, cmd: &mut Command) -> Result<(), SystemError> {
+        if let Some(group) = &self.group {
+            group.apply_to_child(cmd)?;
+        }
+        Ok(())
+    }
+
+    async fn update_rules(&mut self, rule: IsolationRule) -> Result<(), SystemError> {
+        if let Some(anchor) = &mut self.anchor {
+            anchor.update_rules(&rule)?;
+        }
+        Ok(())
     }
 }
