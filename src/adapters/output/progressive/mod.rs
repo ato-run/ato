@@ -405,6 +405,9 @@ pub fn render_security_context(
     host_fallback_requested: bool,
     dangerously_skip_permissions: bool,
     port: Option<u16>,
+    cwd: Option<&std::path::Path>,
+    mount_count: usize,
+    writable_mount_count: usize,
 ) -> Result<()> {
     let exposed = port
         .map(|value| value.to_string())
@@ -439,6 +442,17 @@ pub fn render_security_context(
                 "Local Static Server".to_string(),
             ),
         }
+    };
+    let filesystem = if mount_count == 0 {
+        filesystem
+    } else {
+        let cwd_detail = cwd
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        format!(
+            "{} ({} mounts, {} writable, cwd={})",
+            filesystem, mount_count, writable_mount_count, cwd_detail
+        )
     };
     let body = format!(
         "           {:<14} {:<24} {:<24}\nPreview    {:<14} {:<24} {:<24}\n           {:<14} {:<24} {:<24}",
