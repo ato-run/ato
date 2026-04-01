@@ -94,7 +94,15 @@ Even when none of these apply, `ato run` still works as a general-purpose proces
 
 ## Quick Start
 
-This is the standard workflow for local source development.
+Install `ato` with the one-line installer:
+
+```bash
+curl -fsSL https://ato.run/install.sh | sh
+```
+
+Alternatively, download a pre-built binary from the [GitHub Releases page](https://github.com/ato-run/ato-cli/releases/latest) and place it on your `PATH`.
+
+The following shows the workflow for building from source (contributors / CI):
 
 ```bash
 # Build
@@ -151,7 +159,9 @@ ato registry serve --host 127.0.0.1 --port 18787 [--auth-token <token>]
 
 ### Lock-native input model
 
-Instead of relying on ambiguous human-written config, Ato treats machine-readable `ato.lock.json` as the single source of truth. When this file exists, it guarantees restoration of the same environment regardless of machine differences. If you have not migrated yet, older config formats still work, and `ato init` can migrate you forward.
+Instead of relying on ambiguous human-written config, Ato treats machine-readable `ato.lock.json` as the single source of truth (SSOT). When this file is present, it guarantees the same environment regardless of machine differences.
+
+Projects that still use a `capsule.toml` from older versions of Ato continue to work through a compatibility path — no manual changes required. Running `ato init` inside such a project writes a durable `ato.lock.json` and moves the project to the canonical flow.
 
 ### Unified delivery pipeline
 
@@ -159,8 +169,9 @@ Ato unifies consumer flows (`run` / `install`) and producer flows (`build` / `pu
 
 ### Native Delivery: projecting desktop apps
 
-This is Ato's native app delivery and integration feature for platforms such as macOS. From project structures such as Tauri and Electron, Ato automatically infers the entrypoint, such as `.app`, then autonomously resolves and records all native delivery settings into `ato.lock.json`. No handwritten manifest configuration file is required.
-When a user runs `ato install` on an artifact that includes this metadata, Ato projects it into the OS application area through symlinks and similar mechanisms so it launches like a normal desktop app.
+This is Ato's native app delivery and integration feature. From project structures such as Tauri and Electron, Ato automatically infers the entrypoint (such as `.app` on macOS) and records all native delivery settings into `ato.lock.json`. No separate configuration file is required.
+
+When a user runs `ato install` on an artifact that includes native delivery metadata, Ato projects it into the OS application area so it is accessible like a normal native app. Projection is enabled by default when the artifact supports it; pass `--no-project` to skip it or `--project` to force it explicitly.
 
 ### Dynamic app capsules: Web plus services supervisor
 

@@ -98,7 +98,7 @@ sleep 60 && env -u GH_TOKEN -u GITHUB_TOKEN gh pr view <pr> --json mergeable,mer
 
 3. Increase the wait window for slower matrix jobs:
 
-- 60 to 120 seconds for early setup and fast checks
+- 60 to 120 seconds for PRs (lightweight: clippy + linux-x86_64 only, ~5-7 min total)
 - 180 seconds once only matrix builds remain
 - 240 to 300 seconds only when you are waiting on known long-running artifact or release publication jobs
 
@@ -335,5 +335,8 @@ The workflow is complete only when all of the following are true:
 - `Release PR` success on `main` does not publish the current version by itself.
 - Publication starts from the pushed version tag.
 - The repo has shown branch-policy cases where admin merge is required even after checks are green.
-- `Build (Multi OS)` may have late smoke jobs after the main build matrix appears done.
-- Windows native delivery jobs can materially extend wait time.
+- **PR checks are intentionally lightweight:** `Build (Multi OS)` on `pull_request` runs only `clippy`. The full 4-platform build matrix, `smoke`, `native_delivery_e2e_windows`, and `tar_pack_benchmark` run only on `push` to `dev` and `workflow_dispatch`. `V3 Parity` runs only on schedule and `workflow_dispatch`.
+- This means PR check time is ~5-7 minutes, making the full release cycle achievable in under 1 hour.
+- Expected timing: dev→main PR (~7 min) + post-merge (~3 min) + release-plz PR (~7 min) + post-merge (~3 min) + tag + Release workflow (~20 min) = ~40 min total (no collision).
+- With one version collision: +bump PR (~7 min + ~3 min) = ~50 min, still under 1 hour.
+- Windows native delivery jobs and tar_pack_benchmark run on `dev` push and `workflow_dispatch` only (not PRs).
