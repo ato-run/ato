@@ -61,7 +61,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.artifact_name }}
-    if: ${{ !((github.event_name == 'workflow_dispatch' && inputs.native_only) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[native-only]'))) }}
+    if: ${{ github.event_name != 'pull_request' && !((github.event_name == 'workflow_dispatch' && inputs.native_only) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[native-only]'))) }}
     needs: clippy
     runs-on: ${{ matrix.os }}
     strategy:
@@ -427,7 +427,7 @@ jobs:
 
   native_delivery_e2e_windows:
     name: Native delivery E2E (Windows)
-    if: ${{ !((github.event_name == 'workflow_dispatch' && inputs.native_only) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[native-only]'))) }}
+    if: ${{ github.event_name != 'pull_request' && !((github.event_name == 'workflow_dispatch' && inputs.native_only) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[native-only]'))) }}
     needs: clippy
     runs-on: windows-latest
 
@@ -474,7 +474,7 @@ jobs:
 
   tar_pack_benchmark:
     name: Tar pack benchmark
-    if: ${{ !((github.event_name == 'workflow_dispatch' && inputs.native_only) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[native-only]'))) }}
+    if: ${{ github.event_name != 'pull_request' && !((github.event_name == 'workflow_dispatch' && inputs.native_only) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[native-only]'))) }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
