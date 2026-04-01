@@ -172,6 +172,18 @@ pub(crate) enum Commands {
         #[arg(long, default_value_t = false)]
         allow_unverified: bool,
 
+        /// Grant read-only access to a host file or directory in sandbox mode
+        #[arg(long = "read", value_name = "PATH")]
+        read: Vec<String>,
+
+        /// Grant create/update access to a host file or directory in sandbox mode
+        #[arg(long = "write", value_name = "PATH")]
+        write: Vec<String>,
+
+        /// Grant read-write access to a host file or directory in sandbox mode
+        #[arg(long = "read-write", value_name = "PATH")]
+        read_write: Vec<String>,
+
         /// Arguments passed through to an exported CLI tool after `--`
         #[arg(allow_hyphen_values = true)]
         args: Vec<String>,
