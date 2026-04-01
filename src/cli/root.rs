@@ -184,6 +184,10 @@ pub(crate) enum Commands {
         #[arg(long = "read-write", value_name = "PATH")]
         read_write: Vec<String>,
 
+        /// Override the caller working directory used for relative argv and grant resolution
+        #[arg(long = "cwd", value_name = "PATH")]
+        cwd: Option<PathBuf>,
+
         /// Arguments passed through to an exported CLI tool after `--`
         #[arg(allow_hyphen_values = true)]
         args: Vec<String>,

@@ -74,6 +74,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             read,
             write,
             read_write,
+            cwd,
             args,
         } => run::execute_run_like_command(run::RunLikeCommandArgs {
             path,
@@ -103,6 +104,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             read,
             write,
             read_write,
+            cwd,
             deprecation_warning: None,
             reporter: reporter.clone(),
         }),

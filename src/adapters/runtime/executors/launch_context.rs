@@ -19,6 +19,7 @@ pub struct RuntimeLaunchContext {
     injected_env: HashMap<String, String>,
     injected_mounts: Vec<InjectedMount>,
     command_args: Vec<String>,
+    effective_cwd: Option<PathBuf>,
 }
 
 impl RuntimeLaunchContext {
@@ -33,6 +34,7 @@ impl RuntimeLaunchContext {
                 injected_env: HashMap::new(),
                 injected_mounts: Vec::new(),
                 command_args: Vec::new(),
+                effective_cwd: None,
             }
         } else {
             Self::empty()
@@ -51,6 +53,11 @@ impl RuntimeLaunchContext {
 
     pub fn with_command_args(mut self, args: Vec<String>) -> Self {
         self.command_args.extend(args);
+        self
+    }
+
+    pub fn with_effective_cwd(mut self, cwd: PathBuf) -> Self {
+        self.effective_cwd = Some(cwd);
         self
     }
 
@@ -76,6 +83,10 @@ impl RuntimeLaunchContext {
 
     pub fn command_args(&self) -> &[String] {
         &self.command_args
+    }
+
+    pub fn effective_cwd(&self) -> Option<&PathBuf> {
+        self.effective_cwd.as_ref()
     }
 
     pub fn merged_env(&self) -> HashMap<String, String> {
@@ -180,5 +191,12 @@ mod tests {
         };
         let ctx = RuntimeLaunchContext::empty().with_injected_mounts(vec![mount.clone()]);
         assert_eq!(ctx.injected_mounts(), &[mount]);
+    }
+
+    #[test]
+    fn effective_cwd_is_preserved() {
+        let cwd = PathBuf::from("/workspace/reference");
+        let ctx = RuntimeLaunchContext::empty().with_effective_cwd(cwd.clone());
+        assert_eq!(ctx.effective_cwd(), Some(&cwd));
     }
 }

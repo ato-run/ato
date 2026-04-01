@@ -177,6 +177,7 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) write_grants: Vec<String>,
     pub(crate) read_write_grants: Vec<String>,
     pub(crate) caller_cwd: PathBuf,
+    pub(crate) effective_cwd: Option<PathBuf>,
     pub(crate) authoritative_input: Option<RunAuthoritativeInput>,
     pub(crate) desktop_open_path: Option<PathBuf>,
     pub(crate) background: bool,
@@ -197,6 +198,14 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) inject_bindings: Vec<String>,
     pub(crate) reporter: Arc<CliReporter>,
     pub(crate) preview_mode: bool,
+}
+
+impl ConsumerRunRequest {
+    fn effective_cwd(&self) -> &Path {
+        self.effective_cwd
+            .as_deref()
+            .unwrap_or(self.caller_cwd.as_path())
+    }
 }
 
 pub(crate) struct RunInstallPhaseResult {
@@ -344,14 +353,14 @@ fn normalize_write_path(path: &Path) -> Result<(PathBuf, SandboxGrantScope)> {
 
 fn resolve_grant_source_path(
     raw: &str,
-    caller_cwd: &Path,
+    effective_cwd: &Path,
     access: SandboxGrantAccess,
 ) -> Result<(PathBuf, SandboxGrantScope)> {
     let requested = PathBuf::from(raw);
     let absolute = if requested.is_absolute() {
         requested
     } else {
-        caller_cwd.join(requested)
+        effective_cwd.join(requested)
     };
 
     match access {
@@ -362,21 +371,30 @@ fn resolve_grant_source_path(
     }
 }
 
-fn guest_target_path(raw: &str, execution_working_dir: &Path) -> PathBuf {
+fn guest_target_path(raw: &str, guest_cwd: &Path) -> PathBuf {
     let requested = PathBuf::from(raw);
     let absolute = if requested.is_absolute() {
         requested
     } else {
-        execution_working_dir.join(requested)
+        guest_cwd.join(requested)
     };
     lexical_normalize_absolute(absolute)
 }
 
+fn source_runtime_guest_cwd(effective_cwd: &Path) -> PathBuf {
+    if cfg!(target_os = "linux") {
+        PathBuf::from("/workspace")
+    } else {
+        effective_cwd.to_path_buf()
+    }
+}
+
 fn resolve_sandbox_grants(
     request: &ConsumerRunRequest,
-    execution_working_dir: &Path,
+    guest_cwd: &Path,
 ) -> Result<Vec<ResolvedSandboxGrant>> {
     let mut resolved = Vec::new();
+    let effective_cwd = request.effective_cwd();
 
     for (values, access) in [
         (&request.read_grants, SandboxGrantAccess::Read),
@@ -384,11 +402,10 @@ fn resolve_sandbox_grants(
         (&request.read_write_grants, SandboxGrantAccess::ReadWrite),
     ] {
         for value in values {
-            let (source_path, scope) =
-                resolve_grant_source_path(value, &request.caller_cwd, access)?;
+            let (source_path, scope) = resolve_grant_source_path(value, effective_cwd, access)?;
             resolved.push(ResolvedSandboxGrant {
                 source_path,
-                guest_target: guest_target_path(value, execution_working_dir),
+                guest_target: guest_target_path(value, guest_cwd),
                 access,
                 scope,
             });
@@ -398,12 +415,16 @@ fn resolve_sandbox_grants(
     Ok(resolved)
 }
 
-fn normalize_candidate_path(raw: &str, caller_cwd: &Path, kind: InferredIoKind) -> Option<PathBuf> {
+fn normalize_candidate_path(
+    raw: &str,
+    effective_cwd: &Path,
+    kind: InferredIoKind,
+) -> Option<PathBuf> {
     let candidate = PathBuf::from(raw);
     let absolute = if candidate.is_absolute() {
         candidate
     } else {
-        caller_cwd.join(candidate)
+        effective_cwd.join(candidate)
     };
 
     match kind {
@@ -432,7 +453,7 @@ fn grant_allows_path(grant: &ResolvedSandboxGrant, path: &Path, kind: InferredIo
     }
 }
 
-fn infer_io_candidates(args: &[String], caller_cwd: &Path) -> Vec<(String, InferredIoKind)> {
+fn infer_io_candidates(args: &[String], effective_cwd: &Path) -> Vec<(String, InferredIoKind)> {
     let mut inferred = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -452,7 +473,7 @@ fn infer_io_candidates(args: &[String], caller_cwd: &Path) -> Vec<(String, Infer
             continue;
         }
         if !current.starts_with('-')
-            && normalize_candidate_path(current, caller_cwd, InferredIoKind::Read).is_some()
+            && normalize_candidate_path(current, effective_cwd, InferredIoKind::Read).is_some()
         {
             inferred.push((current.clone(), InferredIoKind::Read));
         }
@@ -465,8 +486,9 @@ fn validate_sandbox_grants_best_effort(
     request: &ConsumerRunRequest,
     grants: &[ResolvedSandboxGrant],
 ) -> Result<()> {
-    for (raw, kind) in infer_io_candidates(&request.args, &request.caller_cwd) {
-        let Some(normalized) = normalize_candidate_path(&raw, &request.caller_cwd, kind) else {
+    let effective_cwd = request.effective_cwd();
+    for (raw, kind) in infer_io_candidates(&request.args, effective_cwd) {
+        let Some(normalized) = normalize_candidate_path(&raw, effective_cwd, kind) else {
             continue;
         };
         if grants
@@ -497,6 +519,33 @@ fn validate_sandbox_grants_best_effort(
 
 fn is_one_shot_run_request(request: &ConsumerRunRequest, prepared: &PreparedRunContext) -> bool {
     request.export_request.is_some() || prepared.execution_override.is_some()
+}
+
+fn sandbox_grant_to_injected_mount(grant: ResolvedSandboxGrant) -> InjectedMount {
+    if grant.source_path.exists() || matches!(grant.scope, SandboxGrantScope::Directory) {
+        return InjectedMount {
+            source: grant.source_path,
+            target: grant.guest_target.to_string_lossy().to_string(),
+            readonly: grant.access.readonly(),
+        };
+    }
+
+    let source_parent = grant
+        .source_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| grant.source_path.clone());
+    let guest_parent = grant
+        .guest_target
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| grant.guest_target.clone());
+
+    InjectedMount {
+        source: source_parent,
+        target: guest_parent.to_string_lossy().to_string(),
+        readonly: false,
+    }
 }
 
 pub(crate) struct RunPipelineState {
@@ -728,21 +777,18 @@ where
     let mut launch_ctx =
         target_runner::resolve_launch_context(&decision.plan, &prepared, &request.reporter)
             .await?
+            .with_effective_cwd(request.effective_cwd().to_path_buf())
             .with_injected_env(merged_injected_env)
             .with_injected_mounts(injected_data.mounts);
 
     if request.sandbox_mode && !request.dangerously_skip_permissions {
-        let sandbox_grants =
-            resolve_sandbox_grants(request, &decision.plan.execution_working_directory())?;
+        let guest_cwd = source_runtime_guest_cwd(request.effective_cwd());
+        let sandbox_grants = resolve_sandbox_grants(request, &guest_cwd)?;
         validate_sandbox_grants_best_effort(request, &sandbox_grants)?;
         launch_ctx = launch_ctx.with_injected_mounts(
             sandbox_grants
                 .into_iter()
-                .map(|grant| InjectedMount {
-                    source: grant.source_path,
-                    target: grant.guest_target.to_string_lossy().to_string(),
-                    readonly: grant.access.readonly(),
-                })
+                .map(sandbox_grant_to_injected_mount)
                 .collect(),
         );
     }
@@ -1356,6 +1402,13 @@ where
                 host_fallback_requested,
                 request.dangerously_skip_permissions,
                 runtime_overrides::override_port(decision.plan.execution_port()),
+                launch_ctx.effective_cwd().map(|path| path.as_path()),
+                launch_ctx.injected_mounts().len(),
+                launch_ctx
+                    .injected_mounts()
+                    .iter()
+                    .filter(|mount| !mount.readonly)
+                    .count(),
             )?;
         }
     }
@@ -1718,6 +1771,12 @@ pub(crate) async fn reroute_auto_provisioned_execution(
         &reporter,
     )
     .await?
+    .with_effective_cwd(
+        launch_ctx
+            .effective_cwd()
+            .cloned()
+            .unwrap_or_else(|| prepared.workspace_root.clone()),
+    )
     .with_injected_env(launch_ctx.merged_env())
     .with_injected_mounts(launch_ctx.injected_mounts().to_vec());
     Ok((rerouted_decision, rerouted_launch_ctx, rerouted_prepared))
@@ -1950,10 +2009,26 @@ fn build_target_launch_options(
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_existing_path, normalize_write_path, DerivedBridgeManifest, PreparedRunContext,
+        normalize_existing_path, normalize_write_path, resolve_sandbox_grants,
+        source_runtime_guest_cwd, validate_sandbox_grants_best_effort, ConsumerRunRequest,
+        DerivedBridgeManifest, PreparedRunContext,
     };
     use capsule_core::ato_lock::AtoLock;
+    use std::fs;
+    use std::path::Path;
     use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use crate::reporters::CliReporter;
+
+    fn workspace_tempdir(name: &str) -> tempfile::TempDir {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(".tmp");
+        fs::create_dir_all(&root).expect("create workspace .tmp");
+        tempfile::Builder::new()
+            .prefix(name)
+            .tempdir_in(root)
+            .expect("workspace tempdir")
+    }
 
     #[test]
     fn prepared_run_context_with_bridge_manifest_retains_authority() {
@@ -2021,5 +2096,115 @@ mod tests {
         let err = normalize_write_path(&link_path.join("output.txt"))
             .expect_err("must reject symlink parent traversal");
         assert!(err.to_string().contains("traverses symlink"));
+    }
+
+    fn sandbox_request(
+        caller_cwd: PathBuf,
+        effective_cwd: Option<PathBuf>,
+        args: Vec<String>,
+        read_grants: Vec<String>,
+        write_grants: Vec<String>,
+    ) -> ConsumerRunRequest {
+        ConsumerRunRequest {
+            target: caller_cwd.join("tool.py"),
+            target_label: None,
+            args,
+            read_grants,
+            write_grants,
+            read_write_grants: Vec::new(),
+            caller_cwd,
+            effective_cwd,
+            authoritative_input: None,
+            desktop_open_path: None,
+            background: false,
+            nacelle: None,
+            enforcement: "strict".to_string(),
+            sandbox_mode: true,
+            dangerously_skip_permissions: false,
+            compatibility_fallback: None,
+            assume_yes: true,
+            agent_mode: crate::RunAgentMode::Off,
+            agent_local_root: None,
+            registry: None,
+            keep_failed_artifacts: false,
+            auto_fix_mode: None,
+            allow_unverified: false,
+            export_request: None,
+            state_bindings: Vec::new(),
+            inject_bindings: Vec::new(),
+            reporter: Arc::new(CliReporter::new(false)),
+            preview_mode: false,
+        }
+    }
+
+    #[test]
+    fn relative_grants_use_effective_cwd_for_host_and_manifest_dir_for_guest() {
+        let caller = workspace_tempdir("caller-cwd-");
+        let explicit = workspace_tempdir("effective-cwd-");
+        let input = explicit.path().join("in.pdf");
+        std::fs::write(&input, b"pdf").expect("write input");
+
+        let request = sandbox_request(
+            caller.path().to_path_buf(),
+            Some(explicit.path().to_path_buf()),
+            vec!["./in.pdf".to_string()],
+            vec!["./in.pdf".to_string()],
+            Vec::new(),
+        );
+
+        let grants = resolve_sandbox_grants(&request, &source_runtime_guest_cwd(explicit.path()))
+            .expect("grants");
+        assert_eq!(grants.len(), 1);
+        assert_eq!(
+            grants[0].source_path,
+            input.canonicalize().expect("canonical input")
+        );
+        assert_eq!(
+            grants[0].guest_target,
+            source_runtime_guest_cwd(explicit.path()).join("in.pdf")
+        );
+    }
+
+    #[test]
+    fn relative_write_grants_project_to_guest_manifest_dir() {
+        let caller = workspace_tempdir("caller-cwd-");
+        let effective = workspace_tempdir("effective-cwd-");
+
+        let request = sandbox_request(
+            caller.path().to_path_buf(),
+            Some(effective.path().to_path_buf()),
+            vec!["-o".to_string(), "./out.md".to_string()],
+            Vec::new(),
+            vec!["./out.md".to_string()],
+        );
+
+        let grants = resolve_sandbox_grants(&request, &source_runtime_guest_cwd(effective.path()))
+            .expect("grants");
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].source_path, effective.path().join("out.md"));
+        assert_eq!(
+            grants[0].guest_target,
+            source_runtime_guest_cwd(effective.path()).join("out.md")
+        );
+    }
+
+    #[test]
+    fn best_effort_validation_uses_effective_cwd_for_relative_args() {
+        let caller = workspace_tempdir("caller-cwd-");
+        let effective = workspace_tempdir("effective-cwd-");
+        let guest_manifest = workspace_tempdir("guest-manifest-");
+        let input = effective.path().join("in.pdf");
+        std::fs::write(&input, b"pdf").expect("write input");
+
+        let request = sandbox_request(
+            caller.path().to_path_buf(),
+            Some(effective.path().to_path_buf()),
+            vec!["./in.pdf".to_string()],
+            vec!["./in.pdf".to_string()],
+            Vec::new(),
+        );
+
+        let grants = resolve_sandbox_grants(&request, guest_manifest.path()).expect("grants");
+        validate_sandbox_grants_best_effort(&request, &grants).expect("validation passes");
     }
 }
