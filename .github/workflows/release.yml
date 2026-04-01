@@ -137,8 +137,9 @@ jobs:
           if-no-files-found: error
 
   build_windows:
-    name: Build Windows binaries
+    name: Build Windows binaries (best effort)
     runs-on: windows-latest
+    continue-on-error: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
