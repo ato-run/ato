@@ -25,6 +25,49 @@ use crate::system::sandbox::{filter_sensitive_paths, sensitive_paths};
 
 use super::SourceRuntime;
 
+fn requested_guest_cwd(target: &SourceTarget) -> PathBuf {
+    target
+        .requested_cwd
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("/app"))
+}
+
+fn sandbox_entrypoint_path(target: &SourceTarget) -> String {
+    let entrypoint = PathBuf::from(&target.entrypoint);
+    if entrypoint.is_absolute() {
+        return entrypoint.display().to_string();
+    }
+
+    let normalized = entrypoint
+        .strip_prefix(".")
+        .unwrap_or(entrypoint.as_path())
+        .to_path_buf();
+    PathBuf::from("/app").join(normalized).display().to_string()
+}
+
+fn ensure_bwrap_dirs(cmd: &mut Command, path: &std::path::Path) {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        if current == PathBuf::from("/") {
+            continue;
+        }
+        cmd.args(["--dir", &current.display().to_string()]);
+    }
+}
+
+fn mount_source_path(mount: &crate::launcher::InjectedMount) -> PathBuf {
+    if mount.source.exists() || mount.source.is_dir() {
+        return mount.source.clone();
+    }
+
+    mount
+        .source
+        .parent()
+        .map(|parent| parent.to_path_buf())
+        .unwrap_or_else(|| mount.source.clone())
+}
+
 /// Generate a `SandboxPolicy` from `IsolationPolicy` for Landlock enforcement.
 ///
 /// The allow-list is constructed from the manifest's `read_only` / `read_write`
@@ -84,6 +127,17 @@ pub fn generate_landlock_policy(target: &SourceTarget) -> crate::system::sandbox
             target.ipc_socket_paths.len()
         );
         policy.ipc_socket_paths = target.ipc_socket_paths.clone();
+    }
+
+    for mount in &target.injected_mounts {
+        let source = mount_source_path(mount);
+        if mount.readonly {
+            if !policy.read_only_paths.contains(&source) {
+                policy.read_only_paths.push(source);
+            }
+        } else if !policy.read_write_paths.contains(&source) {
+            policy.read_write_paths.push(source);
+        }
     }
 
     policy
@@ -194,6 +248,21 @@ pub async fn launch_with_bubblewrap(
     let source_dir_str = target.source_dir.to_string_lossy();
     cmd.args(["--ro-bind", &source_dir_str, "/app"]);
 
+    for mount in &target.injected_mounts {
+        let source = mount_source_path(mount);
+        let target_path = mount.target.clone();
+        if let Some(parent) = target_path.parent() {
+            ensure_bwrap_dirs(&mut cmd, parent);
+        }
+        let source_str = source.to_string_lossy().to_string();
+        let target_str = target_path.to_string_lossy().to_string();
+        if mount.readonly {
+            cmd.args(["--ro-bind", &source_str, &target_str]);
+        } else {
+            cmd.args(["--bind", &source_str, &target_str]);
+        }
+    }
+
     // =====================================================================
     // Apply IsolationPolicy bind-mounts (if provided in capsule.toml)
     // Paths overlapping with sensitive directories are pre-filtered.
@@ -260,7 +329,9 @@ pub async fn launch_with_bubblewrap(
     add_sensitive_path_hiding(&mut cmd, &all_parents);
 
     // Set working directory
-    cmd.args(["--chdir", "/app"]);
+    let requested_cwd = requested_guest_cwd(target);
+    ensure_bwrap_dirs(&mut cmd, &requested_cwd);
+    cmd.args(["--chdir", &requested_cwd.display().to_string()]);
 
     // Security hardening - more restrictive in production mode
     cmd.args(["--new-session"]);
@@ -310,27 +381,45 @@ pub async fn launch_with_bubblewrap(
 
     // Add the actual command
     cmd.arg("--");
-    cmd.arg(&toolchain_path);
+    if let Some(explicit_cmd) = target.cmd.as_ref() {
+        if let Some((binary, args)) = explicit_cmd.split_first() {
+            let binary_path = match binary.as_str() {
+                "python" | "python3" | "node" | "deno" | "ruby" => toolchain_path.clone(),
+                _ => which::which(binary).unwrap_or_else(|_| PathBuf::from(binary)),
+            };
+            cmd.arg(binary_path);
+            let mut entrypoint_rewritten = false;
+            let sandbox_entrypoint = sandbox_entrypoint_path(target);
+            for arg in args {
+                if !entrypoint_rewritten && arg == &target.entrypoint {
+                    cmd.arg(&sandbox_entrypoint);
+                    entrypoint_rewritten = true;
+                } else {
+                    cmd.arg(arg);
+                }
+            }
+        }
+    } else {
+        cmd.arg(&toolchain_path);
 
-    // Add language-specific arguments
-    match target.language.to_lowercase().as_str() {
-        "python" => {
-            // Disable bytecode caching in sandbox
-            cmd.args(["-B", &target.entrypoint]);
+        match target.language.to_lowercase().as_str() {
+            "python" => {
+                cmd.args(["-B", &sandbox_entrypoint_path(target)]);
+            }
+            "node" | "nodejs" => {
+                cmd.arg(&sandbox_entrypoint_path(target));
+            }
+            "deno" => {
+                let sandbox_entrypoint = sandbox_entrypoint_path(target);
+                cmd.args(["run", "--allow-read=/app", &sandbox_entrypoint]);
+            }
+            _ => {
+                cmd.arg(&sandbox_entrypoint_path(target));
+            }
         }
-        "node" | "nodejs" => {
-            cmd.arg(&target.entrypoint);
-        }
-        "deno" => {
-            cmd.args(["run", "--allow-read=/app", &target.entrypoint]);
-        }
-        _ => {
-            cmd.arg(&target.entrypoint);
-        }
+
+        cmd.args(&target.args);
     }
-
-    // Add user-provided arguments
-    cmd.args(&target.args);
 
     // Setup output redirection
     let log_path = runtime.workload_log_path(request.workload_id);

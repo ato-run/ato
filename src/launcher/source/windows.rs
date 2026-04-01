@@ -343,7 +343,12 @@ async fn launch_with_sandboxie(
     cmd.args(&target.args);
 
     // Set working directory
-    cmd.current_dir(&target.source_dir);
+    cmd.current_dir(
+        target
+            .requested_cwd
+            .as_ref()
+            .unwrap_or(&target.source_dir),
+    );
 
     // Setup output redirection
     let log_path = runtime.workload_log_path(request.workload_id);
