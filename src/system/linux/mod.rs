@@ -21,6 +21,12 @@ impl LinuxSandbox {
     }
 }
 
+impl Default for LinuxSandbox {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl NetworkSandbox for LinuxSandbox {
     async fn prepare(&mut self, rule: IsolationRule) -> Result<(), SystemError> {

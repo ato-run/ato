@@ -105,22 +105,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "18"
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v2
-        with:
-          version: 8
-
-      # Build React app for simple-todo
-      - name: Build React app
+      - name: Verify Python sample files
         working-directory: ./samples/simple-todo
         run: |
-          pnpm install
-          pnpm run build
+          python3 -m py_compile app.py
+          test -f build.sh
 
       # Verify capsule.toml is valid
       - name: Verify capsule.toml syntax

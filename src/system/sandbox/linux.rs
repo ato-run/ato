@@ -24,10 +24,9 @@ use tracing::{debug, info, warn};
 /// Check if Landlock is supported on this system
 pub fn is_landlock_supported() -> bool {
     // Try to create a minimal ruleset to check support
-    match Ruleset::default().handle_access(AccessFs::from_all(ABI::V1)) {
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    Ruleset::default()
+        .handle_access(AccessFs::from_all(ABI::V1))
+        .is_ok()
 }
 
 /// Apply Landlock sandbox to the current process
@@ -82,7 +81,7 @@ pub fn apply_landlock_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
 
     // Add IPC socket paths (injected by ato-cli IPC Broker)
     for path in &policy.ipc_socket_paths {
-        if path.exists() || path.parent().map_or(false, |p| p.exists()) {
+        if path.exists() || path.parent().is_some_and(|p| p.exists()) {
             debug!("Adding IPC socket read-write access to: {:?}", path);
             // IPC sockets need full read-write access
             let target = if path.exists() {

@@ -442,7 +442,7 @@ pub async fn launch_with_bubblewrap(
             .prepare_command(&mut cmd)
             .map_err(|e| RuntimeError::CommandExecution {
                 operation: "socket_activation_prepare".to_string(),
-                source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+                source: std::io::Error::other(e.to_string()),
             })?;
         tracing::info!(
             "Socket Activation: Passing FD {} to child process",
