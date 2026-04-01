@@ -35,6 +35,7 @@ pub(crate) struct RunLikeCommandArgs {
     pub(crate) read: Vec<String>,
     pub(crate) write: Vec<String>,
     pub(crate) read_write: Vec<String>,
+    pub(crate) cwd: Option<PathBuf>,
     pub(crate) deprecation_warning: Option<&'static str>,
     pub(crate) reporter: Arc<reporters::CliReporter>,
 }
@@ -76,6 +77,7 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
         args.read,
         args.write,
         args.read_write,
+        args.cwd,
         args.state,
         args.inject,
         args.reporter,
