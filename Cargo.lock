@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "ato-cli"
-version = "0.4.37"
+version = "0.4.38"
 dependencies = [
  "adk-core",
  "adk-model",
