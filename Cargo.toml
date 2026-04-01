@@ -1,6 +1,6 @@
 [package]
 name = "nacelle"
-version = "0.2.0"
+version = "0.2.9"
 edition = "2021"
 rust-version = "1.82"
 license = "Apache-2.0"
@@ -15,52 +15,42 @@ categories = ["command-line-utilities", "development-tools"]
 name = "nacelle"
 path = "src/lib.rs"
 
-
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-toml = "0.8"
-axum = "0.7"
+
+# Shared libraries
+# capsule-sync = { path = "../capsule-sync" }  # TODO: Migrated to sync-rs
 
 # 既存の依存関係
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = "0.8"
+url = "2.5"
 
 clap = { version = "4.0", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 anyhow = "1.0"
 thiserror = "1.0"
-num_cpus = "1.16"
 which = "5.0"
-chrono = { version = "0.4", features = ["serde"] }
 
 dirs = "5.0"
-serde_yaml = "0.9"
 
-
-
-# Storage management
-uuid = { version = "1.10", features = ["v4"] }
 
 
 # Cryptography & Audit
-ed25519-dalek = { version = "2.1", features = ["rand_core", "pkcs8"] }
-rand = "0.8"
 hex = "0.4"
-hmac = "0.12"
+blake3 = "1.5"
+ed25519-dalek = { version = "2.0", features = ["rand_core"] }
 base64 = "0.22"
+chrono = { version = "0.4", default-features = true }
+bs58 = "0.5"
+unsigned-varint = "0.8"
 
 
 # Type definitions and utilities
-dashmap = "6"
-capnp = "0.24"
-tokio-stream = { version = "0.1.17", features = ["sync", "net"] }
-hcl-rs = "0.17"
-async-stream = "0.3.6"
 futures = "0.3.31"
 sha2 = "0.10.9"
-
-bytes = "1.11.0"
 # Cross-compiling for Linux guest (musl) should not depend on host OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 
@@ -73,19 +63,17 @@ fs2 = "0.4.3"
 
 # JIT Provisioning (Phase 1): Progress bar for downloads
 indicatif = "0.17"
+# Wasm Runtime for sync.wasm execution
+wasmtime = "16.0"
+wasmtime-wasi = "16.0"
+wasi-common = "16.0"
+tempfile = "3.8"
 # Socket Activation (Phase 2): FD inheritance for child processes
 nix = { version = "0.30.1", features = ["signal", "fs", "socket", "net"] }
 libc = "0.2"
-subtle = "2.6.1"
-rust_decimal = { version = "1.39.0", features = ["serde"] }
-rust_decimal_macros = "1.39.0"
 shell-words = "1.1.1"
 
 
-# L1 Policy pattern matching
-regex = "1.10"
-ctrlc = "3.4"
-ignore = "0.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Phase 3: Sandbox (Linux Landlock LSM)
@@ -99,22 +87,19 @@ engine = []
 # Library mode: Core types and verification only (for CLI/embedded use)
 library = []
 phase2 = []
-# Embedded mode: minimal dependencies for capsule-cli integration
+# Embedded mode: minimal dependencies for ato-cli integration
 embedded = []
 # Optional CUDA support for VRAM checks
 cuda = []
+legacy-manifest-tests = []
+# Sync runtime support (requires capsule-sync crate)
+sync-runtime = []
 
 [dev-dependencies]
 tempfile = "3.8"
-tower = { version = "0.4", features = ["util"] }
 
 [build-dependencies]
 aya-build = "0.1"
-
-# Workspace configuration
-[workspace]
-members = ["ebpf"]
-resolver = "2"
 
 # v0.2.0 Optimization: Tauri-inspired build profiles
 [profile.release]
@@ -126,5 +111,3 @@ codegen-units = 1     # Better optimization
 
 [profile.release.package.nacelle-ebpf]
 opt-level = "z"
-
-
