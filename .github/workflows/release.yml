@@ -1,5 +1,8 @@
 name: Build and Publish nacelle
 
+permissions:
+  contents: write
+
 on:
   push:
     tags:
@@ -187,12 +190,80 @@ jobs:
           path: ${{ runner.temp }}/nacelle-release
           if-no-files-found: error
 
+  publish_github_release:
+    name: Publish GitHub Release
+    needs:
+      - build_macos
+      - build_linux
+      - build_windows
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    steps:
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nacelle-release-*
+          path: /tmp/nacelle-artifacts
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_version="${GITHUB_REF#refs/tags/}"
+          release_dir="${RUNNER_TEMP}/nacelle-release/${release_version}"
+          mkdir -p "$release_dir"
+
+          mapfile -t binaries < <(find /tmp/nacelle-artifacts -type f -name "nacelle-${release_version}-*" ! -name '*.sha256' | sort)
+          mapfile -t checksum_sidecars < <(find /tmp/nacelle-artifacts -type f -name "nacelle-${release_version}-*.sha256" | sort)
+
+          if [[ "${#binaries[@]}" -eq 0 ]]; then
+            echo "No nacelle binaries found in downloaded artifacts" >&2
+            exit 1
+          fi
+
+          cp "${binaries[@]}" "$release_dir/"
+          if [[ "${#checksum_sidecars[@]}" -gt 0 ]]; then
+            cp "${checksum_sidecars[@]}" "$release_dir/"
+          fi
+
+          : > "$release_dir/SHA256SUMS"
+          for checksum_file in "$release_dir"/*.sha256; do
+            [[ -f "$checksum_file" ]] || continue
+            cat "$checksum_file" >> "$release_dir/SHA256SUMS"
+          done
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_version="${GITHUB_REF#refs/tags/}"
+          release_dir="${RUNNER_TEMP}/nacelle-release/${release_version}"
+          mapfile -t assets < <(find "$release_dir" -maxdepth 1 -type f | sort)
+
+          if [[ "${#assets[@]}" -eq 0 ]]; then
+            echo "No release assets prepared for ${release_version}" >&2
+            exit 1
+          fi
+
+          if gh release view "$release_version" >/dev/null 2>&1; then
+            gh release upload "$release_version" "${assets[@]}" --clobber
+          else
+            gh release create "$release_version" "${assets[@]}" \
+              --title "nacelle ${release_version}" \
+              --generate-notes
+          fi
+
   upload_r2:
     name: Upload nacelle to R2
     needs:
       - build_macos
       - build_linux
       - build_windows
+      - publish_github_release
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     env:
