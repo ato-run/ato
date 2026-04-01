@@ -1,11 +1,23 @@
-//! System-level modules for platform-specific utilities.
+//! System-level modules for platform-specific utilities and security.
 //!
 //! This module provides a cross-platform abstraction layer (Tauri-style):
 //! - Linux: eBPF + cgroup v2
 //! - macOS: PF + group-based rules (planned)
 //! - Windows: WFP + AppContainer (planned)
 //!
-//! v0.2.0: Hardware diagnostics moved to capsule-cli.
+//! v3.0: This module contains OS-native sandbox enforcement and verification
+//! utilities. Validation/policy resolution has been moved to ato-cli.
+//!
+//! Remaining components:
+//! - sandbox: OS-native process sandboxing (Landlock/Seatbelt)
+//! - path: Path validation and security
+//!
+//! Moved to ato-cli:
+//! - verifier: L1 Source Policy + L2 Signature Verification
+//! - signing: Ed25519 signature generation
+//! - egress_policy: L4 Egress policy resolution (domain → IP)
+//!
+//! Note: Audit logging is handled by the caller (ato-cli).
 
 use async_trait::async_trait;
 use std::process::Command;
@@ -19,6 +31,12 @@ pub mod macos;
 
 #[cfg(target_os = "windows")]
 pub mod windows;
+
+pub mod path;
+pub mod sandbox;
+pub mod vram;
+pub use path::*;
+pub use vram::*;
 
 use common::{IsolationRule, SystemError};
 

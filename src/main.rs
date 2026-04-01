@@ -13,7 +13,13 @@ async fn main() -> anyhow::Result<()> {
         return bootstrap_bundled_runtime().await;
     }
 
-    // If not a bundle, dispatch to CLI
+    if std::env::args_os().len() <= 1 {
+        eprintln!("nacelle: missing operand");
+        eprintln!("Try 'nacelle --help' for more information.");
+        eprintln!("(Note: You should probably be using 'capsule' instead)");
+        std::process::exit(2);
+    }
+
     cli::execute().await
 }
 
@@ -27,20 +33,35 @@ fn is_self_extracting_bundle() -> anyhow::Result<bool> {
 async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     println!("🚀 Starting nacelle bundle...");
 
-    let temp_dir = std::env::temp_dir().join(format!("nacelle-{}", std::process::id()));
-    std::fs::create_dir_all(&temp_dir)?;
+    let keep_extracted = std::env::var_os("NACELLE_BUNDLE_KEEP_EXTRACTED").is_some();
+    let extraction_dir = nacelle::bundle::prepare_extraction_dir(keep_extracted)?;
+    let temp_dir_path = extraction_dir.path().to_path_buf();
 
-    println!("📦 Extracting to {:?}...", temp_dir);
+    println!("📦 Extracting to {:?}...", temp_dir_path);
+    if extraction_dir.preserved() {
+        eprintln!(
+            "Preserving extracted bundle contents at {}",
+            temp_dir_path.display()
+        );
+    }
 
     let exe_path = std::env::current_exe()?;
-    nacelle::bundle::extract_bundle_to_dir(&exe_path, &temp_dir)?;
+    nacelle::bundle::extract_bundle_to_dir(&exe_path, &temp_dir_path)?;
 
-    let config_path = temp_dir.join("config.json");
+    let config_path = temp_dir_path.join("config.json");
     if !config_path.exists() {
         anyhow::bail!("No config.json found in bundle (R3 requires config.json)");
     }
 
-    let config = nacelle::runtime_config::load_config(&config_path)?;
+    let mut config = nacelle::config::load_config(&config_path)?;
+
+    if let Some(main_svc) = config.services.get_mut("main") {
+        if main_svc.cwd == Some("source".to_string()) && !temp_dir_path.join("source").is_dir() {
+            main_svc.cwd = Some(".".to_string());
+        }
+    }
+
+    let network_enabled = config.sandbox.network.enabled;
     let egress_mode = config
         .sandbox
         .network
@@ -49,18 +70,17 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
         .map(|e| e.mode.as_str())
         .unwrap_or("allow_all");
 
-    let dns_rules = if config.sandbox.network.allow_domains.is_some() {
-        nacelle::egress::dns_bootstrap::dns_bootstrap_rules()?
-    } else {
-        Vec::new()
-    };
+    let dns_rules = Vec::new();
     let enforcement_str = config.sandbox.network.enforcement.as_str();
     let strict_enforcement = enforcement_str == "strict";
+    if strict_enforcement && !network_enabled {
+        anyhow::bail!("Strict sandbox enforcement requires sandbox.network.enabled=true");
+    }
     let job_id = format!("job-{}", std::process::id());
     let mut sandbox = nacelle::system::new_network_sandbox();
     let mut sandbox_enabled = false;
 
-    if egress_mode != "allow_all" {
+    if network_enabled && (egress_mode != "allow_all" || strict_enforcement) {
         let initial_rule = nacelle::system::common::IsolationRule {
             allow_rules: Vec::new(),
             dns_rules: dns_rules.clone(),
@@ -71,6 +91,12 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
             Err(e) => {
                 eprintln!("⚠️  Sandbox unavailable: {}", e);
                 if strict_enforcement {
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    {
+                        eprintln!(
+                            "Hint: This OS may not support strict sandbox yet. If you trust this code, retry with '--unsafe-bypass-sandbox' from ato-cli."
+                        );
+                    }
                     return Err(anyhow::anyhow!(e));
                 }
             }
@@ -83,14 +109,10 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
             allow_rules.extend(rules.iter().cloned());
         }
     }
-    if let Some(domains) = &config.sandbox.network.allow_domains {
-        let resolved = nacelle::egress::resolver::resolve_allow_domains(domains)?;
-        allow_rules.extend(resolved);
-    }
     if !allow_rules.is_empty() {
-        nacelle::egress::validate_egress_rules(&allow_rules)?;
+        nacelle::config::validate_egress_rules(&allow_rules)?;
     }
-    if egress_mode != "allow_all" && sandbox_enabled {
+    if network_enabled && egress_mode != "allow_all" && sandbox_enabled {
         let update_rule = nacelle::system::common::IsolationRule {
             allow_rules: allow_rules.clone(),
             dns_rules: dns_rules.clone(),
@@ -107,7 +129,7 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     }
 
     #[cfg(target_os = "linux")]
-    {
+    if network_enabled && sandbox_enabled {
         nacelle::system::linux::cgroup::cleanup_orphan_cgroups();
         let enforcement_mode =
             nacelle::system::linux::enforcement::EnforcementMode::parse_mode(enforcement_str);
@@ -120,9 +142,14 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     } else {
         None
     };
-    nacelle::engine::r3_supervisor::run_services_from_config(&config, &temp_dir, sandbox_ref)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+    nacelle::manager::r3_supervisor::run_services_from_config(
+        &config,
+        &temp_dir_path,
+        sandbox_ref,
+        strict_enforcement,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!(e))?;
 
     Ok(())
 }

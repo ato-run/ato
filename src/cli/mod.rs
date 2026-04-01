@@ -3,12 +3,15 @@
 pub mod commands;
 
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "nacelle")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
-#[command(about = "Nacelle runtime CLI")]
+#[command(about = "Nacelle engine CLI (internal plumbing only)")]
+#[command(
+    long_about = "nacelle is the low-level execution engine for capsule bundles. It is intended to be invoked by ato-cli or as a self-extracting bundle, not directly by users.",
+    after_help = "See `ato --help` for development and packaging commands."
+)]
 struct Cli {
     /// Enable verbose output
     #[arg(short, long, global = true)]
@@ -21,6 +24,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Machine-oriented engine interface (JSON over stdio)
+    /// Use ato-cli for human-facing workflows.
     Internal {
         /// JSON input file path, or '-' for stdin
         #[arg(long, default_value = "-")]
@@ -30,41 +34,35 @@ enum Commands {
         command: InternalCommands,
     },
 
-    /// Run a command under the system sandbox (config.json driven)
-    Run {
-        /// Path to config.json
-        #[arg(short, long, default_value = "config.json")]
-        config: PathBuf,
-
-        /// Command and arguments to run
-        #[arg(last = true, required = true)]
-        args: Vec<String>,
-    },
+    /// (Hidden: legacy command, use ato dev instead)
+    #[command(hide = true)]
+    Dev,
 }
 
 #[derive(Subcommand)]
 enum InternalCommands {
-    /// Report engine capabilities for dispatch (JSON)
+    /// Report engine capabilities for dispatch (JSON, internal use)
     Features,
-    /// Build artifacts (JSON)
-    Pack,
-    /// Execute workload (JSON)
+    /// Execute a workload from JSON spec (internal use)
     Exec,
+    /// Legacy placeholder: build/pack is owned by ato-cli, not nacelle
+    #[command(hide = true)]
+    Pack,
 }
 
 pub async fn execute() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     if cli.verbose {
-        println!("🔍 Verbose mode enabled");
+        eprintln!("Verbose mode enabled");
     }
 
     match cli.command {
         Commands::Internal { input, command } => {
             let cmd = match command {
                 InternalCommands::Features => commands::internal::InternalCommand::Features,
-                InternalCommands::Pack => commands::internal::InternalCommand::Pack,
                 InternalCommands::Exec => commands::internal::InternalCommand::Exec,
+                InternalCommands::Pack => commands::internal::InternalCommand::Pack,
             };
 
             commands::internal::execute(commands::internal::InternalArgs {
@@ -73,12 +71,8 @@ pub async fn execute() -> anyhow::Result<()> {
             })
             .await
         }
-        Commands::Run { config, args } => {
-            commands::run::execute(commands::run::RunArgs {
-                config_path: config,
-                args,
-            })
-            .await
+        Commands::Dev => {
+            anyhow::bail!("`nacelle dev` is deprecated. Use `ato dev` instead.");
         }
     }
 }

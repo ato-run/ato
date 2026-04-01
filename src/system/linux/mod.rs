@@ -21,6 +21,12 @@ impl LinuxSandbox {
     }
 }
 
+impl Default for LinuxSandbox {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl NetworkSandbox for LinuxSandbox {
     async fn prepare(&mut self, rule: IsolationRule) -> Result<(), SystemError> {
@@ -35,13 +41,15 @@ impl NetworkSandbox for LinuxSandbox {
         })?;
         let cgroup_path = handle.cgroup_path.clone();
 
-        _cmd.pre_exec(move || {
-            std::fs::write(
-                cgroup_path.join("cgroup.procs"),
-                std::process::id().to_string(),
-            )?;
-            Ok(())
-        });
+        unsafe {
+            _cmd.pre_exec(move || {
+                std::fs::write(
+                    cgroup_path.join("cgroup.procs"),
+                    std::process::id().to_string(),
+                )?;
+                Ok(())
+            });
+        }
 
         Ok(())
     }

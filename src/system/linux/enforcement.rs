@@ -91,4 +91,11 @@ mod tests {
         let result = check_enforcement(EnforcementMode::Strict);
         assert!(result.is_err());
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn best_effort_allows_on_linux() {
+        let result = check_enforcement(EnforcementMode::BestEffort);
+        assert!(result.is_ok());
+    }
 }

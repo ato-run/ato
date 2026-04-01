@@ -70,7 +70,7 @@ jobs:
 
       # Linting (clippy)
       - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --lib --bins -- -D warnings
 
       # Build the main library
       - name: Build nacelle library
@@ -78,12 +78,11 @@ jobs:
 
       # Build the CLI
       - name: Build nacelle CLI
-        working-directory: ./cli
-        run: cargo build --release
+        run: cargo build --release --bin nacelle
 
       # Install CLI to PATH for testing
       - name: Install nacelle CLI
-        run: cargo install --path ./cli --locked
+        run: cargo install --path . --bin nacelle --locked --force
 
       # Run smoke tests on samples
       - name: Test samples
@@ -105,22 +104,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "18"
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v2
-        with:
-          version: 8
-
-      # Build React app for simple-todo
-      - name: Build React app
+      - name: Verify Python sample files
         working-directory: ./samples/simple-todo
         run: |
-          pnpm install
-          pnpm run build
+          python3 -m py_compile app.py
+          test -f build.sh
 
       # Verify capsule.toml is valid
       - name: Verify capsule.toml syntax

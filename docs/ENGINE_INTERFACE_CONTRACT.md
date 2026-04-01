@@ -1,238 +1,192 @@
-# Engine Interface Contract (Draft)
+# Engine Interface Contract
 
-このドキュメントは、**capsule（メタレイヤー/CLI）** が **nacelle（実行エンジン）** をプロセス境界で呼び出すための最小契約（案）です。
-
-目的:
-- 疎結合（Unix哲学）: engine は単機能・stdin/stdout で完結
-- 多態性（Polymorphism）: 将来の `capsule-wasm` / `capsule-oci` 等へ同じ契約で差し替え可能
-- 安定化: capsule は頻繁に更新、engine はLTS志向でも成立
-
-非目的:
-- engine の内部実装詳細（Supervisor/Sandbox/JIT等）を規定しない
-- 高度なUX（watch、GUI等）をこの契約に詰め込まない
-
----
+このドキュメントは、`ato-cli` が `nacelle` を engine process として呼び出すときの最小契約を定義する。
 
 ## 1. 基本原則
 
-- **I/O**: JSON を stdin から受け取り、JSON を stdout に返す
-- **ログ**: 人間向けログは stderr（capsule がそのまま表示/保存できる）
-- **互換性**: `spec_version` で契約バージョンを明示し、後方互換を維持
-- **エラー**: 失敗時は stdout に `ok=false` の JSON を出し、exit code も非0
-- **シグナル**: `exec` は SIGINT/SIGTERM を受けて子へ転送し、終了コードで状態を返す
+- 入力は JSON、出力は machine-readable な JSON / NDJSON
+- 人間向けログは stderr に限定する
+- 失敗時も stdout の先頭行は machine-readable な error response にする
+- `spec_version` は request / response で必須
 
----
-
-## 2. コマンド体系（最小セット）
-
-capsule は engine バイナリ（例: `nacelle`）を次の形式で起動します。
-
-```bash
-nacelle internal --input - <command>
-```
-
-- `--input -` は stdin から JSON payload を読む（ファイルパスも許容してよい）
-
-### 2.1 `internal features`
-**目的**: engine の能力を列挙し、capsule がディスパッチ可否判断に使う。
+## 2. 対応コマンド
 
 ```bash
 nacelle internal --input - features
-```
-
-入力（空JSONで可）:
-```json
-{ "spec_version": "0.1.0" }
-```
-
-出力例:
-```json
-{
-  "ok": true,
-  "spec_version": "0.1.0",
-  "engine": {
-    "name": "nacelle",
-    "engine_version": "0.1.0",
-    "commit": "<optional>",
-    "platform": "darwin-aarch64"
-  },
-  "capabilities": {
-    "workloads": ["source", "bundle"],
-    "languages": ["python"],
-    "sandbox": ["macos-seatbelt", "linux-landlock"],
-    "socket_activation": true,
-    "jit_provisioning": true
-  }
-}
-```
-
-### 2.2 `internal pack`
-**目的**: capsule が用意した workload を受け取り、配布可能な成果物を生成する。
-
-```bash
+nacelle internal --input - exec
 nacelle internal --input - pack
 ```
 
-入力（例）:
+`internal pack` は legacy compatibility 用の placeholder として受理するが、常に
+`ok=false` / `error.code="UNSUPPORTED"` を返す。build / packaging の責務は `ato-cli` にある。
+
+## 3. `spec_version`
+
+現行実装が受け付ける version は次の 2 つ:
+
+- `1.0` : current
+- `0.1.0` : legacy compatibility
+
+それ以外は `ok=false` / `error.code="UNSUPPORTED"` で fail-closed にする。
+
+## 4. `internal features`
+
+### request
+
+```json
+{ "spec_version": "1.0" }
+```
+
+### response
+
 ```json
 {
-  "spec_version": "0.1.0",
+  "ok": true,
+  "spec_version": "1.0",
+  "engine": {
+    "name": "nacelle",
+    "engine_version": "0.2.8",
+    "platform": "darwin-aarch64",
+    "commit": null
+  },
+  "capabilities": {
+    "workloads": ["source", "bundle"],
+    "languages": ["python", "node", "deno", "bun"],
+    "sandbox": ["macos-seatbelt"],
+    "socket_activation": true,
+    "jit_provisioning": true,
+    "ipc_sandbox": true
+  }
+}
+```
+
+### contract notes
+
+- `sandbox` は compile target ではなく runtime backend 可用性ベース
+- backend が 1 つも無い場合、`sandbox=[]` かつ `ipc_sandbox=false`
+- `languages` は `python` / `node` / `deno` / `bun` を返す
+
+## 5. `internal exec`
+
+### request
+
+```json
+{
+  "spec_version": "1.0",
   "workload": {
     "type": "source",
-    "path": "./app",
-    "manifest": "./app/capsule.toml"
+    "manifest": "/abs/path/to/capsule.toml"
   },
-  "output": {
-    "format": "bundle",
-    "path": "./nacelle-bundle"
-  },
-  "runtime_path": null,
-  "options": {
-    "sign": false
-  }
+  "env": [["PORT", "43123"]],
+  "ipc_env": [["CAPSULE_IPC_FOO_URL", "unix:///tmp/foo.sock"]],
+  "ipc_socket_paths": ["/tmp/foo.sock"]
 }
 ```
 
-出力（例）:
-```json
-{
-  "ok": true,
-  "spec_version": "0.1.0",
-  "artifact": {
-    "format": "bundle",
-    "path": "./nacelle-bundle"
-  }
-}
-```
+### stdout contract
 
-### 2.3 `internal exec`
-**目的（最重要）**: workload を実行する。Socket Activation の FD 継承、Supervisor、Sandbox、シグナル転送を engine 側で実施する。
+`internal exec` は stdout を NDJSON として使う。
 
-```bash
-nacelle internal --input - exec
-```
-
-入力（例）:
-```json
-{
-  "spec_version": "0.1.0",
-  "interactive": true,
-  "workload": {
-    "type": "source",
-    "path": "./app",
-    "manifest": "./app/capsule.toml",
-    "entrypoint": "main.py"
-  },
-  "runtime": {
-    "name": "python",
-    "version_constraint": ">=3.11"
-  },
-  "policy": {
-    "network": "allow-outbound",
-    "fs_allow": ["./data"],
-    "sandbox": "best-effort"
-  },
-  "resources": {
-    "env": { "PORT": "8080" },
-    "sockets": [3]
-  }
-}
-```
-
-`exec` は 2 モードを持ちます（A案の「土管」要件対応）:
-
-- `interactive=true`（推奨: `capsule dev`）
-  - **stdout/stderr をアプリのログとしてストリーミング**する
-  - **stdout に JSON を出さない**（ログ汚染を避ける）
-  - 終了状態は **engine プロセスの exit code** で返す
-
-- `interactive=false`（RPC的）
-  - stdout に JSON を返す（下の例）
-
-出力例（`interactive=false`）:
-```json
-{
-  "ok": true,
-  "spec_version": "0.1.0",
-  "result": {
-    "status": "exited",
-    "exit_code": 0,
-    "pid": 12345
-  }
-}
-```
-
-`exec` は原則 **フォアグラウンド**（呼び出し元が待つ）とし、バックグラウンド化は将来拡張で扱う。
-
----
-
-## 3. 共通レスポンス形式
-
-成功/失敗を最低限これで統一します。
+1 行目は常に initial response:
 
 ```json
 {
   "ok": true,
-  "spec_version": "0.1.0"
+  "spec_version": "1.0",
+  "pid": 12345,
+  "log_path": null
 }
 ```
 
-失敗時:
+2 行目以降は 0 個以上の event:
+
+```json
+{"event":"ipc_ready","service":"main","endpoint":"unix:///tmp/foo.sock"}
+{"event":"service_exited","service":"main","exit_code":0}
+```
+
+### event types
+
+- `ipc_ready`
+  - readiness probe 成功時に送る
+  - `endpoint` は `unix://...` または `tcp://...`
+  - `port` は TCP readiness のときのみ付与してよい
+- `service_exited`
+  - service が終了したときに送る
+  - `exit_code` は取得できる場合のみ数値
+
+### ordering
+
+- initial response の前に event を出してはいけない
+- readiness 前に service が落ちた場合は `ipc_ready` を出さず、`service_exited` のみを出す
+
+## 6. `internal pack`
+
+### request
+
+```json
+{ "spec_version": "1.0" }
+```
+
+### response
+
 ```json
 {
   "ok": false,
-  "spec_version": "0.1.0",
+  "spec_version": "1.0",
   "error": {
-    "code": "INVALID_INPUT",
-    "message": "...",
-    "details": { }
+    "code": "UNSUPPORTED",
+    "message": "internal pack is not supported by nacelle. Packaging/build is owned by ato-cli",
+    "details": null
   }
 }
 ```
 
-### 推奨 `error.code`
+## 7. 共通 response schema
+
+成功:
+
+```json
+{
+  "ok": true,
+  "spec_version": "1.0"
+}
+```
+
+失敗:
+
+```json
+{
+  "ok": false,
+  "spec_version": "1.0",
+  "error": {
+    "code": "INVALID_INPUT",
+    "message": "manifest path is required",
+    "details": null
+  }
+}
+```
+
+## 8. 推奨 error.code
+
 - `INVALID_INPUT`
 - `UNSUPPORTED`
-- `NOT_FOUND`
 - `POLICY_VIOLATION`
-- `RUNTIME_MISSING`
 - `INTERNAL`
 
----
+## 9. Exit Code
 
-## 4. Exit Code（推奨）
+- `0`: success
+- `1`: general failure
+- `2`: invalid input
+- `10`: policy violation
 
-- `0`: `ok=true` かつ workload が成功終了
-- `1`: 一般的失敗（`ok=false` / `INTERNAL` など）
-- `2`: 入力不正（`INVALID_INPUT`）
-- `10`: ポリシー違反（`POLICY_VIOLATION`）
-- `128+N`: シグナルによる終了（慣習）
+実装上まだ細かな分類は発展途上だが、stdout contract は上記 schema に固定する。
 
-※ `exec` の場合:
-- `interactive=true` では **stdout JSON は出さず**、workload（または engine）が終了コードで返す。
-- `interactive=false` では stdout に JSON を返す。
+## 10. Discovery
 
----
+`ato-cli` は次の順で engine を探してよい。
 
-## 5. Engine Discovery（capsule 側の推奨）
-
-capsule は engine 探索を次の優先順で行う（案）:
-1. 環境変数: `NACELLE_PATH`（将来的に `CAPSULE_ENGINE_PATH` 等へ一般化可）
+1. `NACELLE_PATH`
 2. `$PATH` 上の `nacelle`
-3. `~/.capsule/engines/nacelle/<version>/nacelle`（JIT install 先）
-
----
-
-## 6. バージョニング方針
-
-- `spec_version` は契約（このドキュメント）に対して SemVer
-- engine 実装バージョンは `engine.engine_version` で別管理
-- capsule は `spec_version` の互換範囲で engine を選ぶ
-
----
-
-## 7. 今後の拡張候補（後回し）
-
-- `internal validate`（pack/exec 前の静的検査のみ）
-- `internal logs`（exec の構造化ログストリーム）
-- `internal exec --mode=daemon`（常駐/監視/再起動ポリシー）
+3. `~/.capsule/engines/nacelle/<version>/nacelle`
