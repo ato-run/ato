@@ -582,7 +582,7 @@ impl NacelleExecAdapter {
         mode: ExecuteMode,
         launch_ctx: &RuntimeLaunchContext,
     ) -> Result<Self> {
-        let normalized_manifest_path = write_normalized_manifest(plan)?;
+        let normalized_manifest_path = write_normalized_manifest(plan, launch_ctx.command_args())?;
         let mut env = runtime_overrides::merged_env(plan.execution_env())
             .into_iter()
             .collect::<Vec<_>>();
@@ -634,6 +634,15 @@ impl NacelleExecAdapter {
                     "manifest": normalized_manifest_path.display().to_string(),
                 },
                 "env": env,
+                "mounts": launch_ctx
+                    .injected_mounts()
+                    .iter()
+                    .map(|mount| json!({
+                        "source": mount.source.display().to_string(),
+                        "target": mount.target,
+                        "readonly": mount.readonly,
+                    }))
+                    .collect::<Vec<_>>(),
                 "ipc_env": ipc_env,
                 "ipc_socket_paths": ipc_socket_paths,
             }),
@@ -642,7 +651,7 @@ impl NacelleExecAdapter {
     }
 }
 
-fn write_normalized_manifest(plan: &ManifestData) -> Result<PathBuf> {
+fn write_normalized_manifest(plan: &ManifestData, explicit_args: &[String]) -> Result<PathBuf> {
     let entrypoint = plan
         .execution_entrypoint()
         .filter(|value| !value.trim().is_empty())
@@ -651,7 +660,8 @@ fn write_normalized_manifest(plan: &ManifestData) -> Result<PathBuf> {
                 "source/native target requires entrypoint",
             )
         })?;
-    let cmd_args = plan.targets_oci_cmd();
+    let mut cmd_args = plan.targets_oci_cmd();
+    cmd_args.extend(explicit_args.iter().cloned());
     let language_name = plan
         .execution_language()
         .or_else(|| plan.execution_driver())
@@ -1083,7 +1093,7 @@ mod tests {
             "dev",
         );
 
-        let normalized_path = write_normalized_manifest(&plan).unwrap();
+        let normalized_path = write_normalized_manifest(&plan, &[]).unwrap();
         let normalized = fs::read_to_string(&normalized_path).unwrap();
 
         assert!(normalized.contains("entrypoint = \"uv\""));
@@ -1132,6 +1142,56 @@ mod tests {
         assert_eq!(
             adapter.payload["ipc_env"][0][0].as_str(),
             Some("CAPSULE_IPC_GREETER_SOCKET")
+        );
+    }
+
+    #[test]
+    fn test_adapter_includes_mounts_and_trailing_args() {
+        let dir = tempdir().unwrap();
+        let input_path = dir.path().join("input.txt");
+        fs::write(&input_path, "hello").unwrap();
+        fs::write(dir.path().join("main.py"), "print('ok')\n").unwrap();
+        let plan = plan_from_manifest(
+            &dir,
+            r#"
+            name = "demo"
+            version = "1.2.3"
+
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            driver = "python"
+            entrypoint = "main.py"
+            "#,
+            "dev",
+        );
+        let launch_ctx = RuntimeLaunchContext::empty()
+            .with_command_args(vec!["--help".to_string()])
+            .with_injected_mounts(vec![crate::executors::launch_context::InjectedMount {
+                source: input_path.clone(),
+                target: "/workspace/input.txt".to_string(),
+                readonly: true,
+            }]);
+
+        let adapter =
+            NacelleExecAdapter::for_plan(&plan, ExecuteMode::Foreground, &launch_ctx).unwrap();
+        let manifest_path = adapter.payload["workload"]["manifest"]
+            .as_str()
+            .expect("manifest path");
+        let normalized = fs::read_to_string(manifest_path).unwrap();
+
+        assert!(normalized.contains("command = \"run python3 main.py --help\""));
+        assert_eq!(
+            adapter.payload["mounts"][0]["source"].as_str(),
+            Some(input_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            adapter.payload["mounts"][0]["target"].as_str(),
+            Some("/workspace/input.txt")
+        );
+        assert_eq!(
+            adapter.payload["mounts"][0]["readonly"].as_bool(),
+            Some(true)
         );
     }
 

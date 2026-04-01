@@ -258,6 +258,41 @@ fn run_command_parses_trailing_args_with_target_flag() {
 }
 
 #[test]
+fn run_command_parses_sandbox_io_grants() {
+    let cli = Cli::try_parse_from([
+        "ato",
+        "run",
+        "--sandbox",
+        "--read",
+        "./in.pdf",
+        "--write",
+        "./out.md",
+        "--read-write",
+        "./cache",
+        "./tool.py",
+        "--",
+        "./in.pdf",
+    ])
+    .expect("parse");
+
+    match cli.command {
+        Commands::Run {
+            read,
+            write,
+            read_write,
+            args,
+            ..
+        } => {
+            assert_eq!(read, vec!["./in.pdf".to_string()]);
+            assert_eq!(write, vec!["./out.md".to_string()]);
+            assert_eq!(read_write, vec!["./cache".to_string()]);
+            assert_eq!(args, vec!["./in.pdf".to_string()]);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
 fn init_command_defaults_to_durable_workspace_materialization() {
     let cli = Cli::try_parse_from(["ato", "init"]).expect("parse");
 
