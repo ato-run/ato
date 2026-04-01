@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::fs;
+use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -21,6 +23,7 @@ use crate::application::engine::install::support::{
 };
 use crate::application::pipeline::cleanup::PipelineAttemptContext;
 use crate::application::workspace::state::EffectiveLockState;
+use crate::executors::launch_context::InjectedMount;
 use crate::executors::source::ExecuteMode;
 use crate::executors::target_runner::{self, TargetLaunchOptions};
 use crate::preview;
@@ -170,6 +173,10 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) target: PathBuf,
     pub(crate) target_label: Option<String>,
     pub(crate) args: Vec<String>,
+    pub(crate) read_grants: Vec<String>,
+    pub(crate) write_grants: Vec<String>,
+    pub(crate) read_write_grants: Vec<String>,
+    pub(crate) caller_cwd: PathBuf,
     pub(crate) authoritative_input: Option<RunAuthoritativeInput>,
     pub(crate) desktop_open_path: Option<PathBuf>,
     pub(crate) background: bool,
@@ -195,6 +202,301 @@ pub(crate) struct ConsumerRunRequest {
 pub(crate) struct RunInstallPhaseResult {
     pub(crate) resolved_target: ResolvedRunTarget,
     pub(crate) manifest_outcome: LocalRunManifestPreparationOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SandboxGrantAccess {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+impl SandboxGrantAccess {
+    fn allows(self, kind: InferredIoKind) -> bool {
+        matches!(
+            (self, kind),
+            (Self::Read, InferredIoKind::Read)
+                | (Self::Write, InferredIoKind::Write)
+                | (Self::ReadWrite, InferredIoKind::Read)
+                | (Self::ReadWrite, InferredIoKind::Write)
+        )
+    }
+
+    fn readonly(self) -> bool {
+        matches!(self, Self::Read)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SandboxGrantScope {
+    Exact,
+    Directory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InferredIoKind {
+    Read,
+    Write,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedSandboxGrant {
+    source_path: PathBuf,
+    guest_target: PathBuf,
+    access: SandboxGrantAccess,
+    scope: SandboxGrantScope,
+}
+
+fn lexical_normalize_absolute(path: PathBuf) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(Path::new("/")),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(segment) => normalized.push(segment),
+        }
+    }
+    normalized
+}
+
+fn reject_symlink_traversal(path: &Path, allow_missing_leaf: bool) -> Result<()> {
+    let mut current = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::RootDir => current.push(Path::new("/")),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                current.pop();
+            }
+            Component::Normal(segment) => {
+                current.push(segment);
+                match fs::symlink_metadata(&current) {
+                    Ok(metadata) => {
+                        if metadata.file_type().is_symlink() {
+                            anyhow::bail!(
+                                "sandbox grant '{}' is rejected because it traverses symlink '{}'",
+                                path.display(),
+                                current.display()
+                            );
+                        }
+                    }
+                    Err(err)
+                        if allow_missing_leaf && err.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        return Err(err).with_context(|| {
+                            format!("failed to inspect path component {}", current.display())
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn normalize_existing_path(path: &Path) -> Result<(PathBuf, SandboxGrantScope)> {
+    reject_symlink_traversal(path, false)?;
+    let canonical = fs::canonicalize(path)
+        .with_context(|| format!("failed to resolve path {}", path.display()))?;
+    let metadata = fs::metadata(&canonical)
+        .with_context(|| format!("failed to stat path {}", canonical.display()))?;
+    let scope = if metadata.is_dir() {
+        SandboxGrantScope::Directory
+    } else {
+        SandboxGrantScope::Exact
+    };
+    Ok((canonical, scope))
+}
+
+fn normalize_write_path(path: &Path) -> Result<(PathBuf, SandboxGrantScope)> {
+    if path.exists() {
+        return normalize_existing_path(path);
+    }
+
+    reject_symlink_traversal(path, true)?;
+
+    let parent = path.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "write grant '{}' must include a parent directory",
+            path.display()
+        )
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        anyhow::anyhow!(
+            "write grant '{}' must name a file or directory",
+            path.display()
+        )
+    })?;
+    let canonical_parent = fs::canonicalize(parent)
+        .with_context(|| format!("failed to resolve parent directory {}", parent.display()))?;
+    Ok((canonical_parent.join(file_name), SandboxGrantScope::Exact))
+}
+
+fn resolve_grant_source_path(
+    raw: &str,
+    caller_cwd: &Path,
+    access: SandboxGrantAccess,
+) -> Result<(PathBuf, SandboxGrantScope)> {
+    let requested = PathBuf::from(raw);
+    let absolute = if requested.is_absolute() {
+        requested
+    } else {
+        caller_cwd.join(requested)
+    };
+
+    match access {
+        SandboxGrantAccess::Read | SandboxGrantAccess::ReadWrite => {
+            normalize_existing_path(&absolute)
+        }
+        SandboxGrantAccess::Write => normalize_write_path(&absolute),
+    }
+}
+
+fn guest_target_path(raw: &str, execution_working_dir: &Path) -> PathBuf {
+    let requested = PathBuf::from(raw);
+    let absolute = if requested.is_absolute() {
+        requested
+    } else {
+        execution_working_dir.join(requested)
+    };
+    lexical_normalize_absolute(absolute)
+}
+
+fn resolve_sandbox_grants(
+    request: &ConsumerRunRequest,
+    execution_working_dir: &Path,
+) -> Result<Vec<ResolvedSandboxGrant>> {
+    let mut resolved = Vec::new();
+
+    for (values, access) in [
+        (&request.read_grants, SandboxGrantAccess::Read),
+        (&request.write_grants, SandboxGrantAccess::Write),
+        (&request.read_write_grants, SandboxGrantAccess::ReadWrite),
+    ] {
+        for value in values {
+            let (source_path, scope) =
+                resolve_grant_source_path(value, &request.caller_cwd, access)?;
+            resolved.push(ResolvedSandboxGrant {
+                source_path,
+                guest_target: guest_target_path(value, execution_working_dir),
+                access,
+                scope,
+            });
+        }
+    }
+
+    Ok(resolved)
+}
+
+fn normalize_candidate_path(raw: &str, caller_cwd: &Path, kind: InferredIoKind) -> Option<PathBuf> {
+    let candidate = PathBuf::from(raw);
+    let absolute = if candidate.is_absolute() {
+        candidate
+    } else {
+        caller_cwd.join(candidate)
+    };
+
+    match kind {
+        InferredIoKind::Read => fs::canonicalize(&absolute).ok(),
+        InferredIoKind::Write => {
+            if absolute.exists() {
+                fs::canonicalize(&absolute).ok()
+            } else {
+                let parent = absolute.parent()?;
+                let file_name = absolute.file_name()?;
+                let canonical_parent = fs::canonicalize(parent).ok()?;
+                Some(canonical_parent.join(file_name))
+            }
+        }
+    }
+}
+
+fn grant_allows_path(grant: &ResolvedSandboxGrant, path: &Path, kind: InferredIoKind) -> bool {
+    if !grant.access.allows(kind) {
+        return false;
+    }
+
+    match grant.scope {
+        SandboxGrantScope::Exact => path == grant.source_path,
+        SandboxGrantScope::Directory => path.starts_with(&grant.source_path),
+    }
+}
+
+fn infer_io_candidates(args: &[String], caller_cwd: &Path) -> Vec<(String, InferredIoKind)> {
+    let mut inferred = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let current = &args[index];
+        if matches!(current.as_str(), "-o" | "--output") {
+            if let Some(next) = args.get(index + 1) {
+                inferred.push((next.clone(), InferredIoKind::Write));
+                index += 2;
+                continue;
+            }
+        }
+        if let Some(value) = current.strip_prefix("--output=") {
+            if !value.trim().is_empty() {
+                inferred.push((value.to_string(), InferredIoKind::Write));
+            }
+            index += 1;
+            continue;
+        }
+        if !current.starts_with('-')
+            && normalize_candidate_path(current, caller_cwd, InferredIoKind::Read).is_some()
+        {
+            inferred.push((current.clone(), InferredIoKind::Read));
+        }
+        index += 1;
+    }
+    inferred
+}
+
+fn validate_sandbox_grants_best_effort(
+    request: &ConsumerRunRequest,
+    grants: &[ResolvedSandboxGrant],
+) -> Result<()> {
+    for (raw, kind) in infer_io_candidates(&request.args, &request.caller_cwd) {
+        let Some(normalized) = normalize_candidate_path(&raw, &request.caller_cwd, kind) else {
+            continue;
+        };
+        if grants
+            .iter()
+            .any(|grant| grant_allows_path(grant, &normalized, kind))
+        {
+            continue;
+        }
+
+        let detail = match kind {
+            InferredIoKind::Read => "read",
+            InferredIoKind::Write => "write",
+        };
+        let suggestion = match kind {
+            InferredIoKind::Read => format!("--read {}", raw),
+            InferredIoKind::Write => format!("--write {}", raw),
+        };
+        anyhow::bail!(
+            "Missing {} grant for {}\n\nTry:\n  {}",
+            detail,
+            raw,
+            suggestion
+        );
+    }
+
+    Ok(())
+}
+
+fn is_one_shot_run_request(request: &ConsumerRunRequest, prepared: &PreparedRunContext) -> bool {
+    request.export_request.is_some() || prepared.execution_override.is_some()
 }
 
 pub(crate) struct RunPipelineState {
@@ -428,6 +730,22 @@ where
             .await?
             .with_injected_env(merged_injected_env)
             .with_injected_mounts(injected_data.mounts);
+
+    if request.sandbox_mode && !request.dangerously_skip_permissions {
+        let sandbox_grants =
+            resolve_sandbox_grants(request, &decision.plan.execution_working_directory())?;
+        validate_sandbox_grants_best_effort(request, &sandbox_grants)?;
+        launch_ctx = launch_ctx.with_injected_mounts(
+            sandbox_grants
+                .into_iter()
+                .map(|grant| InjectedMount {
+                    source: grant.source_path,
+                    target: grant.guest_target.to_string_lossy().to_string(),
+                    readonly: grant.access.readonly(),
+                })
+                .collect(),
+        );
+    }
     let mut agent_attempted = false;
 
     let provisioning_outcome = provisioner::run_auto_provisioning_phase(
@@ -770,6 +1088,7 @@ pub(crate) trait ConsumerRunExecuteHooks {
         plan: &capsule_core::router::ManifestData,
         runtime: String,
         scoped_id: Option<String>,
+        is_one_shot: bool,
         ready_without_events: bool,
         desktop_open_only: bool,
         compatibility_host_mode: CompatibilityHostMode,
@@ -780,6 +1099,7 @@ pub(crate) trait ConsumerRunExecuteHooks {
         &self,
         process: crate::executors::source::CapsuleProcess,
         reporter: Arc<CliReporter>,
+        is_one_shot: bool,
         sandbox_initialized: bool,
         ipc_socket_mapped: bool,
         desktop_open_only: bool,
@@ -1026,6 +1346,7 @@ where
 
     let host_fallback_requested = matches!(compatibility_host_mode, CompatibilityHostMode::Enabled);
     let desktop_native_open_only = request.desktop_open_path.is_some();
+    let is_one_shot = is_one_shot_run_request(request, &prepared);
     if use_progressive_ui && !desktop_native_open_only {
         if host_fallback_requested {
             crate::progressive_ui::render_host_fallback_warning()?;
@@ -1151,6 +1472,7 @@ where
                         &decision.plan,
                         runtime,
                         run_scoped_id.clone(),
+                        is_one_shot,
                         ready_without_events,
                         desktop_native_open_only,
                         compatibility_host_mode,
@@ -1173,6 +1495,7 @@ where
                 .complete_foreground_source_process(
                     process,
                     request.reporter.clone(),
+                    is_one_shot,
                     !host_execution,
                     launch_ctx
                         .socket_paths()
@@ -1210,6 +1533,7 @@ where
                         &decision.plan,
                         runtime,
                         run_scoped_id.clone(),
+                        is_one_shot,
                         ready_without_events,
                         false,
                         compatibility_host_mode,
@@ -1228,6 +1552,7 @@ where
                 .complete_foreground_source_process(
                     process,
                     request.reporter.clone(),
+                    is_one_shot,
                     false,
                     launch_ctx
                         .socket_paths()
@@ -1624,7 +1949,9 @@ fn build_target_launch_options(
 
 #[cfg(test)]
 mod tests {
-    use super::{DerivedBridgeManifest, PreparedRunContext};
+    use super::{
+        normalize_existing_path, normalize_write_path, DerivedBridgeManifest, PreparedRunContext,
+    };
     use capsule_core::ato_lock::AtoLock;
     use std::path::PathBuf;
 
@@ -1663,5 +1990,36 @@ mod tests {
             capsule_core::types::ValidationMode::Preview
         );
         assert!(rerouted.engine_override_declared);
+    }
+
+    #[test]
+    fn existing_grant_rejects_symlink_traversal() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside_dir = tempfile::tempdir().expect("outside tempdir");
+        let link_path = temp.path().join("outside-link");
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside_dir.path(), &link_path).expect("create symlink");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(outside_dir.path(), &link_path).expect("create symlink");
+
+        let err = normalize_existing_path(&link_path).expect_err("must reject symlink grants");
+        assert!(err.to_string().contains("traverses symlink"));
+    }
+
+    #[test]
+    fn write_grant_rejects_missing_file_under_symlink_parent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside_dir = tempfile::tempdir().expect("outside tempdir");
+        let link_path = temp.path().join("outside-link");
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside_dir.path(), &link_path).expect("create symlink");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(outside_dir.path(), &link_path).expect("create symlink");
+
+        let err = normalize_write_path(&link_path.join("output.txt"))
+            .expect_err("must reject symlink parent traversal");
+        assert!(err.to_string().contains("traverses symlink"));
     }
 }
