@@ -4,6 +4,18 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.43] - 2026-04-03
+
+### What Changed
+
+#### Bug Fixes
+
+- Keep single-script relative read/write sandbox paths aligned with the caller/effective cwd instead of drifting into the materialized workspace
+
+- Stop inferring ingress for single-script job workloads and fail closed on job ports during lock/runtime routing
+
+- Materialize single-script run state under the caller workspace root and add markitdown-style regressions for relative PDF input/output behavior
+
 ## [0.4.42] - 2026-04-02
 
 ### What Changed
