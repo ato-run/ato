@@ -42,6 +42,8 @@ pub struct ResolvedTargetRuntime {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_layout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_env: Vec<String>,

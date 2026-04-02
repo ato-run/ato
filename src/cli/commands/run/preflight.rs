@@ -13,12 +13,14 @@ pub(crate) fn preflight_native_sandbox(
     nacelle_override: Option<PathBuf>,
     plan: &capsule_core::router::ManifestData,
     prepared: &PreparedRunContext,
+    effective_cwd: Option<&Path>,
     reporter: &Arc<CliReporter>,
 ) -> Result<PathBuf> {
     preflight_python_uv_lock_for_source_driver(plan)?;
     preflight_python_uv_binary_for_source_driver(plan, prepared.authoritative_lock.as_ref())?;
     preflight_glibc_compat(plan, prepared)?;
     preflight_macos_compat(plan)?;
+    preflight_single_script_effective_cwd_compat(plan, prepared, effective_cwd)?;
 
     let nacelle = resolve_nacelle_for_tier2(nacelle_override, plan, prepared, reporter)?;
     let response = capsule_core::engine::run_internal(
@@ -46,6 +48,67 @@ pub(crate) fn preflight_native_sandbox(
     }
 
     Ok(nacelle)
+}
+
+fn preflight_single_script_effective_cwd_compat(
+    plan: &capsule_core::router::ManifestData,
+    prepared: &PreparedRunContext,
+    effective_cwd: Option<&Path>,
+) -> Result<()> {
+    let Some(effective_cwd) = effective_cwd else {
+        return Ok(());
+    };
+    if !plan
+        .execution_runtime()
+        .as_deref()
+        .is_some_and(|runtime| runtime.eq_ignore_ascii_case("source"))
+    {
+        return Ok(());
+    }
+    if prepared.workspace_root == plan.manifest_dir {
+        return Ok(());
+    }
+
+    let Some(entrypoint) = plan
+        .execution_entrypoint()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    if !is_relative_entrypoint_path(&entrypoint) {
+        return Ok(());
+    }
+    if plan.execution_source_layout().as_deref() == Some("anchored_entrypoint") {
+        return Ok(());
+    }
+
+    Err(AtoExecutionError::execution_contract_invalid(
+        format!(
+            "single-script source execution with relative entrypoint '{}' and effective cwd '{}' requires an anchored source entrypoint layout before native sandbox launch",
+            entrypoint,
+            effective_cwd.display()
+        ),
+        Some("targets.<selected>.source_layout"),
+        Some(plan.selected_target_label()),
+    )
+    .into())
+}
+
+fn is_relative_entrypoint_path(entrypoint: &str) -> bool {
+    if entrypoint.split_whitespace().count() != 1 {
+        return false;
+    }
+
+    let candidate = Path::new(entrypoint);
+    candidate.is_relative()
+        && (entrypoint.contains('/')
+            || entrypoint.ends_with(".py")
+            || entrypoint.ends_with(".js")
+            || entrypoint.ends_with(".mjs")
+            || entrypoint.ends_with(".cjs")
+            || entrypoint.ends_with(".ts")
+            || entrypoint.ends_with(".tsx"))
 }
 
 fn resolve_nacelle_for_tier2(
@@ -863,11 +926,41 @@ pub(super) fn resolve_python_dependency_lock_path(manifest_dir: &Path) -> Option
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_required_glibc_from_lock, preflight_glibc_compat};
+    use super::{
+        detect_required_glibc_from_lock, preflight_glibc_compat,
+        preflight_single_script_effective_cwd_compat,
+    };
     use crate::application::pipeline::phases::run::DerivedBridgeManifest;
     use crate::application::pipeline::phases::run::PreparedRunContext;
     use std::fs;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
+
+    fn prepared_context(workspace_root: &Path) -> PreparedRunContext {
+        PreparedRunContext {
+            authoritative_lock: None,
+            lock_path: None,
+            workspace_root: workspace_root.to_path_buf(),
+            effective_state: None,
+            execution_override: None,
+            bridge_manifest: DerivedBridgeManifest::new(toml::Value::Table(toml::map::Map::new())),
+            validation_mode: capsule_core::types::ValidationMode::Strict,
+            engine_override_declared: false,
+            compatibility_legacy_lock: None,
+        }
+    }
+
+    fn build_plan(manifest_dir: &Path, manifest: &str) -> capsule_core::router::ManifestData {
+        capsule_core::router::execution_descriptor_from_manifest_parts(
+            toml::from_str::<toml::Value>(manifest).expect("parse manifest"),
+            manifest_dir.join("capsule.toml"),
+            manifest_dir.to_path_buf(),
+            capsule_core::router::ExecutionProfile::Dev,
+            Some("default"),
+            std::collections::HashMap::new(),
+        )
+        .expect("execution descriptor")
+    }
 
     #[test]
     fn detect_required_glibc_from_lock_reads_target_constraints_from_json() {
@@ -920,9 +1013,9 @@ mod tests {
         )
         .expect("write lock");
 
-        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
-            toml::from_str::<toml::Value>(
-                r#"
+        let plan = build_plan(
+            &manifest_dir,
+            r#"
 name = "demo"
 type = "app"
 default_target = "default"
@@ -932,27 +1025,78 @@ runtime = "source"
 driver = "native"
 entrypoint = "demo.sh"
 "#,
-            )
-            .expect("parse manifest"),
-            manifest_dir.join("capsule.toml"),
-            manifest_dir.clone(),
-            capsule_core::router::ExecutionProfile::Dev,
-            Some("default"),
-            std::collections::HashMap::new(),
-        )
-        .expect("execution descriptor");
-        let prepared = PreparedRunContext {
-            authoritative_lock: None,
-            lock_path: None,
-            workspace_root: manifest_dir,
-            effective_state: None,
-            execution_override: None,
-            bridge_manifest: DerivedBridgeManifest::new(toml::Value::Table(toml::map::Map::new())),
-            validation_mode: capsule_core::types::ValidationMode::Strict,
-            engine_override_declared: false,
-            compatibility_legacy_lock: None,
-        };
+        );
+        let prepared = prepared_context(&manifest_dir);
 
         preflight_glibc_compat(&plan, &prepared).expect("ignore stray legacy lock");
+    }
+
+    #[test]
+    fn materialized_single_script_requires_anchored_layout_when_effective_cwd_is_set() {
+        let dir = tempdir().expect("tempdir");
+        let manifest_dir = dir.path().join("materialized");
+        fs::create_dir_all(&manifest_dir).expect("create manifest dir");
+        let workspace_root = dir.path().join("caller-workspace");
+        fs::create_dir_all(&workspace_root).expect("create workspace root");
+
+        let plan = build_plan(
+            &manifest_dir,
+            r#"
+name = "demo"
+type = "job"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "python"
+entrypoint = "main.py"
+"#,
+        );
+        let prepared = prepared_context(&workspace_root);
+        let effective_cwd = PathBuf::from("/caller/workspace/reference");
+
+        let err = preflight_single_script_effective_cwd_compat(
+            &plan,
+            &prepared,
+            Some(effective_cwd.as_path()),
+        )
+        .expect_err("missing anchored layout should fail closed");
+
+        assert!(err
+            .to_string()
+            .contains("requires an anchored source entrypoint layout"));
+    }
+
+    #[test]
+    fn materialized_single_script_accepts_anchored_layout_when_effective_cwd_is_set() {
+        let dir = tempdir().expect("tempdir");
+        let manifest_dir = dir.path().join("materialized");
+        fs::create_dir_all(&manifest_dir).expect("create manifest dir");
+        let workspace_root = dir.path().join("caller-workspace");
+        fs::create_dir_all(&workspace_root).expect("create workspace root");
+
+        let plan = build_plan(
+            &manifest_dir,
+            r#"
+name = "demo"
+type = "job"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "python"
+entrypoint = "main.py"
+source_layout = "anchored_entrypoint"
+"#,
+        );
+        let prepared = prepared_context(&workspace_root);
+        let effective_cwd = PathBuf::from("/caller/workspace/reference");
+
+        preflight_single_script_effective_cwd_compat(
+            &plan,
+            &prepared,
+            Some(effective_cwd.as_path()),
+        )
+        .expect("anchored layout should pass preflight");
     }
 }
