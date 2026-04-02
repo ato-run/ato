@@ -911,6 +911,10 @@ impl ExecutionDescriptor {
     }
 
     pub fn execution_port(&self) -> Option<u16> {
+        if self.is_job_capsule() {
+            return None;
+        }
+
         self.target_port(&self.selected_target)
     }
 
@@ -1150,6 +1154,10 @@ impl ExecutionDescriptor {
     }
 
     pub fn target_port(&self, target_label: &str) -> Option<u16> {
+        if self.is_job_capsule() {
+            return None;
+        }
+
         self.runtime_for_target(target_label)
             .and_then(|runtime| runtime.port)
             .or_else(|| {
@@ -1183,6 +1191,14 @@ impl ExecutionDescriptor {
 
     pub fn compat_manifest_path(&self) -> Option<&Path> {
         Some(self.manifest_path.as_path())
+    }
+
+    fn is_job_capsule(&self) -> bool {
+        self.runtime_model
+            .metadata
+            .capsule_type
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("job"))
     }
 
     pub fn compat_target_working_dir(&self, target_label: &str) -> Option<String> {
