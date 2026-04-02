@@ -532,6 +532,12 @@ fn synthesize_manifest_from_lock(
                 toml::Value::String(working_dir.clone()),
             );
         }
+        if let Some(source_layout) = runtime.source_layout.as_ref() {
+            target.insert(
+                "source_layout".to_string(),
+                toml::Value::String(source_layout.clone()),
+            );
+        }
         if let Some(port) = runtime.port {
             target.insert("port".to_string(), toml::Value::Integer(i64::from(port)));
         }
@@ -922,6 +928,10 @@ impl ExecutionDescriptor {
         self.target_working_dir(&self.selected_target)
     }
 
+    pub fn execution_source_layout(&self) -> Option<String> {
+        self.target_source_layout(&self.selected_target)
+    }
+
     pub fn build_lifecycle_build(&self) -> Option<String> {
         self.compat_str(&["targets", &self.selected_target, "build_command"])
             .or_else(|| self.compat_str(&["build", "lifecycle", "build"]))
@@ -1174,6 +1184,12 @@ impl ExecutionDescriptor {
             .filter(|value| !value.trim().is_empty())
     }
 
+    pub fn target_source_layout(&self, target_label: &str) -> Option<String> {
+        self.runtime_for_target(target_label)
+            .and_then(|runtime| runtime.source_layout.clone())
+            .filter(|value| !value.trim().is_empty())
+    }
+
     pub fn compat_manifest(&self) -> Option<&CompatManifestBridge> {
         self.compat_manifest.as_ref()
     }
@@ -1354,6 +1370,7 @@ fn synthesize_runtime_model_from_manifest(
         cmd: named_target.cmd,
         env: named_target.env,
         working_dir: named_target.working_dir,
+        source_layout: named_target.source_layout,
         port: named_target.port,
         required_env: named_target.required_env,
         mounts: Vec::<Mount>::new(),

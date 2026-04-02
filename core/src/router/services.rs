@@ -88,6 +88,7 @@ impl ManifestData {
                     env
                 },
                 working_dir: target.working_dir.clone(),
+                source_layout: target.source_layout.clone(),
                 port: self.target_port(&target_label),
                 required_env: self.target_required_envs(&target_label),
                 mounts: state_mounts_for_service(

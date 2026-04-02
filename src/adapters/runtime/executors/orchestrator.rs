@@ -477,6 +477,7 @@ async fn launch_service<C: OciRuntimeClient>(
                             options.nacelle.clone(),
                             managed_plan,
                             &service_prepared,
+                            prepared.launch_ctx.effective_cwd().map(PathBuf::as_path),
                             reporter,
                         )?;
                         crate::executors::source::execute(

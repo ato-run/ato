@@ -1106,6 +1106,7 @@ where
             request.nacelle.clone(),
             &state.decision.plan,
             &state.prepared,
+            state.launch_ctx.effective_cwd().map(PathBuf::as_path),
             &request.reporter,
         )?);
     }
@@ -1124,6 +1125,7 @@ pub(crate) trait ConsumerRunExecuteHooks {
         nacelle_override: Option<PathBuf>,
         plan: &capsule_core::router::ManifestData,
         prepared: &PreparedRunContext,
+        effective_cwd: Option<&Path>,
         reporter: &Arc<CliReporter>,
     ) -> Result<PathBuf>;
 
@@ -1497,6 +1499,7 @@ where
                         request.nacelle.clone(),
                         &decision.plan,
                         &prepared,
+                        launch_ctx.effective_cwd().map(PathBuf::as_path),
                         &request.reporter,
                     )?,
                 };
