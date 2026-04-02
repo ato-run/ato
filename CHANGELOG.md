@@ -4,6 +4,23 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.42] - 2026-04-02
+
+### What Changed
+
+#### Features
+
+- Add public `CapsuleType::Job` for one-shot workloads and propagate through manifest, lock, router, and runtime synthesis (#219)
+- Single-script source inference emits `job` type; exit code 0 is treated as success for one-shot foreground and background runs (#219)
+- Separate authoritative workspace root from synthetic materialization/execution root; add run-context visibility note (#219)
+- Add `.ato` internal-state fail-closed guards in `input_resolver` and packer; prune `.ato` during source-inference and payload walks (#219)
+- Move single-script generated workspaces to deterministic durable cache roots under `.ato/source-inference/single-script-cache/` (#219)
+
+#### Bug Fixes
+
+- Re-anchor source host isolation under the authoritative workspace root (#219)
+- Collapse nested `if` in `path_contains_workspace_internal_subtree` to satisfy clippy (#219)
+
 ## [0.4.41] - 2026-04-02
 
 ### What Changed
