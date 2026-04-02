@@ -435,6 +435,7 @@ fn native_install_documented_json_contract_fields_are_present() {
             strategy: "ato-managed".to_string(),
             target: Some("desktop".to_string()),
             services: vec!["ollama".to_string(), "opencode".to_string()],
+            materialized_root: PathBuf::from("/tmp/desky-services"),
             bootstrap_state_path: PathBuf::from("/tmp/desky-bootstrap-state.json"),
             bootstrap_phase: "shell_projected".to_string(),
         }),
@@ -499,6 +500,7 @@ fn native_install_documented_json_contract_fields_are_present() {
         &[
             "strategy",
             "services",
+            "materialized_root",
             "bootstrap_state_path",
             "bootstrap_phase",
         ],
@@ -535,6 +537,7 @@ async fn native_install_materializes_ato_managed_environment_bootstrap_state() {
         "DESKY_BOOTSTRAP_STATE_PATH",
         Some(state_path.to_string_lossy().as_ref()),
     );
+    let _path_guard = EnvVarGuard::set("PATH", Some(temp.path().to_string_lossy().as_ref()));
 
     let payload = b"placeholder-payload";
     let lock_json = serde_json::json!({
@@ -590,14 +593,34 @@ async fn native_install_materializes_ato_managed_environment_bootstrap_state() {
     assert_eq!(managed.target.as_deref(), Some("desktop"));
     assert_eq!(managed.bootstrap_phase, "shell_projected");
     assert!(managed.services.iter().any(|service| service == "opencode"));
+    assert!(managed.materialized_root.exists());
+    assert!(managed
+        .materialized_root
+        .join("ollama")
+        .join("service.json")
+        .exists());
+    assert!(managed
+        .materialized_root
+        .join("opencode")
+        .join("run.sh")
+        .exists());
 
     let raw = std::fs::read_to_string(&state_path).expect("read bootstrap state");
     let state: crate::app_control::StoredBootstrapState =
         serde_json::from_str(&raw).expect("parse bootstrap state");
     assert!(state.materialization.shell_installed);
-    assert!(state.materialization.opencode_installed);
+    assert!(!state.materialization.opencode_installed);
     assert_eq!(state.materialization.bootstrap_phase, "shell_projected");
-    assert_eq!(state.health.overall, "healthy");
+    assert_eq!(state.materialization.ollama_mode, "missing");
+    assert_eq!(state.health.overall, "degraded");
+    assert_eq!(
+        state.health.services.get("ollama").map(String::as_str),
+        Some("missing")
+    );
+    assert_eq!(
+        state.health.services.get("opencode").map(String::as_str),
+        Some("missing")
+    );
 }
 
 #[test]
