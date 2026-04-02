@@ -1029,6 +1029,7 @@ async fn run_dry_run_phase(
     run_phase::run_dry_run_phase(&request, &progress, state).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_execute_phase(
     args: &RunArgs,
     target: &Path,
