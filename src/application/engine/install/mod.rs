@@ -109,6 +109,7 @@ pub struct ManagedEnvironmentInfo {
     pub strategy: String,
     pub target: Option<String>,
     pub services: Vec<String>,
+    pub materialized_root: PathBuf,
     pub bootstrap_state_path: PathBuf,
     pub bootstrap_phase: String,
 }
@@ -1437,6 +1438,7 @@ fn materialize_ato_managed_environment(
             .into_iter()
             .map(|service| service.name)
             .collect(),
+        materialized_root: write_result.service_root,
         bootstrap_state_path: write_result.state_path,
         bootstrap_phase: write_result.state.materialization.bootstrap_phase,
     }))
