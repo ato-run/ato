@@ -5,8 +5,8 @@ use thiserror::Error;
 
 use crate::ato_lock::hash::compute_lock_id;
 use crate::ato_lock::schema::{
-    AtoLock, FeatureName, KnownFeature, LockSignature, UnresolvedReason, UnresolvedValue,
-    ATO_LOCK_SCHEMA_VERSION,
+    parse_delivery_environment_value, AtoLock, DeliveryEnvironment, FeatureName, KnownFeature,
+    LockSignature, UnresolvedReason, UnresolvedValue, ATO_LOCK_SCHEMA_VERSION,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,6 +276,15 @@ fn validate_delivery_value(lock: &AtoLock, value: &Value) -> std::result::Result
     validate_delivery_section(object, "install", &mut errors);
     validate_delivery_section(object, "projection", &mut errors);
 
+    if let Some(install) = object.get("install").and_then(Value::as_object) {
+        if let Some(environment) = install.get("environment") {
+            match parse_delivery_environment_value(environment) {
+                Ok(environment) => validate_delivery_environment(&environment, &mut errors),
+                Err(err) => errors.push(err),
+            }
+        }
+    }
+
     if let Some(artifact) = object.get("artifact").and_then(Value::as_object) {
         if artifact.get("kind").and_then(Value::as_str) != Some("desktop-native") {
             errors.push("contract.delivery.artifact.kind must be 'desktop-native'".to_string());
@@ -440,6 +449,43 @@ fn validate_delivery_closure_contract(
     }
 }
 
+fn validate_delivery_environment(environment: &DeliveryEnvironment, errors: &mut Vec<String>) {
+    if environment.strategy.trim().is_empty() {
+        errors.push(
+            "contract.delivery.install.environment.strategy must be a non-empty string".to_string(),
+        );
+    }
+
+    for service in &environment.services {
+        if service.name.trim().is_empty() {
+            errors.push(
+                "contract.delivery.install.environment.services[].name must be non-empty"
+                    .to_string(),
+            );
+        }
+        if service.from.trim().is_empty() {
+            errors.push(format!(
+                "contract.delivery.install.environment.services[{}].from must be non-empty",
+                service.name
+            ));
+        }
+        if service.lifecycle.trim().is_empty() {
+            errors.push(format!(
+                "contract.delivery.install.environment.services[{}].lifecycle must be non-empty",
+                service.name
+            ));
+        }
+        if let Some(healthcheck) = &service.healthcheck {
+            if healthcheck.kind.trim().is_empty() {
+                errors.push(format!(
+                    "contract.delivery.install.environment.services[{}].healthcheck.kind must be non-empty",
+                    service.name
+                ));
+            }
+        }
+    }
+}
+
 fn is_supported_feature(_feature: KnownFeature) -> bool {
     false
 }
@@ -534,5 +580,50 @@ mod tests {
         assert!(errors.iter().any(|error| error
             .to_string()
             .contains("contract.delivery.mode 'source-derivation' requires resolution.closure.kind = 'build_closure'")));
+    }
+
+    #[test]
+    fn delivery_environment_rejects_empty_service_fields() {
+        let lock = lock_with_delivery(
+            json!({
+                "mode": "artifact-import",
+                "artifact": {
+                    "kind": "desktop-native",
+                    "artifact_type": "app-bundle",
+                    "digest": "sha256:abc",
+                    "canonical_build_input": false,
+                    "provenance_limited": true
+                },
+                "install": {
+                    "environment": {
+                        "strategy": "ato-managed",
+                        "services": [
+                            {
+                                "name": "",
+                                "from": "",
+                                "lifecycle": ""
+                            }
+                        ]
+                    }
+                },
+                "projection": {}
+            }),
+            Some(json!({
+                "kind": "imported_artifact_closure",
+                "status": "complete",
+                "artifact": {
+                    "artifact_type": "app-bundle",
+                    "digest": "sha256:abc",
+                    "provenance_limited": true
+                }
+            })),
+        );
+
+        let errors = validate_structural(&lock, ValidationMode::Strict)
+            .expect_err("invalid environment should fail");
+
+        assert!(errors.iter().any(|error| error
+            .to_string()
+            .contains("contract.delivery.install.environment.services[].name must be non-empty")));
     }
 }
