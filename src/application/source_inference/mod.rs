@@ -1011,9 +1011,10 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
     lock.contract
         .entries
         .insert("metadata".to_string(), metadata);
-    lock.contract
-        .entries
-        .insert("network".to_string(), inferred_network_contract(&detected));
+    lock.contract.entries.insert(
+        "network".to_string(),
+        inferred_network_contract(&detected, input.single_script_language),
+    );
     lock.contract.entries.insert(
         "env_contract".to_string(),
         inferred_env_contract(&input.project_root),
@@ -2632,7 +2633,7 @@ fn materialize_run_result(
     mut scope: Option<&mut CleanupScope>,
     original_manifest: Option<&toml::Value>,
 ) -> Result<RunMaterialization> {
-    let run_state_dir = project_root
+    let run_state_dir = workspace_root
         .join(RUN_SOURCE_INFERENCE_DIR)
         .join(unique_attempt_token());
     fs::create_dir_all(&run_state_dir)
@@ -3106,7 +3107,16 @@ fn infer_first_existing_trimmed(project_root: &Path, names: &[&str]) -> Option<S
     })
 }
 
-fn inferred_network_contract(detected: &DetectedProject) -> Value {
+fn inferred_network_contract(
+    detected: &DetectedProject,
+    single_script_language: Option<SingleScriptLanguage>,
+) -> Value {
+    if single_script_language.is_some() {
+        return json!({
+            "ingress": Vec::<Value>::new(),
+        });
+    }
+
     let expected_port = match detected.project_type {
         ProjectType::NodeJs => detected
             .node
@@ -3831,6 +3841,7 @@ mod tests {
         assert_ne!(materialized.project_root, materialized.workspace_root);
         assert_eq!(routed.plan.execution_runtime().as_deref(), Some("source"));
         assert_eq!(routed.plan.execution_driver().as_deref(), Some("deno"));
+        assert_eq!(routed.plan.execution_port(), None);
         assert_eq!(
             routed.plan.execution_entrypoint().as_deref(),
             Some("main.js")
@@ -3880,6 +3891,12 @@ mod tests {
             .project_root
             .to_string_lossy()
             .contains(".ato/source-inference/single-script-cache/"));
+        assert!(first.lock_path.starts_with(dir.path()));
+        assert!(!first.lock_path.starts_with(&first.project_root));
+        assert!(first
+            .lock_path
+            .to_string_lossy()
+            .contains(".ato/tmp/source-inference/"));
     }
 
     #[test]
