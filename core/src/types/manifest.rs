@@ -37,6 +37,8 @@ pub enum CapsuleType {
     Inference,
     /// Utility tool (RAG, code interpreter, etc.)
     Tool,
+    /// One-shot or batch workload executed to completion.
+    Job,
     /// Reusable build-only package in schema v0.3.
     Library,
     /// Application (agent, workflow, etc.)

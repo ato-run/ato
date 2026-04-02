@@ -2049,15 +2049,6 @@ pub(crate) fn execute_run_command(
     inject: Vec<String>,
     reporter: std::sync::Arc<reporters::CliReporter>,
 ) -> Result<()> {
-    let caller_cwd =
-        std::env::current_dir().context("failed to resolve current working directory")?;
-    let effective_cwd = cwd.map(|path| {
-        if path.is_absolute() {
-            path
-        } else {
-            caller_cwd.join(path)
-        }
-    });
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -2082,8 +2073,9 @@ pub(crate) fn execute_run_command(
         read_grants: read,
         write_grants: write,
         read_write_grants: read_write,
-        caller_cwd,
-        effective_cwd,
+        caller_cwd: std::env::current_dir()
+            .context("failed to resolve current working directory")?,
+        effective_cwd: cwd,
         export_request: None,
         state_bindings: state,
         inject_bindings: inject,
