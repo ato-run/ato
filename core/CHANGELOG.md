@@ -2,6 +2,18 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
+## [0.7.1] - 2026-04-02
+
+### What Changed
+
+#### Features
+
+- Add public delivery bootstrap and service environment lock metadata for app control aware installs
+
+#### Bug Fixes
+
+- Validate persisted delivery metadata before install consumers use bootstrap, healthcheck, and repair hints
+
 ## [0.7.0] - 2026-03-29
 
 ### What Changed
