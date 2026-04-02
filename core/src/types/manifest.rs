@@ -1086,6 +1086,10 @@ pub struct NamedTarget {
     #[serde(default)]
     pub working_dir: Option<String>,
 
+    /// Internal source runtime layout hint used by generated manifests.
+    #[serde(default)]
+    pub source_layout: Option<String>,
+
     /// Package type preserved from schema v0.3 (`app` or `library`).
     #[serde(default)]
     pub package_type: Option<String>,
