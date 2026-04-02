@@ -65,9 +65,11 @@ pub fn resolve_lock_runtime_model(
             )
         })?;
 
+    let network = network_from_lock(lock, &metadata);
+
     Ok(ResolvedLockRuntimeModel {
         metadata,
-        network: network_from_lock(lock),
+        network,
         selected,
         services,
     })
@@ -386,7 +388,15 @@ fn resolved_targets(lock: &AtoLock) -> Result<&[Value], AtoExecutionError> {
         })
 }
 
-fn network_from_lock(lock: &AtoLock) -> Option<NetworkConfig> {
+fn network_from_lock(lock: &AtoLock, metadata: &LockContractMetadata) -> Option<NetworkConfig> {
+    if metadata
+        .capsule_type
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("job"))
+    {
+        return None;
+    }
+
     lock.contract
         .entries
         .get("network")
@@ -509,5 +519,22 @@ mod tests {
         let model = resolve_lock_runtime_model(&lock, Some("web")).expect("resolved");
         assert_eq!(model.selected.name, "main");
         assert_eq!(model.services.len(), 1);
+    }
+
+    #[test]
+    fn job_capsule_type_strips_network_contract() {
+        let mut lock = sample_lock();
+        lock.contract.entries.insert(
+            "metadata".to_string(),
+            json!({
+                "name": "demo",
+                "version": "0.1.0",
+                "default_target": "web",
+                "capsule_type": "job"
+            }),
+        );
+
+        let model = resolve_lock_runtime_model(&lock, None).expect("resolved");
+        assert!(model.network.is_none());
     }
 }
