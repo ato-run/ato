@@ -4,6 +4,22 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.41] - 2026-04-02
+
+### What Changed
+
+#### Features
+
+- Add the app control CLI surface and snapshots for bootstrap, status, and repair flows
+
+#### Bug Fixes
+
+- Harden install manifest integrity and delivery metadata handling for the new app control flow
+
+#### CI
+
+- Bump the patch release after `v0.4.40` was already tagged and published
+
 ## [0.4.40] - 2026-04-02
 
 ### What Changed
