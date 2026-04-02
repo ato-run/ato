@@ -60,6 +60,7 @@ pub(crate) struct RunAuthoritativeInput {
     pub(crate) lock: AtoLock,
     pub(crate) lock_path: PathBuf,
     pub(crate) workspace_root: PathBuf,
+    pub(crate) materialization_root: PathBuf,
     pub(crate) effective_state: EffectiveLockState,
     pub(crate) compatibility_legacy_lock: Option<CompatibilityLegacyLockContext>,
 }
@@ -120,7 +121,7 @@ impl PreparedRunContext {
                 router::route_lock(
                     &input.lock_path,
                     &input.lock,
-                    &input.workspace_root,
+                    &input.materialization_root,
                     router::ExecutionProfile::Dev,
                     target_label,
                 )
@@ -381,14 +382,6 @@ fn guest_target_path(raw: &str, guest_cwd: &Path) -> PathBuf {
     lexical_normalize_absolute(absolute)
 }
 
-fn source_runtime_guest_cwd(effective_cwd: &Path) -> PathBuf {
-    if cfg!(target_os = "linux") {
-        PathBuf::from("/workspace")
-    } else {
-        effective_cwd.to_path_buf()
-    }
-}
-
 fn resolve_sandbox_grants(
     request: &ConsumerRunRequest,
     guest_cwd: &Path,
@@ -518,33 +511,28 @@ fn validate_sandbox_grants_best_effort(
 }
 
 fn is_one_shot_run_request(request: &ConsumerRunRequest, prepared: &PreparedRunContext) -> bool {
-    request.export_request.is_some() || prepared.execution_override.is_some()
+    matches!(prepared_capsule_type(prepared), Some(CapsuleType::Job))
+        || request.export_request.is_some()
+        || prepared.execution_override.is_some()
 }
 
-fn sandbox_grant_to_injected_mount(grant: ResolvedSandboxGrant) -> InjectedMount {
-    if grant.source_path.exists() || matches!(grant.scope, SandboxGrantScope::Directory) {
-        return InjectedMount {
-            source: grant.source_path,
-            target: grant.guest_target.to_string_lossy().to_string(),
-            readonly: grant.access.readonly(),
-        };
-    }
+fn prepared_capsule_type(prepared: &PreparedRunContext) -> Option<CapsuleType> {
+    let raw = prepared
+        .bridge_manifest
+        .as_toml()
+        .get("type")
+        .or_else(|| prepared.bridge_manifest.as_toml().get("capsule_type"))?
+        .as_str()?
+        .trim()
+        .to_ascii_lowercase();
 
-    let source_parent = grant
-        .source_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| grant.source_path.clone());
-    let guest_parent = grant
-        .guest_target
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| grant.guest_target.clone());
-
-    InjectedMount {
-        source: source_parent,
-        target: guest_parent.to_string_lossy().to_string(),
-        readonly: false,
+    match raw.as_str() {
+        "inference" => Some(CapsuleType::Inference),
+        "tool" => Some(CapsuleType::Tool),
+        "job" => Some(CapsuleType::Job),
+        "library" => Some(CapsuleType::Library),
+        "app" => Some(CapsuleType::App),
+        _ => None,
     }
 }
 
@@ -676,14 +664,16 @@ where
             HashMap::new()
         };
     let mut decision = if let Some(authoritative_input) = request.authoritative_input.as_ref() {
-        capsule_core::router::route_lock_with_state_overrides(
+        let mut decision = capsule_core::router::route_lock_with_state_overrides(
             &authoritative_input.lock_path,
             &authoritative_input.lock,
-            &authoritative_input.workspace_root,
+            &authoritative_input.materialization_root,
             router::ExecutionProfile::Dev,
             effective_target_label,
             state_source_overrides,
-        )?
+        )?;
+        decision.plan.workspace_root = authoritative_input.workspace_root.clone();
+        decision
     } else {
         let loaded_manifest = capsule_core::manifest::load_manifest_with_validation_mode(
             &manifest_path,
@@ -782,13 +772,16 @@ where
             .with_injected_mounts(injected_data.mounts);
 
     if request.sandbox_mode && !request.dangerously_skip_permissions {
-        let guest_cwd = source_runtime_guest_cwd(request.effective_cwd());
-        let sandbox_grants = resolve_sandbox_grants(request, &guest_cwd)?;
+        let sandbox_grants = resolve_sandbox_grants(request, &decision.plan.manifest_dir)?;
         validate_sandbox_grants_best_effort(request, &sandbox_grants)?;
         launch_ctx = launch_ctx.with_injected_mounts(
             sandbox_grants
                 .into_iter()
-                .map(sandbox_grant_to_injected_mount)
+                .map(|grant| InjectedMount {
+                    source: grant.source_path,
+                    target: grant.guest_target.to_string_lossy().to_string(),
+                    readonly: grant.access.readonly(),
+                })
                 .collect(),
         );
     }
@@ -1402,7 +1395,7 @@ where
                 host_fallback_requested,
                 request.dangerously_skip_permissions,
                 runtime_overrides::override_port(decision.plan.execution_port()),
-                launch_ctx.effective_cwd().map(|path| path.as_path()),
+                launch_ctx.effective_cwd().map(PathBuf::as_path),
                 launch_ctx.injected_mounts().len(),
                 launch_ctx
                     .injected_mounts()
@@ -1410,6 +1403,7 @@ where
                     .filter(|mount| !mount.readonly)
                     .count(),
             )?;
+            render_execution_roots_note(&decision.plan, &launch_ctx)?;
         }
     }
 
@@ -2006,12 +2000,47 @@ fn build_target_launch_options(
     }
 }
 
+fn render_execution_roots_note(
+    plan: &capsule_core::router::ManifestData,
+    launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
+) -> Result<()> {
+    let writable_mounts = launch_ctx
+        .injected_mounts()
+        .iter()
+        .filter(|mount| !mount.readonly)
+        .map(|mount| {
+            format!(
+                "{} <- {}",
+                mount.target,
+                crate::progressive_ui::format_path_for_note(&mount.source)
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let body = format!(
+        "Source Root       : {}\nMaterialized Root : {}\nEffective CWD     : {}\nWritable Mounts   : {}",
+        crate::progressive_ui::format_path_for_note(&plan.workspace_root),
+        crate::progressive_ui::format_path_for_note(&plan.manifest_dir),
+        launch_ctx
+            .effective_cwd()
+            .map(|cwd| crate::progressive_ui::format_path_for_note(cwd.as_path()))
+            .unwrap_or_else(|| "<none>".to_string()),
+        if writable_mounts.is_empty() {
+            "none".to_string()
+        } else {
+            writable_mounts.join("\n                  ")
+        }
+    );
+
+    crate::progressive_ui::show_note("Run Context", body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         normalize_existing_path, normalize_write_path, resolve_sandbox_grants,
-        source_runtime_guest_cwd, validate_sandbox_grants_best_effort, ConsumerRunRequest,
-        DerivedBridgeManifest, PreparedRunContext,
+        validate_sandbox_grants_best_effort, ConsumerRunRequest, DerivedBridgeManifest,
+        PreparedRunContext,
     };
     use capsule_core::ato_lock::AtoLock;
     use std::fs;
@@ -2141,6 +2170,7 @@ mod tests {
     fn relative_grants_use_effective_cwd_for_host_and_manifest_dir_for_guest() {
         let caller = workspace_tempdir("caller-cwd-");
         let explicit = workspace_tempdir("effective-cwd-");
+        let guest_manifest = workspace_tempdir("guest-manifest-");
         let input = explicit.path().join("in.pdf");
         std::fs::write(&input, b"pdf").expect("write input");
 
@@ -2152,23 +2182,20 @@ mod tests {
             Vec::new(),
         );
 
-        let grants = resolve_sandbox_grants(&request, &source_runtime_guest_cwd(explicit.path()))
-            .expect("grants");
+        let grants = resolve_sandbox_grants(&request, guest_manifest.path()).expect("grants");
         assert_eq!(grants.len(), 1);
         assert_eq!(
             grants[0].source_path,
             input.canonicalize().expect("canonical input")
         );
-        assert_eq!(
-            grants[0].guest_target,
-            source_runtime_guest_cwd(explicit.path()).join("in.pdf")
-        );
+        assert_eq!(grants[0].guest_target, guest_manifest.path().join("in.pdf"));
     }
 
     #[test]
     fn relative_write_grants_project_to_guest_manifest_dir() {
         let caller = workspace_tempdir("caller-cwd-");
         let effective = workspace_tempdir("effective-cwd-");
+        let guest_manifest = workspace_tempdir("guest-manifest-");
 
         let request = sandbox_request(
             caller.path().to_path_buf(),
@@ -2178,14 +2205,10 @@ mod tests {
             vec!["./out.md".to_string()],
         );
 
-        let grants = resolve_sandbox_grants(&request, &source_runtime_guest_cwd(effective.path()))
-            .expect("grants");
+        let grants = resolve_sandbox_grants(&request, guest_manifest.path()).expect("grants");
         assert_eq!(grants.len(), 1);
         assert_eq!(grants[0].source_path, effective.path().join("out.md"));
-        assert_eq!(
-            grants[0].guest_target,
-            source_runtime_guest_cwd(effective.path()).join("out.md")
-        );
+        assert_eq!(grants[0].guest_target, guest_manifest.path().join("out.md"));
     }
 
     #[test]

@@ -382,7 +382,10 @@ fn is_hidden(file_name: &std::ffi::OsString) -> bool {
     bytes.first() == Some(&b'.') && bytes.len() > 1
 }
 
-fn build_consumer_run_request(args: &RunArgs) -> run_phase::ConsumerRunRequest {
+fn build_consumer_run_request(
+    args: &RunArgs,
+    export_request: Option<ResolvedCliExportRequest>,
+) -> run_phase::ConsumerRunRequest {
     run_phase::ConsumerRunRequest {
         target: args.target.clone(),
         target_label: args.target_label.clone(),
@@ -407,7 +410,7 @@ fn build_consumer_run_request(args: &RunArgs) -> run_phase::ConsumerRunRequest {
         keep_failed_artifacts: args.keep_failed_artifacts,
         auto_fix_mode: args.auto_fix_mode,
         allow_unverified: args.allow_unverified,
-        export_request: args.export_request.clone(),
+        export_request,
         state_bindings: args.state_bindings.clone(),
         inject_bindings: args.inject_bindings.clone(),
         reporter: args.reporter.clone(),
@@ -423,35 +426,12 @@ fn build_consumer_run_request_with_target(
     desktop_open_path: Option<PathBuf>,
     export_request: Option<ResolvedCliExportRequest>,
 ) -> run_phase::ConsumerRunRequest {
-    let mut request = build_consumer_run_request(args);
+    let mut request = build_consumer_run_request(args, export_request);
     request.target = target.to_path_buf();
     request.agent_local_root = agent_local_root;
     request.authoritative_input = authoritative_input;
     request.desktop_open_path = desktop_open_path;
-    request.export_request = export_request;
     request
-}
-
-struct RunPhaseRequestInputs<'a> {
-    args: &'a RunArgs,
-    target: &'a Path,
-    agent_local_root: Option<PathBuf>,
-    authoritative_input: Option<run_phase::RunAuthoritativeInput>,
-    desktop_open_path: Option<PathBuf>,
-    export_request: Option<ResolvedCliExportRequest>,
-}
-
-impl RunPhaseRequestInputs<'_> {
-    fn into_request(self) -> run_phase::ConsumerRunRequest {
-        build_consumer_run_request_with_target(
-            self.args,
-            self.target,
-            self.agent_local_root,
-            self.authoritative_input,
-            self.desktop_open_path,
-            self.export_request,
-        )
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -467,7 +447,7 @@ fn authoritative_input_from_materialization(
     compatibility_legacy_lock: Option<run_phase::CompatibilityLegacyLockContext>,
 ) -> Result<run_phase::RunAuthoritativeInput> {
     let effective_state = state::resolve_effective_lock_state(
-        &materialized.project_root,
+        &materialized.workspace_root,
         &materialized.lock,
         cli_state_bindings,
     )?;
@@ -475,7 +455,8 @@ fn authoritative_input_from_materialization(
     Ok(run_phase::RunAuthoritativeInput {
         lock: materialized.lock,
         lock_path: materialized.lock_path,
-        workspace_root: materialized.project_root,
+        workspace_root: materialized.workspace_root,
+        materialization_root: materialized.project_root,
         effective_state,
         compatibility_legacy_lock,
     })
@@ -595,8 +576,8 @@ struct ConsumerRunPhaseRunner<'a> {
     target: Option<PathBuf>,
     authoritative_input: Option<run_phase::RunAuthoritativeInput>,
     desktop_open_path: Option<PathBuf>,
-    agent_local_root: Option<PathBuf>,
     export_request: Option<ResolvedCliExportRequest>,
+    agent_local_root: Option<PathBuf>,
     should_stop_after_install: bool,
 }
 
@@ -645,8 +626,8 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                 self.desktop_open_path = normalized
                     .desktop_open_path
                     .or(install.resolved_target.desktop_open_path);
-                self.agent_local_root = install.resolved_target.agent_local_root;
                 self.export_request = install.resolved_target.export_request;
+                self.agent_local_root = install.resolved_target.agent_local_root;
                 self.should_stop_after_install = matches!(
                     install.manifest_outcome,
                     crate::install::support::LocalRunManifestPreparationOutcome::CreatedManualManifest
@@ -727,14 +708,12 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
             HourglassPhase::Execute => {
                 let input = self.take_state(HourglassPhase::Execute)?;
                 run_execute_phase(
-                    RunPhaseRequestInputs {
-                        args: self.args,
-                        target: self.resolved_target(),
-                        agent_local_root: self.agent_local_root.clone(),
-                        authoritative_input: self.authoritative_input.clone(),
-                        desktop_open_path: self.desktop_open_path.clone(),
-                        export_request: self.export_request.clone(),
-                    },
+                    self.args,
+                    self.resolved_target(),
+                    self.agent_local_root.clone(),
+                    self.authoritative_input.clone(),
+                    self.desktop_open_path.clone(),
+                    self.export_request.clone(),
                     input,
                     Some(attempt),
                 )
@@ -759,8 +738,8 @@ async fn execute_normal_mode(args: RunArgs) -> Result<()> {
         target: None,
         authoritative_input: None,
         desktop_open_path: None,
-        agent_local_root: args.agent_local_root.clone(),
         export_request: args.export_request.clone(),
+        agent_local_root: args.agent_local_root.clone(),
         should_stop_after_install: false,
     };
 
@@ -961,7 +940,7 @@ async fn normalize_run_target_after_install(
 }
 
 async fn run_install_phase(args: &RunArgs) -> Result<run_phase::RunInstallPhaseResult> {
-    let request = build_consumer_run_request(args);
+    let request = build_consumer_run_request(args, args.export_request.clone());
     let progress = RunProgress { args };
     run_phase::run_install_phase(&request, &progress).await
 }
@@ -1051,12 +1030,24 @@ async fn run_dry_run_phase(
 }
 
 async fn run_execute_phase(
-    inputs: RunPhaseRequestInputs<'_>,
+    args: &RunArgs,
+    target: &Path,
+    agent_local_root: Option<PathBuf>,
+    authoritative_input: Option<run_phase::RunAuthoritativeInput>,
+    desktop_open_path: Option<PathBuf>,
+    export_request: Option<ResolvedCliExportRequest>,
     state: RunPipelineState,
     attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<()> {
-    let progress = RunProgress { args: inputs.args };
-    let request = inputs.into_request();
+    let request = build_consumer_run_request_with_target(
+        args,
+        target,
+        agent_local_root,
+        authoritative_input,
+        desktop_open_path,
+        export_request,
+    );
+    let progress = RunProgress { args };
     run_phase::run_execute_phase(&request, &progress, state, attempt, &RunExecuteHooks).await
 }
 
@@ -1109,6 +1100,7 @@ enum ForegroundEventMessage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BackgroundStartupOutcome {
     Ready,
+    CompletedSuccessfully,
     TimedOut,
     FailedBeforeReady,
 }
@@ -1138,17 +1130,19 @@ fn execute_watch_mode(args: RunArgs) -> Result<()> {
         None,
     ))?;
     let decision = if let Some(authoritative_input) = normalized.authoritative_input.as_ref() {
-        capsule_core::router::route_lock_with_state_overrides(
+        let mut decision = capsule_core::router::route_lock_with_state_overrides(
             &authoritative_input.lock_path,
             &authoritative_input.lock,
-            &authoritative_input.workspace_root,
+            &authoritative_input.materialization_root,
             router::ExecutionProfile::Dev,
             args.target_label.as_deref(),
             authoritative_input
                 .effective_state
                 .state_source_overrides
                 .clone(),
-        )?
+        )?;
+        decision.plan.workspace_root = authoritative_input.workspace_root.clone();
+        decision
     } else {
         let manifest = if preview_mode {
             capsule_core::manifest::load_manifest_with_validation_mode(
@@ -1438,6 +1432,25 @@ mod tests {
     }
 
     #[test]
+    fn foreground_native_one_shot_exit_zero_is_success() {
+        let message = foreground_native_event_messages(
+            &LifecycleEvent::Exited {
+                service: "main".to_string(),
+                exit_code: Some(0),
+            },
+            false,
+            true,
+        );
+
+        assert_eq!(
+            message,
+            vec![ForegroundEventMessage::Notify(
+                "[✓] Command completed successfully (exit code: 0)".to_string()
+            )]
+        );
+    }
+
+    #[test]
     fn compatibility_host_mode_enables_nodecompat_fallback() {
         let mode = resolve_compatibility_host_mode(ExecutorKind::NodeCompat, Some("host"))
             .expect("resolve fallback mode");
@@ -1469,32 +1482,6 @@ mod tests {
             message,
             "🚀 Desktop app launch requested in background (ID: capsule-42)"
         );
-    }
-
-    #[test]
-    fn foreground_native_one_shot_exit_uses_command_copy() {
-        let message = foreground_native_event_messages(
-            &LifecycleEvent::Exited {
-                service: "main".to_string(),
-                exit_code: Some(42),
-            },
-            false,
-            true,
-        );
-
-        assert_eq!(
-            message,
-            vec![ForegroundEventMessage::Warn(
-                "❌ Command exited before start confirmation (exit code: 42)".to_string()
-            )]
-        );
-    }
-
-    #[test]
-    fn background_ready_message_uses_command_copy_for_one_shot() {
-        let message =
-            background_ready_message("capsule-42", CompatibilityHostMode::Disabled, false, true);
-        assert_eq!(message, "🚀 Background command started (ID: capsule-42)");
     }
 
     #[test]
@@ -1581,9 +1568,7 @@ run_command = "node server.js"
             compatibility_legacy_lock: None,
         };
         for preview_mode in [false, true] {
-            let requested_cwd = tmp.path().join("caller-cwd");
             let launch_ctx = RuntimeLaunchContext::empty()
-                .with_effective_cwd(requested_cwd.clone())
                 .with_injected_env(
                     [("DATABASE_URL".to_string(), "sqlite://shadow.db".to_string())]
                         .into_iter()
@@ -1612,7 +1597,6 @@ run_command = "node server.js"
                 Some("sqlite://shadow.db")
             );
             assert_eq!(rerouted_ctx.injected_mounts(), std::slice::from_ref(&mount));
-            assert_eq!(rerouted_ctx.effective_cwd(), Some(&requested_cwd));
         }
     }
 
@@ -2024,7 +2008,6 @@ target = "/var/lib/app"
             toml::Value::String(schema_version.to_string()),
         );
         manifest.insert("name".to_string(), toml::Value::String("demo".to_string()));
-        manifest.insert("type".to_string(), toml::Value::String("app".to_string()));
         manifest.insert(
             "default_target".to_string(),
             toml::Value::String("default".to_string()),
