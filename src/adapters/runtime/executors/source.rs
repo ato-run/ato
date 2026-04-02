@@ -123,6 +123,9 @@ pub fn execute_host(
     let injected_port =
         runtime_overrides::override_port(launch_spec.port).map(|port| port.to_string());
     let readiness_port = runtime_overrides::override_port(launch_spec.port);
+    let host_command_path =
+        resolve_host_command_path(&launch_spec.working_dir, &launch_spec.command);
+    let execution_cwd = resolve_host_execution_cwd(launch_ctx, &launch_spec.working_dir);
 
     let mut cmd = if let Some(bundle_path) = desktop_open_bundle.as_ref() {
         build_desktop_open_command(bundle_path, &launch_spec.args)
@@ -133,7 +136,7 @@ pub fn execute_host(
             ManagedRuntimeKind::Python,
         )?;
         let mut python = Command::new(python_bin);
-        python.arg(&launch_spec.command);
+        python.arg(&host_command_path);
         python
     } else if force_node_runtime {
         let node_bin = resolve_host_managed_runtime_binary(
@@ -142,16 +145,13 @@ pub fn execute_host(
             ManagedRuntimeKind::Node,
         )?;
         let mut node = Command::new(node_bin);
-        node.arg(&launch_spec.command);
+        node.arg(&host_command_path);
         node
     } else {
-        Command::new(resolve_host_command_path(
-            &launch_spec.working_dir,
-            &launch_spec.command,
-        ))
+        Command::new(&host_command_path)
     };
 
-    cmd.current_dir(&launch_spec.working_dir);
+    cmd.current_dir(&execution_cwd);
     if desktop_open_bundle.is_none() {
         apply_host_isolation(
             &mut cmd,
@@ -497,6 +497,13 @@ fn resolve_host_command_path(working_dir: &Path, command: &str) -> PathBuf {
         return fs::canonicalize(&relative).unwrap_or(relative);
     }
     command_path.to_path_buf()
+}
+
+fn resolve_host_execution_cwd(launch_ctx: &RuntimeLaunchContext, working_dir: &Path) -> PathBuf {
+    launch_ctx
+        .effective_cwd()
+        .cloned()
+        .unwrap_or_else(|| working_dir.to_path_buf())
 }
 
 fn is_python_launch_spec(plan: &ManifestData, command: &str, language: Option<&str>) -> bool {
@@ -1048,6 +1055,28 @@ mod tests {
 
         assert!(resolved.is_absolute());
         assert!(resolved.ends_with(Path::new("tests/fixtures/native-shell-capsule/run.sh")));
+    }
+
+    #[test]
+    fn resolve_host_execution_cwd_prefers_effective_cwd() {
+        let working_dir = PathBuf::from("/materialized/root");
+        let effective_cwd = PathBuf::from("/caller/workspace");
+        let launch_ctx = RuntimeLaunchContext::empty().with_effective_cwd(effective_cwd.clone());
+
+        assert_eq!(
+            resolve_host_execution_cwd(&launch_ctx, &working_dir),
+            effective_cwd
+        );
+    }
+
+    #[test]
+    fn resolve_host_execution_cwd_falls_back_to_working_dir() {
+        let working_dir = PathBuf::from("/materialized/root");
+
+        assert_eq!(
+            resolve_host_execution_cwd(&RuntimeLaunchContext::empty(), &working_dir),
+            working_dir
+        );
     }
 
     #[test]
