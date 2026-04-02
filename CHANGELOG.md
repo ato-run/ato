@@ -4,6 +4,18 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.44] - 2026-04-03
+
+### What Changed
+
+#### Features
+
+- Materialize ato-managed service helpers and service state during install, expose the service root in install output, and refresh service health during bootstrap and repair flows
+
+#### Bug Fixes
+
+- Make host fallback source execution honor the effective cwd so relative outputs land in the caller workspace instead of the materialized root
+
 ## [0.4.43] - 2026-04-03
 
 ### What Changed
