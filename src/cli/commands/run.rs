@@ -476,9 +476,10 @@ impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
         nacelle_override: Option<PathBuf>,
         plan: &capsule_core::router::ManifestData,
         prepared: &run_phase::PreparedRunContext,
+        effective_cwd: Option<&Path>,
         reporter: &Arc<CliReporter>,
     ) -> Result<PathBuf> {
-        preflight_native_sandbox(nacelle_override, plan, prepared, reporter)
+        preflight_native_sandbox(nacelle_override, plan, prepared, effective_cwd, reporter)
     }
 
     async fn complete_background_source_process(

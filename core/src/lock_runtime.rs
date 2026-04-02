@@ -361,6 +361,12 @@ fn runtime_from_target(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string),
+        source_layout: target
+            .get("source_layout")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         port: target
             .get("port")
             .and_then(Value::as_u64)
