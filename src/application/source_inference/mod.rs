@@ -26,7 +26,7 @@ use anyhow::{Context, Result};
 use capsule_core::ato_lock::{
     self, closure_info, normalize_lock_closure, AtoLock, UnresolvedReason, UnresolvedValue,
 };
-use capsule_core::common::paths::workspace_tmp_dir;
+use capsule_core::common::paths::{path_contains_workspace_state_dir, workspace_state_dir};
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::importer::{
     probe_ecosystem_lockfile_evidence, probe_native_framework_evidence, ImportedEvidence,
@@ -42,6 +42,7 @@ use serde_json::{json, Value};
 use walkdir::WalkDir;
 
 const RUN_SOURCE_INFERENCE_DIR: &str = ".ato/tmp/source-inference";
+const SINGLE_SCRIPT_CACHE_SUBDIR: &str = "source-inference/single-script-cache";
 #[derive(Debug, Clone)]
 pub(crate) enum SourceInferenceInput {
     SourceEvidence(SourceEvidenceInput),
@@ -53,6 +54,8 @@ pub(crate) enum SourceInferenceInput {
 pub(crate) struct SourceEvidenceInput {
     pub(crate) project_root: PathBuf,
     pub(crate) explicit_native_artifact: Option<PathBuf>,
+    pub(crate) single_script_language: Option<SingleScriptLanguage>,
+    pub(crate) authoritative_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +111,7 @@ struct GatedSourceModel {
 
 #[derive(Debug, Clone)]
 struct MaterializationAdapter {
+    workspace_root: PathBuf,
     project_root: PathBuf,
     original_manifest: Option<toml::Value>,
 }
@@ -241,6 +245,7 @@ pub(crate) struct SourceInferenceDiagnostic {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RunMaterialization {
+    pub(crate) workspace_root: PathBuf,
     pub(crate) project_root: PathBuf,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) raw_manifest: Option<toml::Value>,
@@ -288,6 +293,8 @@ pub(crate) fn materialize_run_from_source_only(
     let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
         project_root: adapter.project_root.clone(),
         explicit_native_artifact: None,
+        single_script_language: source.single_script.as_ref().map(|script| script.language),
+        authoritative_root: Some(source.project_root.clone()),
     });
     let result =
         execute_shared_engine(input, MaterializationMode::RunAttempt, assume_yes, reporter)?;
@@ -305,12 +312,15 @@ pub(crate) fn materialize_run_from_explicit_native_artifact(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     let adapter = MaterializationAdapter {
+        workspace_root: project_root.clone(),
         project_root: project_root.clone(),
         original_manifest: None,
     };
     let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
         project_root,
         explicit_native_artifact: Some(artifact_path.to_path_buf()),
+        single_script_language: None,
+        authoritative_root: None,
     });
     let result =
         execute_shared_engine(input, MaterializationMode::RunAttempt, assume_yes, reporter)?;
@@ -354,6 +364,7 @@ fn prepare_run_materialization_adapter(
         source.project_root.clone()
     };
     Ok(MaterializationAdapter {
+        workspace_root: source.project_root.clone(),
         project_root,
         original_manifest: None,
     })
@@ -364,6 +375,7 @@ fn prepare_workspace_materialization_adapter(
 ) -> Result<MaterializationAdapter> {
     let project_root = prepare_durable_source_workspace(source)?;
     Ok(MaterializationAdapter {
+        workspace_root: source.project_root.clone(),
         project_root,
         original_manifest: None,
     })
@@ -371,57 +383,35 @@ fn prepare_workspace_materialization_adapter(
 
 fn prepare_python_single_script_workspace(
     script: &ResolvedSingleScript,
-    scope: Option<&mut CleanupScope>,
+    _scope: Option<&mut CleanupScope>,
 ) -> Result<PathBuf> {
-    let parent = script
-        .path
-        .parent()
-        .context("single-file script path must have a parent directory")?;
-    let temp_root = workspace_tmp_dir(parent).join(format!(
-        "ato-single-python-{}-{}",
-        script
-            .path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("script"),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-    ));
-    fs::create_dir_all(&temp_root)
-        .with_context(|| format!("failed to create virtual workspace {}", temp_root.display()))?;
-    if let Some(scope) = scope {
-        scope.register_remove_dir(temp_root.clone());
-    }
-
     let script_text = fs::read_to_string(&script.path)
         .with_context(|| format!("failed to read script {}", script.path.display()))?;
     let metadata = parse_pep723_python_metadata(&script_text)?;
+    let cache_root = single_script_cache_root(script, &script_text)?;
 
-    fs::write(temp_root.join("main.py"), script_text)
-        .with_context(|| format!("failed to write virtual script {}", temp_root.display()))?;
+    fs::create_dir_all(&cache_root).with_context(|| {
+        format!(
+            "failed to create single-script cache {}",
+            cache_root.display()
+        )
+    })?;
+
+    write_if_absent_or_same(&cache_root.join("main.py"), &script_text)?;
 
     if !metadata.dependencies.is_empty() {
-        fs::write(
-            temp_root.join("requirements.txt"),
-            format!("{}\n", metadata.dependencies.join("\n")),
-        )
-        .with_context(|| {
-            format!(
-                "failed to write requirements.txt in {}",
-                temp_root.display()
-            )
-        })?;
+        write_if_absent_or_same(
+            &cache_root.join("requirements.txt"),
+            &format!("{}\n", metadata.dependencies.join("\n")),
+        )?;
     }
 
     let pyproject = python_pyproject_for_single_script(&metadata);
-    fs::write(temp_root.join("pyproject.toml"), pyproject)
-        .with_context(|| format!("failed to write pyproject.toml in {}", temp_root.display()))?;
+    write_if_absent_or_same(&cache_root.join("pyproject.toml"), &pyproject)?;
 
-    generate_uv_lock_for_single_script(&temp_root)?;
+    generate_uv_lock_for_single_script(&cache_root)?;
 
-    Ok(temp_root)
+    Ok(cache_root)
 }
 
 fn prepare_durable_python_single_script_workspace(
@@ -444,6 +434,10 @@ fn prepare_durable_python_single_script_workspace(
 }
 
 fn generate_uv_lock_for_single_script(project_root: &Path) -> Result<()> {
+    if project_root.join("uv.lock").exists() {
+        return Ok(());
+    }
+
     let output = std::process::Command::new("uv")
         .arg("lock")
         .current_dir(project_root)
@@ -463,48 +457,32 @@ fn generate_uv_lock_for_single_script(project_root: &Path) -> Result<()> {
 
 fn prepare_deno_single_script_workspace(
     script: &ResolvedSingleScript,
-    scope: Option<&mut CleanupScope>,
+    _scope: Option<&mut CleanupScope>,
 ) -> Result<PathBuf> {
-    let parent = script
-        .path
-        .parent()
-        .context("single-file script path must have a parent directory")?;
-    let temp_root = workspace_tmp_dir(parent).join(format!(
-        "ato-single-ts-{}-{}",
-        script
-            .path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("script"),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-    ));
-    fs::create_dir_all(&temp_root)
-        .with_context(|| format!("failed to create virtual workspace {}", temp_root.display()))?;
-    if let Some(scope) = scope {
-        scope.register_remove_dir(temp_root.clone());
-    }
-
     let script_text = fs::read_to_string(&script.path)
         .with_context(|| format!("failed to read script {}", script.path.display()))?;
     let metadata = parse_deno_script_metadata(&script_text, &script.path);
+    let cache_root = single_script_cache_root(script, &script_text)?;
+
+    fs::create_dir_all(&cache_root).with_context(|| {
+        format!(
+            "failed to create single-script cache {}",
+            cache_root.display()
+        )
+    })?;
     let entrypoint = deno_single_script_entrypoint_name(&script.path);
-    fs::write(temp_root.join(entrypoint), script_text)
-        .with_context(|| format!("failed to write virtual script {}", temp_root.display()))?;
+    write_if_absent_or_same(&cache_root.join(entrypoint), &script_text)?;
     let deno_json = deno_json_for_single_script(&metadata);
-    fs::write(
-        temp_root.join("deno.json"),
-        serde_json::to_string_pretty(&deno_json)
+    write_if_absent_or_same(
+        &cache_root.join("deno.json"),
+        &(serde_json::to_string_pretty(&deno_json)
             .context("failed to serialize deno.json for single-file Deno script")?
-            + "\n",
-    )
-    .with_context(|| format!("failed to write deno.json in {}", temp_root.display()))?;
+            + "\n"),
+    )?;
 
-    generate_deno_lock_for_single_script(&temp_root, entrypoint)?;
+    generate_deno_lock_for_single_script(&cache_root, entrypoint)?;
 
-    Ok(temp_root)
+    Ok(cache_root)
 }
 
 fn prepare_durable_deno_single_script_workspace(
@@ -546,7 +524,30 @@ fn write_if_absent_or_same(path: &Path, content: &str) -> Result<()> {
     fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))
 }
 
+fn single_script_cache_root(script: &ResolvedSingleScript, script_text: &str) -> Result<PathBuf> {
+    let parent = script
+        .path
+        .parent()
+        .context("single-file script path must have a parent directory")?;
+    let language = match script.language {
+        SingleScriptLanguage::Python => "python",
+        SingleScriptLanguage::TypeScript => "typescript",
+        SingleScriptLanguage::JavaScript => "javascript",
+    };
+    let cache_key = crate::utils::hash::compute_sha256_hex(
+        format!("v1\0{language}\0{}\0{}", script.path.display(), script_text).as_bytes(),
+    );
+
+    Ok(workspace_state_dir(parent)
+        .join(SINGLE_SCRIPT_CACHE_SUBDIR)
+        .join(format!("{}-{}", language, &cache_key[..16])))
+}
+
 fn generate_deno_lock_for_single_script(project_root: &Path, entrypoint: &str) -> Result<()> {
+    if project_root.join("deno.lock").exists() {
+        return Ok(());
+    }
+
     let output = std::process::Command::new("deno")
         .args(["cache", "--lock=deno.lock", entrypoint])
         .current_dir(project_root)
@@ -793,6 +794,7 @@ pub(crate) fn materialize_run_from_canonical_lock(
     assume_yes: bool,
 ) -> Result<RunMaterialization> {
     let adapter = MaterializationAdapter {
+        workspace_root: canonical.project_root.clone(),
         project_root: canonical.project_root.clone(),
         original_manifest: None,
     };
@@ -816,6 +818,7 @@ pub(crate) fn materialize_run_from_compatibility(
     let original_manifest =
         toml::from_str(&project.manifest.raw_text).unwrap_or_else(|_| project.manifest.raw.clone());
     let adapter = MaterializationAdapter {
+        workspace_root: project.project_root.clone(),
         project_root: project.project_root.clone(),
         original_manifest: Some(original_manifest),
     };
@@ -856,6 +859,8 @@ pub(crate) fn execute_init_from_resolved_source_only(
     let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
         project_root: adapter.project_root.clone(),
         explicit_native_artifact: None,
+        single_script_language: source.single_script.as_ref().map(|script| script.language),
+        authoritative_root: Some(source.project_root.clone()),
     });
     let result = execute_shared_engine(
         input,
@@ -873,6 +878,7 @@ pub(crate) fn execute_init_from_compatibility(
 ) -> Result<WorkspaceMaterialization> {
     let (draft_input, compiled) = draft_lock_input_from_compatibility(project)?;
     let adapter = MaterializationAdapter {
+        workspace_root: project.project_root.clone(),
         project_root: project.project_root.clone(),
         original_manifest: None,
     };
@@ -963,7 +969,14 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         &info,
         input.explicit_native_artifact.as_deref(),
     )?;
-    let metadata = source_metadata(&detected, &input.project_root);
+    let metadata = source_metadata(
+        &detected,
+        input
+            .authoritative_root
+            .as_deref()
+            .unwrap_or(input.project_root.as_path()),
+        input.single_script_language,
+    );
     let runtime_kind = desktop_execution
         .as_ref()
         .and_then(|override_contract| {
@@ -1768,6 +1781,8 @@ fn infer_imported_native_artifact_candidate(project_root: &Path) -> Result<Impor
         .follow_links(false)
         .sort_by_file_name()
         .max_depth(6)
+        .into_iter()
+        .filter_entry(|entry| should_walk_source_entry(project_root, entry.path()))
     {
         let entry = entry?;
         let path = entry.path();
@@ -1869,6 +1884,8 @@ fn detect_framework_artifact_relative(
             .follow_links(false)
             .sort_by_file_name()
             .max_depth(6)
+            .into_iter()
+            .filter_entry(|entry| should_walk_source_entry(project_root, entry.path()))
         {
             let entry = entry.ok()?;
             let path = entry.path();
@@ -1882,6 +1899,17 @@ fn detect_framework_artifact_relative(
     candidates.sort();
     candidates.dedup();
     candidates.into_iter().next()
+}
+
+fn should_walk_source_entry(project_root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(project_root) else {
+        return true;
+    };
+    if relative.as_os_str().is_empty() {
+        return true;
+    }
+
+    !path_contains_workspace_state_dir(relative)
 }
 
 fn default_framework_artifact_relative(
@@ -2598,6 +2626,7 @@ fn enforce_mode_preconditions(
 }
 
 fn materialize_run_result(
+    workspace_root: &Path,
     project_root: &Path,
     result: SourceInferenceResult,
     mut scope: Option<&mut CleanupScope>,
@@ -2619,6 +2648,7 @@ fn materialize_run_result(
     write_sidecar(&sidecar_path, &result, MaterializationMode::RunAttempt)?;
 
     Ok(RunMaterialization {
+        workspace_root: workspace_root.to_path_buf(),
         project_root: project_root.to_path_buf(),
         raw_manifest: original_manifest.cloned(),
         lock: result.lock,
@@ -2639,6 +2669,7 @@ fn materialize_run_model(
     result: SourceInferenceResult,
 ) -> Result<RunMaterialization> {
     materialize_run_result(
+        &adapter.workspace_root,
         &adapter.project_root,
         result,
         scope,
@@ -3167,11 +3198,15 @@ fn importer_observation_provenance(
     }
 }
 
-fn source_metadata(detected: &DetectedProject, project_root: &Path) -> Value {
+fn source_metadata(
+    detected: &DetectedProject,
+    project_root: &Path,
+    single_script_language: Option<SingleScriptLanguage>,
+) -> Value {
     json!({
         "name": detected.name,
         "version": infer_project_version(detected, project_root).unwrap_or_else(|| "0.1.0".to_string()),
-        "capsule_type": "app",
+        "capsule_type": if single_script_language.is_some() { "job" } else { "app" },
         "source_root": project_root,
         "project_type": detected.project_type.as_str(),
     })
@@ -3460,6 +3495,8 @@ mod tests {
             SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
                 project_root: dir.path().to_path_buf(),
                 explicit_native_artifact: None,
+                single_script_language: None,
+                authoritative_root: None,
             }),
             MaterializationMode::RunAttempt,
             true,
@@ -3487,6 +3524,8 @@ mod tests {
             SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
                 project_root: dir.path().to_path_buf(),
                 explicit_native_artifact: None,
+                single_script_language: None,
+                authoritative_root: None,
             }),
             MaterializationMode::InitWorkspace,
             true,
@@ -3517,6 +3556,8 @@ mod tests {
             SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
                 project_root: dir.path().to_path_buf(),
                 explicit_native_artifact: None,
+                single_script_language: None,
+                authoritative_root: None,
             }),
             MaterializationMode::RunAttempt,
             true,
@@ -3545,6 +3586,8 @@ mod tests {
             SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
                 project_root: dir.path().to_path_buf(),
                 explicit_native_artifact: None,
+                single_script_language: None,
+                authoritative_root: None,
             }),
             MaterializationMode::RunAttempt,
             true,
@@ -3784,13 +3827,59 @@ mod tests {
         )
         .expect("route lock");
 
+        assert_eq!(materialized.workspace_root, dir.path());
+        assert_ne!(materialized.project_root, materialized.workspace_root);
         assert_eq!(routed.plan.execution_runtime().as_deref(), Some("source"));
         assert_eq!(routed.plan.execution_driver().as_deref(), Some("deno"));
         assert_eq!(
             routed.plan.execution_entrypoint().as_deref(),
             Some("main.js")
         );
+        assert_eq!(
+            materialized
+                .lock
+                .contract
+                .entries
+                .get("metadata")
+                .and_then(|value| value.get("source_root")),
+            Some(&json!(dir.path())),
+        );
         assert!(materialized.project_root.join("deno.lock").exists());
+    }
+
+    #[test]
+    fn single_script_run_materialization_reuses_cached_workspace_root() {
+        if std::process::Command::new("deno")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("hello.js");
+        fs::write(&script_path, "console.log('hello cache');\n").expect("write script");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: Some(ResolvedSingleScript {
+                path: script_path,
+                language: SingleScriptLanguage::JavaScript,
+            }),
+        };
+
+        let first =
+            materialize_run_from_source_only(&source, None, reporter(), true).expect("first");
+        let second =
+            materialize_run_from_source_only(&source, None, reporter(), true).expect("second");
+
+        assert_eq!(first.workspace_root, dir.path());
+        assert_eq!(first.project_root, second.project_root);
+        assert!(first
+            .project_root
+            .to_string_lossy()
+            .contains(".ato/source-inference/single-script-cache/"));
     }
 
     #[test]
@@ -4064,6 +4153,8 @@ mod tests {
             SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
                 project_root: dir.path().to_path_buf(),
                 explicit_native_artifact: None,
+                single_script_language: None,
+                authoritative_root: None,
             }),
             MaterializationMode::RunAttempt,
             true,
@@ -5198,6 +5289,14 @@ print('ok')
 
         assert_eq!(routed.plan.execution_runtime().as_deref(), Some("source"));
         assert_eq!(routed.plan.execution_driver().as_deref(), Some("deno"));
+        assert_eq!(
+            routed
+                .plan
+                .typed_manifest()
+                .expect("typed manifest")
+                .capsule_type,
+            capsule_core::types::CapsuleType::Job
+        );
         assert_eq!(
             routed.plan.execution_entrypoint().as_deref(),
             Some("main.ts")

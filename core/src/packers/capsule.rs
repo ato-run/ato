@@ -11,6 +11,9 @@ use tracing::debug;
 use zstd::stream::write::Encoder as ZstdEncoder;
 
 use crate::capsule_v3::{CasStore, FastCdcWriter, FastCdcWriterConfig, V3_PAYLOAD_MANIFEST_PATH};
+use crate::common::paths::{
+    path_contains_workspace_internal_subtree, path_contains_workspace_state_dir,
+};
 use crate::error::{CapsuleError, Result as CapsuleResult};
 use crate::lockfile::{CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME};
 use crate::packers::pack_filter::PackFilter;
@@ -392,14 +395,24 @@ async fn collect_payload_entries(
             let path = entry.path();
             let file_type = entry.file_type().await?;
 
+            let rel = match path.strip_prefix(src_root) {
+                Ok(rel) if !rel.as_os_str().is_empty() => Some(rel.to_path_buf()),
+                _ => None,
+            };
+
             if file_type.is_dir() {
+                if rel
+                    .as_deref()
+                    .is_some_and(path_contains_workspace_state_dir)
+                {
+                    continue;
+                }
                 stack.push(path);
                 continue;
             }
 
-            let rel = match path.strip_prefix(src_root) {
-                Ok(rel) if !rel.as_os_str().is_empty() => rel,
-                _ => continue,
+            let Some(rel) = rel.as_deref() else {
+                continue;
             };
             let filter_rel = filter_prefix
                 .map(|value| value.join(rel))
@@ -744,6 +757,7 @@ fn select_payload_roots(
 ) -> CapsuleResult<Vec<PayloadRoot>> {
     if !plan.is_schema_v03() {
         let (source_root, warning) = select_payload_source_root(manifest_dir);
+        ensure_payload_source_root(&source_root)?;
         let mut roots = vec![PayloadRoot {
             disk_root: source_root,
             archive_prefix: "source".to_string(),
@@ -766,6 +780,7 @@ fn select_payload_roots(
                 .unwrap_or(working_dir.as_path())
                 .to_path_buf();
             let (source_root, warning) = select_payload_source_root(&working_dir);
+            ensure_payload_source_root(&source_root)?;
             Ok(PayloadRoot {
                 disk_root: source_root,
                 archive_prefix: if relative.as_os_str().is_empty() {
@@ -797,6 +812,7 @@ fn select_payload_roots(
     }
     if deduped.is_empty() {
         let (source_root, warning) = select_payload_source_root(manifest_dir);
+        ensure_payload_source_root(&source_root)?;
         deduped.push(PayloadRoot {
             disk_root: source_root,
             archive_prefix: "source".to_string(),
@@ -820,6 +836,17 @@ fn append_workspace_artifacts_root(roots: &mut Vec<PayloadRoot>, manifest_dir: &
         filter_prefix: None,
         warning: None,
     });
+}
+
+fn ensure_payload_source_root(path: &Path) -> CapsuleResult<()> {
+    if path_contains_workspace_internal_subtree(path) {
+        return Err(CapsuleError::Pack(format!(
+            "refusing to package from workspace internal state root: {}",
+            path.display()
+        )));
+    }
+
+    Ok(())
 }
 fn has_next_standalone_node_modules(root: &Path) -> bool {
     if root.join(".next/standalone/node_modules").is_dir() {
@@ -1032,6 +1059,39 @@ capsule_path = "./apps/admin"
                 "source/packages/ui".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn select_payload_roots_rejects_internal_workspace_state_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let internal_root = tmp.path().join(".ato").join("tmp").join("generated-app");
+        std::fs::create_dir_all(internal_root.join("source")).expect("mkdir source");
+        let manifest_path = internal_root.join("capsule.toml");
+        std::fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.2"
+name = "generated-app"
+version = "0.1.0"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "native"
+entrypoint = "source/main.sh"
+"#,
+        )
+        .expect("write manifest");
+
+        let decision =
+            crate::router::route_manifest(&manifest_path, ExecutionProfile::Release, None)
+                .expect("route manifest");
+        let err = select_payload_roots(&decision.plan, &internal_root)
+            .expect_err("internal workspace state root must fail");
+        assert!(err
+            .to_string()
+            .contains("refusing to package from workspace internal state root"));
     }
 
     #[test]
