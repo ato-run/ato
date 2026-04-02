@@ -1,3 +1,4 @@
+mod app;
 mod binding;
 mod config;
 mod engine;
@@ -27,6 +28,7 @@ use crate::commands;
 use crate::project as crate_project;
 use crate::reporters;
 
+use self::app::execute_app_command;
 use self::config::execute_config_command;
 use self::fetch::{execute_fetch_command, execute_finalize_command};
 use self::inspect::execute_inspect_command;
@@ -420,6 +422,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             },
             reporter.clone(),
         ),
+
+        Commands::App { command } => execute_app_command(command, json),
 
         Commands::State { command } => state::execute_state_command(command),
 

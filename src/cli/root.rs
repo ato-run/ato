@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use super::app::AppCommands;
 use super::binding::BindingCommands;
 use super::config::{ConfigCommands, EngineCommands};
 use super::inspect::InspectCommands;
@@ -35,6 +36,7 @@ Management:
   ps       List running capsules
   stop     Stop a running capsule
   logs     Show logs of a running capsule
+    app      Inspect or adapt app-scoped bootstrap state
   state    Inspect or register persistent state bindings
   binding  Inspect or register host-side service bindings
 
@@ -467,6 +469,15 @@ pub(crate) enum Commands {
         follow: bool,
         #[arg(long)]
         tail: Option<usize>,
+    },
+
+    #[command(
+        next_help_heading = "Management",
+        about = "Inspect or adapt app-scoped bootstrap state"
+    )]
+    App {
+        #[command(subcommand)]
+        command: AppCommands,
     },
 
     #[command(

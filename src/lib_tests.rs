@@ -374,6 +374,92 @@ fn state_command_parses_register_and_inspect_forms() {
 }
 
 #[test]
+fn app_command_parses_status_bootstrap_and_repair_forms() {
+    let status = Cli::try_parse_from(["ato", "app", "status", "ato/desky", "--json"])
+        .expect("parse app status");
+    match status.command {
+        Commands::App {
+            command: AppCommands::Status { package_id, json },
+        } => {
+            assert_eq!(package_id, "ato/desky");
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+
+    let bootstrap = Cli::try_parse_from([
+        "ato",
+        "app",
+        "bootstrap",
+        "ato/desky",
+        "--finalize",
+        "--workspace",
+        "~/Workspace",
+        "--model-tier",
+        "balanced",
+        "--privacy-mode",
+        "strict",
+    ])
+    .expect("parse app bootstrap");
+    match bootstrap.command {
+        Commands::App {
+            command:
+                AppCommands::Bootstrap {
+                    package_id,
+                    finalize,
+                    workspace,
+                    model_tier,
+                    privacy_mode,
+                    json,
+                },
+        } => {
+            assert_eq!(package_id, "ato/desky");
+            assert!(finalize);
+            assert_eq!(workspace.as_deref(), Some("~/Workspace"));
+            assert_eq!(
+                model_tier
+                    .map(|value| value.as_str().to_string())
+                    .as_deref(),
+                Some("balanced")
+            );
+            assert_eq!(
+                privacy_mode
+                    .map(|value| value.as_str().to_string())
+                    .as_deref(),
+                Some("strict")
+            );
+            assert!(!json);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+
+    let repair = Cli::try_parse_from([
+        "ato",
+        "app",
+        "repair",
+        "ato/desky",
+        "--action",
+        "restart-services",
+    ])
+    .expect("parse app repair");
+    match repair.command {
+        Commands::App {
+            command:
+                AppCommands::Repair {
+                    package_id,
+                    action,
+                    json,
+                },
+        } => {
+            assert_eq!(package_id, "ato/desky");
+            assert_eq!(action.as_str(), "restart-services");
+            assert!(!json);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
 fn inspect_command_parses_lock_preview_diagnostics_and_remediation() {
     let lock =
         Cli::try_parse_from(["ato", "inspect", "lock", "./demo"]).expect("parse inspect lock");

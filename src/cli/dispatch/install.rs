@@ -7,6 +7,8 @@ use crate::install;
 use crate::install::support::can_prompt_interactively;
 use crate::GitHubAutoFixMode;
 
+const CURATED_INSTALL_ALIASES: &[(&str, &str)] = &[("desky", "ato/desky")];
+
 pub(crate) struct InstallCommandArgs {
     pub(crate) slug: Option<String>,
     pub(crate) from_gh_repo: Option<String>,
@@ -65,6 +67,7 @@ pub(crate) fn execute_install_command(args: InstallCommandArgs) -> Result<()> {
         let slug = args.slug.ok_or_else(|| {
             anyhow::anyhow!("capsule slug is required when not using --from-gh-repo")
         })?;
+        let slug = resolve_curated_install_alias(&slug).unwrap_or(slug);
         if install::is_slug_only_ref(&slug) {
             anyhow::bail!(
                 "{}",
@@ -89,6 +92,30 @@ pub(crate) fn execute_install_command(args: InstallCommandArgs) -> Result<()> {
         .await?;
 
         render_install_result(&result, args.json, args.no_project)
+    })
+}
+
+fn resolve_curated_install_alias(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed.contains('/') {
+        return None;
+    }
+
+    let (candidate, version_suffix) = match trimmed.rsplit_once('@') {
+        Some((candidate, version)) if !candidate.is_empty() && !version.trim().is_empty() => {
+            (candidate.trim(), Some(version.trim()))
+        }
+        _ => (trimmed, None),
+    };
+
+    let canonical = CURATED_INSTALL_ALIASES
+        .iter()
+        .find(|(alias, _)| alias.eq_ignore_ascii_case(candidate))
+        .map(|(_, scoped_id)| *scoped_id)?;
+
+    Some(match version_suffix {
+        Some(version) => format!("{}@{}", canonical, version),
+        None => canonical.to_string(),
     })
 }
 
@@ -135,6 +162,51 @@ fn render_install_result(
                 println!("   Launcher: skipped");
             }
         }
+        if let Some(managed_environment) = &result.managed_environment {
+            println!("   Environment: {}", managed_environment.strategy);
+            if let Some(target) = &managed_environment.target {
+                println!("   Target:  {}", target);
+            }
+            if !managed_environment.services.is_empty() {
+                println!("   Services: {}", managed_environment.services.join(", "));
+            }
+            println!(
+                "   Bootstrap: {} ({})",
+                managed_environment.bootstrap_state_path.display(),
+                managed_environment.bootstrap_phase
+            );
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_curated_install_alias;
+
+    #[test]
+    fn resolves_curated_desky_alias() {
+        assert_eq!(
+            resolve_curated_install_alias("desky").as_deref(),
+            Some("ato/desky")
+        );
+    }
+
+    #[test]
+    fn resolves_curated_desky_alias_with_version_suffix() {
+        assert_eq!(
+            resolve_curated_install_alias("desky@1.2.3").as_deref(),
+            Some("ato/desky@1.2.3")
+        );
+    }
+
+    #[test]
+    fn ignores_non_curated_slug_only_ref() {
+        assert!(resolve_curated_install_alias("sample-capsule").is_none());
+    }
+
+    #[test]
+    fn ignores_already_scoped_refs() {
+        assert!(resolve_curated_install_alias("koh0920/sample-capsule").is_none());
+    }
 }

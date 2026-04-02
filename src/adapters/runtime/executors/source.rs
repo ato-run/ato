@@ -1175,8 +1175,10 @@ mod tests {
             "#,
             "dev",
         );
+        let effective_cwd = dir.path().join("caller");
         let launch_ctx = RuntimeLaunchContext::empty()
             .with_command_args(vec!["--help".to_string()])
+            .with_effective_cwd(effective_cwd.clone())
             .with_injected_mounts(vec![crate::executors::launch_context::InjectedMount {
                 source: input_path.clone(),
                 target: "/workspace/input.txt".to_string(),
@@ -1202,6 +1204,10 @@ mod tests {
         assert_eq!(
             adapter.payload["mounts"][0]["readonly"].as_bool(),
             Some(true)
+        );
+        assert_eq!(
+            adapter.payload["cwd"].as_str(),
+            runtime_cwd_payload(Some(&effective_cwd)).as_deref()
         );
     }
 

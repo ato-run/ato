@@ -1,3 +1,4 @@
+mod app;
 mod binding;
 pub(crate) mod commands;
 mod config;
@@ -15,6 +16,8 @@ mod shared;
 mod source;
 mod state;
 
+#[allow(unused_imports)]
+pub(crate) use app::{AppCommands, ModelTierArg, PrivacyModeArg, RepairActionArg};
 #[allow(unused_imports)]
 pub(crate) use binding::BindingCommands;
 #[allow(unused_imports)]
