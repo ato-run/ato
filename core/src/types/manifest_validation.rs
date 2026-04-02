@@ -106,6 +106,17 @@ impl CapsuleManifest {
             .map(|t| t.named_targets())
             .cloned()
             .unwrap_or_default();
+        if self.capsule_type == CapsuleType::Job
+            && self
+                .targets
+                .as_ref()
+                .and_then(|targets| targets.port)
+                .is_some()
+        {
+            errors.push(ValidationError::InvalidTarget(
+                "capsule type 'job' must not declare top-level port".to_string(),
+            ));
+        }
         if !is_v03_library && self.default_target.trim().is_empty() {
             errors.push(ValidationError::MissingDefaultTarget);
         }
@@ -237,6 +248,22 @@ impl CapsuleManifest {
             {
                 errors.push(ValidationError::InvalidTarget(label.clone()));
                 continue;
+            }
+
+            if self.capsule_type == CapsuleType::Job {
+                if target.port.is_some() {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{}' declares port but capsule type 'job' must not expose ingress",
+                        label
+                    )));
+                }
+
+                if runtime == "web" {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{}' uses runtime=web but capsule type 'job' must not expose ingress",
+                        label
+                    )));
+                }
             }
 
             if runtime == "source" {
