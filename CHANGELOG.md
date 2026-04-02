@@ -4,6 +4,14 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.45] - 2026-04-03
+
+### What Changed
+
+#### Bug Fixes
+
+- Anchor materialized single-script source entrypoints under `source/`, propagate the layout hint through routing/runtime config generation, and fail closed when relative entrypoints are combined with `effective_cwd` without the anchored layout
+
 ## [0.4.44] - 2026-04-03
 
 ### What Changed
