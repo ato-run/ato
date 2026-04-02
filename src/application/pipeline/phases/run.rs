@@ -388,6 +388,11 @@ fn resolve_sandbox_grants(
 ) -> Result<Vec<ResolvedSandboxGrant>> {
     let mut resolved = Vec::new();
     let effective_cwd = request.effective_cwd();
+    let guest_root = if effective_cwd.is_absolute() {
+        effective_cwd
+    } else {
+        guest_cwd
+    };
 
     for (values, access) in [
         (&request.read_grants, SandboxGrantAccess::Read),
@@ -398,7 +403,7 @@ fn resolve_sandbox_grants(
             let (source_path, scope) = resolve_grant_source_path(value, effective_cwd, access)?;
             resolved.push(ResolvedSandboxGrant {
                 source_path,
-                guest_target: guest_target_path(value, guest_cwd),
+                guest_target: guest_target_path(value, guest_root),
                 access,
                 scope,
             });
@@ -500,9 +505,10 @@ fn validate_sandbox_grants_best_effort(
             InferredIoKind::Write => format!("--write {}", raw),
         };
         anyhow::bail!(
-            "Missing {} grant for {}\n\nTry:\n  {}",
+            "Missing {} grant for {}\nResolved against effective cwd: {}\n\nTry:\n  {}",
             detail,
             raw,
+            effective_cwd.display(),
             suggestion
         );
     }
@@ -2167,7 +2173,7 @@ mod tests {
     }
 
     #[test]
-    fn relative_grants_use_effective_cwd_for_host_and_manifest_dir_for_guest() {
+    fn relative_grants_use_effective_cwd_for_host_and_guest_projection() {
         let caller = workspace_tempdir("caller-cwd-");
         let explicit = workspace_tempdir("effective-cwd-");
         let guest_manifest = workspace_tempdir("guest-manifest-");
@@ -2188,11 +2194,11 @@ mod tests {
             grants[0].source_path,
             input.canonicalize().expect("canonical input")
         );
-        assert_eq!(grants[0].guest_target, guest_manifest.path().join("in.pdf"));
+        assert_eq!(grants[0].guest_target, explicit.path().join("in.pdf"));
     }
 
     #[test]
-    fn relative_write_grants_project_to_guest_manifest_dir() {
+    fn relative_write_grants_project_to_effective_cwd() {
         let caller = workspace_tempdir("caller-cwd-");
         let effective = workspace_tempdir("effective-cwd-");
         let guest_manifest = workspace_tempdir("guest-manifest-");
@@ -2208,7 +2214,7 @@ mod tests {
         let grants = resolve_sandbox_grants(&request, guest_manifest.path()).expect("grants");
         assert_eq!(grants.len(), 1);
         assert_eq!(grants[0].source_path, effective.path().join("out.md"));
-        assert_eq!(grants[0].guest_target, guest_manifest.path().join("out.md"));
+        assert_eq!(grants[0].guest_target, effective.path().join("out.md"));
     }
 
     #[test]
@@ -2229,5 +2235,32 @@ mod tests {
 
         let grants = resolve_sandbox_grants(&request, guest_manifest.path()).expect("grants");
         validate_sandbox_grants_best_effort(&request, &grants).expect("validation passes");
+    }
+
+    #[test]
+    fn missing_grant_reports_effective_cwd() {
+        let caller = workspace_tempdir("caller-cwd-");
+        let effective = workspace_tempdir("effective-cwd-");
+        let guest_manifest = workspace_tempdir("guest-manifest-");
+        let input = effective.path().join("in.pdf");
+        std::fs::write(&input, b"pdf").expect("write input");
+
+        let request = sandbox_request(
+            caller.path().to_path_buf(),
+            Some(effective.path().to_path_buf()),
+            vec!["./in.pdf".to_string()],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let grants = resolve_sandbox_grants(&request, guest_manifest.path()).expect("grants");
+        let err = validate_sandbox_grants_best_effort(&request, &grants)
+            .expect_err("missing read grant must fail");
+        let message = err.to_string();
+        assert!(message.contains("Missing read grant for ./in.pdf"));
+        assert!(message.contains(&format!(
+            "Resolved against effective cwd: {}",
+            effective.path().display()
+        )));
     }
 }

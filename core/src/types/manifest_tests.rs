@@ -91,6 +91,78 @@ entrypoint = "main.py"
 }
 
 #[test]
+fn test_validate_job_manifest_rejects_ports() {
+    let manifest = CapsuleManifest::from_toml(
+        r#"
+schema_version = "0.2"
+name = "job-demo"
+version = "0.1.0"
+type = "job"
+default_target = "cli"
+
+[targets]
+port = 8080
+
+[targets.cli]
+runtime = "source"
+driver = "python"
+entrypoint = "main.py"
+port = 9000
+"#,
+    )
+    .unwrap();
+
+    let errors = manifest
+        .validate()
+        .expect_err("job manifest must reject ports");
+    assert!(errors.iter().any(|error| {
+        matches!(
+            error,
+            ValidationError::InvalidTarget(message)
+                if message.contains("capsule type 'job' must not declare top-level port")
+        )
+    }));
+    assert!(errors.iter().any(|error| {
+        matches!(
+            error,
+            ValidationError::InvalidTarget(message)
+                if message.contains("target 'cli' declares port")
+        )
+    }));
+}
+
+#[test]
+fn test_validate_job_manifest_rejects_web_runtime() {
+    let manifest = CapsuleManifest::from_toml(
+        r#"
+schema_version = "0.2"
+name = "job-web-demo"
+version = "0.1.0"
+type = "job"
+default_target = "cli"
+
+[targets.cli]
+runtime = "web"
+driver = "static"
+entrypoint = "index.html"
+port = 8080
+"#,
+    )
+    .unwrap();
+
+    let errors = manifest
+        .validate()
+        .expect_err("job manifest must reject runtime=web");
+    assert!(errors.iter().any(|error| {
+        matches!(
+            error,
+            ValidationError::InvalidTarget(message)
+                if message.contains("target 'cli' uses runtime=web")
+        )
+    }));
+}
+
+#[test]
 fn test_validate_invalid_schema_version() {
     let toml = VALID_TOML.replace("schema_version = \"0.2\"", "schema_version = \"2.0\"");
     let manifest = CapsuleManifest::from_toml(&toml).unwrap();
