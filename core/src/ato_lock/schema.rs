@@ -198,6 +198,69 @@ pub struct ContractSection {
     pub entries: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DeliveryEnvironment {
+    pub strategy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<DeliveryService>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap: Option<DeliveryBootstrap>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair: Option<DeliveryRepair>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DeliveryService {
+    pub name: String,
+    pub from: String,
+    pub lifecycle: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub healthcheck: Option<DeliveryHealthcheck>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DeliveryHealthcheck {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DeliveryBootstrap {
+    #[serde(default)]
+    pub requires_personalization: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_tiers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DeliveryRepair {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<String>,
+}
+
+pub fn parse_delivery_environment_value(value: &Value) -> Result<DeliveryEnvironment, String> {
+    serde_json::from_value::<DeliveryEnvironment>(value.clone())
+        .map_err(|err| format!("contract.delivery.install.environment is invalid: {err}"))
+}
+
+pub fn delivery_environment(lock: &AtoLock) -> Result<Option<DeliveryEnvironment>, String> {
+    let Some(delivery) = lock.contract.entries.get("delivery") else {
+        return Ok(None);
+    };
+    let Some(install) = delivery.get("install").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    let Some(environment) = install.get("environment") else {
+        return Ok(None);
+    };
+    parse_delivery_environment_value(environment).map(Some)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct BindingSection {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

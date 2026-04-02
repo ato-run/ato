@@ -28,9 +28,11 @@ pub use hash::{
     compute_lock_id, recompute_lock_id,
 };
 pub use schema::{
-    AtoLock, AttestationsSection, BindingSection, ContractSection, FeatureName, KnownFeature,
-    LockFeatures, LockId, LockSignature, PolicySection, ResolutionSection, UnresolvedReason,
-    UnresolvedValue, ATO_LOCK_SCHEMA_VERSION,
+    delivery_environment, parse_delivery_environment_value, AtoLock, AttestationsSection,
+    BindingSection, ContractSection, DeliveryBootstrap, DeliveryEnvironment, DeliveryHealthcheck,
+    DeliveryRepair, DeliveryService, FeatureName, KnownFeature, LockFeatures, LockId,
+    LockSignature, PolicySection, ResolutionSection, UnresolvedReason, UnresolvedValue,
+    ATO_LOCK_SCHEMA_VERSION,
 };
 pub use validate::{
     validate_persisted, validate_structural, AtoLockValidationError, ValidationMode,
@@ -168,6 +170,69 @@ mod tests {
         let mut lock = sample_lock();
         recompute_lock_id(&mut lock).expect("compute lock_id");
         lock
+    }
+
+    #[test]
+    fn parses_delivery_environment_from_contract_install() {
+        let mut lock = sample_lock();
+        lock.contract.entries.insert(
+            "delivery".to_string(),
+            json!({
+                "mode": "artifact-import",
+                "artifact": {
+                    "kind": "desktop-native",
+                    "artifact_type": "app-bundle",
+                    "digest": "sha256:abc",
+                    "canonical_build_input": false,
+                    "provenance_limited": true
+                },
+                "install": {
+                    "environment": {
+                        "strategy": "ato-managed",
+                        "target": "desktop",
+                        "services": [
+                            {
+                                "name": "ollama",
+                                "from": "dependency:ollama",
+                                "lifecycle": "managed",
+                                "healthcheck": {
+                                    "kind": "http",
+                                    "url": "http://127.0.0.1:11434/api/tags"
+                                }
+                            },
+                            {
+                                "name": "opencode",
+                                "from": "dependency:opencode",
+                                "lifecycle": "on-demand",
+                                "depends_on": ["ollama"]
+                            }
+                        ],
+                        "bootstrap": {
+                            "requires_personalization": true,
+                            "model_tiers": ["fast", "balanced", "fallback"]
+                        },
+                        "repair": {
+                            "actions": ["restart-services", "rewrite-config"]
+                        }
+                    }
+                },
+                "projection": {}
+            }),
+        );
+
+        let environment = delivery_environment(&lock)
+            .expect("parse delivery environment")
+            .expect("environment present");
+
+        assert_eq!(environment.strategy, "ato-managed");
+        assert_eq!(environment.target.as_deref(), Some("desktop"));
+        assert_eq!(environment.services.len(), 2);
+        assert_eq!(environment.services[0].name, "ollama");
+        assert_eq!(environment.services[1].depends_on, vec!["ollama"]);
+        assert_eq!(
+            environment.bootstrap.expect("bootstrap").model_tiers,
+            vec!["fast", "balanced", "fallback"]
+        );
     }
 
     #[test]

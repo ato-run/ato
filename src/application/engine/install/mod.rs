@@ -67,6 +67,7 @@ pub struct InstallResult {
     pub launchable: Option<LaunchableTarget>,
     pub local_derivation: Option<LocalDerivationInfo>,
     pub projection: Option<ProjectionInfo>,
+    pub managed_environment: Option<ManagedEnvironmentInfo>,
     pub promotion: Option<PromotionInfo>,
 }
 
@@ -101,6 +102,15 @@ pub struct ProjectionInfo {
     pub state: Option<String>,
     pub schema_version: Option<String>,
     pub metadata_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ManagedEnvironmentInfo {
+    pub strategy: String,
+    pub target: Option<String>,
+    pub services: Vec<String>,
+    pub bootstrap_state_path: PathBuf,
+    pub bootstrap_phase: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1307,6 +1317,12 @@ fn complete_native_install_from_bytes(
         can_prompt_interactively,
         json_output,
     )?;
+    let managed_environment = materialize_ato_managed_environment(
+        &scoped_ref.scoped_id,
+        bytes,
+        true,
+        projection.performed,
+    )?;
 
     Ok(InstallResult {
         capsule_id,
@@ -1330,6 +1346,7 @@ fn complete_native_install_from_bytes(
             derived_digest: Some(finalize_result.derived_digest),
         }),
         projection: Some(projection),
+        managed_environment,
         promotion,
     })
 }
@@ -1378,8 +1395,51 @@ fn complete_standard_install_from_bytes(
         }),
         local_derivation: None,
         projection: None,
+        managed_environment: None,
         promotion,
     })
+}
+
+fn materialize_ato_managed_environment(
+    scoped_id: &str,
+    bytes: &[u8],
+    shell_installed: bool,
+    projection_performed: bool,
+) -> Result<Option<ManagedEnvironmentInfo>> {
+    if scoped_id != "ato/desky" {
+        return Ok(None);
+    }
+
+    let Some(lock) = extract_embedded_ato_lock_from_capsule(bytes)? else {
+        return Ok(None);
+    };
+    let Some(environment) =
+        capsule_core::ato_lock::delivery_environment(&lock).map_err(|err| anyhow::anyhow!(err))?
+    else {
+        return Ok(None);
+    };
+    if environment.strategy.trim() != "ato-managed" {
+        return Ok(None);
+    }
+
+    let write_result = crate::app_control::write_install_bootstrap_state(
+        scoped_id,
+        &environment,
+        shell_installed,
+        projection_performed,
+    )?;
+
+    Ok(Some(ManagedEnvironmentInfo {
+        strategy: environment.strategy,
+        target: environment.target,
+        services: environment
+            .services
+            .into_iter()
+            .map(|service| service.name)
+            .collect(),
+        bootstrap_state_path: write_result.state_path,
+        bootstrap_phase: write_result.state.materialization.bootstrap_phase,
+    }))
 }
 
 fn ensure_local_finalize_allowed(
