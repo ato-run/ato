@@ -154,6 +154,12 @@ type CommandResolution = (
     Option<SignalsConfig>,
 );
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceLayoutHint {
+    Standard,
+    AnchoredEntrypoint,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct ManifestService {
     #[serde(default)]
@@ -364,6 +370,7 @@ fn build_config_json(
     if uses_target_based_services(&manifest_services) {
         services = build_target_based_services(compat_input, standalone)?;
     } else {
+        let layout = read_source_layout(manifest);
         let (executable, args, env, signals) = if let Some(run_command) = read_run_command(manifest)
         {
             resolve_shell_command(&run_command, manifest)
@@ -373,15 +380,21 @@ fn build_config_json(
             let cmd_overrides_entrypoint = target_cmd_overrides_entrypoint(manifest);
             if cmd_overrides_entrypoint {
                 let command_entrypoint = command.as_deref().unwrap_or(&entrypoint);
-                resolve_command(command_entrypoint, None, manifest, standalone)
+                resolve_command(command_entrypoint, None, manifest, standalone, layout)
             } else {
-                resolve_command(&entrypoint, command.as_deref(), manifest, standalone)
+                resolve_command(
+                    &entrypoint,
+                    command.as_deref(),
+                    manifest,
+                    standalone,
+                    layout,
+                )
             }
         };
         let main_spec = ServiceSpec {
             executable,
             args,
-            cwd: Some("source".to_string()),
+            cwd: Some(source_cwd(read_working_dir(manifest), layout)),
             env,
             user: None,
             signals,
@@ -401,8 +414,9 @@ fn build_config_json(
             }
 
             let command = None;
+            let layout = read_source_layout(manifest);
             let (executable, args, env, signals) =
-                resolve_command(&svc.entrypoint, command, manifest, standalone);
+                resolve_command(&svc.entrypoint, command, manifest, standalone, layout);
             let health_check = svc.readiness_probe.as_ref().map(|p| HealthCheck {
                 http_get: p.http_get.clone(),
                 tcp_connect: p.tcp_connect.clone(),
@@ -414,7 +428,7 @@ fn build_config_json(
             let spec = ServiceSpec {
                 executable,
                 args,
-                cwd: Some("source".to_string()),
+                cwd: Some(source_cwd(read_working_dir(manifest), layout)),
                 env: merge_envs(env, svc.env.clone()),
                 user: None,
                 signals,
@@ -523,7 +537,8 @@ fn build_target_service_spec(service: &ResolvedService, standalone: bool) -> Res
         }
     };
 
-    let (executable, args, env) = resolve_target_command(runtime, standalone);
+    let layout = source_layout_hint(runtime.source_layout.as_deref());
+    let (executable, args, env) = resolve_target_command(runtime, standalone, layout);
     let mut merged_env = env.unwrap_or_default();
     for connection in &service.connections {
         merged_env.insert(connection.host_env.clone(), "127.0.0.1".to_string());
@@ -535,7 +550,7 @@ fn build_target_service_spec(service: &ResolvedService, standalone: bool) -> Res
     Ok(ServiceSpec {
         executable,
         args,
-        cwd: Some(source_cwd(runtime.working_dir.as_deref())),
+        cwd: Some(source_cwd(runtime.working_dir.as_deref(), layout)),
         env: if merged_env.is_empty() {
             None
         } else {
@@ -560,11 +575,12 @@ fn build_target_service_spec(service: &ResolvedService, standalone: bool) -> Res
 }
 
 fn build_lock_service_spec(service: &LockServiceUnit, standalone: bool) -> Result<ServiceSpec> {
-    let (executable, args, env) = resolve_target_command(&service.runtime, standalone);
+    let layout = source_layout_hint(service.runtime.source_layout.as_deref());
+    let (executable, args, env) = resolve_target_command(&service.runtime, standalone, layout);
     Ok(ServiceSpec {
         executable,
         args,
-        cwd: Some(source_cwd(service.runtime.working_dir.as_deref())),
+        cwd: Some(source_cwd(service.runtime.working_dir.as_deref(), layout)),
         env,
         user: None,
         signals: None,
@@ -704,12 +720,14 @@ fn resolve_language_command(
     env: &mut HashMap<String, String>,
     language: Option<&str>,
     synthesize_default_args: bool,
+    layout: SourceLayoutHint,
 ) -> (String, Vec<String>) {
     let args = tokens.get(1..).unwrap_or(&[]).to_vec();
+    let default_program_arg = normalized_source_entrypoint(program, layout);
     match language {
         Some("python") => {
             let args = if synthesize_default_args && args.is_empty() {
-                vec![program.to_string()]
+                vec![default_program_arg.clone()]
             } else {
                 args
             };
@@ -730,7 +748,7 @@ fn resolve_language_command(
         }
         Some("node") => {
             let args = if synthesize_default_args && args.is_empty() {
-                vec![program.to_string()]
+                vec![default_program_arg.clone()]
             } else {
                 args
             };
@@ -742,7 +760,11 @@ fn resolve_language_command(
         }
         Some("deno") => {
             let args = if synthesize_default_args && args.is_empty() {
-                vec!["run".to_string(), "-A".to_string(), program.to_string()]
+                vec![
+                    "run".to_string(),
+                    "-A".to_string(),
+                    default_program_arg.clone(),
+                ]
             } else {
                 args
             };
@@ -754,7 +776,7 @@ fn resolve_language_command(
         }
         Some("bun") => {
             let args = if synthesize_default_args && args.is_empty() {
-                vec![program.to_string()]
+                vec![default_program_arg]
             } else {
                 args
             };
@@ -818,6 +840,7 @@ fn execution_signals(manifest: &toml::Value) -> Option<SignalsConfig> {
 fn resolve_target_command(
     runtime: &ResolvedTargetRuntime,
     standalone: bool,
+    layout: SourceLayoutHint,
 ) -> (String, Vec<String>, Option<HashMap<String, String>>) {
     if let Some(run_command) = runtime
         .run_command
@@ -855,10 +878,11 @@ fn resolve_target_command(
         &mut env,
         language.as_deref(),
         true,
+        layout,
     );
 
     let (executable, mut args) = if let Some((cmd_executable, cmd_args)) =
-        resolve_explicit_cmd_override(&runtime.cmd, standalone, &mut env)
+        resolve_explicit_cmd_override(&runtime.cmd, standalone, &mut env, layout)
     {
         (cmd_executable, cmd_args)
     } else {
@@ -879,17 +903,44 @@ fn resolve_target_command(
     )
 }
 
-fn source_cwd(working_dir: Option<&str>) -> String {
+fn source_cwd(working_dir: Option<&str>, layout: SourceLayoutHint) -> String {
     match working_dir.map(str::trim).filter(|value| !value.is_empty()) {
         Some(dir) => {
             let normalized = dir.trim_start_matches("./").trim_matches('/');
             if normalized.is_empty() || normalized == "." {
-                "source".to_string()
+                if matches!(layout, SourceLayoutHint::AnchoredEntrypoint) {
+                    ".".to_string()
+                } else {
+                    "source".to_string()
+                }
+            } else if matches!(layout, SourceLayoutHint::AnchoredEntrypoint) {
+                normalized.to_string()
             } else {
                 format!("source/{normalized}")
             }
         }
-        None => "source".to_string(),
+        None => {
+            if matches!(layout, SourceLayoutHint::AnchoredEntrypoint) {
+                ".".to_string()
+            } else {
+                "source".to_string()
+            }
+        }
+    }
+}
+
+fn source_layout_hint(value: Option<&str>) -> SourceLayoutHint {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("anchored_entrypoint") => SourceLayoutHint::AnchoredEntrypoint,
+        _ => SourceLayoutHint::Standard,
+    }
+}
+
+fn normalized_source_entrypoint(program: &str, layout: SourceLayoutHint) -> String {
+    if matches!(layout, SourceLayoutHint::AnchoredEntrypoint) {
+        normalize_arg(program, true)
+    } else {
+        program.to_string()
     }
 }
 
@@ -935,6 +986,20 @@ fn read_command(manifest: &toml::Value) -> Option<String> {
         }
     }
     None
+}
+
+fn read_working_dir(manifest: &toml::Value) -> Option<&str> {
+    selected_target_table(manifest)
+        .and_then(|target| target.get("working_dir"))
+        .and_then(toml::Value::as_str)
+}
+
+fn read_source_layout(manifest: &toml::Value) -> SourceLayoutHint {
+    source_layout_hint(
+        selected_target_table(manifest)
+            .and_then(|target| target.get("source_layout"))
+            .and_then(toml::Value::as_str),
+    )
 }
 
 fn read_run_command(manifest: &toml::Value) -> Option<String> {
@@ -1235,6 +1300,7 @@ fn resolve_command(
     command: Option<&str>,
     manifest: &toml::Value,
     standalone: bool,
+    layout: SourceLayoutHint,
 ) -> CommandResolution {
     let (program, tokens) = command_tokens(entrypoint, command);
 
@@ -1250,6 +1316,7 @@ fn resolve_command(
         &mut env,
         language.as_deref(),
         true,
+        layout,
     );
 
     if !args.is_empty() {
@@ -1302,6 +1369,7 @@ fn resolve_explicit_cmd_override(
     runtime_cmd: &[String],
     standalone: bool,
     env: &mut HashMap<String, String>,
+    layout: SourceLayoutHint,
 ) -> Option<(String, Vec<String>)> {
     let program = runtime_cmd.first()?.trim().to_string();
     if program.is_empty() {
@@ -1315,6 +1383,7 @@ fn resolve_explicit_cmd_override(
         env,
         detect_language_from_program(&program).as_deref(),
         false,
+        layout,
     ))
 }
 
@@ -1683,6 +1752,39 @@ egress_allow = ["1.1.1.1"]
             config.services["main"].env.as_ref().unwrap()["PORT"],
             "8080"
         );
+    }
+
+    #[test]
+    fn test_single_script_python_config_anchors_entrypoint_for_workspace_cwd() {
+        let tmp = tempdir().unwrap();
+        let manifest_path = tmp.path().join("capsule.toml");
+
+        let manifest = r#"
+    schema_version = "0.2"
+    name = "python-single-script"
+    version = "0.1.0"
+    type = "job"
+    default_target = "cli"
+
+    [targets.cli]
+    runtime = "source"
+    language = "python"
+    entrypoint = "main.py"
+    source_layout = "anchored_entrypoint"
+    "#;
+
+        std::fs::write(&manifest_path, manifest).unwrap();
+
+        let config_path = generate_and_write_config(&manifest_path, None, false).unwrap();
+        let config_raw = std::fs::read_to_string(config_path).unwrap();
+        let config: ConfigJson = serde_json::from_str(&config_raw).unwrap();
+
+        assert_eq!(config.services["main"].executable, "uv");
+        assert_eq!(
+            config.services["main"].args,
+            vec!["run", "--offline", "python3", "source/main.py"]
+        );
+        assert_eq!(config.services["main"].cwd, Some(".".to_string()));
     }
 
     #[test]
