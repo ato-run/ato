@@ -106,13 +106,11 @@ pub fn path_contains_workspace_internal_subtree(path: &Path) -> bool {
     if components
         .iter()
         .any(|component| component == WORKSPACE_STATE_DIR)
-    {
-        if components
+        && components
             .last()
             .is_some_and(|component| component == WORKSPACE_STATE_DIR)
-        {
-            return true;
-        }
+    {
+        return true;
     }
 
     components.windows(2).any(|window| {
