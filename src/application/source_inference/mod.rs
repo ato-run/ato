@@ -1046,6 +1046,12 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
                             Value::String(runtime_kind.to_string()),
                         );
                     }
+                    if input.single_script_language.is_some() {
+                        target.insert(
+                            "source_layout".to_string(),
+                            Value::String("anchored_entrypoint".to_string()),
+                        );
+                    }
                     target.insert("compatible".to_string(), Value::Bool(true));
                     Value::Object(target)
                 }])
@@ -3845,6 +3851,10 @@ mod tests {
         assert_eq!(
             routed.plan.execution_entrypoint().as_deref(),
             Some("main.js")
+        );
+        assert_eq!(
+            routed.plan.execution_source_layout().as_deref(),
+            Some("anchored_entrypoint")
         );
         assert_eq!(
             materialized
