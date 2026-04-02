@@ -431,6 +431,13 @@ fn native_install_documented_json_contract_fields_are_present() {
             schema_version: Some("0.1".to_string()),
             metadata_path: Some(PathBuf::from("/tmp/projection.json")),
         }),
+        managed_environment: Some(ManagedEnvironmentInfo {
+            strategy: "ato-managed".to_string(),
+            target: Some("desktop".to_string()),
+            services: vec!["ollama".to_string(), "opencode".to_string()],
+            bootstrap_state_path: PathBuf::from("/tmp/desky-bootstrap-state.json"),
+            bootstrap_phase: "shell_projected".to_string(),
+        }),
         promotion: Some(PromotionInfo {
             performed: true,
             preview_id: Some("preview-123".to_string()),
@@ -467,6 +474,7 @@ fn native_install_documented_json_contract_fields_are_present() {
             "launchable",
             "local_derivation",
             "projection",
+            "managed_environment",
             "promotion",
         ],
     );
@@ -484,6 +492,16 @@ fn native_install_documented_json_contract_fields_are_present() {
     assert_json_object_has_keys(
         &value["projection"],
         &["schema_version", "metadata_path", "state"],
+    );
+
+    assert_json_object_has_keys(
+        &value["managed_environment"],
+        &[
+            "strategy",
+            "services",
+            "bootstrap_state_path",
+            "bootstrap_phase",
+        ],
     );
 
     assert_json_object_has_keys(
@@ -506,6 +524,80 @@ fn native_install_documented_json_contract_fields_are_present() {
             "promotion_eligibility",
         ],
     );
+}
+
+#[tokio::test]
+async fn native_install_materializes_ato_managed_environment_bootstrap_state() {
+    let _env_lock = acquire_test_env_lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let state_path = temp.path().join("bootstrap-state.json");
+    let _state_path_guard = EnvVarGuard::set(
+        "DESKY_BOOTSTRAP_STATE_PATH",
+        Some(state_path.to_string_lossy().as_ref()),
+    );
+
+    let payload = b"placeholder-payload";
+    let lock_json = serde_json::json!({
+        "schema_version": 1,
+        "contract": {
+            "delivery": {
+                "mode": "artifact-import",
+                "artifact": {
+                    "kind": "desktop-native",
+                    "artifact_type": "app-bundle",
+                    "digest": "sha256:abc",
+                    "canonical_build_input": false,
+                    "provenance_limited": true
+                },
+                "install": {
+                    "environment": {
+                        "strategy": "ato-managed",
+                        "target": "desktop",
+                        "services": [
+                            {
+                                "name": "ollama",
+                                "from": "dependency:ollama",
+                                "lifecycle": "managed"
+                            },
+                            {
+                                "name": "opencode",
+                                "from": "dependency:opencode",
+                                "lifecycle": "on-demand",
+                                "depends_on": ["ollama"]
+                            }
+                        ],
+                        "bootstrap": {
+                            "requires_personalization": true,
+                            "model_tiers": ["fast", "balanced", "fallback"]
+                        },
+                        "repair": {
+                            "actions": ["restart-services", "rewrite-config", "switch-model-tier"]
+                        }
+                    }
+                },
+                "projection": {}
+            }
+        }
+    })
+    .to_string();
+    let artifact = build_capsule_artifact(None, Some(&lock_json), payload).expect("artifact");
+
+    let managed = materialize_ato_managed_environment("ato/desky", &artifact, true, true)
+        .expect("materialize managed environment")
+        .expect("managed environment");
+
+    assert_eq!(managed.strategy, "ato-managed");
+    assert_eq!(managed.target.as_deref(), Some("desktop"));
+    assert_eq!(managed.bootstrap_phase, "shell_projected");
+    assert!(managed.services.iter().any(|service| service == "opencode"));
+
+    let raw = std::fs::read_to_string(&state_path).expect("read bootstrap state");
+    let state: crate::app_control::StoredBootstrapState =
+        serde_json::from_str(&raw).expect("parse bootstrap state");
+    assert!(state.materialization.shell_installed);
+    assert!(state.materialization.opencode_installed);
+    assert_eq!(state.materialization.bootstrap_phase, "shell_projected");
+    assert_eq!(state.health.overall, "healthy");
 }
 
 #[test]
