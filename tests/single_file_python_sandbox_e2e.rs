@@ -368,6 +368,59 @@ fn single_file_python_sandbox_preserves_relative_read_write_and_caller_cwd() {
 #[cfg(unix)]
 #[test]
 #[serial]
+fn single_file_python_sandbox_markitdown_relative_output_stays_in_caller_workspace() {
+    let Some((nacelle, _uv)) = require_native_prerequisites() else {
+        return;
+    };
+
+    let (temp, _tool_dir, caller_dir, _script_path) = setup_single_file_workspace();
+    let input_path = caller_dir.join("phd-thesis.pdf");
+    let output_path = caller_dir.join("phd-thesis.rel.md");
+    fs::write(&input_path, "fake pdf bytes for markitdown\n").expect("write input");
+
+    let output = run_single_file_sandbox(
+        &caller_dir,
+        "../tool/convert.py",
+        &nacelle,
+        &[
+            "--read",
+            "./phd-thesis.pdf",
+            "--write",
+            "./phd-thesis.rel.md",
+        ],
+        &["./phd-thesis.pdf", "-o", "./phd-thesis.rel.md"],
+    );
+    if !assert_success_or_skip(&output) {
+        return;
+    }
+
+    let payload = load_output_json(&output_path, temp.path(), &output);
+    let expected_cwd = caller_dir
+        .canonicalize()
+        .expect("canonicalize expected caller cwd");
+    assert_eq!(
+        payload["cwd"].as_str(),
+        Some(expected_cwd.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        payload["argv"],
+        serde_json::json!(["./phd-thesis.pdf", "-o", "./phd-thesis.rel.md"])
+    );
+    assert_eq!(payload["input_exists"].as_bool(), Some(true));
+    assert_eq!(
+        payload["content"].as_str(),
+        Some("fake pdf bytes for markitdown\n")
+    );
+    assert!(
+        output_path.exists(),
+        "relative markdown output should stay in caller workspace"
+    );
+    assert_no_nested_workspace_tmp(temp.path());
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
 fn single_file_python_sandbox_treats_plain_and_dot_relative_paths_equivalently() {
     let Some((nacelle, _uv)) = require_native_prerequisites() else {
         return;
@@ -1024,6 +1077,42 @@ fn single_file_python_sandbox_surfaces_preflight_failure_shape_for_missing_read_
 
     assert!(!caller_dir.join("output.txt").exists());
     assert_missing_grant_preflight(&output, "read", "./input.txt", "--read ./input.txt");
+    assert!(temp.path().exists());
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn single_file_python_sandbox_markitdown_relative_input_requires_read_grant() {
+    let Some((nacelle, _uv)) = require_native_prerequisites() else {
+        return;
+    };
+
+    let (temp, _tool_dir, caller_dir, _script_path) = setup_single_file_workspace();
+    fs::write(
+        caller_dir.join("phd-thesis.pdf"),
+        "fake pdf bytes for markitdown\n",
+    )
+    .expect("write input");
+
+    let output = run_single_file_sandbox(
+        &caller_dir,
+        "../tool/convert.py",
+        &nacelle,
+        &["--write", "./phd-thesis.rel.md"],
+        &["./phd-thesis.pdf", "-o", "./phd-thesis.rel.md"],
+    );
+    if !assert_failure_or_skip(&output) {
+        return;
+    }
+
+    assert!(!caller_dir.join("phd-thesis.rel.md").exists());
+    assert_missing_grant_preflight(
+        &output,
+        "read",
+        "./phd-thesis.pdf",
+        "--read ./phd-thesis.pdf",
+    );
     assert!(temp.path().exists());
 }
 
