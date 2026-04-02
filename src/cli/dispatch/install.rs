@@ -171,6 +171,10 @@ fn render_install_result(
                 println!("   Services: {}", managed_environment.services.join(", "));
             }
             println!(
+                "   Service root: {}",
+                managed_environment.materialized_root.display()
+            );
+            println!(
                 "   Bootstrap: {} ({})",
                 managed_environment.bootstrap_state_path.display(),
                 managed_environment.bootstrap_phase
