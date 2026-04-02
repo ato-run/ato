@@ -60,6 +60,13 @@ fn maybe_resolve_uv_path() -> Option<PathBuf> {
 }
 
 #[cfg(unix)]
+fn maybe_resolve_python_path() -> Option<PathBuf> {
+    which::which("python3")
+        .ok()
+        .or_else(|| which::which("python").ok())
+}
+
+#[cfg(unix)]
 fn write_single_file_script(path: &Path) {
     fs::write(
         path,
@@ -155,6 +162,31 @@ fn run_single_file_sandbox_with_runtime_args(
 }
 
 #[cfg(unix)]
+fn run_single_file_host_with_runtime_args(
+    caller_dir: &Path,
+    script_arg: &str,
+    runtime_args: &[&str],
+    sandbox_args: &[&str],
+    target_args: &[&str],
+) -> std::process::Output {
+    let home = workspace_tempdir("single-file-host-home-");
+    std::process::Command::new(env!("CARGO_BIN_EXE_ato"))
+        .current_dir(caller_dir)
+        .arg("run")
+        .arg("--dangerously-skip-permissions")
+        .arg("--yes")
+        .args(runtime_args)
+        .args(sandbox_args)
+        .arg(script_arg)
+        .arg("--")
+        .args(target_args)
+        .env("HOME", home.path())
+        .env("CAPSULE_ALLOW_UNSAFE", "1")
+        .output()
+        .expect("run single-file python host fixture")
+}
+
+#[cfg(unix)]
 fn assert_failure_or_skip(output: &std::process::Output) -> bool {
     let stderr = String::from_utf8_lossy(&output.stderr);
     if host_limited(&stderr) {
@@ -190,6 +222,25 @@ fn require_native_prerequisites() -> Option<(PathBuf, PathBuf)> {
         return None;
     };
     Some((nacelle, uv))
+}
+
+#[cfg(unix)]
+fn require_host_single_file_prerequisites() -> Option<(PathBuf, PathBuf)> {
+    let Some(uv) = maybe_resolve_uv_path() else {
+        assert!(
+            !strict_ci(),
+            "strict CI requires uv to be available for single-file host execution tests"
+        );
+        return None;
+    };
+    let Some(python) = maybe_resolve_python_path() else {
+        assert!(
+            !strict_ci(),
+            "strict CI requires python to be available for single-file host execution tests"
+        );
+        return None;
+    };
+    Some((uv, python))
 }
 
 #[cfg(unix)]
@@ -415,6 +466,53 @@ fn single_file_python_sandbox_markitdown_relative_output_stays_in_caller_workspa
         output_path.exists(),
         "relative markdown output should stay in caller workspace"
     );
+    assert_no_nested_workspace_tmp(temp.path());
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn single_file_python_host_execution_honors_effective_cwd_for_relative_output() {
+    let Some((_uv, _python)) = require_host_single_file_prerequisites() else {
+        return;
+    };
+
+    let (temp, _tool_dir, caller_dir, _script_path) = setup_single_file_workspace();
+    let override_dir = temp.path().join("override-cwd");
+    fs::create_dir_all(&override_dir).expect("create override dir");
+    fs::write(caller_dir.join("input.txt"), "hello from caller cwd\n").expect("write caller input");
+    fs::write(override_dir.join("input.txt"), "hello from effective cwd\n")
+        .expect("write override input");
+
+    let override_arg = override_dir.display().to_string();
+    let output = run_single_file_host_with_runtime_args(
+        &caller_dir,
+        "../tool/convert.py",
+        &["--cwd", &override_arg],
+        &["--read", "./input.txt", "--write", "./output.txt"],
+        &["./input.txt", "-o", "./output.txt"],
+    );
+
+    assert!(
+        output.status.success(),
+        "stdout={}; stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload = load_output_json(&override_dir.join("output.txt"), temp.path(), &output);
+    let expected_cwd = override_dir
+        .canonicalize()
+        .expect("canonicalize expected override cwd");
+    assert_eq!(
+        payload["cwd"].as_str(),
+        Some(expected_cwd.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        payload["content"].as_str(),
+        Some("hello from effective cwd\n")
+    );
+    assert!(!caller_dir.join("output.txt").exists());
     assert_no_nested_workspace_tmp(temp.path());
 }
 
