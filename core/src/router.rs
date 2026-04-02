@@ -456,7 +456,16 @@ fn synthesize_manifest_from_lock(
         "schema_version".to_string(),
         toml::Value::String("0.2".to_string()),
     );
-    manifest.insert("type".to_string(), toml::Value::String("app".to_string()));
+    manifest.insert(
+        "type".to_string(),
+        toml::Value::String(
+            runtime_model
+                .metadata
+                .capsule_type
+                .clone()
+                .unwrap_or_else(|| "app".to_string()),
+        ),
+    );
     manifest.insert(
         "default_target".to_string(),
         toml::Value::String(runtime_model.selected.target_label.clone()),
@@ -1300,6 +1309,10 @@ fn synthesize_runtime_model_from_manifest(
             .map(str::to_string),
         version: manifest
             .get("version")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        capsule_type: manifest
+            .get("type")
             .and_then(|value| value.as_str())
             .map(str::to_string),
         default_target: manifest

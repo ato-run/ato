@@ -642,6 +642,11 @@ fn load_inspection_snapshot(path: &Path) -> Result<InspectionSnapshot> {
                 SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
                     project_root: source.project_root.clone(),
                     explicit_native_artifact: None,
+                    single_script_language: source
+                        .single_script
+                        .as_ref()
+                        .map(|script| script.language),
+                    authoritative_root: Some(source.project_root.clone()),
                 }),
                 MaterializationMode::InitWorkspace,
                 true,
