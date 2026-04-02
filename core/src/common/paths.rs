@@ -1,11 +1,22 @@
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const ENV_ATO_HOME: &str = "ATO_HOME";
 const WORKSPACE_STATE_DIR: &str = ".ato";
 const WORKSPACE_TMP_DIR: &str = ".ato/tmp";
 const WORKSPACE_ARTIFACTS_DIR: &str = ".ato/artifacts";
 const WORKSPACE_DERIVED_DIR: &str = ".ato/derived";
+const WORKSPACE_INTERNAL_SUBDIRS: &[&str] = &[
+    "tmp",
+    "artifacts",
+    "derived",
+    "source-inference",
+    "binding",
+    "policy",
+    "attestations",
+    "run",
+    "previews",
+];
 
 /// Returns the best-effort user home directory without falling back to `/tmp`.
 pub fn home_dir_or_workspace_tmp() -> PathBuf {
@@ -74,4 +85,70 @@ pub fn workspace_tmp_dir(workspace_root: &Path) -> PathBuf {
 /// Returns the workspace-local root for generated runtime artifacts.
 pub fn workspace_artifacts_dir(workspace_root: &Path) -> PathBuf {
     workspace_root.join(WORKSPACE_ARTIFACTS_DIR)
+}
+
+pub fn path_contains_workspace_state_dir(path: &Path) -> bool {
+    path.components().any(|component| match component {
+        Component::Normal(value) => value == WORKSPACE_STATE_DIR,
+        _ => false,
+    })
+}
+
+pub fn path_contains_workspace_internal_subtree(path: &Path) -> bool {
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if components
+        .iter()
+        .any(|component| component == WORKSPACE_STATE_DIR)
+        && components
+            .last()
+            .is_some_and(|component| component == WORKSPACE_STATE_DIR)
+    {
+        return true;
+    }
+
+    components.windows(2).any(|window| {
+        window[0] == WORKSPACE_STATE_DIR && WORKSPACE_INTERNAL_SUBDIRS.contains(&window[1].as_str())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{path_contains_workspace_internal_subtree, path_contains_workspace_state_dir};
+    use std::path::Path;
+
+    #[test]
+    fn detects_workspace_state_dir_components() {
+        assert!(path_contains_workspace_state_dir(Path::new(
+            "project/.ato/tmp/run"
+        )));
+        assert!(path_contains_workspace_state_dir(Path::new(
+            ".ato/source-inference"
+        )));
+        assert!(!path_contains_workspace_state_dir(Path::new(
+            "project/source"
+        )));
+    }
+
+    #[test]
+    fn detects_internal_workspace_subtrees_without_matching_store_paths() {
+        assert!(path_contains_workspace_internal_subtree(Path::new(
+            "project/.ato/tmp/run"
+        )));
+        assert!(path_contains_workspace_internal_subtree(Path::new(
+            "project/.ato"
+        )));
+        assert!(path_contains_workspace_internal_subtree(Path::new(
+            "project/.ato/artifacts"
+        )));
+        assert!(!path_contains_workspace_internal_subtree(Path::new(
+            "/Users/test/.ato/store/pkg"
+        )));
+    }
 }

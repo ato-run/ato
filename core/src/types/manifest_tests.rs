@@ -70,6 +70,27 @@ fn test_validate_valid_manifest() {
 }
 
 #[test]
+fn test_parse_job_manifest_type() {
+    let manifest = CapsuleManifest::from_toml(
+        r#"
+schema_version = "0.2"
+name = "job-demo"
+version = "0.1.0"
+type = "job"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "python"
+entrypoint = "main.py"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(manifest.capsule_type, CapsuleType::Job);
+}
+
+#[test]
 fn test_validate_invalid_schema_version() {
     let toml = VALID_TOML.replace("schema_version = \"0.2\"", "schema_version = \"2.0\"");
     let manifest = CapsuleManifest::from_toml(&toml).unwrap();

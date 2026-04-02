@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::ato_lock::{
     self, AtoLock, AtoLockValidationError, ValidationMode as CanonicalValidationMode,
 };
+use crate::common::paths::path_contains_workspace_internal_subtree;
 use crate::error::{CapsuleError, Result};
 use crate::lockfile::{self, CapsuleLock};
 use crate::manifest::{self, LoadedManifest};
@@ -204,6 +205,13 @@ fn discover_input(path: &Path) -> Result<InputDiscovery> {
             path.display()
         ))
     })?;
+
+    if path_contains_workspace_internal_subtree(&requested_path) {
+        return Err(CapsuleError::Config(format!(
+            "Workspace-local internal state path is not an authoritative input: {}",
+            requested_path.display()
+        )));
+    }
 
     let (project_root, explicit_input_kind) = if requested_path.is_dir() {
         (requested_path.clone(), ExplicitInputKind::Directory)
@@ -617,6 +625,21 @@ port = 4173
         assert!(err
             .to_string()
             .contains("is not an authoritative command-entry input without capsule.toml"));
+    }
+
+    #[test]
+    fn internal_workspace_state_path_is_fail_closed() {
+        let dir = tempdir().expect("tempdir");
+        let internal_dir = dir.path().join(".ato").join("tmp").join("synthetic");
+        fs::create_dir_all(&internal_dir).expect("create internal dir");
+        let script_path = internal_dir.join("hello.py");
+        fs::write(&script_path, "print('hello')\n").expect("write script");
+
+        let err = resolve_authoritative_input(&script_path, ResolveInputOptions::default())
+            .expect_err("internal workspace state path must fail");
+        assert!(err
+            .to_string()
+            .contains("Workspace-local internal state path is not an authoritative input"));
     }
 
     #[test]
