@@ -2,6 +2,18 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
+## [0.8.0] - 2026-04-02
+
+### What Changed
+
+#### Features
+
+- Add public `CapsuleType::Job` enum variant for one-shot workload classification (#219)
+- Add `path_contains_workspace_state_dir` and `path_contains_workspace_internal_subtree` path helpers in `common::paths` (#219)
+- Propagate capsule type through `LockContractMetadata` and router synthesis (#219)
+- Add fail-closed rejection for explicit authoritative inputs under workspace-local `.ato` internal state in `input_resolver` (#219)
+- Add explicit `.ato` payload root fail-closed guard and `.ato` directory skip in packer (#219)
+
 ## [0.7.1] - 2026-04-02
 
 ### What Changed
