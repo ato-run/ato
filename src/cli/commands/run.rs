@@ -1581,7 +1581,9 @@ run_command = "node server.js"
             compatibility_legacy_lock: None,
         };
         for preview_mode in [false, true] {
+            let requested_cwd = tmp.path().join("caller-cwd");
             let launch_ctx = RuntimeLaunchContext::empty()
+                .with_effective_cwd(requested_cwd.clone())
                 .with_injected_env(
                     [("DATABASE_URL".to_string(), "sqlite://shadow.db".to_string())]
                         .into_iter()
@@ -1610,6 +1612,7 @@ run_command = "node server.js"
                 Some("sqlite://shadow.db")
             );
             assert_eq!(rerouted_ctx.injected_mounts(), std::slice::from_ref(&mount));
+            assert_eq!(rerouted_ctx.effective_cwd(), Some(&requested_cwd));
         }
     }
 
