@@ -248,7 +248,7 @@ fn apply_host_isolation(
     launch_port: Option<u16>,
     launch_ctx: &RuntimeLaunchContext,
 ) -> Result<()> {
-    let isolation_root = workspace_tmp_dir(&plan.manifest_dir);
+    let isolation_root = workspace_tmp_dir(&plan.workspace_root);
     fs::create_dir_all(&isolation_root).with_context(|| {
         format!(
             "Failed to create host isolation root: {}",

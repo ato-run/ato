@@ -73,6 +73,16 @@ pub(super) fn background_timeout_message(
     )
 }
 
+pub(super) fn background_completed_message(
+    id: &str,
+    compatibility_host_mode: CompatibilityHostMode,
+) -> String {
+    if matches!(compatibility_host_mode, CompatibilityHostMode::Enabled) {
+        return format!("✔ Background command completed successfully (Host Fallback, ID: {id})");
+    }
+    format!("✔ Background command completed successfully (ID: {id})")
+}
+
 pub(super) fn background_failure_prefix(
     id: &str,
     compatibility_host_mode: CompatibilityHostMode,
@@ -187,6 +197,18 @@ pub(super) async fn complete_background_source_process(
                     options.compatibility_host_mode,
                     options.desktop_open_only,
                     options.is_one_shot,
+                ))
+                .await?;
+            Ok(())
+        }
+        BackgroundStartupOutcome::CompletedSuccessfully => {
+            let _ = process.child;
+            let _ = event_rx;
+            let _ = process_manager.read_pid(&process_id)?;
+            reporter
+                .notify(background_completed_message(
+                    &process_id,
+                    options.compatibility_host_mode,
                 ))
                 .await?;
             Ok(())
@@ -346,19 +368,31 @@ pub(super) fn wait_for_background_native_startup(
                     info.status,
                     crate::runtime::process::ProcessStatus::Starting
                 ) {
-                    info.status = crate::runtime::process::ProcessStatus::Failed;
-                    if info.last_error.is_none() {
-                        info.last_error = Some(if is_one_shot {
-                            "command exited before start confirmation".to_string()
-                        } else {
-                            "process exited before readiness".to_string()
-                        });
+                    if is_one_shot && status.success() {
+                        info.status = crate::runtime::process::ProcessStatus::Exited;
+                        info.last_error = None;
+                    } else {
+                        info.status = crate::runtime::process::ProcessStatus::Failed;
+                        if info.last_error.is_none() {
+                            info.last_error = Some(if is_one_shot {
+                                "command exited before start confirmation".to_string()
+                            } else {
+                                "process exited before readiness".to_string()
+                            });
+                        }
                     }
                 } else if info.status.is_active() {
                     info.status = crate::runtime::process::ProcessStatus::Exited;
                 }
             });
-            return Ok((BackgroundStartupOutcome::FailedBeforeReady, event_rx));
+            return Ok((
+                if is_one_shot && status.success() {
+                    BackgroundStartupOutcome::CompletedSuccessfully
+                } else {
+                    BackgroundStartupOutcome::FailedBeforeReady
+                },
+                event_rx,
+            ));
         }
 
         let now = Instant::now();
@@ -383,6 +417,9 @@ pub(super) fn wait_for_background_native_startup(
             )? {
                 BackgroundStartupOutcome::Ready => {
                     return Ok((BackgroundStartupOutcome::Ready, event_rx));
+                }
+                BackgroundStartupOutcome::CompletedSuccessfully => {
+                    return Ok((BackgroundStartupOutcome::CompletedSuccessfully, event_rx));
                 }
                 BackgroundStartupOutcome::FailedBeforeReady => {
                     return Ok((BackgroundStartupOutcome::FailedBeforeReady, event_rx));
@@ -440,12 +477,17 @@ fn persist_background_native_event(
                 info.status,
                 crate::runtime::process::ProcessStatus::Starting
             ) {
-                info.status = crate::runtime::process::ProcessStatus::Failed;
-                info.last_error = Some(if is_one_shot {
-                    format!("command '{}' exited before start confirmation", service)
+                if is_one_shot && exit_code == &Some(0) {
+                    info.status = crate::runtime::process::ProcessStatus::Exited;
+                    info.last_error = None;
                 } else {
-                    format!("service '{}' exited before readiness", service)
-                });
+                    info.status = crate::runtime::process::ProcessStatus::Failed;
+                    info.last_error = Some(if is_one_shot {
+                        format!("command '{}' exited before start confirmation", service)
+                    } else {
+                        format!("service '{}' exited before readiness", service)
+                    });
+                }
             } else if info.status.is_active() {
                 info.status = crate::runtime::process::ProcessStatus::Exited;
             }
@@ -454,6 +496,11 @@ fn persist_background_native_event(
 
     Ok(match updated.status {
         crate::runtime::process::ProcessStatus::Ready => BackgroundStartupOutcome::Ready,
+        crate::runtime::process::ProcessStatus::Exited
+            if is_one_shot && updated.exit_code == Some(0) =>
+        {
+            BackgroundStartupOutcome::CompletedSuccessfully
+        }
         crate::runtime::process::ProcessStatus::Failed => {
             BackgroundStartupOutcome::FailedBeforeReady
         }
@@ -527,6 +574,13 @@ pub(super) fn foreground_native_event_messages(
             let exit_code = exit_code
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
+            if is_one_shot && exit_code == "0" {
+                return vec![ForegroundEventMessage::Notify(if service == "main" {
+                    "[✓] Command completed successfully (exit code: 0)".to_string()
+                } else {
+                    format!("[✓] Command '{service}' completed successfully (exit code: 0)")
+                })];
+            }
             let message = if is_one_shot {
                 if service == "main" {
                     format!("❌ Command exited before start confirmation (exit code: {exit_code})")
