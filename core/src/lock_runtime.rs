@@ -19,6 +19,7 @@ pub struct LockCompilerOverlay {
 pub struct LockContractMetadata {
     pub name: Option<String>,
     pub version: Option<String>,
+    pub capsule_type: Option<String>,
     pub default_target: Option<String>,
 }
 
@@ -114,6 +115,10 @@ fn metadata_from_lock(lock: &AtoLock) -> LockContractMetadata {
             .map(str::to_string),
         version: metadata
             .and_then(|value| value.get("version"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        capsule_type: metadata
+            .and_then(|value| value.get("capsule_type"))
             .and_then(Value::as_str)
             .map(str::to_string),
         default_target: metadata

@@ -302,6 +302,31 @@ fn load_output_json(path: &Path, search_root: &Path, output: &std::process::Outp
 }
 
 #[cfg(unix)]
+fn assert_no_nested_workspace_tmp(root: &Path) {
+    let nested = walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            let components = entry
+                .path()
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+            components.windows(4).any(|window| {
+                window[0] == ".ato"
+                    && window[1] == "tmp"
+                    && window[2] == ".ato"
+                    && window[3] == "tmp"
+            })
+        });
+    assert!(
+        !nested,
+        "found nested .ato/tmp recursion under {}",
+        root.display()
+    );
+}
+
+#[cfg(unix)]
 #[test]
 #[serial]
 fn single_file_python_sandbox_preserves_relative_read_write_and_caller_cwd() {
@@ -337,6 +362,7 @@ fn single_file_python_sandbox_preserves_relative_read_write_and_caller_cwd() {
     );
     assert_eq!(payload["input_exists"].as_bool(), Some(true));
     assert_eq!(payload["content"].as_str(), Some("hello from caller cwd\n"));
+    assert_no_nested_workspace_tmp(temp.path());
 }
 
 #[cfg(unix)]
