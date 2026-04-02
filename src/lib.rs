@@ -10,6 +10,7 @@ use capsule_core::CapsuleReporter;
 use clap::{CommandFactory, Parser};
 
 pub(crate) mod adapters;
+pub(crate) mod app_control;
 pub(crate) mod application;
 pub(crate) mod cli;
 pub(crate) mod common;
