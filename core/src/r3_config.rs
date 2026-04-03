@@ -9,6 +9,7 @@ use crate::common::paths::workspace_derived_dir;
 use crate::lock_runtime::{LockCompilerOverlay, LockServiceUnit, ResolvedLockRuntimeModel};
 use crate::manifest;
 use crate::policy::egress_resolver::{resolve_egress_policy, EgressRule};
+use crate::python_runtime::extend_python_selector_env;
 use crate::router::{self, CompatProjectInput, ExecutionProfile};
 use crate::types::{ResolvedService, ResolvedServiceRuntime, ResolvedTargetRuntime};
 
@@ -713,7 +714,6 @@ fn command_tokens(entrypoint: &str, command: Option<&str>) -> (String, Vec<Strin
     (program, tokens)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_language_command(
     program: &str,
     tokens: &[String],
@@ -1398,15 +1398,7 @@ fn resolve_explicit_cmd_override(
 }
 
 fn insert_uv_python_runtime_env(env: &mut HashMap<String, String>, runtime_version: Option<&str>) {
-    let Some(runtime_version) = runtime_version
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return;
-    };
-
-    env.insert("UV_MANAGED_PYTHON".to_string(), "1".to_string());
-    env.insert("UV_PYTHON".to_string(), runtime_version.to_string());
+    extend_python_selector_env(env, runtime_version);
 }
 
 fn read_target_runtime_version(manifest: &toml::Value) -> Option<String> {
@@ -1622,6 +1614,49 @@ mod tests {
                     "driver": "deno",
                     "entrypoint": "worker.ts",
                     "cmd": ["deno", "run", "worker.ts"]
+                }
+            ]),
+        );
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"kind": "metadata_only", "status": "incomplete"}),
+        );
+        lock
+    }
+
+    fn sample_python_lock() -> AtoLock {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "metadata".to_string(),
+            json!({"name": "python-demo", "version": "0.1.0", "default_target": "cli"}),
+        );
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "main.py", "cmd": ["uv", "run", "python3", "main.py"]}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([
+                {
+                    "name": "main",
+                    "target": "cli",
+                    "process": {"entrypoint": "main.py", "cmd": ["uv", "run", "python3", "main.py"]}
+                }
+            ]),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "python", "selected_target": "cli"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([
+                {
+                    "label": "cli",
+                    "runtime": "source",
+                    "driver": "python",
+                    "runtime_version": "3.11.10",
+                    "entrypoint": "main.py"
                 }
             ]),
         );
@@ -2292,6 +2327,30 @@ port = 3000
                 .as_ref()
                 .and_then(|value| value.name.as_deref()),
             Some("svc-demo")
+        );
+    }
+
+    #[test]
+    fn generate_config_from_lock_derives_python_selector_env_from_runtime_version() {
+        let lock = sample_python_lock();
+        let resolved = resolve_lock_runtime_model(&lock, Some("cli")).expect("resolved");
+        let config = generate_config_from_lock(
+            &lock,
+            &resolved,
+            &LockCompilerOverlay::default(),
+            None,
+            false,
+        )
+        .expect("config");
+
+        assert_eq!(config.services["main"].executable, "uv");
+        assert_eq!(
+            config.services["main"].env.as_ref().unwrap()["UV_MANAGED_PYTHON"],
+            "1"
+        );
+        assert_eq!(
+            config.services["main"].env.as_ref().unwrap()["UV_PYTHON"],
+            "3.11.10"
         );
     }
 

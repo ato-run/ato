@@ -5,6 +5,7 @@ use serde_json::Value;
 
 use crate::ato_lock::AtoLock;
 use crate::execution_plan::error::AtoExecutionError;
+use crate::python_runtime::extend_python_selector_env;
 use crate::types::{NetworkConfig, ReadinessProbe, ResolvedTargetRuntime};
 
 #[derive(Debug, Clone, Default)]
@@ -333,24 +334,34 @@ fn runtime_from_target(
         .or_else(|| process.get("args").and_then(json_string_array))
         .unwrap_or_default();
 
+    let driver = target
+        .get("driver")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let runtime_version = target
+        .get("runtime_version")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     let mut env = json_string_map(target.get("env"));
     env.extend(json_string_map(process.get("env")));
+    if is_python_target_runtime(
+        runtime,
+        driver.as_deref(),
+        &entrypoint,
+        run_command.as_deref(),
+    ) {
+        extend_python_selector_env(&mut env, runtime_version.as_deref());
+    }
 
     Ok(ResolvedTargetRuntime {
         target: target_label.to_string(),
         runtime: runtime.to_string(),
-        driver: target
-            .get("driver")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
-        runtime_version: target
-            .get("runtime_version")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
+        driver,
+        runtime_version,
         image: target
             .get("image")
             .and_then(Value::as_str)
@@ -439,6 +450,32 @@ fn json_string_map(value: Option<&Value>) -> HashMap<String, String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn is_python_target_runtime(
+    runtime: &str,
+    driver: Option<&str>,
+    entrypoint: &str,
+    run_command: Option<&str>,
+) -> bool {
+    if driver.is_some_and(|value| value.eq_ignore_ascii_case("python")) {
+        return true;
+    }
+
+    if !runtime.eq_ignore_ascii_case("source") {
+        return false;
+    }
+
+    if entrypoint.trim().to_ascii_lowercase().ends_with(".py") {
+        return true;
+    }
+
+    run_command.map(str::trim).is_some_and(|value| {
+        matches!(
+            value.split_whitespace().next(),
+            Some("python" | "python3" | "uv")
+        )
+    })
 }
 
 fn explicit_candidates(lock: &AtoLock) -> Vec<String> {
@@ -548,5 +585,60 @@ mod tests {
 
         let model = resolve_lock_runtime_model(&lock, None).expect("resolved");
         assert!(model.network.is_none());
+    }
+
+    #[test]
+    fn python_targets_derive_uv_selector_env_from_runtime_version() {
+        let mut lock = sample_lock();
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "main.py", "cmd": ["uv", "run", "python3", "main.py"]}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([
+                {
+                    "name": "main",
+                    "target": "cli",
+                    "process": {"entrypoint": "main.py", "cmd": ["uv", "run", "python3", "main.py"]}
+                }
+            ]),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "python", "selected_target": "cli"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([
+                {
+                    "label": "cli",
+                    "runtime": "source",
+                    "driver": "python",
+                    "runtime_version": "3.11.10",
+                    "entrypoint": "main.py"
+                }
+            ]),
+        );
+
+        let model = resolve_lock_runtime_model(&lock, None).expect("resolved");
+        assert_eq!(
+            model
+                .selected
+                .runtime
+                .env
+                .get("UV_MANAGED_PYTHON")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            model
+                .selected
+                .runtime
+                .env
+                .get("UV_PYTHON")
+                .map(String::as_str),
+            Some("3.11.10")
+        );
     }
 }
