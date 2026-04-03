@@ -714,32 +714,42 @@ fn command_tokens(entrypoint: &str, command: Option<&str>) -> (String, Vec<Strin
     (program, tokens)
 }
 
+struct LanguageCommandContext<'a> {
+    standalone: bool,
+    env: &'a mut HashMap<String, String>,
+    language: Option<&'a str>,
+    runtime_version: Option<&'a str>,
+    synthesize_default_args: bool,
+    layout: SourceLayoutHint,
+}
+
 fn resolve_language_command(
     program: &str,
     tokens: &[String],
-    standalone: bool,
-    env: &mut HashMap<String, String>,
-    language: Option<&str>,
-    runtime_version: Option<&str>,
-    synthesize_default_args: bool,
-    layout: SourceLayoutHint,
+    context: LanguageCommandContext<'_>,
 ) -> (String, Vec<String>) {
     let args = tokens.get(1..).unwrap_or(&[]).to_vec();
-    let default_program_arg = normalized_source_entrypoint(program, layout);
-    match language {
+    let default_program_arg = normalized_source_entrypoint(program, context.layout);
+    match context.language {
         Some("python") => {
-            let args = if synthesize_default_args && args.is_empty() {
+            let args = if context.synthesize_default_args && args.is_empty() {
                 vec![default_program_arg.clone()]
             } else {
                 args
             };
-            env.insert("PYTHONDONTWRITEBYTECODE".to_string(), "1".to_string());
-            if standalone {
-                env.insert("PYTHONHOME".to_string(), "runtime/python".to_string());
-                env.insert("PYTHONPATH".to_string(), "source".to_string());
+            context
+                .env
+                .insert("PYTHONDONTWRITEBYTECODE".to_string(), "1".to_string());
+            if context.standalone {
+                context
+                    .env
+                    .insert("PYTHONHOME".to_string(), "runtime/python".to_string());
+                context
+                    .env
+                    .insert("PYTHONPATH".to_string(), "source".to_string());
                 ("runtime/python/bin/python3".to_string(), args)
             } else {
-                insert_uv_python_runtime_env(env, runtime_version);
+                insert_uv_python_runtime_env(context.env, context.runtime_version);
                 let mut uv_args = vec!["run".to_string(), "--offline".to_string()];
                 uv_args.push("python3".to_string());
                 uv_args.extend(args);
@@ -747,19 +757,19 @@ fn resolve_language_command(
             }
         }
         Some("node") => {
-            let args = if synthesize_default_args && args.is_empty() {
+            let args = if context.synthesize_default_args && args.is_empty() {
                 vec![default_program_arg.clone()]
             } else {
                 args
             };
-            if standalone {
+            if context.standalone {
                 ("runtime/node/bin/node".to_string(), args)
             } else {
                 ("node".to_string(), args)
             }
         }
         Some("deno") => {
-            let args = if synthesize_default_args && args.is_empty() {
+            let args = if context.synthesize_default_args && args.is_empty() {
                 vec![
                     "run".to_string(),
                     "-A".to_string(),
@@ -768,26 +778,26 @@ fn resolve_language_command(
             } else {
                 args
             };
-            if standalone {
+            if context.standalone {
                 ("runtime/deno/bin/deno".to_string(), args)
             } else {
                 ("deno".to_string(), args)
             }
         }
         Some("bun") => {
-            let args = if synthesize_default_args && args.is_empty() {
+            let args = if context.synthesize_default_args && args.is_empty() {
                 vec![default_program_arg]
             } else {
                 args
             };
-            if standalone {
+            if context.standalone {
                 ("runtime/bun/bin/bun".to_string(), args)
             } else {
                 ("bun".to_string(), args)
             }
         }
         _ => (
-            normalize_program(program, standalone),
+            normalize_program(program, context.standalone),
             tokens.get(1..).unwrap_or(&[]).to_vec(),
         ),
     }
@@ -874,12 +884,14 @@ fn resolve_target_command(
     let (executable, args) = resolve_language_command(
         &program,
         &tokens,
-        standalone,
-        &mut env,
-        language.as_deref(),
-        runtime.runtime_version.as_deref(),
-        true,
-        layout,
+        LanguageCommandContext {
+            standalone,
+            env: &mut env,
+            language: language.as_deref(),
+            runtime_version: runtime.runtime_version.as_deref(),
+            synthesize_default_args: true,
+            layout,
+        },
     );
 
     let (executable, mut args) = if let Some((cmd_executable, cmd_args)) =
@@ -1319,12 +1331,14 @@ fn resolve_command(
     let (executable, mut args) = resolve_language_command(
         &program,
         &tokens,
-        standalone,
-        &mut env,
-        language.as_deref(),
-        read_target_runtime_version(manifest).as_deref(),
-        true,
-        layout,
+        LanguageCommandContext {
+            standalone,
+            env: &mut env,
+            language: language.as_deref(),
+            runtime_version: read_target_runtime_version(manifest).as_deref(),
+            synthesize_default_args: true,
+            layout,
+        },
     );
 
     if !args.is_empty() {
@@ -1388,12 +1402,14 @@ fn resolve_explicit_cmd_override(
     Some(resolve_language_command(
         &program,
         runtime_cmd,
-        standalone,
-        env,
-        detect_language_from_program(&program).as_deref(),
-        runtime_version,
-        false,
-        layout,
+        LanguageCommandContext {
+            standalone,
+            env,
+            language: detect_language_from_program(&program).as_deref(),
+            runtime_version,
+            synthesize_default_args: false,
+            layout,
+        },
     ))
 }
 

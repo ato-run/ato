@@ -96,7 +96,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             unsafe_bypass_sandbox_legacy,
             dangerously_skip_permissions,
             compatibility_fallback,
-            provider_backend: via,
+            provider_toolchain: via,
             yes,
             agent_mode: agent,
             keep_failed_artifacts,
