@@ -74,7 +74,7 @@ pub(crate) enum Commands {
         trailing_var_arg = true
     )]
     Run {
-        /// Local path (./, ../, ~/, /...), store scoped ID (publisher/slug), or GitHub repo (github.com/owner/repo). Default: current directory
+        /// Local path (./, ../, ~/, /...), provider target (pypi:<package> or pypi:<package>[extra]), store scoped ID (publisher/slug), or GitHub repo (github.com/owner/repo). Default: current directory
         #[arg(default_value = ".")]
         path: PathBuf,
 
