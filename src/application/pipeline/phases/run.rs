@@ -39,6 +39,7 @@ use crate::state::{
 };
 use capsule_core::router;
 
+use crate::ProviderToolchain;
 use crate::RunAgentMode;
 
 use crate::application::pipeline::hourglass::HourglassPhase;
@@ -188,6 +189,7 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) sandbox_mode: bool,
     pub(crate) dangerously_skip_permissions: bool,
     pub(crate) compatibility_fallback: Option<String>,
+    pub(crate) provider_toolchain_requested: ProviderToolchain,
     pub(crate) assume_yes: bool,
     pub(crate) agent_mode: RunAgentMode,
     pub(crate) agent_local_root: Option<PathBuf>,
@@ -575,6 +577,7 @@ where
     let resolved_target = crate::install::support::resolve_run_target_or_install(
         request.target.clone(),
         request.assume_yes,
+        request.provider_toolchain_requested,
         request.keep_failed_artifacts,
         request.auto_fix_mode,
         request.allow_unverified,
@@ -2323,6 +2326,7 @@ mode = "managed"
             sandbox_mode: true,
             dangerously_skip_permissions: false,
             compatibility_fallback: None,
+            provider_toolchain_requested: crate::ProviderToolchain::Auto,
             assume_yes: true,
             agent_mode: crate::RunAgentMode::Off,
             agent_local_root: None,

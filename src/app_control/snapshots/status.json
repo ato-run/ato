@@ -20,10 +20,10 @@
     "health": {
       "overall": "degraded",
       "services": {
-        "ollama": "healthy",
-        "opencode": "missing"
+        "ollama": "unmaterialized",
+        "opencode": "unmaterialized"
       },
-      "last_error": "opencode_not_materialized",
+      "last_error": "managed_environment_not_materialized",
       "checked_at": "2026-04-02T00:00:01+00:00"
     },
     "repair_history": [
