@@ -4,6 +4,10 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- Keep one-shot single-script `ato run` materialization state out of the caller workspace by moving cache and run-attempt state under `~/.ato/cache` and `~/.ato/runs`
+
 ## [0.4.46] - 2026-04-03
 
 ### What Changed
