@@ -67,6 +67,20 @@ pub fn engine_cache_dir() -> Result<PathBuf> {
     Ok(nacelle_home_dir()?.join("engines"))
 }
 
+/// Returns the shared cache directory for ephemeral CLI-managed artifacts.
+///
+/// Layout: `~/.ato/cache`
+pub fn ato_cache_dir() -> PathBuf {
+    nacelle_home_dir_or_workspace_tmp().join("cache")
+}
+
+/// Returns the shared run state directory for ephemeral CLI-managed artifacts.
+///
+/// Layout: `~/.ato/runs`
+pub fn ato_runs_dir() -> PathBuf {
+    nacelle_home_dir_or_workspace_tmp().join("runs")
+}
+
 /// Returns the workspace-local directory for generated compatibility artifacts.
 pub(crate) fn workspace_derived_dir(workspace_root: &Path) -> PathBuf {
     workspace_root.join(WORKSPACE_DERIVED_DIR)
