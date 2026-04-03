@@ -41,7 +41,7 @@ pub(crate) use registry::RegistryCommands;
 pub(crate) use root::{Cli, Commands};
 #[allow(unused_imports)]
 pub(crate) use shared::{
-    CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, ProviderBackend,
+    CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, ProviderToolchain,
     RunAgentMode, DEFAULT_RUN_REGISTRY_URL,
 };
 #[allow(unused_imports)]

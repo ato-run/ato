@@ -13,7 +13,7 @@ use super::profile::ProfileCommands;
 use super::project::{ProjectCommands, ScaffoldCommands};
 use super::registry::RegistryCommands;
 use super::shared::{
-    cli_styles, CompatibilityFallbackBackend, EnforcementMode, ProviderBackend, RunAgentMode,
+    cli_styles, CompatibilityFallbackBackend, EnforcementMode, ProviderToolchain, RunAgentMode,
 };
 use super::source::SourceCommands;
 use super::state::StateCommands;
@@ -77,7 +77,7 @@ pub(crate) enum Commands {
         trailing_var_arg = true
     )]
     Run {
-        /// Local path (./, ../, ~/, /...), provider target (pypi:<package>), store scoped ID (publisher/slug), or GitHub repo (github.com/owner/repo). Default: current directory
+        /// Local path (./, ../, ~/, /...), provider target (pypi:<package>, pypi:<package>[extra], npm:<package>, npm:@scope/package), store scoped ID (publisher/slug), or GitHub repo (github.com/owner/repo). Default: current directory
         #[arg(default_value = ".")]
         path: PathBuf,
 
@@ -137,9 +137,9 @@ pub(crate) enum Commands {
         #[arg(long = "compatibility-fallback", value_enum)]
         compatibility_fallback: Option<CompatibilityFallbackBackend>,
 
-        /// Experimental provider materialization backend hint for provider-backed run targets
-        #[arg(long = "via", value_enum, hide = true)]
-        via: Option<ProviderBackend>,
+        /// Select the provider-backed materialization toolchain
+        #[arg(long = "via", value_enum, default_value_t = ProviderToolchain::Auto)]
+        via: ProviderToolchain,
 
         /// Skip prompt and auto-install when app-id is not installed
         #[arg(short = 'y', long = "yes", default_value_t = false)]

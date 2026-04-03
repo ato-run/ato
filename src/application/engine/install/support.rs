@@ -22,7 +22,7 @@ use crate::reporters;
 use crate::runtime::tree as runtime_tree;
 use crate::tui;
 use crate::{
-    CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, ProviderBackend,
+    CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, ProviderToolchain,
     DEFAULT_RUN_REGISTRY_URL,
 };
 
@@ -736,6 +736,7 @@ pub(crate) struct ResolvedRunTarget {
     pub(crate) desktop_open_path: Option<PathBuf>,
     pub(crate) export_request: Option<ResolvedCliExportRequest>,
     pub(crate) provider_workspace: Option<install::provider_target::ProviderRunWorkspace>,
+    pub(crate) transient_workspace_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -761,11 +762,11 @@ enum RunManifestRecoveryChoice {
 pub(crate) async fn resolve_run_target_or_install(
     path: PathBuf,
     yes: bool,
+    provider_toolchain: ProviderToolchain,
     keep_failed_artifacts: bool,
     auto_fix_mode: Option<GitHubAutoFixMode>,
     allow_unverified: bool,
     registry: Option<&str>,
-    provider_backend: Option<ProviderBackend>,
     reporter: Arc<reporters::CliReporter>,
 ) -> Result<ResolvedRunTarget> {
     let raw = path.to_string_lossy().to_string();
@@ -773,9 +774,10 @@ pub(crate) async fn resolve_run_target_or_install(
     let expanded_local = crate::local_input::expand_local_path(&raw);
     match install::provider_target::classify_run_target(&raw, &expanded_local)? {
         install::provider_target::ParsedRunTarget::LocalPath(local_path) => {
-            if provider_backend.is_some() {
+            if provider_toolchain != ProviderToolchain::Auto {
                 anyhow::bail!(
-                    "`--via` is only supported for provider-backed run targets such as `pypi:<package>`."
+                    "`--via {}` is only supported for provider-backed targets in this MVP. Use `ato run pypi:<package> -- ...` or `ato run npm:<package> -- ...`.",
+                    provider_toolchain.as_str()
                 );
             }
             return Ok(ResolvedRunTarget {
@@ -784,12 +786,14 @@ pub(crate) async fn resolve_run_target_or_install(
                 desktop_open_path: None,
                 export_request: None,
                 provider_workspace: None,
+                transient_workspace_root: None,
             });
         }
         install::provider_target::ParsedRunTarget::GitHubRepository(repository) => {
-            if provider_backend.is_some() {
+            if provider_toolchain != ProviderToolchain::Auto {
                 anyhow::bail!(
-                    "`--via` is only supported for provider-backed run targets such as `pypi:<package>`."
+                    "`--via {}` is only supported for provider-backed targets in this MVP. Use `ato run pypi:<package> -- ...` or `ato run npm:<package> -- ...`.",
+                    provider_toolchain.as_str()
                 );
             }
             let json_mode = reporter.is_json();
@@ -820,6 +824,20 @@ pub(crate) async fn resolve_run_target_or_install(
                 );
             }
 
+            let checkout = install::download_github_repository_at_ref(&repository, None).await?;
+            let checkout_root = checkout.checkout_dir.clone();
+            if checkout_root.join("capsule.toml").exists() {
+                let preserved_root = relocate_github_run_checkout(&checkout_root)?;
+                return Ok(ResolvedRunTarget {
+                    path: preserved_root.clone(),
+                    agent_local_root: Some(preserved_root.clone()),
+                    desktop_open_path: None,
+                    export_request: None,
+                    provider_workspace: None,
+                    transient_workspace_root: Some(preserved_root),
+                });
+            }
+
             let install_result = install_github_repository(
                 &repository,
                 None,
@@ -842,12 +860,13 @@ pub(crate) async fn resolve_run_target_or_install(
                 desktop_open_path,
                 export_request: None,
                 provider_workspace: None,
+                transient_workspace_root: None,
             });
         }
         install::provider_target::ParsedRunTarget::Provider(provider_target) => {
             let workspace = install::provider_target::materialize_provider_run_workspace(
                 &provider_target,
-                provider_backend,
+                provider_toolchain,
                 keep_failed_artifacts,
                 reporter.is_json(),
             )?;
@@ -856,16 +875,25 @@ pub(crate) async fn resolve_run_target_or_install(
                 agent_local_root: Some(workspace.workspace_root.clone()),
                 desktop_open_path: None,
                 export_request: None,
+                transient_workspace_root: Some(workspace.workspace_root.clone()),
                 provider_workspace: Some(workspace),
             });
         }
         install::provider_target::ParsedRunTarget::RegistryReference => {
-            if provider_backend.is_some() {
+            if provider_toolchain != ProviderToolchain::Auto {
                 anyhow::bail!(
-                    "`--via` is only supported for provider-backed run targets such as `pypi:<package>`."
+                    "`--via {}` is only supported for provider-backed targets in this MVP. Use `ato run pypi:<package> -- ...` or `ato run npm:<package> -- ...`.",
+                    provider_toolchain.as_str()
                 );
             }
         }
+    }
+
+    if provider_toolchain != ProviderToolchain::Auto {
+        anyhow::bail!(
+            "`--via {}` is only supported for provider-backed targets in this MVP. Use `ato run pypi:<package> -- ...` or `ato run npm:<package> -- ...`.",
+            provider_toolchain.as_str()
+        );
     }
 
     let scoped_ref = match install::parse_capsule_ref(&raw) {
@@ -921,6 +949,7 @@ pub(crate) async fn resolve_run_target_or_install(
                                 &installed_capsule,
                             )?,
                             provider_workspace: None,
+                            transient_workspace_root: None,
                         });
                     }
                 }
@@ -946,6 +975,7 @@ pub(crate) async fn resolve_run_target_or_install(
                             &installed_capsule,
                         )?,
                         provider_workspace: None,
+                        transient_workspace_root: None,
                     });
                 }
                 return Err(error);
@@ -966,6 +996,7 @@ pub(crate) async fn resolve_run_target_or_install(
                 &installed_capsule,
             )?,
             provider_workspace: None,
+            transient_workspace_root: None,
         });
     }
 
@@ -1038,7 +1069,43 @@ pub(crate) async fn resolve_run_target_or_install(
         desktop_open_path,
         export_request: resolve_cli_export_request(export_invocation, &scoped_ref, &install_path)?,
         provider_workspace: None,
+        transient_workspace_root: None,
     })
+}
+
+fn relocate_github_run_checkout(checkout_root: &Path) -> Result<PathBuf> {
+    let invocation_dir =
+        std::env::current_dir().context("Failed to resolve current directory for GitHub run")?;
+    let transient_root = invocation_dir.join(".tmp").join("gh-run");
+    std::fs::create_dir_all(&transient_root).with_context(|| {
+        format!(
+            "Failed to create transient GitHub run root: {}",
+            transient_root.display()
+        )
+    })?;
+
+    let checkout_name = checkout_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("checkout");
+    let destination = transient_root.join(checkout_name);
+    if destination.exists() {
+        std::fs::remove_dir_all(&destination).with_context(|| {
+            format!(
+                "Failed to clear existing transient GitHub run checkout: {}",
+                destination.display()
+            )
+        })?;
+    }
+    std::fs::rename(checkout_root, &destination).with_context(|| {
+        format!(
+            "Failed to relocate GitHub run checkout {} -> {}",
+            checkout_root.display(),
+            destination.display()
+        )
+    })?;
+    Ok(destination)
 }
 
 fn resolve_cli_export_request(
@@ -2077,7 +2144,7 @@ pub(crate) fn execute_run_command(
     sandbox_mode: bool,
     dangerously_skip_permissions: bool,
     compatibility_fallback: Option<String>,
-    provider_backend: Option<ProviderBackend>,
+    provider_toolchain: ProviderToolchain,
     assume_yes: bool,
     agent_mode: crate::RunAgentMode,
     agent_local_root: Option<PathBuf>,
@@ -2107,7 +2174,7 @@ pub(crate) fn execute_run_command(
         sandbox_mode,
         dangerously_skip_permissions,
         compatibility_fallback,
-        provider_backend,
+        provider_toolchain_requested: provider_toolchain,
         assume_yes,
         agent_mode,
         agent_local_root,
@@ -2255,10 +2322,10 @@ mod tests {
         resolve_run_target_or_install(
             PathBuf::from("@team/tool"),
             true,
+            ProviderToolchain::Auto,
             false,
             None,
             false,
-            None,
             None,
             Arc::new(reporters::CliReporter::new(false)),
         )
