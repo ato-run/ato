@@ -91,7 +91,7 @@ Ticket 02 では authoritative input の境界を `core/src/input_resolver.rs` �
 - `run` 入口反映: source-only と canonical lock は shared inference で attempt-local の `ato.lock.json` / provenance sidecar / generated manifest bridge を生成して既存 hourglass pipeline へ接続する
 - `init` 入口反映: source-only と compatibility project は shared inference で workspace-local の durable `ato.lock.json` と provenance sidecar を生成する
 - ambiguity policy: equal-rank process candidate は `run` では fail-closed、`init` では unresolved marker として durable lock に保持する
-- sidecar policy: `run` は `.tmp/source-inference/<attempt>/`、`init` は `.ato/source-inference/` に provenance sidecar を書き分ける
+- sidecar policy: workspace `run` は `.ato/tmp/source-inference/<attempt>/`、one-shot single-script `run` は `~/.ato/runs/source-inference/<attempt>/`、`init` は `.ato/source-inference/` に provenance sidecar を書き分ける
 - focused tests: `compatibility_draft_handoff_does_not_reinfer_process` と `source_inference::tests` を通し、source-only inference、draft handoff、generated manifest materialization、unresolved durability、equal-rank fail-closed を検証済み
 
 ### Ticket 04 Follow-up Checks

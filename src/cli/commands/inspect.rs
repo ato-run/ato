@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Error as AnyhowError, Result};
 use capsule_core::ato_lock::{closure_info, AtoLock, UnresolvedValue};
+use capsule_core::common::paths::ato_runs_dir;
 use capsule_core::input_resolver::{
     resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ATO_LOCK_FILE_NAME,
 };
@@ -208,6 +209,7 @@ pub fn try_emit_json_error(err: &AnyhowError) -> bool {
 }
 
 const INSPECT_SCHEMA_VERSION: &str = "1";
+const GLOBAL_RUN_SOURCE_INFERENCE_DIR: &str = "source-inference";
 const RUN_SOURCE_INFERENCE_DIR: &str = ".ato/tmp/source-inference";
 const WORKSPACE_SOURCE_INFERENCE_DIR: &str = ".ato/source-inference";
 const WORKSPACE_BINDING_SEED_PATH: &str = ".ato/binding/seed.json";
@@ -423,6 +425,7 @@ struct InspectionSnapshot {
     provenance_path: Option<PathBuf>,
     provenance_cache_path: Option<PathBuf>,
     binding_seed_path: Option<PathBuf>,
+    run_attempt_root: PathBuf,
     input_kind: String,
     lock: AtoLock,
     provenance: Vec<StoredProvenanceRecord>,
@@ -586,12 +589,13 @@ fn load_inspection_snapshot(path: &Path) -> Result<InspectionSnapshot> {
             Ok(snapshot_from_result(
                 path.display().to_string(),
                 provenance.selected_kind.as_str().to_string(),
-                canonical.project_root,
+                canonical.project_root.clone(),
                 Some(canonical.path.clone()),
                 canonical.path,
                 Some(sidecar_paths.provenance_path),
                 Some(sidecar_paths.cache_path),
                 Some(sidecar_paths.binding_seed_path),
+                canonical.project_root.join(RUN_SOURCE_INFERENCE_DIR),
                 advisories.into_iter().map(|value| value.message).collect(),
                 result,
             ))
@@ -629,6 +633,7 @@ fn load_inspection_snapshot(path: &Path) -> Result<InspectionSnapshot> {
                         .join("provenance-cache.json"),
                 ),
                 Some(project.project_root.join(WORKSPACE_BINDING_SEED_PATH)),
+                project.project_root.join(RUN_SOURCE_INFERENCE_DIR),
                 advisories.into_iter().map(|value| value.message).collect(),
                 result,
             ))
@@ -671,6 +676,11 @@ fn load_inspection_snapshot(path: &Path) -> Result<InspectionSnapshot> {
                         .join("provenance-cache.json"),
                 ),
                 Some(source.project_root.join(WORKSPACE_BINDING_SEED_PATH)),
+                if source.single_script.is_some() {
+                    ato_runs_dir().join(GLOBAL_RUN_SOURCE_INFERENCE_DIR)
+                } else {
+                    source.project_root.join(RUN_SOURCE_INFERENCE_DIR)
+                },
                 advisories.into_iter().map(|value| value.message).collect(),
                 result,
             ))
@@ -688,6 +698,7 @@ fn snapshot_from_result(
     provenance_path: Option<PathBuf>,
     provenance_cache_path: Option<PathBuf>,
     binding_seed_path: Option<PathBuf>,
+    run_attempt_root: PathBuf,
     advisories: Vec<String>,
     result: SourceInferenceResult,
 ) -> InspectionSnapshot {
@@ -700,6 +711,7 @@ fn snapshot_from_result(
         provenance_path,
         provenance_cache_path,
         binding_seed_path,
+        run_attempt_root,
         input_kind: input_kind_label(result.input_kind).to_string(),
         lock: result.lock,
         provenance: result
@@ -835,8 +847,7 @@ fn build_preview_view(snapshot: &InspectionSnapshot) -> PreviewLockView {
                     PreviewOutputPathView {
                         label: "attempt_lock".to_string(),
                         path: snapshot
-                            .project_root
-                            .join(RUN_SOURCE_INFERENCE_DIR)
+                            .run_attempt_root
                             .join("<attempt>")
                             .join(ATO_LOCK_FILE_NAME)
                             .display()
@@ -845,8 +856,7 @@ fn build_preview_view(snapshot: &InspectionSnapshot) -> PreviewLockView {
                     PreviewOutputPathView {
                         label: "attempt_provenance".to_string(),
                         path: snapshot
-                            .project_root
-                            .join(RUN_SOURCE_INFERENCE_DIR)
+                            .run_attempt_root
                             .join("<attempt>")
                             .join("provenance.json")
                             .display()

@@ -26,7 +26,7 @@ use anyhow::{Context, Result};
 use capsule_core::ato_lock::{
     self, closure_info, normalize_lock_closure, AtoLock, UnresolvedReason, UnresolvedValue,
 };
-use capsule_core::common::paths::{path_contains_workspace_state_dir, workspace_state_dir};
+use capsule_core::common::paths::{ato_cache_dir, ato_runs_dir, path_contains_workspace_state_dir};
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::importer::{
     probe_ecosystem_lockfile_evidence, probe_native_framework_evidence, ImportedEvidence,
@@ -41,7 +41,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use walkdir::WalkDir;
 
-const RUN_SOURCE_INFERENCE_DIR: &str = ".ato/tmp/source-inference";
+const GLOBAL_RUN_SOURCE_INFERENCE_DIR: &str = "source-inference";
+const WORKSPACE_RUN_SOURCE_INFERENCE_DIR: &str = ".ato/tmp/source-inference";
 const SINGLE_SCRIPT_CACHE_SUBDIR: &str = "source-inference/single-script-cache";
 #[derive(Debug, Clone)]
 pub(crate) enum SourceInferenceInput {
@@ -114,6 +115,7 @@ struct MaterializationAdapter {
     workspace_root: PathBuf,
     project_root: PathBuf,
     original_manifest: Option<toml::Value>,
+    use_global_run_state: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -315,6 +317,7 @@ pub(crate) fn materialize_run_from_explicit_native_artifact(
         workspace_root: project_root.clone(),
         project_root: project_root.clone(),
         original_manifest: None,
+        use_global_run_state: false,
     };
     let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
         project_root,
@@ -367,6 +370,7 @@ fn prepare_run_materialization_adapter(
         workspace_root: source.project_root.clone(),
         project_root,
         original_manifest: None,
+        use_global_run_state: source.single_script.is_some(),
     })
 }
 
@@ -378,6 +382,7 @@ fn prepare_workspace_materialization_adapter(
         workspace_root: source.project_root.clone(),
         project_root,
         original_manifest: None,
+        use_global_run_state: false,
     })
 }
 
@@ -525,10 +530,6 @@ fn write_if_absent_or_same(path: &Path, content: &str) -> Result<()> {
 }
 
 fn single_script_cache_root(script: &ResolvedSingleScript, script_text: &str) -> Result<PathBuf> {
-    let parent = script
-        .path
-        .parent()
-        .context("single-file script path must have a parent directory")?;
     let language = match script.language {
         SingleScriptLanguage::Python => "python",
         SingleScriptLanguage::TypeScript => "typescript",
@@ -538,7 +539,7 @@ fn single_script_cache_root(script: &ResolvedSingleScript, script_text: &str) ->
         format!("v1\0{language}\0{}\0{}", script.path.display(), script_text).as_bytes(),
     );
 
-    Ok(workspace_state_dir(parent)
+    Ok(ato_cache_dir()
         .join(SINGLE_SCRIPT_CACHE_SUBDIR)
         .join(format!("{}-{}", language, &cache_key[..16])))
 }
@@ -797,6 +798,7 @@ pub(crate) fn materialize_run_from_canonical_lock(
         workspace_root: canonical.project_root.clone(),
         project_root: canonical.project_root.clone(),
         original_manifest: None,
+        use_global_run_state: false,
     };
     let input = SourceInferenceInput::CanonicalLock(CanonicalLockInput {
         project_root: canonical.project_root.clone(),
@@ -821,6 +823,7 @@ pub(crate) fn materialize_run_from_compatibility(
         workspace_root: project.project_root.clone(),
         project_root: project.project_root.clone(),
         original_manifest: Some(original_manifest),
+        use_global_run_state: false,
     };
     let mut result = execute_shared_engine(
         SourceInferenceInput::DraftLock(draft_input),
@@ -881,6 +884,7 @@ pub(crate) fn execute_init_from_compatibility(
         workspace_root: project.project_root.clone(),
         project_root: project.project_root.clone(),
         original_manifest: None,
+        use_global_run_state: false,
     };
     let mut result = execute_shared_engine(
         SourceInferenceInput::DraftLock(draft_input),
@@ -2635,13 +2639,17 @@ fn enforce_mode_preconditions(
 fn materialize_run_result(
     workspace_root: &Path,
     project_root: &Path,
+    use_global_run_state: bool,
     result: SourceInferenceResult,
     mut scope: Option<&mut CleanupScope>,
     original_manifest: Option<&toml::Value>,
 ) -> Result<RunMaterialization> {
-    let run_state_dir = workspace_root
-        .join(RUN_SOURCE_INFERENCE_DIR)
-        .join(unique_attempt_token());
+    let run_state_root = if use_global_run_state {
+        ato_runs_dir().join(GLOBAL_RUN_SOURCE_INFERENCE_DIR)
+    } else {
+        workspace_root.join(WORKSPACE_RUN_SOURCE_INFERENCE_DIR)
+    };
+    let run_state_dir = run_state_root.join(unique_attempt_token());
     fs::create_dir_all(&run_state_dir)
         .with_context(|| format!("Failed to create {}", run_state_dir.display()))?;
     if let Some(scope) = scope.as_mut() {
@@ -2678,6 +2686,7 @@ fn materialize_run_model(
     materialize_run_result(
         &adapter.workspace_root,
         &adapter.project_root,
+        adapter.use_global_run_state,
         result,
         scope,
         adapter.original_manifest.as_ref(),
@@ -3467,7 +3476,8 @@ fn is_equal_ranked(candidates: &[RankedCandidate]) -> bool {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     use capsule_core::ato_lock::{self, AtoLock};
     use capsule_core::input_resolver::{
@@ -3477,6 +3487,36 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock")
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let original = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.original.take() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     fn reporter() -> Arc<CliReporter> {
         Arc::new(CliReporter::new(false))
@@ -3878,7 +3918,10 @@ mod tests {
             return;
         }
 
+        let _env_lock = env_lock();
         let dir = tempdir().expect("tempdir");
+        let ato_home = dir.path().join("ato-home");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
         let script_path = dir.path().join("hello.js");
         fs::write(&script_path, "console.log('hello cache');\n").expect("write script");
 
@@ -3897,16 +3940,17 @@ mod tests {
 
         assert_eq!(first.workspace_root, dir.path());
         assert_eq!(first.project_root, second.project_root);
-        assert!(first
-            .project_root
-            .to_string_lossy()
-            .contains(".ato/source-inference/single-script-cache/"));
-        assert!(first.lock_path.starts_with(dir.path()));
-        assert!(!first.lock_path.starts_with(&first.project_root));
+        assert!(first.project_root.starts_with(
+            ato_home
+                .join("cache")
+                .join("source-inference")
+                .join("single-script-cache")
+        ));
+        assert!(!dir.path().join(".ato").exists());
         assert!(first
             .lock_path
-            .to_string_lossy()
-            .contains(".ato/tmp/source-inference/"));
+            .starts_with(ato_home.join("runs").join("source-inference")));
+        assert!(!first.lock_path.starts_with(&first.project_root));
     }
 
     #[test]
