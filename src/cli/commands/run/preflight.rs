@@ -459,6 +459,10 @@ fn preflight_python_uv_lock_for_source_driver(
         return Ok(());
     }
 
+    if resolve_python_requirements_path(&plan.manifest_dir).is_some() {
+        return Ok(());
+    }
+
     match probe_required_python_lockfile(&plan.manifest_dir)? {
         ProbeResult::Found(_) => return Ok(()),
         ProbeResult::Missing(_) | ProbeResult::NotApplicable => {}
@@ -470,7 +474,7 @@ fn preflight_python_uv_lock_for_source_driver(
     }
 
     Err(AtoExecutionError::lock_incomplete(
-        "source/python target requires uv.lock for fail-closed provisioning",
+        "source/python target requires uv.lock or requirements.txt for fail-closed provisioning",
         Some("uv.lock"),
     )
     .into())
@@ -482,6 +486,16 @@ fn preflight_python_uv_binary_for_source_driver(
 ) -> Result<()> {
     if !is_python_source_target(plan) {
         return Ok(());
+    }
+
+    if resolve_python_requirements_path(&plan.manifest_dir).is_some() {
+        return which::which("uv").map(|_| ()).map_err(|_| {
+            AtoExecutionError::lock_incomplete(
+                "source/python target requires uv on PATH when using requirements.txt",
+                Some("uv"),
+            )
+            .into()
+        });
     }
 
     runtime_manager::ensure_uv_binary_with_authority(plan, authoritative_lock)
@@ -919,9 +933,18 @@ fn resolve_uv_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
     }
 }
 
+fn resolve_python_requirements_path(manifest_dir: &Path) -> Option<PathBuf> {
+    [
+        manifest_dir.join("requirements.txt"),
+        manifest_dir.join("source").join("requirements.txt"),
+    ]
+    .into_iter()
+    .find(|path| path.exists())
+}
+
 #[cfg(test)]
 pub(super) fn resolve_python_dependency_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
-    resolve_uv_lock_path(manifest_dir)
+    resolve_uv_lock_path(manifest_dir).or_else(|| resolve_python_requirements_path(manifest_dir))
 }
 
 #[cfg(test)]

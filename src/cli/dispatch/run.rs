@@ -160,6 +160,7 @@ mod tests {
             desktop_open_path: None,
             export_request: None,
             provider_workspace: None,
+            transient_workspace_root: None,
         };
         let reporter = Arc::new(crate::reporters::CliReporter::new(true));
 
@@ -204,6 +205,7 @@ mod tests {
             desktop_open_path: None,
             export_request: None,
             provider_workspace: None,
+            transient_workspace_root: None,
         };
         let reporter = Arc::new(crate::reporters::CliReporter::new(true));
 

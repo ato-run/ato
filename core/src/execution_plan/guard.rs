@@ -127,11 +127,11 @@ pub fn evaluate_for_mode_with_authority(
             }
         }
         Some(RequiredLock::UvLock) => {
-            if resolve_uv_lock_path(manifest_dir).is_none()
+            if resolve_python_dependency_path(manifest_dir).is_none()
                 && !matches!(mode, RuntimeGuardMode::Preview)
             {
                 return Err(AtoExecutionError::lock_incomplete(
-                    "uv.lock is required for source/python execution",
+                    "uv.lock or requirements.txt is required for source/python execution",
                     Some("uv.lock"),
                 ));
             }
@@ -328,6 +328,18 @@ fn resolve_uv_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
         manifest_dir.join("source").join("uv.lock"),
     ];
     candidates.into_iter().find(|path| path.exists())
+}
+
+fn resolve_python_requirements_path(manifest_dir: &Path) -> Option<PathBuf> {
+    let candidates = [
+        manifest_dir.join("requirements.txt"),
+        manifest_dir.join("source").join("requirements.txt"),
+    ];
+    candidates.into_iter().find(|path| path.exists())
+}
+
+fn resolve_python_dependency_path(manifest_dir: &Path) -> Option<PathBuf> {
+    resolve_uv_lock_path(manifest_dir).or_else(|| resolve_python_requirements_path(manifest_dir))
 }
 
 #[cfg(test)]
