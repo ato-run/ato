@@ -852,8 +852,8 @@ async fn normalize_run_target_after_install(
 ) -> Result<NormalizedRunTarget> {
     if let Some(transient_workspace_root) = resolved_target.transient_workspace_root.as_ref() {
         if !args.keep_failed_artifacts {
-            if let Some(attempt) = attempt.as_deref_mut() {
-                let mut scope = attempt.cleanup_scope();
+            if let Some(attempt) = attempt.as_mut() {
+                let mut scope = (*attempt).cleanup_scope();
                 scope.register_remove_dir(transient_workspace_root.clone());
             }
         }
@@ -895,9 +895,7 @@ async fn normalize_run_target_after_install(
             })
             .unwrap_or(false)
     {
-        let mut cleanup_scope = attempt
-            .as_deref_mut()
-            .map(|attempt| attempt.cleanup_scope());
+        let mut cleanup_scope = attempt.as_mut().map(|attempt| (*attempt).cleanup_scope());
         let materialized = source_inference::materialize_run_from_explicit_native_artifact(
             target_path,
             cleanup_scope.as_mut(),
@@ -933,9 +931,7 @@ async fn normalize_run_target_after_install(
     {
         return match resolve_authoritative_input(target_path, ResolveInputOptions::default())? {
             ResolvedInput::CanonicalLock { canonical, .. } => {
-                let mut cleanup_scope = attempt
-                    .as_deref_mut()
-                    .map(|attempt| attempt.cleanup_scope());
+                let mut cleanup_scope = attempt.as_mut().map(|attempt| (*attempt).cleanup_scope());
                 let materialized = source_inference::materialize_run_from_canonical_lock(
                     &canonical,
                     cleanup_scope.as_mut(),
@@ -954,9 +950,7 @@ async fn normalize_run_target_after_install(
                 })
             }
             ResolvedInput::CompatibilityProject { project, .. } => {
-                let mut cleanup_scope = attempt
-                    .as_deref_mut()
-                    .map(|attempt| attempt.cleanup_scope());
+                let mut cleanup_scope = attempt.as_mut().map(|attempt| (*attempt).cleanup_scope());
                 let materialized = source_inference::materialize_run_from_compatibility(
                     &project,
                     cleanup_scope.as_mut(),
@@ -982,9 +976,7 @@ async fn normalize_run_target_after_install(
                 })
             }
             ResolvedInput::SourceOnly { source, .. } => {
-                let mut cleanup_scope = attempt
-                    .as_deref_mut()
-                    .map(|attempt| attempt.cleanup_scope());
+                let mut cleanup_scope = attempt.as_mut().map(|attempt| (*attempt).cleanup_scope());
                 let materialized = source_inference::materialize_run_from_source_only(
                     &source,
                     cleanup_scope.as_mut(),
