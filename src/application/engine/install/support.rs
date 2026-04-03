@@ -759,6 +759,7 @@ enum RunManifestRecoveryChoice {
     Abort,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_run_target_or_install(
     path: PathBuf,
     yes: bool,
