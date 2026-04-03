@@ -2,6 +2,14 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
+## [0.9.0] - 2026-04-03
+
+### What Changed
+
+#### Breaking Changes
+
+- Add public `source_layout` metadata to manifest and resolved runtime targets so anchored single-script source execution can preserve caller cwd semantics across materialized runs
+
 ## [0.8.0] - 2026-04-02
 
 ### What Changed
