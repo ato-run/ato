@@ -10,7 +10,8 @@ use crate::install::support::{enforce_sandbox_mode_flags, execute_run_command};
 pub(crate) use crate::install::support::{LocalRunManifestPreparationOutcome, ResolvedRunTarget};
 use crate::reporters;
 use crate::{
-    CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, ProviderBackend, RunAgentMode,
+    CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, ProviderToolchain,
+    RunAgentMode,
 };
 
 pub(crate) struct RunLikeCommandArgs {
@@ -29,7 +30,7 @@ pub(crate) struct RunLikeCommandArgs {
     pub(crate) unsafe_bypass_sandbox_legacy: bool,
     pub(crate) dangerously_skip_permissions: bool,
     pub(crate) compatibility_fallback: Option<CompatibilityFallbackBackend>,
-    pub(crate) provider_backend: Option<ProviderBackend>,
+    pub(crate) provider_toolchain: ProviderToolchain,
     pub(crate) yes: bool,
     pub(crate) agent_mode: RunAgentMode,
     pub(crate) keep_failed_artifacts: bool,
@@ -71,7 +72,7 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
         args.compatibility_fallback
             .map(CompatibilityFallbackBackend::as_str)
             .map(str::to_string),
-        args.provider_backend,
+        args.provider_toolchain,
         args.yes,
         args.agent_mode,
         None,
@@ -164,6 +165,7 @@ mod tests {
             desktop_open_path: None,
             export_request: None,
             provider_workspace: None,
+            transient_workspace_root: None,
         };
         let reporter = Arc::new(crate::reporters::CliReporter::new(true));
 
@@ -208,6 +210,7 @@ mod tests {
             desktop_open_path: None,
             export_request: None,
             provider_workspace: None,
+            transient_workspace_root: None,
         };
         let reporter = Arc::new(crate::reporters::CliReporter::new(true));
 

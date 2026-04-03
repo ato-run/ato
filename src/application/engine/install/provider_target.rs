@@ -1,7 +1,8 @@
 use anyhow::{bail, Context, Result};
 use rand::RngCore;
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,14 +11,22 @@ use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
+use crate::ProviderToolchain;
 use capsule_core::common::paths::ato_runs_dir;
 use capsule_core::python_runtime::{normalized_python_runtime_version, python_selector_env};
 
 const PROVIDER_RUN_ROOT: &str = "provider-backed";
+const PROVIDER_PACKAGE_JSON_FILE: &str = ".ato/provider/package.json";
+const PROVIDER_PACKAGE_LOCK_FILE: &str = ".ato/provider/package-lock.json";
+const PROVIDER_PNPM_LOCK_FILE: &str = ".ato/provider/pnpm-lock.yaml";
+const PROVIDER_BUN_LOCK_FILE: &str = ".ato/provider/bun.lock";
+const PROVIDER_BUN_LOCKB_FILE: &str = ".ato/provider/bun.lockb";
+const PROVIDER_NODE_MODULES_DIR: &str = ".ato/provider/node_modules";
 const PROVIDER_SITE_PACKAGES_DIR: &str = ".ato/provider/site-packages";
 const PROVIDER_REQUIREMENTS_FILE: &str = ".ato/provider/requirements.txt";
 const PROVIDER_RESOLUTION_METADATA_FILE: &str = ".ato/provider/resolution.json";
 const PROVIDER_PYTHON_RUNTIME_VERSION: &str = "3.11.10";
+const PROVIDER_NODE_RUNTIME_VERSION: &str = "20.11.0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProviderKind {
@@ -56,10 +65,10 @@ pub(crate) struct ProviderRunWorkspace {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ResolvedConsoleScript {
-    distribution_name: String,
-    distribution_version: String,
-    script_name: String,
+struct ResolvedProviderEntrypoint {
+    package_name: String,
+    package_version: String,
+    entrypoint_name: String,
     entrypoint_value: String,
 }
 
@@ -83,20 +92,58 @@ impl ParsedPyPIRequirement {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedNpmRequirement {
+    package_name: String,
+}
+
+impl ParsedNpmRequirement {
+    fn canonical_ref(&self) -> String {
+        self.package_name.clone()
+    }
+
+    fn package_dir(&self) -> PathBuf {
+        let mut path = PathBuf::new();
+        for segment in self.package_name.split('/') {
+            path.push(segment);
+        }
+        path
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct ProviderResolutionMetadata {
     provider: String,
     r#ref: String,
+    requested_provider_toolchain: String,
+    effective_provider_toolchain: String,
     requested_package_name: String,
     requested_extras: Vec<String>,
-    resolved_distribution_name: String,
-    resolved_distribution_version: String,
+    resolved_package_name: String,
+    resolved_package_version: String,
     selected_entrypoint: String,
     generated_wrapper_path: String,
     index_source: String,
     requested_runtime_version: String,
     effective_runtime_version: String,
-    materialization_python_selector: String,
+    materialization_runtime_selector: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct NpmPackageManifest {
+    name: Option<String>,
+    version: Option<String>,
+    #[serde(default)]
+    bin: Option<serde_json::Value>,
+    #[serde(default)]
+    scripts: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeProviderLockfileKind {
+    PackageLock,
+    PnpmLock,
+    BunLock,
 }
 
 struct WorkspaceGuard {
@@ -177,7 +224,7 @@ pub(crate) fn parse_provider_target_ref(input: &str) -> Result<Option<ProviderTa
         "npm" => ProviderKind::Npm,
         unknown => {
             bail!(
-                "unknown provider `{}`\n\nSupported providers:\n  pypi\n  npm (recognized, run not implemented yet)",
+                "unknown provider `{}`\n\nSupported providers:\n  pypi\n  npm",
                 unknown
             )
         }
@@ -193,7 +240,7 @@ pub(crate) fn parse_provider_target_ref(input: &str) -> Result<Option<ProviderTa
 
     let ref_string = match provider {
         ProviderKind::PyPI => parse_pypi_requirement_ref(ref_string)?.canonical_ref(),
-        ProviderKind::Npm => ref_string.to_string(),
+        ProviderKind::Npm => parse_npm_package_ref(ref_string)?.canonical_ref(),
     };
 
     Ok(Some(ProviderTargetRef {
@@ -204,24 +251,29 @@ pub(crate) fn parse_provider_target_ref(input: &str) -> Result<Option<ProviderTa
 
 pub(crate) fn materialize_provider_run_workspace(
     target: &ProviderTargetRef,
+    requested_toolchain: ProviderToolchain,
     keep_failed_artifacts: bool,
     json: bool,
 ) -> Result<ProviderRunWorkspace> {
     match target.provider {
-        ProviderKind::PyPI => materialize_pypi_workspace(target, keep_failed_artifacts, json),
-        ProviderKind::Npm => bail!(
-            "Provider target '{}' is recognized but not implemented yet. MVP provider-backed execution currently supports `pypi:<package>` and `pypi:<package>[extra]`.",
-            format_provider_target(target)
-        ),
+        ProviderKind::PyPI => {
+            materialize_pypi_workspace(target, requested_toolchain, keep_failed_artifacts, json)
+        }
+        ProviderKind::Npm => {
+            materialize_npm_workspace(target, requested_toolchain, keep_failed_artifacts, json)
+        }
     }
 }
 
 fn materialize_pypi_workspace(
     target: &ProviderTargetRef,
+    requested_toolchain: ProviderToolchain,
     keep_failed_artifacts: bool,
     json: bool,
 ) -> Result<ProviderRunWorkspace> {
     let package_ref = parse_pypi_requirement_ref(&target.ref_string)?;
+    let effective_toolchain =
+        resolve_effective_provider_toolchain(target.provider, requested_toolchain)?;
     let workspace_root = unique_provider_workspace_root(target.provider)?;
     fs::create_dir_all(&workspace_root)
         .with_context(|| format!("failed to create {}", workspace_root.display()))?;
@@ -257,7 +309,7 @@ fn materialize_pypi_workspace(
         fs::write(
             &wrapper_path,
             python_wrapper_for_entrypoint(
-                &resolved.script_name,
+                &resolved.entrypoint_name,
                 &resolved.entrypoint_value,
                 ".ato/provider/site-packages",
                 &package_ref,
@@ -267,7 +319,7 @@ fn materialize_pypi_workspace(
         fs::write(
             &source_wrapper_path,
             python_wrapper_for_entrypoint(
-                &resolved.script_name,
+                &resolved.entrypoint_name,
                 &resolved.entrypoint_value,
                 "../.ato/provider/site-packages",
                 &package_ref,
@@ -280,7 +332,10 @@ fn materialize_pypi_workspace(
             &manifest_path,
             capsule_manifest_for_provider_run(
                 &package_ref.package_name,
-                &resolved.distribution_version,
+                &resolved.package_version,
+                "python",
+                PROVIDER_PYTHON_RUNTIME_VERSION,
+                "main.py",
             ),
         )
         .with_context(|| format!("failed to write {}", manifest_path.display()))?;
@@ -289,16 +344,18 @@ fn materialize_pypi_workspace(
         let metadata = ProviderResolutionMetadata {
             provider: target.provider.as_str().to_string(),
             r#ref: package_ref.canonical_ref(),
+            requested_provider_toolchain: requested_toolchain.as_str().to_string(),
+            effective_provider_toolchain: effective_toolchain.as_str().to_string(),
             requested_package_name: package_ref.package_name.clone(),
             requested_extras: package_ref.extras.clone(),
-            resolved_distribution_name: resolved.distribution_name,
-            resolved_distribution_version: resolved.distribution_version,
+            resolved_package_name: resolved.package_name,
+            resolved_package_version: resolved.package_version,
             selected_entrypoint: resolved.entrypoint_value,
             generated_wrapper_path: wrapper_path.display().to_string(),
-            index_source: current_index_source(),
+            index_source: current_provider_index_source(target.provider),
             requested_runtime_version: PROVIDER_PYTHON_RUNTIME_VERSION.to_string(),
             effective_runtime_version: PROVIDER_PYTHON_RUNTIME_VERSION.to_string(),
-            materialization_python_selector: normalized_python_runtime_version(Some(
+            materialization_runtime_selector: normalized_python_runtime_version(Some(
                 PROVIDER_PYTHON_RUNTIME_VERSION,
             ))
             .unwrap_or_else(|| PROVIDER_PYTHON_RUNTIME_VERSION.to_string()),
@@ -317,7 +374,144 @@ fn materialize_pypi_workspace(
             workspace_root = %workspace_root.display(),
             "Materialized provider-backed PyPI workspace"
         );
+        guard.keep();
 
+        Ok(ProviderRunWorkspace {
+            target: target.clone(),
+            workspace_root: workspace_root.clone(),
+            resolution_metadata_path,
+        })
+    })();
+
+    if result.is_err() && keep_failed_artifacts {
+        guard.keep();
+        maybe_report_kept_failed_provider_workspace(&workspace_root, json);
+    }
+
+    result
+}
+
+fn materialize_npm_workspace(
+    target: &ProviderTargetRef,
+    requested_toolchain: ProviderToolchain,
+    keep_failed_artifacts: bool,
+    json: bool,
+) -> Result<ProviderRunWorkspace> {
+    let package_ref = parse_npm_package_ref(&target.ref_string)?;
+    let effective_toolchain =
+        resolve_effective_provider_toolchain(target.provider, requested_toolchain)?;
+    let workspace_root = unique_provider_workspace_root(target.provider)?;
+    fs::create_dir_all(&workspace_root)
+        .with_context(|| format!("failed to create {}", workspace_root.display()))?;
+    let mut guard = WorkspaceGuard::new(workspace_root.clone());
+    let result = (|| -> Result<ProviderRunWorkspace> {
+        let provider_dir = workspace_root.join(".ato/provider");
+        fs::create_dir_all(&provider_dir)
+            .with_context(|| format!("failed to create {}", provider_dir.display()))?;
+
+        let package_json_path = workspace_root.join(PROVIDER_PACKAGE_JSON_FILE);
+        if let Some(parent) = package_json_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(
+            &package_json_path,
+            serde_json::to_string_pretty(&json!({
+                "name": "ato-provider-run",
+                "private": true,
+                "dependencies": {
+                    package_ref.package_name.clone(): "*",
+                },
+            }))
+            .context("failed to serialize synthetic npm package.json")?
+                + "\n",
+        )
+        .with_context(|| format!("failed to write {}", package_json_path.display()))?;
+
+        let lockfile_path = install_node_provider_package(
+            &provider_dir,
+            workspace_root.as_path(),
+            effective_toolchain,
+        )?;
+
+        let source_dir = workspace_root.join("source");
+        fs::create_dir_all(&source_dir)
+            .with_context(|| format!("failed to create {}", source_dir.display()))?;
+        let lockfile_name = lockfile_path
+            .file_name()
+            .context("provider-backed node lockfile must have a filename")?;
+        fs::copy(&lockfile_path, source_dir.join(lockfile_name)).with_context(|| {
+            format!(
+                "failed to mirror node lockfile into {}",
+                source_dir.display()
+            )
+        })?;
+
+        let installed_package_dir = workspace_root
+            .join(PROVIDER_NODE_MODULES_DIR)
+            .join(package_ref.package_dir());
+        let resolved = resolve_npm_bin_metadata(&installed_package_dir, &package_ref.package_name)?;
+        let root_bin_relative = installed_package_dir
+            .join(&resolved.entrypoint_value)
+            .strip_prefix(&workspace_root)
+            .context("npm bin path must stay under synthetic workspace root")?
+            .to_string_lossy()
+            .to_string();
+
+        let wrapper_path = workspace_root.join("main.mjs");
+        let source_wrapper_path = source_dir.join("main.mjs");
+        fs::write(&wrapper_path, node_wrapper_for_bin(&root_bin_relative)?)
+            .with_context(|| format!("failed to write {}", wrapper_path.display()))?;
+        fs::write(
+            &source_wrapper_path,
+            node_wrapper_for_bin(&format!("../{root_bin_relative}"))?,
+        )
+        .with_context(|| format!("failed to write {}", source_wrapper_path.display()))?;
+
+        let manifest_path = workspace_root.join("capsule.toml");
+        fs::write(
+            &manifest_path,
+            capsule_manifest_for_provider_run(
+                &package_ref.package_name,
+                &resolved.package_version,
+                "node",
+                PROVIDER_NODE_RUNTIME_VERSION,
+                "main.mjs",
+            ),
+        )
+        .with_context(|| format!("failed to write {}", manifest_path.display()))?;
+
+        let resolution_metadata_path = workspace_root.join(PROVIDER_RESOLUTION_METADATA_FILE);
+        let metadata = ProviderResolutionMetadata {
+            provider: target.provider.as_str().to_string(),
+            r#ref: package_ref.canonical_ref(),
+            requested_provider_toolchain: requested_toolchain.as_str().to_string(),
+            effective_provider_toolchain: effective_toolchain.as_str().to_string(),
+            requested_package_name: package_ref.package_name.clone(),
+            requested_extras: Vec::new(),
+            resolved_package_name: resolved.package_name,
+            resolved_package_version: resolved.package_version,
+            selected_entrypoint: resolved.entrypoint_value,
+            generated_wrapper_path: wrapper_path.display().to_string(),
+            index_source: current_provider_index_source(target.provider),
+            requested_runtime_version: PROVIDER_NODE_RUNTIME_VERSION.to_string(),
+            effective_runtime_version: PROVIDER_NODE_RUNTIME_VERSION.to_string(),
+            materialization_runtime_selector: PROVIDER_NODE_RUNTIME_VERSION.to_string(),
+        };
+        fs::write(
+            &resolution_metadata_path,
+            serde_json::to_string_pretty(&metadata)
+                .context("failed to serialize provider resolution metadata")?
+                + "\n",
+        )
+        .with_context(|| format!("failed to write {}", resolution_metadata_path.display()))?;
+
+        debug!(
+            selected_node_runtime = PROVIDER_NODE_RUNTIME_VERSION,
+            effective_provider_toolchain = effective_toolchain.as_str(),
+            workspace_root = %workspace_root.display(),
+            "Materialized provider-backed npm workspace"
+        );
         guard.keep();
 
         Ok(ProviderRunWorkspace {
@@ -394,7 +588,7 @@ fn sync_provider_site_packages(workspace_root: &Path, site_packages_dir: &Path) 
 fn resolve_console_script_metadata(
     site_packages_dir: &Path,
     requested_package: &str,
-) -> Result<ResolvedConsoleScript> {
+) -> Result<ResolvedProviderEntrypoint> {
     let normalized_requested = normalize_pypi_name(requested_package);
     let mut matches = Vec::new();
 
@@ -477,12 +671,277 @@ fn resolve_console_script_metadata(
     let (script_name, entrypoint_value) = console_scripts.remove(0);
     validate_entrypoint_value(&entrypoint_value)?;
 
-    Ok(ResolvedConsoleScript {
-        distribution_name,
-        distribution_version,
-        script_name,
+    Ok(ResolvedProviderEntrypoint {
+        package_name: distribution_name,
+        package_version: distribution_version,
+        entrypoint_name: script_name,
         entrypoint_value,
     })
+}
+
+fn resolve_effective_provider_toolchain(
+    provider: ProviderKind,
+    requested: ProviderToolchain,
+) -> Result<ProviderToolchain> {
+    match (provider, requested) {
+        (ProviderKind::PyPI, ProviderToolchain::Auto | ProviderToolchain::Uv) => {
+            Ok(ProviderToolchain::Uv)
+        }
+        (ProviderKind::PyPI, invalid) => bail!(
+            "`--via {}` is not valid for pypi: targets in this MVP. Supported combinations:\n  pypi + auto\n  pypi + uv",
+            invalid.as_str()
+        ),
+        (
+            ProviderKind::Npm,
+            ProviderToolchain::Auto | ProviderToolchain::Npm,
+        ) => Ok(ProviderToolchain::Npm),
+        (ProviderKind::Npm, ProviderToolchain::Bun) => Ok(ProviderToolchain::Bun),
+        (ProviderKind::Npm, ProviderToolchain::Pnpm) => Ok(ProviderToolchain::Pnpm),
+        (ProviderKind::Npm, invalid) => bail!(
+            "`--via {}` is not valid for npm: targets in this MVP. Supported combinations:\n  npm + auto\n  npm + npm\n  npm + bun\n  npm + pnpm",
+            invalid.as_str()
+        ),
+    }
+}
+
+fn install_node_provider_package(
+    provider_dir: &Path,
+    workspace_root: &Path,
+    toolchain: ProviderToolchain,
+) -> Result<PathBuf> {
+    let (program, args, expected_lockfile_kind) = node_provider_install_command(toolchain)?;
+    let output = Command::new(&program)
+        .args(args)
+        .current_dir(provider_dir)
+        .output()
+        .with_context(|| format!("failed to execute `{}`", program.display()))?;
+
+    if output.status.success() {
+        return resolve_node_provider_lockfile_path(workspace_root, expected_lockfile_kind);
+    }
+
+    bail!(
+        "failed to materialize provider-backed {} package (status {}): {}",
+        toolchain.as_str(),
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+}
+
+fn node_provider_install_command(
+    toolchain: ProviderToolchain,
+) -> Result<(PathBuf, Vec<&'static str>, NodeProviderLockfileKind)> {
+    match toolchain {
+        ProviderToolchain::Npm => Ok((
+            find_npm_binary()?,
+            npm_install_command_args().to_vec(),
+            NodeProviderLockfileKind::PackageLock,
+        )),
+        ProviderToolchain::Pnpm => Ok((
+            find_pnpm_binary()?,
+            pnpm_install_command_args().to_vec(),
+            NodeProviderLockfileKind::PnpmLock,
+        )),
+        ProviderToolchain::Bun => Ok((
+            find_bun_binary()?,
+            bun_install_command_args().to_vec(),
+            NodeProviderLockfileKind::BunLock,
+        )),
+        other => bail!(
+            "Node provider toolchain '{}' is not materializable in this MVP.",
+            other.as_str()
+        ),
+    }
+}
+
+fn npm_install_command_args() -> [&'static str; 5] {
+    [
+        "install",
+        "--ignore-scripts",
+        "--no-audit",
+        "--no-fund",
+        "--silent",
+    ]
+}
+
+fn pnpm_install_command_args() -> [&'static str; 5] {
+    [
+        "install",
+        "--ignore-scripts",
+        "--ignore-workspace",
+        "--no-frozen-lockfile",
+        "--silent",
+    ]
+}
+
+fn bun_install_command_args() -> [&'static str; 3] {
+    ["install", "--ignore-scripts", "--silent"]
+}
+
+fn resolve_node_provider_lockfile_path(
+    workspace_root: &Path,
+    expected_lockfile_kind: NodeProviderLockfileKind,
+) -> Result<PathBuf> {
+    let path = match expected_lockfile_kind {
+        NodeProviderLockfileKind::PackageLock => workspace_root.join(PROVIDER_PACKAGE_LOCK_FILE),
+        NodeProviderLockfileKind::PnpmLock => workspace_root.join(PROVIDER_PNPM_LOCK_FILE),
+        NodeProviderLockfileKind::BunLock => {
+            let bun_lock = workspace_root.join(PROVIDER_BUN_LOCK_FILE);
+            if bun_lock.exists() {
+                bun_lock
+            } else {
+                workspace_root.join(PROVIDER_BUN_LOCKB_FILE)
+            }
+        }
+    };
+
+    if path.exists() {
+        return Ok(path);
+    }
+
+    bail!(
+        "failed to materialize provider-backed node package: expected lockfile {} was not generated",
+        path.display()
+    );
+}
+
+fn resolve_npm_bin_metadata(
+    installed_package_dir: &Path,
+    requested_package: &str,
+) -> Result<ResolvedProviderEntrypoint> {
+    let manifest_path = installed_package_dir.join("package.json");
+    if !manifest_path.exists() {
+        bail!(
+            "Package '{}' was not materialized under node_modules. Provider-backed npm execution currently supports registry package-name resolution only.",
+            requested_package
+        );
+    }
+
+    let manifest: NpmPackageManifest = serde_json::from_str(
+        &fs::read_to_string(&manifest_path)
+            .with_context(|| format!("failed to read {}", manifest_path.display()))?,
+    )
+    .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+
+    reject_npm_lifecycle_scripts(manifest.scripts.as_ref(), requested_package)?;
+
+    let package_name = manifest
+        .name
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| requested_package.to_string());
+    let package_version = manifest
+        .version
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "0.0.0".to_string());
+    let Some(bin) = manifest.bin else {
+        bail!(
+            "Package '{}' does not expose a CLI bin entrypoint. Explicit entrypoint selection is not supported yet.",
+            requested_package
+        );
+    };
+
+    let mut entries = match bin {
+        serde_json::Value::String(path) => vec![(default_npm_bin_name(&package_name), path)],
+        serde_json::Value::Object(map) => map
+            .into_iter()
+            .filter_map(|(name, value)| value.as_str().map(|path| (name, path.to_string())))
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+
+    if entries.is_empty() {
+        bail!(
+            "Package '{}' does not expose a CLI bin entrypoint. Explicit entrypoint selection is not supported yet.",
+            requested_package
+        );
+    }
+    if entries.len() > 1 {
+        let names = entries
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!(
+            "Package '{}' exposes multiple bin entrypoints ({names}). Explicit entrypoint selection is not supported yet.",
+            requested_package
+        );
+    }
+
+    let (entrypoint_name, entrypoint_value) = entries.remove(0);
+    validate_npm_bin_path(&entrypoint_value)?;
+    let bin_path = installed_package_dir.join(&entrypoint_value);
+    if !bin_path.exists() {
+        bail!(
+            "Package '{}' publishes bin '{}' -> '{}' but the file is missing after `npm install --ignore-scripts`. Packages that require install scripts are not supported in this MVP.",
+            requested_package,
+            entrypoint_name,
+            entrypoint_value
+        );
+    }
+
+    Ok(ResolvedProviderEntrypoint {
+        package_name,
+        package_version,
+        entrypoint_name,
+        entrypoint_value,
+    })
+}
+
+fn reject_npm_lifecycle_scripts(
+    scripts: Option<&serde_json::Map<String, serde_json::Value>>,
+    requested_package: &str,
+) -> Result<()> {
+    let Some(scripts) = scripts else {
+        return Ok(());
+    };
+
+    let lifecycle = ["preinstall", "install", "postinstall", "prepare"]
+        .into_iter()
+        .filter(|name| {
+            scripts
+                .get(*name)
+                .and_then(|value| value.as_str())
+                .is_some()
+        })
+        .collect::<Vec<_>>();
+    if lifecycle.is_empty() {
+        return Ok(());
+    }
+
+    bail!(
+        "Package '{}' declares install lifecycle scripts ({}). MVP provider-backed npm execution always runs `npm install --ignore-scripts` and rejects packages that require install scripts.",
+        requested_package,
+        lifecycle.join(", ")
+    );
+}
+
+fn default_npm_bin_name(package_name: &str) -> String {
+    package_name
+        .rsplit('/')
+        .next()
+        .unwrap_or(package_name)
+        .to_string()
+}
+
+fn validate_npm_bin_path(raw: &str) -> Result<()> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        bail!("Resolved npm bin path must not be empty");
+    }
+    let path = Path::new(trimmed);
+    if path.is_absolute() {
+        bail!("Resolved npm bin path '{}' must be relative", raw);
+    }
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(_) | std::path::Component::CurDir => {}
+            _ => bail!(
+                "Resolved npm bin path '{}' must stay within the package root",
+                raw
+            ),
+        }
+    }
+    Ok(())
 }
 
 fn parse_console_scripts(raw: &str) -> Vec<(String, String)> {
@@ -620,7 +1079,39 @@ if __name__ == "__main__":
     ))
 }
 
-fn capsule_manifest_for_provider_run(package_name: &str, version: &str) -> String {
+fn node_wrapper_for_bin(relative_bin_path: &str) -> Result<String> {
+    let relative_literal = serde_json::to_string(relative_bin_path)
+        .context("failed to encode npm bin path literal")?;
+    Ok(format!(
+        r#"#!/usr/bin/env node
+import {{ spawnSync }} from "node:child_process";
+import path from "node:path";
+import {{ fileURLToPath }} from "node:url";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const binPath = path.resolve(here, {relative_literal});
+const result = spawnSync(process.execPath, [binPath, ...process.argv.slice(2)], {{
+  stdio: "inherit",
+  cwd: process.cwd(),
+  env: process.env,
+}});
+
+if (result.error) {{
+  throw result.error;
+}}
+
+process.exit(result.status ?? 1);
+"#
+    ))
+}
+
+fn capsule_manifest_for_provider_run(
+    package_name: &str,
+    version: &str,
+    driver: &str,
+    runtime_version: &str,
+    entrypoint: &str,
+) -> String {
     format!(
         r#"schema_version = "0.2"
 name = "{package_name}"
@@ -630,9 +1121,9 @@ default_target = "cli"
 
 [targets.cli]
 runtime = "source"
-driver = "python"
-runtime_version = "{PROVIDER_PYTHON_RUNTIME_VERSION}"
-entrypoint = "main.py"
+driver = "{driver}"
+runtime_version = "{runtime_version}"
+entrypoint = "{entrypoint}"
 source_layout = "anchored_entrypoint"
 "#
     )
@@ -715,6 +1206,91 @@ fn normalize_pypi_name(raw: &str) -> String {
         .to_string()
 }
 
+fn parse_npm_package_ref(raw_ref: &str) -> Result<ParsedNpmRequirement> {
+    let trimmed = raw_ref.trim();
+    if trimmed.is_empty() || trimmed.contains(char::is_whitespace) || trimmed.contains('\\') {
+        bail!(
+            "Unsupported provider target '{}'. MVP provider-backed npm execution accepts only `npm:<package>` or `npm:@scope/package`.",
+            raw_ref
+        );
+    }
+    if trimmed.starts_with("file:")
+        || trimmed.starts_with("git+")
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.contains("://")
+    {
+        bail!(
+            "Unsupported provider target '{}'. MVP provider-backed npm execution does not support direct URL, git, or file references yet.",
+            raw_ref
+        );
+    }
+
+    let package_name = if let Some(scoped) = trimmed.strip_prefix('@') {
+        let Some((scope, remainder)) = scoped.split_once('/') else {
+            bail!(
+                "Unsupported provider target '{}'. Scoped npm refs must use `npm:@scope/package`.",
+                raw_ref
+            );
+        };
+        if remainder.contains('/') {
+            bail!(
+                "Unsupported provider target '{}'. MVP provider-backed npm execution does not support package subpaths.",
+                raw_ref
+            );
+        }
+        if remainder.contains('@') {
+            bail!(
+                "Unsupported provider target '{}'. MVP provider-backed npm execution does not support inline versions or dist-tags yet.",
+                raw_ref
+            );
+        }
+        validate_npm_name_segment(scope, raw_ref)?;
+        validate_npm_name_segment(remainder, raw_ref)?;
+        format!(
+            "@{}/{}",
+            scope.to_ascii_lowercase(),
+            remainder.to_ascii_lowercase()
+        )
+    } else {
+        if trimmed.contains('/') {
+            bail!(
+                "Unsupported provider target '{}'. MVP provider-backed npm execution does not support package subpaths.",
+                raw_ref
+            );
+        }
+        if trimmed.contains('@') {
+            bail!(
+                "Unsupported provider target '{}'. MVP provider-backed npm execution does not support inline versions or dist-tags yet.",
+                raw_ref
+            );
+        }
+        validate_npm_name_segment(trimmed, raw_ref)?;
+        trimmed.to_ascii_lowercase()
+    };
+
+    Ok(ParsedNpmRequirement { package_name })
+}
+
+fn validate_npm_name_segment(segment: &str, raw_ref: &str) -> Result<()> {
+    if segment.is_empty()
+        || !segment.chars().all(|value| {
+            value.is_ascii_lowercase() || value.is_ascii_digit() || matches!(value, '.' | '_' | '-')
+        })
+        || !segment
+            .chars()
+            .next()
+            .map(|value| value.is_ascii_lowercase() || value.is_ascii_digit())
+            .unwrap_or(false)
+    {
+        bail!(
+            "Unsupported provider target '{}'. MVP provider-backed npm execution accepts package names matching [a-z0-9._-]+.",
+            raw_ref
+        );
+    }
+    Ok(())
+}
+
 fn strip_entrypoint_extras(value: &str) -> &str {
     value
         .split_once('[')
@@ -722,16 +1298,27 @@ fn strip_entrypoint_extras(value: &str) -> &str {
         .unwrap_or(value)
 }
 
-fn current_index_source() -> String {
-    env::var("UV_INDEX_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            env::var("PIP_INDEX_URL")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })
-        .unwrap_or_else(|| "default".to_string())
+fn current_provider_index_source(provider: ProviderKind) -> String {
+    match provider {
+        ProviderKind::PyPI => env::var("UV_INDEX_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                env::var("PIP_INDEX_URL")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "default".to_string()),
+        ProviderKind::Npm => env::var("NPM_CONFIG_REGISTRY")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                env::var("npm_config_registry")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "default".to_string()),
+    }
 }
 
 fn unique_provider_workspace_root(provider: ProviderKind) -> Result<PathBuf> {
@@ -749,6 +1336,18 @@ fn find_uv_binary() -> Result<PathBuf> {
     which::which("uv").context("provider-backed PyPI execution requires `uv` on PATH")
 }
 
+fn find_npm_binary() -> Result<PathBuf> {
+    which::which("npm").context("provider-backed npm execution requires `npm` on PATH")
+}
+
+fn find_pnpm_binary() -> Result<PathBuf> {
+    which::which("pnpm").context("provider-backed pnpm execution requires `pnpm` on PATH")
+}
+
+fn find_bun_binary() -> Result<PathBuf> {
+    which::which("bun").context("provider-backed bun execution requires `bun` on PATH")
+}
+
 pub(crate) fn maybe_report_kept_failed_provider_workspace(workspace_root: &Path, json: bool) {
     if json {
         return;
@@ -759,17 +1358,13 @@ pub(crate) fn maybe_report_kept_failed_provider_workspace(workspace_root: &Path,
     );
 }
 
-fn format_provider_target(target: &ProviderTargetRef) -> String {
-    format!("{}:{}", target.provider.as_str(), target.ref_string)
-}
-
 fn run_only_install_message(provider: Option<ProviderKind>, ref_string: &str) -> String {
     match provider {
         Some(ProviderKind::PyPI) => format!(
             "provider-backed targets are run-only in this MVP. Use `ato run pypi:{ref_string} -- ...`; `ato install pypi:{ref_string}` is not supported."
         ),
         Some(ProviderKind::Npm) => format!(
-            "provider-backed targets are run-only in this MVP, and `npm:` execution is not implemented yet. `ato install npm:{ref_string}` is not supported."
+            "provider-backed targets are run-only in this MVP. Use `ato run npm:{ref_string} -- ...`; `ato install npm:{ref_string}` is not supported."
         ),
         None => "provider-backed targets are run-only in this MVP.".to_string(),
     }
@@ -815,11 +1410,14 @@ fn pypi_normalize_regex() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_run_target, materialize_provider_run_workspace, parse_provider_target_ref,
-        parse_pypi_requirement_ref, resolve_console_script_metadata, ParsedRunTarget, ProviderKind,
-        ProviderTargetRef, PROVIDER_RESOLUTION_METADATA_FILE,
+        classify_run_target, materialize_provider_run_workspace, npm_install_command_args,
+        parse_npm_package_ref, parse_provider_target_ref, parse_pypi_requirement_ref,
+        pnpm_install_command_args, resolve_console_script_metadata,
+        resolve_effective_provider_toolchain, resolve_npm_bin_metadata, ParsedRunTarget,
+        ProviderKind, ProviderTargetRef, PROVIDER_RESOLUTION_METADATA_FILE,
     };
-    use serde_json::Value;
+    use crate::ProviderToolchain;
+    use serde_json::{json, Value};
     use serial_test::serial;
     use std::fs;
     use std::fs::File;
@@ -1187,6 +1785,26 @@ Tag: py3-none-any\n";
         }
     }
 
+    fn write_npm_package_manifest(
+        package_root: &Path,
+        manifest: serde_json::Value,
+        bin_files: &[(&str, &str)],
+    ) {
+        fs::create_dir_all(package_root).expect("create npm package root");
+        fs::write(
+            package_root.join("package.json"),
+            serde_json::to_string_pretty(&manifest).expect("serialize npm package manifest"),
+        )
+        .expect("write npm package manifest");
+        for (relative_path, contents) in bin_files {
+            let path = package_root.join(relative_path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create npm bin parent");
+            }
+            fs::write(path, contents).expect("write npm bin file");
+        }
+    }
+
     #[test]
     fn classify_run_target_parses_pypi_provider_target() {
         let parsed = classify_run_target("pypi:markitdown", Path::new("pypi:markitdown"))
@@ -1221,6 +1839,36 @@ Tag: py3-none-any\n";
             .expect("provider target");
         assert_eq!(target.provider, ProviderKind::Npm);
         assert_eq!(target.ref_string, "@scope/pkg");
+    }
+
+    #[test]
+    fn parse_npm_package_ref_accepts_unscoped_package() {
+        let target = parse_npm_package_ref("tsx").expect("parse npm package");
+        assert_eq!(target.package_name, "tsx");
+    }
+
+    #[test]
+    fn parse_npm_package_ref_rejects_inline_version() {
+        let err = parse_npm_package_ref("tsx@4.9.0").expect_err("version must fail");
+        assert!(err
+            .to_string()
+            .contains("does not support inline versions or dist-tags"));
+    }
+
+    #[test]
+    fn parse_npm_package_ref_rejects_direct_url() {
+        let err = parse_npm_package_ref("https://example.com/demo.tgz").expect_err("url must fail");
+        assert!(err
+            .to_string()
+            .contains("does not support direct URL, git, or file references"));
+    }
+
+    #[test]
+    fn parse_npm_package_ref_rejects_subpath() {
+        let err = parse_npm_package_ref("@scope/pkg/bin").expect_err("subpath must fail");
+        assert!(err
+            .to_string()
+            .contains("does not support package subpaths"));
     }
 
     #[test]
@@ -1265,6 +1913,115 @@ Tag: py3-none-any\n";
     }
 
     #[test]
+    fn npm_install_command_uses_ignore_scripts() {
+        assert_eq!(
+            npm_install_command_args(),
+            [
+                "install",
+                "--ignore-scripts",
+                "--no-audit",
+                "--no-fund",
+                "--silent"
+            ]
+        );
+    }
+
+    #[test]
+    fn pnpm_install_command_uses_ignore_scripts() {
+        assert_eq!(
+            pnpm_install_command_args(),
+            [
+                "install",
+                "--ignore-scripts",
+                "--ignore-workspace",
+                "--no-frozen-lockfile",
+                "--silent"
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_effective_provider_toolchain_accepts_pnpm_for_npm_targets() {
+        let toolchain =
+            resolve_effective_provider_toolchain(ProviderKind::Npm, ProviderToolchain::Pnpm)
+                .expect("pnpm should be valid for npm targets");
+        assert_eq!(toolchain, ProviderToolchain::Pnpm);
+    }
+
+    #[test]
+    fn resolve_effective_provider_toolchain_rejects_pnpm_for_pypi_targets() {
+        let err = resolve_effective_provider_toolchain(ProviderKind::PyPI, ProviderToolchain::Pnpm)
+            .expect_err("pnpm should be rejected for pypi targets");
+        assert!(err.to_string().contains("pypi + uv"));
+    }
+
+    #[test]
+    fn resolve_npm_bin_metadata_accepts_single_bin_string() {
+        let temp = workspace_tempdir("provider-target-npm-single-bin-");
+        write_npm_package_manifest(
+            temp.path(),
+            json!({
+                "name": "demo-npm-single-bin",
+                "version": "1.0.0",
+                "bin": "bin/cli.mjs",
+            }),
+            &[("bin/cli.mjs", "console.log('ok');\n")],
+        );
+
+        let resolved =
+            resolve_npm_bin_metadata(temp.path(), "demo-npm-single-bin").expect("resolve npm bin");
+        assert_eq!(resolved.package_name, "demo-npm-single-bin");
+        assert_eq!(resolved.package_version, "1.0.0");
+        assert_eq!(resolved.entrypoint_name, "demo-npm-single-bin");
+        assert_eq!(resolved.entrypoint_value, "bin/cli.mjs");
+    }
+
+    #[test]
+    fn resolve_npm_bin_metadata_rejects_multiple_bins() {
+        let temp = workspace_tempdir("provider-target-npm-multi-bin-");
+        write_npm_package_manifest(
+            temp.path(),
+            json!({
+                "name": "demo-npm-multi-bin",
+                "version": "1.0.0",
+                "bin": {
+                    "demo-a": "bin/a.mjs",
+                    "demo-b": "bin/b.mjs",
+                },
+            }),
+            &[("bin/a.mjs", "a\n"), ("bin/b.mjs", "b\n")],
+        );
+
+        let err = resolve_npm_bin_metadata(temp.path(), "demo-npm-multi-bin")
+            .expect_err("multiple bins must fail");
+        assert!(err.to_string().contains("multiple bin entrypoints"));
+    }
+
+    #[test]
+    fn resolve_npm_bin_metadata_rejects_install_lifecycle_scripts() {
+        let temp = workspace_tempdir("provider-target-npm-install-script-");
+        write_npm_package_manifest(
+            temp.path(),
+            json!({
+                "name": "demo-npm-needs-install-script",
+                "version": "1.0.0",
+                "bin": "bin/cli.mjs",
+                "scripts": {
+                    "install": "node build.mjs",
+                },
+            }),
+            &[("bin/cli.mjs", "console.log('ok');\n")],
+        );
+
+        let err = resolve_npm_bin_metadata(temp.path(), "demo-npm-needs-install-script")
+            .expect_err("install script package must fail");
+        assert!(err
+            .to_string()
+            .contains("declares install lifecycle scripts"));
+        assert!(err.to_string().contains("--ignore-scripts"));
+    }
+
+    #[test]
     fn resolve_console_script_metadata_uses_distribution_metadata_only() {
         let temp = workspace_tempdir("provider-target-metadata-only-");
         write_distribution(
@@ -1276,9 +2033,9 @@ Tag: py3-none-any\n";
 
         let resolved = resolve_console_script_metadata(temp.path(), "demo-provider")
             .expect("resolve entrypoint");
-        assert_eq!(resolved.distribution_name, "demo-provider");
-        assert_eq!(resolved.distribution_version, "0.1.0");
-        assert_eq!(resolved.script_name, "demo-provider");
+        assert_eq!(resolved.package_name, "demo-provider");
+        assert_eq!(resolved.package_version, "0.1.0");
+        assert_eq!(resolved.entrypoint_name, "demo-provider");
         assert_eq!(resolved.entrypoint_value, "demo_provider.cli:main");
     }
 
@@ -1357,6 +2114,7 @@ Tag: py3-none-any\n";
                 provider: ProviderKind::PyPI,
                 ref_string: "demo-provider".to_string(),
             },
+            ProviderToolchain::Auto,
             false,
             false,
         )
@@ -1407,14 +2165,19 @@ Tag: py3-none-any\n";
         assert_eq!(metadata["provider"].as_str(), Some("pypi"));
         assert_eq!(metadata["ref"].as_str(), Some("demo-provider"));
         assert_eq!(
+            metadata["requested_provider_toolchain"].as_str(),
+            Some("auto")
+        );
+        assert_eq!(
+            metadata["effective_provider_toolchain"].as_str(),
+            Some("uv")
+        );
+        assert_eq!(
             metadata["requested_package_name"].as_str(),
             Some("demo-provider")
         );
         assert_eq!(metadata["requested_extras"], serde_json::json!([]));
-        assert_eq!(
-            metadata["resolved_distribution_version"].as_str(),
-            Some("0.1.0")
-        );
+        assert_eq!(metadata["resolved_package_version"].as_str(), Some("0.1.0"));
         assert_eq!(
             metadata["selected_entrypoint"].as_str(),
             Some("demo_provider.cli:main")
@@ -1428,7 +2191,7 @@ Tag: py3-none-any\n";
             Some(super::PROVIDER_PYTHON_RUNTIME_VERSION)
         );
         assert_eq!(
-            metadata["materialization_python_selector"].as_str(),
+            metadata["materialization_runtime_selector"].as_str(),
             Some(super::PROVIDER_PYTHON_RUNTIME_VERSION)
         );
         assert!(
@@ -1509,6 +2272,7 @@ Tag: py3-none-any\n";
                 provider: ProviderKind::PyPI,
                 ref_string: "demo-provider[b,a,a]".to_string(),
             },
+            ProviderToolchain::Auto,
             false,
             false,
         )
@@ -1529,12 +2293,20 @@ Tag: py3-none-any\n";
         .expect("parse resolution metadata");
         assert_eq!(metadata["ref"].as_str(), Some("demo-provider[a,b]"));
         assert_eq!(
+            metadata["requested_provider_toolchain"].as_str(),
+            Some("auto")
+        );
+        assert_eq!(
+            metadata["effective_provider_toolchain"].as_str(),
+            Some("uv")
+        );
+        assert_eq!(
             metadata["requested_package_name"].as_str(),
             Some("demo-provider")
         );
         assert_eq!(metadata["requested_extras"], serde_json::json!(["a", "b"]));
         assert_eq!(
-            metadata["materialization_python_selector"].as_str(),
+            metadata["materialization_runtime_selector"].as_str(),
             Some(super::PROVIDER_PYTHON_RUNTIME_VERSION)
         );
 
