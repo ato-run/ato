@@ -16,6 +16,7 @@ use capsule_core::lockfile::{
 };
 use capsule_core::types::{CapsuleManifest, CapsuleType, StateDurability};
 use capsule_core::CapsuleReporter;
+use serde_json::Value as JsonValue;
 use tracing::debug;
 
 use crate::application::engine::install::support::{
@@ -720,6 +721,16 @@ where
         );
     }
 
+    let preflight_manifest = std::fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|raw| toml::from_str::<toml::Value>(&raw).ok());
+    run_external_service_preflight(
+        preflight_manifest
+            .as_ref()
+            .unwrap_or_else(|| prepared.bridge_manifest.as_toml()),
+    )
+    .await?;
+
     let external_dependencies = if prepared
         .bridge_manifest
         .as_toml()
@@ -888,6 +899,120 @@ where
         compatibility_host_mode: None,
         native_nacelle: None,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OllamaReuseIfPresentPreflight {
+    healthcheck_url: String,
+    required_model: Option<String>,
+}
+
+fn parse_ollama_reuse_if_present_preflight(
+    manifest: &toml::Value,
+) -> Option<OllamaReuseIfPresentPreflight> {
+    let services = manifest.get("services")?.as_table()?;
+    let (_, ollama_service) = services.iter().find(|(_, service)| {
+        service
+            .as_table()
+            .and_then(|table| table.get("from"))
+            .and_then(toml::Value::as_str)
+            .map(|from| from.trim().eq_ignore_ascii_case("dependency:ollama"))
+            .unwrap_or(false)
+    })?;
+    let service = ollama_service.as_table()?;
+    let mode = service.get("mode").and_then(toml::Value::as_str)?.trim();
+    if !mode.eq_ignore_ascii_case("reuse-if-present") {
+        return None;
+    }
+
+    let healthcheck_url = service
+        .get("healthcheck")
+        .and_then(toml::Value::as_table)
+        .and_then(|healthcheck| healthcheck.get("url"))
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("http://127.0.0.1:11434/api/tags")
+        .to_string();
+    let required_model = manifest
+        .get("bootstrap")
+        .and_then(toml::Value::as_table)
+        .and_then(|bootstrap| bootstrap.get("defaults"))
+        .and_then(toml::Value::as_table)
+        .and_then(|defaults| defaults.get("ollama_model"))
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+
+    Some(OllamaReuseIfPresentPreflight {
+        healthcheck_url,
+        required_model,
+    })
+}
+
+async fn run_external_service_preflight(manifest: &toml::Value) -> Result<()> {
+    let Some(preflight) = parse_ollama_reuse_if_present_preflight(manifest) else {
+        return Ok(());
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .context("failed to build external service preflight HTTP client")?;
+    debug!(
+        healthcheck_url = %preflight.healthcheck_url,
+        required_model = ?preflight.required_model,
+        "Running Ollama reuse-if-present preflight"
+    );
+
+    let response = client
+        .get(&preflight.healthcheck_url)
+        .send()
+        .await
+        .with_context(|| {
+            format!(
+                "Ollama is not reachable at {}\nStart or install Ollama, then retry",
+                preflight.healthcheck_url
+            )
+        })?;
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "Ollama is not reachable at {}\nStart or install Ollama, then retry",
+            preflight.healthcheck_url
+        );
+    }
+
+    let Some(required_model) = preflight.required_model.as_deref() else {
+        return Ok(());
+    };
+    let payload: JsonValue = response
+        .json()
+        .await
+        .context("failed to parse Ollama /api/tags response")?;
+    let model_present = payload
+        .get("models")
+        .and_then(JsonValue::as_array)
+        .map(|models| {
+            models.iter().any(|model| {
+                model
+                    .get("name")
+                    .or_else(|| model.get("model"))
+                    .and_then(JsonValue::as_str)
+                    .map(|name| name.trim() == required_model)
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    if !model_present {
+        anyhow::bail!(
+            "Required Ollama model \"{}\" is missing\nRun: ollama pull {}",
+            required_model,
+            required_model
+        );
+    }
+
+    Ok(())
 }
 
 fn build_execution_override(
@@ -2047,9 +2172,9 @@ fn render_execution_roots_note(
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_existing_path, normalize_write_path, resolve_sandbox_grants,
-        validate_sandbox_grants_best_effort, ConsumerRunRequest, DerivedBridgeManifest,
-        PreparedRunContext,
+        normalize_existing_path, normalize_write_path, parse_ollama_reuse_if_present_preflight,
+        resolve_sandbox_grants, validate_sandbox_grants_best_effort, ConsumerRunRequest,
+        DerivedBridgeManifest, PreparedRunContext,
     };
     use capsule_core::ato_lock::AtoLock;
     use std::fs;
@@ -2134,6 +2259,44 @@ mod tests {
         let err = normalize_write_path(&link_path.join("output.txt"))
             .expect_err("must reject symlink parent traversal");
         assert!(err.to_string().contains("traverses symlink"));
+    }
+
+    #[test]
+    fn parse_ollama_reuse_if_present_preflight_reads_healthcheck_and_model() {
+        let manifest: toml::Value = toml::from_str(
+            r#"
+[services.ollama]
+from = "dependency:ollama"
+mode = "reuse-if-present"
+
+[services.ollama.healthcheck]
+kind = "http"
+url = "http://127.0.0.1:11434/api/tags"
+
+[bootstrap.defaults]
+ollama_model = "qwen2:7b"
+"#,
+        )
+        .expect("parse manifest");
+
+        let preflight =
+            parse_ollama_reuse_if_present_preflight(&manifest).expect("ollama preflight");
+        assert_eq!(preflight.healthcheck_url, "http://127.0.0.1:11434/api/tags");
+        assert_eq!(preflight.required_model.as_deref(), Some("qwen2:7b"));
+    }
+
+    #[test]
+    fn parse_ollama_reuse_if_present_preflight_ignores_other_service_modes() {
+        let manifest: toml::Value = toml::from_str(
+            r#"
+[services.ollama]
+from = "dependency:ollama"
+mode = "managed"
+"#,
+        )
+        .expect("parse manifest");
+
+        assert!(parse_ollama_reuse_if_present_preflight(&manifest).is_none());
     }
 
     fn sandbox_request(
