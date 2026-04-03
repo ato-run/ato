@@ -501,6 +501,10 @@ pub struct CapsuleManifest {
     #[serde(default)]
     pub services: Option<HashMap<String, ServiceSpec>>,
 
+    /// Workspace-scoped setup authoring surface used by `ato setup`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceSetupSpec>,
+
     /// Distribution metadata generated at pack/publish time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distribution: Option<DistributionInfo>,
@@ -620,6 +624,49 @@ pub struct ExternalInjectionSpec {
     pub required: bool,
     #[serde(default)]
     pub default: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceDependencySpec {
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceAppPersonalizationSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceAppSpec {
+    #[serde(flatten)]
+    pub dependency: WorkspaceDependencySpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personalization: Option<WorkspaceAppPersonalizationSpec>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceServiceSpec {
+    #[serde(flatten)]
+    pub dependency: WorkspaceDependencySpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSetupSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_app: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub apps: BTreeMap<String, WorkspaceAppSpec>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tools: BTreeMap<String, WorkspaceDependencySpec>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub services: BTreeMap<String, WorkspaceServiceSpec>,
 }
 
 /// Pre-warmed container pool configuration

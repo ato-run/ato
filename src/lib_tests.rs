@@ -14,6 +14,7 @@ use crate::install::support::{
     github_build_error_requires_manual_intervention, resolve_installed_capsule_archive_in_store,
     run_blocking_github_install_step, select_capsule_file_in_version, ParsedSemver,
 };
+use crate::ProviderToolchain;
 
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -124,6 +125,7 @@ fn resolve_run_target_rejects_noncanonical_github_url_input() {
         .block_on(run_install_dispatch::resolve_run_target_or_install(
             PathBuf::from("https://github.com/Koh0920/demo-repo"),
             true,
+            ProviderToolchain::Auto,
             false,
             None,
             false,
@@ -138,6 +140,26 @@ fn resolve_run_target_rejects_noncanonical_github_url_input() {
             .contains("ato run github.com/Koh0920/demo-repo"),
         "error={error:#}"
     );
+}
+
+#[test]
+fn resolve_run_target_rejects_via_for_local_paths() {
+    let reporter = std::sync::Arc::new(reporters::CliReporter::new(false));
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let error = runtime
+        .block_on(run_install_dispatch::resolve_run_target_or_install(
+            PathBuf::from("."),
+            true,
+            ProviderToolchain::Uv,
+            false,
+            None,
+            false,
+            None,
+            reporter,
+        ))
+        .expect_err("non-provider target must reject --via");
+
+    assert!(error.to_string().contains("`--via` is only supported"));
 }
 
 #[test]
@@ -214,6 +236,20 @@ fn run_command_parses_agent_mode() {
 
     match cli.command {
         Commands::Run { agent, .. } => assert_eq!(agent, RunAgentMode::Force),
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn run_command_parses_provider_toolchain_via_flag() {
+    let cli = Cli::try_parse_from(["ato", "run", "npm:tsx", "--via", "pnpm", "--", "--help"])
+        .expect("parse");
+
+    match cli.command {
+        Commands::Run { via, args, .. } => {
+            assert_eq!(via, ProviderToolchain::Pnpm);
+            assert_eq!(args, vec!["--help".to_string()]);
+        }
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 }
@@ -315,6 +351,20 @@ fn run_command_parses_cwd_override() {
 }
 
 #[test]
+fn run_command_parses_hidden_provider_toolchain_hint() {
+    let cli =
+        Cli::try_parse_from(["ato", "run", "pypi:markitdown[pdf]", "--via", "uv"]).expect("parse");
+
+    match cli.command {
+        Commands::Run { path, via, .. } => {
+            assert_eq!(path, PathBuf::from("pypi:markitdown[pdf]"));
+            assert_eq!(via, ProviderToolchain::Uv);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
 fn init_command_defaults_to_durable_workspace_materialization() {
     let cli = Cli::try_parse_from(["ato", "init"]).expect("parse");
 
@@ -322,6 +372,28 @@ fn init_command_defaults_to_durable_workspace_materialization() {
         Commands::Init { path, yes } => {
             assert_eq!(path, PathBuf::from("."));
             assert!(!yes);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn setup_command_defaults_to_project_dependency_fetch() {
+    let cli = Cli::try_parse_from(["ato", "setup"]).expect("parse");
+
+    match cli.command {
+        Commands::Setup {
+            path,
+            registry,
+            yes,
+            json,
+            dry_run,
+        } => {
+            assert_eq!(path, PathBuf::from("."));
+            assert!(registry.is_none());
+            assert!(!yes);
+            assert!(!json);
+            assert!(!dry_run);
         }
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
