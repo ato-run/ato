@@ -8,6 +8,22 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Keep one-shot single-script `ato run` materialization state out of the caller workspace by moving cache and run-attempt state under `~/.ato/cache` and `~/.ato/runs`
 
+## [0.4.46] - 2026-04-03
+
+### What Changed
+
+#### CI
+
+- Bump the patch release after `v0.4.45` was already tagged and published
+
+## [0.4.45] - 2026-04-03
+
+### What Changed
+
+#### Bug Fixes
+
+- Anchor materialized single-script source entrypoints under `source/`, propagate the layout hint through routing/runtime config generation, and fail closed when relative entrypoints are combined with `effective_cwd` without the anchored layout
+
 ## [0.4.44] - 2026-04-03
 
 ### What Changed
