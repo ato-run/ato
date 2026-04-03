@@ -472,6 +472,62 @@ fn single_file_python_sandbox_markitdown_relative_output_stays_in_caller_workspa
 #[cfg(unix)]
 #[test]
 #[serial]
+fn single_file_python_sandbox_markitdown_relative_output_stays_in_caller_workspace_with_cwd_override(
+) {
+    let Some((nacelle, _uv)) = require_native_prerequisites() else {
+        return;
+    };
+
+    let (temp, _tool_dir, caller_dir, _script_path) = setup_single_file_workspace();
+    let input_path = caller_dir.join("phd-thesis.pdf");
+    let output_path = caller_dir.join("phd-thesis.cwd.md");
+    fs::write(&input_path, "fake pdf bytes for markitdown\n").expect("write input");
+
+    let override_arg = caller_dir.display().to_string();
+    let output = run_single_file_sandbox_with_runtime_args(
+        &caller_dir,
+        "../tool/convert.py",
+        &nacelle,
+        &["--cwd", &override_arg],
+        &[
+            "--read",
+            "./phd-thesis.pdf",
+            "--write",
+            "./phd-thesis.cwd.md",
+        ],
+        &["./phd-thesis.pdf", "-o", "./phd-thesis.cwd.md"],
+    );
+    if !assert_success_or_skip(&output) {
+        return;
+    }
+
+    let payload = load_output_json(&output_path, temp.path(), &output);
+    let expected_cwd = caller_dir
+        .canonicalize()
+        .expect("canonicalize expected caller cwd");
+    assert_eq!(
+        payload["cwd"].as_str(),
+        Some(expected_cwd.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        payload["argv"],
+        serde_json::json!(["./phd-thesis.pdf", "-o", "./phd-thesis.cwd.md"])
+    );
+    assert_eq!(payload["input_exists"].as_bool(), Some(true));
+    assert_eq!(
+        payload["content"].as_str(),
+        Some("fake pdf bytes for markitdown\n")
+    );
+    assert!(
+        output_path.exists(),
+        "relative markdown output should stay in caller workspace with explicit cwd override"
+    );
+    assert_no_nested_workspace_tmp(temp.path());
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
 fn single_file_python_host_execution_honors_effective_cwd_for_relative_output() {
     let Some((_uv, _python)) = require_host_single_file_prerequisites() else {
         return;
