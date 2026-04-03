@@ -28,6 +28,9 @@ use capsule_core::isolation::HostIsolationContext;
 use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::lifecycle::LifecycleEvent;
 use capsule_core::lock_runtime;
+use capsule_core::python_runtime::{
+    extend_python_selector_env, normalized_python_runtime_version, python_selector_env,
+};
 use capsule_core::r3_config;
 use capsule_core::router::ManifestData;
 
@@ -590,9 +593,17 @@ impl NacelleExecAdapter {
         launch_ctx: &RuntimeLaunchContext,
     ) -> Result<Self> {
         let normalized_manifest_path = write_normalized_manifest(plan, launch_ctx.command_args())?;
-        let mut env = runtime_overrides::merged_env(plan.execution_env())
-            .into_iter()
-            .collect::<Vec<_>>();
+        let mut env_map = runtime_overrides::merged_env(plan.execution_env());
+        if plan
+            .execution_language()
+            .or_else(|| plan.execution_driver())
+            .or_else(|| plan.execution_runtime())
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("python"))
+        {
+            extend_python_selector_env(&mut env_map, plan.execution_runtime_version().as_deref());
+        }
+        let mut env = env_map.into_iter().collect::<Vec<_>>();
         if let Some(port) = runtime_overrides::override_port(plan.execution_port()) {
             env.push(("PORT".to_string(), port.to_string()));
         }
@@ -612,6 +623,15 @@ impl NacelleExecAdapter {
             for (key, value) in ipc_env {
                 env.push((key.clone(), value.clone()));
             }
+        }
+
+        if let Some(selected_python_runtime) =
+            normalized_python_runtime_version(plan.execution_runtime_version().as_deref())
+        {
+            debug!(
+                selected_python_runtime = %selected_python_runtime,
+                "Prepared source/python runtime selector"
+            );
         }
 
         let ipc_env = launch_ctx
@@ -770,19 +790,11 @@ fn write_normalized_manifest(plan: &ManifestData, explicit_args: &[String]) -> R
 fn python_runtime_selector_env(
     runtime_version: Option<&str>,
 ) -> Option<toml::map::Map<String, toml::Value>> {
-    let runtime_version = runtime_version
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    let mut env = toml::map::Map::new();
-    env.insert(
-        "UV_MANAGED_PYTHON".to_string(),
-        toml::Value::String("1".to_string()),
-    );
-    env.insert(
-        "UV_PYTHON".to_string(),
-        toml::Value::String(runtime_version.to_string()),
-    );
-    Some(env)
+    let env = python_selector_env(runtime_version)
+        .into_iter()
+        .map(|(key, value)| (key, toml::Value::String(value)))
+        .collect::<toml::map::Map<_, _>>();
+    (!env.is_empty()).then_some(env)
 }
 
 fn sandbox_source_entrypoint(plan: &ManifestData, entrypoint: &str) -> String {
@@ -1257,6 +1269,31 @@ mod tests {
     }
 
     #[test]
+    fn test_write_normalized_manifest_omits_python_selector_without_runtime_version() {
+        let dir = tempdir().unwrap();
+        let plan = plan_from_manifest(
+            &dir,
+            r#"
+            name = "demo"
+            version = "1.2.3"
+
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            entrypoint = "main.py"
+            source_layout = "anchored_entrypoint"
+            "#,
+            "dev",
+        );
+
+        let normalized_path = write_normalized_manifest(&plan, &[]).unwrap();
+        let normalized = fs::read_to_string(&normalized_path).unwrap();
+
+        assert!(!normalized.contains("UV_MANAGED_PYTHON"));
+        assert!(!normalized.contains("UV_PYTHON"));
+    }
+
+    #[test]
     fn test_adapter_includes_ipc_socket_paths() {
         let dir = tempdir().unwrap();
         let plan = plan_from_manifest(
@@ -1356,6 +1393,13 @@ mod tests {
             adapter.payload["cwd"].as_str(),
             runtime_cwd_payload(Some(&effective_cwd)).as_deref()
         );
+        let payload_env = adapter.payload["env"].as_array().expect("payload env");
+        assert!(payload_env.iter().any(|pair| {
+            pair[0].as_str() == Some("UV_MANAGED_PYTHON") && pair[1].as_str() == Some("1")
+        }));
+        assert!(payload_env.iter().any(|pair| {
+            pair[0].as_str() == Some("UV_PYTHON") && pair[1].as_str() == Some("3.11.10")
+        }));
     }
 
     #[test]
