@@ -192,6 +192,7 @@ mod tests {
             targets: None,
             exports: None,
             services: None,
+            workspace: None,
             distribution: None,
         })
         .expect("filter");
@@ -231,6 +232,7 @@ mod tests {
             targets: None,
             exports: None,
             services: None,
+            workspace: None,
             distribution: None,
         })
         .expect("filter");
@@ -266,6 +268,7 @@ mod tests {
             targets: None,
             exports: None,
             services: None,
+            workspace: None,
             distribution: None,
         };
         manifest.pack = Some(PackConfig {
@@ -307,6 +310,7 @@ mod tests {
             targets: None,
             exports: None,
             services: None,
+            workspace: None,
             distribution: None,
         };
         manifest.pack = Some(PackConfig {
@@ -346,6 +350,7 @@ mod tests {
             targets: None,
             exports: None,
             services: None,
+            workspace: None,
             distribution: None,
         };
         manifest.pack = Some(PackConfig {
@@ -392,6 +397,7 @@ mod tests {
             targets: None,
             exports: None,
             services: None,
+            workspace: None,
             distribution: None,
         };
         manifest.pack = Some(PackConfig {

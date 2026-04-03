@@ -187,6 +187,7 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) sandbox_mode: bool,
     pub(crate) dangerously_skip_permissions: bool,
     pub(crate) compatibility_fallback: Option<String>,
+    pub(crate) provider_backend: Option<crate::ProviderBackend>,
     pub(crate) assume_yes: bool,
     pub(crate) agent_mode: RunAgentMode,
     pub(crate) agent_local_root: Option<PathBuf>,
@@ -578,6 +579,7 @@ where
         request.auto_fix_mode,
         request.allow_unverified,
         request.registry.as_deref(),
+        request.provider_backend,
         request.reporter.clone(),
     )
     .await?;
@@ -2160,6 +2162,7 @@ mod tests {
             sandbox_mode: true,
             dangerously_skip_permissions: false,
             compatibility_fallback: None,
+            provider_backend: None,
             assume_yes: true,
             agent_mode: crate::RunAgentMode::Off,
             agent_local_root: None,
