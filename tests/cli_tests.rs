@@ -1873,6 +1873,7 @@ fn test_run_help_shows_yes_flag() {
         .success()
         .stdout(predicate::str::contains("github.com/owner/repo"))
         .stdout(predicate::str::contains("pypi:<package>"))
+        .stdout(predicate::str::contains("npm:<package>"))
         .stdout(predicate::str::contains("--skill <SKILL>").not())
         .stdout(predicate::str::contains("--yes"))
         .stdout(predicate::str::contains("--registry"))
@@ -1956,15 +1957,36 @@ fn test_run_rejects_pypi_vcs_syntax() {
 }
 
 #[test]
-fn test_run_recognizes_npm_provider_but_reports_not_implemented() {
+fn test_run_rejects_npm_inline_version_syntax() {
     let mut cmd = Command::cargo_bin("ato").unwrap();
-    cmd.args(["run", "npm:@scope/pkg", "--yes"])
+    cmd.args(["run", "npm:tsx@4.9.0", "--yes"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "recognized but not implemented yet",
-        ))
-        .stderr(predicate::str::contains("pypi:<package>[extra]"));
+            "does not support inline versions or dist-tags",
+        ));
+}
+
+#[test]
+fn test_run_rejects_npm_direct_url_syntax() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["run", "npm:https://example.com/demo.tgz", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "does not support direct URL, git, or file references",
+        ));
+}
+
+#[test]
+fn test_run_rejects_npm_subpath_syntax() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["run", "npm:@scope/pkg/bin", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "does not support package subpaths",
+        ));
 }
 
 #[test]
@@ -1976,6 +1998,17 @@ fn test_install_rejects_provider_target_with_targeted_message() {
         .stderr(predicate::str::contains("run-only in this MVP"))
         .stderr(predicate::str::contains("pypi:markitdown"))
         .stderr(predicate::str::contains("ato install pypi:markitdown"));
+}
+
+#[test]
+fn test_install_rejects_npm_provider_target_with_targeted_message() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["install", "npm:tsx"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("run-only in this MVP"))
+        .stderr(predicate::str::contains("npm:tsx"))
+        .stderr(predicate::str::contains("ato install npm:tsx"));
 }
 
 #[test]
