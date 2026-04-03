@@ -14,6 +14,7 @@ pub(crate) mod publish;
 pub(crate) mod registry;
 mod run;
 mod scaffold;
+mod setup;
 mod source;
 mod state;
 
@@ -66,6 +67,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             unsafe_bypass_sandbox_legacy,
             dangerously_skip_permissions,
             compatibility_fallback,
+            via,
             yes,
             agent,
             keep_failed_artifacts,
@@ -94,6 +96,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             unsafe_bypass_sandbox_legacy,
             dangerously_skip_permissions,
             compatibility_fallback,
+            provider_toolchain: via,
             yes,
             agent_mode: agent,
             keep_failed_artifacts,
@@ -118,10 +121,18 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         Commands::Registry { command } => registry::execute_registry_command(command),
 
         Commands::Setup {
-            engine,
-            version,
-            skip_verify,
-        } => engine::execute_setup_command(engine, version, skip_verify, reporter.clone()),
+            path,
+            registry,
+            yes,
+            json,
+            dry_run,
+        } => setup::execute_setup_command(setup::SetupCommandArgs {
+            path,
+            registry,
+            yes,
+            json,
+            dry_run,
+        }),
 
         Commands::Init { path, yes } => crate_project::init::execute_durable_init(
             crate_project::init::InitArgs {

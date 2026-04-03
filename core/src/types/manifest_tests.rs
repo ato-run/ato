@@ -422,6 +422,60 @@ build = "pnpm --filter ui build"
 }
 
 #[test]
+fn test_from_toml_preserves_workspace_setup_surface() {
+    let toml = r#"
+schema_version = "0.3"
+name = "desky"
+version = "0.1.0"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source"
+driver = "native"
+run = "open Desky.app"
+
+[workspace]
+default_app = "desky"
+
+[workspace.apps.desky]
+source = "ato/desky"
+
+[workspace.apps.desky.personalization]
+model_tier = "balanced"
+privacy_mode = "strict"
+
+[workspace.tools.opencode]
+source = "ato/opencode-engine"
+version = "0.4.0"
+
+[workspace.services.ollama]
+source = "ato/ollama-runtime"
+mode = "reuse-if-present"
+"#;
+
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse workspace setup manifest");
+    let workspace = manifest.workspace.as_ref().expect("workspace setup");
+    assert_eq!(workspace.default_app.as_deref(), Some("desky"));
+    assert_eq!(workspace.apps["desky"].dependency.source, "ato/desky");
+    assert_eq!(
+        workspace.apps["desky"]
+            .personalization
+            .as_ref()
+            .and_then(|value| value.model_tier.as_deref()),
+        Some("balanced")
+    );
+    assert_eq!(
+        workspace.tools["opencode"].version.as_deref(),
+        Some("0.4.0")
+    );
+    assert_eq!(
+        workspace.services["ollama"].mode.as_deref(),
+        Some("reuse-if-present")
+    );
+}
+
+#[test]
 fn test_from_toml_accepts_chml_workspace_packages_as_named_targets() {
     let toml = r#"
 name = "workspace-demo"
