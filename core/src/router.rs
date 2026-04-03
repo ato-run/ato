@@ -1364,6 +1364,7 @@ fn synthesize_runtime_model_from_manifest(
         target: selected_target.to_string(),
         runtime: named_target.runtime,
         driver: named_target.driver,
+        runtime_version: named_target.runtime_version,
         image: named_target.image,
         entrypoint: named_target.entrypoint,
         run_command: named_target.run_command,

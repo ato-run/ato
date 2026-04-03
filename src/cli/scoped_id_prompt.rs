@@ -44,8 +44,9 @@ pub(crate) async fn run_scoped_id_prompt(slug: &str, registry: Option<&str>) -> 
         slug,
         registry,
         format!(
-            "scoped_id_required: '{}' is not valid for `ato run`. Use publisher/slug (for example: koh0920/{}).",
+            "scoped_id_required: '{}' is not valid for `ato run`.\n\nTry one of:\n  ato run pypi:{} -- ...\n  ato run @publisher/{} -- ...",
             slug,
+            slug.trim(),
             slug.trim()
         ),
         &format!(

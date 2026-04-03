@@ -182,12 +182,14 @@ Accepted inputs:
 - local directory
 - local capsule.toml
 - local .capsule file
+- provider-backed target in `provider:ref` form such as `pypi:markitdown` or `pypi:markitdown[pdf]`
 - scoped store ID in publisher/slug form
 - GitHub shorthand in github.com/owner/repo form
 
 Important rules:
 
 - github.com/owner/repo is the canonical GitHub run syntax
+- provider-backed targets use canonical `provider:ref` syntax; MVP execution supports `pypi:<package>` and `pypi:<package>[extra[,extra2]]`
 - https://github.com/... and other non-canonical GitHub URL forms are rejected for ato run and produce a corrective error
 - slug-only inputs are rejected; the CLI prompts toward publisher/slug
 - for sandboxed one-shot CLI execution, trailing target arguments are expressed as `ato run <target> -- <target-args...>` and the filesystem grant contract is defined in [docs/adr-sandboxed-one-shot-cli-contract.md](docs/adr-sandboxed-one-shot-cli-contract.md)
@@ -626,7 +628,8 @@ ato run resolves input in this order:
 
 1. local path after path expansion
 2. GitHub shorthand in github.com/owner/repo form
-3. scoped capsule reference in publisher/slug form
+3. provider-backed target in provider:ref form
+4. scoped capsule reference in publisher/slug form
 
 If input is local:
 
@@ -643,6 +646,13 @@ If input is GitHub shorthand:
 - ato prepares a GitHub preview session
 - ato can infer a runnable manifest for install and execution
 - non-canonical GitHub URL forms are rejected with a corrective message
+
+If input is provider-backed:
+
+- canonical syntax is `provider:ref`
+- MVP execution supports `pypi:<package>` and `pypi:<package>[extra[,extra2]]`
+- `npm:<ref>` is recognized but not implemented yet
+- provider-backed install is not part of the MVP; `ato install pypi:...` is rejected with a targeted message
 
 If input is publisher/slug:
 
