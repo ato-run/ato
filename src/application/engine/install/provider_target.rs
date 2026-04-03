@@ -11,12 +11,16 @@ use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
+use crate::ProviderToolchain;
 use capsule_core::common::paths::ato_runs_dir;
 use capsule_core::python_runtime::{normalized_python_runtime_version, python_selector_env};
 
 const PROVIDER_RUN_ROOT: &str = "provider-backed";
 const PROVIDER_PACKAGE_JSON_FILE: &str = ".ato/provider/package.json";
 const PROVIDER_PACKAGE_LOCK_FILE: &str = ".ato/provider/package-lock.json";
+const PROVIDER_PNPM_LOCK_FILE: &str = ".ato/provider/pnpm-lock.yaml";
+const PROVIDER_BUN_LOCK_FILE: &str = ".ato/provider/bun.lock";
+const PROVIDER_BUN_LOCKB_FILE: &str = ".ato/provider/bun.lockb";
 const PROVIDER_NODE_MODULES_DIR: &str = ".ato/provider/node_modules";
 const PROVIDER_SITE_PACKAGES_DIR: &str = ".ato/provider/site-packages";
 const PROVIDER_REQUIREMENTS_FILE: &str = ".ato/provider/requirements.txt";
@@ -111,6 +115,8 @@ impl ParsedNpmRequirement {
 struct ProviderResolutionMetadata {
     provider: String,
     r#ref: String,
+    requested_provider_toolchain: String,
+    effective_provider_toolchain: String,
     requested_package_name: String,
     requested_extras: Vec<String>,
     resolved_package_name: String,
@@ -131,6 +137,13 @@ struct NpmPackageManifest {
     bin: Option<serde_json::Value>,
     #[serde(default)]
     scripts: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeProviderLockfileKind {
+    PackageLock,
+    PnpmLock,
+    BunLock,
 }
 
 struct WorkspaceGuard {
@@ -238,21 +251,29 @@ pub(crate) fn parse_provider_target_ref(input: &str) -> Result<Option<ProviderTa
 
 pub(crate) fn materialize_provider_run_workspace(
     target: &ProviderTargetRef,
+    requested_toolchain: ProviderToolchain,
     keep_failed_artifacts: bool,
     json: bool,
 ) -> Result<ProviderRunWorkspace> {
     match target.provider {
-        ProviderKind::PyPI => materialize_pypi_workspace(target, keep_failed_artifacts, json),
-        ProviderKind::Npm => materialize_npm_workspace(target, keep_failed_artifacts, json),
+        ProviderKind::PyPI => {
+            materialize_pypi_workspace(target, requested_toolchain, keep_failed_artifacts, json)
+        }
+        ProviderKind::Npm => {
+            materialize_npm_workspace(target, requested_toolchain, keep_failed_artifacts, json)
+        }
     }
 }
 
 fn materialize_pypi_workspace(
     target: &ProviderTargetRef,
+    requested_toolchain: ProviderToolchain,
     keep_failed_artifacts: bool,
     json: bool,
 ) -> Result<ProviderRunWorkspace> {
     let package_ref = parse_pypi_requirement_ref(&target.ref_string)?;
+    let effective_toolchain =
+        resolve_effective_provider_toolchain(target.provider, requested_toolchain)?;
     let workspace_root = unique_provider_workspace_root(target.provider)?;
     fs::create_dir_all(&workspace_root)
         .with_context(|| format!("failed to create {}", workspace_root.display()))?;
@@ -323,6 +344,8 @@ fn materialize_pypi_workspace(
         let metadata = ProviderResolutionMetadata {
             provider: target.provider.as_str().to_string(),
             r#ref: package_ref.canonical_ref(),
+            requested_provider_toolchain: requested_toolchain.as_str().to_string(),
+            effective_provider_toolchain: effective_toolchain.as_str().to_string(),
             requested_package_name: package_ref.package_name.clone(),
             requested_extras: package_ref.extras.clone(),
             resolved_package_name: resolved.package_name,
@@ -371,10 +394,13 @@ fn materialize_pypi_workspace(
 
 fn materialize_npm_workspace(
     target: &ProviderTargetRef,
+    requested_toolchain: ProviderToolchain,
     keep_failed_artifacts: bool,
     json: bool,
 ) -> Result<ProviderRunWorkspace> {
     let package_ref = parse_npm_package_ref(&target.ref_string)?;
+    let effective_toolchain =
+        resolve_effective_provider_toolchain(target.provider, requested_toolchain)?;
     let workspace_root = unique_provider_workspace_root(target.provider)?;
     fs::create_dir_all(&workspace_root)
         .with_context(|| format!("failed to create {}", workspace_root.display()))?;
@@ -403,22 +429,21 @@ fn materialize_npm_workspace(
         )
         .with_context(|| format!("failed to write {}", package_json_path.display()))?;
 
-        install_npm_provider_package(&provider_dir)?;
-
-        let package_lock_path = workspace_root.join(PROVIDER_PACKAGE_LOCK_FILE);
-        if !package_lock_path.exists() {
-            bail!(
-                "failed to materialize provider-backed npm package: {} was not generated",
-                package_lock_path.display()
-            );
-        }
+        let lockfile_path = install_node_provider_package(
+            &provider_dir,
+            workspace_root.as_path(),
+            effective_toolchain,
+        )?;
 
         let source_dir = workspace_root.join("source");
         fs::create_dir_all(&source_dir)
             .with_context(|| format!("failed to create {}", source_dir.display()))?;
-        fs::copy(&package_lock_path, source_dir.join("package-lock.json")).with_context(|| {
+        let lockfile_name = lockfile_path
+            .file_name()
+            .context("provider-backed node lockfile must have a filename")?;
+        fs::copy(&lockfile_path, source_dir.join(lockfile_name)).with_context(|| {
             format!(
-                "failed to mirror npm lockfile into {}",
+                "failed to mirror node lockfile into {}",
                 source_dir.display()
             )
         })?;
@@ -461,6 +486,8 @@ fn materialize_npm_workspace(
         let metadata = ProviderResolutionMetadata {
             provider: target.provider.as_str().to_string(),
             r#ref: package_ref.canonical_ref(),
+            requested_provider_toolchain: requested_toolchain.as_str().to_string(),
+            effective_provider_toolchain: effective_toolchain.as_str().to_string(),
             requested_package_name: package_ref.package_name.clone(),
             requested_extras: Vec::new(),
             resolved_package_name: resolved.package_name,
@@ -482,6 +509,7 @@ fn materialize_npm_workspace(
 
         debug!(
             selected_node_runtime = PROVIDER_NODE_RUNTIME_VERSION,
+            effective_provider_toolchain = effective_toolchain.as_str(),
             workspace_root = %workspace_root.display(),
             "Materialized provider-backed npm workspace"
         );
@@ -653,23 +681,79 @@ fn resolve_console_script_metadata(
     })
 }
 
-fn install_npm_provider_package(provider_dir: &Path) -> Result<()> {
-    let npm = find_npm_binary()?;
-    let output = Command::new(&npm)
-        .args(npm_install_command_args())
+fn resolve_effective_provider_toolchain(
+    provider: ProviderKind,
+    requested: ProviderToolchain,
+) -> Result<ProviderToolchain> {
+    match (provider, requested) {
+        (ProviderKind::PyPI, ProviderToolchain::Auto | ProviderToolchain::Uv) => {
+            Ok(ProviderToolchain::Uv)
+        }
+        (ProviderKind::PyPI, invalid) => bail!(
+            "`--via {}` is not valid for pypi: targets in this MVP. Supported combinations:\n  pypi + auto\n  pypi + uv",
+            invalid.as_str()
+        ),
+        (
+            ProviderKind::Npm,
+            ProviderToolchain::Auto | ProviderToolchain::Npm,
+        ) => Ok(ProviderToolchain::Npm),
+        (ProviderKind::Npm, ProviderToolchain::Bun) => Ok(ProviderToolchain::Bun),
+        (ProviderKind::Npm, ProviderToolchain::Pnpm) => Ok(ProviderToolchain::Pnpm),
+        (ProviderKind::Npm, invalid) => bail!(
+            "`--via {}` is not valid for npm: targets in this MVP. Supported combinations:\n  npm + auto\n  npm + npm\n  npm + bun\n  npm + pnpm",
+            invalid.as_str()
+        ),
+    }
+}
+
+fn install_node_provider_package(
+    provider_dir: &Path,
+    workspace_root: &Path,
+    toolchain: ProviderToolchain,
+) -> Result<PathBuf> {
+    let (program, args, expected_lockfile_kind) = node_provider_install_command(toolchain)?;
+    let output = Command::new(&program)
+        .args(args)
         .current_dir(provider_dir)
         .output()
-        .with_context(|| format!("failed to execute `{}`", npm.display()))?;
+        .with_context(|| format!("failed to execute `{}`", program.display()))?;
 
     if output.status.success() {
-        return Ok(());
+        return resolve_node_provider_lockfile_path(workspace_root, expected_lockfile_kind);
     }
 
     bail!(
-        "failed to materialize provider-backed npm package (status {}): {}",
+        "failed to materialize provider-backed {} package (status {}): {}",
+        toolchain.as_str(),
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     );
+}
+
+fn node_provider_install_command(
+    toolchain: ProviderToolchain,
+) -> Result<(PathBuf, Vec<&'static str>, NodeProviderLockfileKind)> {
+    match toolchain {
+        ProviderToolchain::Npm => Ok((
+            find_npm_binary()?,
+            npm_install_command_args().to_vec(),
+            NodeProviderLockfileKind::PackageLock,
+        )),
+        ProviderToolchain::Pnpm => Ok((
+            find_pnpm_binary()?,
+            pnpm_install_command_args().to_vec(),
+            NodeProviderLockfileKind::PnpmLock,
+        )),
+        ProviderToolchain::Bun => Ok((
+            find_bun_binary()?,
+            bun_install_command_args().to_vec(),
+            NodeProviderLockfileKind::BunLock,
+        )),
+        other => bail!(
+            "Node provider toolchain '{}' is not materializable in this MVP.",
+            other.as_str()
+        ),
+    }
 }
 
 fn npm_install_command_args() -> [&'static str; 5] {
@@ -680,6 +764,47 @@ fn npm_install_command_args() -> [&'static str; 5] {
         "--no-fund",
         "--silent",
     ]
+}
+
+fn pnpm_install_command_args() -> [&'static str; 5] {
+    [
+        "install",
+        "--ignore-scripts",
+        "--ignore-workspace",
+        "--no-frozen-lockfile",
+        "--silent",
+    ]
+}
+
+fn bun_install_command_args() -> [&'static str; 3] {
+    ["install", "--ignore-scripts", "--silent"]
+}
+
+fn resolve_node_provider_lockfile_path(
+    workspace_root: &Path,
+    expected_lockfile_kind: NodeProviderLockfileKind,
+) -> Result<PathBuf> {
+    let path = match expected_lockfile_kind {
+        NodeProviderLockfileKind::PackageLock => workspace_root.join(PROVIDER_PACKAGE_LOCK_FILE),
+        NodeProviderLockfileKind::PnpmLock => workspace_root.join(PROVIDER_PNPM_LOCK_FILE),
+        NodeProviderLockfileKind::BunLock => {
+            let bun_lock = workspace_root.join(PROVIDER_BUN_LOCK_FILE);
+            if bun_lock.exists() {
+                bun_lock
+            } else {
+                workspace_root.join(PROVIDER_BUN_LOCKB_FILE)
+            }
+        }
+    };
+
+    if path.exists() {
+        return Ok(path);
+    }
+
+    bail!(
+        "failed to materialize provider-backed node package: expected lockfile {} was not generated",
+        path.display()
+    );
 }
 
 fn resolve_npm_bin_metadata(
@@ -1217,6 +1342,14 @@ fn find_npm_binary() -> Result<PathBuf> {
     which::which("npm").context("provider-backed npm execution requires `npm` on PATH")
 }
 
+fn find_pnpm_binary() -> Result<PathBuf> {
+    which::which("pnpm").context("provider-backed pnpm execution requires `pnpm` on PATH")
+}
+
+fn find_bun_binary() -> Result<PathBuf> {
+    which::which("bun").context("provider-backed bun execution requires `bun` on PATH")
+}
+
 pub(crate) fn maybe_report_kept_failed_provider_workspace(workspace_root: &Path, json: bool) {
     if json {
         return;
@@ -1281,9 +1414,11 @@ mod tests {
     use super::{
         classify_run_target, materialize_provider_run_workspace, npm_install_command_args,
         parse_npm_package_ref, parse_provider_target_ref, parse_pypi_requirement_ref,
-        resolve_console_script_metadata, resolve_npm_bin_metadata, ParsedRunTarget, ProviderKind,
-        ProviderTargetRef, PROVIDER_RESOLUTION_METADATA_FILE,
+        pnpm_install_command_args, resolve_console_script_metadata,
+        resolve_effective_provider_toolchain, resolve_npm_bin_metadata, ParsedRunTarget,
+        ProviderKind, ProviderTargetRef, PROVIDER_RESOLUTION_METADATA_FILE,
     };
+    use crate::ProviderToolchain;
     use serde_json::{json, Value};
     use serial_test::serial;
     use std::fs;
@@ -1794,6 +1929,35 @@ Tag: py3-none-any\n";
     }
 
     #[test]
+    fn pnpm_install_command_uses_ignore_scripts() {
+        assert_eq!(
+            pnpm_install_command_args(),
+            [
+                "install",
+                "--ignore-scripts",
+                "--ignore-workspace",
+                "--no-frozen-lockfile",
+                "--silent"
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_effective_provider_toolchain_accepts_pnpm_for_npm_targets() {
+        let toolchain =
+            resolve_effective_provider_toolchain(ProviderKind::Npm, ProviderToolchain::Pnpm)
+                .expect("pnpm should be valid for npm targets");
+        assert_eq!(toolchain, ProviderToolchain::Pnpm);
+    }
+
+    #[test]
+    fn resolve_effective_provider_toolchain_rejects_pnpm_for_pypi_targets() {
+        let err = resolve_effective_provider_toolchain(ProviderKind::PyPI, ProviderToolchain::Pnpm)
+            .expect_err("pnpm should be rejected for pypi targets");
+        assert!(err.to_string().contains("pypi + uv"));
+    }
+
+    #[test]
     fn resolve_npm_bin_metadata_accepts_single_bin_string() {
         let temp = workspace_tempdir("provider-target-npm-single-bin-");
         write_npm_package_manifest(
@@ -1952,6 +2116,7 @@ Tag: py3-none-any\n";
                 provider: ProviderKind::PyPI,
                 ref_string: "demo-provider".to_string(),
             },
+            ProviderToolchain::Auto,
             false,
             false,
         )
@@ -2001,6 +2166,14 @@ Tag: py3-none-any\n";
         .expect("parse resolution metadata");
         assert_eq!(metadata["provider"].as_str(), Some("pypi"));
         assert_eq!(metadata["ref"].as_str(), Some("demo-provider"));
+        assert_eq!(
+            metadata["requested_provider_toolchain"].as_str(),
+            Some("auto")
+        );
+        assert_eq!(
+            metadata["effective_provider_toolchain"].as_str(),
+            Some("uv")
+        );
         assert_eq!(
             metadata["requested_package_name"].as_str(),
             Some("demo-provider")
@@ -2101,6 +2274,7 @@ Tag: py3-none-any\n";
                 provider: ProviderKind::PyPI,
                 ref_string: "demo-provider[b,a,a]".to_string(),
             },
+            ProviderToolchain::Auto,
             false,
             false,
         )
@@ -2120,6 +2294,14 @@ Tag: py3-none-any\n";
         )
         .expect("parse resolution metadata");
         assert_eq!(metadata["ref"].as_str(), Some("demo-provider[a,b]"));
+        assert_eq!(
+            metadata["requested_provider_toolchain"].as_str(),
+            Some("auto")
+        );
+        assert_eq!(
+            metadata["effective_provider_toolchain"].as_str(),
+            Some("uv")
+        );
         assert_eq!(
             metadata["requested_package_name"].as_str(),
             Some("demo-provider")
