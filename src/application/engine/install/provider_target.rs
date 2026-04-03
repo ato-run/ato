@@ -699,7 +699,7 @@ fn parse_pypi_requirement_ref(raw_ref: &str) -> Result<ParsedPyPIRequirement> {
 fn canonicalize_pypi_extras(raw_extras: &str) -> Result<Vec<String>> {
     let mut extras = raw_extras
         .split(',')
-        .map(|value| normalize_pypi_name(value))
+        .map(normalize_pypi_name)
         .collect::<Vec<_>>();
     if extras.iter().any(|value| value.is_empty()) {
         bail!("PyPI extras must not be empty");
