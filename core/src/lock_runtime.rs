@@ -345,6 +345,12 @@ fn runtime_from_target(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string),
+        runtime_version: target
+            .get("runtime_version")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         image: target
             .get("image")
             .and_then(Value::as_str)
