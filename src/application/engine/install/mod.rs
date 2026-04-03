@@ -36,6 +36,7 @@ mod github_inference;
 mod manifest_delta;
 mod manifest_integrity;
 mod persistence;
+pub(crate) mod provider_target;
 pub(crate) mod support;
 
 use github_archive::*;

@@ -684,6 +684,7 @@ fn write_normalized_manifest(plan: &ManifestData, explicit_args: &[String]) -> R
         .execution_language()
         .or_else(|| plan.execution_driver())
         .or_else(|| plan.execution_runtime());
+    let runtime_version = plan.execution_runtime_version();
     let is_python = language_name
         .as_deref()
         .map(|value| value.eq_ignore_ascii_case("python"))
@@ -734,6 +735,11 @@ fn write_normalized_manifest(plan: &ManifestData, explicit_args: &[String]) -> R
     if let Some(command) = command {
         execution.insert("command".to_string(), toml::Value::String(command));
     }
+    if is_python {
+        if let Some(env_table) = python_runtime_selector_env(runtime_version.as_deref()) {
+            execution.insert("env".to_string(), toml::Value::Table(env_table));
+        }
+    }
     manifest.insert("execution".to_string(), toml::Value::Table(execution));
 
     if let Some(isolation) = plan.manifest.get("isolation").cloned() {
@@ -759,6 +765,24 @@ fn write_normalized_manifest(plan: &ManifestData, explicit_args: &[String]) -> R
     fs::write(&path, toml::to_string(&toml::Value::Table(manifest))?)
         .with_context(|| format!("Failed to write normalized manifest: {}", path.display()))?;
     Ok(path)
+}
+
+fn python_runtime_selector_env(
+    runtime_version: Option<&str>,
+) -> Option<toml::map::Map<String, toml::Value>> {
+    let runtime_version = runtime_version
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let mut env = toml::map::Map::new();
+    env.insert(
+        "UV_MANAGED_PYTHON".to_string(),
+        toml::Value::String("1".to_string()),
+    );
+    env.insert(
+        "UV_PYTHON".to_string(),
+        toml::Value::String(runtime_version.to_string()),
+    );
+    Some(env)
 }
 
 fn sandbox_source_entrypoint(plan: &ManifestData, entrypoint: &str) -> String {
@@ -1172,6 +1196,8 @@ mod tests {
         assert!(normalized.contains(&format!(
             "command = \"run python3 {expected_entrypoint} --flag value\""
         )));
+        assert!(normalized.contains("UV_MANAGED_PYTHON = \"1\""));
+        assert!(normalized.contains("UV_PYTHON = \"3.12\""));
         assert!(normalized.contains("language = \"python\""));
         assert!(normalized.contains("version = \"3.12\""));
     }
@@ -1200,6 +1226,34 @@ mod tests {
 
         assert!(normalized.contains("entrypoint = \"uv\""));
         assert!(normalized.contains(&format!("command = \"run python3 {expected_entrypoint}\"")));
+    }
+
+    #[test]
+    fn test_write_normalized_manifest_respects_runtime_version_for_anchored_python_targets() {
+        let dir = tempdir().unwrap();
+        let plan = plan_from_manifest(
+            &dir,
+            r#"
+            name = "demo"
+            version = "1.2.3"
+
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            runtime_version = "3.11.10"
+            entrypoint = "main.py"
+            source_layout = "anchored_entrypoint"
+            "#,
+            "dev",
+        );
+
+        let normalized_path = write_normalized_manifest(&plan, &[]).unwrap();
+        let normalized = fs::read_to_string(&normalized_path).unwrap();
+        let expected_entrypoint = sandbox_source_entrypoint(&plan, "main.py");
+
+        assert!(normalized.contains(&format!("command = \"run python3 {expected_entrypoint}\"")));
+        assert!(normalized.contains("UV_MANAGED_PYTHON = \"1\""));
+        assert!(normalized.contains("UV_PYTHON = \"3.11.10\""));
     }
 
     #[test]

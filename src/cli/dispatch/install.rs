@@ -67,6 +67,9 @@ pub(crate) fn execute_install_command(args: InstallCommandArgs) -> Result<()> {
         let slug = args.slug.ok_or_else(|| {
             anyhow::anyhow!("capsule slug is required when not using --from-gh-repo")
         })?;
+        if let Some(message) = install::provider_target::provider_install_error(&slug)? {
+            anyhow::bail!(message);
+        }
         let slug = resolve_curated_install_alias(&slug).unwrap_or(slug);
         if install::is_slug_only_ref(&slug) {
             anyhow::bail!(

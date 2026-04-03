@@ -74,6 +74,7 @@ impl ManifestData {
                 target: target_label.clone(),
                 runtime: target.runtime.clone(),
                 driver: target.driver.clone(),
+                runtime_version: target.runtime_version.clone(),
                 image: target.image.clone().or_else(|| {
                     (!target.entrypoint.trim().is_empty()).then(|| target.entrypoint.clone())
                 }),
