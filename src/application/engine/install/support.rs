@@ -736,6 +736,7 @@ pub(crate) struct ResolvedRunTarget {
     pub(crate) desktop_open_path: Option<PathBuf>,
     pub(crate) export_request: Option<ResolvedCliExportRequest>,
     pub(crate) provider_workspace: Option<install::provider_target::ProviderRunWorkspace>,
+    pub(crate) transient_workspace_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -785,6 +786,7 @@ pub(crate) async fn resolve_run_target_or_install(
                 desktop_open_path: None,
                 export_request: None,
                 provider_workspace: None,
+                transient_workspace_root: None,
             });
         }
         install::provider_target::ParsedRunTarget::GitHubRepository(repository) => {
@@ -822,6 +824,20 @@ pub(crate) async fn resolve_run_target_or_install(
                 );
             }
 
+            let checkout = install::download_github_repository_at_ref(&repository, None).await?;
+            let checkout_root = checkout.checkout_dir.clone();
+            if checkout_root.join("capsule.toml").exists() {
+                let preserved_root = relocate_github_run_checkout(&checkout_root)?;
+                return Ok(ResolvedRunTarget {
+                    path: preserved_root.clone(),
+                    agent_local_root: Some(preserved_root.clone()),
+                    desktop_open_path: None,
+                    export_request: None,
+                    provider_workspace: None,
+                    transient_workspace_root: Some(preserved_root),
+                });
+            }
+
             let install_result = install_github_repository(
                 &repository,
                 None,
@@ -844,6 +860,7 @@ pub(crate) async fn resolve_run_target_or_install(
                 desktop_open_path,
                 export_request: None,
                 provider_workspace: None,
+                transient_workspace_root: None,
             });
         }
         install::provider_target::ParsedRunTarget::Provider(provider_target) => {
@@ -858,6 +875,7 @@ pub(crate) async fn resolve_run_target_or_install(
                 agent_local_root: Some(workspace.workspace_root.clone()),
                 desktop_open_path: None,
                 export_request: None,
+                transient_workspace_root: Some(workspace.workspace_root.clone()),
                 provider_workspace: Some(workspace),
             });
         }
@@ -924,6 +942,7 @@ pub(crate) async fn resolve_run_target_or_install(
                                 &installed_capsule,
                             )?,
                             provider_workspace: None,
+                            transient_workspace_root: None,
                         });
                     }
                 }
@@ -949,6 +968,7 @@ pub(crate) async fn resolve_run_target_or_install(
                             &installed_capsule,
                         )?,
                         provider_workspace: None,
+                        transient_workspace_root: None,
                     });
                 }
                 return Err(error);
@@ -969,6 +989,7 @@ pub(crate) async fn resolve_run_target_or_install(
                 &installed_capsule,
             )?,
             provider_workspace: None,
+            transient_workspace_root: None,
         });
     }
 
@@ -1041,7 +1062,43 @@ pub(crate) async fn resolve_run_target_or_install(
         desktop_open_path,
         export_request: resolve_cli_export_request(export_invocation, &scoped_ref, &install_path)?,
         provider_workspace: None,
+        transient_workspace_root: None,
     })
+}
+
+fn relocate_github_run_checkout(checkout_root: &Path) -> Result<PathBuf> {
+    let invocation_dir =
+        std::env::current_dir().context("Failed to resolve current directory for GitHub run")?;
+    let transient_root = invocation_dir.join(".tmp").join("gh-run");
+    std::fs::create_dir_all(&transient_root).with_context(|| {
+        format!(
+            "Failed to create transient GitHub run root: {}",
+            transient_root.display()
+        )
+    })?;
+
+    let checkout_name = checkout_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("checkout");
+    let destination = transient_root.join(checkout_name);
+    if destination.exists() {
+        std::fs::remove_dir_all(&destination).with_context(|| {
+            format!(
+                "Failed to clear existing transient GitHub run checkout: {}",
+                destination.display()
+            )
+        })?;
+    }
+    std::fs::rename(checkout_root, &destination).with_context(|| {
+        format!(
+            "Failed to relocate GitHub run checkout {} -> {}",
+            checkout_root.display(),
+            destination.display()
+        )
+    })?;
+    Ok(destination)
 }
 
 fn resolve_cli_export_request(

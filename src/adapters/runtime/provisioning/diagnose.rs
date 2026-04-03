@@ -51,6 +51,9 @@ fn detect_missing_lockfile(plan: &ManifestData) -> Option<ProvisioningIssue> {
                 .as_ref()
                 .map(|spec| spec.working_dir.clone())
                 .unwrap_or_else(|| plan.execution_working_directory());
+            if resolve_python_requirements_path(&working_dir).is_some() {
+                return None;
+            }
             let candidates = vec![working_dir.join("uv.lock")];
             (working_dir, candidates)
         }
@@ -70,6 +73,15 @@ fn detect_missing_lockfile(plan: &ManifestData) -> Option<ProvisioningIssue> {
             .map(|candidate| candidate.display().to_string())
             .collect(),
     })
+}
+
+fn resolve_python_requirements_path(working_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    [
+        working_dir.join("requirements.txt"),
+        working_dir.join("source").join("requirements.txt"),
+    ]
+    .into_iter()
+    .find(|path| path.exists())
 }
 
 fn detect_missing_required_env(
