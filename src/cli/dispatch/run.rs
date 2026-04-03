@@ -159,6 +159,7 @@ mod tests {
             agent_local_root: Some(tmp.path().to_path_buf()),
             desktop_open_path: None,
             export_request: None,
+            provider_workspace: None,
         };
         let reporter = Arc::new(crate::reporters::CliReporter::new(true));
 
@@ -202,6 +203,7 @@ mod tests {
             agent_local_root: Some(tmp.path().to_path_buf()),
             desktop_open_path: None,
             export_request: None,
+            provider_workspace: None,
         };
         let reporter = Arc::new(crate::reporters::CliReporter::new(true));
 
