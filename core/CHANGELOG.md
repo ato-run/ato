@@ -2,6 +2,14 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
+## [0.9.1] - 2026-04-04
+
+### What Changed
+
+#### Features
+
+- Add shared Python runtime selector helpers so lock-derived runtime generation and source execution derive the same managed Python transport from `runtime_version`
+
 ## [0.9.0] - 2026-04-03
 
 ### What Changed
