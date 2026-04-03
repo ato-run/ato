@@ -378,6 +378,15 @@ fn assert_no_nested_workspace_tmp(root: &Path) {
 }
 
 #[cfg(unix)]
+fn assert_no_workspace_state_dir(root: &Path) {
+    assert!(
+        !root.join(".ato").exists(),
+        "unexpected workspace-local .ato created under {}",
+        root.display()
+    );
+}
+
+#[cfg(unix)]
 #[test]
 #[serial]
 fn single_file_python_sandbox_preserves_relative_read_write_and_caller_cwd() {
@@ -413,6 +422,7 @@ fn single_file_python_sandbox_preserves_relative_read_write_and_caller_cwd() {
     );
     assert_eq!(payload["input_exists"].as_bool(), Some(true));
     assert_eq!(payload["content"].as_str(), Some("hello from caller cwd\n"));
+    assert_no_workspace_state_dir(&caller_dir);
     assert_no_nested_workspace_tmp(temp.path());
 }
 
@@ -466,6 +476,7 @@ fn single_file_python_sandbox_markitdown_relative_output_stays_in_caller_workspa
         output_path.exists(),
         "relative markdown output should stay in caller workspace"
     );
+    assert_no_workspace_state_dir(&caller_dir);
     assert_no_nested_workspace_tmp(temp.path());
 }
 
@@ -522,6 +533,7 @@ fn single_file_python_sandbox_markitdown_relative_output_stays_in_caller_workspa
         output_path.exists(),
         "relative markdown output should stay in caller workspace with explicit cwd override"
     );
+    assert_no_workspace_state_dir(&caller_dir);
     assert_no_nested_workspace_tmp(temp.path());
 }
 
