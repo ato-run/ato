@@ -677,6 +677,7 @@ fn write_normalized_manifest(plan: &ManifestData, explicit_args: &[String]) -> R
                 "source/native target requires entrypoint",
             )
         })?;
+    let sandbox_entrypoint = sandbox_source_entrypoint(plan, &entrypoint);
     let mut cmd_args = plan.targets_oci_cmd();
     cmd_args.extend(explicit_args.iter().cloned());
     let language_name = plan
@@ -698,7 +699,7 @@ fn write_normalized_manifest(plan: &ManifestData, explicit_args: &[String]) -> R
             tokens.push(requirements);
         }
         tokens.push("python3".to_string());
-        tokens.push(entrypoint.clone());
+        tokens.push(sandbox_entrypoint.clone());
         tokens.extend(cmd_args.iter().cloned());
         (
             "uv".to_string(),
@@ -706,7 +707,7 @@ fn write_normalized_manifest(plan: &ManifestData, explicit_args: &[String]) -> R
         )
     } else {
         let command = (!cmd_args.is_empty()).then(|| cmd_args.join(" "));
-        (entrypoint.clone(), command)
+        (sandbox_entrypoint, command)
     };
 
     let mut manifest = toml::map::Map::new();
@@ -758,6 +759,37 @@ fn write_normalized_manifest(plan: &ManifestData, explicit_args: &[String]) -> R
     fs::write(&path, toml::to_string(&toml::Value::Table(manifest))?)
         .with_context(|| format!("Failed to write normalized manifest: {}", path.display()))?;
     Ok(path)
+}
+
+fn sandbox_source_entrypoint(plan: &ManifestData, entrypoint: &str) -> String {
+    let relative = sandbox_source_entrypoint_relative(plan, entrypoint);
+    if cfg!(target_os = "linux") {
+        Path::new("/workspace").join(relative).display().to_string()
+    } else {
+        plan.manifest_dir.join(relative).display().to_string()
+    }
+}
+
+fn sandbox_source_entrypoint_relative(plan: &ManifestData, entrypoint: &str) -> PathBuf {
+    let entrypoint_path = Path::new(entrypoint.trim());
+
+    if plan.execution_source_layout().as_deref() == Some("anchored_entrypoint") {
+        return entrypoint_path.to_path_buf();
+    }
+
+    match plan.execution_working_dir() {
+        Some(raw_working_dir) => {
+            let trimmed = raw_working_dir.trim();
+            if trimmed.is_empty() || trimmed == "." {
+                Path::new("source").join(entrypoint_path)
+            } else {
+                Path::new("source")
+                    .join(trimmed.trim_start_matches("./"))
+                    .join(entrypoint_path)
+            }
+        }
+        None => Path::new("source").join(entrypoint_path),
+    }
 }
 
 fn resolve_python_requirements_argument(plan: &ManifestData) -> Option<String> {
@@ -1134,11 +1166,40 @@ mod tests {
 
         let normalized_path = write_normalized_manifest(&plan, &[]).unwrap();
         let normalized = fs::read_to_string(&normalized_path).unwrap();
+        let expected_entrypoint = sandbox_source_entrypoint(&plan, "main.py");
 
         assert!(normalized.contains("entrypoint = \"uv\""));
-        assert!(normalized.contains("command = \"run python3 main.py --flag value\""));
+        assert!(normalized.contains(&format!(
+            "command = \"run python3 {expected_entrypoint} --flag value\""
+        )));
         assert!(normalized.contains("language = \"python\""));
         assert!(normalized.contains("version = \"3.12\""));
+    }
+
+    #[test]
+    fn test_write_normalized_manifest_anchors_single_script_entrypoint_for_cwd_override() {
+        let dir = tempdir().unwrap();
+        let plan = plan_from_manifest(
+            &dir,
+            r#"
+            name = "demo"
+            version = "1.2.3"
+
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            entrypoint = "main.py"
+            source_layout = "anchored_entrypoint"
+            "#,
+            "dev",
+        );
+
+        let normalized_path = write_normalized_manifest(&plan, &[]).unwrap();
+        let normalized = fs::read_to_string(&normalized_path).unwrap();
+        let expected_entrypoint = sandbox_source_entrypoint(&plan, "main.py");
+
+        assert!(normalized.contains("entrypoint = \"uv\""));
+        assert!(normalized.contains(&format!("command = \"run python3 {expected_entrypoint}\"")));
     }
 
     #[test]
@@ -1220,8 +1281,11 @@ mod tests {
             .as_str()
             .expect("manifest path");
         let normalized = fs::read_to_string(manifest_path).unwrap();
+        let expected_entrypoint = sandbox_source_entrypoint(&plan, "main.py");
 
-        assert!(normalized.contains("command = \"run python3 main.py --help\""));
+        assert!(normalized.contains(&format!(
+            "command = \"run python3 {expected_entrypoint} --help\""
+        )));
         assert_eq!(
             adapter.payload["mounts"][0]["source"].as_str(),
             Some(input_path.to_string_lossy().as_ref())
