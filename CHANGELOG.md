@@ -4,6 +4,14 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.49] - 2026-04-04
+
+### What Changed
+
+#### Bug Fixes
+
+- Align provider-backed PyPI materialization and thin `source/python` execution on the same `runtime_version`-derived managed Python selector so C-extension packages like `markitdown[pdf]` do not hit ABI mismatches at runtime
+
 ## [0.4.48] - 2026-04-03
 
 ### What Changed
