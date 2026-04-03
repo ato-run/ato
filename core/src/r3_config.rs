@@ -713,12 +713,14 @@ fn command_tokens(entrypoint: &str, command: Option<&str>) -> (String, Vec<Strin
     (program, tokens)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_language_command(
     program: &str,
     tokens: &[String],
     standalone: bool,
     env: &mut HashMap<String, String>,
     language: Option<&str>,
+    runtime_version: Option<&str>,
     synthesize_default_args: bool,
     layout: SourceLayoutHint,
 ) -> (String, Vec<String>) {
@@ -737,11 +739,9 @@ fn resolve_language_command(
                 env.insert("PYTHONPATH".to_string(), "source".to_string());
                 ("runtime/python/bin/python3".to_string(), args)
             } else {
-                let mut uv_args = vec![
-                    "run".to_string(),
-                    "--offline".to_string(),
-                    "python3".to_string(),
-                ];
+                insert_uv_python_runtime_env(env, runtime_version);
+                let mut uv_args = vec!["run".to_string(), "--offline".to_string()];
+                uv_args.push("python3".to_string());
                 uv_args.extend(args);
                 ("uv".to_string(), uv_args)
             }
@@ -877,13 +877,19 @@ fn resolve_target_command(
         standalone,
         &mut env,
         language.as_deref(),
+        runtime.runtime_version.as_deref(),
         true,
         layout,
     );
 
     let (executable, mut args) = if let Some((cmd_executable, cmd_args)) =
-        resolve_explicit_cmd_override(&runtime.cmd, standalone, &mut env, layout)
-    {
+        resolve_explicit_cmd_override(
+            &runtime.cmd,
+            runtime.runtime_version.as_deref(),
+            standalone,
+            &mut env,
+            layout,
+        ) {
         (cmd_executable, cmd_args)
     } else {
         (executable, args)
@@ -1006,6 +1012,7 @@ fn read_run_command(manifest: &toml::Value) -> Option<String> {
     selected_target_table(manifest)
         .and_then(|target| target.get("run_command"))
         .and_then(|value| value.as_str())
+        .or_else(|| manifest.get("run").and_then(|value| value.as_str()))
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
@@ -1315,6 +1322,7 @@ fn resolve_command(
         standalone,
         &mut env,
         language.as_deref(),
+        read_target_runtime_version(manifest).as_deref(),
         true,
         layout,
     );
@@ -1367,6 +1375,7 @@ fn detect_language_from_entrypoint(entrypoint: &str) -> Option<String> {
 
 fn resolve_explicit_cmd_override(
     runtime_cmd: &[String],
+    runtime_version: Option<&str>,
     standalone: bool,
     env: &mut HashMap<String, String>,
     layout: SourceLayoutHint,
@@ -1382,9 +1391,31 @@ fn resolve_explicit_cmd_override(
         standalone,
         env,
         detect_language_from_program(&program).as_deref(),
+        runtime_version,
         false,
         layout,
     ))
+}
+
+fn insert_uv_python_runtime_env(env: &mut HashMap<String, String>, runtime_version: Option<&str>) {
+    let Some(runtime_version) = runtime_version
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+
+    env.insert("UV_MANAGED_PYTHON".to_string(), "1".to_string());
+    env.insert("UV_PYTHON".to_string(), runtime_version.to_string());
+}
+
+fn read_target_runtime_version(manifest: &toml::Value) -> Option<String> {
+    selected_target_table(manifest)
+        .and_then(|target| target.get("runtime_version"))
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn normalize_language(lang: &str) -> String {
@@ -1651,7 +1682,7 @@ egress_allow = ["1.1.1.1"]
     [targets.cli]
     runtime = "source"
     language = "python"
-    version = "3.11"
+    runtime_version = "3.11.10"
     entrypoint = "main.py"
 
     [targets.cli.env]
@@ -1725,7 +1756,7 @@ egress_allow = ["1.1.1.1"]
     [targets.cli]
     runtime = "source"
     language = "python"
-    version = "3.11"
+    runtime_version = "3.11.10"
     entrypoint = "main.py"
 
     [targets.cli.env]
@@ -1747,6 +1778,14 @@ egress_allow = ["1.1.1.1"]
         assert_eq!(
             config.services["main"].env.as_ref().unwrap()["PYTHONDONTWRITEBYTECODE"],
             "1"
+        );
+        assert_eq!(
+            config.services["main"].env.as_ref().unwrap()["UV_MANAGED_PYTHON"],
+            "1"
+        );
+        assert_eq!(
+            config.services["main"].env.as_ref().unwrap()["UV_PYTHON"],
+            "3.11.10"
         );
         assert_eq!(
             config.services["main"].env.as_ref().unwrap()["PORT"],
@@ -1913,6 +1952,14 @@ env = { PYTHONPATH = "src" }
                 "--port",
                 "8081"
             ]
+        );
+        assert_eq!(
+            config.services["control_plane"].env.as_ref().unwrap()["UV_MANAGED_PYTHON"],
+            "1"
+        );
+        assert_eq!(
+            config.services["control_plane"].env.as_ref().unwrap()["UV_PYTHON"],
+            "3.11.10"
         );
         assert_eq!(
             config.services["control_plane"].cwd,

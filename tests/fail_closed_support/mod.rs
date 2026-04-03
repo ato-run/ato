@@ -759,6 +759,9 @@ pub fn spawn_static_file_server(root: PathBuf) -> StaticFileServer {
                         .next()
                         .and_then(|line| line.split_whitespace().nth(1))
                         .unwrap_or("/")
+                        .split('?')
+                        .next()
+                        .unwrap_or("/")
                         .to_string();
 
                     {
@@ -768,10 +771,25 @@ pub fn spawn_static_file_server(root: PathBuf) -> StaticFileServer {
 
                     let relative = path.trim_start_matches('/');
                     let file_path = root.join(relative);
+                    let file_path = if file_path.is_dir() {
+                        file_path.join("index.html")
+                    } else {
+                        file_path
+                    };
                     if let Ok(body) = fs::read(&file_path) {
+                        let content_type = match file_path
+                            .extension()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or_default()
+                        {
+                            "html" => "text/html; charset=utf-8",
+                            "whl" => "application/octet-stream",
+                            _ => "application/octet-stream",
+                        };
                         let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                            body.len()
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: {}\r\nConnection: close\r\n\r\n",
+                            body.len(),
+                            content_type
                         );
                         let _ = stream.write_all(response.as_bytes());
                         let _ = stream.write_all(&body);
