@@ -22,7 +22,8 @@ use crate::reporters;
 use crate::runtime::tree as runtime_tree;
 use crate::tui;
 use crate::{
-    CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, DEFAULT_RUN_REGISTRY_URL,
+    CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, ProviderBackend,
+    DEFAULT_RUN_REGISTRY_URL,
 };
 
 pub(crate) async fn resolve_installed_capsule_archive(
@@ -764,6 +765,7 @@ pub(crate) async fn resolve_run_target_or_install(
     auto_fix_mode: Option<GitHubAutoFixMode>,
     allow_unverified: bool,
     registry: Option<&str>,
+    provider_backend: Option<ProviderBackend>,
     reporter: Arc<reporters::CliReporter>,
 ) -> Result<ResolvedRunTarget> {
     let raw = path.to_string_lossy().to_string();
@@ -771,6 +773,11 @@ pub(crate) async fn resolve_run_target_or_install(
     let expanded_local = crate::local_input::expand_local_path(&raw);
     match install::provider_target::classify_run_target(&raw, &expanded_local)? {
         install::provider_target::ParsedRunTarget::LocalPath(local_path) => {
+            if provider_backend.is_some() {
+                anyhow::bail!(
+                    "`--via` is only supported for provider-backed run targets such as `pypi:<package>`."
+                );
+            }
             return Ok(ResolvedRunTarget {
                 agent_local_root: agent_local_root_for_path(&local_path),
                 path: local_path,
@@ -780,6 +787,11 @@ pub(crate) async fn resolve_run_target_or_install(
             });
         }
         install::provider_target::ParsedRunTarget::GitHubRepository(repository) => {
+            if provider_backend.is_some() {
+                anyhow::bail!(
+                    "`--via` is only supported for provider-backed run targets such as `pypi:<package>`."
+                );
+            }
             let json_mode = reporter.is_json();
             if crate::progressive_ui::can_use_progressive_ui(json_mode) {
                 crate::progressive_ui::begin_flow_without_logo()?;
@@ -835,6 +847,7 @@ pub(crate) async fn resolve_run_target_or_install(
         install::provider_target::ParsedRunTarget::Provider(provider_target) => {
             let workspace = install::provider_target::materialize_provider_run_workspace(
                 &provider_target,
+                provider_backend,
                 keep_failed_artifacts,
                 reporter.is_json(),
             )?;
@@ -846,7 +859,13 @@ pub(crate) async fn resolve_run_target_or_install(
                 provider_workspace: Some(workspace),
             });
         }
-        install::provider_target::ParsedRunTarget::RegistryReference => {}
+        install::provider_target::ParsedRunTarget::RegistryReference => {
+            if provider_backend.is_some() {
+                anyhow::bail!(
+                    "`--via` is only supported for provider-backed run targets such as `pypi:<package>`."
+                );
+            }
+        }
     }
 
     let scoped_ref = match install::parse_capsule_ref(&raw) {
@@ -2058,6 +2077,7 @@ pub(crate) fn execute_run_command(
     sandbox_mode: bool,
     dangerously_skip_permissions: bool,
     compatibility_fallback: Option<String>,
+    provider_backend: Option<ProviderBackend>,
     assume_yes: bool,
     agent_mode: crate::RunAgentMode,
     agent_local_root: Option<PathBuf>,
@@ -2087,6 +2107,7 @@ pub(crate) fn execute_run_command(
         sandbox_mode,
         dangerously_skip_permissions,
         compatibility_fallback,
+        provider_backend,
         assume_yes,
         agent_mode,
         agent_local_root,
@@ -2237,6 +2258,7 @@ mod tests {
             false,
             None,
             false,
+            None,
             None,
             Arc::new(reporters::CliReporter::new(false)),
         )

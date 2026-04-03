@@ -12,7 +12,9 @@ use super::package::PackageCommands;
 use super::profile::ProfileCommands;
 use super::project::{ProjectCommands, ScaffoldCommands};
 use super::registry::RegistryCommands;
-use super::shared::{cli_styles, CompatibilityFallbackBackend, EnforcementMode, RunAgentMode};
+use super::shared::{
+    cli_styles, CompatibilityFallbackBackend, EnforcementMode, ProviderBackend, RunAgentMode,
+};
 use super::source::SourceCommands;
 use super::state::StateCommands;
 
@@ -29,6 +31,7 @@ Primary Commands:
   build    Pack a project into an immutable .capsule archive
   publish  Publish capsule artifacts to a registry
   install  Install a verified package from the registry
+    setup    Fetch declared development dependencies for the current project
   init     Materialize a durable ato.lock.json baseline for the current project
   search   Search the registry for agent skills and packages
 
@@ -74,7 +77,7 @@ pub(crate) enum Commands {
         trailing_var_arg = true
     )]
     Run {
-        /// Local path (./, ../, ~/, /...), provider target (pypi:<package> or pypi:<package>[extra]), store scoped ID (publisher/slug), or GitHub repo (github.com/owner/repo). Default: current directory
+        /// Local path (./, ../, ~/, /...), provider target (pypi:<package>), store scoped ID (publisher/slug), or GitHub repo (github.com/owner/repo). Default: current directory
         #[arg(default_value = ".")]
         path: PathBuf,
 
@@ -133,6 +136,10 @@ pub(crate) enum Commands {
         /// Run with an explicit compatibility fallback backend instead of the standard runtime path
         #[arg(long = "compatibility-fallback", value_enum)]
         compatibility_fallback: Option<CompatibilityFallbackBackend>,
+
+        /// Experimental provider materialization backend hint for provider-backed run targets
+        #[arg(long = "via", value_enum, hide = true)]
+        via: Option<ProviderBackend>,
 
         /// Skip prompt and auto-install when app-id is not installed
         #[arg(short = 'y', long = "yes", default_value_t = false)]
@@ -282,6 +289,32 @@ pub(crate) enum Commands {
             conflicts_with_all = ["auto_fix_toml", "auto_fix_src"]
         )]
         auto_fix_all: bool,
+    },
+
+    #[command(
+        next_help_heading = "Primary Commands",
+        about = "Fetch declared development dependencies for a local project"
+    )]
+    Setup {
+        /// Local workspace path to prepare
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Registry URL override for Ato capsule dependencies
+        #[arg(long)]
+        registry: Option<String>,
+
+        /// Skip prompts when Ato dependency install requires confirmation
+        #[arg(short = 'y', long = "yes", default_value_t = false)]
+        yes: bool,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+
+        /// Print the detected setup plan without executing it
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
     },
 
     #[command(
@@ -639,17 +672,6 @@ pub(crate) enum Commands {
     Registry {
         #[command(subcommand)]
         command: RegistryCommands,
-    },
-
-    #[command(hide = true)]
-    Setup {
-        /// Engine name to install
-        #[arg(long, default_value = "nacelle")]
-        engine: String,
-        #[arg(long)]
-        version: Option<String>,
-        #[arg(long, default_value_t = false)]
-        skip_verify: bool,
     },
 
     #[command(hide = true)]

@@ -9,7 +9,9 @@ use crate::install::support::{enforce_sandbox_mode_flags, execute_run_command};
 #[cfg(test)]
 pub(crate) use crate::install::support::{LocalRunManifestPreparationOutcome, ResolvedRunTarget};
 use crate::reporters;
-use crate::{CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, RunAgentMode};
+use crate::{
+    CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, ProviderBackend, RunAgentMode,
+};
 
 pub(crate) struct RunLikeCommandArgs {
     pub(crate) path: PathBuf,
@@ -27,6 +29,7 @@ pub(crate) struct RunLikeCommandArgs {
     pub(crate) unsafe_bypass_sandbox_legacy: bool,
     pub(crate) dangerously_skip_permissions: bool,
     pub(crate) compatibility_fallback: Option<CompatibilityFallbackBackend>,
+    pub(crate) provider_backend: Option<ProviderBackend>,
     pub(crate) yes: bool,
     pub(crate) agent_mode: RunAgentMode,
     pub(crate) keep_failed_artifacts: bool,
@@ -68,6 +71,7 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
         args.compatibility_fallback
             .map(CompatibilityFallbackBackend::as_str)
             .map(str::to_string),
+        args.provider_backend,
         args.yes,
         args.agent_mode,
         None,

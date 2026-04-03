@@ -1928,9 +1928,8 @@ fn test_run_rejects_pypi_inline_version_syntax() {
     cmd.args(["run", "pypi:markitdown@0.1.0", "--yes"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "does not support inline version syntax yet",
-        ));
+        .stderr(predicate::str::contains("inline version syntax is"))
+        .stderr(predicate::str::contains("not supported yet"));
 }
 
 #[test]
@@ -1939,8 +1938,9 @@ fn test_run_rejects_pypi_direct_url_syntax() {
     cmd.args(["run", "pypi:https://example.com/demo.whl", "--yes"])
         .assert()
         .failure()
+        .stderr(predicate::str::contains("direct URL,"))
         .stderr(predicate::str::contains(
-            "does not support direct URL, VCS, or path",
+            "path references are not supported",
         ));
 }
 
@@ -1950,21 +1950,44 @@ fn test_run_rejects_pypi_vcs_syntax() {
     cmd.args(["run", "pypi:git+https://example.com/demo.git", "--yes"])
         .assert()
         .failure()
+        .stderr(predicate::str::contains("direct URL,"))
         .stderr(predicate::str::contains(
-            "does not support direct URL, VCS, or path",
+            "path references are not supported",
+        ));
+}
+
+#[test]
+fn test_run_rejects_via_for_local_path_targets() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["run", ".", "--via", "auto", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`--via` is only supported for provider-backed run targets",
+        ));
+}
+
+#[test]
+fn test_run_rejects_via_uv_for_npm_provider_targets() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["run", "npm:@scope/pkg", "--via", "uv", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`--via uv` is not supported for `npm:`",
         ));
 }
 
 #[test]
 fn test_run_recognizes_npm_provider_but_reports_not_implemented() {
     let mut cmd = Command::cargo_bin("ato").unwrap();
-    cmd.args(["run", "npm:@scope/pkg", "--yes"])
+    cmd.args(["run", "npm:@scope/pkg", "--via", "auto", "--yes"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
             "recognized but not implemented yet",
         ))
-        .stderr(predicate::str::contains("pypi:<package>[extra]"));
+        .stderr(predicate::str::contains("supports only `pypi:<package>`"));
 }
 
 #[test]

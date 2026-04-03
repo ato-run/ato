@@ -33,9 +33,6 @@ ato run publisher/awesome-tool
 # Run a provider-backed PyPI package in one shot.
 ato run pypi:markitdown -- --help
 
-# Run a provider-backed PyPI package with extras.
-ato run pypi:markitdown[pdf] -- input.pdf -o output.md
-
 # Run an exported CLI entry in one shot.
 ato run @publisher/tool -- --help
 

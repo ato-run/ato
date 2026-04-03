@@ -21,6 +21,8 @@ use crate::cli::{ModelTierArg, PrivacyModeArg, RepairActionArg};
 const DESKY_PACKAGE_ID: &str = "ato/desky";
 const SCHEMA_VERSION: &str = "desky-control-plane/v1";
 const STATE_VERSION: u32 = 1;
+const MANAGED_ENVIRONMENT_NOT_MATERIALIZED_ERROR: &str = "managed_environment_not_materialized";
+const UNMATERIALIZED_SERVICE_STATUS: &str = "unmaterialized";
 
 #[derive(Debug, Clone)]
 pub struct InstallBootstrapStateWriteResult {
@@ -237,6 +239,8 @@ pub fn bootstrap(
         anyhow::bail!("MVP only supports `ato app bootstrap ato/desky --finalize` right now.");
     }
 
+    let service_root = ensure_desky_managed_environment_materialized()?;
+
     let workspace = workspace
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -252,7 +256,7 @@ pub fn bootstrap(
     state.personalization.model_tier = Some(model_tier.as_str().to_string());
     state.personalization.privacy_mode = Some(privacy_mode.as_str().to_string());
     state.personalization.submitted_at = Some(now_iso());
-    let _ = orchestrate_managed_services(&managed_service_root(package_id)?);
+    let _ = orchestrate_managed_services(&service_root);
     refresh_materialized_service_health(&mut state);
     state.health.checked_at = now_iso();
     recalculate_stub_health(&mut state);
@@ -282,8 +286,9 @@ pub fn repair(package_id: &str, action: RepairActionArg, json: bool) -> Result<(
 
     let detail = match action {
         RepairActionArg::RestartServices => {
-            let _ = stop_managed_services(&managed_service_root(package_id)?);
-            let _ = orchestrate_managed_services(&managed_service_root(package_id)?);
+            let service_root = ensure_desky_managed_environment_materialized()?;
+            let _ = stop_managed_services(&service_root);
+            let _ = orchestrate_managed_services(&service_root);
             refresh_materialized_service_health(&mut state);
             state.health.last_error = None;
             "Stopped materialized services, then re-ran start and readiness checks for Desky control-plane state.".to_string()
@@ -450,6 +455,71 @@ fn phase_after_personalization(state: &StoredBootstrapState) -> &'static str {
     }
 }
 
+fn desky_delivery_environment() -> DeliveryEnvironment {
+    DeliveryEnvironment {
+        strategy: "ato-managed".to_string(),
+        target: Some("desktop".to_string()),
+        services: vec![
+            capsule_core::ato_lock::DeliveryService {
+                name: "ollama".to_string(),
+                from: "dependency:ollama".to_string(),
+                lifecycle: "managed".to_string(),
+                depends_on: Vec::new(),
+                healthcheck: None,
+            },
+            capsule_core::ato_lock::DeliveryService {
+                name: "opencode".to_string(),
+                from: "dependency:opencode".to_string(),
+                lifecycle: "on-demand".to_string(),
+                depends_on: vec!["ollama".to_string()],
+                healthcheck: None,
+            },
+        ],
+        bootstrap: None,
+        repair: None,
+    }
+}
+
+fn managed_service_layout_is_materialized(
+    service_root: &Path,
+    environment: &DeliveryEnvironment,
+) -> bool {
+    service_root.exists()
+        && environment.services.iter().all(|service| {
+            let service_dir = service_root.join(service_dir_name(&service.name));
+            let record_exists = service_dir.join("service.json").exists();
+            let helper_exists = default_service_helper_command(service)
+                .map(|_| service_dir.join("run.sh").exists())
+                .unwrap_or(true);
+            record_exists && helper_exists
+        })
+}
+
+fn ensure_desky_managed_environment_materialized() -> Result<PathBuf> {
+    let environment = desky_delivery_environment();
+    let service_root = managed_service_root(DESKY_PACKAGE_ID)?;
+    if managed_service_layout_is_materialized(&service_root, &environment) {
+        return Ok(service_root);
+    }
+
+    let _ = materialize_managed_services(DESKY_PACKAGE_ID, &environment)?;
+    Ok(service_root)
+}
+
+fn mark_managed_environment_unmaterialized(state: &mut StoredBootstrapState) {
+    for service in desky_delivery_environment().services {
+        state
+            .health
+            .services
+            .insert(service.name, UNMATERIALIZED_SERVICE_STATUS.to_string());
+    }
+    state.materialization.opencode_installed = false;
+    state.materialization.ollama_mode = "missing".to_string();
+    state.health.overall = "degraded".to_string();
+    state.health.last_error = Some(MANAGED_ENVIRONMENT_NOT_MATERIALIZED_ERROR.to_string());
+    state.health.checked_at = now_iso();
+}
+
 fn recalculate_stub_health(state: &mut StoredBootstrapState) {
     let ollama_status = state
         .health
@@ -480,8 +550,12 @@ fn recalculate_stub_health(state: &mut StoredBootstrapState) {
             }
         });
 
-    state.materialization.opencode_installed = opencode_status != "missing";
-    if ollama_status == "missing" {
+    state.materialization.opencode_installed =
+        matches!(opencode_status.as_str(), "healthy" | "pending");
+    if matches!(
+        ollama_status.as_str(),
+        "missing" | UNMATERIALIZED_SERVICE_STATUS
+    ) {
         state.materialization.ollama_mode = "missing".to_string();
     }
 
@@ -496,12 +570,20 @@ fn recalculate_stub_health(state: &mut StoredBootstrapState) {
 
     if opencode_status == "healthy" && ollama_status == "healthy" {
         state.health.overall = "healthy".to_string();
-        if state.health.last_error.as_deref() == Some("opencode_not_materialized") {
+        if state.health.last_error.as_deref() == Some("opencode_not_materialized")
+            || state.health.last_error.as_deref() == Some("ollama_not_ready")
+            || state.health.last_error.as_deref()
+                == Some(MANAGED_ENVIRONMENT_NOT_MATERIALIZED_ERROR)
+        {
             state.health.last_error = None;
         }
     } else {
         state.health.overall = "degraded".to_string();
-        if opencode_status == "missing" {
+        if opencode_status == UNMATERIALIZED_SERVICE_STATUS
+            || ollama_status == UNMATERIALIZED_SERVICE_STATUS
+        {
+            state.health.last_error = Some(MANAGED_ENVIRONMENT_NOT_MATERIALIZED_ERROR.to_string());
+        } else if opencode_status == "missing" {
             state.health.last_error = Some("opencode_not_materialized".to_string());
         } else if ollama_status != "healthy" {
             state.health.last_error = Some("ollama_not_ready".to_string());
@@ -564,14 +646,19 @@ fn materialize_managed_services(
 }
 
 fn refresh_materialized_service_health(state: &mut StoredBootstrapState) {
+    let environment = desky_delivery_environment();
     let root = managed_service_root(DESKY_PACKAGE_ID).ok();
-    let Some(root) = root.filter(|path| path.exists()) else {
-        recalculate_stub_health(state);
+    let Some(root) = root else {
+        mark_managed_environment_unmaterialized(state);
         return;
     };
+    if !managed_service_layout_is_materialized(&root, &environment) {
+        mark_managed_environment_unmaterialized(state);
+        return;
+    }
 
     let Ok(records) = load_materialized_service_records(&root) else {
-        recalculate_stub_health(state);
+        mark_managed_environment_unmaterialized(state);
         return;
     };
 
@@ -1134,8 +1221,55 @@ fn default_state() -> StoredBootstrapState {
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
 
     use super::*;
+
+    struct EnvVarGuard {
+        key: String,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &str, value: Option<&str>) -> Self {
+            let previous = std::env::var_os(key);
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+            Self {
+                key: key.to_string(),
+                previous,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.as_ref() {
+                Some(value) => std::env::set_var(&self.key, value),
+                None => std::env::remove_var(&self.key),
+            }
+        }
+    }
+
+    fn test_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn write_fake_binary(dir: &Path, name: &str) {
+        let path = dir.join(name);
+        fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write fake binary");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(&path).expect("binary metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).expect("set fake binary permissions");
+        }
+    }
 
     fn assert_snapshot(name: &str, actual: String) {
         let snapshot_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1157,8 +1291,14 @@ mod tests {
 
     fn sample_state() -> StoredBootstrapState {
         let mut services = BTreeMap::new();
-        services.insert("ollama".to_string(), "healthy".to_string());
-        services.insert("opencode".to_string(), "missing".to_string());
+        services.insert(
+            "ollama".to_string(),
+            UNMATERIALIZED_SERVICE_STATUS.to_string(),
+        );
+        services.insert(
+            "opencode".to_string(),
+            UNMATERIALIZED_SERVICE_STATUS.to_string(),
+        );
         StoredBootstrapState {
             state_version: STATE_VERSION,
             materialization: MaterializationState {
@@ -1176,7 +1316,7 @@ mod tests {
             health: HealthState {
                 overall: "degraded".to_string(),
                 services,
-                last_error: Some("opencode_not_materialized".to_string()),
+                last_error: Some(MANAGED_ENVIRONMENT_NOT_MATERIALIZED_ERROR.to_string()),
                 checked_at: "2026-04-02T00:00:01+00:00".to_string(),
             },
             repair_history: vec![RepairRecord {
@@ -1306,28 +1446,7 @@ mod tests {
 
     #[test]
     fn build_install_bootstrap_state_marks_materialized_services_ready() {
-        let environment = DeliveryEnvironment {
-            strategy: "ato-managed".to_string(),
-            target: Some("desktop".to_string()),
-            services: vec![
-                capsule_core::ato_lock::DeliveryService {
-                    name: "ollama".to_string(),
-                    from: "dependency:ollama".to_string(),
-                    lifecycle: "managed".to_string(),
-                    depends_on: Vec::new(),
-                    healthcheck: None,
-                },
-                capsule_core::ato_lock::DeliveryService {
-                    name: "opencode".to_string(),
-                    from: "dependency:opencode".to_string(),
-                    lifecycle: "on-demand".to_string(),
-                    depends_on: vec!["ollama".to_string()],
-                    healthcheck: None,
-                },
-            ],
-            bootstrap: None,
-            repair: None,
-        };
+        let environment = desky_delivery_environment();
 
         let materialized = MaterializedServiceOutcome {
             service_root: PathBuf::from("/tmp/desky-services"),
@@ -1370,5 +1489,106 @@ mod tests {
         assert!(state.materialization.opencode_installed);
         assert_eq!(state.materialization.ollama_mode, "managed");
         assert_eq!(state.health.overall, "healthy");
+    }
+
+    #[test]
+    fn load_state_marks_missing_service_root_as_unmaterialized() {
+        let _guard = test_env_lock().lock().expect("lock env");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_path = temp.path().join("bootstrap-state.json");
+        let _state_guard = EnvVarGuard::set(
+            "DESKY_BOOTSTRAP_STATE_PATH",
+            Some(state_path.to_string_lossy().as_ref()),
+        );
+
+        let state = sample_state();
+        write_state_to_path(&state_path, &state).expect("write sample state");
+
+        let loaded = load_state_from_path(&state_path).expect("load state");
+        assert_eq!(
+            loaded.health.last_error.as_deref(),
+            Some(MANAGED_ENVIRONMENT_NOT_MATERIALIZED_ERROR)
+        );
+        assert_eq!(
+            loaded.health.services.get("ollama").map(String::as_str),
+            Some(UNMATERIALIZED_SERVICE_STATUS)
+        );
+        assert_eq!(
+            loaded.health.services.get("opencode").map(String::as_str),
+            Some(UNMATERIALIZED_SERVICE_STATUS)
+        );
+    }
+
+    #[test]
+    fn bootstrap_finalize_materializes_missing_service_root() {
+        let _guard = test_env_lock().lock().expect("lock env");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_path = temp.path().join("bootstrap-state.json");
+        let bin_dir = temp.path().join("bin");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        write_fake_binary(&bin_dir, "ollama");
+        write_fake_binary(&bin_dir, "opencode");
+        let _state_guard = EnvVarGuard::set(
+            "DESKY_BOOTSTRAP_STATE_PATH",
+            Some(state_path.to_string_lossy().as_ref()),
+        );
+        let _path_guard = EnvVarGuard::set("PATH", Some(bin_dir.to_string_lossy().as_ref()));
+
+        bootstrap(
+            DESKY_PACKAGE_ID,
+            true,
+            Some("/Users/test/Workspace"),
+            Some(ModelTierArg::Balanced),
+            Some(PrivacyModeArg::Strict),
+            true,
+        )
+        .expect("bootstrap finalize");
+
+        let service_root = managed_service_root(DESKY_PACKAGE_ID).expect("service root");
+        assert!(service_root.join("ollama").join("service.json").exists());
+        assert!(service_root.join("opencode").join("run.sh").exists());
+
+        let raw = fs::read_to_string(&state_path).expect("read written state");
+        let state: StoredBootstrapState = serde_json::from_str(&raw).expect("parse written state");
+        assert_eq!(
+            state.personalization.workspace_path.as_deref(),
+            Some("/Users/test/Workspace")
+        );
+        assert_ne!(
+            state.health.last_error.as_deref(),
+            Some(MANAGED_ENVIRONMENT_NOT_MATERIALIZED_ERROR)
+        );
+    }
+
+    #[test]
+    fn repair_restart_services_recreates_missing_service_root() {
+        let _guard = test_env_lock().lock().expect("lock env");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_path = temp.path().join("bootstrap-state.json");
+        let bin_dir = temp.path().join("bin");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        write_fake_binary(&bin_dir, "ollama");
+        write_fake_binary(&bin_dir, "opencode");
+        let _state_guard = EnvVarGuard::set(
+            "DESKY_BOOTSTRAP_STATE_PATH",
+            Some(state_path.to_string_lossy().as_ref()),
+        );
+        let _path_guard = EnvVarGuard::set("PATH", Some(bin_dir.to_string_lossy().as_ref()));
+
+        let mut state = sample_state();
+        state.health.last_error = Some(MANAGED_ENVIRONMENT_NOT_MATERIALIZED_ERROR.to_string());
+        write_state_to_path(&state_path, &state).expect("write broken state");
+
+        repair(DESKY_PACKAGE_ID, RepairActionArg::RestartServices, true).expect("repair");
+
+        let service_root = managed_service_root(DESKY_PACKAGE_ID).expect("service root");
+        assert!(service_root.join("ollama").join("service.json").exists());
+        assert!(service_root.join("opencode").join("run.sh").exists());
+
+        let repaired = load_state_from_path(&state_path).expect("load repaired state");
+        assert_ne!(
+            repaired.health.last_error.as_deref(),
+            Some(MANAGED_ENVIRONMENT_NOT_MATERIALIZED_ERROR)
+        );
     }
 }
