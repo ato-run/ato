@@ -22,7 +22,8 @@ use crate::reporters;
 use crate::runtime::tree as runtime_tree;
 use crate::tui;
 use crate::{
-    CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, DEFAULT_RUN_REGISTRY_URL,
+    CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, ProviderToolchain,
+    DEFAULT_RUN_REGISTRY_URL,
 };
 
 pub(crate) async fn resolve_installed_capsule_archive(
@@ -760,6 +761,7 @@ enum RunManifestRecoveryChoice {
 pub(crate) async fn resolve_run_target_or_install(
     path: PathBuf,
     yes: bool,
+    provider_toolchain: ProviderToolchain,
     keep_failed_artifacts: bool,
     auto_fix_mode: Option<GitHubAutoFixMode>,
     allow_unverified: bool,
@@ -771,6 +773,12 @@ pub(crate) async fn resolve_run_target_or_install(
     let expanded_local = crate::local_input::expand_local_path(&raw);
     match install::provider_target::classify_run_target(&raw, &expanded_local)? {
         install::provider_target::ParsedRunTarget::LocalPath(local_path) => {
+            if provider_toolchain != ProviderToolchain::Auto {
+                anyhow::bail!(
+                    "`--via {}` is only supported for provider-backed targets in this MVP. Use `ato run pypi:<package> -- ...` or `ato run npm:<package> -- ...`.",
+                    provider_toolchain.as_str()
+                );
+            }
             return Ok(ResolvedRunTarget {
                 agent_local_root: agent_local_root_for_path(&local_path),
                 path: local_path,
@@ -780,6 +788,12 @@ pub(crate) async fn resolve_run_target_or_install(
             });
         }
         install::provider_target::ParsedRunTarget::GitHubRepository(repository) => {
+            if provider_toolchain != ProviderToolchain::Auto {
+                anyhow::bail!(
+                    "`--via {}` is only supported for provider-backed targets in this MVP. Use `ato run pypi:<package> -- ...` or `ato run npm:<package> -- ...`.",
+                    provider_toolchain.as_str()
+                );
+            }
             let json_mode = reporter.is_json();
             if crate::progressive_ui::can_use_progressive_ui(json_mode) {
                 crate::progressive_ui::begin_flow_without_logo()?;
@@ -835,6 +849,7 @@ pub(crate) async fn resolve_run_target_or_install(
         install::provider_target::ParsedRunTarget::Provider(provider_target) => {
             let workspace = install::provider_target::materialize_provider_run_workspace(
                 &provider_target,
+                provider_toolchain,
                 keep_failed_artifacts,
                 reporter.is_json(),
             )?;
@@ -847,6 +862,13 @@ pub(crate) async fn resolve_run_target_or_install(
             });
         }
         install::provider_target::ParsedRunTarget::RegistryReference => {}
+    }
+
+    if provider_toolchain != ProviderToolchain::Auto {
+        anyhow::bail!(
+            "`--via {}` is only supported for provider-backed targets in this MVP. Use `ato run pypi:<package> -- ...` or `ato run npm:<package> -- ...`.",
+            provider_toolchain.as_str()
+        );
     }
 
     let scoped_ref = match install::parse_capsule_ref(&raw) {
@@ -2058,6 +2080,7 @@ pub(crate) fn execute_run_command(
     sandbox_mode: bool,
     dangerously_skip_permissions: bool,
     compatibility_fallback: Option<String>,
+    provider_toolchain: ProviderToolchain,
     assume_yes: bool,
     agent_mode: crate::RunAgentMode,
     agent_local_root: Option<PathBuf>,
@@ -2087,6 +2110,7 @@ pub(crate) fn execute_run_command(
         sandbox_mode,
         dangerously_skip_permissions,
         compatibility_fallback,
+        provider_toolchain_requested: provider_toolchain,
         assume_yes,
         agent_mode,
         agent_local_root,
@@ -2234,6 +2258,7 @@ mod tests {
         resolve_run_target_or_install(
             PathBuf::from("@team/tool"),
             true,
+            ProviderToolchain::Auto,
             false,
             None,
             false,

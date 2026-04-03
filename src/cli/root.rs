@@ -12,7 +12,9 @@ use super::package::PackageCommands;
 use super::profile::ProfileCommands;
 use super::project::{ProjectCommands, ScaffoldCommands};
 use super::registry::RegistryCommands;
-use super::shared::{cli_styles, CompatibilityFallbackBackend, EnforcementMode, RunAgentMode};
+use super::shared::{
+    cli_styles, CompatibilityFallbackBackend, EnforcementMode, ProviderToolchain, RunAgentMode,
+};
 use super::source::SourceCommands;
 use super::state::StateCommands;
 
@@ -133,6 +135,10 @@ pub(crate) enum Commands {
         /// Run with an explicit compatibility fallback backend instead of the standard runtime path
         #[arg(long = "compatibility-fallback", value_enum)]
         compatibility_fallback: Option<CompatibilityFallbackBackend>,
+
+        /// Select the provider-backed materialization toolchain
+        #[arg(long = "via", value_enum, default_value_t = ProviderToolchain::Auto)]
+        via: ProviderToolchain,
 
         /// Skip prompt and auto-install when app-id is not installed
         #[arg(short = 'y', long = "yes", default_value_t = false)]
