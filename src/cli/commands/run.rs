@@ -591,7 +591,8 @@ struct ConsumerRunPhaseRunner<'a> {
     desktop_open_path: Option<PathBuf>,
     export_request: Option<ResolvedCliExportRequest>,
     agent_local_root: Option<PathBuf>,
-    provider_workspace_root: Option<PathBuf>,
+    transient_workspace_root: Option<PathBuf>,
+    provider_backed_target: bool,
     should_stop_after_install: bool,
 }
 
@@ -642,11 +643,9 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     .or(install.resolved_target.desktop_open_path);
                 self.export_request = install.resolved_target.export_request;
                 self.agent_local_root = install.resolved_target.agent_local_root;
-                self.provider_workspace_root = install
-                    .resolved_target
-                    .provider_workspace
-                    .as_ref()
-                    .map(|workspace| workspace.workspace_root.clone());
+                self.transient_workspace_root =
+                    install.resolved_target.transient_workspace_root.clone();
+                self.provider_backed_target = install.resolved_target.provider_workspace.is_some();
                 self.should_stop_after_install = matches!(
                     install.manifest_outcome,
                     crate::install::support::LocalRunManifestPreparationOutcome::CreatedManualManifest
@@ -759,21 +758,29 @@ async fn execute_normal_mode(args: RunArgs) -> Result<()> {
         desktop_open_path: None,
         export_request: args.export_request.clone(),
         agent_local_root: args.agent_local_root.clone(),
-        provider_workspace_root: None,
+        transient_workspace_root: None,
+        provider_backed_target: false,
         should_stop_after_install: false,
     };
 
     let result = pipeline.run(&mut runner).await;
     if result.is_ok() {
-        if let Some(provider_workspace_root) = runner.provider_workspace_root.as_ref() {
-            let _ = fs::remove_dir_all(provider_workspace_root);
+        if let Some(transient_workspace_root) = runner.transient_workspace_root.as_ref() {
+            let _ = fs::remove_dir_all(transient_workspace_root);
         }
     } else if args.keep_failed_artifacts {
-        if let Some(provider_workspace_root) = runner.provider_workspace_root.as_ref() {
-            crate::install::provider_target::maybe_report_kept_failed_provider_workspace(
-                provider_workspace_root,
-                args.reporter.is_json(),
-            );
+        if let Some(transient_workspace_root) = runner.transient_workspace_root.as_ref() {
+            if runner.provider_backed_target {
+                crate::install::provider_target::maybe_report_kept_failed_provider_workspace(
+                    transient_workspace_root,
+                    args.reporter.is_json(),
+                );
+            } else if !args.reporter.is_json() {
+                eprintln!(
+                    "⚠️  Kept transient run workspace for debugging: {}",
+                    transient_workspace_root.display()
+                );
+            }
         }
     }
     result
@@ -841,16 +848,28 @@ async fn normalize_run_target_after_install(
     resolved_target: &crate::install::support::ResolvedRunTarget,
     mut attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<NormalizedRunTarget> {
-    if let Some(provider_workspace) = resolved_target.provider_workspace.as_ref() {
+    if let Some(transient_workspace_root) = resolved_target.transient_workspace_root.as_ref() {
         if !args.keep_failed_artifacts {
             if let Some(attempt) = attempt.as_deref_mut() {
                 let mut scope = attempt.cleanup_scope();
-                scope.register_remove_dir(provider_workspace.workspace_root.clone());
+                scope.register_remove_dir(transient_workspace_root.clone());
             }
         }
     }
 
     let target_path = resolved_target.path.as_path();
+
+    if resolved_target.transient_workspace_root.is_some()
+        && resolved_target.provider_workspace.is_none()
+        && target_path.is_dir()
+        && target_path.join("capsule.toml").exists()
+    {
+        return Ok(NormalizedRunTarget {
+            target: resolved_target.path.clone(),
+            authoritative_input: None,
+            desktop_open_path: None,
+        });
+    }
 
     if target_path
         .extension()
@@ -1175,6 +1194,7 @@ fn execute_watch_mode(args: RunArgs) -> Result<()> {
         desktop_open_path: None,
         export_request: args.export_request.clone(),
         provider_workspace: None,
+        transient_workspace_root: None,
     };
     let normalized =
         futures::executor::block_on(normalize_run_target_after_install(&args, &resolved, None))?;
@@ -1714,6 +1734,7 @@ run_command = "node server.js"
             desktop_open_path: None,
             export_request: None,
             provider_workspace: None,
+            transient_workspace_root: None,
         };
 
         let normalized = normalize_run_target_after_install(&args, &resolved, None)
@@ -1768,6 +1789,7 @@ run_command = "node server.js"
             desktop_open_path: None,
             export_request: None,
             provider_workspace: None,
+            transient_workspace_root: None,
         };
 
         let normalized = normalize_run_target_after_install(&args, &resolved, None)
