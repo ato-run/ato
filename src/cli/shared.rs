@@ -59,27 +59,34 @@ impl CompatibilityFallbackBackend {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub(crate) enum ProviderBackend {
-    Auto,
-    Uv,
-}
-
-impl ProviderBackend {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            ProviderBackend::Auto => "auto",
-            ProviderBackend::Uv => "uv",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub(crate) enum RunAgentMode {
     #[default]
     Auto,
     Off,
     Force,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ProviderToolchain {
+    #[default]
+    Auto,
+    Uv,
+    Npm,
+    Bun,
+    Pnpm,
+}
+
+impl ProviderToolchain {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            ProviderToolchain::Auto => "auto",
+            ProviderToolchain::Uv => "uv",
+            ProviderToolchain::Npm => "npm",
+            ProviderToolchain::Bun => "bun",
+            ProviderToolchain::Pnpm => "pnpm",
+        }
+    }
 }
 
 pub(super) fn cli_styles() -> clap::builder::Styles {

@@ -1873,6 +1873,8 @@ fn test_run_help_shows_yes_flag() {
         .success()
         .stdout(predicate::str::contains("github.com/owner/repo"))
         .stdout(predicate::str::contains("pypi:<package>"))
+        .stdout(predicate::str::contains("npm:<package>"))
+        .stdout(predicate::str::contains("--via <VIA>"))
         .stdout(predicate::str::contains("--skill <SKILL>").not())
         .stdout(predicate::str::contains("--yes"))
         .stdout(predicate::str::contains("--registry"))
@@ -1979,15 +1981,78 @@ fn test_run_rejects_via_uv_for_npm_provider_targets() {
 }
 
 #[test]
-fn test_run_recognizes_npm_provider_but_reports_not_implemented() {
+fn test_run_rejects_npm_inline_version_syntax() {
     let mut cmd = Command::cargo_bin("ato").unwrap();
-    cmd.args(["run", "npm:@scope/pkg", "--via", "auto", "--yes"])
+    cmd.args(["run", "npm:tsx@4.9.0", "--yes"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "recognized but not implemented yet",
+            "does not support inline versions or dist-tags",
+        ));
+}
+
+#[test]
+fn test_run_rejects_npm_direct_url_syntax() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["run", "npm:https://example.com/demo.tgz", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "does not support direct URL, git, or file references",
+        ));
+}
+
+#[test]
+fn test_run_rejects_npm_subpath_syntax() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["run", "npm:@scope/pkg/bin", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "does not support package subpaths",
+        ));
+}
+
+#[test]
+fn test_run_rejects_pnpm_toolchain_for_pypi_targets() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["run", "pypi:markitdown", "--via", "pnpm", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`--via pnpm` is not valid for pypi: targets",
         ))
-        .stderr(predicate::str::contains("supports only `pypi:<package>`"));
+        .stderr(predicate::str::contains("pypi + uv"));
+}
+
+#[test]
+fn test_run_rejects_pnpm_toolchain_for_non_provider_targets() {
+    let temp = tempdir().unwrap();
+    fs::write(
+        temp.path().join("capsule.toml"),
+        r#"schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+default_target = "app"
+
+[targets.app]
+runtime = "node"
+driver = "node"
+entrypoint = "index.mjs"
+"#,
+    )
+    .unwrap();
+    fs::write(temp.path().join("index.mjs"), "console.log('ok')\n").unwrap();
+
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.current_dir(temp.path())
+        .args(["run", ".", "--via", "pnpm", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`--via pnpm` is only supported for provider-backed targets",
+        ))
+        .stderr(predicate::str::contains("ato run npm:<package> -- ..."));
 }
 
 #[test]
@@ -1999,6 +2064,17 @@ fn test_install_rejects_provider_target_with_targeted_message() {
         .stderr(predicate::str::contains("run-only in this MVP"))
         .stderr(predicate::str::contains("pypi:markitdown"))
         .stderr(predicate::str::contains("ato install pypi:markitdown"));
+}
+
+#[test]
+fn test_install_rejects_npm_provider_target_with_targeted_message() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["install", "npm:tsx"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("run-only in this MVP"))
+        .stderr(predicate::str::contains("npm:tsx"))
+        .stderr(predicate::str::contains("ato install npm:tsx"));
 }
 
 #[test]
