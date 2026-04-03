@@ -8,8 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::debug;
 
 use capsule_core::common::paths::ato_runs_dir;
+use capsule_core::python_runtime::{normalized_python_runtime_version, python_selector_env};
 
 const PROVIDER_RUN_ROOT: &str = "provider-backed";
 const PROVIDER_SITE_PACKAGES_DIR: &str = ".ato/provider/site-packages";
@@ -92,7 +94,9 @@ struct ProviderResolutionMetadata {
     selected_entrypoint: String,
     generated_wrapper_path: String,
     index_source: String,
+    requested_runtime_version: String,
     effective_runtime_version: String,
+    materialization_python_selector: String,
 }
 
 struct WorkspaceGuard {
@@ -292,7 +296,12 @@ fn materialize_pypi_workspace(
             selected_entrypoint: resolved.entrypoint_value,
             generated_wrapper_path: wrapper_path.display().to_string(),
             index_source: current_index_source(),
+            requested_runtime_version: PROVIDER_PYTHON_RUNTIME_VERSION.to_string(),
             effective_runtime_version: PROVIDER_PYTHON_RUNTIME_VERSION.to_string(),
+            materialization_python_selector: normalized_python_runtime_version(Some(
+                PROVIDER_PYTHON_RUNTIME_VERSION,
+            ))
+            .unwrap_or_else(|| PROVIDER_PYTHON_RUNTIME_VERSION.to_string()),
         };
         fs::write(
             &resolution_metadata_path,
@@ -301,6 +310,13 @@ fn materialize_pypi_workspace(
                 + "\n",
         )
         .with_context(|| format!("failed to write {}", resolution_metadata_path.display()))?;
+
+        debug!(
+            selected_python_runtime = PROVIDER_PYTHON_RUNTIME_VERSION,
+            materialized_python_selector = PROVIDER_PYTHON_RUNTIME_VERSION,
+            workspace_root = %workspace_root.display(),
+            "Materialized provider-backed PyPI workspace"
+        );
 
         guard.keep();
 
@@ -321,8 +337,10 @@ fn materialize_pypi_workspace(
 
 fn compile_provider_lockfile(workspace_root: &Path) -> Result<()> {
     let uv = find_uv_binary()?;
+    let selector_env = python_selector_env(Some(PROVIDER_PYTHON_RUNTIME_VERSION));
     let mut command = Command::new(&uv);
     command
+        .envs(selector_env.iter())
         .args([
             "pip",
             "compile",
@@ -350,8 +368,10 @@ fn compile_provider_lockfile(workspace_root: &Path) -> Result<()> {
 
 fn sync_provider_site_packages(workspace_root: &Path, site_packages_dir: &Path) -> Result<()> {
     let uv = find_uv_binary()?;
+    let selector_env = python_selector_env(Some(PROVIDER_PYTHON_RUNTIME_VERSION));
     let mut command = Command::new(&uv);
     command
+        .envs(selector_env.iter())
         .args(["pip", "sync", "uv.lock", "--managed-python"])
         .arg(format!("--python={PROVIDER_PYTHON_RUNTIME_VERSION}"))
         .args(["--target", site_packages_dir.to_string_lossy().as_ref()])
@@ -679,7 +699,7 @@ fn parse_pypi_requirement_ref(raw_ref: &str) -> Result<ParsedPyPIRequirement> {
 fn canonicalize_pypi_extras(raw_extras: &str) -> Result<Vec<String>> {
     let mut extras = raw_extras
         .split(',')
-        .map(normalize_pypi_name)
+        .map(|value| normalize_pypi_name(value))
         .collect::<Vec<_>>();
     if extras.iter().any(|value| value.is_empty()) {
         bail!("PyPI extras must not be empty");
@@ -1371,6 +1391,10 @@ Tag: py3-none-any\n";
             "provider capsule manifest must pin the effective runtime version"
         );
         assert!(
+            !manifest_raw.contains("UV_PYTHON"),
+            "provider capsule manifest must not persist UV runtime transport"
+        );
+        assert!(
             workspace.resolution_metadata_path.exists(),
             "resolution metadata file should be generated"
         );
@@ -1396,7 +1420,15 @@ Tag: py3-none-any\n";
             Some("demo_provider.cli:main")
         );
         assert_eq!(
+            metadata["requested_runtime_version"].as_str(),
+            Some(super::PROVIDER_PYTHON_RUNTIME_VERSION)
+        );
+        assert_eq!(
             metadata["effective_runtime_version"].as_str(),
+            Some(super::PROVIDER_PYTHON_RUNTIME_VERSION)
+        );
+        assert_eq!(
+            metadata["materialization_python_selector"].as_str(),
             Some(super::PROVIDER_PYTHON_RUNTIME_VERSION)
         );
         assert!(
@@ -1501,6 +1533,10 @@ Tag: py3-none-any\n";
             Some("demo-provider")
         );
         assert_eq!(metadata["requested_extras"], serde_json::json!(["a", "b"]));
+        assert_eq!(
+            metadata["materialization_python_selector"].as_str(),
+            Some(super::PROVIDER_PYTHON_RUNTIME_VERSION)
+        );
 
         fs::remove_dir_all(&workspace.workspace_root).expect("cleanup provider workspace");
     }
