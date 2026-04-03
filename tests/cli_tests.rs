@@ -1872,6 +1872,7 @@ fn test_run_help_shows_yes_flag() {
         .assert()
         .success()
         .stdout(predicate::str::contains("github.com/owner/repo"))
+        .stdout(predicate::str::contains("pypi:<package>"))
         .stdout(predicate::str::contains("--skill <SKILL>").not())
         .stdout(predicate::str::contains("--yes"))
         .stdout(predicate::str::contains("--registry"))
@@ -1898,6 +1899,83 @@ fn test_run_requires_yes_or_tty_for_github_repo_install() {
         .stderr(predicate::str::contains(
             "Interactive install confirmation requires a TTY",
         ));
+}
+
+#[test]
+fn test_run_rejects_unknown_provider() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["run", "foo:bar", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown provider `foo`"))
+        .stderr(predicate::str::contains("pypi"))
+        .stderr(predicate::str::contains("npm"));
+}
+
+#[test]
+fn test_run_rejects_provider_sugar_syntax() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["run", "pypi/markitdown", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("canonical syntax"))
+        .stderr(predicate::str::contains("ato run pypi:markitdown -- ..."));
+}
+
+#[test]
+fn test_run_rejects_pypi_inline_version_syntax() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["run", "pypi:markitdown@0.1.0", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "does not support inline version syntax yet",
+        ));
+}
+
+#[test]
+fn test_run_rejects_pypi_direct_url_syntax() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["run", "pypi:https://example.com/demo.whl", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "does not support direct URL, VCS, or path",
+        ));
+}
+
+#[test]
+fn test_run_rejects_pypi_vcs_syntax() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["run", "pypi:git+https://example.com/demo.git", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "does not support direct URL, VCS, or path",
+        ));
+}
+
+#[test]
+fn test_run_recognizes_npm_provider_but_reports_not_implemented() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["run", "npm:@scope/pkg", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "recognized but not implemented yet",
+        ))
+        .stderr(predicate::str::contains("pypi:<package>[extra]"));
+}
+
+#[test]
+fn test_install_rejects_provider_target_with_targeted_message() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["install", "pypi:markitdown"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("run-only in this MVP"))
+        .stderr(predicate::str::contains("pypi:markitdown"))
+        .stderr(predicate::str::contains("ato install pypi:markitdown"));
 }
 
 #[test]

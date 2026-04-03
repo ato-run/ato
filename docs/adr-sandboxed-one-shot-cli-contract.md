@@ -89,6 +89,7 @@ Accepted target classes are:
 
 - local paths
 - GitHub shorthand such as `github.com/owner/repo`
+- provider-backed targets in canonical `provider:ref` form
 - Ato registry references
 
 For remote registry references, `@publisher/slug` is the canonical public syntax.
@@ -98,7 +99,7 @@ For remote registry references, `@publisher/slug` is the canonical public syntax
 The following are not part of this ADR and must not be introduced as implicit resolution behavior.
 
 - bare remote lookup such as `ato run markitdown`
-- ecosystem-specific shorthand such as `pip/markitdown`
+- ecosystem-specific slash shorthand such as `pip/markitdown`
 - slug-only remote disambiguation at execution time
 
 ## 5. Target Argument Contract
@@ -286,7 +287,7 @@ For one-shot CLI targets, user-facing errors should avoid service-oriented wordi
 This ADR intentionally does not define:
 
 - bare-name remote package lookup
-- ecosystem-specific ref syntax such as `pypi:` or `npm:`
+- provider-specific resolution beyond canonical `provider:ref` parsing and one-shot execution
 - automatic full-fidelity discovery of every file access from `argv`
 - stable semantics for `--mount-cwd` in 0.5.x
 - package metadata hints for automatic I/O grants

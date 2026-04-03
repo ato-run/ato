@@ -108,8 +108,20 @@ async fn execute_watch_mode_with_install(args: RunArgs) -> Result<()> {
         return Ok(());
     }
 
+    if let Some(provider_workspace) = install.resolved_target.provider_workspace.as_ref() {
+        if !args.keep_failed_artifacts {
+            let _ = std::fs::remove_dir_all(&provider_workspace.workspace_root);
+        } else {
+            crate::install::provider_target::maybe_report_kept_failed_provider_workspace(
+                &provider_workspace.workspace_root,
+                args.reporter.is_json(),
+            );
+        }
+        anyhow::bail!("--watch is not supported for provider-backed targets in this MVP");
+    }
+
     let normalized =
-        normalize_run_target_after_install(&args, &install.resolved_target.path, None).await?;
+        normalize_run_target_after_install(&args, &install.resolved_target, None).await?;
     execute_watch_mode(RunArgs {
         target: normalized.target,
         agent_local_root: install.resolved_target.agent_local_root,
@@ -579,6 +591,7 @@ struct ConsumerRunPhaseRunner<'a> {
     desktop_open_path: Option<PathBuf>,
     export_request: Option<ResolvedCliExportRequest>,
     agent_local_root: Option<PathBuf>,
+    provider_workspace_root: Option<PathBuf>,
     should_stop_after_install: bool,
 }
 
@@ -615,7 +628,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                 })?;
                 let normalized = normalize_run_target_after_install(
                     self.args,
-                    &install.resolved_target.path,
+                    &install.resolved_target,
                     Some(attempt),
                 )
                 .await
@@ -629,6 +642,11 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     .or(install.resolved_target.desktop_open_path);
                 self.export_request = install.resolved_target.export_request;
                 self.agent_local_root = install.resolved_target.agent_local_root;
+                self.provider_workspace_root = install
+                    .resolved_target
+                    .provider_workspace
+                    .as_ref()
+                    .map(|workspace| workspace.workspace_root.clone());
                 self.should_stop_after_install = matches!(
                     install.manifest_outcome,
                     crate::install::support::LocalRunManifestPreparationOutcome::CreatedManualManifest
@@ -741,10 +759,24 @@ async fn execute_normal_mode(args: RunArgs) -> Result<()> {
         desktop_open_path: None,
         export_request: args.export_request.clone(),
         agent_local_root: args.agent_local_root.clone(),
+        provider_workspace_root: None,
         should_stop_after_install: false,
     };
 
-    pipeline.run(&mut runner).await
+    let result = pipeline.run(&mut runner).await;
+    if result.is_ok() {
+        if let Some(provider_workspace_root) = runner.provider_workspace_root.as_ref() {
+            let _ = fs::remove_dir_all(provider_workspace_root);
+        }
+    } else if args.keep_failed_artifacts {
+        if let Some(provider_workspace_root) = runner.provider_workspace_root.as_ref() {
+            crate::install::provider_target::maybe_report_kept_failed_provider_workspace(
+                provider_workspace_root,
+                args.reporter.is_json(),
+            );
+        }
+    }
+    result
 }
 
 fn run_phase_detail(boundary: HourglassPhase) -> &'static str {
@@ -806,15 +838,26 @@ fn emit_run_phase_failure(args: &RunArgs, boundary: HourglassPhase, error: &anyh
 
 async fn normalize_run_target_after_install(
     args: &RunArgs,
-    resolved_target: &Path,
-    attempt: Option<&mut PipelineAttemptContext>,
+    resolved_target: &crate::install::support::ResolvedRunTarget,
+    mut attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<NormalizedRunTarget> {
-    if resolved_target
+    if let Some(provider_workspace) = resolved_target.provider_workspace.as_ref() {
+        if !args.keep_failed_artifacts {
+            if let Some(attempt) = attempt.as_deref_mut() {
+                let mut scope = attempt.cleanup_scope();
+                scope.register_remove_dir(provider_workspace.workspace_root.clone());
+            }
+        }
+    }
+
+    let target_path = resolved_target.path.as_path();
+
+    if target_path
         .extension()
         .map(|value| value.eq_ignore_ascii_case("capsule"))
         .unwrap_or(false)
     {
-        let target = prepare_capsule_target(args, &resolved_target.to_path_buf(), attempt).await?;
+        let target = prepare_capsule_target(args, &resolved_target.path, attempt).await?;
         return Ok(NormalizedRunTarget {
             target,
             authoritative_input: None,
@@ -822,8 +865,8 @@ async fn normalize_run_target_after_install(
         });
     }
 
-    if resolved_target.is_file()
-        && resolved_target
+    if target_path.is_file()
+        && target_path
             .extension()
             .and_then(|value| value.to_str())
             .map(|value| {
@@ -831,9 +874,9 @@ async fn normalize_run_target_after_install(
             })
             .unwrap_or(false)
     {
-        let mut cleanup_scope = attempt.map(|attempt| attempt.cleanup_scope());
+        let mut cleanup_scope = attempt.as_mut().map(|attempt| attempt.cleanup_scope());
         let materialized = source_inference::materialize_run_from_explicit_native_artifact(
-            resolved_target,
+            target_path,
             cleanup_scope.as_mut(),
             args.reporter.clone(),
             args.assume_yes,
@@ -850,10 +893,10 @@ async fn normalize_run_target_after_install(
         });
     }
 
-    if resolved_target.is_dir()
-        || resolved_target.file_name().and_then(|value| value.to_str()) == Some("capsule.toml")
-        || resolved_target.file_name().and_then(|value| value.to_str()) == Some(ATO_LOCK_FILE_NAME)
-        || resolved_target
+    if target_path.is_dir()
+        || target_path.file_name().and_then(|value| value.to_str()) == Some("capsule.toml")
+        || target_path.file_name().and_then(|value| value.to_str()) == Some(ATO_LOCK_FILE_NAME)
+        || target_path
             .extension()
             .and_then(|value| value.to_str())
             .map(|value| {
@@ -865,9 +908,9 @@ async fn normalize_run_target_after_install(
             })
             .unwrap_or(false)
     {
-        return match resolve_authoritative_input(resolved_target, ResolveInputOptions::default())? {
+        return match resolve_authoritative_input(target_path, ResolveInputOptions::default())? {
             ResolvedInput::CanonicalLock { canonical, .. } => {
-                let mut cleanup_scope = attempt.map(|attempt| attempt.cleanup_scope());
+                let mut cleanup_scope = attempt.as_mut().map(|attempt| attempt.cleanup_scope());
                 let materialized = source_inference::materialize_run_from_canonical_lock(
                     &canonical,
                     cleanup_scope.as_mut(),
@@ -886,7 +929,7 @@ async fn normalize_run_target_after_install(
                 })
             }
             ResolvedInput::CompatibilityProject { project, .. } => {
-                let mut cleanup_scope = attempt.map(|attempt| attempt.cleanup_scope());
+                let mut cleanup_scope = attempt.as_mut().map(|attempt| attempt.cleanup_scope());
                 let materialized = source_inference::materialize_run_from_compatibility(
                     &project,
                     cleanup_scope.as_mut(),
@@ -912,7 +955,7 @@ async fn normalize_run_target_after_install(
                 })
             }
             ResolvedInput::SourceOnly { source, .. } => {
-                let mut cleanup_scope = attempt.map(|attempt| attempt.cleanup_scope());
+                let mut cleanup_scope = attempt.as_mut().map(|attempt| attempt.cleanup_scope());
                 let materialized = source_inference::materialize_run_from_source_only(
                     &source,
                     cleanup_scope.as_mut(),
@@ -934,7 +977,7 @@ async fn normalize_run_target_after_install(
     }
 
     Ok(NormalizedRunTarget {
-        target: resolved_target.to_path_buf(),
+        target: resolved_target.path.clone(),
         authoritative_input: None,
         desktop_open_path: None,
     })
@@ -1126,11 +1169,15 @@ fn execute_watch_mode(args: RunArgs) -> Result<()> {
     let preview_mode = args.preview_mode
         || (manifest_path.exists()
             && preview::load_preview_session_for_manifest(&manifest_path)?.is_some());
-    let normalized = futures::executor::block_on(normalize_run_target_after_install(
-        &args,
-        &args.target,
-        None,
-    ))?;
+    let resolved = crate::install::support::ResolvedRunTarget {
+        path: args.target.clone(),
+        agent_local_root: args.agent_local_root.clone(),
+        desktop_open_path: None,
+        export_request: args.export_request.clone(),
+        provider_workspace: None,
+    };
+    let normalized =
+        futures::executor::block_on(normalize_run_target_after_install(&args, &resolved, None))?;
     let decision = if let Some(authoritative_input) = normalized.authoritative_input.as_ref() {
         let mut decision = capsule_core::router::route_lock_with_state_overrides(
             &authoritative_input.lock_path,
@@ -1661,7 +1708,15 @@ run_command = "node server.js"
             preview_mode: false,
         };
 
-        let normalized = normalize_run_target_after_install(&args, &lock_path, None)
+        let resolved = crate::install::support::ResolvedRunTarget {
+            path: lock_path.clone(),
+            agent_local_root: Some(tmp.path().to_path_buf()),
+            desktop_open_path: None,
+            export_request: None,
+            provider_workspace: None,
+        };
+
+        let normalized = normalize_run_target_after_install(&args, &resolved, None)
             .await
             .expect("normalize target");
 
@@ -1707,7 +1762,15 @@ run_command = "node server.js"
             preview_mode: false,
         };
 
-        let normalized = normalize_run_target_after_install(&args, &appimage_path, None)
+        let resolved = crate::install::support::ResolvedRunTarget {
+            path: appimage_path.clone(),
+            agent_local_root: Some(tmp.path().to_path_buf()),
+            desktop_open_path: None,
+            export_request: None,
+            provider_workspace: None,
+        };
+
+        let normalized = normalize_run_target_after_install(&args, &resolved, None)
             .await
             .expect("normalize target");
         let authoritative = normalized

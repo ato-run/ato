@@ -734,6 +734,7 @@ pub(crate) struct ResolvedRunTarget {
     pub(crate) agent_local_root: Option<PathBuf>,
     pub(crate) desktop_open_path: Option<PathBuf>,
     pub(crate) export_request: Option<ResolvedCliExportRequest>,
+    pub(crate) provider_workspace: Option<install::provider_target::ProviderRunWorkspace>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -768,66 +769,84 @@ pub(crate) async fn resolve_run_target_or_install(
     let raw = path.to_string_lossy().to_string();
     let export_invocation = raw.trim().starts_with('@');
     let expanded_local = crate::local_input::expand_local_path(&raw);
-    if crate::local_input::should_treat_input_as_local(&raw, &expanded_local) {
-        return Ok(ResolvedRunTarget {
-            agent_local_root: agent_local_root_for_path(&expanded_local),
-            path: expanded_local,
-            desktop_open_path: None,
-            export_request: None,
-        });
-    }
-
-    if let Some(repository) = install::parse_github_run_ref(&raw)? {
-        let json_mode = reporter.is_json();
-        if crate::progressive_ui::can_use_progressive_ui(json_mode) {
-            crate::progressive_ui::begin_flow_without_logo()?;
+    match install::provider_target::classify_run_target(&raw, &expanded_local)? {
+        install::provider_target::ParsedRunTarget::LocalPath(local_path) => {
+            return Ok(ResolvedRunTarget {
+                agent_local_root: agent_local_root_for_path(&local_path),
+                path: local_path,
+                desktop_open_path: None,
+                export_request: None,
+                provider_workspace: None,
+            });
         }
-        if json_mode && !yes {
-            anyhow::bail!(
-                "Non-interactive JSON mode requires -y/--yes when auto-installing missing capsules"
-            );
-        }
+        install::provider_target::ParsedRunTarget::GitHubRepository(repository) => {
+            let json_mode = reporter.is_json();
+            if crate::progressive_ui::can_use_progressive_ui(json_mode) {
+                crate::progressive_ui::begin_flow_without_logo()?;
+            }
+            if json_mode && !yes {
+                anyhow::bail!(
+                    "Non-interactive JSON mode requires -y/--yes when auto-installing missing capsules"
+                );
+            }
 
-        if !yes
-            && !can_prompt_interactively(
-                std::io::stdin().is_terminal(),
-                std::io::stdout().is_terminal(),
-            )
-        {
-            anyhow::bail!(
-                "Interactive install confirmation requires a TTY. Re-run with -y/--yes in CI or non-interactive environments."
-            );
-        }
-
-        if yes {
-            debug!(
-                repository = %repository,
-                "GitHub repository not installed locally; continuing with -y auto-install"
-            );
-        }
-
-        let install_result = install_github_repository(
-            &repository,
-            None,
-            yes,
-            install::ProjectionPreference::Skip,
-            json_mode,
-            !json_mode
-                && can_prompt_interactively(
+            if !yes
+                && !can_prompt_interactively(
                     std::io::stdin().is_terminal(),
-                    std::io::stderr().is_terminal(),
-                ),
-            keep_failed_artifacts,
-            auto_fix_mode,
-        )
-        .await?;
-        let desktop_open_path = launchable_desktop_open_path(&install_result);
-        return Ok(ResolvedRunTarget {
-            path: install_result.path,
-            agent_local_root: None,
-            desktop_open_path,
-            export_request: None,
-        });
+                    std::io::stdout().is_terminal(),
+                )
+            {
+                anyhow::bail!(
+                    "Interactive install confirmation requires a TTY. Re-run with -y/--yes in CI or non-interactive environments."
+                );
+            }
+
+            if yes {
+                debug!(
+                    repository = %repository,
+                    "GitHub repository not installed locally; continuing with -y auto-install"
+                );
+            }
+
+            let install_result = install_github_repository(
+                &repository,
+                None,
+                yes,
+                install::ProjectionPreference::Skip,
+                json_mode,
+                !json_mode
+                    && can_prompt_interactively(
+                        std::io::stdin().is_terminal(),
+                        std::io::stderr().is_terminal(),
+                    ),
+                keep_failed_artifacts,
+                auto_fix_mode,
+            )
+            .await?;
+            let desktop_open_path = launchable_desktop_open_path(&install_result);
+            return Ok(ResolvedRunTarget {
+                path: install_result.path,
+                agent_local_root: None,
+                desktop_open_path,
+                export_request: None,
+                provider_workspace: None,
+            });
+        }
+        install::provider_target::ParsedRunTarget::Provider(provider_target) => {
+            let workspace = install::provider_target::materialize_provider_run_workspace(
+                &provider_target,
+                keep_failed_artifacts,
+                reporter.is_json(),
+            )?;
+            return Ok(ResolvedRunTarget {
+                path: workspace.workspace_root.clone(),
+                agent_local_root: Some(workspace.workspace_root.clone()),
+                desktop_open_path: None,
+                export_request: None,
+                provider_workspace: Some(workspace),
+            });
+        }
+        install::provider_target::ParsedRunTarget::RegistryReference => {}
     }
 
     let scoped_ref = match install::parse_capsule_ref(&raw) {
@@ -882,6 +901,7 @@ pub(crate) async fn resolve_run_target_or_install(
                                 &scoped_ref,
                                 &installed_capsule,
                             )?,
+                            provider_workspace: None,
                         });
                     }
                 }
@@ -906,6 +926,7 @@ pub(crate) async fn resolve_run_target_or_install(
                             &scoped_ref,
                             &installed_capsule,
                         )?,
+                        provider_workspace: None,
                     });
                 }
                 return Err(error);
@@ -925,6 +946,7 @@ pub(crate) async fn resolve_run_target_or_install(
                 &scoped_ref,
                 &installed_capsule,
             )?,
+            provider_workspace: None,
         });
     }
 
@@ -996,6 +1018,7 @@ pub(crate) async fn resolve_run_target_or_install(
         agent_local_root: None,
         desktop_open_path,
         export_request: resolve_cli_export_request(export_invocation, &scoped_ref, &install_path)?,
+        provider_workspace: None,
     })
 }
 

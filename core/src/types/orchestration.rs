@@ -30,6 +30,8 @@ pub struct ResolvedTargetRuntime {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub driver: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     #[serde(default)]
     pub entrypoint: String,
