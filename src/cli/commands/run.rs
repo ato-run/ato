@@ -73,6 +73,7 @@ pub struct RunArgs {
     pub sandbox_mode: bool,
     pub dangerously_skip_permissions: bool,
     pub compatibility_fallback: Option<String>,
+    pub provider_backend: Option<crate::ProviderBackend>,
     pub assume_yes: bool,
     pub agent_mode: crate::RunAgentMode,
     pub agent_local_root: Option<PathBuf>,
@@ -415,6 +416,7 @@ fn build_consumer_run_request(
         sandbox_mode: args.sandbox_mode,
         dangerously_skip_permissions: args.dangerously_skip_permissions,
         compatibility_fallback: args.compatibility_fallback.clone(),
+        provider_backend: args.provider_backend,
         assume_yes: args.assume_yes,
         agent_mode: args.agent_mode,
         agent_local_root: args.agent_local_root.clone(),
@@ -874,7 +876,9 @@ async fn normalize_run_target_after_install(
             })
             .unwrap_or(false)
     {
-        let mut cleanup_scope = attempt.as_mut().map(|attempt| attempt.cleanup_scope());
+        let mut cleanup_scope = attempt
+            .as_deref_mut()
+            .map(|attempt| attempt.cleanup_scope());
         let materialized = source_inference::materialize_run_from_explicit_native_artifact(
             target_path,
             cleanup_scope.as_mut(),
@@ -910,7 +914,9 @@ async fn normalize_run_target_after_install(
     {
         return match resolve_authoritative_input(target_path, ResolveInputOptions::default())? {
             ResolvedInput::CanonicalLock { canonical, .. } => {
-                let mut cleanup_scope = attempt.as_mut().map(|attempt| attempt.cleanup_scope());
+                let mut cleanup_scope = attempt
+                    .as_deref_mut()
+                    .map(|attempt| attempt.cleanup_scope());
                 let materialized = source_inference::materialize_run_from_canonical_lock(
                     &canonical,
                     cleanup_scope.as_mut(),
@@ -929,7 +935,9 @@ async fn normalize_run_target_after_install(
                 })
             }
             ResolvedInput::CompatibilityProject { project, .. } => {
-                let mut cleanup_scope = attempt.as_mut().map(|attempt| attempt.cleanup_scope());
+                let mut cleanup_scope = attempt
+                    .as_deref_mut()
+                    .map(|attempt| attempt.cleanup_scope());
                 let materialized = source_inference::materialize_run_from_compatibility(
                     &project,
                     cleanup_scope.as_mut(),
@@ -955,7 +963,9 @@ async fn normalize_run_target_after_install(
                 })
             }
             ResolvedInput::SourceOnly { source, .. } => {
-                let mut cleanup_scope = attempt.as_mut().map(|attempt| attempt.cleanup_scope());
+                let mut cleanup_scope = attempt
+                    .as_deref_mut()
+                    .map(|attempt| attempt.cleanup_scope());
                 let materialized = source_inference::materialize_run_from_source_only(
                     &source,
                     cleanup_scope.as_mut(),
@@ -1690,6 +1700,7 @@ run_command = "node server.js"
             sandbox_mode: false,
             dangerously_skip_permissions: false,
             compatibility_fallback: None,
+            provider_backend: None,
             assume_yes: true,
             agent_mode: crate::RunAgentMode::Off,
             agent_local_root: Some(tmp.path().to_path_buf()),
@@ -1744,6 +1755,7 @@ run_command = "node server.js"
             sandbox_mode: false,
             dangerously_skip_permissions: false,
             compatibility_fallback: None,
+            provider_backend: None,
             assume_yes: true,
             agent_mode: crate::RunAgentMode::Off,
             agent_local_root: Some(tmp.path().to_path_buf()),
