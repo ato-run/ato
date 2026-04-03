@@ -9,6 +9,7 @@ use crate::common::paths::workspace_derived_dir;
 use crate::lock_runtime::{LockCompilerOverlay, LockServiceUnit, ResolvedLockRuntimeModel};
 use crate::manifest;
 use crate::policy::egress_resolver::{resolve_egress_policy, EgressRule};
+use crate::python_runtime::extend_python_selector_env;
 use crate::router::{self, CompatProjectInput, ExecutionProfile};
 use crate::types::{ResolvedService, ResolvedServiceRuntime, ResolvedTargetRuntime};
 
@@ -713,33 +714,42 @@ fn command_tokens(entrypoint: &str, command: Option<&str>) -> (String, Vec<Strin
     (program, tokens)
 }
 
-#[allow(clippy::too_many_arguments)]
+struct LanguageCommandContext<'a> {
+    standalone: bool,
+    env: &'a mut HashMap<String, String>,
+    language: Option<&'a str>,
+    runtime_version: Option<&'a str>,
+    synthesize_default_args: bool,
+    layout: SourceLayoutHint,
+}
+
 fn resolve_language_command(
     program: &str,
     tokens: &[String],
-    standalone: bool,
-    env: &mut HashMap<String, String>,
-    language: Option<&str>,
-    runtime_version: Option<&str>,
-    synthesize_default_args: bool,
-    layout: SourceLayoutHint,
+    context: LanguageCommandContext<'_>,
 ) -> (String, Vec<String>) {
     let args = tokens.get(1..).unwrap_or(&[]).to_vec();
-    let default_program_arg = normalized_source_entrypoint(program, layout);
-    match language {
+    let default_program_arg = normalized_source_entrypoint(program, context.layout);
+    match context.language {
         Some("python") => {
-            let args = if synthesize_default_args && args.is_empty() {
+            let args = if context.synthesize_default_args && args.is_empty() {
                 vec![default_program_arg.clone()]
             } else {
                 args
             };
-            env.insert("PYTHONDONTWRITEBYTECODE".to_string(), "1".to_string());
-            if standalone {
-                env.insert("PYTHONHOME".to_string(), "runtime/python".to_string());
-                env.insert("PYTHONPATH".to_string(), "source".to_string());
+            context
+                .env
+                .insert("PYTHONDONTWRITEBYTECODE".to_string(), "1".to_string());
+            if context.standalone {
+                context
+                    .env
+                    .insert("PYTHONHOME".to_string(), "runtime/python".to_string());
+                context
+                    .env
+                    .insert("PYTHONPATH".to_string(), "source".to_string());
                 ("runtime/python/bin/python3".to_string(), args)
             } else {
-                insert_uv_python_runtime_env(env, runtime_version);
+                insert_uv_python_runtime_env(context.env, context.runtime_version);
                 let mut uv_args = vec!["run".to_string(), "--offline".to_string()];
                 uv_args.push("python3".to_string());
                 uv_args.extend(args);
@@ -747,19 +757,19 @@ fn resolve_language_command(
             }
         }
         Some("node") => {
-            let args = if synthesize_default_args && args.is_empty() {
+            let args = if context.synthesize_default_args && args.is_empty() {
                 vec![default_program_arg.clone()]
             } else {
                 args
             };
-            if standalone {
+            if context.standalone {
                 ("runtime/node/bin/node".to_string(), args)
             } else {
                 ("node".to_string(), args)
             }
         }
         Some("deno") => {
-            let args = if synthesize_default_args && args.is_empty() {
+            let args = if context.synthesize_default_args && args.is_empty() {
                 vec![
                     "run".to_string(),
                     "-A".to_string(),
@@ -768,26 +778,26 @@ fn resolve_language_command(
             } else {
                 args
             };
-            if standalone {
+            if context.standalone {
                 ("runtime/deno/bin/deno".to_string(), args)
             } else {
                 ("deno".to_string(), args)
             }
         }
         Some("bun") => {
-            let args = if synthesize_default_args && args.is_empty() {
+            let args = if context.synthesize_default_args && args.is_empty() {
                 vec![default_program_arg]
             } else {
                 args
             };
-            if standalone {
+            if context.standalone {
                 ("runtime/bun/bin/bun".to_string(), args)
             } else {
                 ("bun".to_string(), args)
             }
         }
         _ => (
-            normalize_program(program, standalone),
+            normalize_program(program, context.standalone),
             tokens.get(1..).unwrap_or(&[]).to_vec(),
         ),
     }
@@ -874,12 +884,14 @@ fn resolve_target_command(
     let (executable, args) = resolve_language_command(
         &program,
         &tokens,
-        standalone,
-        &mut env,
-        language.as_deref(),
-        runtime.runtime_version.as_deref(),
-        true,
-        layout,
+        LanguageCommandContext {
+            standalone,
+            env: &mut env,
+            language: language.as_deref(),
+            runtime_version: runtime.runtime_version.as_deref(),
+            synthesize_default_args: true,
+            layout,
+        },
     );
 
     let (executable, mut args) = if let Some((cmd_executable, cmd_args)) =
@@ -1319,12 +1331,14 @@ fn resolve_command(
     let (executable, mut args) = resolve_language_command(
         &program,
         &tokens,
-        standalone,
-        &mut env,
-        language.as_deref(),
-        read_target_runtime_version(manifest).as_deref(),
-        true,
-        layout,
+        LanguageCommandContext {
+            standalone,
+            env: &mut env,
+            language: language.as_deref(),
+            runtime_version: read_target_runtime_version(manifest).as_deref(),
+            synthesize_default_args: true,
+            layout,
+        },
     );
 
     if !args.is_empty() {
@@ -1388,25 +1402,19 @@ fn resolve_explicit_cmd_override(
     Some(resolve_language_command(
         &program,
         runtime_cmd,
-        standalone,
-        env,
-        detect_language_from_program(&program).as_deref(),
-        runtime_version,
-        false,
-        layout,
+        LanguageCommandContext {
+            standalone,
+            env,
+            language: detect_language_from_program(&program).as_deref(),
+            runtime_version,
+            synthesize_default_args: false,
+            layout,
+        },
     ))
 }
 
 fn insert_uv_python_runtime_env(env: &mut HashMap<String, String>, runtime_version: Option<&str>) {
-    let Some(runtime_version) = runtime_version
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return;
-    };
-
-    env.insert("UV_MANAGED_PYTHON".to_string(), "1".to_string());
-    env.insert("UV_PYTHON".to_string(), runtime_version.to_string());
+    extend_python_selector_env(env, runtime_version);
 }
 
 fn read_target_runtime_version(manifest: &toml::Value) -> Option<String> {
@@ -1622,6 +1630,49 @@ mod tests {
                     "driver": "deno",
                     "entrypoint": "worker.ts",
                     "cmd": ["deno", "run", "worker.ts"]
+                }
+            ]),
+        );
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"kind": "metadata_only", "status": "incomplete"}),
+        );
+        lock
+    }
+
+    fn sample_python_lock() -> AtoLock {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "metadata".to_string(),
+            json!({"name": "python-demo", "version": "0.1.0", "default_target": "cli"}),
+        );
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "main.py", "cmd": ["uv", "run", "python3", "main.py"]}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([
+                {
+                    "name": "main",
+                    "target": "cli",
+                    "process": {"entrypoint": "main.py", "cmd": ["uv", "run", "python3", "main.py"]}
+                }
+            ]),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "python", "selected_target": "cli"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([
+                {
+                    "label": "cli",
+                    "runtime": "source",
+                    "driver": "python",
+                    "runtime_version": "3.11.10",
+                    "entrypoint": "main.py"
                 }
             ]),
         );
@@ -2292,6 +2343,30 @@ port = 3000
                 .as_ref()
                 .and_then(|value| value.name.as_deref()),
             Some("svc-demo")
+        );
+    }
+
+    #[test]
+    fn generate_config_from_lock_derives_python_selector_env_from_runtime_version() {
+        let lock = sample_python_lock();
+        let resolved = resolve_lock_runtime_model(&lock, Some("cli")).expect("resolved");
+        let config = generate_config_from_lock(
+            &lock,
+            &resolved,
+            &LockCompilerOverlay::default(),
+            None,
+            false,
+        )
+        .expect("config");
+
+        assert_eq!(config.services["main"].executable, "uv");
+        assert_eq!(
+            config.services["main"].env.as_ref().unwrap()["UV_MANAGED_PYTHON"],
+            "1"
+        );
+        assert_eq!(
+            config.services["main"].env.as_ref().unwrap()["UV_PYTHON"],
+            "3.11.10"
         );
     }
 
