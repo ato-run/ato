@@ -1038,7 +1038,7 @@ async fn normalize_run_target_after_install(
         return normalized_target_from_resolved_input(
             args,
             resolve_authoritative_input(target_path, ResolveInputOptions::default())?,
-            attempt.as_deref_mut(),
+            attempt,
         );
     }
 

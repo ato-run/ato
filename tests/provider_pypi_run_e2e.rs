@@ -74,7 +74,6 @@ fn maybe_resolve_test_nacelle_path() -> Option<PathBuf> {
 }
 
 #[cfg(unix)]
-#[cfg(unix)]
 fn require_native_provider_prerequisites() -> Option<PathBuf> {
     let Some(nacelle) = maybe_resolve_test_nacelle_path() else {
         assert!(
