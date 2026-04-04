@@ -97,18 +97,22 @@ mod tests {
             thread::sleep(Duration::from_millis(100));
         }
 
-        panic!("process {} still exists after stop: {:?}", pid, process_state(pid));
+        panic!(
+            "process {} still exists after stop: {:?}",
+            pid,
+            process_state(pid)
+        );
     }
 
-    #[test]
-    fn desky_session_roundtrip_for_tauri_mock() {
+    fn assert_guest_mode_env(sample_name: &str, adapter: &str) {
         let home = TempDir::new().expect("temp home");
         let session_root = home.path().join("desky-sessions");
         fs::create_dir_all(&session_root).expect("create session root");
-        let sample = sample_dir("desky-mock-tauri");
+        let sample = sample_dir(sample_name);
 
         let mut start = capsule();
-        start.args(["app", "session", "start"])
+        start
+            .args(["app", "session", "start"])
             .arg(&sample)
             .arg("--json");
         for (key, value) in session_test_env(home.path(), &session_root) {
@@ -125,9 +129,119 @@ mod tests {
             .as_str()
             .expect("invoke url")
             .to_string();
-        let adapter = start_json["session"]["adapter"]
+
+        let response = post_json(
+            &invoke_url,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": "req-env",
+                "method": "capsule/invoke",
+                "params": {
+                    "command": "check_env",
+                    "payload": {}
+                }
+            }),
+        );
+        assert_eq!(response["result"]["ok"], json!(true));
+        assert_eq!(response["result"]["adapter"], json!(adapter));
+        assert!(response["result"]["session_id"].as_str().is_some());
+        assert_eq!(response["result"]["ato_guest_mode"], json!("1"));
+
+        let mut stop = capsule();
+        stop.args(["app", "session", "stop", &session_id, "--json"]);
+        for (key, value) in session_test_env(home.path(), &session_root) {
+            stop.env(key, value);
+        }
+        let stop_output = stop.output().expect("run app session stop");
+        let stop_json = parse_json_output(&stop_output);
+        assert_eq!(stop_json["stopped"], json!(true));
+        wait_for_process_absence(pid);
+        assert!(!session_root.join(format!("{}.json", session_id)).exists());
+    }
+
+    fn assert_roundtrip(sample_name: &str, adapter: &str, message: &str) {
+        let home = TempDir::new().expect("temp home");
+        let session_root = home.path().join("desky-sessions");
+        fs::create_dir_all(&session_root).expect("create session root");
+        let sample = sample_dir(sample_name);
+
+        let mut start = capsule();
+        start
+            .args(["app", "session", "start"])
+            .arg(&sample)
+            .arg("--json");
+        for (key, value) in session_test_env(home.path(), &session_root) {
+            start.env(key, value);
+        }
+        let start_output = start.output().expect("run app session start");
+        let start_json = parse_json_output(&start_output);
+        let session_id = start_json["session"]["session_id"]
             .as_str()
-            .expect("adapter");
+            .expect("session id")
+            .to_string();
+        let pid = start_json["session"]["pid"].as_i64().expect("session pid");
+        let invoke_url = start_json["session"]["invoke_url"]
+            .as_str()
+            .expect("invoke url")
+            .to_string();
+
+        let response = post_json(
+            &invoke_url,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": "req-1",
+                "method": "capsule/invoke",
+                "params": {
+                    "command": "ping",
+                    "payload": {
+                        "message": message
+                    }
+                }
+            }),
+        );
+        assert_eq!(response["result"]["ok"], json!(true));
+        assert_eq!(response["result"]["adapter"], json!(adapter));
+        assert_eq!(response["result"]["echo"], json!(message));
+
+        let mut stop = capsule();
+        stop.args(["app", "session", "stop", &session_id, "--json"]);
+        for (key, value) in session_test_env(home.path(), &session_root) {
+            stop.env(key, value);
+        }
+        let stop_output = stop.output().expect("run app session stop");
+        let stop_json = parse_json_output(&stop_output);
+        assert_eq!(stop_json["stopped"], json!(true));
+        wait_for_process_absence(pid);
+        assert!(!session_root.join(format!("{}.json", session_id)).exists());
+    }
+
+    #[test]
+    fn desky_session_roundtrip_for_tauri_mock() {
+        let home = TempDir::new().expect("temp home");
+        let session_root = home.path().join("desky-sessions");
+        fs::create_dir_all(&session_root).expect("create session root");
+        let sample = sample_dir("desky-mock-tauri");
+
+        let mut start = capsule();
+        start
+            .args(["app", "session", "start"])
+            .arg(&sample)
+            .arg("--json");
+        for (key, value) in session_test_env(home.path(), &session_root) {
+            start.env(key, value);
+        }
+        let start_output = start.output().expect("run app session start");
+        let start_json = parse_json_output(&start_output);
+        let session_id = start_json["session"]["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+        let pid = start_json["session"]["pid"].as_i64().expect("session pid");
+        let invoke_url = start_json["session"]["invoke_url"]
+            .as_str()
+            .expect("invoke url")
+            .to_string();
+        let adapter = start_json["session"]["adapter"].as_str().expect("adapter");
         assert_eq!(adapter, "tauri");
 
         let response = post_json(
@@ -161,6 +275,21 @@ mod tests {
     }
 
     #[test]
+    fn desky_session_injects_ato_guest_mode_env() {
+        assert_guest_mode_env("desky-mock-tauri", "tauri");
+    }
+
+    #[test]
+    fn desky_session_injects_ato_guest_mode_env_for_wails_mock() {
+        assert_guest_mode_env("desky-mock-wails", "wails");
+    }
+
+    #[test]
+    fn desky_session_injects_ato_guest_mode_env_for_electron_mock() {
+        assert_guest_mode_env("desky-mock-electron", "electron");
+    }
+
+    #[test]
     fn desky_session_start_smoke_for_wails_mock() {
         let home = TempDir::new().expect("temp home");
         let session_root = home.path().join("desky-sessions");
@@ -168,7 +297,8 @@ mod tests {
         let sample = sample_dir("desky-mock-wails");
 
         let mut start = capsule();
-        start.args(["app", "session", "start"])
+        start
+            .args(["app", "session", "start"])
             .arg(&sample)
             .arg("--json");
         for (key, value) in session_test_env(home.path(), &session_root) {
@@ -200,7 +330,8 @@ mod tests {
         let sample = sample_dir("desky-mock-tauri");
 
         let mut start = capsule();
-        start.args(["app", "session", "start"])
+        start
+            .args(["app", "session", "start"])
             .arg(&sample)
             .arg("--json");
         for (key, value) in session_test_env(home.path(), &session_root) {
@@ -213,7 +344,10 @@ mod tests {
             .expect("session id")
             .to_string();
         let pid = start_json["session"]["pid"].as_i64().expect("session pid");
-        assert!(process_state(pid).is_some(), "backend process should be visible before stop");
+        assert!(
+            process_state(pid).is_some(),
+            "backend process should be visible before stop"
+        );
 
         let mut stop = capsule();
         stop.args(["app", "session", "stop", &session_id, "--json"]);
@@ -226,5 +360,30 @@ mod tests {
 
         wait_for_process_absence(pid);
         assert!(!session_root.join(format!("{}.json", session_id)).exists());
+    }
+
+    #[test]
+    #[ignore = "requires local Electron runtime from apps/desky/node_modules"]
+    fn desky_session_roundtrip_for_real_electron_sample() {
+        assert_roundtrip(
+            "desky-real-electron",
+            "electron",
+            "hello from real electron e2e",
+        );
+        assert_guest_mode_env("desky-real-electron", "electron");
+    }
+
+    #[test]
+    #[ignore = "requires Go toolchain and Wails runtime dependencies"]
+    fn desky_session_roundtrip_for_real_wails_sample() {
+        assert_roundtrip("desky-real-wails", "wails", "hello from real wails e2e");
+        assert_guest_mode_env("desky-real-wails", "wails");
+    }
+
+    #[test]
+    #[ignore = "requires local Tauri toolchain and macOS runtime dependencies"]
+    fn desky_session_roundtrip_for_real_tauri_sample() {
+        assert_roundtrip("desky-real-tauri", "tauri", "hello from real tauri e2e");
+        assert_guest_mode_env("desky-real-tauri", "tauri");
     }
 }

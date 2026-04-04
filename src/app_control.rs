@@ -18,8 +18,8 @@ use crate::application::services::{
 };
 use crate::cli::{ModelTierArg, PrivacyModeArg, RepairActionArg};
 
-mod resolve;
 mod guest_contract;
+mod resolve;
 mod session;
 
 pub use resolve::resolve_handle;

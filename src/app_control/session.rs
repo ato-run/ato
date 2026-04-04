@@ -72,11 +72,7 @@ struct StoredSessionInfo {
     notes: Vec<String>,
 }
 
-pub fn start_session(
-    handle: &str,
-    target_label: Option<&str>,
-    json: bool,
-) -> Result<()> {
+pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Result<()> {
     let normalized = normalize_local_handle(handle)?;
     let (manifest_path, plan, launch, notes) = derive_local_launch_plan(&normalized, target_label)?;
     let raw_manifest = fs::read_to_string(&manifest_path)
@@ -85,14 +81,14 @@ pub fn start_session(
         .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
     let guest = parse_guest_contract(
         &manifest_value,
-        manifest_path
-            .parent()
-            .unwrap_or_else(|| Path::new(".")),
+        manifest_path.parent().unwrap_or_else(|| Path::new(".")),
     )
-    .ok_or_else(|| anyhow::anyhow!(
-        "missing [metadata.desky_guest] contract in {}",
-        manifest_path.display()
-    ))?;
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "missing [metadata.desky_guest] contract in {}",
+            manifest_path.display()
+        )
+    })?;
 
     let port = reserve_port(guest.default_port)?;
     let process_manager = ProcessManager::new()?;
@@ -127,6 +123,7 @@ pub fn start_session(
     command.env("DESKY_SESSION_ADAPTER", &guest.adapter);
     command.env("DESKY_SESSION_RPC_PATH", &guest.rpc_path);
     command.env("DESKY_SESSION_HEALTH_PATH", &guest.health_path);
+    command.env("ATO_GUEST_MODE", "1");
 
     let mut child = command.spawn().with_context(|| {
         format!(
@@ -279,8 +276,13 @@ fn session_root() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("DESKY_SESSION_ROOT") {
         return Ok(PathBuf::from(path));
     }
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("failed to resolve home directory"))?;
-    Ok(home.join(".ato").join("apps").join("desky").join("sessions"))
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("failed to resolve home directory"))?;
+    Ok(home
+        .join(".ato")
+        .join("apps")
+        .join("desky")
+        .join("sessions"))
 }
 
 fn write_session_record(root: &Path, session: &StoredSessionInfo) -> Result<()> {
