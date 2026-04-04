@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "ato-cli"
-version = "0.4.52"
+version = "0.4.53"
 dependencies = [
  "adk-core",
  "adk-model",
@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "capsule-core"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "async-trait",
