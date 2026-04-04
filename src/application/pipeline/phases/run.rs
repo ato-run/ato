@@ -23,6 +23,7 @@ use crate::application::engine::install::support::{
     LocalRunManifestPreparationOutcome, ResolvedCliExportRequest, ResolvedRunTarget,
 };
 use crate::application::pipeline::cleanup::PipelineAttemptContext;
+use crate::application::ports::output::OutputPort;
 use crate::application::workspace::state::EffectiveLockState;
 use crate::executors::launch_context::InjectedMount;
 use crate::executors::source::ExecuteMode;
@@ -1309,6 +1310,20 @@ fn cleanup_process_artifacts(paths: &[PathBuf]) {
     }
 }
 
+fn maybe_report_failed_provider_workspace(request: &ConsumerRunRequest, workspace_root: &Path) {
+    if !request.keep_failed_artifacts {
+        return;
+    }
+
+    let resolution_metadata = workspace_root.join(".ato/provider/resolution.json");
+    if resolution_metadata.exists() {
+        crate::install::provider_target::maybe_report_kept_failed_provider_workspace(
+            workspace_root,
+            request.reporter.is_json(),
+        );
+    }
+}
+
 pub(crate) async fn run_execute_phase<P, H>(
     request: &ConsumerRunRequest,
     progress: &P,
@@ -1362,6 +1377,7 @@ where
             if let Some(external_capsules) = external_capsules.as_mut() {
                 external_capsules.shutdown_now();
             }
+            maybe_report_failed_provider_workspace(request, &prepared.workspace_root);
             std::process::exit(exit);
         }
 
@@ -1382,6 +1398,7 @@ where
             if let Some(external_capsules) = external_capsules.as_mut() {
                 external_capsules.shutdown_now();
             }
+            maybe_report_failed_provider_workspace(request, &prepared.workspace_root);
             std::process::exit(exit);
         }
 
@@ -1512,6 +1529,7 @@ where
             if let Some(external_capsules) = external_capsules.as_mut() {
                 external_capsules.shutdown_now();
             }
+            maybe_report_failed_provider_workspace(request, &prepared.workspace_root);
             std::process::exit(exit_code);
         }
 
@@ -1695,6 +1713,7 @@ where
                 if let Some(external_capsules) = external_capsules.as_mut() {
                     external_capsules.shutdown_now();
                 }
+                maybe_report_failed_provider_workspace(request, &prepared.workspace_root);
                 std::process::exit(exit_code);
             }
         }
@@ -1752,6 +1771,7 @@ where
                 if let Some(external_capsules) = external_capsules.as_mut() {
                     external_capsules.shutdown_now();
                 }
+                maybe_report_failed_provider_workspace(request, &prepared.workspace_root);
                 std::process::exit(exit_code);
             }
         }
@@ -1832,6 +1852,7 @@ where
                 if let Some(external_capsules) = external_capsules.as_mut() {
                     external_capsules.shutdown_now();
                 }
+                maybe_report_failed_provider_workspace(request, &prepared.workspace_root);
                 std::process::exit(exit);
             }
         }
@@ -1848,6 +1869,7 @@ where
                 if let Some(external_capsules) = external_capsules.as_mut() {
                     external_capsules.shutdown_now();
                 }
+                maybe_report_failed_provider_workspace(request, &prepared.workspace_root);
                 std::process::exit(exit);
             }
         }
