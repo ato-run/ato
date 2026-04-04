@@ -2,6 +2,23 @@ use clap::{Subcommand, ValueEnum};
 
 #[derive(Subcommand)]
 pub(crate) enum AppCommands {
+    #[command(about = "Resolve a Desky handle into a launch preview")]
+    Resolve {
+        handle: String,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
+        registry: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+
+    #[command(about = "Manage a Desky guest session")]
+    Session {
+        #[command(subcommand)]
+        command: SessionCommands,
+    },
+
     #[command(about = "Read app-scoped bootstrap state and health")]
     Status {
         package_id: String,
@@ -29,6 +46,25 @@ pub(crate) enum AppCommands {
         package_id: String,
         #[arg(long, value_enum)]
         action: RepairActionArg,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum SessionCommands {
+    #[command(about = "Start a Desky guest session from a local handle")]
+    Start {
+        handle: String,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+
+    #[command(about = "Stop a Desky guest session")]
+    Stop {
+        session_id: String,
         #[arg(long)]
         json: bool,
     },
