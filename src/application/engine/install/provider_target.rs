@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use anyhow::{bail, Context, Result};
 use rand::RngCore;
 use regex::Regex;
