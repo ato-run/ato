@@ -3,6 +3,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+use capsule_core::execution_plan::canonical::{
+    compute_policy_segment_hash, compute_provisioning_policy_hash,
+};
 use capsule_core::execution_plan::derive::{self, PlatformSnapshot};
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::execution_plan::guard::{self, RuntimeGuardMode, RuntimeGuardResult};
@@ -221,6 +224,7 @@ pub fn prepare_target_execution(
         let mut effective_args = derive_launch_spec(plan)?.args;
         effective_args.extend(execution_override.args.clone());
         execution_plan.runtime.policy.args = effective_args;
+        refresh_execution_plan_consent_hashes(&mut execution_plan)?;
         launch_ctx.with_command_args(execution_override.args.clone())
     } else {
         launch_ctx
@@ -265,6 +269,17 @@ pub fn prepare_target_execution(
         guard_result,
         launch_ctx,
     })
+}
+
+fn refresh_execution_plan_consent_hashes(execution_plan: &mut ExecutionPlan) -> Result<()> {
+    execution_plan.consent.policy_segment_hash = compute_policy_segment_hash(
+        &execution_plan.runtime,
+        &execution_plan.consent.mount_set_algo_id,
+        execution_plan.consent.mount_set_algo_version,
+    )?;
+    execution_plan.consent.provisioning_policy_hash =
+        compute_provisioning_policy_hash(&execution_plan.provisioning)?;
+    Ok(())
 }
 
 pub fn preflight_required_environment_variables(
@@ -375,6 +390,9 @@ mod tests {
     };
     use crate::executors::launch_context::RuntimeLaunchContext;
     use crate::reporters::CliReporter;
+    use capsule_core::execution_plan::canonical::{
+        compute_policy_segment_hash, compute_provisioning_policy_hash,
+    };
     use capsule_core::launch_spec::derive_launch_spec;
     use capsule_core::lockfile::{CapsuleLock, LockMeta};
     use capsule_core::router::{self, ExecutionProfile};
@@ -616,6 +634,20 @@ run_command = "python3 tool.py --from-target"
         assert_eq!(
             execution.launch_ctx.command_args(),
             &["--from-export".to_string(), "--help".to_string()]
+        );
+        assert_eq!(
+            execution.execution_plan.consent.policy_segment_hash,
+            compute_policy_segment_hash(
+                &execution.execution_plan.runtime,
+                &execution.execution_plan.consent.mount_set_algo_id,
+                execution.execution_plan.consent.mount_set_algo_version,
+            )
+            .expect("recompute policy segment hash")
+        );
+        assert_eq!(
+            execution.execution_plan.consent.provisioning_policy_hash,
+            compute_provisioning_policy_hash(&execution.execution_plan.provisioning)
+                .expect("recompute provisioning hash")
         );
     }
 
