@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const CURRENT_SPEC_VERSION: &str = "1.0";
+pub const NEXT_SPEC_VERSION: &str = "2.0";
 pub const LEGACY_SPEC_VERSION: &str = "0.1.0";
 
 pub fn validate_spec_version(spec_version: &str) -> Result<(), String> {
@@ -9,12 +10,21 @@ pub fn validate_spec_version(spec_version: &str) -> Result<(), String> {
     }
 
     Err(format!(
-        "Unsupported spec_version '{spec_version}'. Supported versions: {CURRENT_SPEC_VERSION}, {LEGACY_SPEC_VERSION}"
+        "Unsupported spec_version '{spec_version}'. Supported versions: {CURRENT_SPEC_VERSION}, {NEXT_SPEC_VERSION}, {LEGACY_SPEC_VERSION}"
     ))
 }
 
 pub fn is_supported_spec_version(spec_version: &str) -> bool {
-    spec_version == CURRENT_SPEC_VERSION || spec_version == LEGACY_SPEC_VERSION
+    spec_version == CURRENT_SPEC_VERSION
+        || spec_version == NEXT_SPEC_VERSION
+        || spec_version == LEGACY_SPEC_VERSION
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExportedArtifact {
+    pub kind: String,
+    pub relative_path: String,
+    pub size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -28,6 +38,17 @@ pub enum NacelleEvent {
     },
     ServiceExited {
         service: String,
+        exit_code: Option<i32>,
+    },
+    ExecutionCompleted {
+        service: String,
+        run_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        derived_output_path: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exported_artifacts: Vec<ExportedArtifact>,
+        cleanup_policy_applied: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
     },
 }
@@ -49,9 +70,11 @@ mod tests {
     #[test]
     fn supports_current_and_legacy_spec_versions() {
         assert!(is_supported_spec_version(CURRENT_SPEC_VERSION));
+        assert!(is_supported_spec_version(NEXT_SPEC_VERSION));
         assert!(is_supported_spec_version(LEGACY_SPEC_VERSION));
         assert!(validate_spec_version(CURRENT_SPEC_VERSION).is_ok());
+        assert!(validate_spec_version(NEXT_SPEC_VERSION).is_ok());
         assert!(validate_spec_version(LEGACY_SPEC_VERSION).is_ok());
-        assert!(validate_spec_version("2.0").is_err());
+        assert!(validate_spec_version("3.0").is_err());
     }
 }

@@ -162,7 +162,16 @@ async fn launch_with_windows_sandbox(
     })?;
 
     // Generate .wsb configuration file
-    let wsb_content = generate_wsb_config(target, &toolchain_path);
+    let source_read_only = request
+        .env
+        .as_ref()
+        .map(|envs| {
+            !envs
+                .iter()
+                .any(|(key, value)| key == "NACELLE_WORKSPACE_WRITABLE" && value == "1")
+        })
+        .unwrap_or(true);
+    let wsb_content = generate_wsb_config(target, &toolchain_path, source_read_only);
     let wsb_path = runtime
         .config
         .state_dir
@@ -218,7 +227,7 @@ async fn launch_with_windows_sandbox(
 /// - LogonCommand: Execute the script on sandbox startup
 /// - Networking: Enable (for dev mode)
 /// - vGPU: Disable (not needed for scripts)
-fn generate_wsb_config(target: &SourceTarget, toolchain_path: &PathBuf) -> String {
+fn generate_wsb_config(target: &SourceTarget, toolchain_path: &PathBuf, source_read_only: bool) -> String {
     let source_dir = target.source_dir.to_string_lossy();
     let toolchain = toolchain_path.to_string_lossy();
 
@@ -253,7 +262,7 @@ fn generate_wsb_config(target: &SourceTarget, toolchain_path: &PathBuf) -> Strin
     <MappedFolder>
       <HostFolder>{source_dir}</HostFolder>
       <SandboxFolder>C:\Source</SandboxFolder>
-      <ReadOnly>true</ReadOnly>
+    <ReadOnly>{source_read_only}</ReadOnly>
     </MappedFolder>
   </MappedFolders>
   <LogonCommand>
@@ -266,6 +275,7 @@ fn generate_wsb_config(target: &SourceTarget, toolchain_path: &PathBuf) -> Strin
   <PrinterRedirection>Disable</PrinterRedirection>
 </Configuration>"#,
         source_dir = source_dir,
+        source_read_only = if source_read_only { "true" } else { "false" },
         command = full_command.replace("\"", "&quot;")
     )
 }
@@ -438,7 +448,7 @@ mod tests {
         };
         let toolchain = PathBuf::from(r"C:\Python311\python.exe");
 
-        let config = generate_wsb_config(&target, &toolchain);
+        let config = generate_wsb_config(&target, &toolchain, true);
 
         assert!(config.contains("<Configuration>"));
         assert!(config.contains("<vGPU>Disable</vGPU>"));
