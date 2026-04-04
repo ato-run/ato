@@ -260,12 +260,28 @@ pub(crate) fn print_phase_line(
     if json_output {
         return;
     }
-    println!(
+    println!("{}", format_phase_line(phase, state, detail));
+}
+
+pub(crate) fn eprint_phase_line(
+    json_output: bool,
+    phase: HourglassPhase,
+    state: HourglassPhaseState,
+    detail: &str,
+) {
+    if json_output {
+        return;
+    }
+    eprintln!("{}", format_phase_line(phase, state, detail));
+}
+
+fn format_phase_line(phase: HourglassPhase, state: HourglassPhaseState, detail: &str) -> String {
+    format!(
         "PHASE {:<7} {:<4} {}",
         phase.as_str(),
         state.as_str(),
         detail
-    );
+    )
 }
 
 fn new_phase_result(phase: HourglassPhase, selected: bool) -> HourglassPhaseResult {
