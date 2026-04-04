@@ -192,6 +192,7 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) compatibility_fallback: Option<String>,
     pub(crate) provider_toolchain_requested: ProviderToolchain,
     pub(crate) assume_yes: bool,
+    pub(crate) verbose: bool,
     pub(crate) agent_mode: RunAgentMode,
     pub(crate) agent_local_root: Option<PathBuf>,
     pub(crate) registry: Option<String>,
@@ -642,8 +643,9 @@ where
         None
     };
     let preview_mode = request.preview_mode || preview_session.is_some();
-    let use_progressive_ui =
-        crate::progressive_ui::can_use_progressive_ui(false) && !request.background;
+    let use_progressive_ui = request.verbose
+        && crate::progressive_ui::can_use_progressive_ui(false)
+        && !request.background;
     let source_label = preview_session
         .as_ref()
         .map(|session| session.target_reference.clone())
@@ -2350,6 +2352,7 @@ mode = "managed"
             compatibility_fallback: None,
             provider_toolchain_requested: crate::ProviderToolchain::Auto,
             assume_yes: true,
+            verbose: false,
             agent_mode: crate::RunAgentMode::Off,
             agent_local_root: None,
             registry: None,

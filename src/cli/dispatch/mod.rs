@@ -69,6 +69,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             compatibility_fallback,
             via,
             yes,
+            verbose,
             agent,
             keep_failed_artifacts,
             auto_fix_toml,
@@ -98,6 +99,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             compatibility_fallback,
             provider_toolchain: via,
             yes,
+            verbose,
             agent_mode: agent,
             keep_failed_artifacts,
             auto_fix_mode: crate::GitHubAutoFixMode::from_cli_flags(
@@ -111,7 +113,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             read_write,
             cwd,
             deprecation_warning: None,
-            reporter: reporter.clone(),
+            reporter: Arc::new(reporters::CliReporter::new_run(json)),
         }),
 
         Commands::Engine { command } => {

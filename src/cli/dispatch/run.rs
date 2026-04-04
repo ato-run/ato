@@ -32,6 +32,7 @@ pub(crate) struct RunLikeCommandArgs {
     pub(crate) compatibility_fallback: Option<CompatibilityFallbackBackend>,
     pub(crate) provider_toolchain: ProviderToolchain,
     pub(crate) yes: bool,
+    pub(crate) verbose: bool,
     pub(crate) agent_mode: RunAgentMode,
     pub(crate) keep_failed_artifacts: bool,
     pub(crate) auto_fix_mode: Option<GitHubAutoFixMode>,
@@ -74,6 +75,7 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
             .map(str::to_string),
         args.provider_toolchain,
         args.yes,
+        resolve_run_verbose(args.verbose),
         args.agent_mode,
         None,
         args.keep_failed_artifacts,
@@ -89,14 +91,39 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
     )
 }
 
+fn resolve_run_verbose(explicit_verbose: bool) -> bool {
+    explicit_verbose || ato_log_requests_verbose()
+}
+
+fn ato_log_requests_verbose() -> bool {
+    std::env::var("ATO_LOG")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "info" | "debug" | "trace"
+            )
+        })
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use capsule_core::ato_lock::{self, AtoLock};
     use serde_json::json;
+    use std::sync::{Mutex, OnceLock};
 
-    use super::{LocalRunManifestPreparationOutcome, ResolvedRunTarget, RunPhaseBoundary};
+    use super::{
+        ato_log_requests_verbose, resolve_run_verbose, LocalRunManifestPreparationOutcome,
+        ResolvedRunTarget, RunPhaseBoundary,
+    };
     use crate::install::support::LocalRunManifestStatus;
     use std::sync::Arc;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn run_phase_boundaries_follow_hourglass_order() {
@@ -219,5 +246,27 @@ mod tests {
                 .expect("run");
         assert_eq!(outcome, LocalRunManifestPreparationOutcome::Ready);
         assert!(!tmp.path().join("capsule.toml").exists());
+    }
+
+    #[test]
+    fn ato_log_info_enables_verbose_run_output() {
+        let _lock = env_lock().lock().unwrap();
+        std::env::set_var("ATO_LOG", "info");
+
+        assert!(ato_log_requests_verbose());
+        assert!(resolve_run_verbose(false));
+
+        std::env::remove_var("ATO_LOG");
+    }
+
+    #[test]
+    fn explicit_verbose_overrides_silent_ato_log() {
+        let _lock = env_lock().lock().unwrap();
+        std::env::set_var("ATO_LOG", "warn");
+
+        assert!(!ato_log_requests_verbose());
+        assert!(resolve_run_verbose(true));
+
+        std::env::remove_var("ATO_LOG");
     }
 }
