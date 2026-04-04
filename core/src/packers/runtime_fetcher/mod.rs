@@ -14,6 +14,8 @@ use tracing::{debug, info};
 
 use crate::error::{CapsuleError, Result};
 
+const DEFAULT_UV_VERSION: &str = "0.4.19";
+
 struct RuntimeInstallLock {
     _file: File,
 }
@@ -243,6 +245,14 @@ impl RuntimeFetcher {
         Ok(bun_bin)
     }
 
+    pub async fn ensure_uv(&self, version: Option<&str>) -> Result<PathBuf> {
+        let version = version.unwrap_or(DEFAULT_UV_VERSION);
+        let runtime_dir = self.download_uv_tool_with_progress(version, true).await?;
+        let uv_bin = Self::find_binary_recursive(&runtime_dir, &["uv", "uv.exe"])?;
+        info!("uv {} ready at {:?}", version, uv_bin);
+        Ok(uv_bin)
+    }
+
     pub async fn download_node_runtime(&self, version: &str) -> Result<PathBuf> {
         self.download_node_runtime_with_progress(version, true)
             .await
@@ -273,6 +283,88 @@ impl RuntimeFetcher {
     ) -> Result<PathBuf> {
         self.download_runtime_with_progress("deno", version, show_progress)
             .await
+    }
+
+    async fn download_uv_tool_with_progress(
+        &self,
+        version: &str,
+        show_progress: bool,
+    ) -> Result<PathBuf> {
+        let install_dir = self.cache_dir.join(format!("uv-{}", version));
+        if install_dir.exists() {
+            return Ok(install_dir);
+        }
+
+        let _lock = self.acquire_install_lock("uv", version).await?;
+        if install_dir.exists() {
+            return Ok(install_dir);
+        }
+
+        let target = if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+            "aarch64-apple-darwin"
+        } else if cfg!(target_os = "macos") && cfg!(target_arch = "x86_64") {
+            "x86_64-apple-darwin"
+        } else if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
+            "x86_64-unknown-linux-gnu"
+        } else if cfg!(target_os = "linux") && cfg!(target_arch = "aarch64") {
+            "aarch64-unknown-linux-gnu"
+        } else if cfg!(target_os = "windows") && cfg!(target_arch = "x86_64") {
+            "x86_64-pc-windows-msvc"
+        } else {
+            return Err(CapsuleError::Pack(
+                "Unsupported platform for uv runtime acquisition".to_string(),
+            ));
+        };
+
+        let extension = if target.ends_with("windows-msvc") {
+            "zip"
+        } else {
+            "tar.gz"
+        };
+        let filename = format!("uv-{}.{}", target, extension);
+        let url = format!(
+            "https://github.com/astral-sh/uv/releases/download/{}/{}",
+            version, filename
+        );
+        let checksum_url = format!("{}.sha256", url);
+
+        if show_progress {
+            self.reporter
+                .notify(format!("⬇️  Downloading uv {}", version))
+                .await?;
+        }
+
+        let sha256 = self.fetch_expected_sha256(&checksum_url, None).await?;
+        let archive_path = self
+            .cache_dir
+            .join(format!("uv-{}-{}.{}", version, target, extension));
+        self.download_with_progress(&url, &archive_path, show_progress)
+            .await?;
+        self.verify_sha256_of_file(&archive_path, &sha256)?;
+
+        if install_dir.exists() {
+            fs::remove_dir_all(&install_dir).map_err(|e| {
+                CapsuleError::Pack(format!(
+                    "Failed to reset existing uv install directory {:?}: {}",
+                    install_dir, e
+                ))
+            })?;
+        }
+
+        fs::create_dir_all(&install_dir).map_err(|e| {
+            CapsuleError::Pack(format!(
+                "Failed to create uv install directory {:?}: {}",
+                install_dir, e
+            ))
+        })?;
+
+        if extension == "zip" {
+            Self::extract_zip_from_file(&archive_path, &install_dir)?;
+        } else {
+            Self::extract_archive_from_file(&archive_path, &install_dir)?;
+        }
+
+        Ok(install_dir)
     }
 
     async fn download_bun_runtime_with_progress(

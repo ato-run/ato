@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::fs;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -907,40 +908,118 @@ where
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OllamaReuseIfPresentPreflight {
-    healthcheck_url: String,
-    required_model: Option<String>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalServiceMode {
+    ReuseIfPresent,
+    Managed,
+    RequiredExternal,
 }
 
-fn parse_ollama_reuse_if_present_preflight(
-    manifest: &toml::Value,
-) -> Option<OllamaReuseIfPresentPreflight> {
-    let services = manifest.get("services")?.as_table()?;
-    let (_, ollama_service) = services.iter().find(|(_, service)| {
-        service
-            .as_table()
-            .and_then(|table| table.get("from"))
-            .and_then(toml::Value::as_str)
-            .map(|from| from.trim().eq_ignore_ascii_case("dependency:ollama"))
-            .unwrap_or(false)
-    })?;
-    let service = ollama_service.as_table()?;
-    let mode = service.get("mode").and_then(toml::Value::as_str)?.trim();
-    if !mode.eq_ignore_ascii_case("reuse-if-present") {
-        return None;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalServiceHealthcheckKind {
+    Http,
+    Tcp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExternalServiceHealthcheck {
+    kind: ExternalServiceHealthcheckKind,
+    endpoint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ServiceRequiredAsset {
+    OllamaModel { model: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExternalServiceContract {
+    service_name: String,
+    source_ref: String,
+    mode: ExternalServiceMode,
+    healthcheck: Option<ExternalServiceHealthcheck>,
+    required_assets: Vec<ServiceRequiredAsset>,
+}
+
+impl ExternalServiceMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ReuseIfPresent => "reuse-if-present",
+            Self::Managed => "managed",
+            Self::RequiredExternal => "required-external",
+        }
+    }
+}
+
+impl ServiceRequiredAsset {
+    fn label(&self) -> String {
+        match self {
+            Self::OllamaModel { model } => format!("ollama-model={model}"),
+        }
     }
 
-    let healthcheck_url = service
+    fn remediation_hint(&self) -> Option<String> {
+        match self {
+            Self::OllamaModel { model } => Some(format!("Run: ollama pull {model}")),
+        }
+    }
+}
+
+fn parse_external_service_mode(raw: &str) -> Option<ExternalServiceMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "reuse-if-present" => Some(ExternalServiceMode::ReuseIfPresent),
+        "managed" => Some(ExternalServiceMode::Managed),
+        "required-external" => Some(ExternalServiceMode::RequiredExternal),
+        _ => None,
+    }
+}
+
+fn parse_external_service_healthcheck(
+    service_name: &str,
+    source_ref: &str,
+    service: &toml::value::Table,
+) -> Option<ExternalServiceHealthcheck> {
+    let parsed = service
         .get("healthcheck")
         .and_then(toml::Value::as_table)
-        .and_then(|healthcheck| healthcheck.get("url"))
-        .and_then(toml::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("http://127.0.0.1:11434/api/tags")
-        .to_string();
-    let required_model = manifest
+        .and_then(|healthcheck| {
+            let endpoint = healthcheck
+                .get("url")
+                .and_then(toml::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            let kind = healthcheck
+                .get("kind")
+                .and_then(toml::Value::as_str)
+                .map(str::trim)
+                .unwrap_or("http");
+            let kind = match kind.to_ascii_lowercase().as_str() {
+                "http" => ExternalServiceHealthcheckKind::Http,
+                "tcp" => ExternalServiceHealthcheckKind::Tcp,
+                _ => return None,
+            };
+            Some(ExternalServiceHealthcheck {
+                kind,
+                endpoint: endpoint.to_string(),
+            })
+        });
+
+    parsed.or_else(|| {
+        if source_ref.trim().eq_ignore_ascii_case("dependency:ollama")
+            || service_name.trim().eq_ignore_ascii_case("ollama")
+        {
+            Some(ExternalServiceHealthcheck {
+                kind: ExternalServiceHealthcheckKind::Http,
+                endpoint: "http://127.0.0.1:11434/api/tags".to_string(),
+            })
+        } else {
+            None
+        }
+    })
+}
+
+fn parse_external_service_contracts(manifest: &toml::Value) -> Vec<ExternalServiceContract> {
+    let legacy_ollama_model = manifest
         .get("bootstrap")
         .and_then(toml::Value::as_table)
         .and_then(|bootstrap| bootstrap.get("defaults"))
@@ -951,71 +1030,230 @@ fn parse_ollama_reuse_if_present_preflight(
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
 
-    Some(OllamaReuseIfPresentPreflight {
-        healthcheck_url,
-        required_model,
-    })
+    manifest
+        .get("services")
+        .and_then(toml::Value::as_table)
+        .map(|services| {
+            services
+                .iter()
+                .filter_map(|(service_name, service_value)| {
+                    let service = service_value.as_table()?;
+                    let source_ref = service
+                        .get("from")
+                        .and_then(toml::Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())?
+                        .to_string();
+                    let mode = service
+                        .get("mode")
+                        .and_then(toml::Value::as_str)
+                        .and_then(parse_external_service_mode)?;
+                    let mut required_assets = Vec::new();
+                    if source_ref.eq_ignore_ascii_case("dependency:ollama") {
+                        if let Some(model) = legacy_ollama_model.clone() {
+                            required_assets.push(ServiceRequiredAsset::OllamaModel { model });
+                        }
+                    }
+
+                    Some(ExternalServiceContract {
+                        service_name: service_name.trim().to_string(),
+                        source_ref: source_ref.clone(),
+                        mode,
+                        healthcheck: parse_external_service_healthcheck(
+                            service_name,
+                            &source_ref,
+                            service,
+                        ),
+                        required_assets,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_preflight_service_contracts(manifest: &toml::Value) -> Vec<ExternalServiceContract> {
+    parse_external_service_contracts(manifest)
+}
+
+#[cfg(test)]
+fn parse_reuse_if_present_service_preflights(
+    manifest: &toml::Value,
+) -> Vec<ExternalServiceContract> {
+    parse_preflight_service_contracts(manifest)
+        .into_iter()
+        .filter(|service| service.mode == ExternalServiceMode::ReuseIfPresent)
+        .collect()
+}
+
+fn service_preflight_header(summary: &str, service: &ExternalServiceContract) -> String {
+    format!(
+        "{summary}\nservice: {}\nmode: {}\nsource: {}",
+        service.service_name,
+        service.mode.as_str(),
+        service.source_ref
+    )
+}
+
+fn missing_healthcheck_message(service: &ExternalServiceContract) -> String {
+    format!(
+        "{}\ndetail: no healthcheck is declared for this service mode",
+        service_preflight_header("Service cannot be preflighted", service)
+    )
+}
+
+fn unavailable_service_message(service: &ExternalServiceContract, endpoint: &str) -> String {
+    let detail = match service.mode {
+        ExternalServiceMode::ReuseIfPresent => {
+            "no reusable instance is currently reachable\nStart the service and retry"
+        }
+        ExternalServiceMode::RequiredExternal => {
+            "this service is managed outside Ato\nStart it externally and retry"
+        }
+        ExternalServiceMode::Managed => {
+            "this service is declared as Ato-managed\nAutomatic startup is not available in this run path yet"
+        }
+    };
+
+    format!(
+        "{}\nhealthcheck: {}\ndetail: service is not reachable\n{}",
+        service_preflight_header("Service is unavailable", service),
+        endpoint,
+        detail
+    )
+}
+
+fn required_asset_missing_message(
+    service: &ExternalServiceContract,
+    asset: &ServiceRequiredAsset,
+) -> String {
+    let mut message = format!(
+        "{}\nasset: {}\ndetail: a required service asset is missing",
+        service_preflight_header("Required service asset is missing", service),
+        asset.label()
+    );
+    if let Some(hint) = asset.remediation_hint() {
+        message.push('\n');
+        message.push_str(&hint);
+    }
+    message
+}
+
+fn tcp_healthcheck_ready(endpoint: &str) -> bool {
+    let addresses = if let Ok(url) = reqwest::Url::parse(endpoint) {
+        match (url.host_str(), url.port_or_known_default()) {
+            (Some(host), Some(port)) => format!("{host}:{port}").to_socket_addrs(),
+            _ => return false,
+        }
+    } else {
+        endpoint.to_socket_addrs()
+    };
+
+    let Ok(addresses) = addresses else {
+        return false;
+    };
+
+    addresses
+        .into_iter()
+        .any(|address| TcpStream::connect_timeout(&address, Duration::from_secs(2)).is_ok())
+}
+
+fn validate_required_service_assets(
+    service: &ExternalServiceContract,
+    payload: Option<&JsonValue>,
+) -> Result<()> {
+    for asset in &service.required_assets {
+        match asset {
+            ServiceRequiredAsset::OllamaModel { model } => {
+                let Some(payload) = payload else {
+                    let missing = ServiceRequiredAsset::OllamaModel {
+                        model: model.clone(),
+                    };
+                    anyhow::bail!(required_asset_missing_message(service, &missing));
+                };
+                let model_present = payload
+                    .get("models")
+                    .and_then(JsonValue::as_array)
+                    .map(|models| {
+                        models.iter().any(|entry| {
+                            entry
+                                .get("name")
+                                .or_else(|| entry.get("model"))
+                                .and_then(JsonValue::as_str)
+                                .map(|name| name.trim() == model)
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false);
+                if !model_present {
+                    let missing = ServiceRequiredAsset::OllamaModel {
+                        model: model.clone(),
+                    };
+                    anyhow::bail!(required_asset_missing_message(service, &missing));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn run_external_service_preflight(manifest: &toml::Value) -> Result<()> {
-    let Some(preflight) = parse_ollama_reuse_if_present_preflight(manifest) else {
+    let preflights = parse_preflight_service_contracts(manifest);
+    if preflights.is_empty() {
         return Ok(());
-    };
+    }
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
         .context("failed to build external service preflight HTTP client")?;
-    debug!(
-        healthcheck_url = %preflight.healthcheck_url,
-        required_model = ?preflight.required_model,
-        "Running Ollama reuse-if-present preflight"
-    );
 
-    let response = client
-        .get(&preflight.healthcheck_url)
-        .send()
-        .await
-        .with_context(|| {
-            format!(
-                "Ollama is not reachable at {}\nStart or install Ollama, then retry",
-                preflight.healthcheck_url
-            )
-        })?;
-    if !response.status().is_success() {
-        anyhow::bail!(
-            "Ollama is not reachable at {}\nStart or install Ollama, then retry",
-            preflight.healthcheck_url
-        );
-    }
+    for service in preflights {
+        let Some(healthcheck) = service.healthcheck.as_ref() else {
+            anyhow::bail!(missing_healthcheck_message(&service));
+        };
 
-    let Some(required_model) = preflight.required_model.as_deref() else {
-        return Ok(());
-    };
-    let payload: JsonValue = response
-        .json()
-        .await
-        .context("failed to parse Ollama /api/tags response")?;
-    let model_present = payload
-        .get("models")
-        .and_then(JsonValue::as_array)
-        .map(|models| {
-            models.iter().any(|model| {
-                model
-                    .get("name")
-                    .or_else(|| model.get("model"))
-                    .and_then(JsonValue::as_str)
-                    .map(|name| name.trim() == required_model)
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false);
-    if !model_present {
-        anyhow::bail!(
-            "Required Ollama model \"{}\" is missing\nRun: ollama pull {}",
-            required_model,
-            required_model
+        debug!(
+            service_name = %service.service_name,
+            source_ref = %service.source_ref,
+            healthcheck_endpoint = %healthcheck.endpoint,
+            mode = service.mode.as_str(),
+            "Running external service preflight"
         );
+
+        match healthcheck.kind {
+            ExternalServiceHealthcheckKind::Http => {
+                let response = client
+                    .get(&healthcheck.endpoint)
+                    .send()
+                    .await
+                    .with_context(|| {
+                        unavailable_service_message(&service, &healthcheck.endpoint)
+                    })?;
+                if !response.status().is_success() {
+                    anyhow::bail!(unavailable_service_message(&service, &healthcheck.endpoint));
+                }
+
+                let payload = if service.required_assets.is_empty() {
+                    None
+                } else {
+                    Some(
+                        response
+                            .json::<JsonValue>()
+                            .await
+                            .context("failed to parse external service healthcheck response")?,
+                    )
+                };
+                validate_required_service_assets(&service, payload.as_ref())?;
+            }
+            ExternalServiceHealthcheckKind::Tcp => {
+                if !tcp_healthcheck_ready(&healthcheck.endpoint) {
+                    anyhow::bail!(unavailable_service_message(&service, &healthcheck.endpoint));
+                }
+                validate_required_service_assets(&service, None)?;
+            }
+        }
     }
 
     Ok(())
@@ -1317,7 +1555,7 @@ fn maybe_report_failed_provider_workspace(request: &ConsumerRunRequest, workspac
         return;
     }
 
-    let resolution_metadata = workspace_root.join(".ato/provider/resolution.json");
+    let resolution_metadata = workspace_root.join("resolution.json");
     if resolution_metadata.exists() {
         crate::install::provider_target::maybe_report_kept_failed_provider_workspace(
             workspace_root,
@@ -1589,6 +1827,8 @@ where
                 )
                 .into());
             }
+            crate::consent_store::record_consent(&execution_plan)?;
+        } else if request.assume_yes && prepared.workspace_root.join("resolution.json").exists() {
             crate::consent_store::record_consent(&execution_plan)?;
         } else {
             crate::consent_store::require_consent(&execution_plan, request.assume_yes)?;
@@ -2199,9 +2439,12 @@ fn render_execution_roots_note(
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_existing_path, normalize_write_path, parse_ollama_reuse_if_present_preflight,
-        resolve_sandbox_grants, validate_sandbox_grants_best_effort, ConsumerRunRequest,
-        DerivedBridgeManifest, PreparedRunContext,
+        normalize_existing_path, normalize_write_path, parse_external_service_contracts,
+        parse_reuse_if_present_service_preflights, resolve_sandbox_grants,
+        unavailable_service_message, validate_sandbox_grants_best_effort, ConsumerRunRequest,
+        DerivedBridgeManifest, ExternalServiceContract, ExternalServiceHealthcheck,
+        ExternalServiceHealthcheckKind, ExternalServiceMode, PreparedRunContext,
+        ServiceRequiredAsset,
     };
     use capsule_core::ato_lock::AtoLock;
     use std::fs;
@@ -2289,7 +2532,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_ollama_reuse_if_present_preflight_reads_healthcheck_and_model() {
+    fn parse_reuse_if_present_service_preflights_reads_healthcheck_and_model() {
         let manifest: toml::Value = toml::from_str(
             r#"
 [services.ollama]
@@ -2306,14 +2549,29 @@ ollama_model = "qwen2:7b"
         )
         .expect("parse manifest");
 
-        let preflight =
-            parse_ollama_reuse_if_present_preflight(&manifest).expect("ollama preflight");
-        assert_eq!(preflight.healthcheck_url, "http://127.0.0.1:11434/api/tags");
-        assert_eq!(preflight.required_model.as_deref(), Some("qwen2:7b"));
+        let preflights = parse_reuse_if_present_service_preflights(&manifest);
+        assert_eq!(preflights.len(), 1);
+        let preflight = &preflights[0];
+        assert_eq!(preflight.service_name, "ollama");
+        assert_eq!(preflight.source_ref, "dependency:ollama");
+        assert_eq!(preflight.mode, ExternalServiceMode::ReuseIfPresent);
+        assert_eq!(
+            preflight
+                .healthcheck
+                .as_ref()
+                .map(|value| value.endpoint.as_str()),
+            Some("http://127.0.0.1:11434/api/tags")
+        );
+        assert_eq!(
+            preflight.required_assets,
+            vec![ServiceRequiredAsset::OllamaModel {
+                model: "qwen2:7b".to_string()
+            }]
+        );
     }
 
     #[test]
-    fn parse_ollama_reuse_if_present_preflight_ignores_other_service_modes() {
+    fn parse_reuse_if_present_service_preflights_ignores_other_service_modes() {
         let manifest: toml::Value = toml::from_str(
             r#"
 [services.ollama]
@@ -2323,7 +2581,97 @@ mode = "managed"
         )
         .expect("parse manifest");
 
-        assert!(parse_ollama_reuse_if_present_preflight(&manifest).is_none());
+        assert!(parse_reuse_if_present_service_preflights(&manifest).is_empty());
+    }
+
+    #[test]
+    fn parse_external_service_contracts_reads_generic_service_without_ollama_defaults() {
+        let manifest: toml::Value = toml::from_str(
+            r#"
+[services.cache]
+from = "dependency:cache"
+mode = "reuse-if-present"
+
+[services.cache.healthcheck]
+kind = "tcp"
+url = "127.0.0.1:6380"
+"#,
+        )
+        .expect("parse manifest");
+
+        let services = parse_external_service_contracts(&manifest);
+        assert_eq!(services.len(), 1);
+        let service = &services[0];
+        assert_eq!(service.service_name, "cache");
+        assert_eq!(service.source_ref, "dependency:cache");
+        assert_eq!(service.mode, ExternalServiceMode::ReuseIfPresent);
+        assert_eq!(
+            service.healthcheck,
+            Some(ExternalServiceHealthcheck {
+                kind: ExternalServiceHealthcheckKind::Tcp,
+                endpoint: "127.0.0.1:6380".to_string(),
+            })
+        );
+        assert!(service.required_assets.is_empty());
+    }
+
+    #[test]
+    fn parse_external_service_contracts_preserves_managed_and_required_external_modes() {
+        let manifest: toml::Value = toml::from_str(
+            r#"
+[services.cache]
+from = "dependency:cache"
+mode = "managed"
+
+[services.cache.healthcheck]
+kind = "tcp"
+url = "127.0.0.1:6380"
+
+[services.catalog]
+from = "dependency:catalog"
+mode = "required-external"
+
+[services.catalog.healthcheck]
+kind = "http"
+url = "http://127.0.0.1:8787/health"
+"#,
+        )
+        .expect("parse manifest");
+
+        let services = parse_external_service_contracts(&manifest);
+        assert_eq!(services.len(), 2);
+        let cache = services
+            .iter()
+            .find(|service| service.service_name == "cache")
+            .expect("cache service");
+        let catalog = services
+            .iter()
+            .find(|service| service.service_name == "catalog")
+            .expect("catalog service");
+        assert_eq!(cache.mode, ExternalServiceMode::Managed);
+        assert_eq!(catalog.mode, ExternalServiceMode::RequiredExternal);
+    }
+
+    #[test]
+    fn unavailable_service_message_is_generic_for_managed_mode() {
+        let service = ExternalServiceContract {
+            service_name: "cache".to_string(),
+            source_ref: "dependency:cache".to_string(),
+            mode: ExternalServiceMode::Managed,
+            healthcheck: Some(ExternalServiceHealthcheck {
+                kind: ExternalServiceHealthcheckKind::Tcp,
+                endpoint: "127.0.0.1:6380".to_string(),
+            }),
+            required_assets: Vec::new(),
+        };
+
+        let message = unavailable_service_message(&service, "127.0.0.1:6380");
+        assert!(message.contains("Service is unavailable"));
+        assert!(message.contains("service: cache"));
+        assert!(message.contains("mode: managed"));
+        assert!(message.contains("source: dependency:cache"));
+        assert!(message.contains("Automatic startup is not available in this run path yet"));
+        assert!(!message.contains("Ollama"));
     }
 
     fn sandbox_request(

@@ -478,6 +478,96 @@ fn authoritative_input_from_materialization(
     })
 }
 
+fn persist_provider_authoritative_lock_if_needed(
+    resolved_target: &crate::install::support::ResolvedRunTarget,
+    authoritative_input: &run_phase::RunAuthoritativeInput,
+) -> Result<()> {
+    let Some(provider_workspace) = resolved_target.provider_workspace.as_ref() else {
+        return Ok(());
+    };
+
+    crate::install::provider_target::persist_provider_authoritative_lock(
+        &provider_workspace.workspace_root,
+        &provider_workspace.resolution_metadata_path,
+        &authoritative_input.lock,
+    )?;
+
+    Ok(())
+}
+
+fn normalized_target_from_resolved_input(
+    args: &RunArgs,
+    resolved_input: ResolvedInput,
+    attempt: Option<&mut PipelineAttemptContext>,
+) -> Result<NormalizedRunTarget> {
+    match resolved_input {
+        ResolvedInput::CanonicalLock { canonical, .. } => {
+            let mut cleanup_scope = attempt.map(|attempt| attempt.cleanup_scope());
+            let materialized = source_inference::materialize_run_from_canonical_lock(
+                &canonical,
+                cleanup_scope.as_mut(),
+                args.reporter.clone(),
+                args.assume_yes,
+            )?;
+            let target = materialized.project_root.clone();
+            Ok(NormalizedRunTarget {
+                target,
+                authoritative_input: Some(authoritative_input_from_materialization(
+                    materialized,
+                    &args.state_bindings,
+                    None,
+                )?),
+                desktop_open_path: None,
+            })
+        }
+        ResolvedInput::CompatibilityProject { project, .. } => {
+            let mut cleanup_scope = attempt.map(|attempt| attempt.cleanup_scope());
+            let materialized = source_inference::materialize_run_from_compatibility(
+                &project,
+                cleanup_scope.as_mut(),
+                args.reporter.clone(),
+                args.assume_yes,
+            )?;
+            let target = materialized.project_root.clone();
+            let compatibility_legacy_lock = project.legacy_lock.clone().map(|legacy_lock| {
+                run_phase::CompatibilityLegacyLockContext {
+                    manifest_path: project.manifest.path.clone(),
+                    path: legacy_lock.path,
+                    lock: legacy_lock.lock,
+                }
+            });
+            Ok(NormalizedRunTarget {
+                target,
+                authoritative_input: Some(authoritative_input_from_materialization(
+                    materialized,
+                    &args.state_bindings,
+                    compatibility_legacy_lock,
+                )?),
+                desktop_open_path: None,
+            })
+        }
+        ResolvedInput::SourceOnly { source, .. } => {
+            let mut cleanup_scope = attempt.map(|attempt| attempt.cleanup_scope());
+            let materialized = source_inference::materialize_run_from_source_only(
+                &source,
+                cleanup_scope.as_mut(),
+                args.reporter.clone(),
+                args.assume_yes,
+            )?;
+            let target = materialized.project_root.clone();
+            Ok(NormalizedRunTarget {
+                target,
+                authoritative_input: Some(authoritative_input_from_materialization(
+                    materialized,
+                    &args.state_bindings,
+                    None,
+                )?),
+                desktop_open_path: None,
+            })
+        }
+    }
+}
+
 struct RunProgress<'a> {
     args: &'a RunArgs,
 }
@@ -865,6 +955,18 @@ async fn normalize_run_target_after_install(
 
     let target_path = resolved_target.path.as_path();
 
+    if resolved_target.provider_workspace.is_some() {
+        let normalized = normalized_target_from_resolved_input(
+            args,
+            resolve_authoritative_input(target_path, ResolveInputOptions::default())?,
+            attempt.as_deref_mut(),
+        )?;
+        if let Some(authoritative_input) = normalized.authoritative_input.as_ref() {
+            persist_provider_authoritative_lock_if_needed(resolved_target, authoritative_input)?;
+        }
+        return Ok(normalized);
+    }
+
     if resolved_target.transient_workspace_root.is_some()
         && resolved_target.provider_workspace.is_none()
         && target_path.is_dir()
@@ -933,72 +1035,11 @@ async fn normalize_run_target_after_install(
             })
             .unwrap_or(false)
     {
-        return match resolve_authoritative_input(target_path, ResolveInputOptions::default())? {
-            ResolvedInput::CanonicalLock { canonical, .. } => {
-                let mut cleanup_scope = attempt.as_mut().map(|attempt| (*attempt).cleanup_scope());
-                let materialized = source_inference::materialize_run_from_canonical_lock(
-                    &canonical,
-                    cleanup_scope.as_mut(),
-                    args.reporter.clone(),
-                    args.assume_yes,
-                )?;
-                let target = materialized.project_root.clone();
-                Ok(NormalizedRunTarget {
-                    target,
-                    authoritative_input: Some(authoritative_input_from_materialization(
-                        materialized,
-                        &args.state_bindings,
-                        None,
-                    )?),
-                    desktop_open_path: None,
-                })
-            }
-            ResolvedInput::CompatibilityProject { project, .. } => {
-                let mut cleanup_scope = attempt.as_mut().map(|attempt| (*attempt).cleanup_scope());
-                let materialized = source_inference::materialize_run_from_compatibility(
-                    &project,
-                    cleanup_scope.as_mut(),
-                    args.reporter.clone(),
-                    args.assume_yes,
-                )?;
-                let target = materialized.project_root.clone();
-                let compatibility_legacy_lock = project.legacy_lock.clone().map(|legacy_lock| {
-                    run_phase::CompatibilityLegacyLockContext {
-                        manifest_path: project.manifest.path.clone(),
-                        path: legacy_lock.path,
-                        lock: legacy_lock.lock,
-                    }
-                });
-                Ok(NormalizedRunTarget {
-                    target,
-                    authoritative_input: Some(authoritative_input_from_materialization(
-                        materialized,
-                        &args.state_bindings,
-                        compatibility_legacy_lock,
-                    )?),
-                    desktop_open_path: None,
-                })
-            }
-            ResolvedInput::SourceOnly { source, .. } => {
-                let mut cleanup_scope = attempt.as_mut().map(|attempt| (*attempt).cleanup_scope());
-                let materialized = source_inference::materialize_run_from_source_only(
-                    &source,
-                    cleanup_scope.as_mut(),
-                    args.reporter.clone(),
-                    args.assume_yes,
-                )?;
-                let target = materialized.project_root.clone();
-                Ok(NormalizedRunTarget {
-                    target,
-                    authoritative_input: Some(authoritative_input_from_materialization(
-                        materialized,
-                        &args.state_bindings,
-                        None,
-                    )?),
-                    desktop_open_path: None,
-                })
-            }
-        };
+        return normalized_target_from_resolved_input(
+            args,
+            resolve_authoritative_input(target_path, ResolveInputOptions::default())?,
+            attempt,
+        );
     }
 
     Ok(NormalizedRunTarget {
@@ -1304,7 +1345,7 @@ mod tests {
     use capsule_core::lifecycle::LifecycleEvent;
     use capsule_core::router::{self, ExecutionProfile, ManifestData};
     use capsule_core::types::CapsuleManifest;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -1752,6 +1793,150 @@ run_command = "node server.js"
         assert!(normalized.authoritative_input.is_some());
         assert_eq!(normalized.target, tmp.path().canonicalize().unwrap());
         assert!(normalized.target.exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn normalize_provider_target_persists_authoritative_lock_in_workspace() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = tmp.path().join("provider-workspace");
+        std::fs::create_dir_all(workspace_root.join(".ato").join("provider"))
+            .expect("create provider metadata dir");
+        std::fs::write(
+            workspace_root.join("capsule.toml"),
+            r#"
+schema_version = "0.2"
+name = "demo-provider"
+version = "0.1.0"
+type = "job"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11.10"
+entrypoint = "main.py"
+source_layout = "anchored_entrypoint"
+"#,
+        )
+        .expect("write provider manifest");
+        std::fs::write(workspace_root.join("main.py"), "print('ok')\n")
+            .expect("write provider entrypoint");
+
+        let resolution_metadata_path = workspace_root.join("resolution.json");
+        std::fs::write(
+            &resolution_metadata_path,
+            serde_json::to_string_pretty(&json!({
+                "provider": "pypi",
+                "ref": "demo-provider",
+                "resolution_role": "audit_provenance_only",
+                "requested_provider_toolchain": "auto",
+                "effective_provider_toolchain": "uv",
+                "requested_package_name": "demo-provider",
+                "requested_extras": [],
+                "resolved_package_name": "demo-provider",
+                "resolved_package_version": "0.1.0",
+                "selected_entrypoint": "demo_provider.cli:main",
+                "generated_capsule_root": workspace_root.display().to_string(),
+                "generated_manifest_path": workspace_root.join("capsule.toml").display().to_string(),
+                "generated_wrapper_path": workspace_root.join("main.py").display().to_string(),
+                "index_source": "https://example.invalid/simple",
+                "requested_runtime_version": "3.11.10",
+                "effective_runtime_version": "3.11.10",
+                "materialization_runtime_selector": "3.11.10"
+            }))
+            .expect("serialize provider resolution metadata")
+                + "\n",
+        )
+        .expect("write provider resolution metadata");
+
+        let args = RunArgs {
+            target: workspace_root.clone(),
+            target_label: None,
+            args: Vec::new(),
+            watch: false,
+            background: false,
+            nacelle: None,
+            registry: None,
+            enforcement: "best_effort".to_string(),
+            sandbox_mode: false,
+            dangerously_skip_permissions: false,
+            compatibility_fallback: None,
+            provider_toolchain_requested: crate::ProviderToolchain::Auto,
+            assume_yes: true,
+            verbose: false,
+            agent_mode: crate::RunAgentMode::Off,
+            agent_local_root: Some(workspace_root.clone()),
+            keep_failed_artifacts: false,
+            auto_fix_mode: None,
+            allow_unverified: false,
+            read_grants: Vec::new(),
+            write_grants: Vec::new(),
+            read_write_grants: Vec::new(),
+            caller_cwd: tmp.path().to_path_buf(),
+            effective_cwd: None,
+            export_request: None,
+            state_bindings: Vec::new(),
+            inject_bindings: Vec::new(),
+            reporter: Arc::new(CliReporter::new(true)),
+            preview_mode: false,
+        };
+
+        let resolved = crate::install::support::ResolvedRunTarget {
+            path: workspace_root.clone(),
+            agent_local_root: Some(workspace_root.clone()),
+            desktop_open_path: None,
+            export_request: None,
+            provider_workspace: Some(crate::install::provider_target::ProviderRunWorkspace {
+                target: crate::install::provider_target::ProviderTargetRef {
+                    provider: crate::install::provider_target::ProviderKind::PyPI,
+                    ref_string: "demo-provider".to_string(),
+                },
+                workspace_root: workspace_root.clone(),
+                resolution_metadata_path: resolution_metadata_path.clone(),
+            }),
+            transient_workspace_root: Some(workspace_root.clone()),
+        };
+
+        let normalized = normalize_run_target_after_install(&args, &resolved, None)
+            .await
+            .expect("normalize provider target");
+        let authoritative = normalized
+            .authoritative_input
+            .as_ref()
+            .expect("provider authoritative input");
+        let persisted_lock_path = workspace_root.join("ato.lock.json");
+        assert!(
+            persisted_lock_path.exists(),
+            "persisted provider ato.lock.json missing"
+        );
+
+        let persisted_lock = ato_lock::load_unvalidated_from_path(&persisted_lock_path)
+            .expect("load persisted provider lock");
+        assert!(persisted_lock.lock_id.is_some());
+        assert_eq!(
+            persisted_lock.schema_version,
+            authoritative.lock.schema_version
+        );
+        assert_eq!(persisted_lock.resolution, authoritative.lock.resolution);
+        assert_eq!(persisted_lock.contract, authoritative.lock.contract);
+        assert_eq!(persisted_lock.binding, authoritative.lock.binding);
+        assert_eq!(persisted_lock.policy, authoritative.lock.policy);
+        assert_eq!(persisted_lock.attestations, authoritative.lock.attestations);
+
+        let metadata: Value = serde_json::from_str(
+            &std::fs::read_to_string(&resolution_metadata_path)
+                .expect("read updated provider resolution metadata"),
+        )
+        .expect("parse updated provider resolution metadata");
+        let persisted_lock_path_str = persisted_lock_path.display().to_string();
+        assert_eq!(
+            metadata["resolution_role"].as_str(),
+            Some("audit_provenance_only")
+        );
+        assert_eq!(
+            metadata["generated_authoritative_lock_path"].as_str(),
+            Some(persisted_lock_path_str.as_str())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
