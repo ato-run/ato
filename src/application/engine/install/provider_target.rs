@@ -12,21 +12,26 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
 use crate::ProviderToolchain;
+use capsule_core::ato_lock::AtoLock;
 use capsule_core::common::paths::ato_runs_dir;
+use capsule_core::input_resolver::ATO_LOCK_FILE_NAME;
 use capsule_core::python_runtime::{normalized_python_runtime_version, python_selector_env};
 
+mod synthetic;
+
 const PROVIDER_RUN_ROOT: &str = "provider-backed";
-const PROVIDER_PACKAGE_JSON_FILE: &str = ".ato/provider/package.json";
-const PROVIDER_PACKAGE_LOCK_FILE: &str = ".ato/provider/package-lock.json";
-const PROVIDER_PNPM_LOCK_FILE: &str = ".ato/provider/pnpm-lock.yaml";
-const PROVIDER_BUN_LOCK_FILE: &str = ".ato/provider/bun.lock";
-const PROVIDER_BUN_LOCKB_FILE: &str = ".ato/provider/bun.lockb";
-const PROVIDER_NODE_MODULES_DIR: &str = ".ato/provider/node_modules";
-const PROVIDER_SITE_PACKAGES_DIR: &str = ".ato/provider/site-packages";
-const PROVIDER_REQUIREMENTS_FILE: &str = ".ato/provider/requirements.txt";
-const PROVIDER_RESOLUTION_METADATA_FILE: &str = ".ato/provider/resolution.json";
+const PROVIDER_PACKAGE_JSON_FILE: &str = "package.json";
+const PROVIDER_PACKAGE_LOCK_FILE: &str = "package-lock.json";
+const PROVIDER_PNPM_LOCK_FILE: &str = "pnpm-lock.yaml";
+const PROVIDER_BUN_LOCK_FILE: &str = "bun.lock";
+const PROVIDER_BUN_LOCKB_FILE: &str = "bun.lockb";
+const PROVIDER_NODE_MODULES_DIR: &str = "node_modules";
+const PROVIDER_SITE_PACKAGES_DIR: &str = "site-packages";
+const PROVIDER_REQUIREMENTS_FILE: &str = "requirements.txt";
+const PROVIDER_RESOLUTION_METADATA_FILE: &str = "resolution.json";
 const PROVIDER_PYTHON_RUNTIME_VERSION: &str = "3.11.10";
 const PROVIDER_NODE_RUNTIME_VERSION: &str = "20.11.0";
+const PROVIDER_UV_TOOL_VERSION: &str = "0.4.19";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProviderKind {
@@ -115,6 +120,7 @@ impl ParsedNpmRequirement {
 struct ProviderResolutionMetadata {
     provider: String,
     r#ref: String,
+    resolution_role: String,
     requested_provider_toolchain: String,
     effective_provider_toolchain: String,
     requested_package_name: String,
@@ -122,7 +128,11 @@ struct ProviderResolutionMetadata {
     resolved_package_name: String,
     resolved_package_version: String,
     selected_entrypoint: String,
+    generated_capsule_root: String,
+    generated_manifest_path: String,
     generated_wrapper_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generated_authoritative_lock_path: Option<String>,
     index_source: String,
     requested_runtime_version: String,
     effective_runtime_version: String,
@@ -256,14 +266,12 @@ pub(crate) fn materialize_provider_run_workspace(
     keep_failed_artifacts: bool,
     json: bool,
 ) -> Result<ProviderRunWorkspace> {
-    match target.provider {
-        ProviderKind::PyPI => {
-            materialize_pypi_workspace(target, requested_toolchain, keep_failed_artifacts, json)
-        }
-        ProviderKind::Npm => {
-            materialize_npm_workspace(target, requested_toolchain, keep_failed_artifacts, json)
-        }
-    }
+    synthetic::materialize_provider_run_workspace(
+        target,
+        requested_toolchain,
+        keep_failed_artifacts,
+        json,
+    )
 }
 
 fn materialize_pypi_workspace(
@@ -345,6 +353,7 @@ fn materialize_pypi_workspace(
         let metadata = ProviderResolutionMetadata {
             provider: target.provider.as_str().to_string(),
             r#ref: package_ref.canonical_ref(),
+            resolution_role: "audit_provenance_only".to_string(),
             requested_provider_toolchain: requested_toolchain.as_str().to_string(),
             effective_provider_toolchain: effective_toolchain.as_str().to_string(),
             requested_package_name: package_ref.package_name.clone(),
@@ -352,7 +361,10 @@ fn materialize_pypi_workspace(
             resolved_package_name: resolved.package_name,
             resolved_package_version: resolved.package_version,
             selected_entrypoint: resolved.entrypoint_value,
+            generated_capsule_root: workspace_root.display().to_string(),
+            generated_manifest_path: manifest_path.display().to_string(),
             generated_wrapper_path: wrapper_path.display().to_string(),
+            generated_authoritative_lock_path: None,
             index_source: current_provider_index_source(target.provider),
             requested_runtime_version: PROVIDER_PYTHON_RUNTIME_VERSION.to_string(),
             effective_runtime_version: PROVIDER_PYTHON_RUNTIME_VERSION.to_string(),
@@ -486,6 +498,7 @@ fn materialize_npm_workspace(
         let metadata = ProviderResolutionMetadata {
             provider: target.provider.as_str().to_string(),
             r#ref: package_ref.canonical_ref(),
+            resolution_role: "audit_provenance_only".to_string(),
             requested_provider_toolchain: requested_toolchain.as_str().to_string(),
             effective_provider_toolchain: effective_toolchain.as_str().to_string(),
             requested_package_name: package_ref.package_name.clone(),
@@ -493,7 +506,10 @@ fn materialize_npm_workspace(
             resolved_package_name: resolved.package_name,
             resolved_package_version: resolved.package_version,
             selected_entrypoint: resolved.entrypoint_value,
+            generated_capsule_root: workspace_root.display().to_string(),
+            generated_manifest_path: manifest_path.display().to_string(),
             generated_wrapper_path: wrapper_path.display().to_string(),
+            generated_authoritative_lock_path: None,
             index_source: current_provider_index_source(target.provider),
             requested_runtime_version: PROVIDER_NODE_RUNTIME_VERSION.to_string(),
             effective_runtime_version: PROVIDER_NODE_RUNTIME_VERSION.to_string(),
@@ -692,14 +708,11 @@ fn resolve_effective_provider_toolchain(
             "`--via {}` is not valid for pypi: targets in this MVP. Supported combinations:\n  pypi + auto\n  pypi + uv",
             invalid.as_str()
         ),
-        (
-            ProviderKind::Npm,
-            ProviderToolchain::Auto | ProviderToolchain::Npm,
-        ) => Ok(ProviderToolchain::Npm),
-        (ProviderKind::Npm, ProviderToolchain::Bun) => Ok(ProviderToolchain::Bun),
-        (ProviderKind::Npm, ProviderToolchain::Pnpm) => Ok(ProviderToolchain::Pnpm),
+        (ProviderKind::Npm, ProviderToolchain::Auto | ProviderToolchain::Npm) => {
+            Ok(ProviderToolchain::Npm)
+        }
         (ProviderKind::Npm, invalid) => bail!(
-            "`--via {}` is not valid for npm: targets in this MVP. Supported combinations:\n  npm + auto\n  npm + npm\n  npm + bun\n  npm + pnpm",
+            "`--via {}` is not valid for npm: targets in this MVP. Supported combinations:\n  npm + auto\n  npm + npm",
             invalid.as_str()
         ),
     }
@@ -1363,6 +1376,47 @@ fn find_bun_binary() -> Result<PathBuf> {
     which::which("bun").context("provider-backed bun execution requires `bun` on PATH")
 }
 
+pub(crate) fn persist_provider_authoritative_lock(
+    workspace_root: &Path,
+    resolution_metadata_path: &Path,
+    lock: &AtoLock,
+) -> Result<PathBuf> {
+    let lock_path = workspace_root.join(ATO_LOCK_FILE_NAME);
+    capsule_core::ato_lock::write_pretty_to_path(lock, &lock_path)
+        .with_context(|| format!("failed to write {}", lock_path.display()))?;
+    record_provider_authoritative_lock_path(resolution_metadata_path, &lock_path)?;
+    Ok(lock_path)
+}
+
+fn record_provider_authoritative_lock_path(
+    resolution_metadata_path: &Path,
+    lock_path: &Path,
+) -> Result<()> {
+    let raw = fs::read_to_string(resolution_metadata_path)
+        .with_context(|| format!("failed to read {}", resolution_metadata_path.display()))?;
+    let mut metadata: serde_json::Value = serde_json::from_str(&raw).with_context(|| {
+        format!(
+            "failed to parse provider resolution metadata {}",
+            resolution_metadata_path.display()
+        )
+    })?;
+    let object = metadata.as_object_mut().context(
+        "provider resolution metadata must be a JSON object before authority lock annotation",
+    )?;
+    object.insert(
+        "generated_authoritative_lock_path".to_string(),
+        serde_json::Value::String(lock_path.display().to_string()),
+    );
+    fs::write(
+        resolution_metadata_path,
+        serde_json::to_string_pretty(&metadata)
+            .context("failed to serialize provider resolution metadata")?
+            + "\n",
+    )
+    .with_context(|| format!("failed to write {}", resolution_metadata_path.display()))?;
+    Ok(())
+}
+
 pub(crate) fn maybe_report_kept_failed_provider_workspace(workspace_root: &Path, json: bool) {
     if json {
         return;
@@ -1432,6 +1486,7 @@ mod tests {
         ProviderKind, ProviderTargetRef, PROVIDER_RESOLUTION_METADATA_FILE,
     };
     use crate::ProviderToolchain;
+    use capsule_core::ato_lock;
     use serde_json::{json, Value};
     use serial_test::serial;
     use std::fs;
@@ -1968,11 +2023,10 @@ Tag: py3-none-any\n";
     }
 
     #[test]
-    fn resolve_effective_provider_toolchain_accepts_pnpm_for_npm_targets() {
-        let toolchain =
-            resolve_effective_provider_toolchain(ProviderKind::Npm, ProviderToolchain::Pnpm)
-                .expect("pnpm should be valid for npm targets");
-        assert_eq!(toolchain, ProviderToolchain::Pnpm);
+    fn resolve_effective_provider_toolchain_rejects_pnpm_for_npm_targets() {
+        let err = resolve_effective_provider_toolchain(ProviderKind::Npm, ProviderToolchain::Pnpm)
+            .expect_err("pnpm should be rejected for npm targets in this MVP");
+        assert!(err.to_string().contains("npm + npm"));
     }
 
     #[test]
@@ -2087,20 +2141,12 @@ Tag: py3-none-any\n";
 
     #[test]
     fn resolution_metadata_path_is_stable() {
-        assert_eq!(
-            PROVIDER_RESOLUTION_METADATA_FILE,
-            ".ato/provider/resolution.json"
-        );
+        assert_eq!(PROVIDER_RESOLUTION_METADATA_FILE, "resolution.json");
     }
 
     #[test]
     #[serial]
     fn materialize_provider_workspace_writes_generated_project_and_resolution_metadata() {
-        if !require_provider_materialization_prerequisites() {
-            return;
-        }
-
-        let home = workspace_tempdir("provider-target-home-");
         let index_root = workspace_tempdir("provider-target-index-");
         let cli_source = "raise RuntimeError('package code must not be imported during probe')\n";
         let wheel_name = write_test_wheel(
@@ -2120,10 +2166,7 @@ Tag: py3-none-any\n";
             &[("demo-provider", vec![wheel_name.clone()])],
         );
         let server = spawn_test_static_file_server(index_root.path().to_path_buf());
-        let poisoned_path_dir = workspace_tempdir("provider-target-path-");
-        write_poison_python_shims(poisoned_path_dir.path());
         let _env = TestEnvGuard::set(&[
-            ("HOME", home.path().display().to_string()),
             (
                 "UV_INDEX_URL",
                 format!("{}/simple", server.base_url.as_str()),
@@ -2132,8 +2175,6 @@ Tag: py3-none-any\n";
                 "PIP_INDEX_URL",
                 format!("{}/simple", server.base_url.as_str()),
             ),
-            ("UV_INSECURE_HOST", "127.0.0.1".to_string()),
-            ("PATH", prepend_path(poisoned_path_dir.path())),
         ]);
 
         let workspace = materialize_provider_run_workspace(
@@ -2148,40 +2189,40 @@ Tag: py3-none-any\n";
         .expect("materialize provider workspace");
 
         assert!(
-            workspace.workspace_root.join("capsule.toml").exists(),
-            "capsule manifest should be generated"
+            workspace.workspace_root.join("ato.lock.json").exists(),
+            "authoritative lock should be generated"
         );
         assert!(
             workspace.workspace_root.join("main.py").exists(),
             "python wrapper should be generated"
         );
         assert!(
-            workspace
-                .workspace_root
-                .join(".ato/provider/requirements.txt")
-                .exists(),
+            workspace.workspace_root.join("requirements.txt").exists(),
             "requirements.txt should be generated"
         );
         assert!(
-            workspace.workspace_root.join("uv.lock").exists(),
-            "uv.lock should be generated"
-        );
-        let manifest_raw = fs::read_to_string(workspace.workspace_root.join("capsule.toml"))
-            .expect("read manifest");
-        assert!(
-            manifest_raw.contains(&format!(
-                "runtime_version = \"{}\"",
-                super::PROVIDER_PYTHON_RUNTIME_VERSION
-            )),
-            "provider capsule manifest must pin the effective runtime version"
-        );
-        assert!(
-            !manifest_raw.contains("UV_PYTHON"),
-            "provider capsule manifest must not persist UV runtime transport"
+            !workspace.workspace_root.join("uv.lock").exists(),
+            "uv.lock should remain a derived execution input"
         );
         assert!(
             workspace.resolution_metadata_path.exists(),
             "resolution metadata file should be generated"
+        );
+
+        let lock =
+            ato_lock::load_unvalidated_from_path(&workspace.workspace_root.join("ato.lock.json"))
+                .expect("load provider authoritative lock");
+        assert_eq!(
+            lock.contract.entries["metadata"]["default_target"].as_str(),
+            Some("app")
+        );
+        assert_eq!(
+            lock.resolution.entries["runtime"]["driver"].as_str(),
+            Some("python")
+        );
+        assert_eq!(
+            lock.resolution.entries["resolved_targets"][0]["entrypoint"].as_str(),
+            Some("main.py")
         );
 
         let metadata: Value = serde_json::from_str(
@@ -2221,12 +2262,15 @@ Tag: py3-none-any\n";
             metadata["materialization_runtime_selector"].as_str(),
             Some(super::PROVIDER_PYTHON_RUNTIME_VERSION)
         );
+        assert_eq!(
+            metadata["resolution_role"].as_str(),
+            Some("audit_provenance_only")
+        );
         assert!(
-            workspace
-                .workspace_root
-                .join(".ato/provider/site-packages/demo_provider-0.1.0.dist-info")
-                .exists(),
-            "installed distribution metadata should be present"
+            metadata["generated_authoritative_lock_path"]
+                .as_str()
+                .is_some(),
+            "persisted authoritative lock path should be recorded"
         );
 
         fs::remove_dir_all(&workspace.workspace_root).expect("cleanup provider workspace");
@@ -2235,14 +2279,7 @@ Tag: py3-none-any\n";
     #[test]
     #[serial]
     fn materialize_provider_workspace_preserves_normalized_extras_in_requirements_and_metadata() {
-        if !require_provider_materialization_prerequisites() {
-            return;
-        }
-
-        let home = workspace_tempdir("provider-target-extras-home-");
         let index_root = workspace_tempdir("provider-target-extras-index-");
-        let poisoned_path_dir = workspace_tempdir("provider-target-extras-path-");
-        write_poison_python_shims(poisoned_path_dir.path());
 
         let helper_wheel = write_test_wheel(
             index_root.path(),
@@ -2281,7 +2318,6 @@ Tag: py3-none-any\n";
         );
         let server = spawn_test_static_file_server(index_root.path().to_path_buf());
         let _env = TestEnvGuard::set(&[
-            ("HOME", home.path().display().to_string()),
             (
                 "UV_INDEX_URL",
                 format!("{}/simple", server.base_url.as_str()),
@@ -2290,8 +2326,6 @@ Tag: py3-none-any\n";
                 "PIP_INDEX_URL",
                 format!("{}/simple", server.base_url.as_str()),
             ),
-            ("UV_INSECURE_HOST", "127.0.0.1".to_string()),
-            ("PATH", prepend_path(poisoned_path_dir.path())),
         ]);
 
         let workspace = materialize_provider_run_workspace(
@@ -2305,13 +2339,9 @@ Tag: py3-none-any\n";
         )
         .expect("materialize provider workspace with extras");
 
-        let requirements = fs::read_to_string(
-            workspace
-                .workspace_root
-                .join(".ato/provider/requirements.txt"),
-        )
-        .expect("read generated requirements");
-        assert_eq!(requirements, "demo-provider[a,b]\n");
+        let requirements = fs::read_to_string(workspace.workspace_root.join("requirements.txt"))
+            .expect("read generated requirements");
+        assert_eq!(requirements, "demo-provider[a,b]==0.1.0\n");
 
         let metadata: Value = serde_json::from_str(
             &fs::read_to_string(&workspace.resolution_metadata_path)
