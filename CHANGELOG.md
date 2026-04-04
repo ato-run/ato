@@ -4,6 +4,15 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.52] - 2026-04-04
+
+### What Changed
+
+#### Bug Fixes
+
+- Make `ato run` quiet by default, keep run metadata on stderr, and expose `--verbose` plus `ATO_LOG` for detailed output
+- Remove the verbose run logo animation so `ato run --verbose` stays focused on context details
+
 ### Bug Fixes
 
 - Keep one-shot single-script `ato run` materialization state out of the caller workspace by moving cache and run-attempt state under `~/.ato/cache` and `~/.ato/runs`
