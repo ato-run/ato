@@ -75,7 +75,6 @@ fn has_cap_bpf() -> bool {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(target_os = "linux"))]
     use super::*;
 
     #[cfg(not(target_os = "linux"))]

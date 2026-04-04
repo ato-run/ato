@@ -14,6 +14,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub mod environment;
 pub mod source;
 pub mod traits;
 pub use source::SourceRuntime;
