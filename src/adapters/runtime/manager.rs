@@ -10,6 +10,7 @@ use capsule_core::lockfile::{
     parse_lockfile_text, resolve_existing_lockfile_path, CapsuleLock, RuntimeArtifact,
     RuntimeEntry, ToolArtifact, CAPSULE_LOCK_FILE_NAME,
 };
+use capsule_core::packers::runtime_fetcher::RuntimeFetcher;
 use capsule_core::router::ManifestData;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
@@ -275,15 +276,17 @@ pub fn ensure_python_binary_with_authority(
     authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
 ) -> Result<PathBuf> {
     if authoritative_lock.is_some() {
-        let candidates: &[&str] = if cfg!(windows) {
-            &["python.exe", "python"]
-        } else {
-            &["python3", "python"]
-        };
-        return ensure_host_capability_for_authoritative_lock(
-            BootstrapBoundary::host_runtime("python"),
-            candidates,
-        );
+        let version = required_runtime_tool_version(plan, "python")?
+            .or(required_runtime_version(plan, &["python"])?);
+        let version = version.ok_or_else(|| {
+            anyhow::anyhow!(
+                "targets.{}.runtime_version or runtime_tools.python is required for authoritative python execution",
+                plan.selected_target_label()
+            )
+        })?;
+        return block_on_runtime_fetch(async move {
+            RuntimeFetcher::new()?.ensure_python(&version).await
+        });
     }
     ensure_python_binary(plan)
 }
@@ -297,15 +300,17 @@ pub fn ensure_node_binary_with_authority(
     authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
 ) -> Result<PathBuf> {
     if authoritative_lock.is_some() {
-        let candidates: &[&str] = if cfg!(windows) {
-            &["node.exe", "node"]
-        } else {
-            &["node"]
-        };
-        return ensure_host_capability_for_authoritative_lock(
-            BootstrapBoundary::host_runtime("node"),
-            candidates,
-        );
+        let version = required_runtime_tool_version(plan, "node")?
+            .or(required_runtime_version(plan, &["node"])?);
+        let version = version.ok_or_else(|| {
+            anyhow::anyhow!(
+                "targets.{}.runtime_version or runtime_tools.node is required for authoritative node execution",
+                plan.selected_target_label()
+            )
+        })?;
+        return block_on_runtime_fetch(async move {
+            RuntimeFetcher::new()?.ensure_node(&version).await
+        });
     }
     ensure_node_binary(plan)
 }
@@ -319,17 +324,41 @@ pub fn ensure_uv_binary_with_authority(
     authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
 ) -> Result<PathBuf> {
     if authoritative_lock.is_some() {
-        let candidates: &[&str] = if cfg!(windows) {
-            &["uv.exe", "uv"]
-        } else {
-            &["uv"]
-        };
-        return ensure_host_capability_for_authoritative_lock(
-            BootstrapBoundary::host_tool("uv"),
-            candidates,
-        );
+        let version = required_runtime_tool_version(plan, "uv")?;
+        return block_on_runtime_fetch(async move {
+            RuntimeFetcher::new()?.ensure_uv(version.as_deref()).await
+        });
     }
     ensure_uv_binary(plan)
+}
+
+fn block_on_runtime_fetch<F>(future: F) -> Result<PathBuf>
+where
+    F: std::future::Future<Output = capsule_core::Result<PathBuf>> + Send + 'static,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        return tokio::task::block_in_place(|| {
+            let _ = handle;
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(anyhow::Error::from)?;
+                runtime
+                    .block_on(future)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+            })
+            .join()
+            .map_err(|_| anyhow::anyhow!("runtime fetch thread panicked"))?
+        });
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime
+        .block_on(future)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
 fn ensure_host_capability_for_authoritative_lock(

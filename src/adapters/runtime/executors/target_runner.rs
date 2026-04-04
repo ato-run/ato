@@ -241,7 +241,11 @@ pub fn prepare_target_execution(
             guard_mode,
             prepared.authoritative_lock.is_some(),
         )?;
-        crate::consent_store::require_consent(&execution_plan, options.assume_yes)?;
+        if options.assume_yes && is_transient_provider_workspace(&runtime_decision.plan) {
+            crate::consent_store::record_consent(&execution_plan)?;
+        } else {
+            crate::consent_store::require_consent(&execution_plan, options.assume_yes)?;
+        }
 
         return Ok(PreparedTargetExecution {
             execution_plan,
@@ -269,6 +273,10 @@ pub fn prepare_target_execution(
         guard_result,
         launch_ctx,
     })
+}
+
+fn is_transient_provider_workspace(plan: &ManifestData) -> bool {
+    plan.manifest_dir.join("resolution.json").exists()
 }
 
 fn refresh_execution_plan_consent_hashes(execution_plan: &mut ExecutionPlan) -> Result<()> {

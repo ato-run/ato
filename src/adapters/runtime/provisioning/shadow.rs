@@ -325,6 +325,12 @@ fn generate_node_lockfile(working_dir: &Path) -> Result<ShadowLockfileMaterializ
             },
         });
     }
+    if is_provider_workspace(working_dir) {
+        return Ok(ShadowLockfileMaterialization::Skipped {
+            detail: "provider-backed workspace derives package-lock.json during runtime prep"
+                .to_string(),
+        });
+    }
     if !command_exists("npm") {
         return Ok(ShadowLockfileMaterialization::Skipped {
             detail: "npm not available on PATH".to_string(),
@@ -358,6 +364,11 @@ fn generate_python_lockfile(working_dir: &Path) -> Result<ShadowLockfileMaterial
             detail: "uv.lock already exists".to_string(),
         });
     }
+    if is_provider_workspace(working_dir) {
+        return Ok(ShadowLockfileMaterialization::Skipped {
+            detail: "provider-backed workspace derives uv.lock during runtime prep".to_string(),
+        });
+    }
     let Some((program, args)) = python_lock_generation_command(working_dir) else {
         return Ok(ShadowLockfileMaterialization::Skipped {
             detail: python_lock_generation_skip_reason(working_dir),
@@ -389,6 +400,10 @@ fn generate_python_lockfile(working_dir: &Path) -> Result<ShadowLockfileMaterial
             status
         )
     }
+}
+
+fn is_provider_workspace(working_dir: &Path) -> bool {
+    working_dir.join("resolution.json").exists()
 }
 
 fn command_exists(command: &str) -> bool {

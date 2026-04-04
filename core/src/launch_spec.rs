@@ -248,7 +248,11 @@ fn resolve_required_lockfile(
             plan.manifest_dir.join("source").join("pnpm-lock.yaml"),
             plan.manifest_dir.join("source").join("bun.lock"),
             plan.manifest_dir.join("source").join("bun.lockb"),
-        ]);
+        ])
+        .or_else(|| {
+            is_provider_workspace_marker(plan, working_dir)
+                .then(|| plan.manifest_dir.join("package-lock.json"))
+        });
     }
 
     if resolved.eq_ignore_ascii_case("python") {
@@ -256,10 +260,24 @@ fn resolve_required_lockfile(
             working_dir.join("uv.lock"),
             plan.manifest_dir.join("uv.lock"),
             plan.manifest_dir.join("source").join("uv.lock"),
-        ]);
+        ])
+        .or_else(|| {
+            is_provider_workspace_marker(plan, working_dir)
+                .then(|| plan.manifest_dir.join("uv.lock"))
+        });
     }
 
     None
+}
+
+fn is_provider_workspace_marker(plan: &ManifestData, working_dir: &Path) -> bool {
+    [
+        working_dir.join("resolution.json"),
+        plan.manifest_dir.join("resolution.json"),
+        plan.manifest_dir.join("source").join("resolution.json"),
+    ]
+    .into_iter()
+    .any(|path| path.exists())
 }
 
 fn first_existing_path<const N: usize>(candidates: [PathBuf; N]) -> Option<PathBuf> {
