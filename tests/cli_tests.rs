@@ -1976,7 +1976,7 @@ fn test_run_rejects_via_uv_for_npm_provider_targets() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "`--via uv` is not supported for `npm:`",
+            "`--via uv` is not valid for npm: targets",
         ));
 }
 
