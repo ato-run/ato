@@ -251,7 +251,7 @@ pub fn is_flow_active() -> bool {
 }
 
 pub fn show_run_intro(source: &str) -> Result<()> {
-    begin_flow_with_logo(true)?;
+    begin_flow_without_logo()?;
     log::step(format!("Source: {}", style(source).cyan()))
         .context("failed to render TUI source step")?;
     Ok(())
