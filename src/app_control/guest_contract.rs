@@ -136,10 +136,13 @@ capabilities = ["app.invoke", "ping"]
         )
         .expect("parse toml");
 
-        let contract = parse_guest_contract(&manifest, Path::new("/workspace"))
-            .expect("guest contract");
+        let contract =
+            parse_guest_contract(&manifest, Path::new("/workspace")).expect("guest contract");
         assert_eq!(contract.adapter, "tauri");
-        assert_eq!(contract.frontend_entry, PathBuf::from("/workspace/frontend/index.html"));
+        assert_eq!(
+            contract.frontend_entry,
+            PathBuf::from("/workspace/frontend/index.html")
+        );
         assert_eq!(contract.rpc_path, "/rpc");
         assert_eq!(contract.health_path, "/health");
         assert_eq!(contract.default_port, Some(43123));

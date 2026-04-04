@@ -196,7 +196,12 @@ fn build_local_resolution(
     let (plan, guest, mut notes) = resolve_local_plan(&manifest_path, target_label)?;
     let launch = derive_launch_spec(&plan)
         .map(build_launch_preview)
-        .with_context(|| format!("failed to derive launch spec for {}", manifest_path.display()))?;
+        .with_context(|| {
+            format!(
+                "failed to derive launch spec for {}",
+                manifest_path.display()
+            )
+        })?;
 
     Ok(HandleResolution {
         input,
@@ -221,12 +226,10 @@ pub(super) fn resolve_local_plan(
     manifest_path: &std::path::Path,
     target_label: Option<&str>,
 ) -> Result<(ManifestData, Option<GuestContract>, Vec<String>)> {
-    let raw = std::fs::read_to_string(manifest_path).with_context(|| {
-        format!("failed to read manifest at {}", manifest_path.display())
-    })?;
-    let raw_manifest: toml::Value = toml::from_str(&raw).with_context(|| {
-        format!("failed to parse manifest at {}", manifest_path.display())
-    })?;
+    let raw = std::fs::read_to_string(manifest_path)
+        .with_context(|| format!("failed to read manifest at {}", manifest_path.display()))?;
+    let raw_manifest: toml::Value = toml::from_str(&raw)
+        .with_context(|| format!("failed to parse manifest at {}", manifest_path.display()))?;
     let guest = parse_guest_contract(
         &raw_manifest,
         manifest_path
@@ -447,15 +450,24 @@ pub(super) fn normalize_local_handle(raw: &str) -> Result<PathBuf> {
 pub(super) fn derive_local_launch_plan(
     path: &std::path::Path,
     target_label: Option<&str>,
-) -> Result<(PathBuf, ManifestData, capsule_core::launch_spec::LaunchSpec, Vec<String>)> {
+) -> Result<(
+    PathBuf,
+    ManifestData,
+    capsule_core::launch_spec::LaunchSpec,
+    Vec<String>,
+)> {
     let manifest_path = if path.is_dir() {
         path.join("capsule.toml")
     } else {
         path.to_path_buf()
     };
     let (plan, _guest, notes) = resolve_local_plan(&manifest_path, target_label)?;
-    let launch = derive_launch_spec(&plan)
-        .with_context(|| format!("failed to derive launch spec for {}", manifest_path.display()))?;
+    let launch = derive_launch_spec(&plan).with_context(|| {
+        format!(
+            "failed to derive launch spec for {}",
+            manifest_path.display()
+        )
+    })?;
     Ok((manifest_path, plan, launch, notes))
 }
 
@@ -496,7 +508,10 @@ fn print_resolution(resolution: &HandleResolution) {
     println!("Input: {}", resolution.input);
     println!("Normalized: {}", resolution.normalized_handle);
     println!("Kind: {}", handle_kind_label(&resolution.kind));
-    println!("Render strategy: {}", render_strategy_label(&resolution.render_strategy));
+    println!(
+        "Render strategy: {}",
+        render_strategy_label(&resolution.render_strategy)
+    );
 
     if let Some(guest) = &resolution.guest {
         println!("Adapter: {}", guest.adapter);
@@ -566,14 +581,20 @@ mod tests {
     fn normalize_curated_alias_preserves_version_suffix() {
         let normalized = normalize_handle("desky@1.2.3").expect("normalize alias");
         assert_eq!(normalized.normalized_handle, "ato/desky@1.2.3");
-        assert!(matches!(normalized.kind, NormalizedHandleKind::StoreCapsule));
+        assert!(matches!(
+            normalized.kind,
+            NormalizedHandleKind::StoreCapsule
+        ));
     }
 
     #[test]
     fn normalize_github_source_ref_marks_remote_source() {
         let normalized = normalize_handle("capsule://github.com/acme/editor").expect("normalize");
         assert_eq!(normalized.normalized_handle, "github.com/acme/editor");
-        assert!(matches!(normalized.kind, NormalizedHandleKind::RemoteSourceRef));
+        assert!(matches!(
+            normalized.kind,
+            NormalizedHandleKind::RemoteSourceRef
+        ));
     }
 
     #[test]
@@ -608,7 +629,19 @@ entrypoint = "backend/mock-tauri"
             .expect("resolve local tauri manifest");
         assert_eq!(resolution.kind, HandleKind::LocalCapsule);
         assert_eq!(resolution.render_strategy, RenderStrategy::GuestWebview);
-        assert_eq!(resolution.target.as_ref().map(|target| target.target_label.as_str()), Some("desktop"));
-        assert_eq!(resolution.launch.as_ref().map(|launch| launch.command.as_str()), Some("backend/mock-tauri"));
+        assert_eq!(
+            resolution
+                .target
+                .as_ref()
+                .map(|target| target.target_label.as_str()),
+            Some("desktop")
+        );
+        assert_eq!(
+            resolution
+                .launch
+                .as_ref()
+                .map(|launch| launch.command.as_str()),
+            Some("backend/mock-tauri")
+        );
     }
 }
