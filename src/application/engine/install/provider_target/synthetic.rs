@@ -607,7 +607,14 @@ struct WheelCandidate {
 }
 
 fn wheel_candidate_for_url(normalized_package: &str, url: &str) -> Option<WheelCandidate> {
-    let filename = url.rsplit('/').next()?;
+    let filename = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.path_segments()?.next_back().map(str::to_string))
+        .or_else(|| {
+            url.split(['#', '?'])
+                .next()
+                .and_then(|value| value.rsplit('/').next().map(str::to_string))
+        })?;
     if !filename.ends_with(".whl") {
         return None;
     }
@@ -687,4 +694,21 @@ fn encode_npm_registry_package_path(package_name: &str) -> String {
 
 fn synthetic_workspace_package_name(package_name: &str) -> String {
     format!("ato-provider-{}", package_name.replace('/', "-"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wheel_candidate_for_url;
+
+    #[test]
+    fn wheel_candidate_accepts_fragment_bearing_pypi_links() {
+        let candidate = wheel_candidate_for_url(
+            "markitdown",
+            "https://files.pythonhosted.org/packages/6c/28/example/markitdown-0.0.1a1-py3-none-any.whl#sha256=012634784612d85dbf8b994dc8e20bfb2fb37dbc08bb130171c519a8f20b8002",
+        )
+        .expect("fragment-bearing wheel url should remain a candidate");
+
+        assert_eq!(candidate.version, "0.0.1a1");
+        assert!(candidate.url.contains("#sha256="));
+    }
 }
