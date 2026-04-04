@@ -6,7 +6,7 @@
 //!
 //! Platform-specific sandbox implementations:
 //! - Linux: bubblewrap (bwrap) namespace isolation
-//! - macOS: Alcoholless (preferred) or sandbox-exec (fallback)
+//! - macOS: sandbox-exec Seatbelt sandboxing
 //! - Windows: Windows Sandbox (Pro/Enterprise) or Sandboxie Plus (all editions)
 
 pub mod toolchain;
@@ -115,10 +115,7 @@ impl SourceRuntime {
 
     #[cfg(target_os = "macos")]
     pub fn native_sandbox_capability_report() -> NativeSandboxCapabilityReport {
-        macos_capability_report(
-            macos::is_alcoholless_available(),
-            macos::is_seatbelt_available(),
-        )
+        macos_capability_report(macos::is_seatbelt_available())
     }
 
     #[cfg(target_os = "windows")]
@@ -426,7 +423,7 @@ impl SourceRuntime {
 
     /// Launch using native sandbox
     /// - Linux: bubblewrap
-    /// - macOS: Alcoholless or sandbox-exec
+    /// - macOS: sandbox-exec
     /// - Windows: Windows Sandbox or Sandboxie Plus
     #[cfg(target_os = "linux")]
     async fn launch_native(
@@ -499,24 +496,13 @@ fn linux_capability_report(
 }
 
 #[cfg(any(test, target_os = "macos"))]
-fn macos_capability_report(
-    alcoholless_available: bool,
-    seatbelt_available: bool,
-) -> NativeSandboxCapabilityReport {
-    if !alcoholless_available && !seatbelt_available {
+fn macos_capability_report(seatbelt_available: bool) -> NativeSandboxCapabilityReport {
+    if !seatbelt_available {
         return NativeSandboxCapabilityReport::default();
     }
 
-    let mut backends = Vec::new();
-    if seatbelt_available {
-        backends.push("macos-seatbelt".to_string());
-    }
-    if alcoholless_available {
-        backends.push("macos-alcoholless".to_string());
-    }
-
     NativeSandboxCapabilityReport {
-        backends,
+        backends: vec!["macos-seatbelt".to_string()],
         ipc_sandbox: seatbelt_available,
     }
 }
@@ -703,18 +689,11 @@ mod tests {
     #[test]
     fn macos_capability_report_requires_real_backend() {
         assert_eq!(
-            macos_capability_report(false, false),
+            macos_capability_report(false),
             NativeSandboxCapabilityReport::default()
         );
         assert_eq!(
-            macos_capability_report(true, false),
-            NativeSandboxCapabilityReport {
-                backends: vec!["macos-alcoholless".to_string()],
-                ipc_sandbox: false,
-            }
-        );
-        assert_eq!(
-            macos_capability_report(false, true),
+            macos_capability_report(true),
             NativeSandboxCapabilityReport {
                 backends: vec!["macos-seatbelt".to_string()],
                 ipc_sandbox: true,
