@@ -65,6 +65,7 @@ nacelle internal --input - pack
 - `sandbox` は compile target ではなく runtime backend 可用性ベース
 - backend が 1 つも無い場合、`sandbox=[]` かつ `ipc_sandbox=false`
 - `languages` は `python` / `node` / `deno` / `bun` を返す
+- macOS backend は `macos-seatbelt` のみを返す
 
 ## 5. `internal exec`
 
