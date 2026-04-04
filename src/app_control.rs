@@ -18,6 +18,13 @@ use crate::application::services::{
 };
 use crate::cli::{ModelTierArg, PrivacyModeArg, RepairActionArg};
 
+mod resolve;
+mod guest_contract;
+mod session;
+
+pub use resolve::resolve_handle;
+pub use session::{start_session, stop_session};
+
 const DESKY_PACKAGE_ID: &str = "ato/desky";
 const SCHEMA_VERSION: &str = "desky-control-plane/v1";
 const STATE_VERSION: u32 = 1;
