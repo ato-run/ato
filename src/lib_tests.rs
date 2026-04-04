@@ -255,6 +255,26 @@ fn run_command_parses_provider_toolchain_via_flag() {
 }
 
 #[test]
+fn run_command_parses_verbose_flag() {
+    let cli = Cli::try_parse_from(["ato", "run", "--verbose", "npm:prettier", "--", "--version"])
+        .expect("parse");
+
+    match cli.command {
+        Commands::Run {
+            verbose,
+            path,
+            args,
+            ..
+        } => {
+            assert!(verbose);
+            assert_eq!(path, PathBuf::from("npm:prettier"));
+            assert_eq!(args, vec!["--version".to_string()]);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
 fn run_command_parses_trailing_args_after_separator() {
     let cli =
         Cli::try_parse_from(["ato", "run", "@demo/tool", "--", "--help", "-v"]).expect("parse");

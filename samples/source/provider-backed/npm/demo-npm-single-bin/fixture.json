@@ -1,0 +1,13 @@
+{
+  "fixture_id": "provider-backed-npm-demo-npm-single-bin",
+  "provider": "npm",
+  "package": "demo-npm-single-bin",
+  "version": "1.0.0",
+  "intended_commands": [
+    "ato run npm:demo-npm-single-bin -- <input> -o <output>"
+  ],
+  "expected_behavior": "success",
+  "notes": [
+    "Single-bin npm CLI fixture for provider-backed run coverage."
+  ]
+}

@@ -456,6 +456,11 @@ fn provider_npm_run_sandbox_preserves_caller_cwd_and_cleans_workspace() {
         return;
     }
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("PHASE "), "stdout={stdout}");
+    let stdout_json: Value = serde_json::from_slice(&output.stdout)
+        .expect("default run stdout should contain only tool output json");
+
     let payload = load_output_json(&output_path, &output);
     let expected_cwd = caller_dir
         .canonicalize()
@@ -468,6 +473,7 @@ fn provider_npm_run_sandbox_preserves_caller_cwd_and_cleans_workspace() {
         payload["argv"],
         serde_json::json!(["./input.txt", "-o", "./output.json"])
     );
+    assert_eq!(stdout_json, payload);
     assert_eq!(payload["inputExists"].as_bool(), Some(true));
     assert_eq!(
         payload["content"].as_str(),
