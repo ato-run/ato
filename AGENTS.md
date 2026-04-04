@@ -6,6 +6,33 @@
 - Applies to the workspace root and subdirectories.
 - Follow existing patterns unless instructed otherwise.
 
+## Ato Minimal Philosophy
+
+This philosophy should inform design, implementation, and review decisions throughout the repo.
+
+1. Everything is a capsule
+	Ato が扱う対象は、app・tool・service を問わず、すべて capsule である。違いはカテゴリではなく、実行契約の違いにすぎない。
+2. Everything runs through the same handle
+	capsule の起動は、できる限り同じ操作面で扱う。特別な対象ごとに別の mental model を増やさない。
+3. Declare first, then materialize
+	まず「何が必要か」を宣言し、次に Ato がそれを環境として展開する。実行は宣言の上に成り立つ。
+4. One boundary, one policy
+	どの capsule も、同じ境界モデルで実行される。workspace、filesystem、network、env、permissions は、対象ごとに別物ではなく共通の政策面で扱う。
+5. Execution is not installation
+	インストール、解決、起動、修復、状態確認は分離されうるが、ユーザーから見える世界では一貫した流れであるべき。
+6. Reuse the model, not special cases
+	個別の Ollama 対応や Desky 対応を増やすのではなく、それらを自然に表現できる共通モデルを先に作る。
+7. State is layered
+	- 宣言: capsule.toml
+	- 解決結果: ato.lock.json
+	- 実機状態: local state
+	この 3 層を混ぜない。
+8. Safe by default
+	Ato は便利さより先に、境界・再現性・監査可能性を守る。曖昧な自動化より、明示的で安全な実行を優先する。
+
+One-sentence version:
+Ato は、あらゆるソフトウェアを capsule として宣言し、同じハンドルで安全に展開・実行・修復できるようにするための基盤である。
+
 ## Repository Layout
 
 - `src/` contains the CLI binary (`ato`).
