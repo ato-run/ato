@@ -8,6 +8,9 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::path::{Path, PathBuf};
+    use std::process::Command as ProcessCommand;
+    use std::thread;
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     fn capsule() -> Command {
@@ -67,6 +70,36 @@ mod tests {
         ]
     }
 
+    fn process_state(pid: i64) -> Option<String> {
+        let output = ProcessCommand::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "stat="])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if status.is_empty() {
+            None
+        } else {
+            Some(status)
+        }
+    }
+
+    fn wait_for_process_absence(pid: i64) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            match process_state(pid) {
+                None => return,
+                Some(state) if state.starts_with('Z') => {}
+                Some(_) => {}
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+
+        panic!("process {} still exists after stop: {:?}", pid, process_state(pid));
+    }
+
     #[test]
     fn desky_session_roundtrip_for_tauri_mock() {
         let home = TempDir::new().expect("temp home");
@@ -87,6 +120,7 @@ mod tests {
             .as_str()
             .expect("session id")
             .to_string();
+        let pid = start_json["session"]["pid"].as_i64().expect("session pid");
         let invoke_url = start_json["session"]["invoke_url"]
             .as_str()
             .expect("invoke url")
@@ -122,6 +156,8 @@ mod tests {
         let stop_output = stop.output().expect("run app session stop");
         let stop_json = parse_json_output(&stop_output);
         assert_eq!(stop_json["stopped"], json!(true));
+        wait_for_process_absence(pid);
+        assert!(!session_root.join(format!("{}.json", session_id)).exists());
     }
 
     #[test]
@@ -154,5 +190,41 @@ mod tests {
         let stop_output = stop.output().expect("run app session stop");
         let stop_json = parse_json_output(&stop_output);
         assert_eq!(stop_json["stopped"], json!(true));
+    }
+
+    #[test]
+    fn desky_session_stop_reaps_backend_process() {
+        let home = TempDir::new().expect("temp home");
+        let session_root = home.path().join("desky-sessions");
+        fs::create_dir_all(&session_root).expect("create session root");
+        let sample = sample_dir("desky-mock-tauri");
+
+        let mut start = capsule();
+        start.args(["app", "session", "start"])
+            .arg(&sample)
+            .arg("--json");
+        for (key, value) in session_test_env(home.path(), &session_root) {
+            start.env(key, value);
+        }
+        let start_output = start.output().expect("run app session start");
+        let start_json = parse_json_output(&start_output);
+        let session_id = start_json["session"]["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+        let pid = start_json["session"]["pid"].as_i64().expect("session pid");
+        assert!(process_state(pid).is_some(), "backend process should be visible before stop");
+
+        let mut stop = capsule();
+        stop.args(["app", "session", "stop", &session_id, "--json"]);
+        for (key, value) in session_test_env(home.path(), &session_root) {
+            stop.env(key, value);
+        }
+        let stop_output = stop.output().expect("run app session stop");
+        let stop_json = parse_json_output(&stop_output);
+        assert_eq!(stop_json["stopped"], json!(true));
+
+        wait_for_process_absence(pid);
+        assert!(!session_root.join(format!("{}.json", session_id)).exists());
     }
 }
