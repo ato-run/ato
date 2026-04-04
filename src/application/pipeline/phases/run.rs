@@ -1828,12 +1828,10 @@ where
                 .into());
             }
             crate::consent_store::record_consent(&execution_plan)?;
+        } else if request.assume_yes && prepared.workspace_root.join("resolution.json").exists() {
+            crate::consent_store::record_consent(&execution_plan)?;
         } else {
-            if request.assume_yes && prepared.workspace_root.join("resolution.json").exists() {
-                crate::consent_store::record_consent(&execution_plan)?;
-            } else {
-                crate::consent_store::require_consent(&execution_plan, request.assume_yes)?;
-            }
+            crate::consent_store::require_consent(&execution_plan, request.assume_yes)?;
         }
     } else if host_fallback_requested {
         if use_progressive_ui {
