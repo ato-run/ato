@@ -262,12 +262,7 @@ pub fn ensure_deno_binary_with_authority(
     plan: &ManifestData,
     authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
 ) -> Result<PathBuf> {
-    if authoritative_lock.is_some() {
-        return ensure_host_capability_for_authoritative_lock(
-            BootstrapBoundary::host_runtime("deno"),
-            &["deno"],
-        );
-    }
+    let _ = authoritative_lock;
     ensure_deno_binary(plan)
 }
 

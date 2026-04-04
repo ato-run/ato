@@ -75,6 +75,7 @@ pub struct RunArgs {
     pub compatibility_fallback: Option<String>,
     pub provider_toolchain_requested: crate::ProviderToolchain,
     pub assume_yes: bool,
+    pub verbose: bool,
     pub agent_mode: crate::RunAgentMode,
     pub agent_local_root: Option<PathBuf>,
     pub keep_failed_artifacts: bool,
@@ -418,6 +419,7 @@ fn build_consumer_run_request(
         compatibility_fallback: args.compatibility_fallback.clone(),
         provider_toolchain_requested: args.provider_toolchain_requested,
         assume_yes: args.assume_yes,
+        verbose: args.verbose,
         agent_mode: args.agent_mode,
         agent_local_root: args.agent_local_root.clone(),
         registry: args.registry.clone(),
@@ -816,7 +818,9 @@ fn emit_run_phase(
         state = state.as_str(),
         "Running run pipeline phase"
     );
-    hourglass::print_phase_line(args.reporter.is_json(), boundary, state, detail);
+    if args.verbose {
+        hourglass::eprint_phase_line(args.reporter.is_json(), boundary, state, detail);
+    }
 }
 
 fn emit_run_phase_start(args: &RunArgs, boundary: HourglassPhase) {
@@ -1714,6 +1718,7 @@ run_command = "node server.js"
             compatibility_fallback: None,
             provider_toolchain_requested: crate::ProviderToolchain::Auto,
             assume_yes: true,
+            verbose: false,
             agent_mode: crate::RunAgentMode::Off,
             agent_local_root: Some(tmp.path().to_path_buf()),
             keep_failed_artifacts: false,
@@ -1770,6 +1775,7 @@ run_command = "node server.js"
             compatibility_fallback: None,
             provider_toolchain_requested: crate::ProviderToolchain::Auto,
             assume_yes: true,
+            verbose: false,
             agent_mode: crate::RunAgentMode::Off,
             agent_local_root: Some(tmp.path().to_path_buf()),
             keep_failed_artifacts: false,
