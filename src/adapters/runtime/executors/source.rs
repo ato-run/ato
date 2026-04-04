@@ -22,6 +22,7 @@ use crate::common::proxy;
 use crate::reporters::CliReporter;
 use crate::runtime::manager as runtime_manager;
 use crate::runtime::overrides as runtime_overrides;
+use crate::runtime::provider_workspace;
 
 use capsule_core::engine;
 use capsule_core::isolation::HostIsolationContext;
@@ -60,6 +61,8 @@ pub fn execute(
     mode: ExecuteMode,
     launch_ctx: &RuntimeLaunchContext,
 ) -> Result<CapsuleProcess> {
+    provider_workspace::ensure_provider_python_execution_inputs(plan, authoritative_lock)?;
+
     let nacelle = engine::discover_nacelle(engine::EngineRequest {
         explicit_path: nacelle_override,
         manifest_path: Some(plan.manifest_path.clone()),
@@ -114,6 +117,8 @@ pub fn execute_host(
     mode: ExecuteMode,
     launch_ctx: &RuntimeLaunchContext,
 ) -> Result<CapsuleProcess> {
+    provider_workspace::ensure_provider_python_execution_inputs(plan, authoritative_lock)?;
+
     let mut launch_spec = derive_launch_spec(plan)?;
     launch_spec
         .args
@@ -319,62 +324,14 @@ fn resolve_host_managed_runtime_binary(
     authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
     runtime: ManagedRuntimeKind,
 ) -> Result<PathBuf> {
-    if authoritative_lock.is_none() {
-        return match runtime {
-            ManagedRuntimeKind::Node => runtime_manager::ensure_node_binary(plan),
-            ManagedRuntimeKind::Python => runtime_manager::ensure_python_binary(plan),
-        };
-    }
-
-    let candidates: &[&str] = match runtime {
+    match runtime {
         ManagedRuntimeKind::Node => {
-            if cfg!(windows) {
-                &["node.exe", "node"]
-            } else {
-                &["node"]
-            }
+            runtime_manager::ensure_node_binary_with_authority(plan, authoritative_lock)
         }
         ManagedRuntimeKind::Python => {
-            if cfg!(windows) {
-                &["python.exe", "python"]
-            } else {
-                &["python3", "python"]
-            }
-        }
-    };
-
-    find_command_on_path(candidates).ok_or_else(|| {
-        let runtime_name = match runtime {
-            ManagedRuntimeKind::Node => "node",
-            ManagedRuntimeKind::Python => "python",
-        };
-        anyhow::anyhow!(
-            "lock-derived source execution requires a host-local '{}' runtime on PATH",
-            runtime_name
-        )
-    })
-}
-
-fn find_command_on_path(candidates: &[&str]) -> Option<PathBuf> {
-    let path = env::var_os("PATH")?;
-    let path_exts = executable_extensions();
-
-    for directory in env::split_paths(&path) {
-        for candidate in candidates {
-            let direct = directory.join(candidate);
-            if direct.is_file() {
-                return Some(direct);
-            }
-            for extension in &path_exts {
-                let with_extension = directory.join(format!("{}{}", candidate, extension));
-                if with_extension.is_file() {
-                    return Some(with_extension);
-                }
-            }
+            runtime_manager::ensure_python_binary_with_authority(plan, authoritative_lock)
         }
     }
-
-    None
 }
 
 fn executable_extensions() -> Vec<String> {
@@ -709,23 +666,33 @@ fn write_normalized_manifest(plan: &ManifestData, explicit_args: &[String]) -> R
         .as_deref()
         .map(|value| value.eq_ignore_ascii_case("python"))
         .unwrap_or(false);
+    let is_provider_workspace = provider_workspace::is_provider_workspace(&plan.manifest_dir);
 
     let (normalized_entrypoint, command) = if is_python {
-        let mut tokens = vec!["run".to_string()];
-        if has_local_uv_cache(plan) {
-            tokens.push("--offline".to_string());
+        if is_provider_workspace {
+            let mut tokens = vec![sandbox_entrypoint.clone()];
+            tokens.extend(cmd_args.iter().cloned());
+            (
+                "python3".to_string(),
+                Some(shell_words::join(tokens.iter().map(String::as_str))),
+            )
+        } else {
+            let mut tokens = vec!["run".to_string()];
+            if has_local_uv_cache(plan) {
+                tokens.push("--offline".to_string());
+            }
+            if let Some(requirements) = resolve_python_requirements_argument(plan) {
+                tokens.push("--with-requirements".to_string());
+                tokens.push(requirements);
+            }
+            tokens.push("python3".to_string());
+            tokens.push(sandbox_entrypoint.clone());
+            tokens.extend(cmd_args.iter().cloned());
+            (
+                "uv".to_string(),
+                Some(shell_words::join(tokens.iter().map(String::as_str))),
+            )
         }
-        if let Some(requirements) = resolve_python_requirements_argument(plan) {
-            tokens.push("--with-requirements".to_string());
-            tokens.push(requirements);
-        }
-        tokens.push("python3".to_string());
-        tokens.push(sandbox_entrypoint.clone());
-        tokens.extend(cmd_args.iter().cloned());
-        (
-            "uv".to_string(),
-            Some(shell_words::join(tokens.iter().map(String::as_str))),
-        )
     } else {
         let command = (!cmd_args.is_empty()).then(|| cmd_args.join(" "));
         (sandbox_entrypoint, command)
@@ -808,6 +775,10 @@ fn sandbox_source_entrypoint(plan: &ManifestData, entrypoint: &str) -> String {
 
 fn sandbox_source_entrypoint_relative(plan: &ManifestData, entrypoint: &str) -> PathBuf {
     let entrypoint_path = Path::new(entrypoint.trim());
+
+    if provider_workspace::is_provider_workspace(&plan.manifest_dir) {
+        return entrypoint_path.to_path_buf();
+    }
 
     if plan.execution_source_layout().as_deref() == Some("anchored_entrypoint") {
         return entrypoint_path.to_path_buf();
