@@ -1,11 +1,8 @@
 //! macOS-specific sandbox implementation
 //!
-//! Provides two sandbox approaches:
-//! 1. Alcoholless (alcless) - lightweight user-separation sandbox (preferred)
-//! 2. sandbox-exec - built-in Seatbelt sandbox with dynamic profile generation (fallback)
+//! Provides sandbox-exec based Seatbelt sandboxing for source workloads.
 //!
 //! Reference:
-//! - Alcoholless: https://github.com/AkihiroSuda/alcless
 //! - sandbox-exec: https://igorstechnoclub.com/sandbox-exec/
 
 use std::path::PathBuf;
@@ -44,9 +41,6 @@ fn allowed_mount_host_path(mount: &crate::launcher::InjectedMount) -> PathBuf {
         .map(|parent| parent.to_path_buf())
         .unwrap_or_else(|| mount.source.clone())
 }
-
-/// Alcoholless installation guide URL
-const ALCOHOLLESS_INSTALL_URL: &str = "https://github.com/AkihiroSuda/alcless#install";
 
 /// Resolve the executable and arguments based on target.cmd or language detection
 ///
@@ -191,7 +185,7 @@ async fn resolve_binary(
     })
 }
 
-/// Launch with native macOS sandbox (Alcoholless preferred, sandbox-exec fallback)
+/// Launch with native macOS sandbox.
 /// In dev_mode, skip sandbox entirely for better debugging and log forwarding
 pub async fn launch_native_macos(
     runtime: &SourceRuntime,
@@ -204,35 +198,16 @@ pub async fn launch_native_macos(
         return launch_direct(runtime, request, target).await;
     }
 
-    let requires_ipc_passthrough = !target.ipc_socket_paths.is_empty();
-
-    // IPC socket allow-lists are currently implemented only in the Seatbelt path.
-    if !requires_ipc_passthrough && is_alcoholless_available() {
-        info!("Using Alcoholless sandbox for macOS");
-        return launch_with_alcoholless(runtime, request, target).await;
-    }
-
     if is_seatbelt_available() {
-        if requires_ipc_passthrough {
+        if !target.ipc_socket_paths.is_empty() {
             info!("Using sandbox-exec for macOS IPC socket passthrough");
-        } else {
-            warn!(
-                "Alcoholless not found. Install via: {}. Falling back to sandbox-exec.",
-                ALCOHOLLESS_INSTALL_URL
-            );
         }
         return launch_with_sandbox_exec(runtime, request, target).await;
     }
 
     Err(RuntimeError::SandboxSetupFailed(
-        "No macOS sandbox backend available. Install Alcoholless or restore sandbox-exec."
-            .to_string(),
+        "No macOS sandbox backend available. Restore sandbox-exec.".to_string(),
     ))
-}
-
-/// Check if Alcoholless (alcless) is installed
-pub fn is_alcoholless_available() -> bool {
-    which::which("alcless").is_ok() || which::which("alclessctl").is_ok()
 }
 
 /// Check if sandbox-exec (Seatbelt launcher) is available.
@@ -241,176 +216,9 @@ pub fn is_seatbelt_available() -> bool {
 }
 
 /// Check if native sandbox is available on macOS
-/// Returns true if either Alcoholless or sandbox-exec is available
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn is_native_available() -> bool {
-    is_alcoholless_available() || is_seatbelt_available()
-}
-
-/// Launch using Alcoholless (alcless) sandbox
-///
-/// Alcoholless creates a separate user environment using sudo/su/pam_launchd
-/// and syncs files back via rsync. Very low overhead, no VM/container.
-///
-/// Usage: `alcless <command>` or `alclessctl shell default -- <command>`
-async fn launch_with_alcoholless(
-    runtime: &SourceRuntime,
-    request: &LaunchRequest<'_>,
-    target: &SourceTarget,
-) -> Result<LaunchResult, RuntimeError> {
-    // Find toolchain binary with JIT provisioning
-    let toolchain_path = runtime
-        .ensure_toolchain(target)
-        .await
-        .map_err(|e| RuntimeError::ToolchainError {
-            message: format!("Failed to ensure {} toolchain", target.language),
-            technical_reason: Some(e.to_string()),
-            cloud_upsell: Some(
-                "💡 This app requires a cloud environment. Run with '--mode=cloud' (Pro) to execute in a managed Linux VM with guaranteed compatibility."
-                    .to_string(),
-            ),
-        })?;
-
-    info!(
-        "Launching with Alcoholless: {} {} (toolchain: {:?})",
-        target.language, target.entrypoint, toolchain_path
-    );
-
-    // Ensure log directory exists
-    std::fs::create_dir_all(&runtime.config.log_dir).map_err(|e| RuntimeError::Io {
-        path: runtime.config.log_dir.clone(),
-        source: e,
-    })?;
-
-    // Build alcless command
-    // alcless runs the command in a sandboxed user environment
-    // Files in current directory are synced back on exit
-    let mut cmd = Command::new("alcless");
-
-    // Use --plain to skip directory rsync if source_dir is not writable
-    if !target.source_dir.join(".alcless_writable").exists() {
-        cmd.arg("--plain");
-    }
-
-    // Set working directory to source
-    cmd.current_dir(requested_host_cwd(target));
-
-    // Check if explicit cmd is provided (Generic Source Runtime)
-    if let Some(ref explicit_cmd) = target.cmd {
-        // Use explicit command directly
-        // The first element is the binary, rest are arguments
-        if let Some((binary, args)) = explicit_cmd.split_first() {
-            // Find the actual binary path using toolchain manager or PATH
-            let binary_path = if binary == &target.language
-                || binary == "python"
-                || binary == "python3"
-                || binary == "node"
-                || binary == "ruby"
-                || binary == "deno"
-            {
-                toolchain_path.clone()
-            } else {
-                which::which(binary).unwrap_or_else(|_| PathBuf::from(binary))
-            };
-            cmd.arg(&binary_path);
-
-            // For Python interpreter, add -B to disable bytecode caching
-            // Skip for tools like uv, pip that are not the interpreter itself
-            if target.language == "python" && is_python_interpreter(binary) {
-                cmd.arg("-B");
-            }
-
-            cmd.args(args);
-        }
-    } else {
-        // Legacy path: use toolchain + language-specific arguments
-        cmd.arg(&toolchain_path);
-
-        // Add language-specific arguments
-        match target.language.to_lowercase().as_str() {
-            "python" | "python3" => {
-                cmd.args(["-B", &target.entrypoint]); // Disable bytecode caching
-            }
-            "deno" => {
-                cmd.args(["run", "--allow-read=.", &target.entrypoint]);
-            }
-            _ => {
-                cmd.arg(&target.entrypoint);
-            }
-        }
-    }
-
-    // Add user-provided arguments
-    cmd.args(&target.args);
-
-    // Apply user-provided environment variables
-    if let Some(ref envs) = request.env {
-        for (key, value) in envs {
-            cmd.env(key, value);
-        }
-    }
-
-    // Apply sidecar (SOCKS5 proxy) environment variables
-    runtime.apply_sidecar_env(&mut cmd);
-
-    // Setup output redirection
-    let log_path = runtime.workload_log_path(request.workload_id);
-    let log_file = std::fs::File::create(&log_path).map_err(|e| RuntimeError::Io {
-        path: log_path.clone(),
-        source: e,
-    })?;
-
-    cmd.stdout(Stdio::from(log_file.try_clone().map_err(|e| {
-        RuntimeError::Io {
-            path: log_path.clone(),
-            source: e,
-        }
-    })?));
-    cmd.stderr(Stdio::from(log_file));
-
-    // Socket Activation (Phase 2): Pass listening socket FD to child process
-    if let Some(ref socket_manager) = request.socket_manager {
-        socket_manager
-            .prepare_command(&mut cmd)
-            .map_err(|e| RuntimeError::CommandExecution {
-                operation: "socket_activation_prepare".to_string(),
-                source: std::io::Error::other(e.to_string()),
-            })?;
-        info!(
-            "Socket Activation: Passing FD {} to child process",
-            crate::manager::socket::SD_LISTEN_FDS_START
-        );
-    }
-
-    debug!("Executing alcless command: {:?}", cmd);
-
-    // Spawn the process
-    let child = cmd.spawn().map_err(|e| RuntimeError::CommandExecution {
-        operation: "alcless spawn".to_string(),
-        source: e,
-    })?;
-
-    let pid = child.id();
-    info!(
-        "Started source workload {} with Alcoholless, PID {}",
-        request.workload_id, pid
-    );
-
-    // Track the workload (PID for quick lookup)
-    {
-        let mut workloads = runtime.active_workloads.lock().unwrap();
-        workloads.insert(request.workload_id.to_string(), pid);
-    }
-
-    // Register child handle for lifecycle management (keeps process alive)
-    runtime.register_child(request.workload_id.to_string(), child);
-
-    Ok(LaunchResult {
-        pid: Some(pid),
-        bundle_path: None,
-        log_path: Some(log_path),
-        port: None,
-    })
+    is_seatbelt_available()
 }
 
 /// Launch using sandbox-exec with dynamic Seatbelt profile
@@ -882,18 +690,13 @@ fn escape_path_for_sbpl(path: &std::path::Path) -> Option<String> {
 mod tests {
     use super::*;
     use crate::launcher::IsolationPolicy;
+    use crate::launcher::LaunchRequest;
+    use tempfile::TempDir;
 
     #[test]
     fn test_native_available() {
         // sandbox-exec is always available on macOS
         assert!(is_native_available());
-    }
-
-    #[test]
-    fn test_alcoholless_check() {
-        // This will be false on most dev machines unless alcless is installed
-        let _available = is_alcoholless_available();
-        // Just ensure the check doesn't panic
     }
 
     #[test]
@@ -1080,5 +883,77 @@ mod tests {
         if let Some(escaped) = escape_path_for_sbpl(&path_with_quotes) {
             assert!(escaped.contains("\\\""));
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_sandbox_exec_launches_python_workload() {
+        if !is_seatbelt_available() || which::which("python3").is_err() {
+            return;
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let source_dir = temp_dir.path().join("source");
+        let log_dir = temp_dir.path().join("logs");
+        let state_dir = temp_dir.path().join("state");
+        std::fs::create_dir_all(&source_dir).unwrap();
+
+        let output_path = source_dir.join("sandbox-output.txt");
+        let script_path = source_dir.join("main.py");
+        std::fs::write(
+            &script_path,
+            format!(
+                "from pathlib import Path\nPath({:?}).write_text('ok', encoding='utf-8')\n",
+                output_path
+            ),
+        )
+        .unwrap();
+
+        let runtime = SourceRuntime::new(crate::launcher::source::SourceRuntimeConfig {
+            dev_mode: false,
+            log_dir,
+            state_dir,
+            sidecar_config: None,
+        });
+
+        let target = SourceTarget {
+            language: "python".to_string(),
+            version: None,
+            entrypoint: "main.py".to_string(),
+            dependencies: None,
+            args: vec![],
+            source_dir: source_dir.clone(),
+            requested_cwd: None,
+            cmd: None,
+            dev_mode: false,
+            isolation: Some(IsolationPolicy {
+                sandbox_enabled: true,
+                read_only_paths: vec![],
+                read_write_paths: vec![],
+                network_enabled: false,
+                egress_allow: vec![],
+            }),
+            ipc_socket_paths: vec![],
+            injected_mounts: vec![],
+        };
+
+        let request = LaunchRequest {
+            workload_id: "macos-seatbelt-smoke",
+            bundle_root: source_dir.clone(),
+            env: None,
+            args: None,
+            source_target: Some(target.clone()),
+            socket_manager: None,
+        };
+
+        let result = launch_native_macos(&runtime, &request, &target)
+            .await
+            .unwrap();
+        assert!(result.pid.is_some());
+
+        let mut child = runtime.take_child("macos-seatbelt-smoke").unwrap();
+        let status = child.wait().unwrap();
+        assert!(status.success(), "sandboxed process failed: {status:?}");
+        assert_eq!(std::fs::read_to_string(output_path).unwrap(), "ok");
     }
 }

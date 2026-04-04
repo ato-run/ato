@@ -6,7 +6,7 @@
 
 - **Mechanism（実行メカニズム）**
   - バンドル/アーティファクトの展開
-  - OSネイティブ隔離（filesystem / network）
+  - OSネイティブ隔離（filesystem / network, macOS は Seatbelt ベース）
   - プロセス起動・監視（Supervisor Mode）
   - Socket Activation（FD継承）
 
