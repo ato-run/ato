@@ -22,9 +22,12 @@ nacelle internal --input - pack
 
 ## 3. `spec_version`
 
-現行実装が受け付ける version は次の 2 つ:
+`spec_version` は request schema version として厳格に扱う。未知 version は best-effort せず fail-closed にする。
+
+現行実装が受け付ける version は次の 3 つ:
 
 - `1.0` : current
+- `2.0` : declarative environment contract
 - `0.1.0` : legacy compatibility
 
 それ以外は `ok=false` / `error.code="UNSUPPORTED"` で fail-closed にする。
@@ -84,6 +87,55 @@ nacelle internal --input - pack
 }
 ```
 
+### request (`spec_version = "2.0"`)
+
+```json
+{
+  "spec_version": "2.0",
+  "workload": {
+    "type": "source",
+    "environment_spec": {
+      "lower_source": {
+        "manifest": "/abs/path/to/capsule.toml"
+      },
+      "upper_overlays": [
+        {
+          "source": "/abs/path/to/generated.env",
+          "target": ".env",
+          "readonly": true
+        }
+      ],
+      "derived_outputs": [
+        {
+          "host_path": "/abs/path/to/derived-output",
+          "target": ".derived",
+          "kind": "artifact"
+        }
+      ],
+      "runtime_artifacts": [
+        {
+          "name": "python",
+          "path": "/abs/path/to/python3",
+          "env_var": "NACELLE_RUNTIME_ARTIFACT_PYTHON",
+          "add_to_path": true
+        }
+      ]
+    }
+  },
+  "env": [["PORT", "43123"]],
+  "ipc_env": [["CAPSULE_IPC_FOO_URL", "unix:///tmp/foo.sock"]],
+  "ipc_socket_paths": ["/tmp/foo.sock"],
+  "cwd": "."
+}
+```
+
+### v2 environment semantics
+
+- `lower_source` は実行時の基準ワークスペースで、元のホストパスは不変として扱う
+- `upper_overlays` は workspace root からの相対 target に重ねる
+- `derived_outputs` は workspace root からの相対 target に write target を注入し、`host_path` は lower_source 配下を指してはいけない
+- `runtime_artifacts` は `ato-cli` が解決済みの参照のみを渡す。`nacelle` は解決せず、存在検証と env/PATH 注入だけを行う
+
 ### stdout contract
 
 `internal exec` は stdout を NDJSON として使う。
@@ -104,6 +156,7 @@ nacelle internal --input - pack
 ```json
 {"event":"ipc_ready","service":"main","endpoint":"unix:///tmp/foo.sock"}
 {"event":"service_exited","service":"main","exit_code":0}
+{"event":"execution_completed","service":"main","run_id":"exec-12345","derived_output_path":"/abs/path/to/derived-output","exported_artifacts":[{"kind":"artifact","relative_path":"result.txt","size_bytes":42}],"cleanup_policy_applied":"delete_workspace_preserve_outputs","exit_code":0}
 ```
 
 ### event types
@@ -115,11 +168,18 @@ nacelle internal --input - pack
 - `service_exited`
   - service が終了したときに送る
   - `exit_code` は取得できる場合のみ数値
+- `execution_completed`
+  - 実行の最終サマリ
+  - `run_id` は engine 内の一意識別子
+  - `derived_output_path` は primary output root がある場合のみ付与する
+  - `exported_artifacts[]` は `kind` / `relative_path` / `size_bytes` を返す
+  - `cleanup_policy_applied` は engine が適用した cleanup policy を返す
 
 ### ordering
 
 - initial response の前に event を出してはいけない
 - readiness 前に service が落ちた場合は `ipc_ready` を出さず、`service_exited` のみを出す
+- `execution_completed` は `service_exited` の後に出す
 
 ## 6. `internal pack`
 

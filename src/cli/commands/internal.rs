@@ -1,12 +1,19 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing::info;
 
-use nacelle::internal_api::{validate_spec_version, NacelleEvent, CURRENT_SPEC_VERSION};
+use nacelle::internal_api::{
+    validate_spec_version, NacelleEvent, CURRENT_SPEC_VERSION, NEXT_SPEC_VERSION,
+};
+use nacelle::launcher::environment::{
+    prepare_environment, DerivedOutputMountSpec, EnvironmentPrepareRequest,
+    EnvironmentWorkspace, OverlayMountSpec, RuntimeArtifactReference,
+};
 use nacelle::launcher::source::{
     NativeSandboxCapabilityReport, SourceRuntime, SourceRuntimeConfig,
 };
@@ -152,6 +159,59 @@ pub struct ExecEnvelope {
     /// Additional host mounts injected by ato-cli.
     #[serde(default)]
     pub mounts: Vec<ExecMount>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+pub struct ExecEnvelopeV2 {
+    pub spec_version: String,
+    pub workload: WorkloadSpecV2,
+    #[serde(default)]
+    pub env: Option<Vec<(String, String)>>,
+    #[serde(default)]
+    pub ipc_env: Option<Vec<(String, String)>>,
+    #[serde(default)]
+    pub ipc_socket_paths: Option<Vec<String>>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+pub struct WorkloadSpecV2 {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub environment_spec: CapsuleEnvironmentSpec,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+pub struct CapsuleEnvironmentSpec {
+    pub lower_source: LowerSourceSpec,
+    #[serde(default)]
+    pub upper_overlays: Vec<OverlayMountSpec>,
+    #[serde(default)]
+    pub derived_outputs: Vec<DerivedOutputMountSpec>,
+    #[serde(default)]
+    pub runtime_artifacts: Vec<RuntimeArtifactReference>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+pub struct LowerSourceSpec {
+    pub manifest: PathBuf,
+}
+
+#[derive(Debug)]
+enum ParsedExecRequest {
+    V1(ExecEnvelope),
+    V2(ExecEnvelopeV2),
+}
+
+#[derive(Debug, Serialize)]
+struct ExecResult {
+    pid: Option<u32>,
+    log_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -844,187 +904,210 @@ fn convert_isolation_config(
     }
 }
 
-/// Handle exec command - launch a workload from manifest
-async fn handle_exec(raw: &str) -> Result<()> {
-    let envelope: ExecEnvelope =
-        serde_json::from_str(raw).context("Failed to parse exec request JSON")?;
-    validate_spec_version(&envelope.spec_version).map_err(anyhow::Error::msg)?;
+fn merge_workload_env(
+    env: Option<Vec<(String, String)>>,
+    ipc_env: Option<Vec<(String, String)>>,
+) -> Vec<(String, String)> {
+    let mut merged_env = env.unwrap_or_default();
+    if let Some(ipc_env) = ipc_env {
+        merged_env.extend(ipc_env);
+    }
+    merged_env
+}
 
-    info!("Received exec request: {:?}", envelope.workload);
+fn parse_ipc_socket_paths(paths: Option<Vec<String>>) -> Vec<PathBuf> {
+    paths
+        .unwrap_or_default()
+        .into_iter()
+        .map(PathBuf::from)
+        .collect()
+}
 
-    // Get manifest path
+fn emit_execution_completed(
+    service: &str,
+    prepared: &EnvironmentWorkspace,
+    exit_code: Option<i32>,
+) -> Result<()> {
+    NacelleEvent::ExecutionCompleted {
+        service: service.to_string(),
+        run_id: prepared.run_id.clone(),
+        derived_output_path: prepared.primary_derived_output_path(),
+        exported_artifacts: prepared.exported_artifacts()?,
+        cleanup_policy_applied: prepared.cleanup_policy().as_str().to_string(),
+        exit_code,
+    }
+    .emit();
+    Ok(())
+}
+
+fn prepare_v1_launch(envelope: ExecEnvelope) -> Result<EnvironmentWorkspace> {
     let manifest_path = envelope
         .workload
         .manifest
         .ok_or_else(|| anyhow::anyhow!("manifest path is required"))?;
+    let merged_env = merge_workload_env(envelope.env, envelope.ipc_env);
+    let ipc_socket_paths = parse_ipc_socket_paths(envelope.ipc_socket_paths);
+    let injected_mounts = envelope
+        .mounts
+        .into_iter()
+        .map(|mount| InjectedMount {
+            source: PathBuf::from(mount.source),
+            target: PathBuf::from(mount.target),
+            readonly: mount.readonly,
+        })
+        .collect();
 
-    if !manifest_path.exists() {
-        anyhow::bail!("manifest not found: {}", manifest_path.display());
+    EnvironmentWorkspace::for_manifest(
+        format!("exec-{}", std::process::id()),
+        envelope.spec_version,
+        manifest_path,
+        envelope.cwd.map(PathBuf::from),
+        merged_env,
+        ipc_socket_paths,
+        injected_mounts,
+    )
+}
+
+fn prepare_v2_launch(envelope: ExecEnvelopeV2) -> Result<EnvironmentWorkspace> {
+    if envelope.workload.kind != "source" {
+        anyhow::bail!("unsupported v2 workload type: {}", envelope.workload.kind);
     }
 
-    // Read and parse manifest
-    let manifest_content = std::fs::read_to_string(&manifest_path)
-        .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
+    prepare_environment(EnvironmentPrepareRequest {
+        run_id: format!("exec-{}", std::process::id()),
+        spec_version: envelope.spec_version,
+        manifest_path: envelope.workload.environment_spec.lower_source.manifest,
+        requested_cwd: envelope.cwd,
+        env: merge_workload_env(envelope.env, envelope.ipc_env),
+        ipc_socket_paths: parse_ipc_socket_paths(envelope.ipc_socket_paths),
+        injected_mounts: vec![],
+        overlays: envelope.workload.environment_spec.upper_overlays,
+        derived_outputs: envelope.workload.environment_spec.derived_outputs,
+        runtime_artifacts: envelope.workload.environment_spec.runtime_artifacts,
+    })
+}
 
+/// Handle exec command - launch a workload from manifest
+async fn handle_exec(raw: &str) -> Result<()> {
+    let request = parse_exec_request(raw)?;
+
+    match request {
+        ParsedExecRequest::V1(envelope) => handle_exec_v1(envelope).await,
+        ParsedExecRequest::V2(envelope) => handle_exec_v2(envelope).await,
+    }
+}
+
+fn parse_exec_request(raw: &str) -> Result<ParsedExecRequest> {
+    let value: serde_json::Value =
+        serde_json::from_str(raw).context("Failed to parse exec request JSON")?;
+    let spec_version = value
+        .get("spec_version")
+        .and_then(|value| value.as_str())
+        .unwrap_or(CURRENT_SPEC_VERSION);
+    validate_spec_version(spec_version).map_err(anyhow::Error::msg)?;
+
+    if spec_version == NEXT_SPEC_VERSION {
+        let envelope: ExecEnvelopeV2 = serde_json::from_value(value)
+            .context("Failed to deserialize exec request v2 JSON")?;
+        return Ok(ParsedExecRequest::V2(envelope));
+    }
+
+    let envelope: ExecEnvelope = serde_json::from_value(value)
+        .context("Failed to deserialize exec request JSON")?;
+    Ok(ParsedExecRequest::V1(envelope))
+}
+
+async fn handle_exec_v2(envelope: ExecEnvelopeV2) -> Result<()> {
+    validate_spec_version(&envelope.spec_version).map_err(anyhow::Error::msg)?;
+    let prepared = prepare_v2_launch(envelope)?;
+    execute_prepared_launch(prepared).await
+}
+
+async fn handle_exec_v1(envelope: ExecEnvelope) -> Result<()> {
+    validate_spec_version(&envelope.spec_version).map_err(anyhow::Error::msg)?;
+    let prepared = prepare_v1_launch(envelope)?;
+    execute_prepared_launch(prepared).await
+}
+
+async fn execute_prepared_launch(prepared: EnvironmentWorkspace) -> Result<()> {
+    info!("Received exec request for run {}", prepared.run_id);
+
+    let manifest_content = fs::read_to_string(&prepared.manifest_path).with_context(|| {
+        format!(
+            "Failed to read manifest: {}",
+            prepared.manifest_path.display()
+        )
+    })?;
     let manifest: CapsuleManifest =
         toml::from_str(&manifest_content).context("Failed to parse manifest TOML")?;
-
     info!("Loaded manifest: {} v{}", manifest.name, manifest.version);
 
-    // Determine source directory
-    let source_dir = manifest_path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-
-    // Resolve command from manifest (new unified logic)
     let resolution = resolve_execution_command(&manifest);
     info!(
         "Resolved command: executable='{}', args={:?}, language={:?}",
         resolution.executable, resolution.args, resolution.language
     );
 
-    // Convert isolation config to IsolationPolicy
-    let isolation_policy = convert_isolation_config(&manifest.isolation, &source_dir);
-    info!(
-        "Isolation policy: sandbox={}, network={}, read_only={:?}, read_write={:?}",
-        isolation_policy.sandbox_enabled,
-        isolation_policy.network_enabled,
-        isolation_policy.read_only_paths,
-        isolation_policy.read_write_paths
-    );
-
-    // Determine dev_mode: if sandbox is explicitly disabled in manifest, use dev_mode
-    // Otherwise, respect the DEV_MODE env var or default to production
+    let isolation_policy = convert_isolation_config(&manifest.isolation, &prepared.source_dir);
     let is_dev_mode =
         !isolation_policy.sandbox_enabled || std::env::var("NACELLE_DEV_MODE").is_ok();
 
-    // Merge IPC environment variables into the workload env.
-    // nacelle does NOT interpret these values (Smart Build, Dumb Runtime).
-    // ato-cli (IPC Broker) generates them; we just pass them through.
-    let mut merged_env: Vec<(String, String)> = envelope.env.clone().unwrap_or_default();
-    if let Some(ref ipc_env) = envelope.ipc_env {
-        info!(
-            "Passing {} IPC environment variables to workload",
-            ipc_env.len()
-        );
-        merged_env.extend(ipc_env.iter().cloned());
-    }
-
-    // Collect IPC socket paths for Sandbox policy
-    let ipc_socket_paths: Vec<PathBuf> = envelope
-        .ipc_socket_paths
-        .as_ref()
-        .map(|paths| paths.iter().map(PathBuf::from).collect())
-        .unwrap_or_default();
-    if !ipc_socket_paths.is_empty() {
-        info!(
-            "IPC socket paths for sandbox allow-list: {:?}",
-            ipc_socket_paths
-        );
-    }
-
-    let requested_cwd = envelope.cwd.as_ref().map(PathBuf::from);
-    if let Some(cwd) = requested_cwd.as_ref() {
-        info!("Requested runtime cwd: {}", cwd.display());
-    }
-
-    let injected_mounts: Vec<InjectedMount> = envelope
-        .mounts
-        .iter()
-        .map(|mount| InjectedMount {
-            source: PathBuf::from(&mount.source),
-            target: PathBuf::from(&mount.target),
-            readonly: mount.readonly,
-        })
-        .collect();
-    if !injected_mounts.is_empty() {
-        info!("Injected sandbox mounts: {:?}", injected_mounts);
-    }
-
     let source_target = SourceTarget {
         language: resolution.language.unwrap_or_else(|| "generic".to_string()),
-        version: manifest.language.as_ref().and_then(|l| l.version.clone()),
+        version: manifest.language.as_ref().and_then(|language| language.version.clone()),
         entrypoint: resolution.entrypoint_file.clone(),
         dependencies: None,
         args: vec![],
-        source_dir: source_dir.clone(),
-        requested_cwd,
+        source_dir: prepared.source_dir.clone(),
+        requested_cwd: prepared.requested_cwd.clone(),
         cmd: Some(resolution.full_command),
         dev_mode: is_dev_mode,
         isolation: Some(isolation_policy),
-        ipc_socket_paths,
-        injected_mounts,
+        ipc_socket_paths: prepared.ipc_socket_paths.clone(),
+        injected_mounts: prepared.injected_mounts.clone(),
     };
 
-    // Create runtime config
-    let config = SourceRuntimeConfig {
-        dev_mode: is_dev_mode,
-        log_dir: std::env::temp_dir().join("nacelle-logs"),
-        state_dir: std::env::temp_dir().join("nacelle-state"),
-        sidecar_config: None,
-    };
-
-    // Create runtime
+    let config: SourceRuntimeConfig = prepared.runtime_config(is_dev_mode);
     let runtime = SourceRuntime::new(config);
 
-    // Create launch request with merged environment variables (workload + IPC)
-    let workload_id = format!("exec-{}", std::process::id());
     let request = LaunchRequest {
-        workload_id: &workload_id,
-        bundle_root: source_dir.clone(),
-        env: if merged_env.is_empty() {
+        workload_id: &prepared.run_id,
+        bundle_root: prepared.source_dir.clone(),
+        env: if prepared.env.is_empty() {
             None
         } else {
-            Some(merged_env)
+            Some(prepared.env.clone())
         },
         args: None,
         source_target: Some(source_target.clone()),
         socket_manager: None,
     };
 
-    // Launch the workload
-    info!(
-        "Launching workload with env count: {}",
-        request.env.as_ref().map_or(0, |e| e.len())
-    );
     let result = runtime
         .launch(request)
         .await
-        .map_err(|e| anyhow::anyhow!("Launch failed: {:?}", e))?;
-
-    let pid = result.pid;
-    info!("Launched with PID: {:?}", pid);
-
-    // Write success response IMMEDIATELY so Ato Desktop can capture the PID
-    // This must happen before we block on waiting
-    #[derive(Serialize)]
-    struct ExecResult {
-        pid: Option<u32>,
-        log_path: Option<String>,
-    }
+        .map_err(|err| anyhow::anyhow!("Launch failed: {:?}", err))?;
 
     write_ok(
-        envelope.spec_version.clone(),
+        prepared.spec_version.clone(),
         ExecResult {
-            pid,
-            log_path: result.log_path.as_ref().map(|p| p.display().to_string()),
+            pid: result.pid,
+            log_path: result.log_path.as_ref().map(|path| path.display().to_string()),
         },
     );
 
-    // Flush stdout to ensure Ato Desktop receives the response
     use std::io::Write;
     let _ = std::io::stdout().flush();
 
-    if let Some(child_pid) = pid {
+    if let Some(child_pid) = result.pid {
         eprintln!(
             "[nacelle] Supervisor mode: waiting for child PID {} to terminate...",
             child_pid
         );
 
-        let mut child = if let Some(child) = runtime.take_async_child(&workload_id).await {
+        let mut child = if let Some(child) = runtime.take_async_child(&prepared.run_id).await {
             ManagedChild::Async(child)
-        } else if let Some(child) = runtime.take_child(&workload_id) {
+        } else if let Some(child) = runtime.take_child(&prepared.run_id) {
             ManagedChild::Sync(child)
         } else {
             anyhow::bail!("Internal exec lost child handle for PID {}", child_pid);
@@ -1048,23 +1131,29 @@ async fn handle_exec(raw: &str) -> Result<()> {
                 }
                 ReadinessOutcome::Exited(status) => {
                     emit_service_exited(&manifest.name, &status);
+                    prepared.sync_derived_outputs()?;
+                    emit_execution_completed(&manifest.name, &prepared, status.code())?;
+                    prepared.cleanup();
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     std::process::exit(status.code().unwrap_or(1));
                 }
             }
         } else {
-            // One-shot and no-probe source jobs should be considered ready as soon as
-            // the launcher successfully hands back a child process. This avoids treating
-            // a clean exit as "before start confirmation" on the ato side.
             emit_service_ready(&manifest.name);
         }
 
         let status = wait_for_child_exit(&mut child).await?;
         emit_service_exited(&manifest.name, &status);
+        prepared.sync_derived_outputs()?;
+        emit_execution_completed(&manifest.name, &prepared, status.code())?;
+        prepared.cleanup();
         tokio::time::sleep(Duration::from_millis(100)).await;
         std::process::exit(status.code().unwrap_or(1));
     }
 
+    prepared.sync_derived_outputs()?;
+    emit_execution_completed(&manifest.name, &prepared, None)?;
+    prepared.cleanup();
     Ok(())
 }
 
