@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -24,6 +26,7 @@ use capsule_core::router::ManifestData;
 use crate::common::proxy;
 use crate::runtime::manager as runtime_manager;
 use crate::runtime::overrides as runtime_overrides;
+use crate::runtime::provider_workspace;
 
 use super::launch_context::RuntimeLaunchContext;
 
@@ -427,6 +430,8 @@ fn build_host_node_entrypoint_command(
     explicit_script_args: &[String],
     launch_ctx: &RuntimeLaunchContext,
 ) -> Result<PreparedCommand> {
+    provider_workspace::ensure_provider_node_execution_inputs(plan, authoritative_lock)?;
+
     let node_bin = runtime_manager::ensure_node_binary_with_authority(plan, authoritative_lock)?;
     let command_cwd = launch_ctx
         .effective_cwd()
@@ -465,20 +470,11 @@ fn build_host_node_entrypoint_command(
 }
 
 fn is_provider_backed_node_workspace(runtime_dir: &Path) -> bool {
-    provider_resolution_metadata_path(runtime_dir)
-        .map(|path| path.exists())
-        .unwrap_or(false)
+    provider_workspace::is_provider_workspace(runtime_dir)
 }
 
 fn provider_resolution_metadata_path(runtime_dir: &Path) -> Option<std::path::PathBuf> {
-    let direct = runtime_dir.join(".ato/provider/resolution.json");
-    if direct.exists() {
-        return Some(direct);
-    }
-
-    runtime_dir
-        .parent()
-        .map(|parent| parent.join(".ato/provider/resolution.json"))
+    provider_workspace::provider_resolution_metadata_path(runtime_dir)
 }
 
 fn direct_node_args(
@@ -807,13 +803,7 @@ entrypoint = "main.js"
     #[test]
     fn provider_workspace_detection_accepts_manifest_root() {
         let tmp = tempfile::tempdir().expect("create temp dir");
-        let resolution = tmp.path().join(".ato/provider/resolution.json");
-        std::fs::create_dir_all(
-            resolution
-                .parent()
-                .expect("resolution metadata parent directory"),
-        )
-        .expect("create provider metadata directory");
+        let resolution = tmp.path().join("resolution.json");
         std::fs::write(&resolution, "{}\n").expect("write provider metadata");
 
         assert!(is_provider_backed_node_workspace(tmp.path()));
@@ -827,14 +817,8 @@ entrypoint = "main.js"
     fn provider_workspace_detection_accepts_source_subdir() {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let source = tmp.path().join("source");
-        let resolution = tmp.path().join(".ato/provider/resolution.json");
+        let resolution = tmp.path().join("resolution.json");
         std::fs::create_dir_all(&source).expect("create source directory");
-        std::fs::create_dir_all(
-            resolution
-                .parent()
-                .expect("resolution metadata parent directory"),
-        )
-        .expect("create provider metadata directory");
         std::fs::write(&resolution, "{}\n").expect("write provider metadata");
 
         assert!(is_provider_backed_node_workspace(&source));

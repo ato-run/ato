@@ -60,6 +60,10 @@ fn detect_missing_lockfile(plan: &ManifestData) -> Option<ProvisioningIssue> {
         _ => return None,
     };
 
+    if is_provider_workspace(&working_dir) {
+        return None;
+    }
+
     if candidates.iter().any(|candidate| candidate.exists()) {
         return None;
     }
@@ -73,6 +77,10 @@ fn detect_missing_lockfile(plan: &ManifestData) -> Option<ProvisioningIssue> {
             .map(|candidate| candidate.display().to_string())
             .collect(),
     })
+}
+
+fn is_provider_workspace(working_dir: &std::path::Path) -> bool {
+    working_dir.join("resolution.json").exists()
 }
 
 fn resolve_python_requirements_path(working_dir: &std::path::Path) -> Option<std::path::PathBuf> {

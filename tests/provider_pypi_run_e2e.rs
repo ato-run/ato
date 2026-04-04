@@ -74,11 +74,6 @@ fn maybe_resolve_test_nacelle_path() -> Option<PathBuf> {
 }
 
 #[cfg(unix)]
-fn maybe_resolve_uv_path() -> Option<PathBuf> {
-    which::which("uv").ok()
-}
-
-#[cfg(unix)]
 fn require_native_provider_prerequisites() -> Option<PathBuf> {
     let Some(nacelle) = maybe_resolve_test_nacelle_path() else {
         assert!(
@@ -87,27 +82,12 @@ fn require_native_provider_prerequisites() -> Option<PathBuf> {
         );
         return None;
     };
-    let Some(_uv) = maybe_resolve_uv_path() else {
-        assert!(
-            !strict_ci(),
-            "strict CI requires uv for provider-backed sandbox E2E"
-        );
-        return None;
-    };
     Some(nacelle)
 }
 
 #[cfg(unix)]
 fn require_provider_materialization_prerequisites() -> bool {
-    if maybe_resolve_uv_path().is_some() {
-        return true;
-    }
-
-    assert!(
-        !strict_ci(),
-        "strict CI requires uv for provider-backed materialization E2E"
-    );
-    false
+    true
 }
 
 #[cfg(unix)]

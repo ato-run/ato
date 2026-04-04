@@ -118,6 +118,7 @@ pub fn evaluate_for_mode_with_authority(
         }
         Some(RequiredLock::NodeDependencyLock) => {
             if resolve_node_dependency_lock_path(manifest_dir).is_none()
+                && !has_authoritative_lock
                 && !matches!(mode, RuntimeGuardMode::Preview)
             {
                 return Err(AtoExecutionError::lock_incomplete(
@@ -128,6 +129,7 @@ pub fn evaluate_for_mode_with_authority(
         }
         Some(RequiredLock::UvLock) => {
             if resolve_python_dependency_path(manifest_dir).is_none()
+                && !has_authoritative_lock
                 && !matches!(mode, RuntimeGuardMode::Preview)
             {
                 return Err(AtoExecutionError::lock_incomplete(
