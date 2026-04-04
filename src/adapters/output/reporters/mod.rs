@@ -7,16 +7,24 @@ use crate::application::ports::output::OutputPort;
 
 #[derive(Debug, Clone)]
 pub enum CliReporter {
-    Stdout(StdoutReporter),
+    Text(TextReporter),
     Json(JsonReporter),
 }
 
 impl CliReporter {
     pub fn new(json: bool) -> Self {
+        Self::new_with_stream(json, TextStream::Stdout)
+    }
+
+    pub fn new_run(json: bool) -> Self {
+        Self::new_with_stream(json, TextStream::Stderr)
+    }
+
+    fn new_with_stream(json: bool, stream: TextStream) -> Self {
         if json {
             Self::Json(JsonReporter)
         } else {
-            Self::Stdout(StdoutReporter)
+            Self::Text(TextReporter { stream })
         }
     }
 }
@@ -32,14 +40,14 @@ impl OutputPort for CliReporter {
 impl UsageReporter for CliReporter {
     async fn report_sample(&self, metrics: &UnifiedMetrics) -> anyhow::Result<()> {
         match self {
-            Self::Stdout(reporter) => reporter.report_sample(metrics).await,
+            Self::Text(reporter) => reporter.report_sample(metrics).await,
             Self::Json(reporter) => reporter.report_sample(metrics).await,
         }
     }
 
     async fn report_final(&self, metrics: &UnifiedMetrics) -> anyhow::Result<()> {
         match self {
-            Self::Stdout(reporter) => reporter.report_final(metrics).await,
+            Self::Text(reporter) => reporter.report_final(metrics).await,
             Self::Json(reporter) => reporter.report_final(metrics).await,
         }
     }
@@ -49,63 +57,143 @@ impl UsageReporter for CliReporter {
 impl CapsuleReporter for CliReporter {
     async fn notify(&self, message: String) -> anyhow::Result<()> {
         match self {
-            Self::Stdout(reporter) => reporter.notify(message).await,
+            Self::Text(reporter) => reporter.notify(message).await,
             Self::Json(reporter) => reporter.notify(message).await,
         }
     }
 
     async fn warn(&self, message: String) -> anyhow::Result<()> {
         match self {
-            Self::Stdout(reporter) => reporter.warn(message).await,
+            Self::Text(reporter) => reporter.warn(message).await,
             Self::Json(reporter) => reporter.warn(message).await,
         }
     }
 
     async fn progress_start(&self, label: String, total: Option<u64>) -> anyhow::Result<()> {
         match self {
-            Self::Stdout(reporter) => reporter.progress_start(label, total).await,
+            Self::Text(reporter) => reporter.progress_start(label, total).await,
             Self::Json(reporter) => reporter.progress_start(label, total).await,
         }
     }
 
     async fn progress_inc(&self, amount: u64) -> anyhow::Result<()> {
         match self {
-            Self::Stdout(reporter) => reporter.progress_inc(amount).await,
+            Self::Text(reporter) => reporter.progress_inc(amount).await,
             Self::Json(reporter) => reporter.progress_inc(amount).await,
         }
     }
 
     async fn progress_finish(&self, message: Option<String>) -> anyhow::Result<()> {
         match self {
-            Self::Stdout(reporter) => reporter.progress_finish(message).await,
+            Self::Text(reporter) => reporter.progress_finish(message).await,
             Self::Json(reporter) => reporter.progress_finish(message).await,
         }
     }
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct StdoutReporter;
+#[derive(Debug, Clone, Copy)]
+enum TextStream {
+    Stdout,
+    Stderr,
+}
+
+impl TextStream {
+    fn print_line(self, message: &str) -> anyhow::Result<()> {
+        match self {
+            Self::Stdout => println!("{}", message),
+            Self::Stderr => eprintln!("{}", message),
+        }
+        Ok(())
+    }
+
+    fn write_progress_start(self, label: &str, total: Option<u64>) -> anyhow::Result<()> {
+        match self {
+            Self::Stdout => {
+                if std::io::stdout().is_terminal() {
+                    if let Some(total) = total {
+                        print!("\r{} ({} bytes)", label, total);
+                    } else {
+                        print!("\r{}", label);
+                    }
+                    std::io::stdout().flush()?;
+                } else if let Some(total) = total {
+                    println!("{} ({} bytes)", label, total);
+                } else {
+                    println!("{}", label);
+                }
+            }
+            Self::Stderr => {
+                if std::io::stderr().is_terminal() {
+                    if let Some(total) = total {
+                        eprint!("\r{} ({} bytes)", label, total);
+                    } else {
+                        eprint!("\r{}", label);
+                    }
+                    std::io::stderr().flush()?;
+                } else if let Some(total) = total {
+                    eprintln!("{} ({} bytes)", label, total);
+                } else {
+                    eprintln!("{}", label);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn write_progress_finish(self, message: Option<String>) -> anyhow::Result<()> {
+        match self {
+            Self::Stdout => {
+                if std::io::stdout().is_terminal() {
+                    print!("\r\x1B[2K");
+                    if let Some(message) = message {
+                        println!("{}", message);
+                    } else {
+                        std::io::stdout().flush()?;
+                    }
+                } else if let Some(message) = message {
+                    println!("{}", message);
+                }
+            }
+            Self::Stderr => {
+                if std::io::stderr().is_terminal() {
+                    eprint!("\r\x1B[2K");
+                    if let Some(message) = message {
+                        eprintln!("{}", message);
+                    } else {
+                        std::io::stderr().flush()?;
+                    }
+                } else if let Some(message) = message {
+                    eprintln!("{}", message);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TextReporter {
+    stream: TextStream,
+}
 
 #[async_trait]
-impl UsageReporter for StdoutReporter {
+impl UsageReporter for TextReporter {
     async fn report_sample(&self, _metrics: &UnifiedMetrics) -> anyhow::Result<()> {
         Ok(())
     }
 
     async fn report_final(&self, metrics: &UnifiedMetrics) -> anyhow::Result<()> {
-        println!(
+        self.stream.print_line(&format!(
             "📈 Metrics: session={}, duration_ms={}, peak_memory_bytes={}",
             metrics.session_id, metrics.resources.duration_ms, metrics.resources.peak_memory_bytes
-        );
-        Ok(())
+        ))
     }
 }
 
 #[async_trait]
-impl CapsuleReporter for StdoutReporter {
+impl CapsuleReporter for TextReporter {
     async fn notify(&self, message: String) -> anyhow::Result<()> {
-        println!("{}", message);
-        Ok(())
+        self.stream.print_line(&message)
     }
 
     async fn warn(&self, message: String) -> anyhow::Result<()> {
@@ -114,19 +202,7 @@ impl CapsuleReporter for StdoutReporter {
     }
 
     async fn progress_start(&self, label: String, total: Option<u64>) -> anyhow::Result<()> {
-        if std::io::stdout().is_terminal() {
-            if let Some(total) = total {
-                print!("\r{} ({} bytes)", label, total);
-            } else {
-                print!("\r{}", label);
-            }
-            std::io::stdout().flush()?;
-        } else if let Some(total) = total {
-            println!("{} ({} bytes)", label, total);
-        } else {
-            println!("{}", label);
-        }
-        Ok(())
+        self.stream.write_progress_start(&label, total)
     }
 
     async fn progress_inc(&self, _amount: u64) -> anyhow::Result<()> {
@@ -134,17 +210,7 @@ impl CapsuleReporter for StdoutReporter {
     }
 
     async fn progress_finish(&self, message: Option<String>) -> anyhow::Result<()> {
-        if std::io::stdout().is_terminal() {
-            print!("\r\x1B[2K");
-            if let Some(message) = message {
-                println!("{}", message);
-            } else {
-                std::io::stdout().flush()?;
-            }
-        } else if let Some(message) = message {
-            println!("{}", message);
-        }
-        Ok(())
+        self.stream.write_progress_finish(message)
     }
 }
 
