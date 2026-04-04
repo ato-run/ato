@@ -11,6 +11,7 @@ These are fixtures first, not polished example applications. They exist to prese
 - Exercise import detection, source inference, build bridging, diagnostics, and compatibility behavior without committing generated machine-local state.
 - Preserve unsupported or intentionally unresolved project shapes as explicit fixtures.
 - Provide a predictable place to add future fixtures for web, mobile, wasm, and container flows.
+- Provide a predictable place to add future fixtures for provider-backed run flows such as npm and PyPI.
 
 ## Fixture Model
 
@@ -26,6 +27,7 @@ Source fixtures are the primary checked-in inputs. Expectations are optional and
 Checked-in fixtures may represent minimal but realistic source inputs for:
 
 - native desktop apps such as Tauri, Electron, and Wails
+- provider-backed packages such as npm and PyPI CLI tools
 - web apps and static sites
 - mobile apps
 - wasm projects
@@ -52,12 +54,14 @@ The repository now uses an explicit split between checked-in source inputs and r
 ```text
 samples/
   source/
+    provider-backed/
     native-desktop/
     web/
     mobile/
     wasm/
     containers/
   expectations/
+    provider-backed/
     native-desktop/
     web/
     mobile/
@@ -69,9 +73,31 @@ samples/
 - expectations stores expected lock, diagnostics, preview, or publish snapshots when needed
 - tests must copy source fixtures into a temporary workspace before mutating anything
 
-Current checked-in source fixtures live under source/native-desktop.
+Provider-backed fixtures may also be materialized into temporary package indexes or archives at test runtime. Keep the checked-in source tree as the canonical package contents and metadata.
+
+Current checked-in source fixtures live under source/native-desktop and source/provider-backed.
 
 The other source and expectations families exist so new fixtures can be added without redesigning the tree again.
+
+Example provider-backed layout:
+
+```text
+samples/source/provider-backed/
+  npm/
+    demo-npm-single-bin/
+    demo-npm-multi-bin/
+    demo-npm-no-bin/
+    demo-npm-needs-install-script/
+  pypi/
+    demo-provider/
+    demo-provider-pdf-helper/
+    markitdown/
+    markitdown-pdf-helper/
+```
+
+These fixtures are intended to back ato run <provider>:<package> coverage. Tests may package them into tarballs, wheels, or simple indexes inside a temporary workspace.
+
+When a fixture benefits from preserving a reviewed command contract, it may also include small .sh helpers such as run-ato.sh. Keep these scripts hand-authored, use repo-local .tmp paths for scratch data, and prefer environment variables for registry or index endpoints.
 
 ## Native Desktop Guidance
 
