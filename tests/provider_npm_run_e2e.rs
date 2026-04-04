@@ -7,6 +7,8 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::net::TcpListener;
 #[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::{
@@ -76,17 +78,30 @@ fn require_native_provider_prerequisites() -> Option<PathBuf> {
         );
         return None;
     };
-    if which::which("npm").is_err()
-        || which::which("node").is_err()
-        || which::which("pnpm").is_err()
-    {
-        assert!(
-            !strict_ci(),
-            "strict CI requires npm, pnpm, and node for provider-backed npm sandbox E2E"
-        );
-        return None;
-    }
     Some(nacelle)
+}
+
+#[cfg(unix)]
+fn write_poison_node_shims(root: &Path) {
+    let script = "#!/bin/sh\necho poisoned node shim >&2\nexit 97\n";
+    for name in ["node", "npm", "pnpm"] {
+        let path = root.join(name);
+        fs::write(&path, script).expect("write poison node shim");
+        let mut permissions = fs::metadata(&path).expect("shim metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).expect("shim permissions");
+    }
+}
+
+#[cfg(unix)]
+fn prepend_path(dir: &Path) -> String {
+    let original = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![dir.to_path_buf()];
+    paths.extend(std::env::split_paths(&original));
+    std::env::join_paths(paths)
+        .expect("join PATH entries")
+        .to_string_lossy()
+        .to_string()
 }
 
 #[cfg(unix)]
@@ -419,7 +434,9 @@ fn provider_npm_run_sandbox_preserves_caller_cwd_and_cleans_workspace() {
     let temp = workspace_tempdir("provider-npm-run-");
     let caller_dir = temp.path().join("caller");
     let home = workspace_tempdir("provider-npm-home-");
+    let poisoned_path = workspace_tempdir("provider-npm-path-");
     fs::create_dir_all(&caller_dir).expect("create caller dir");
+    write_poison_node_shims(poisoned_path.path());
     let server = spawn_npm_registry_server(vec![
         demo_npm_single_bin_fixture(),
         demo_npm_multi_bin_fixture(),
@@ -449,6 +466,7 @@ fn provider_npm_run_sandbox_preserves_caller_cwd_and_cleans_workspace() {
         .env("NPM_CONFIG_REGISTRY", &server.base_url)
         .env("npm_config_registry", &server.base_url)
         .env("NPM_CONFIG_CACHE", home.path().join(".npm-cache"))
+        .env("PATH", prepend_path(poisoned_path.path()))
         .output()
         .expect("run provider-backed npm sandbox fixture");
 
@@ -504,81 +522,25 @@ fn provider_npm_run_sandbox_preserves_caller_cwd_and_cleans_workspace() {
 #[test]
 #[serial]
 fn provider_npm_run_via_pnpm_sandbox_preserves_caller_cwd_and_cleans_workspace() {
-    let Some(nacelle) = require_native_provider_prerequisites() else {
-        return;
-    };
-
     let temp = workspace_tempdir("provider-npm-run-pnpm-");
     let caller_dir = temp.path().join("caller");
     let home = workspace_tempdir("provider-pnpm-home-");
     fs::create_dir_all(&caller_dir).expect("create caller dir");
-    let server = spawn_npm_registry_server(vec![demo_npm_single_bin_fixture()]);
-
-    let input_path = caller_dir.join("input.txt");
-    let output_path = caller_dir.join("output.json");
-    fs::write(&input_path, "hello from pnpm provider package\n").expect("write input");
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ato"))
         .current_dir(&caller_dir)
         .arg("run")
-        .arg("--sandbox")
         .arg("--yes")
         .arg("--via")
         .arg("pnpm")
-        .arg("--nacelle")
-        .arg(&nacelle)
-        .arg("--read")
-        .arg("./input.txt")
-        .arg("--write")
-        .arg("./output.json")
         .arg("npm:demo-npm-single-bin")
-        .arg("--")
-        .args(["./input.txt", "-o", "./output.json"])
         .env("HOME", home.path())
-        .env("NPM_CONFIG_REGISTRY", &server.base_url)
-        .env("npm_config_registry", &server.base_url)
-        .env("NPM_CONFIG_CACHE", home.path().join(".npm-cache"))
-        .env("PNPM_HOME", home.path().join(".pnpm-home"))
-        .env("PNPM_STORE_DIR", home.path().join(".pnpm-store"))
         .output()
-        .expect("run provider-backed pnpm sandbox fixture");
+        .expect("run provider-backed npm invalid-via fixture");
 
-    if !assert_success_or_skip(&output) {
-        return;
-    }
-
-    let payload = load_output_json(&output_path, &output);
-    let expected_cwd = caller_dir
-        .canonicalize()
-        .expect("canonicalize expected caller cwd");
-    assert_eq!(
-        payload["cwd"].as_str(),
-        Some(expected_cwd.to_string_lossy().as_ref())
-    );
-    assert_eq!(
-        payload["argv"],
-        serde_json::json!(["./input.txt", "-o", "./output.json"])
-    );
-    assert_eq!(payload["inputExists"].as_bool(), Some(true));
-    assert_eq!(
-        payload["content"].as_str(),
-        Some("hello from pnpm provider package\n")
-    );
-
-    let provider_runs = provider_runs_root(home.path());
-    let remaining = if provider_runs.is_dir() {
-        fs::read_dir(&provider_runs)
-            .expect("read provider runs dir")
-            .next()
-            .is_some()
-    } else {
-        false
-    };
-    assert!(
-        !remaining,
-        "provider-backed synthetic workspaces should be cleaned up under {}",
-        provider_runs.display()
-    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not valid for npm:"), "stderr={stderr}");
 }
 
 #[cfg(unix)]
@@ -619,8 +581,6 @@ fn provider_npm_run_via_pnpm_multi_bin_fails_closed() {
     let caller_dir = temp.path().join("caller");
     let home = workspace_tempdir("provider-pnpm-multi-home-");
     fs::create_dir_all(&caller_dir).expect("create caller dir");
-    let server = spawn_npm_registry_server(vec![demo_npm_multi_bin_fixture()]);
-
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ato"))
         .current_dir(&caller_dir)
         .arg("run")
@@ -629,20 +589,12 @@ fn provider_npm_run_via_pnpm_multi_bin_fails_closed() {
         .arg("pnpm")
         .arg("npm:demo-npm-multi-bin")
         .env("HOME", home.path())
-        .env("NPM_CONFIG_REGISTRY", &server.base_url)
-        .env("npm_config_registry", &server.base_url)
-        .env("NPM_CONFIG_CACHE", home.path().join(".npm-cache"))
-        .env("PNPM_HOME", home.path().join(".pnpm-home"))
-        .env("PNPM_STORE_DIR", home.path().join(".pnpm-store"))
         .output()
         .expect("run provider-backed pnpm multi-bin fixture");
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("multiple bin entrypoints"),
-        "stderr={stderr}"
-    );
+    assert!(stderr.contains("not valid for npm:"), "stderr={stderr}");
 }
 
 #[cfg(unix)]
@@ -684,12 +636,13 @@ fn provider_npm_keep_failed_artifacts_preserves_materialized_workspace() {
     assert_eq!(retained.len(), 1, "retained={retained:?}");
 
     let workspace = &retained[0];
-    assert!(workspace.join(".ato/provider/package.json").exists());
-    assert!(workspace.join(".ato/provider/package-lock.json").exists());
+    assert!(!workspace.join("package.json").exists());
+    assert!(!workspace.join("package-lock.json").exists());
     assert!(
-        !workspace.join(".ato/provider/resolution.json").exists(),
+        !workspace.join("resolution.json").exists(),
         "multi-bin failure should stop before final resolution metadata is written"
     );
+    assert!(!workspace.join("ato.lock.json").exists());
 
     fs::remove_dir_all(workspace).expect("cleanup retained provider workspace");
 }
@@ -697,11 +650,13 @@ fn provider_npm_keep_failed_artifacts_preserves_materialized_workspace() {
 #[cfg(unix)]
 #[test]
 #[serial]
-fn provider_pnpm_keep_failed_artifacts_preserves_resolution_metadata() {
+fn provider_npm_keep_failed_artifacts_preserves_resolution_metadata() {
     let temp = workspace_tempdir("provider-pnpm-keep-failed-");
     let caller_dir = temp.path().join("caller");
     let home = workspace_tempdir("provider-pnpm-keep-home-");
+    let poisoned_path = workspace_tempdir("provider-pnpm-keep-path-");
     fs::create_dir_all(&caller_dir).expect("create caller dir");
+    write_poison_node_shims(poisoned_path.path());
     let server = spawn_npm_registry_server(vec![demo_npm_single_bin_fixture()]);
 
     let input_path = caller_dir.join("input.txt");
@@ -711,8 +666,6 @@ fn provider_pnpm_keep_failed_artifacts_preserves_resolution_metadata() {
         .current_dir(&caller_dir)
         .arg("run")
         .arg("--yes")
-        .arg("--via")
-        .arg("pnpm")
         .arg("--keep-failed-artifacts")
         .arg("npm:demo-npm-single-bin")
         .arg("--")
@@ -721,10 +674,9 @@ fn provider_pnpm_keep_failed_artifacts_preserves_resolution_metadata() {
         .env("NPM_CONFIG_REGISTRY", &server.base_url)
         .env("npm_config_registry", &server.base_url)
         .env("NPM_CONFIG_CACHE", home.path().join(".npm-cache"))
-        .env("PNPM_HOME", home.path().join(".pnpm-home"))
-        .env("PNPM_STORE_DIR", home.path().join(".pnpm-store"))
+        .env("PATH", prepend_path(poisoned_path.path()))
         .output()
-        .expect("run provider-backed pnpm keep-failed fixture");
+        .expect("run provider-backed npm keep-failed fixture");
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -741,7 +693,7 @@ fn provider_pnpm_keep_failed_artifacts_preserves_resolution_metadata() {
         .collect::<Vec<_>>();
     assert_eq!(retained.len(), 1, "retained={retained:?}");
 
-    let metadata_path = retained[0].join(".ato/provider/resolution.json");
+    let metadata_path = retained[0].join("resolution.json");
     assert!(
         metadata_path.exists(),
         "metadata should exist at {}",
@@ -753,13 +705,15 @@ fn provider_pnpm_keep_failed_artifacts_preserves_resolution_metadata() {
             .expect("parse resolution metadata");
     assert_eq!(
         metadata["requested_provider_toolchain"].as_str(),
-        Some("pnpm")
+        Some("auto")
     );
     assert_eq!(
         metadata["effective_provider_toolchain"].as_str(),
-        Some("pnpm")
+        Some("npm")
     );
     assert_eq!(metadata["provider"].as_str(), Some("npm"));
+    assert!(retained[0].join("package.json").exists());
+    assert!(retained[0].join("ato.lock.json").exists());
 
     fs::remove_dir_all(&retained[0]).expect("cleanup retained provider workspace");
 }
@@ -822,10 +776,7 @@ fn provider_npm_run_via_pnpm_no_bin_fails_closed() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("does not expose a CLI bin entrypoint"),
-        "stderr={stderr}"
-    );
+    assert!(stderr.contains("not valid for npm:"), "stderr={stderr}");
 }
 
 #[cfg(unix)]

@@ -485,6 +485,44 @@ ollama_model = "qwen2:7b"
 }
 
 #[cfg(unix)]
+fn fixture_generic_required_external_manifest(service_base_url: &str) -> String {
+    format!(
+        r#"schema_version = "0.2"
+name = "generic-service-client"
+version = "0.1.0"
+type = "job"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11.10"
+entrypoint = "main.py"
+source_layout = "anchored_entrypoint"
+
+[services.catalog]
+from = "dependency:catalog"
+mode = "required-external"
+
+[services.catalog.healthcheck]
+kind = "http"
+url = "{service_base_url}/health"
+"#
+    )
+}
+
+#[cfg(unix)]
+fn fixture_noop_source() -> &'static str {
+    r#"def main() -> int:
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"#
+}
+
+#[cfg(unix)]
 fn load_json(path: &Path) -> Value {
     let raw = fs::read(path).expect("read json file");
     serde_json::from_slice(&raw).expect("parse json")
@@ -689,12 +727,19 @@ fn github_source_python_run_errors_when_ollama_is_unreachable() {
 
     assert!(!output.status.success(), "missing Ollama should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Service is unavailable"), "stderr={stderr}");
+    assert!(stderr.contains("service: ollama"), "stderr={stderr}");
+    assert!(stderr.contains("mode: reuse-if-present"), "stderr={stderr}");
     assert!(
-        stderr.contains("Ollama is not reachable at http://127.0.0.1:9/api/tags"),
+        stderr.contains("healthcheck: http://127.0.0.1:9/api/tags"),
         "stderr={stderr}"
     );
     assert!(
-        stderr.contains("Start or install Ollama, then retry"),
+        stderr.contains("no reusable instance is currently reachable"),
+        "stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("Start the service and retry"),
         "stderr={stderr}"
     );
 }
@@ -746,11 +791,72 @@ fn github_source_python_run_errors_when_required_ollama_model_is_missing() {
     assert!(!output.status.success(), "missing Ollama model should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Required Ollama model \"qwen2:7b\" is missing"),
+        stderr.contains("Required service asset is missing"),
+        "stderr={stderr}"
+    );
+    assert!(stderr.contains("service: ollama"), "stderr={stderr}");
+    assert!(
+        stderr.contains("asset: ollama-model=qwen2:7b"),
         "stderr={stderr}"
     );
     assert!(
         stderr.contains("Run: ollama pull qwen2:7b"),
+        "stderr={stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn github_source_python_run_errors_when_required_external_service_is_unreachable() {
+    let temp = workspace_tempdir("github-required-external-missing-service-");
+    let caller_dir = temp.path().join("caller");
+    fs::create_dir_all(&caller_dir).expect("create caller dir");
+
+    let archive = build_github_tarball(
+        "wolfreka-generic-service-client-abcdef",
+        &[
+            (
+                "capsule.toml",
+                &fixture_generic_required_external_manifest("http://127.0.0.1:9"),
+            ),
+            ("main.py", fixture_noop_source()),
+        ],
+    );
+    let github_server =
+        spawn_github_archive_server("/repos/wolfreka/generic-service-client/tarball", archive);
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ato"))
+        .current_dir(&caller_dir)
+        .arg("run")
+        .arg("--yes")
+        .arg("github.com/wolfreka/generic-service-client")
+        .env("ATO_TOKEN", "test-token")
+        .env("ATO_GITHUB_API_BASE_URL", github_server.base_url.as_str())
+        .output()
+        .expect("run GitHub source missing required-external service fixture");
+
+    assert!(
+        !output.status.success(),
+        "missing required-external service should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Service is unavailable"), "stderr={stderr}");
+    assert!(stderr.contains("service: catalog"), "stderr={stderr}");
+    assert!(
+        stderr.contains("mode: required-external"),
+        "stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("healthcheck: http://127.0.0.1:9/health"),
+        "stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("this service is managed outside Ato"),
+        "stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("Start it externally and retry"),
         "stderr={stderr}"
     );
 }
