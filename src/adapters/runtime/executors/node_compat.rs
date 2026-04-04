@@ -40,8 +40,6 @@ pub fn execute(
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
 ) -> Result<i32> {
-    let deno_bin = runtime_manager::ensure_deno_binary_with_authority(plan, authoritative_lock)?;
-
     verify_execution_plan_hashes(execution_plan)?;
 
     let launch_spec = derive_launch_spec(plan)?;
@@ -52,6 +50,31 @@ pub fn execute(
         )
         .into());
     };
+
+    if let Some(PreparedCommand {
+        mut cmd,
+        #[cfg(unix)]
+        _secret_fd_guard,
+    }) = maybe_build_direct_node_command(
+        plan,
+        authoritative_lock,
+        execution_plan,
+        &launch_spec.working_dir,
+        &launch_spec.command,
+        &launch_spec.args,
+        launch_ctx,
+    )? {
+        let status = cmd
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("Failed to execute direct node runtime for node compat")?;
+
+        return Ok(status.code().unwrap_or(1));
+    }
+
+    let deno_bin = runtime_manager::ensure_deno_binary_with_authority(plan, authoritative_lock)?;
 
     let use_compat_flag = deno_supports_compat_flag(&deno_bin)?;
 
@@ -94,8 +117,6 @@ pub fn spawn(
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
 ) -> Result<Child> {
-    let deno_bin = runtime_manager::ensure_deno_binary_with_authority(plan, authoritative_lock)?;
-
     verify_execution_plan_hashes(execution_plan)?;
 
     let launch_spec = derive_launch_spec(plan)?;
@@ -106,6 +127,29 @@ pub fn spawn(
         )
         .into());
     };
+
+    if let Some(PreparedCommand {
+        mut cmd,
+        #[cfg(unix)]
+        _secret_fd_guard,
+    }) = maybe_build_direct_node_command(
+        plan,
+        authoritative_lock,
+        execution_plan,
+        &launch_spec.working_dir,
+        &launch_spec.command,
+        &launch_spec.args,
+        launch_ctx,
+    )? {
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        return cmd
+            .spawn()
+            .context("Failed to spawn direct node runtime for orchestration");
+    }
+
+    let deno_bin = runtime_manager::ensure_deno_binary_with_authority(plan, authoritative_lock)?;
 
     let use_compat_flag = deno_supports_compat_flag(&deno_bin)?;
 
@@ -175,6 +219,44 @@ fn run_provisioning(
     }
 }
 
+fn maybe_build_direct_node_command(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
+    runtime_dir: &Path,
+    entrypoint: &str,
+    explicit_script_args: &[String],
+    launch_ctx: &RuntimeLaunchContext,
+) -> Result<Option<PreparedCommand>> {
+    if let Some(package_bin) = entrypoint.strip_prefix("npm:") {
+        return build_host_node_package_command(
+            plan,
+            authoritative_lock,
+            execution_plan,
+            runtime_dir,
+            package_bin,
+            explicit_script_args,
+            launch_ctx,
+        )
+        .map(Some);
+    }
+
+    if is_provider_backed_node_workspace(runtime_dir) {
+        return build_host_node_entrypoint_command(
+            plan,
+            authoritative_lock,
+            execution_plan,
+            runtime_dir,
+            entrypoint,
+            explicit_script_args,
+            launch_ctx,
+        )
+        .map(Some);
+    }
+
+    Ok(None)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_runtime_command(
     deno_bin: &Path,
@@ -192,6 +274,7 @@ fn build_runtime_command(
         return build_host_node_package_command(
             plan,
             authoritative_lock,
+            execution_plan,
             runtime_dir,
             package_bin,
             explicit_script_args,
@@ -281,11 +364,7 @@ fn build_runtime_command(
     }
 
     cmd.arg(entrypoint);
-    let args = if explicit_script_args.is_empty() {
-        plan.targets_oci_cmd()
-    } else {
-        explicit_script_args.to_vec()
-    };
+    let args = direct_node_args(plan, execution_plan, explicit_script_args, launch_ctx);
     if !args.is_empty() {
         cmd.args(args);
     }
@@ -300,6 +379,7 @@ fn build_runtime_command(
 fn build_host_node_package_command(
     plan: &ManifestData,
     authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     package_bin: &str,
     explicit_script_args: &[String],
@@ -307,9 +387,12 @@ fn build_host_node_package_command(
 ) -> Result<PreparedCommand> {
     let node_bin = runtime_manager::ensure_node_binary_with_authority(plan, authoritative_lock)?;
     let bin_path = resolve_node_package_bin(runtime_dir, package_bin)?;
+    let command_cwd = launch_ctx
+        .effective_cwd()
+        .map_or(runtime_dir, |value| value);
 
     let mut cmd = Command::new(node_bin);
-    cmd.current_dir(runtime_dir).arg(&bin_path);
+    cmd.current_dir(command_cwd).arg(&bin_path);
 
     for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
         cmd.env(key, value);
@@ -323,11 +406,7 @@ fn build_host_node_package_command(
         proxy::apply_proxy_env(&mut cmd, &proxy_env);
     }
 
-    let args = if explicit_script_args.is_empty() {
-        plan.targets_oci_cmd()
-    } else {
-        explicit_script_args.to_vec()
-    };
+    let args = direct_node_args(plan, execution_plan, explicit_script_args, launch_ctx);
     if !args.is_empty() {
         cmd.args(args);
     }
@@ -337,6 +416,88 @@ fn build_host_node_package_command(
         #[cfg(unix)]
         _secret_fd_guard: None,
     })
+}
+
+fn build_host_node_entrypoint_command(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
+    runtime_dir: &Path,
+    entrypoint: &str,
+    explicit_script_args: &[String],
+    launch_ctx: &RuntimeLaunchContext,
+) -> Result<PreparedCommand> {
+    let node_bin = runtime_manager::ensure_node_binary_with_authority(plan, authoritative_lock)?;
+    let command_cwd = launch_ctx
+        .effective_cwd()
+        .map_or(runtime_dir, |value| value);
+    let entrypoint_path = if Path::new(entrypoint).is_absolute() {
+        Path::new(entrypoint).to_path_buf()
+    } else {
+        runtime_dir.join(entrypoint)
+    };
+
+    let mut cmd = Command::new(node_bin);
+    cmd.current_dir(command_cwd).arg(entrypoint_path);
+
+    for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
+        cmd.env(key, value);
+    }
+    if let Some(port) = runtime_overrides::override_port(plan.execution_port()) {
+        cmd.env("PORT", port.to_string());
+    }
+
+    launch_ctx.apply_allowlisted_env(&mut cmd)?;
+    if let Some(proxy_env) = proxy::proxy_env_from_env(&[])? {
+        proxy::apply_proxy_env(&mut cmd, &proxy_env);
+    }
+
+    let args = direct_node_args(plan, execution_plan, explicit_script_args, launch_ctx);
+    if !args.is_empty() {
+        cmd.args(args);
+    }
+
+    Ok(PreparedCommand {
+        cmd,
+        #[cfg(unix)]
+        _secret_fd_guard: None,
+    })
+}
+
+fn is_provider_backed_node_workspace(runtime_dir: &Path) -> bool {
+    provider_resolution_metadata_path(runtime_dir)
+        .map(|path| path.exists())
+        .unwrap_or(false)
+}
+
+fn provider_resolution_metadata_path(runtime_dir: &Path) -> Option<std::path::PathBuf> {
+    let direct = runtime_dir.join(".ato/provider/resolution.json");
+    if direct.exists() {
+        return Some(direct);
+    }
+
+    runtime_dir
+        .parent()
+        .map(|parent| parent.join(".ato/provider/resolution.json"))
+}
+
+fn direct_node_args(
+    plan: &ManifestData,
+    execution_plan: &ExecutionPlan,
+    explicit_script_args: &[String],
+    launch_ctx: &RuntimeLaunchContext,
+) -> Vec<String> {
+    if !execution_plan.runtime.policy.args.is_empty() {
+        execution_plan.runtime.policy.args.clone()
+    } else if explicit_script_args.is_empty() {
+        let mut args = plan.targets_oci_cmd();
+        args.extend(launch_ctx.command_args().iter().cloned());
+        args
+    } else {
+        let mut args = explicit_script_args.to_vec();
+        args.extend(launch_ctx.command_args().iter().cloned());
+        args
+    }
 }
 
 fn resolve_node_package_bin(runtime_dir: &Path, package_bin: &str) -> Result<std::path::PathBuf> {
@@ -579,7 +740,10 @@ fn verify_execution_plan_hashes(execution_plan: &ExecutionPlan) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_deno_permission_error, map_node_compat_error};
+    use super::{
+        is_provider_backed_node_workspace, map_deno_permission_error, map_node_compat_error,
+        provider_resolution_metadata_path,
+    };
 
     use capsule_core::launch_spec::{derive_launch_spec, LaunchSpecSource};
     use capsule_core::router::{
@@ -637,6 +801,46 @@ entrypoint = "main.js"
         assert_eq!(
             spec.required_lockfile,
             Some(tmp.path().join("source").join("pnpm-lock.yaml"))
+        );
+    }
+
+    #[test]
+    fn provider_workspace_detection_accepts_manifest_root() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let resolution = tmp.path().join(".ato/provider/resolution.json");
+        std::fs::create_dir_all(
+            resolution
+                .parent()
+                .expect("resolution metadata parent directory"),
+        )
+        .expect("create provider metadata directory");
+        std::fs::write(&resolution, "{}\n").expect("write provider metadata");
+
+        assert!(is_provider_backed_node_workspace(tmp.path()));
+        assert_eq!(
+            provider_resolution_metadata_path(tmp.path()),
+            Some(resolution.clone())
+        );
+    }
+
+    #[test]
+    fn provider_workspace_detection_accepts_source_subdir() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let source = tmp.path().join("source");
+        let resolution = tmp.path().join(".ato/provider/resolution.json");
+        std::fs::create_dir_all(&source).expect("create source directory");
+        std::fs::create_dir_all(
+            resolution
+                .parent()
+                .expect("resolution metadata parent directory"),
+        )
+        .expect("create provider metadata directory");
+        std::fs::write(&resolution, "{}\n").expect("write provider metadata");
+
+        assert!(is_provider_backed_node_workspace(&source));
+        assert_eq!(
+            provider_resolution_metadata_path(&source),
+            Some(resolution.clone())
         );
     }
 

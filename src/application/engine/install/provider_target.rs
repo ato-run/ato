@@ -1113,9 +1113,10 @@ fn capsule_manifest_for_provider_run(
     runtime_version: &str,
     entrypoint: &str,
 ) -> String {
+    let manifest_name = normalize_provider_manifest_name(package_name);
     format!(
         r#"schema_version = "0.2"
-name = "{package_name}"
+name = "{manifest_name}"
 version = "{version}"
 type = "job"
 default_target = "cli"
@@ -1128,6 +1129,19 @@ entrypoint = "{entrypoint}"
 source_layout = "anchored_entrypoint"
 "#
     )
+}
+
+fn normalize_provider_manifest_name(package_name: &str) -> String {
+    package_name
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 fn parse_pypi_requirement_ref(raw_ref: &str) -> Result<ParsedPyPIRequirement> {
@@ -1411,9 +1425,9 @@ fn pypi_normalize_regex() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_run_target, materialize_provider_run_workspace, npm_install_command_args,
-        parse_npm_package_ref, parse_provider_target_ref, parse_pypi_requirement_ref,
-        pnpm_install_command_args, resolve_console_script_metadata,
+        capsule_manifest_for_provider_run, classify_run_target, materialize_provider_run_workspace,
+        npm_install_command_args, parse_npm_package_ref, parse_provider_target_ref,
+        parse_pypi_requirement_ref, pnpm_install_command_args, resolve_console_script_metadata,
         resolve_effective_provider_toolchain, resolve_npm_bin_metadata, ParsedRunTarget,
         ProviderKind, ProviderTargetRef, PROVIDER_RESOLUTION_METADATA_FILE,
     };
@@ -1846,6 +1860,18 @@ Tag: py3-none-any\n";
     fn parse_npm_package_ref_accepts_unscoped_package() {
         let target = parse_npm_package_ref("tsx").expect("parse npm package");
         assert_eq!(target.package_name, "tsx");
+    }
+
+    #[test]
+    fn capsule_manifest_for_provider_run_normalizes_scoped_package_name() {
+        let manifest = capsule_manifest_for_provider_run(
+            "@biomejs/biome",
+            "1.0.0",
+            "node",
+            "20.11.0",
+            "main.mjs",
+        );
+        assert!(manifest.contains("name = \"biomejs-biome\""));
     }
 
     #[test]
