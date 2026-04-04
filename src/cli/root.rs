@@ -145,6 +145,10 @@ pub(crate) enum Commands {
         #[arg(short = 'y', long = "yes", default_value_t = false)]
         yes: bool,
 
+        /// Show phase and execution context details on stderr
+        #[arg(short = 'v', long = "verbose", default_value_t = false)]
+        verbose: bool,
+
         /// Agentic setup recovery mode for local path runs
         #[arg(long, value_enum, default_value_t = RunAgentMode::Auto)]
         agent: RunAgentMode,
