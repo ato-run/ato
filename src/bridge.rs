@@ -15,6 +15,7 @@ use crate::state::{ActivityEntry, ActivityTone};
 
 #[derive(Clone, Debug)]
 pub struct GuestSessionContext {
+    pub pane_id: usize,
     pub session_id: String,
     pub adapter: String,
     pub invoke_url: String,
@@ -63,11 +64,14 @@ pub enum ShellEvent {
     SessionReady { pane_id: usize },
     PermissionDenied { pane_id: usize, capability: String },
     SessionClosed { pane_id: usize },
+    UrlChanged { pane_id: usize, url: String },
+    TitleChanged { pane_id: usize, title: String },
 }
 
 #[derive(Clone, Default)]
 pub struct BridgeProxy {
     activity: Arc<Mutex<Vec<ActivityEntry>>>,
+    shell_events: Arc<Mutex<Vec<ShellEvent>>>,
 }
 
 impl BridgeProxy {
@@ -208,6 +212,21 @@ impl BridgeProxy {
         std::mem::take(&mut *activity)
     }
 
+    pub fn push_shell_event(&self, event: ShellEvent) {
+        self.shell_events
+            .lock()
+            .expect("bridge shell event lock poisoned")
+            .push(event);
+    }
+
+    pub fn drain_shell_events(&self) -> Vec<ShellEvent> {
+        let mut shell_events = self
+            .shell_events
+            .lock()
+            .expect("bridge shell event lock poisoned");
+        std::mem::take(&mut *shell_events)
+    }
+
     fn dispatch_invoke(
         &self,
         command: &str,
@@ -223,6 +242,12 @@ impl BridgeProxy {
                     .unwrap_or("Ato Desktop")
                     .to_string();
                 self.log(ActivityTone::Info, format!("Host title request: {title}"));
+                if let Some(session) = session {
+                    self.push_shell_event(ShellEvent::TitleChanged {
+                        pane_id: session.pane_id,
+                        title: title.clone(),
+                    });
+                }
                 Ok(serde_json::json!({ "title": title }))
             }
             "plugin:fs|readFile" => read_session_file(session, &payload),

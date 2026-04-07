@@ -1,8 +1,11 @@
+use std::collections::VecDeque;
 use std::fmt;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use url::Url;
+use url::{form_urlencoded, Url};
+
+use crate::bridge::ShellEvent;
 
 pub type WorkspaceId = usize;
 pub type TaskSetId = usize;
@@ -123,6 +126,7 @@ pub enum PaneRole {
 pub enum PaneSurface {
     Web(WebPane),
     Native { body: String },
+    Launcher,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -166,6 +170,34 @@ pub struct Workspace {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SidebarTaskIconSpec {
+    Monogram(String),
+    ExternalUrl { origin: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarTaskItem {
+    pub id: TaskSetId,
+    pub title: String,
+    pub is_active: bool,
+    pub icon: SidebarTaskIconSpec,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OmnibarSuggestionAction {
+    Navigate { url: String },
+    SelectTask { task_id: TaskSetId },
+    ShowSettings,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OmnibarSuggestion {
+    pub title: String,
+    pub detail: String,
+    pub action: OmnibarSuggestionAction,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActivityTone {
     Info,
     Warning,
@@ -176,6 +208,19 @@ pub enum ActivityTone {
 pub struct ActivityEntry {
     pub tone: ActivityTone,
     pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BrowserCommandKind {
+    Back,
+    Forward,
+    Reload,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowserCommand {
+    pub pane_id: PaneId,
+    pub kind: BrowserCommandKind,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -199,6 +244,10 @@ pub struct AppState {
     pub workspaces: Vec<Workspace>,
     pub command_bar_text: String,
     pub activity: Vec<ActivityEntry>,
+    pub browser_commands: VecDeque<BrowserCommand>,
+    next_task_id: TaskSetId,
+    next_pane_id: PaneId,
+    next_new_tab_index: usize,
 }
 
 impl AppState {
@@ -221,19 +270,37 @@ impl AppState {
             session: "welcome".to_string(),
             entry_path: "/index.html".to_string(),
         };
-        let store =
-            GuestRoute::ExternalUrl(Url::parse("https://store.ato.run").expect("valid url"));
+        let store = GuestRoute::ExternalUrl(Url::parse("https://ato.run").expect("valid url"));
         let wry = GuestRoute::ExternalUrl(
             Url::parse("https://github.com/tauri-apps/wry").expect("valid url"),
         );
 
-        let welcome_task = TaskSet {
+        let launcher_task = TaskSet {
             id: 1,
-            title: "Guest surfaces".to_string(),
+            title: "New Tab".to_string(),
             focused_pane: 1,
             pane_tree: PaneTree::Leaf(1),
             panes: vec![Pane {
                 id: 1,
+                title: "New Tab".to_string(),
+                role: PaneRole::Primary,
+                visible: true,
+                bounds: PaneBounds::empty(),
+                surface: PaneSurface::Launcher,
+            }],
+            split_ratio: 0.5,
+            route_candidates: vec![],
+            route_index: 0,
+            preview: "Launchpad".to_string(),
+        };
+
+        let welcome_task = TaskSet {
+            id: 2,
+            title: "Guest surfaces".to_string(),
+            focused_pane: 2,
+            pane_tree: PaneTree::Leaf(2),
+            panes: vec![Pane {
+                id: 2,
                 title: local_tauri.to_string(),
                 role: PaneRole::Primary,
                 visible: true,
@@ -260,12 +327,12 @@ impl AppState {
         };
 
         let store_task = TaskSet {
-            id: 2,
-            title: "Ato store".to_string(),
-            focused_pane: 2,
-            pane_tree: PaneTree::Leaf(2),
+            id: 3,
+            title: "Ato".to_string(),
+            focused_pane: 3,
+            pane_tree: PaneTree::Leaf(3),
             panes: vec![Pane {
-                id: 2,
+                id: 3,
                 title: store.to_string(),
                 role: PaneRole::Primary,
                 visible: true,
@@ -281,7 +348,7 @@ impl AppState {
             split_ratio: 0.68,
             route_candidates: vec![store, wry],
             route_index: 0,
-            preview: "remote URL in the shell".to_string(),
+            preview: "ato.run landing page".to_string(),
         };
 
         Self {
@@ -290,19 +357,67 @@ impl AppState {
             workspaces: vec![Workspace {
                 id: 1,
                 title: "Rust host".to_string(),
-                active_task: 1,
-                tasks: vec![welcome_task, store_task],
+                active_task: 3,
+                tasks: vec![launcher_task, welcome_task, store_task],
             }],
-            command_bar_text: "capsule://local/desky-real-tauri".to_string(),
+            command_bar_text: "https://ato.run/".to_string(),
             activity: vec![ActivityEntry {
                 tone: ActivityTone::Info,
                 message: "Phase 3 shell bootstrapped with ato-cli guest orchestration".to_string(),
             }],
+            browser_commands: VecDeque::new(),
+            next_task_id: 4,
+            next_pane_id: 4,
+            next_new_tab_index: 2,
         }
     }
 
     pub fn focus_command_bar(&mut self) {
         self.shell_mode = ShellMode::CommandBar;
+    }
+
+    pub fn omnibar_suggestions(&self, input: &str) -> Vec<OmnibarSuggestion> {
+        let trimmed = input.trim();
+        let query = trimmed.to_lowercase();
+        let mut suggestions = Vec::new();
+
+        if !trimmed.is_empty() {
+            suggestions.push(OmnibarSuggestion {
+                title: Self::normalize_input(trimmed),
+                detail: "Open URL or search".to_string(),
+                action: OmnibarSuggestionAction::Navigate {
+                    url: trimmed.to_string(),
+                },
+            });
+        }
+
+        if query.is_empty() || "settings".contains(&query) || "preferences".contains(&query) {
+            suggestions.push(OmnibarSuggestion {
+                title: "Settings".to_string(),
+                detail: "Open desktop settings".to_string(),
+                action: OmnibarSuggestionAction::ShowSettings,
+            });
+        }
+
+        if let Some(workspace) = self.active_workspace() {
+            for task in &workspace.tasks {
+                let detail = task_route_label(task);
+                let title_matches = query.is_empty() || task.title.to_lowercase().contains(&query);
+                let detail_matches = query.is_empty() || detail.to_lowercase().contains(&query);
+                if !(title_matches || detail_matches) {
+                    continue;
+                }
+
+                suggestions.push(OmnibarSuggestion {
+                    title: task.title.clone(),
+                    detail,
+                    action: OmnibarSuggestionAction::SelectTask { task_id: task.id },
+                });
+            }
+        }
+
+        suggestions.truncate(6);
+        suggestions
     }
 
     pub fn toggle_overview(&mut self) {
@@ -316,6 +431,48 @@ impl AppState {
         match self.shell_mode {
             ShellMode::CommandBar | ShellMode::Overview => self.shell_mode = ShellMode::Focus,
             ShellMode::Focus => {}
+        }
+    }
+
+    pub fn create_new_tab(&mut self) {
+        let next_task_id = self.next_task_id;
+        let next_pane_id = self.next_pane_id;
+        let title = if self.next_new_tab_index == 1 {
+            "New Tab".to_string()
+        } else {
+            format!("New Tab {}", self.next_new_tab_index)
+        };
+
+        let mut created = false;
+        if let Some(workspace) = self.active_workspace_mut() {
+            workspace.tasks.push(TaskSet {
+                id: next_task_id,
+                title: title.clone(),
+                focused_pane: next_pane_id,
+                pane_tree: PaneTree::Leaf(next_pane_id),
+                panes: vec![Pane {
+                    id: next_pane_id,
+                    title: title.clone(),
+                    role: PaneRole::Primary,
+                    visible: true,
+                    bounds: PaneBounds::empty(),
+                    surface: PaneSurface::Launcher,
+                }],
+                split_ratio: 0.5,
+                route_candidates: vec![],
+                route_index: 0,
+                preview: "Launchpad".to_string(),
+            });
+            workspace.active_task = next_task_id;
+            created = true;
+        }
+
+        if created {
+            self.next_task_id += 1;
+            self.next_pane_id += 1;
+            self.next_new_tab_index += 1;
+            self.command_bar_text.clear();
+            self.push_activity(ActivityTone::Info, format!("Opened {title}"));
         }
     }
 
@@ -333,6 +490,196 @@ impl AppState {
 
     pub fn previous_task(&mut self) {
         self.advance_task(-1);
+    }
+
+    pub fn select_task(&mut self, task_id: TaskSetId) {
+        let mut selected_title = None;
+        if let Some(workspace) = self.active_workspace_mut() {
+            if let Some(task) = workspace.tasks.iter().find(|task| task.id == task_id) {
+                workspace.active_task = task.id;
+                selected_title = Some(task.title.clone());
+            }
+        }
+
+        if let Some(title) = selected_title {
+            self.sync_command_bar_with_active_route();
+            self.push_activity(ActivityTone::Info, format!("Switched task to {title}"));
+        }
+    }
+
+    pub fn navigate_to_url(&mut self, input: &str) {
+        let normalized = Self::normalize_input(input);
+        let Ok(url) = Url::parse(&normalized) else {
+            self.push_activity(
+                ActivityTone::Error,
+                format!("Unable to navigate to invalid URL: {input}"),
+            );
+            return;
+        };
+
+        let next_route = GuestRoute::ExternalUrl(url);
+        let label = next_route.to_string();
+        let partition_id = sanitize(&label);
+        let mut navigated = false;
+
+        if let Some(task) = self.active_task_mut() {
+            if let Some(pane) = task.focused_pane_mut() {
+                pane.title = label.clone();
+                pane.surface = PaneSurface::Web(WebPane {
+                    route: next_route.clone(),
+                    partition_id,
+                    session: WebSessionState::Launching,
+                    capabilities: vec![CapabilityGrant::OpenExternal],
+                    profile: "electron".to_string(),
+                });
+                navigated = true;
+            }
+        }
+
+        if !navigated {
+            self.push_activity(
+                ActivityTone::Error,
+                "No focused pane available for navigation",
+            );
+            return;
+        }
+
+        self.command_bar_text = label.clone();
+        self.shell_mode = ShellMode::Focus;
+        self.push_activity(ActivityTone::Info, format!("Navigating to {label}"));
+    }
+
+    pub fn show_settings_panel(&mut self) {
+        let next_task_id = self.next_task_id;
+        let next_pane_id = self.next_pane_id;
+        let settings_index = self
+            .active_workspace()
+            .map(|workspace| {
+                workspace
+                    .tasks
+                    .iter()
+                    .filter(|task| task.title.starts_with("Settings"))
+                    .count()
+                    + 1
+            })
+            .unwrap_or(1);
+        let title = if settings_index == 1 {
+            "Settings".to_string()
+        } else {
+            format!("Settings {settings_index}")
+        };
+
+        let mut created = false;
+        if let Some(workspace) = self.active_workspace_mut() {
+            workspace.tasks.push(TaskSet {
+                id: next_task_id,
+                title: title.clone(),
+                focused_pane: next_pane_id,
+                pane_tree: PaneTree::Leaf(next_pane_id),
+                panes: vec![Pane {
+                    id: next_pane_id,
+                    title: title.clone(),
+                    role: PaneRole::Primary,
+                    visible: true,
+                    bounds: PaneBounds::empty(),
+                    surface: PaneSurface::Native {
+                        body: "Desktop settings and diagnostics will appear here.".to_string(),
+                    },
+                }],
+                split_ratio: 0.5,
+                route_candidates: vec![],
+                route_index: 0,
+                preview: "Desktop settings".to_string(),
+            });
+            workspace.active_task = next_task_id;
+            created = true;
+        }
+
+        if !created {
+            self.push_activity(
+                ActivityTone::Error,
+                "No focused pane available for settings",
+            );
+            return;
+        }
+
+        self.next_task_id += 1;
+        self.next_pane_id += 1;
+        self.sync_command_bar_with_active_route();
+        self.shell_mode = ShellMode::Focus;
+        self.push_activity(ActivityTone::Info, format!("Opened {title}"));
+    }
+
+    pub fn browser_back(&mut self) {
+        self.enqueue_browser_command(BrowserCommandKind::Back);
+    }
+
+    pub fn browser_forward(&mut self) {
+        self.enqueue_browser_command(BrowserCommandKind::Forward);
+    }
+
+    pub fn browser_reload(&mut self) {
+        self.enqueue_browser_command(BrowserCommandKind::Reload);
+    }
+
+    pub fn drain_browser_commands(&mut self, pane_id: PaneId) -> Vec<BrowserCommandKind> {
+        let mut drained = Vec::new();
+        let mut remaining = VecDeque::new();
+
+        while let Some(command) = self.browser_commands.pop_front() {
+            if command.pane_id == pane_id {
+                drained.push(command.kind);
+            } else {
+                remaining.push_back(command);
+            }
+        }
+
+        self.browser_commands = remaining;
+        drained
+    }
+
+    pub fn apply_shell_events(&mut self, events: Vec<ShellEvent>) {
+        for event in events {
+            match event {
+                ShellEvent::SessionReady { pane_id } => {
+                    self.sync_web_session_state(pane_id, WebSessionState::Mounted);
+                }
+                ShellEvent::PermissionDenied {
+                    pane_id,
+                    capability,
+                } => {
+                    self.push_activity(
+                        ActivityTone::Warning,
+                        format!("Pane {pane_id} denied capability {capability}"),
+                    );
+                }
+                ShellEvent::SessionClosed { pane_id } => {
+                    self.sync_web_session_state(pane_id, WebSessionState::Closed);
+                }
+                ShellEvent::UrlChanged { pane_id, url } => {
+                    let Ok(parsed) = Url::parse(&url) else {
+                        continue;
+                    };
+                    let active_pane = self.active_web_pane().map(|pane| pane.pane_id);
+                    self.update_pane(pane_id, |pane| {
+                        pane.title = url.clone();
+                        if let PaneSurface::Web(web) = &mut pane.surface {
+                            web.route = GuestRoute::ExternalUrl(parsed.clone());
+                            web.partition_id = sanitize(&url);
+                            web.session = WebSessionState::Mounted;
+                        }
+                    });
+                    if active_pane == Some(pane_id) {
+                        self.command_bar_text = url;
+                    }
+                }
+                ShellEvent::TitleChanged { pane_id, title } => {
+                    self.update_pane(pane_id, |pane| {
+                        pane.title = title.clone();
+                    });
+                }
+            }
+        }
     }
 
     pub fn cycle_handle(&mut self) {
@@ -461,7 +808,7 @@ impl AppState {
                 session: web.session.clone(),
                 bounds: pane.bounds,
             }),
-            PaneSurface::Native { .. } => None,
+            PaneSurface::Native { .. } | PaneSurface::Launcher => None,
         }
     }
 
@@ -489,6 +836,23 @@ impl AppState {
         self.active_task()
             .map(|task| task.panes.iter().collect())
             .unwrap_or_default()
+    }
+
+    pub fn sidebar_task_items(&self) -> Vec<SidebarTaskItem> {
+        let Some(workspace) = self.active_workspace() else {
+            return Vec::new();
+        };
+
+        workspace
+            .tasks
+            .iter()
+            .map(|task| SidebarTaskItem {
+                id: task.id,
+                title: task.title.clone(),
+                is_active: task.id == workspace.active_task,
+                icon: sidebar_icon_for_task(task),
+            })
+            .collect()
     }
 
     pub fn sync_web_session_state(&mut self, pane_id: PaneId, session: WebSessionState) {
@@ -524,6 +888,29 @@ impl AppState {
         }
     }
 
+    pub fn normalize_input(input: &str) -> String {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return "https://www.google.com".to_string();
+        }
+
+        if Url::parse(trimmed).is_ok() {
+            return trimmed.to_string();
+        }
+
+        if trimmed.contains('.') && !trimmed.contains(' ') {
+            let candidate = format!("https://{trimmed}");
+            if Url::parse(&candidate).is_ok() {
+                return candidate;
+            }
+        }
+
+        let encoded = form_urlencoded::byte_serialize(trimmed.as_bytes())
+            .collect::<String>()
+            .replace('+', "%20");
+        format!("https://www.google.com/search?q={encoded}")
+    }
+
     fn advance_workspace(&mut self, delta: isize) {
         if self.workspaces.is_empty() {
             return;
@@ -536,10 +923,7 @@ impl AppState {
         let len = self.workspaces.len() as isize;
         let next = (current_index + delta).rem_euclid(len) as usize;
         self.active_workspace = self.workspaces[next].id;
-        self.command_bar_text = self
-            .active_web_pane()
-            .map(|pane| pane.route.to_string())
-            .unwrap_or_default();
+        self.sync_command_bar_with_active_route();
         // Switching workspace should also refresh the omnibar so the shell always points at the active route.
         let title = self.workspaces[next].title.clone();
         self.push_activity(ActivityTone::Info, format!("Switched workspace to {title}"));
@@ -559,10 +943,7 @@ impl AppState {
         } else {
             None
         };
-        self.command_bar_text = self
-            .active_web_pane()
-            .map(|pane| pane.route.to_string())
-            .unwrap_or_default();
+        self.sync_command_bar_with_active_route();
         // Task switching keeps the shell focus model and the command bar text in sync.
         if let Some(title) = next_title {
             self.push_activity(ActivityTone::Info, format!("Switched task to {title}"));
@@ -586,6 +967,40 @@ impl AppState {
                 format!("Adjusted split ratio to {:.0}%", ratio * 100.0),
             );
         }
+    }
+
+    fn enqueue_browser_command(&mut self, kind: BrowserCommandKind) {
+        let Some(active) = self.active_web_pane() else {
+            return;
+        };
+        if !matches!(&active.route, GuestRoute::ExternalUrl(_)) {
+            return;
+        }
+
+        self.browser_commands.push_back(BrowserCommand {
+            pane_id: active.pane_id,
+            kind,
+        });
+        self.sync_web_session_state(active.pane_id, WebSessionState::Launching);
+    }
+
+    fn update_pane(&mut self, pane_id: PaneId, mut update: impl FnMut(&mut Pane)) {
+        for workspace in &mut self.workspaces {
+            for task in &mut workspace.tasks {
+                for pane in &mut task.panes {
+                    if pane.id == pane_id {
+                        update(pane);
+                    }
+                }
+            }
+        }
+    }
+
+    fn sync_command_bar_with_active_route(&mut self) {
+        self.command_bar_text = self
+            .active_web_pane()
+            .map(|pane| pane.route.to_string())
+            .unwrap_or_default();
     }
 }
 
@@ -626,6 +1041,49 @@ fn sanitize(value: &str) -> String {
         .collect()
 }
 
+fn sidebar_icon_for_task(task: &TaskSet) -> SidebarTaskIconSpec {
+    let Some(pane) = task.focused_pane() else {
+        return SidebarTaskIconSpec::Monogram(short_label(&task.title));
+    };
+
+    match &pane.surface {
+        PaneSurface::Web(web) => match &web.route {
+            GuestRoute::ExternalUrl(url) => external_origin(url)
+                .map(|origin| SidebarTaskIconSpec::ExternalUrl { origin })
+                .unwrap_or_else(|| SidebarTaskIconSpec::Monogram(short_label(&task.title))),
+            GuestRoute::Capsule { .. } | GuestRoute::LocalCapsule { .. } => {
+                SidebarTaskIconSpec::Monogram(short_label(&task.title))
+            }
+        },
+        PaneSurface::Native { .. } | PaneSurface::Launcher => {
+            SidebarTaskIconSpec::Monogram(short_label(&task.title))
+        }
+    }
+}
+
+fn external_origin(url: &Url) -> Option<String> {
+    match url.scheme() {
+        "http" | "https" => Some(url.origin().ascii_serialization()),
+        _ => None,
+    }
+}
+
+fn short_label(title: &str) -> String {
+    title.chars().take(2).collect::<String>().to_uppercase()
+}
+
+fn task_route_label(task: &TaskSet) -> String {
+    let Some(pane) = task.focused_pane() else {
+        return "No pane".to_string();
+    };
+
+    match &pane.surface {
+        PaneSurface::Web(web) => web.route.to_string(),
+        PaneSurface::Native { .. } => "Native settings panel".to_string(),
+        PaneSurface::Launcher => "Launchpad".to_string(),
+    }
+}
+
 fn demo_local_capsule(name: &str) -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../samples")
@@ -646,13 +1104,205 @@ fn route_profile(route: &GuestRoute) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::ShellEvent;
 
     #[test]
     fn cycle_handle_changes_route() {
         let mut state = AppState::demo();
+        state.select_task(2);
         let before = state.active_web_pane().expect("pane").route.to_string();
         state.cycle_handle();
         let after = state.active_web_pane().expect("pane").route.to_string();
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn normalize_input_supports_urls_hosts_and_searches() {
+        assert_eq!(
+            AppState::normalize_input("https://example.com"),
+            "https://example.com"
+        );
+        assert_eq!(
+            AppState::normalize_input("example.com"),
+            "https://example.com"
+        );
+        assert_eq!(
+            AppState::normalize_input("hello world"),
+            "https://www.google.com/search?q=hello%20world"
+        );
+        assert_eq!(AppState::normalize_input(""), "https://www.google.com");
+    }
+
+    #[test]
+    fn navigate_to_url_updates_web_pane_state() {
+        let mut state = AppState::demo();
+        state.navigate_to_url("example.com");
+        let pane = state.active_web_pane().expect("pane");
+
+        assert_eq!(pane.route.to_string(), "https://example.com/");
+        assert_eq!(pane.partition_id, "https---example-com-");
+        assert_eq!(pane.profile, "electron");
+        assert_eq!(pane.session, WebSessionState::Launching);
+        assert_eq!(state.command_bar_text, "https://example.com/");
+    }
+
+    #[test]
+    fn apply_shell_events_updates_route_title_and_command_bar() {
+        let mut state = AppState::demo();
+        state.select_task(2);
+        let pane_id = state.active_web_pane().expect("pane").pane_id;
+
+        state.apply_shell_events(vec![
+            ShellEvent::UrlChanged {
+                pane_id,
+                url: "https://docs.rs/".to_string(),
+            },
+            ShellEvent::TitleChanged {
+                pane_id,
+                title: "docs.rs".to_string(),
+            },
+        ]);
+
+        let pane = state.active_web_pane().expect("pane");
+        assert_eq!(pane.route.to_string(), "https://docs.rs/");
+        assert_eq!(pane.title, "docs.rs");
+        assert_eq!(state.command_bar_text, "https://docs.rs/");
+    }
+
+    #[test]
+    fn apply_shell_events_marks_session_ready_as_mounted() {
+        let mut state = AppState::demo();
+        state.select_task(2);
+        let pane_id = state.active_web_pane().expect("pane").pane_id;
+
+        state.apply_shell_events(vec![ShellEvent::SessionReady { pane_id }]);
+
+        let pane = state.active_web_pane().expect("pane");
+        assert_eq!(pane.session, WebSessionState::Mounted);
+    }
+
+    #[test]
+    fn show_settings_panel_adds_new_settings_task() {
+        let mut state = AppState::demo();
+        let original_task_count = state.active_workspace().expect("workspace").tasks.len();
+        let original_task_id = state.active_task().expect("task").id;
+
+        state.show_settings_panel();
+
+        let workspace = state.active_workspace().expect("workspace");
+        assert_eq!(workspace.tasks.len(), original_task_count + 1);
+        assert_eq!(workspace.active_task().expect("task").title, "Settings");
+
+        let pane = workspace.active_task().and_then(|task| task.focused_pane()).expect("pane");
+        assert!(matches!(pane.surface, PaneSurface::Native { .. }));
+        assert_eq!(state.command_bar_text, "");
+
+        let previous_task = workspace
+            .tasks
+            .iter()
+            .find(|task| task.id == original_task_id)
+            .expect("original task should remain");
+        assert!(matches!(
+            previous_task.focused_pane().expect("pane").surface,
+            PaneSurface::Web(_) | PaneSurface::Launcher
+        ));
+    }
+
+    #[test]
+    fn select_task_updates_active_task_and_command_bar() {
+        let mut state = AppState::demo();
+
+        state.select_task(3);
+
+        assert_eq!(state.active_task().expect("task").id, 3);
+        assert_eq!(state.command_bar_text, "https://ato.run/");
+    }
+
+    #[test]
+    fn create_new_tab_adds_task_to_active_workspace() {
+        let mut state = AppState::demo();
+        let workspace_count = state.workspaces.len();
+        let task_count = state.active_workspace().expect("workspace").tasks.len();
+
+        state.create_new_tab();
+
+        let workspace = state.active_workspace().expect("workspace");
+        assert_eq!(state.workspaces.len(), workspace_count);
+        assert_eq!(workspace.tasks.len(), task_count + 1);
+        assert_eq!(workspace.active_task().expect("task").title, "New Tab 2");
+        assert_eq!(state.command_bar_text, "");
+    }
+
+    #[test]
+    fn sidebar_task_items_flag_external_urls() {
+        let state = AppState::demo();
+        let tasks = state.sidebar_task_items();
+
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(
+            tasks[0].icon,
+            SidebarTaskIconSpec::Monogram("NE".to_string())
+        );
+        assert_eq!(
+            tasks[1].icon,
+            SidebarTaskIconSpec::Monogram("GU".to_string())
+        );
+        assert_eq!(
+            tasks[2].icon,
+            SidebarTaskIconSpec::ExternalUrl {
+                origin: "https://ato.run".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn omnibar_suggestions_include_settings_and_matching_tasks() {
+        let state = AppState::demo();
+
+        let suggestions = state.omnibar_suggestions("ato");
+
+        assert!(suggestions.iter().any(|item| matches!(
+            item.action,
+            OmnibarSuggestionAction::Navigate { .. }
+        )));
+        assert!(suggestions.iter().any(|item| matches!(
+            item.action,
+            OmnibarSuggestionAction::SelectTask { task_id: 3 }
+        )));
+    }
+
+    #[test]
+    fn empty_omnibar_suggestions_include_settings() {
+        let state = AppState::demo();
+
+        let suggestions = state.omnibar_suggestions("");
+
+        assert!(suggestions.iter().any(|item| matches!(
+            item.action,
+            OmnibarSuggestionAction::ShowSettings
+        )));
+    }
+
+    #[test]
+    fn drain_browser_commands_only_returns_matching_pane() {
+        let mut state = AppState::demo();
+        state.browser_commands.push_back(BrowserCommand {
+            pane_id: 1,
+            kind: BrowserCommandKind::Back,
+        });
+        state.browser_commands.push_back(BrowserCommand {
+            pane_id: 2,
+            kind: BrowserCommandKind::Reload,
+        });
+
+        let commands = state.drain_browser_commands(1);
+        assert_eq!(commands, vec![BrowserCommandKind::Back]);
+        assert_eq!(
+            state.browser_commands.into_iter().collect::<Vec<_>>(),
+            vec![BrowserCommand {
+                pane_id: 2,
+                kind: BrowserCommandKind::Reload
+            }]
+        );
     }
 }
