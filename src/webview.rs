@@ -2,22 +2,28 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::thread;
 
 use anyhow::{Context, Result};
-use gpui::Window;
+use gpui::{AnyWindowHandle, AppContext, AsyncApp, Window};
 use http::header::CONTENT_TYPE;
 use wry::http::{Request, Response};
-use wry::{Rect, RequestAsyncResponder, WebContext, WebView, WebViewBuilder};
+use wry::{PageLoadEvent, Rect, RequestAsyncResponder, WebContext, WebView, WebViewBuilder};
 
-use crate::bridge::{BridgeProxy, GuestBridgeResponse, GuestSessionContext};
+use crate::bridge::{BridgeProxy, GuestBridgeResponse, GuestSessionContext, ShellEvent};
 use crate::orchestrator::{resolve_and_start_guest, stop_guest_session, GuestLaunchSession};
 use crate::state::{
-    ActiveWebPane, ActivityTone, AppState, GuestRoute, PaneBounds, WebSessionState,
+    ActiveWebPane, ActivityTone, AppState, BrowserCommandKind, GuestRoute, PaneBounds, ShellMode,
+    WebSessionState,
 };
 
 pub struct WebViewManager {
-    active: Option<ManagedWebView>,
+    views: HashMap<usize, ManagedWebView>,
+    pending_launches: HashMap<String, PendingLaunch>,
+    active_pane_id: Option<usize>,
+    async_app: AsyncApp,
+    window_handle: AnyWindowHandle,
     preload_registry: PreloadRegistry,
     protocol_router: ProtocolRouter,
     bridge: BridgeProxy,
@@ -26,6 +32,7 @@ pub struct WebViewManager {
 
 struct ManagedWebView {
     pane_id: usize,
+    route: GuestRoute,
     route_key: String,
     bounds: PaneBounds,
     launched_session: Option<GuestLaunchSession>,
@@ -33,10 +40,25 @@ struct ManagedWebView {
     _context: WebContext,
 }
 
+struct PendingLaunch {
+    pane_id: usize,
+    route_key: String,
+    receiver: Receiver<PendingLaunchResult>,
+}
+
+struct PendingLaunchResult {
+    route_key: String,
+    session: Result<GuestLaunchSession, String>,
+}
+
 impl WebViewManager {
-    pub fn new() -> Self {
+    pub fn new(window_handle: AnyWindowHandle, async_app: AsyncApp) -> Self {
         Self {
-            active: None,
+            views: HashMap::new(),
+            pending_launches: HashMap::new(),
+            active_pane_id: None,
+            async_app,
+            window_handle,
             preload_registry: PreloadRegistry,
             protocol_router: ProtocolRouter,
             bridge: BridgeProxy::new(),
@@ -47,82 +69,285 @@ impl WebViewManager {
     pub fn sync_from_state(&mut self, window: &Window, state: &mut AppState) {
         // Pull bridge activity into app state first so rebuilds always see the latest guest messages.
         state.extend_activity(self.bridge.drain_activity());
+        let shell_events = self.bridge.drain_shell_events();
+        self.apply_shell_events(&shell_events);
+        state.apply_shell_events(shell_events);
+        self.drain_pending_launches(window, state);
 
         let Some(active) = state.active_web_pane() else {
-            // If the active pane disappeared, tear down the child webview and stop its launched session.
-            if let Some(existing) = self.active.take() {
-                self.stop_launched_session(&existing, state);
-                state.sync_web_session_state(existing.pane_id, WebSessionState::Closed);
+            if let Some(previous_pane_id) = self.active_pane_id.take() {
+                self.set_cached_visibility(previous_pane_id, false, state);
                 self.bridge
                     .log(ActivityTone::Info, "Detached active child webview");
             }
             return;
         };
 
-        let route_key = active.route.to_string();
-        // A different pane id or route means the existing child webview can no longer be reused.
-        let needs_rebuild = self
-            .active
-            .as_ref()
-            .map(|existing| existing.pane_id != active.pane_id || existing.route_key != route_key)
-            .unwrap_or(true);
+        if self.active_pane_id != Some(active.pane_id) {
+            if let Some(previous_pane_id) = self.active_pane_id {
+                self.set_cached_visibility(previous_pane_id, false, state);
+            }
+            self.active_pane_id = Some(active.pane_id);
+        }
 
-        if needs_rebuild {
-            if let Some(previous) = self.active.take() {
+        let route_key = active.route.to_string();
+        let reuse_action = self
+            .views
+            .get(&active.pane_id)
+            .map(|existing| {
+                reuse_action(
+                    existing.pane_id,
+                    &existing.route,
+                    &existing.route_key,
+                    &active,
+                )
+            })
+            .unwrap_or(WebViewReuseAction::Rebuild);
+
+        if matches!(reuse_action, WebViewReuseAction::Rebuild) {
+            if let Some(previous) = self.views.remove(&active.pane_id) {
                 self.stop_launched_session(&previous, state);
                 state.sync_web_session_state(previous.pane_id, WebSessionState::Closed);
             }
 
-            match self.build_webview(window, &active) {
-                Ok(webview) => {
-                    state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
-                    self.bridge.log(
-                        ActivityTone::Info,
-                        format!("Mounted child webview for {}", active.route),
-                    );
-                    self.active = Some(webview);
+            match &active.route {
+                GuestRoute::LocalCapsule { handle, .. } => {
+                    if matches!(active.session, WebSessionState::Launching) {
+                        self.ensure_pending_local_launch(active.pane_id, &route_key, handle, state);
+                    }
                 }
-                Err(error) => {
-                    state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
+                _ => match self.build_webview(window, &active, None) {
+                    Ok(webview) => {
+                        if !route_requires_ready_signal(&active.route) {
+                            state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
+                        }
+                        self.bridge.log(
+                            ActivityTone::Info,
+                            format!("Built child webview for {}", active.route),
+                        );
+                        self.views.insert(active.pane_id, webview);
+                    }
+                    Err(error) => {
+                        state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
+                        state.push_activity(
+                            ActivityTone::Error,
+                            format!("Failed to build child webview: {error}"),
+                        );
+                        return;
+                    }
+                },
+            }
+        } else if matches!(reuse_action, WebViewReuseAction::Navigate) {
+            if let Some(existing) = self.views.get_mut(&active.pane_id) {
+                if let Err(error) = existing.webview.load_url(&route_key) {
                     state.push_activity(
                         ActivityTone::Error,
-                        format!("Failed to build child webview: {error}"),
+                        format!("Failed to navigate child webview: {error}"),
                     );
-                    return;
+                } else {
+                    existing.route = active.route.clone();
+                    existing.route_key = route_key.clone();
                 }
             }
         }
 
-        if let Some(existing) = &mut self.active {
-            if bounds_changed(existing.bounds, active.bounds) {
-                if let Err(error) = existing.webview.set_bounds(bounds_to_rect(active.bounds)) {
+        let webview_bounds = content_bounds(active.bounds);
+
+        if let Some(existing) = self.views.get_mut(&active.pane_id) {
+            if bounds_changed(existing.bounds, webview_bounds) {
+                if let Err(error) = existing.webview.set_bounds(bounds_to_rect(webview_bounds)) {
                     state.push_activity(
                         ActivityTone::Error,
                         format!("Failed to resize child webview: {error}"),
                     );
                 } else {
-                    existing.bounds = active.bounds;
+                    existing.bounds = webview_bounds;
                 }
             }
+        }
 
-            let next_visibility = active.bounds.width > 8.0 && active.bounds.height > 8.0;
-            let cached = self
-                .visibility_cache
-                .get(&active.pane_id)
-                .copied()
-                .unwrap_or(true);
-            if cached != next_visibility {
-                let _ = existing.webview.set_visible(next_visibility);
-                self.visibility_cache
-                    .insert(active.pane_id, next_visibility);
+        self.set_cached_visibility(
+            active.pane_id,
+            should_show_webview(
+                &active.route,
+                &active_web_session(state, active.pane_id).unwrap_or(active.session.clone()),
+                state.shell_mode.clone(),
+                webview_bounds,
+            ),
+            state,
+        );
+
+        if let Some(existing) = self.views.get_mut(&active.pane_id) {
+            for command in state.drain_browser_commands(active.pane_id) {
+                let label = format!("{command:?}");
+                let result = match command {
+                    BrowserCommandKind::Back => existing.webview.evaluate_script("history.back();"),
+                    BrowserCommandKind::Forward => {
+                        existing.webview.evaluate_script("history.forward();")
+                    }
+                    BrowserCommandKind::Reload => existing.webview.reload(),
+                };
+
+                if let Err(error) = result {
+                    state.push_activity(
+                        ActivityTone::Error,
+                        format!("Failed to run browser command {label}: {error}"),
+                    );
+                }
             }
         }
     }
 
-    fn build_webview(&mut self, window: &Window, pane: &ActiveWebPane) -> Result<ManagedWebView> {
+    fn apply_shell_events(&mut self, events: &[ShellEvent]) {
+        for event in events {
+            if let ShellEvent::UrlChanged { pane_id, url } = event {
+                if let Some(view) = self.views.get_mut(pane_id) {
+                    if let Ok(parsed) = url.parse() {
+                        view.route = GuestRoute::ExternalUrl(parsed);
+                        view.route_key = url.clone();
+                    }
+                }
+            }
+        }
+    }
+
+    fn drain_pending_launches(&mut self, window: &Window, state: &mut AppState) {
+        let mut completed_keys = Vec::new();
+        let mut completed = Vec::new();
+
+        for (key, pending) in &self.pending_launches {
+            match pending.receiver.try_recv() {
+                Ok(result) => {
+                    completed_keys.push(key.clone());
+                    completed.push((pending.pane_id, result));
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    completed_keys.push(key.clone());
+                    completed.push((
+                        pending.pane_id,
+                        PendingLaunchResult {
+                            route_key: pending.route_key.clone(),
+                            session: Err(
+                                "guest session worker disconnected before completion".to_string()
+                            ),
+                        },
+                    ));
+                }
+            }
+        }
+
+        for key in completed_keys {
+            self.pending_launches.remove(&key);
+        }
+
+        for (pane_id, completed) in completed {
+            let Some(active) = state.active_web_pane() else {
+                if let Ok(session) = completed.session {
+                    self.stop_guest_session_record(&session, state);
+                }
+                continue;
+            };
+
+            if active.pane_id != pane_id || active.route.to_string() != completed.route_key {
+                if let Ok(session) = completed.session {
+                    self.stop_guest_session_record(&session, state);
+                }
+                continue;
+            }
+
+            match completed.session {
+                Ok(session) => match self.build_webview(window, &active, Some(session)) {
+                    Ok(webview) => {
+                        self.bridge.log(
+                            ActivityTone::Info,
+                            format!("Built child webview for {}", active.route),
+                        );
+                        self.views.insert(active.pane_id, webview);
+                    }
+                    Err(error) => {
+                        state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
+                        state.push_activity(
+                            ActivityTone::Error,
+                            format!("Failed to build child webview: {error}"),
+                        );
+                    }
+                },
+                Err(error) => {
+                    state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
+                    state.push_activity(
+                        ActivityTone::Error,
+                        format!("Failed to start guest session: {error}"),
+                    );
+                }
+            }
+        }
+    }
+
+    fn ensure_pending_local_launch(
+        &mut self,
+        pane_id: usize,
+        route_key: &str,
+        handle: &str,
+        state: &mut AppState,
+    ) {
+        let key = pending_launch_key(pane_id, route_key);
+        if self.pending_launches.contains_key(&key) {
+            return;
+        }
+
+        let (sender, receiver) = channel();
+        let route_key = route_key.to_string();
+        let handle = handle.to_string();
+        let background_executor = self.async_app.background_executor().clone();
+        let foreground_executor = self.async_app.foreground_executor().clone();
+        let async_app = self.async_app.clone();
+        let window_handle = self.window_handle;
+
+        self.pending_launches.insert(
+            key,
+            PendingLaunch {
+                pane_id,
+                route_key: route_key.clone(),
+                receiver,
+            },
+        );
+        state.push_activity(
+            ActivityTone::Info,
+            format!("Launching guest session for {route_key}"),
+        );
+
+        let launch_task = background_executor.spawn(async move {
+            let result = PendingLaunchResult {
+                route_key,
+                session: resolve_and_start_guest(&handle).map_err(|error| error.to_string()),
+            };
+
+            if let Err(error) = sender.send(result) {
+                if let Ok(session) = error.0.session {
+                    let _ = stop_guest_session(&session.session_id);
+                }
+            }
+        });
+
+        foreground_executor
+            .spawn(async move {
+                launch_task.await;
+                notify_window(async_app, window_handle);
+            })
+            .detach();
+    }
+
+    fn build_webview(
+        &mut self,
+        window: &Window,
+        pane: &ActiveWebPane,
+        local_session: Option<GuestLaunchSession>,
+    ) -> Result<ManagedWebView> {
         let scheme = self.protocol_router.scheme_for(&pane.partition_id);
         let mut launched_session = None;
         let mut session_context = None;
+        let build_flags = build_flags_for_route(&pane.route);
 
         let (url, bridge_endpoint, allowlist, route_content, guest_payload) = match &pane.route {
             GuestRoute::Capsule {
@@ -143,24 +368,17 @@ impl WebViewManager {
                     None,
                 )
             }
-            GuestRoute::ExternalUrl(url) => {
-                // External URLs bypass the custom protocol and are loaded directly by the webview.
-                let allowlist = pane
-                    .capabilities
-                    .iter()
-                    .map(|capability| capability.as_str().to_string())
-                    .collect::<Vec<_>>();
-                (
-                    url.as_str().to_string(),
-                    None,
-                    allowlist,
-                    RouteContent::External,
-                    None,
-                )
-            }
-            GuestRoute::LocalCapsule { handle, .. } => {
-                // Local capsules need an ato-cli session start so we can resolve the real frontend assets.
-                let session = resolve_and_start_guest(handle)?;
+            GuestRoute::ExternalUrl(url) => (
+                url.as_str().to_string(),
+                None,
+                Vec::new(),
+                RouteContent::External,
+                None,
+            ),
+            GuestRoute::LocalCapsule { .. } => {
+                let session = local_session.ok_or_else(|| {
+                    anyhow::anyhow!("local capsule webview build requires resolved guest session")
+                })?;
                 for note in &session.notes {
                     self.bridge.log(ActivityTone::Info, note.clone());
                 }
@@ -174,6 +392,7 @@ impl WebViewManager {
 
                 let session_id = session.session_id.clone();
                 session_context = Some(GuestSessionContext {
+                    pane_id: pane.pane_id,
                     session_id: session.session_id.clone(),
                     adapter: session.adapter.clone(),
                     invoke_url: session.invoke_url.clone(),
@@ -190,39 +409,42 @@ impl WebViewManager {
             }
         };
 
-        let preload_script = self.preload_registry.script_for(
-            &pane.profile,
-            self.bridge.preload_environment(&allowlist),
-            bridge_endpoint,
-            guest_payload,
-        );
-
-        // The preload script wires the host bridge and guest metadata in before any page JS runs.
-        let route = pane.route.clone();
-        let allowlist_for_ipc = allowlist.clone();
-        let bridge = self.bridge.clone();
-        let session_context_for_ipc = session_context.clone();
-
+        let webview_bounds = content_bounds(pane.bounds);
         let mut context = WebContext::new(None);
         let mut builder = WebViewBuilder::new_with_web_context(&mut context)
-            .with_bounds(bounds_to_rect(pane.bounds))
-            .with_initialization_script_for_main_only(preload_script, true)
-            .with_ipc_handler(move |request| {
+            .with_bounds(bounds_to_rect(webview_bounds));
+
+        if build_flags.inject_bridge {
+            let preload_script = self.preload_registry.script_for(
+                &pane.profile,
+                self.bridge.preload_environment(&allowlist),
+                bridge_endpoint,
+                guest_payload,
+            );
+            builder = builder.with_initialization_script_for_main_only(preload_script, true);
+        }
+
+        if build_flags.enable_ipc {
+            let route = pane.route.clone();
+            let allowlist_for_ipc = allowlist.clone();
+            let bridge = self.bridge.clone();
+            let session_context_for_ipc = session_context.clone();
+            builder = builder.with_ipc_handler(move |request| {
                 let response = bridge.handle_message(
                     request.body(),
                     &allowlist_for_ipc,
                     session_context_for_ipc.as_ref(),
                 );
                 if matches!(response, GuestBridgeResponse::Denied { .. }) {
-                    // Denied bridge calls are expected for missing capabilities, but we still log them.
                     bridge.log(
                         ActivityTone::Warning,
                         format!("Guest request denied for route {}", route),
                     );
                 }
             });
+        }
 
-        if !matches!(pane.route, GuestRoute::ExternalUrl(_)) {
+        if build_flags.enable_custom_protocol {
             let protocol = self.protocol_router.clone();
             let scheme_name = scheme.clone();
             let bridge = self.bridge.clone();
@@ -246,6 +468,41 @@ impl WebViewManager {
             );
         }
 
+        if !matches!(build_flags.page_load_behavior, PageLoadBehavior::None) {
+            let bridge = self.bridge.clone();
+            let pane_id = pane.pane_id;
+            let page_load_behavior = build_flags.page_load_behavior;
+            let async_app = self.async_app.clone();
+            let window_handle = self.window_handle;
+            builder = builder.with_on_page_load_handler(move |event, url| {
+                if !matches!(event, PageLoadEvent::Finished) {
+                    return;
+                }
+
+                match page_load_behavior {
+                    PageLoadBehavior::UpdateExternalUrl => {
+                        bridge.push_shell_event(ShellEvent::UrlChanged { pane_id, url });
+                    }
+                    PageLoadBehavior::MarkCapsuleReady => {
+                        bridge.push_shell_event(ShellEvent::SessionReady { pane_id });
+                    }
+                    PageLoadBehavior::None => {}
+                }
+                notify_window(async_app.clone(), window_handle);
+            });
+        }
+
+        if build_flags.observe_title_changes {
+            let bridge = self.bridge.clone();
+            let pane_id = pane.pane_id;
+            let async_app = self.async_app.clone();
+            let window_handle = self.window_handle;
+            builder = builder.with_document_title_changed_handler(move |title| {
+                bridge.push_shell_event(ShellEvent::TitleChanged { pane_id, title });
+                notify_window(async_app.clone(), window_handle);
+            });
+        }
+
         let webview = builder
             .with_url(&url)
             .build_as_child(window)
@@ -253,8 +510,9 @@ impl WebViewManager {
 
         Ok(ManagedWebView {
             pane_id: pane.pane_id,
+            route: pane.route.clone(),
             route_key: pane.route.to_string(),
-            bounds: pane.bounds,
+            bounds: webview_bounds,
             launched_session,
             webview,
             _context: context,
@@ -266,6 +524,10 @@ impl WebViewManager {
             return;
         };
 
+        self.stop_guest_session_record(session, state);
+    }
+
+    fn stop_guest_session_record(&self, session: &GuestLaunchSession, state: &mut AppState) {
         match stop_guest_session(&session.session_id) {
             Ok(true) => state.push_activity(
                 ActivityTone::Info,
@@ -284,17 +546,151 @@ impl WebViewManager {
             ),
         }
     }
+
+    fn set_cached_visibility(&mut self, pane_id: usize, visible: bool, state: &mut AppState) {
+        let cached = self
+            .visibility_cache
+            .get(&pane_id)
+            .copied()
+            .unwrap_or(!visible);
+        if cached == visible {
+            return;
+        }
+
+        if let Some(view) = self.views.get_mut(&pane_id) {
+            if let Err(error) = view.webview.set_visible(visible) {
+                state.push_activity(
+                    ActivityTone::Error,
+                    format!("Failed to update child webview visibility: {error}"),
+                );
+                return;
+            }
+        }
+
+        self.visibility_cache.insert(pane_id, visible);
+    }
 }
 
 impl Drop for WebViewManager {
     fn drop(&mut self) {
         // Best-effort shutdown so orphaned guest sessions do not survive process exit.
-        if let Some(existing) = self.active.take() {
+        for existing in self.views.drain().map(|(_, existing)| existing) {
             if let Some(session) = existing.launched_session {
                 let _ = stop_guest_session(&session.session_id);
             }
         }
+
+        for pending in self.pending_launches.drain().map(|(_, pending)| pending) {
+            drop(pending.receiver);
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WebViewReuseAction {
+    Rebuild,
+    Navigate,
+    Keep,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BuildFlags {
+    inject_bridge: bool,
+    enable_ipc: bool,
+    enable_custom_protocol: bool,
+    page_load_behavior: PageLoadBehavior,
+    observe_title_changes: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageLoadBehavior {
+    None,
+    UpdateExternalUrl,
+    MarkCapsuleReady,
+}
+
+fn reuse_action(
+    existing_pane_id: usize,
+    existing_route: &GuestRoute,
+    existing_route_key: &str,
+    next: &ActiveWebPane,
+) -> WebViewReuseAction {
+    if existing_pane_id != next.pane_id {
+        return WebViewReuseAction::Rebuild;
+    }
+
+    if existing_route_key == next.route.to_string() {
+        return WebViewReuseAction::Keep;
+    }
+
+    if matches!(existing_route, GuestRoute::ExternalUrl(_))
+        && matches!(next.route, GuestRoute::ExternalUrl(_))
+    {
+        return WebViewReuseAction::Navigate;
+    }
+
+    WebViewReuseAction::Rebuild
+}
+
+fn build_flags_for_route(route: &GuestRoute) -> BuildFlags {
+    match route {
+        GuestRoute::ExternalUrl(_) => BuildFlags {
+            inject_bridge: false,
+            enable_ipc: false,
+            enable_custom_protocol: false,
+            page_load_behavior: PageLoadBehavior::UpdateExternalUrl,
+            observe_title_changes: true,
+        },
+        GuestRoute::Capsule { .. } | GuestRoute::LocalCapsule { .. } => BuildFlags {
+            inject_bridge: true,
+            enable_ipc: true,
+            enable_custom_protocol: true,
+            page_load_behavior: PageLoadBehavior::MarkCapsuleReady,
+            observe_title_changes: false,
+        },
+    }
+}
+
+fn pending_launch_key(pane_id: usize, route_key: &str) -> String {
+    format!("{pane_id}:{route_key}")
+}
+
+fn route_requires_ready_signal(route: &GuestRoute) -> bool {
+    matches!(
+        route,
+        GuestRoute::Capsule { .. } | GuestRoute::LocalCapsule { .. }
+    )
+}
+
+fn should_show_webview(
+    route: &GuestRoute,
+    session: &WebSessionState,
+    shell_mode: ShellMode,
+    bounds: PaneBounds,
+) -> bool {
+    matches!(shell_mode, ShellMode::Focus | ShellMode::CommandBar)
+        && bounds.width > 8.0
+        && bounds.height > 8.0
+        && (!route_requires_ready_signal(route) || matches!(session, WebSessionState::Mounted))
+}
+
+fn active_web_session(state: &AppState, pane_id: usize) -> Option<WebSessionState> {
+    state.active_panes().into_iter().find_map(|pane| {
+        if pane.id != pane_id {
+            return None;
+        }
+
+        match &pane.surface {
+            crate::state::PaneSurface::Web(web) => Some(web.session.clone()),
+            crate::state::PaneSurface::Native { .. } | crate::state::PaneSurface::Launcher => None,
+        }
+    })
+}
+
+fn notify_window(mut async_app: AsyncApp, window_handle: AnyWindowHandle) {
+    let _ = async_app.update_window(window_handle, |_, window, _| {
+        window.refresh();
+    });
 }
 
 #[derive(Clone)]
@@ -493,6 +889,15 @@ fn bounds_changed(current: PaneBounds, next: PaneBounds) -> bool {
         || (current.height - next.height).abs() > 0.5
 }
 
+fn content_bounds(bounds: PaneBounds) -> PaneBounds {
+    PaneBounds {
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height.max(1.0),
+    }
+}
+
 fn bounds_to_rect(bounds: PaneBounds) -> Rect {
     use wry::dpi::{LogicalPosition, LogicalSize};
 
@@ -616,5 +1021,159 @@ fn mime_for_path(path: &Path) -> &'static str {
         "woff" => "font/woff",
         "woff2" => "font/woff2",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{CapabilityGrant, WebSessionState};
+
+    fn active_web_pane(route: GuestRoute, pane_id: usize) -> ActiveWebPane {
+        ActiveWebPane {
+            workspace_id: 1,
+            task_id: 1,
+            pane_id,
+            title: route.to_string(),
+            route: route.clone(),
+            partition_id: "pane".to_string(),
+            profile: "electron".to_string(),
+            capabilities: vec![CapabilityGrant::OpenExternal],
+            session: WebSessionState::Launching,
+            bounds: PaneBounds::empty(),
+        }
+    }
+
+    #[test]
+    fn external_routes_disable_bridge_and_ipc() {
+        let flags = build_flags_for_route(&GuestRoute::ExternalUrl(
+            url::Url::parse("https://example.com").expect("url"),
+        ));
+
+        assert!(!flags.inject_bridge);
+        assert!(!flags.enable_ipc);
+        assert!(!flags.enable_custom_protocol);
+        assert_eq!(
+            flags.page_load_behavior,
+            PageLoadBehavior::UpdateExternalUrl
+        );
+        assert!(flags.observe_title_changes);
+    }
+
+    #[test]
+    fn capsule_routes_wait_for_ready_before_showing_webview() {
+        let bounds = PaneBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 640.0,
+            height: 480.0,
+        };
+        let route = GuestRoute::Capsule {
+            session: "welcome".to_string(),
+            entry_path: "/index.html".to_string(),
+        };
+
+        assert!(!should_show_webview(
+            &route,
+            &WebSessionState::Launching,
+            ShellMode::Focus,
+            bounds,
+        ));
+        assert!(should_show_webview(
+            &route,
+            &WebSessionState::Mounted,
+            ShellMode::Focus,
+            bounds,
+        ));
+    }
+
+    #[test]
+    fn external_routes_show_webview_without_ready_signal() {
+        let bounds = PaneBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 640.0,
+            height: 480.0,
+        };
+        let route = GuestRoute::ExternalUrl(url::Url::parse("https://example.com").expect("url"));
+
+        assert!(should_show_webview(
+            &route,
+            &WebSessionState::Launching,
+            ShellMode::Focus,
+            bounds,
+        ));
+    }
+
+    #[test]
+    fn command_bar_keeps_external_webviews_visible() {
+        let bounds = PaneBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 640.0,
+            height: 480.0,
+        };
+        let route = GuestRoute::ExternalUrl(url::Url::parse("https://example.com").expect("url"));
+
+        assert!(should_show_webview(
+            &route,
+            &WebSessionState::Launching,
+            ShellMode::CommandBar,
+            bounds,
+        ));
+    }
+
+    #[test]
+    fn command_bar_keeps_ready_capsule_webviews_visible() {
+        let bounds = PaneBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 640.0,
+            height: 480.0,
+        };
+        let route = GuestRoute::Capsule {
+            session: "welcome".to_string(),
+            entry_path: "/index.html".to_string(),
+        };
+
+        assert!(should_show_webview(
+            &route,
+            &WebSessionState::Mounted,
+            ShellMode::CommandBar,
+            bounds,
+        ));
+    }
+
+    #[test]
+    fn reuse_action_navigates_between_external_urls_in_same_pane() {
+        let existing =
+            GuestRoute::ExternalUrl(url::Url::parse("https://example.com").expect("url"));
+        let next = active_web_pane(
+            GuestRoute::ExternalUrl(url::Url::parse("https://docs.rs").expect("url")),
+            7,
+        );
+
+        assert_eq!(
+            reuse_action(7, &existing, "https://example.com/", &next),
+            WebViewReuseAction::Navigate
+        );
+    }
+
+    #[test]
+    fn reuse_action_rebuilds_on_route_kind_change() {
+        let existing =
+            GuestRoute::ExternalUrl(url::Url::parse("https://example.com").expect("url"));
+        let next = active_web_pane(
+            GuestRoute::Capsule {
+                session: "welcome".to_string(),
+                entry_path: "/index.html".to_string(),
+            },
+            7,
+        );
+
+        assert_eq!(
+            reuse_action(7, &existing, "https://example.com/", &next),
+            WebViewReuseAction::Rebuild
+        );
     }
 }

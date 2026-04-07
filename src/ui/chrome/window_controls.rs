@@ -4,7 +4,7 @@ use gpui::{div, px, rgb, Hsla, IntoElement};
 #[cfg(not(target_os = "macos"))]
 use gpui::{point, BoxShadow, Div, WindowControlArea};
 
-const MACOS_TRAFFIC_LIGHT_SPACER_WIDTH: f32 = 56.0;
+const MACOS_TRAFFIC_LIGHT_SPACER_WIDTH: f32 = 80.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum WindowControlIntent {
