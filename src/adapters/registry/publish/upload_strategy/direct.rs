@@ -1,3 +1,5 @@
+use std::error::Error as _;
+
 use anyhow::{Context, Result};
 
 use super::{
@@ -60,7 +62,12 @@ impl UploadStrategy for DirectUploadStrategy {
             anyhow::bail!("direct upload strategy requires a direct upload session")
         };
 
-        let client = crate::registry::http::blocking_client_builder(&request.registry_url)
+        let mut client_builder =
+            crate::registry::http::blocking_client_builder(&request.registry_url);
+        if super::super::artifact::is_managed_store_direct_registry(&request.registry_url) {
+            client_builder = client_builder.http1_only();
+        }
+        let client = client_builder
             .build()
             .context("Failed to create registry upload client")?;
         let mut builder = client.put(&session.endpoint);
@@ -70,7 +77,11 @@ impl UploadStrategy for DirectUploadStrategy {
         builder = crate::registry::http::with_blocking_ato_token(builder);
 
         let response = builder.body(request.artifact_bytes).send().map_err(|err| {
-            anyhow::anyhow!("Failed to upload artifact to {}: {}", session.endpoint, err)
+            anyhow::anyhow!(
+                "Failed to upload artifact to {}: {}",
+                session.endpoint,
+                format_reqwest_transport_error(&err),
+            )
         })?;
 
         Ok(TransferArtifactResponse::Direct(
@@ -104,4 +115,18 @@ impl UploadStrategy for DirectUploadStrategy {
         .with_context(|| "Failed to finalize payload v3 metadata for uploaded release")?;
         Ok(result)
     }
+}
+
+fn format_reqwest_transport_error(err: &reqwest::Error) -> String {
+    let mut rendered = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        let detail = cause.to_string();
+        if !detail.is_empty() && !rendered.contains(&detail) {
+            rendered.push_str(": ");
+            rendered.push_str(&detail);
+        }
+        source = cause.source();
+    }
+    rendered
 }

@@ -17,7 +17,7 @@ mod source;
 mod state;
 
 #[allow(unused_imports)]
-pub(crate) use app::{AppCommands, ModelTierArg, PrivacyModeArg, RepairActionArg};
+pub(crate) use app::{AppCommands, ModelTierArg, PrivacyModeArg, RepairActionArg, SessionCommands};
 #[allow(unused_imports)]
 pub(crate) use binding::BindingCommands;
 #[allow(unused_imports)]

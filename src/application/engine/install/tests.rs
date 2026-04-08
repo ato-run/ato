@@ -2,6 +2,12 @@ use super::github_inference::{
     auto_fix_github_install_preview_toml, reassign_github_install_preview_toml_port,
 };
 use super::*;
+#[cfg(target_os = "macos")]
+use crate::application::producer_input::resolve_producer_authoritative_input;
+#[cfg(target_os = "macos")]
+use crate::publish_ci::build_capsule_artifact as build_publish_capsule_artifact;
+#[cfg(target_os = "macos")]
+use crate::reporters::CliReporter;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -682,6 +688,7 @@ fn test_scoped_ref() -> ScopedCapsuleRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MockScenario {
     FalsePositiveRecovery,
+    MissingChunksAfterRetryFallback,
     FallbackNotImplemented,
     ManifestApiNotFound,
     ArtifactRejectsAuthorization,
@@ -1110,6 +1117,17 @@ async fn mock_negotiate(
                 }))
                 .into_response()
             }
+        }
+        MockScenario::MissingChunksAfterRetryFallback => {
+            let lease_id = guard.fixture.lease_id.clone();
+            Json(serde_json::json!({
+                "session_id": format!("session-{}", call_index),
+                "required_chunks": [guard.fixture.chunk_hashes[0].clone()],
+                "required_manifests": [],
+                "lease_id": lease_id,
+                "lease_expires_at": "2026-03-05T00:15:00Z",
+            }))
+            .into_response()
         }
     }
 }
@@ -1931,6 +1949,77 @@ async fn test_install_app_uses_version_resolve_for_explicit_time_travel() {
     assert_eq!(observations.epoch_calls, 0);
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "current_thread")]
+async fn repository_ato_desktop_capsule_installs_via_native_local_derivation() {
+    let _env_lock = acquire_test_env_lock().await;
+    let home_root = tempfile::tempdir().expect("home root");
+    let output_root = tempfile::tempdir().expect("output root");
+    let _home_guard = EnvVarGuard::set("HOME", Some(home_root.path().to_string_lossy().as_ref()));
+
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("repo root");
+    let desktop_root = repo_root.join("apps").join("ato-desktop");
+
+    let authoritative_input = resolve_producer_authoritative_input(
+        &desktop_root,
+        std::sync::Arc::new(CliReporter::new(false)),
+        false,
+    )
+    .expect("authoritative input");
+    let artifact_path =
+        build_publish_capsule_artifact("ato-desktop", "0.1.0", Some(&authoritative_input), None)
+            .expect("artifact build");
+    let bytes = std::fs::read(&artifact_path).expect("artifact bytes");
+    let scoped_ref = parse_capsule_ref("koh0920/ato-desktop").expect("scoped ref");
+
+    let result = complete_install_from_bytes(
+        "local:ato-desktop".to_string(),
+        scoped_ref,
+        "ato-desktop".to_string(),
+        "0.1.0".to_string(),
+        bytes,
+        "ato-desktop-0.1.0.capsule".to_string(),
+        InstallExecutionOptions {
+            output_dir: Some(output_root.path().to_path_buf()),
+            yes: true,
+            projection_preference: ProjectionPreference::Skip,
+            json_output: true,
+            can_prompt_interactively: false,
+            promotion_source: None,
+            keep_progressive_flow_open: false,
+        },
+        InstallSource::Local("test://ato-desktop".to_string()),
+    )
+    .await
+    .expect("native install should succeed");
+
+    assert!(matches!(
+        result.install_kind,
+        InstallKind::NativeRequiresLocalDerivation
+    ));
+    assert!(
+        result.path.is_file(),
+        "installed capsule archive must exist"
+    );
+    let derived_app_path = result
+        .local_derivation
+        .as_ref()
+        .and_then(|info| info.derived_app_path.as_ref())
+        .expect("derived app path");
+    assert!(derived_app_path.is_dir(), "derived app bundle must exist");
+    assert!(matches!(
+        result.launchable,
+        Some(LaunchableTarget::DerivedApp { .. })
+    ));
+    assert!(result
+        .projection
+        .as_ref()
+        .is_some_and(|projection| !projection.performed));
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn test_install_app_fails_closed_on_negotiate_501() {
     let _env_lock = acquire_test_env_lock().await;
@@ -2099,6 +2188,46 @@ async fn test_distribution_artifact_fallback_does_not_send_auth_to_presigned_url
     let observations = server.observations().await;
     assert_eq!(observations.distribution_calls, 1);
     assert_eq!(observations.artifact_calls, 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_missing_chunks_after_retry_falls_back_to_distribution_download() {
+    let _env_lock = acquire_test_env_lock().await;
+    let cas_root = tempfile::tempdir().expect("cas root");
+    let _cas_guard = EnvVarGuard::set(
+        "ATO_CAS_ROOT",
+        Some(cas_root.path().to_string_lossy().as_ref()),
+    );
+    let _token_guard = EnvVarGuard::set("ATO_TOKEN", Some("test-token"));
+
+    let fixture = build_mock_fixture(
+        TEST_SCOPED_ID,
+        TEST_VERSION,
+        vec![b"chunk-a".to_vec(), b"chunk-b".to_vec()],
+    );
+    let expected_artifact = fixture.artifact_bytes.clone();
+    let expected_file_name = format!("sample-{}.capsule", TEST_VERSION);
+    let server = spawn_mock_registry(MockScenario::MissingChunksAfterRetryFallback, fixture).await;
+    let client = reqwest::Client::new();
+    let scoped_ref = test_scoped_ref();
+    let result =
+        install_manifest_delta_path(&client, server.base_url(), &scoped_ref, None, None, None)
+            .await
+            .expect("missing chunks after retry should fall back to direct artifact download");
+
+    match result {
+        DeltaInstallResult::DownloadedArtifact { bytes, file_name } => {
+            assert_eq!(bytes, expected_artifact);
+            assert_eq!(file_name, expected_file_name);
+        }
+        other => panic!("expected downloaded artifact fallback, got {:?}", other),
+    }
+
+    let observations = server.observations().await;
+    assert_eq!(observations.negotiate_calls.len(), 2);
+    assert_eq!(observations.distribution_calls, 1);
+    assert_eq!(observations.artifact_calls, 1);
+    assert_eq!(observations.release_calls, vec![TEST_LEASE_ID.to_string()]);
 }
 
 #[tokio::test(flavor = "current_thread")]
