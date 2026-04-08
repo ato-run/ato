@@ -141,7 +141,7 @@ pub(crate) async fn install_manifest_delta_path(
     }
     match result {
         Ok(result) => Ok(result),
-        Err(err) if is_manifest_api_unsupported_error(&err) => {
+        Err(err) if should_fallback_to_distribution_download(&err) => {
             download_capsule_artifact_via_distribution(
                 client,
                 registry,
@@ -170,6 +170,15 @@ pub(crate) fn is_manifest_api_unsupported_error(err: &anyhow::Error) -> bool {
     let message = err.to_string().to_ascii_lowercase();
     (message.contains("endpoint not found") || message.contains("status=404"))
         && (message.contains("manifest") || message.contains("epoch pointer"))
+}
+
+pub(crate) fn should_fallback_to_distribution_download(err: &anyhow::Error) -> bool {
+    if is_manifest_api_unsupported_error(err) {
+        return true;
+    }
+
+    let message = err.to_string().to_ascii_lowercase();
+    message.contains("missing chunks after retry negotiate")
 }
 
 pub(crate) async fn download_capsule_artifact_via_distribution(

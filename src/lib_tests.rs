@@ -466,7 +466,87 @@ fn state_command_parses_register_and_inspect_forms() {
 }
 
 #[test]
-fn app_command_parses_status_bootstrap_and_repair_forms() {
+fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
+    let resolve = Cli::try_parse_from([
+        "ato",
+        "app",
+        "resolve",
+        "capsule://store/ato/desky",
+        "--target",
+        "desktop",
+        "--json",
+    ])
+    .expect("parse app resolve");
+    match resolve.command {
+        Commands::App {
+            command:
+                AppCommands::Resolve {
+                    handle,
+                    target,
+                    registry,
+                    json,
+                },
+        } => {
+            assert_eq!(handle, "capsule://store/ato/desky");
+            assert_eq!(target.as_deref(), Some("desktop"));
+            assert!(registry.is_none());
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+
+    let session_start = Cli::try_parse_from([
+        "ato",
+        "app",
+        "session",
+        "start",
+        "./samples/desky-mock-tauri",
+        "--target",
+        "desktop",
+        "--json",
+    ])
+    .expect("parse app session start");
+    match session_start.command {
+        Commands::App {
+            command:
+                AppCommands::Session {
+                    command:
+                        SessionCommands::Start {
+                            handle,
+                            target,
+                            json,
+                        },
+                },
+        } => {
+            assert_eq!(handle, "./samples/desky-mock-tauri");
+            assert_eq!(target.as_deref(), Some("desktop"));
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+
+    let session_stop = Cli::try_parse_from([
+        "ato",
+        "app",
+        "session",
+        "stop",
+        "desky-session-123",
+        "--json",
+    ])
+    .expect("parse app session stop");
+    match session_stop.command {
+        Commands::App {
+            command:
+                AppCommands::Session {
+                    command: SessionCommands::Stop { session_id, json },
+                },
+        } => {
+            assert_eq!(session_id, "desky-session-123");
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+
     let status = Cli::try_parse_from(["ato", "app", "status", "ato/desky", "--json"])
         .expect("parse app status");
     match status.command {

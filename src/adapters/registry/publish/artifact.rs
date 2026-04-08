@@ -152,7 +152,7 @@ pub(crate) struct SyncCommitResponse {
 pub enum PublishArtifactError {
     #[error("Artifact upload conflict (409 version_exists): {message}")]
     VersionExists { message: String },
-    #[error("Managed Store direct publish cannot accept artifacts larger than the current conservative limit for {registry_url}: artifact is {size_bytes} bytes, limit is {limit_bytes} bytes")]
+    #[error("Managed Store direct publish cannot accept artifacts larger than the current conservative limit for {registry_url}: artifact is {size_bytes} bytes, limit is {limit_bytes} bytes. The current edge-backed single PUT path has been timing out before the registry accepts larger bodies.")]
     ManagedStoreDirectPayloadLimitExceeded {
         registry_url: String,
         size_bytes: u64,
@@ -762,11 +762,11 @@ pub(crate) fn classify_upload_failure(status: StatusCode, body: &str) -> Publish
 }
 
 // Temporary conservative gate for the current managed Store direct-upload path.
-// This is intentionally lower than the observed failure size and is not a
+// This is intentionally conservative and is not a
 // remote acceptance guarantee. Replace it with capability-based or presigned
 // upload negotiation once the managed publish path no longer relies on single
 // PUT upload through the edge request-body path.
-pub(crate) const MANAGED_STORE_DIRECT_CONSERVATIVE_LIMIT_BYTES: u64 = 95 * 1024 * 1024;
+pub(crate) const MANAGED_STORE_DIRECT_CONSERVATIVE_LIMIT_BYTES: u64 = 100 * 1024 * 1024;
 
 pub(crate) fn enforce_managed_store_direct_upload_policy(
     registry_url: &str,
