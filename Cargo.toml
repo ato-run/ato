@@ -8,6 +8,7 @@ build = "build.rs"
 
 [dependencies]
 anyhow = "1.0"
+capsule-core = { path = "../ato-cli/core" }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "15d86607" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "15d86607", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 gpui-component = { path = ".tmp/vendor/gpui-component-local/crates/ui" }
