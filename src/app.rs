@@ -2,8 +2,13 @@ use gpui::{
     actions, px, size, Action, App, AppContext, AssetSource, Bounds, KeyBinding, SharedString,
     WindowBounds, WindowDecorations, WindowOptions,
 };
+#[cfg(target_os = "macos")]
+use gpui::{Menu, MenuItem, OsAction, SystemMenuType};
+#[cfg(target_os = "macos")]
+use gpui_component::input;
 use serde::Deserialize;
 use std::borrow::Cow;
+use std::path::PathBuf;
 
 use crate::ui::DesktopShell;
 use gpui_component::TitleBar;
@@ -27,6 +32,19 @@ actions!(
         BrowserForward,
         BrowserReload,
         NewTab,
+        NativeUndo,
+        NativeRedo,
+        NativeCut,
+        NativeCopy,
+        NativePaste,
+        NativeSelectAll,
+        ToggleTheme,
+        OpenAuthInBrowser,
+        CancelAuthHandoff,
+        ResumeAfterAuth,
+        AllowPermissionOnce,
+        AllowPermissionForSession,
+        DenyPermissionPrompt,
         Quit
     ]
 );
@@ -62,7 +80,7 @@ impl AssetSource for LocalAssetSource {
 }
 
 pub fn run() {
-    let assets_dir = std::env::current_dir().unwrap().join("assets");
+    let assets_dir = resolve_assets_dir().expect("failed to resolve ato-desktop assets directory");
     gpui_platform::application()
         .with_assets(LocalAssetSource(assets_dir))
         .run(|cx: &mut App| {
@@ -83,9 +101,24 @@ pub fn run() {
                 KeyBinding::new("tab", CycleHandle, Some("DeskyShell")),
                 KeyBinding::new("cmd-t", NewTab, Some("DeskyShell")),
                 KeyBinding::new("escape", DismissTransient, Some("DeskyShell")),
+                KeyBinding::new("cmd-z", NativeUndo, Some("Pane")),
+                KeyBinding::new("cmd-shift-z", NativeRedo, Some("Pane")),
+                KeyBinding::new("cmd-x", NativeCut, Some("Pane")),
+                KeyBinding::new("cmd-c", NativeCopy, Some("Pane")),
+                KeyBinding::new("cmd-v", NativePaste, Some("Pane")),
+                KeyBinding::new("cmd-a", NativeSelectAll, Some("Pane")),
                 KeyBinding::new("cmd-q", Quit, None),
             ]);
 
+            #[cfg(target_os = "macos")]
+            install_app_menus(cx);
+
+            cx.on_action(|_: &NativeUndo, _: &mut App| {});
+            cx.on_action(|_: &NativeRedo, _: &mut App| {});
+            cx.on_action(|_: &NativeCut, _: &mut App| {});
+            cx.on_action(|_: &NativeCopy, _: &mut App| {});
+            cx.on_action(|_: &NativePaste, _: &mut App| {});
+            cx.on_action(|_: &NativeSelectAll, _: &mut App| {});
             cx.on_action(|_: &Quit, cx| cx.quit());
             cx.on_window_closed(|cx, _window_id| {
                 if cx.windows().is_empty() {
@@ -115,4 +148,90 @@ pub fn run() {
 
             cx.activate(true);
         });
+}
+
+#[cfg(target_os = "macos")]
+fn install_app_menus(cx: &mut App) {
+    cx.set_menus(vec![
+        Menu {
+            name: "ato-desktop".into(),
+            items: vec![
+                MenuItem::os_submenu("Services", SystemMenuType::Services),
+                MenuItem::separator(),
+                MenuItem::action("Quit", Quit),
+            ],
+            disabled: false,
+        },
+        Menu {
+            name: "Edit".into(),
+            items: vec![
+                MenuItem::os_action("Undo", NativeUndo, OsAction::Undo),
+                MenuItem::os_action("Redo", NativeRedo, OsAction::Redo),
+                MenuItem::separator(),
+                MenuItem::action("Cut", NativeCut),
+                MenuItem::action("Copy", NativeCopy),
+                MenuItem::action("Paste", NativePaste),
+                MenuItem::separator(),
+                MenuItem::action("Delete", input::Delete),
+                MenuItem::action("Delete Previous Word", input::DeleteToPreviousWordStart),
+                MenuItem::action("Delete Next Word", input::DeleteToNextWordEnd),
+                MenuItem::separator(),
+                MenuItem::action("Find", input::Search),
+                MenuItem::separator(),
+                MenuItem::action("Select All", NativeSelectAll),
+            ],
+            disabled: false,
+        },
+    ]);
+}
+
+fn resolve_assets_dir() -> anyhow::Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("ATO_DESKTOP_ASSETS_DIR") {
+        let path = PathBuf::from(dir);
+        if path.is_dir() {
+            return Ok(path);
+        }
+    }
+
+    let cwd_assets = std::env::current_dir()?.join("assets");
+    if cwd_assets.is_dir() {
+        return Ok(cwd_assets);
+    }
+
+    let exe = std::env::current_exe()?;
+    let macos_dir = exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("ato-desktop executable has no parent directory"))?;
+
+    let bundled_assets = macos_dir.parent().and_then(|contents| {
+        contents
+            .parent()
+            .map(|_| contents.join("Resources").join("assets"))
+    });
+    if let Some(path) = bundled_assets {
+        if path.is_dir() {
+            return Ok(path);
+        }
+    }
+
+    let sibling_assets = macos_dir.join("assets");
+    if sibling_assets.is_dir() {
+        return Ok(sibling_assets);
+    }
+
+    Err(anyhow::anyhow!(
+        "ato-desktop assets directory was not found; set ATO_DESKTOP_ASSETS_DIR or run from the app root"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_assets_dir;
+
+    #[test]
+    fn resolve_assets_dir_finds_workspace_assets() {
+        let path = resolve_assets_dir().expect("workspace assets should resolve");
+        assert!(path.ends_with("assets"));
+        assert!(path.is_dir());
+    }
 }

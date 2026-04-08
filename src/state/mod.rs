@@ -321,6 +321,14 @@ pub struct BrowserCommand {
     pub kind: BrowserCommandKind,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PermissionPrompt {
+    pub pane_id: PaneId,
+    pub route_label: String,
+    pub capability: String,
+    pub command: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActiveWebPane {
     pub workspace_id: WorkspaceId,
@@ -347,6 +355,7 @@ pub struct AppState {
     pub command_bar_text: String,
     pub activity: Vec<ActivityEntry>,
     pub browser_commands: VecDeque<BrowserCommand>,
+    pub pending_permission_prompt: Option<PermissionPrompt>,
     pub theme_mode: ThemeMode,
     pub auth_sessions: Vec<AuthSession>,
     pub auth_policy_registry: AuthPolicyRegistry,
@@ -479,6 +488,7 @@ impl AppState {
                 message: "Phase 3 shell bootstrapped with ato-cli guest orchestration".to_string(),
             }],
             browser_commands: VecDeque::new(),
+            pending_permission_prompt: None,
             theme_mode: ThemeMode::Light,
             auth_sessions: Vec::new(),
             auth_policy_registry: AuthPolicyRegistry::default_third_party(),
@@ -551,6 +561,7 @@ impl AppState {
     }
 
     pub fn dismiss_transient(&mut self) {
+        self.pending_permission_prompt = None;
         match self.shell_mode {
             ShellMode::CommandBar | ShellMode::Overview => self.shell_mode = ShellMode::Focus,
             ShellMode::Focus => {}
@@ -838,10 +849,20 @@ impl AppState {
                 ShellEvent::PermissionDenied {
                     pane_id,
                     capability,
+                    command,
                 } => {
+                    let route_label = self
+                        .pane_route_label(pane_id)
+                        .unwrap_or_else(|| format!("pane-{pane_id}"));
+                    self.pending_permission_prompt = Some(PermissionPrompt {
+                        pane_id,
+                        route_label: route_label.clone(),
+                        capability: capability.clone(),
+                        command: command.clone(),
+                    });
                     self.push_activity(
                         ActivityTone::Warning,
-                        format!("Pane {pane_id} denied capability {capability}"),
+                        format!("Pane {pane_id} denied capability {capability} for {route_label}"),
                     );
                 }
                 ShellEvent::SessionClosed { pane_id } => {
@@ -1221,6 +1242,20 @@ impl AppState {
         }
     }
 
+    fn pane_route_label(&self, pane_id: PaneId) -> Option<String> {
+        self.workspaces
+            .iter()
+            .flat_map(|workspace| workspace.tasks.iter())
+            .flat_map(|task| task.panes.iter())
+            .find(|pane| pane.id == pane_id)
+            .map(|pane| match &pane.surface {
+                PaneSurface::Web(web) => web.route.to_string(),
+                PaneSurface::Native { .. } => pane.title.clone(),
+                PaneSurface::Launcher => "Launchpad".to_string(),
+                PaneSurface::AuthHandoff { origin, .. } => format!("Signing in to {origin}…"),
+            })
+    }
+
     pub fn update_guest_route_metadata(
         &mut self,
         pane_id: PaneId,
@@ -1237,6 +1272,46 @@ impl AppState {
                 web.snapshot_label = snapshot_label.clone();
             }
         });
+    }
+
+    pub fn active_permission_prompt(&self) -> Option<&PermissionPrompt> {
+        self.pending_permission_prompt.as_ref()
+    }
+
+    pub fn allow_permission_once(&mut self) {
+        let Some(prompt) = self.pending_permission_prompt.take() else {
+            return;
+        };
+        self.push_activity(
+            ActivityTone::Info,
+            format!(
+                "Host recorded one-shot permission intent for {} on {}. Runtime grant wiring is pending.",
+                prompt.capability, prompt.route_label
+            ),
+        );
+    }
+
+    pub fn allow_permission_for_session(&mut self) {
+        let Some(prompt) = self.pending_permission_prompt.take() else {
+            return;
+        };
+        self.push_activity(
+            ActivityTone::Info,
+            format!(
+                "Host recorded session permission intent for {} on {}. Runtime grant wiring is pending.",
+                prompt.capability, prompt.route_label
+            ),
+        );
+    }
+
+    pub fn deny_permission_prompt(&mut self) {
+        let Some(prompt) = self.pending_permission_prompt.take() else {
+            return;
+        };
+        self.push_activity(
+            ActivityTone::Warning,
+            format!("Denied permission {} for {}.", prompt.capability, prompt.route_label),
+        );
     }
 
     pub fn classify_url(&self, url: &str) -> AuthMode {
@@ -1541,6 +1616,24 @@ mod tests {
 
         let pane = state.active_web_pane().expect("pane");
         assert_eq!(pane.session, WebSessionState::Mounted);
+    }
+
+    #[test]
+    fn permission_denied_event_raises_host_owned_prompt() {
+        let mut state = AppState::demo();
+        state.select_task(2);
+        let pane_id = state.active_web_pane().expect("pane").pane_id;
+
+        state.apply_shell_events(vec![ShellEvent::PermissionDenied {
+            pane_id,
+            capability: "read-file".to_string(),
+            command: Some("fs.read".to_string()),
+        }]);
+
+        let prompt = state.active_permission_prompt().expect("permission prompt");
+        assert_eq!(prompt.pane_id, pane_id);
+        assert_eq!(prompt.capability, "read-file");
+        assert_eq!(prompt.command.as_deref(), Some("fs.read"));
     }
 
     #[test]
