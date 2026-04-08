@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 
 const ATO_BIN_ENV: &str = "ATO_DESKTOP_ATO_BIN";
@@ -46,12 +46,12 @@ impl GuestLaunchSession {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct ResolveEnvelope {
     resolution: ResolvePayload,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct ResolvePayload {
     render_strategy: String,
     canonical_handle: Option<String>,
@@ -64,24 +64,24 @@ struct ResolvePayload {
     notes: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct ResolveGuest {
     adapter: String,
     frontend_entry: String,
     capabilities: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct ResolveTarget {
     manifest_path: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct SessionStartEnvelope {
     session: SessionStartInfo,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct SessionStartInfo {
     session_id: String,
     handle: String,
@@ -114,48 +114,15 @@ struct StoredSessionRecord {
 }
 
 pub fn resolve_and_start_guest(handle: &str) -> Result<GuestLaunchSession> {
-    // Resolve first so we can validate the guest contract before a session is started.
     let resolved = resolve_guest(handle)?;
+    if !supports_resolved_guest_launch(&resolved)
+        && !allows_registry_guest_recovery(handle, &resolved)
+    {
+        bail!(unsupported_render_strategy_message(handle, &resolved));
+    }
+
     let started = start_guest(handle)?;
-
-    let manifest_path = PathBuf::from(&started.manifest_path);
-    let app_root = manifest_path
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| {
-            anyhow::anyhow!("manifest path has no parent: {}", manifest_path.display())
-        })?;
-
-    let guest = resolved
-        .guest
-        .ok_or_else(|| anyhow::anyhow!("resolve did not return guest metadata"))?;
-    // Guest frontend entries are served relative to the capsule root, so normalize them here.
-    let frontend_entry =
-        normalize_frontend_entry(&app_root, &started.frontend_entry, &guest.frontend_entry)?;
-
-    Ok(GuestLaunchSession {
-        handle: started.handle,
-        normalized_handle: started.normalized_handle,
-        canonical_handle: resolved.canonical_handle,
-        source: resolved.source,
-        trust_state: started.trust_state,
-        restricted: started.restricted,
-        snapshot_label: started.snapshot.as_ref().map(snapshot_label),
-        session_id: started.session_id,
-        adapter: started.adapter,
-        frontend_entry,
-        invoke_url: started.invoke_url,
-        healthcheck_url: started.healthcheck_url,
-        capabilities: if started.capabilities.is_empty() {
-            guest.capabilities
-        } else {
-            started.capabilities
-        },
-        manifest_path,
-        app_root,
-        target_label: started.target_label,
-        notes: combine_notes(resolved.notes, started.notes, &guest.adapter),
-    })
+    build_launch_session(handle, resolved, started)
 }
 
 pub fn stop_guest_session(session_id: &str) -> Result<bool> {
@@ -212,20 +179,6 @@ pub fn cleanup_stale_guest_sessions() -> Result<Vec<String>> {
 
 fn resolve_guest(handle: &str) -> Result<ResolvePayload> {
     let envelope: ResolveEnvelope = run_ato_json(&["app", "resolve", handle, "--json"])?;
-    // The desktop shell only knows how to mount guest webviews, not other render strategies.
-    if envelope.resolution.render_strategy != "guest-webview" {
-        bail!(
-            "ato app resolve returned unsupported render strategy '{}' for {}",
-            envelope.resolution.render_strategy,
-            handle
-        );
-    }
-    if envelope.resolution.guest.is_none() {
-        bail!(
-            "ato app resolve did not return guest metadata for {}",
-            handle
-        );
-    }
     Ok(envelope.resolution)
 }
 
@@ -333,8 +286,123 @@ fn combine_notes(
     resolve_notes
 }
 
+fn supports_resolved_guest_launch(resolved: &ResolvePayload) -> bool {
+    resolved.render_strategy == "guest-webview" && resolved.guest.is_some()
+}
+
+fn allows_registry_guest_recovery(handle: &str, resolved: &ResolvePayload) -> bool {
+    let source_is_registry = resolved.source.as_deref() == Some("registry");
+    let canonical_is_registry = resolved
+        .canonical_handle
+        .as_deref()
+        .is_some_and(|value| value.starts_with("capsule://ato.run/"));
+
+    (source_is_registry || canonical_is_registry) && handle.starts_with("capsule://ato.run/")
+}
+
+fn unsupported_render_strategy_message(handle: &str, resolved: &ResolvePayload) -> String {
+    if resolved.guest.is_none() {
+        format!(
+            "ato app resolve did not return guest metadata for {handle}, and registry guest recovery is unavailable"
+        )
+    } else {
+        format!(
+            "ato app resolve returned unsupported render strategy '{}' for {handle}",
+            resolved.render_strategy
+        )
+    }
+}
+
+fn build_launch_session(
+    handle: &str,
+    resolved: ResolvePayload,
+    started: SessionStartInfo,
+) -> Result<GuestLaunchSession> {
+    let manifest_path = PathBuf::from(&started.manifest_path);
+    let app_root = manifest_path
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow!("manifest path has no parent: {}", manifest_path.display()))?;
+
+    let recover_from_materialized_manifest =
+        resolved.guest.is_none() && allows_registry_guest_recovery(handle, &resolved);
+    let guest = resolved.guest.clone();
+    let guest_adapter = guest
+        .as_ref()
+        .map(|item| item.adapter.as_str())
+        .unwrap_or(&started.adapter);
+    let frontend_entry = normalize_frontend_entry(
+        &app_root,
+        &started.frontend_entry,
+        guest
+            .as_ref()
+            .map(|item| item.frontend_entry.as_str())
+            .unwrap_or(&started.frontend_entry),
+    )?;
+
+    let mut notes = combine_notes(resolved.notes, started.notes, guest_adapter);
+    if recover_from_materialized_manifest {
+        notes.push(
+            "Remote resolve was metadata-only; guest contract was recovered from the materialized session manifest."
+                .to_string(),
+        );
+    }
+    if let Some(manifest_path) = resolved
+        .target
+        .as_ref()
+        .and_then(|target| target.manifest_path.as_deref())
+    {
+        notes.push(format!(
+            "Resolve target advertised manifest path {manifest_path} before local materialization."
+        ));
+    }
+
+    let trust_state = if started.trust_state.is_empty() {
+        resolved
+            .trust_state
+            .clone()
+            .unwrap_or_else(|| "untrusted".to_string())
+    } else {
+        started.trust_state.clone()
+    };
+
+    Ok(GuestLaunchSession {
+        handle: started.handle,
+        normalized_handle: started.normalized_handle,
+        canonical_handle: started
+            .canonical_handle
+            .clone()
+            .or_else(|| resolved.canonical_handle.clone()),
+        source: started.source.clone().or_else(|| resolved.source.clone()),
+        trust_state,
+        restricted: started.restricted || resolved.restricted.unwrap_or(false),
+        snapshot_label: started
+            .snapshot
+            .as_ref()
+            .or(resolved.snapshot.as_ref())
+            .map(snapshot_label),
+        session_id: started.session_id,
+        adapter: started.adapter.clone(),
+        frontend_entry,
+        invoke_url: started.invoke_url,
+        healthcheck_url: started.healthcheck_url,
+        capabilities: if started.capabilities.is_empty() {
+            guest.map(|item| item.capabilities).unwrap_or_default()
+        } else {
+            started.capabilities.clone()
+        },
+        manifest_path,
+        app_root,
+        target_label: started.target_label,
+        notes,
+    })
+}
+
 fn snapshot_label(snapshot: &serde_json::Value) -> String {
-    if let Some(commit_sha) = snapshot.get("commit_sha").and_then(serde_json::Value::as_str) {
+    if let Some(commit_sha) = snapshot
+        .get("commit_sha")
+        .and_then(serde_json::Value::as_str)
+    {
         return format!("commit {}", short_id(commit_sha));
     }
     if let Some(version) = snapshot.get("version").and_then(serde_json::Value::as_str) {
@@ -402,11 +470,90 @@ fn process_is_alive(pid: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::which_in_path;
+    use super::{
+        allows_registry_guest_recovery, build_launch_session, supports_resolved_guest_launch,
+        which_in_path, ResolvePayload, SessionStartInfo,
+    };
+
+    fn resolved_payload(
+        render_strategy: &str,
+        source: Option<&str>,
+        guest: bool,
+    ) -> ResolvePayload {
+        ResolvePayload {
+            render_strategy: render_strategy.to_string(),
+            canonical_handle: Some("capsule://ato.run/koh0920/ato-onboarding".to_string()),
+            source: source.map(ToOwned::to_owned),
+            trust_state: Some("untrusted".to_string()),
+            restricted: Some(true),
+            snapshot: Some(serde_json::json!({ "version": "0.1.0" })),
+            guest: guest.then(|| super::ResolveGuest {
+                adapter: "tauri".to_string(),
+                frontend_entry: "dist/index.html".to_string(),
+                capabilities: vec!["read-file".to_string()],
+            }),
+            target: None,
+            notes: vec!["resolved".to_string()],
+        }
+    }
+
+    fn session_start() -> SessionStartInfo {
+        SessionStartInfo {
+            session_id: "desky-session-1".to_string(),
+            handle: "capsule://ato.run/koh0920/ato-onboarding".to_string(),
+            normalized_handle: "capsule://ato.run/koh0920/ato-onboarding".to_string(),
+            canonical_handle: Some("capsule://ato.run/koh0920/ato-onboarding".to_string()),
+            trust_state: "untrusted".to_string(),
+            source: Some("registry".to_string()),
+            restricted: true,
+            snapshot: Some(serde_json::json!({ "version": "0.1.0" })),
+            adapter: "tauri".to_string(),
+            frontend_entry: "dist/index.html".to_string(),
+            healthcheck_url: "http://127.0.0.1:9000/health".to_string(),
+            invoke_url: "http://127.0.0.1:9000/rpc".to_string(),
+            capabilities: vec!["read-file".to_string()],
+            manifest_path: "/tmp/example/capsule.toml".to_string(),
+            target_label: "web".to_string(),
+            notes: vec!["started".to_string()],
+        }
+    }
 
     #[test]
     fn which_in_path_resolves_existing_binary() {
         let sh = which_in_path("sh").expect("sh should exist on PATH in tests");
         assert!(sh.is_file());
+    }
+
+    #[test]
+    fn registry_capsule_can_recover_guest_from_materialized_session() {
+        let resolved = resolved_payload("terminal", Some("registry"), false);
+        assert!(allows_registry_guest_recovery(
+            "capsule://ato.run/koh0920/ato-onboarding",
+            &resolved
+        ));
+
+        let session = build_launch_session(
+            "capsule://ato.run/koh0920/ato-onboarding",
+            resolved,
+            session_start(),
+        )
+        .expect("session");
+
+        assert_eq!(session.adapter, "tauri");
+        assert_eq!(session.snapshot_label.as_deref(), Some("version 0.1.0"));
+        assert!(session
+            .notes
+            .iter()
+            .any(|note| note.contains("metadata-only")));
+    }
+
+    #[test]
+    fn guest_webview_without_guest_metadata_is_not_launchable_for_non_registry_sources() {
+        let resolved = resolved_payload("terminal", Some("github"), false);
+        assert!(!supports_resolved_guest_launch(&resolved));
+        assert!(!allows_registry_guest_recovery(
+            "capsule://github.com/acme/chat",
+            &resolved
+        ));
     }
 }
