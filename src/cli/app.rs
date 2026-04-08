@@ -2,7 +2,7 @@ use clap::{Subcommand, ValueEnum};
 
 #[derive(Subcommand)]
 pub(crate) enum AppCommands {
-    #[command(about = "Resolve a Desky handle into a launch preview")]
+    #[command(about = "Resolve a capsule-aware Desky handle into a launch preview")]
     Resolve {
         handle: String,
         #[arg(long)]
@@ -53,7 +53,7 @@ pub(crate) enum AppCommands {
 
 #[derive(Subcommand)]
 pub(crate) enum SessionCommands {
-    #[command(about = "Start a Desky guest session from a local handle")]
+    #[command(about = "Start a Desky guest session from a capsule handle or local path")]
     Start {
         handle: String,
         #[arg(long)]
