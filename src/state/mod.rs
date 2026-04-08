@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -108,6 +108,27 @@ pub enum WebSessionState {
     Closed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CapsuleLogStage {
+    Resolve,
+    Materialize,
+    Launch,
+    Permission,
+    Runtime,
+}
+
+impl CapsuleLogStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Resolve => "resolve",
+            Self::Materialize => "materialize",
+            Self::Launch => "launch",
+            Self::Permission => "permission",
+            Self::Runtime => "runtime",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PaneBounds {
     pub x: f32,
@@ -162,26 +183,65 @@ impl AuthPolicyRegistry {
             default_mode: AuthMode::BrowserPreferred,
             policies: vec![
                 // Google OAuth
-                AuthPolicy { origin_contains: "accounts.google.com".into(), path_prefix: None, mode: AuthMode::BrowserRequired },
+                AuthPolicy {
+                    origin_contains: "accounts.google.com".into(),
+                    path_prefix: None,
+                    mode: AuthMode::BrowserRequired,
+                },
                 // GitHub
-                AuthPolicy { origin_contains: "github.com".into(), path_prefix: Some("/login".into()), mode: AuthMode::BrowserRequired },
-                AuthPolicy { origin_contains: "github.com".into(), path_prefix: Some("/session".into()), mode: AuthMode::BrowserRequired },
+                AuthPolicy {
+                    origin_contains: "github.com".into(),
+                    path_prefix: Some("/login".into()),
+                    mode: AuthMode::BrowserRequired,
+                },
+                AuthPolicy {
+                    origin_contains: "github.com".into(),
+                    path_prefix: Some("/session".into()),
+                    mode: AuthMode::BrowserRequired,
+                },
                 // Microsoft
-                AuthPolicy { origin_contains: "login.microsoftonline.com".into(), path_prefix: None, mode: AuthMode::BrowserRequired },
-                AuthPolicy { origin_contains: "login.live.com".into(), path_prefix: None, mode: AuthMode::BrowserRequired },
+                AuthPolicy {
+                    origin_contains: "login.microsoftonline.com".into(),
+                    path_prefix: None,
+                    mode: AuthMode::BrowserRequired,
+                },
+                AuthPolicy {
+                    origin_contains: "login.live.com".into(),
+                    path_prefix: None,
+                    mode: AuthMode::BrowserRequired,
+                },
                 // Generic OAuth paths
-                AuthPolicy { origin_contains: "".into(), path_prefix: Some("/oauth/".into()), mode: AuthMode::BrowserRequired },
-                AuthPolicy { origin_contains: "".into(), path_prefix: Some("/oauth2/".into()), mode: AuthMode::BrowserRequired },
-                AuthPolicy { origin_contains: "".into(), path_prefix: Some("/authorize".into()), mode: AuthMode::BrowserRequired },
-                AuthPolicy { origin_contains: "".into(), path_prefix: Some("/sso/".into()), mode: AuthMode::BrowserRequired },
+                AuthPolicy {
+                    origin_contains: "".into(),
+                    path_prefix: Some("/oauth/".into()),
+                    mode: AuthMode::BrowserRequired,
+                },
+                AuthPolicy {
+                    origin_contains: "".into(),
+                    path_prefix: Some("/oauth2/".into()),
+                    mode: AuthMode::BrowserRequired,
+                },
+                AuthPolicy {
+                    origin_contains: "".into(),
+                    path_prefix: Some("/authorize".into()),
+                    mode: AuthMode::BrowserRequired,
+                },
+                AuthPolicy {
+                    origin_contains: "".into(),
+                    path_prefix: Some("/sso/".into()),
+                    mode: AuthMode::BrowserRequired,
+                },
             ],
         }
     }
 
     pub fn classify(&self, url: &str) -> AuthMode {
         for policy in &self.policies {
-            let host_match = policy.origin_contains.is_empty() || url.contains(&policy.origin_contains);
-            let path_match = policy.path_prefix.as_ref()
+            let host_match =
+                policy.origin_contains.is_empty() || url.contains(&policy.origin_contains);
+            let path_match = policy
+                .path_prefix
+                .as_ref()
                 .map(|p| url.contains(p.as_str()))
                 .unwrap_or(true);
             if host_match && path_match {
@@ -214,7 +274,10 @@ pub struct AuthSession {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PaneSurface {
     Web(WebPane),
-    Native { body: String },
+    Native {
+        body: String,
+    },
+    Inspector,
     Launcher,
     AuthHandoff {
         session_id: String,
@@ -234,6 +297,10 @@ pub struct WebPane {
     pub trust_state: Option<String>,
     pub restricted: bool,
     pub snapshot_label: Option<String>,
+    pub canonical_handle: Option<String>,
+    pub session_id: Option<String>,
+    pub adapter: Option<String>,
+    pub manifest_path: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -309,6 +376,13 @@ pub struct ActivityEntry {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapsuleLogEntry {
+    pub stage: CapsuleLogStage,
+    pub tone: ActivityTone,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BrowserCommandKind {
     Back,
     Forward,
@@ -344,7 +418,28 @@ pub struct ActiveWebPane {
     pub trust_state: Option<String>,
     pub restricted: bool,
     pub snapshot_label: Option<String>,
+    pub canonical_handle: Option<String>,
+    pub session_id: Option<String>,
+    pub adapter: Option<String>,
+    pub manifest_path: Option<String>,
     pub bounds: PaneBounds,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapsuleInspectorView {
+    pub pane_id: PaneId,
+    pub title: String,
+    pub handle: String,
+    pub canonical_handle: Option<String>,
+    pub source_label: Option<String>,
+    pub trust_state: Option<String>,
+    pub restricted: bool,
+    pub snapshot_label: Option<String>,
+    pub session_state: WebSessionState,
+    pub session_id: Option<String>,
+    pub adapter: Option<String>,
+    pub manifest_path: Option<String>,
+    pub logs: Vec<CapsuleLogEntry>,
 }
 
 #[derive(Clone, Debug)]
@@ -354,6 +449,7 @@ pub struct AppState {
     pub workspaces: Vec<Workspace>,
     pub command_bar_text: String,
     pub activity: Vec<ActivityEntry>,
+    pub capsule_logs: HashMap<PaneId, Vec<CapsuleLogEntry>>,
     pub browser_commands: VecDeque<BrowserCommand>,
     pub pending_permission_prompt: Option<PermissionPrompt>,
     pub theme_mode: ThemeMode,
@@ -429,6 +525,10 @@ impl AppState {
                     trust_state: Some("local".to_string()),
                     restricted: true,
                     snapshot_label: None,
+                    canonical_handle: Some(local_tauri.to_string()),
+                    session_id: None,
+                    adapter: None,
+                    manifest_path: None,
                 }),
             }],
             split_ratio: 0.68,
@@ -465,6 +565,10 @@ impl AppState {
                     trust_state: None,
                     restricted: false,
                     snapshot_label: None,
+                    canonical_handle: None,
+                    session_id: None,
+                    adapter: None,
+                    manifest_path: None,
                 }),
             }],
             split_ratio: 0.68,
@@ -487,6 +591,7 @@ impl AppState {
                 tone: ActivityTone::Info,
                 message: "Phase 3 shell bootstrapped with ato-cli guest orchestration".to_string(),
             }],
+            capsule_logs: HashMap::new(),
             browser_commands: VecDeque::new(),
             pending_permission_prompt: None,
             theme_mode: ThemeMode::Light,
@@ -670,7 +775,10 @@ impl AppState {
                 Ok(CapsuleSurfaceInput::HostRoute { route }) => {
                     self.push_activity(
                         ActivityTone::Info,
-                        format!("Host route {} is reserved for desktop callbacks", route.namespace),
+                        format!(
+                            "Host route {} is reserved for desktop callbacks",
+                            route.namespace
+                        ),
                     );
                     return;
                 }
@@ -718,10 +826,11 @@ impl AppState {
             };
         let label = next_route.to_string();
         let partition_id = sanitize(&label);
-        let mut navigated = false;
+        let mut navigated = None;
 
         if let Some(task) = self.active_task_mut() {
             if let Some(pane) = task.focused_pane_mut() {
+                let pane_id = pane.id;
                 pane.title = label.clone();
                 pane.surface = PaneSurface::Web(WebPane {
                     route: next_route.clone(),
@@ -733,22 +842,40 @@ impl AppState {
                     trust_state,
                     restricted,
                     snapshot_label: None,
+                    canonical_handle: match &next_route {
+                        GuestRoute::CapsuleHandle { handle, .. } => Some(handle.clone()),
+                        _ => None,
+                    },
+                    session_id: None,
+                    adapter: None,
+                    manifest_path: None,
                 });
-                navigated = true;
+                navigated = Some(pane_id);
             }
         }
 
-        if !navigated {
+        let Some(pane_id) = navigated else {
             self.push_activity(
                 ActivityTone::Error,
                 "No focused pane available for navigation",
             );
             return;
-        }
+        };
 
         self.command_bar_text = label.clone();
         self.shell_mode = ShellMode::Focus;
         self.push_activity(ActivityTone::Info, format!("Navigating to {label}"));
+        if matches!(next_route, GuestRoute::CapsuleHandle { .. }) {
+            self.capsule_logs.remove(&pane_id);
+            self.push_capsule_log(
+                pane_id,
+                CapsuleLogStage::Resolve,
+                ActivityTone::Info,
+                format!("Queued capsule launch for {label}"),
+            );
+        } else {
+            self.capsule_logs.remove(&pane_id);
+        }
     }
 
     pub fn show_settings_panel(&mut self) {
@@ -845,6 +972,12 @@ impl AppState {
             match event {
                 ShellEvent::SessionReady { pane_id } => {
                     self.sync_web_session_state(pane_id, WebSessionState::Mounted);
+                    self.push_capsule_log(
+                        pane_id,
+                        CapsuleLogStage::Launch,
+                        ActivityTone::Info,
+                        "Capsule frontend mounted",
+                    );
                 }
                 ShellEvent::PermissionDenied {
                     pane_id,
@@ -864,9 +997,27 @@ impl AppState {
                         ActivityTone::Warning,
                         format!("Pane {pane_id} denied capability {capability} for {route_label}"),
                     );
+                    self.push_capsule_log(
+                        pane_id,
+                        CapsuleLogStage::Permission,
+                        ActivityTone::Warning,
+                        format!(
+                            "Capability {capability} was denied for {route_label}{}",
+                            command
+                                .as_deref()
+                                .map(|value| format!(" via {value}"))
+                                .unwrap_or_default()
+                        ),
+                    );
                 }
                 ShellEvent::SessionClosed { pane_id } => {
                     self.sync_web_session_state(pane_id, WebSessionState::Closed);
+                    self.push_capsule_log(
+                        pane_id,
+                        CapsuleLogStage::Launch,
+                        ActivityTone::Warning,
+                        "Capsule session closed",
+                    );
                 }
                 ShellEvent::UrlChanged { pane_id, url } => {
                     let Ok(parsed) = Url::parse(&url) else {
@@ -883,6 +1034,10 @@ impl AppState {
                             web.trust_state = None;
                             web.restricted = false;
                             web.snapshot_label = None;
+                            web.canonical_handle = None;
+                            web.session_id = None;
+                            web.adapter = None;
+                            web.manifest_path = None;
                         }
                     });
                     if active_pane == Some(pane_id) {
@@ -916,7 +1071,9 @@ impl AppState {
                     web.partition_id = sanitize(&label);
                     web.session = WebSessionState::Launching;
                     web.source_label = match &web.route {
-                        GuestRoute::CapsuleHandle { handle, .. } => Some(route_source_label(handle)),
+                        GuestRoute::CapsuleHandle { handle, .. } => {
+                            Some(route_source_label(handle))
+                        }
                         GuestRoute::Capsule { .. } => Some("embedded".to_string()),
                         GuestRoute::ExternalUrl(_) => Some("web".to_string()),
                     };
@@ -949,13 +1106,11 @@ impl AppState {
                 // The companion pane is deliberately native so diagnostics stay separate from guest content.
                 task.panes.push(Pane {
                     id: next_id,
-                    title: "Capability inspector".to_string(),
+                    title: "Capsule inspector".to_string(),
                     role: PaneRole::Companion,
                     visible: true,
                     bounds: PaneBounds::empty(),
-                    surface: PaneSurface::Native {
-                        body: "Phase 2 keeps the primary pane live and uses this companion pane for diagnostics.".to_string(),
-                    },
+                    surface: PaneSurface::Inspector,
                 });
                 task.pane_tree = PaneTree::Split {
                     axis: SplitAxis::Vertical,
@@ -1040,9 +1195,16 @@ impl AppState {
                 trust_state: web.trust_state.clone(),
                 restricted: web.restricted,
                 snapshot_label: web.snapshot_label.clone(),
+                canonical_handle: web.canonical_handle.clone(),
+                session_id: web.session_id.clone(),
+                adapter: web.adapter.clone(),
+                manifest_path: web.manifest_path.clone(),
                 bounds: pane.bounds,
             }),
-            PaneSurface::Native { .. } | PaneSurface::Launcher | PaneSurface::AuthHandoff { .. } => None,
+            PaneSurface::Native { .. }
+            | PaneSurface::Inspector
+            | PaneSurface::Launcher
+            | PaneSurface::AuthHandoff { .. } => None,
         }
     }
 
@@ -1104,6 +1266,36 @@ impl AppState {
         }
     }
 
+    pub fn active_capsule_inspector(&self) -> Option<CapsuleInspectorView> {
+        let active = self.active_web_pane()?;
+        if !matches!(
+            active.route,
+            GuestRoute::CapsuleHandle { .. } | GuestRoute::Capsule { .. }
+        ) {
+            return None;
+        }
+
+        Some(CapsuleInspectorView {
+            pane_id: active.pane_id,
+            title: active.title,
+            handle: active.route.to_string(),
+            canonical_handle: active.canonical_handle,
+            source_label: active.source_label,
+            trust_state: active.trust_state,
+            restricted: active.restricted,
+            snapshot_label: active.snapshot_label,
+            session_state: active.session,
+            session_id: active.session_id,
+            adapter: active.adapter,
+            manifest_path: active.manifest_path,
+            logs: self
+                .capsule_logs
+                .get(&active.pane_id)
+                .cloned()
+                .unwrap_or_default(),
+        })
+    }
+
     pub fn push_activity(&mut self, tone: ActivityTone, message: impl Into<String>) {
         self.activity.push(ActivityEntry {
             tone,
@@ -1116,9 +1308,22 @@ impl AppState {
         }
     }
 
-    pub fn extend_activity(&mut self, entries: Vec<ActivityEntry>) {
-        for entry in entries {
-            self.push_activity(entry.tone, entry.message);
+    pub fn push_capsule_log(
+        &mut self,
+        pane_id: PaneId,
+        stage: CapsuleLogStage,
+        tone: ActivityTone,
+        message: impl Into<String>,
+    ) {
+        let logs = self.capsule_logs.entry(pane_id).or_default();
+        logs.push(CapsuleLogEntry {
+            stage,
+            tone,
+            message: message.into(),
+        });
+        if logs.len() > 40 {
+            let excess = logs.len() - 40;
+            logs.drain(0..excess);
         }
     }
 
@@ -1251,6 +1456,7 @@ impl AppState {
             .map(|pane| match &pane.surface {
                 PaneSurface::Web(web) => web.route.to_string(),
                 PaneSurface::Native { .. } => pane.title.clone(),
+                PaneSurface::Inspector => "Capsule inspector".to_string(),
                 PaneSurface::Launcher => "Launchpad".to_string(),
                 PaneSurface::AuthHandoff { origin, .. } => format!("Signing in to {origin}…"),
             })
@@ -1259,17 +1465,25 @@ impl AppState {
     pub fn update_guest_route_metadata(
         &mut self,
         pane_id: PaneId,
+        canonical_handle: Option<String>,
         source_label: Option<String>,
         trust_state: Option<String>,
         restricted: bool,
         snapshot_label: Option<String>,
+        session_id: Option<String>,
+        adapter: Option<String>,
+        manifest_path: Option<String>,
     ) {
         self.update_pane(pane_id, |pane| {
             if let PaneSurface::Web(web) = &mut pane.surface {
+                web.canonical_handle = canonical_handle.clone();
                 web.source_label = source_label.clone();
                 web.trust_state = trust_state.clone();
                 web.restricted = restricted;
                 web.snapshot_label = snapshot_label.clone();
+                web.session_id = session_id.clone();
+                web.adapter = adapter.clone();
+                web.manifest_path = manifest_path.clone();
             }
         });
     }
@@ -1282,6 +1496,15 @@ impl AppState {
         let Some(prompt) = self.pending_permission_prompt.take() else {
             return;
         };
+        self.push_capsule_log(
+            prompt.pane_id,
+            CapsuleLogStage::Permission,
+            ActivityTone::Info,
+            format!(
+                "Recorded one-shot permission intent for {}",
+                prompt.capability
+            ),
+        );
         self.push_activity(
             ActivityTone::Info,
             format!(
@@ -1295,6 +1518,15 @@ impl AppState {
         let Some(prompt) = self.pending_permission_prompt.take() else {
             return;
         };
+        self.push_capsule_log(
+            prompt.pane_id,
+            CapsuleLogStage::Permission,
+            ActivityTone::Info,
+            format!(
+                "Recorded session permission intent for {}",
+                prompt.capability
+            ),
+        );
         self.push_activity(
             ActivityTone::Info,
             format!(
@@ -1308,9 +1540,18 @@ impl AppState {
         let Some(prompt) = self.pending_permission_prompt.take() else {
             return;
         };
+        self.push_capsule_log(
+            prompt.pane_id,
+            CapsuleLogStage::Permission,
+            ActivityTone::Warning,
+            format!("Denied permission {}", prompt.capability),
+        );
         self.push_activity(
             ActivityTone::Warning,
-            format!("Denied permission {} for {}.", prompt.capability, prompt.route_label),
+            format!(
+                "Denied permission {} for {}.",
+                prompt.capability, prompt.route_label
+            ),
         );
     }
 
@@ -1335,7 +1576,9 @@ impl AppState {
             created_at: std::time::SystemTime::now(),
         });
         self.update_pane(pane_id, |pane| {
-            if let PaneSurface::Web(web) = std::mem::replace(&mut pane.surface, PaneSurface::Launcher) {
+            if let PaneSurface::Web(web) =
+                std::mem::replace(&mut pane.surface, PaneSurface::Launcher)
+            {
                 pane.surface = PaneSurface::AuthHandoff {
                     session_id: session_id.clone(),
                     origin: origin.clone(),
@@ -1348,26 +1591,36 @@ impl AppState {
 
     pub fn cancel_auth_handoff(&mut self, pane_id: PaneId) {
         self.update_pane(pane_id, |pane| {
-            if let PaneSurface::AuthHandoff { original_web_pane, .. } =
-                std::mem::replace(&mut pane.surface, PaneSurface::Launcher)
+            if let PaneSurface::AuthHandoff {
+                original_web_pane, ..
+            } = std::mem::replace(&mut pane.surface, PaneSurface::Launcher)
             {
                 pane.surface = PaneSurface::Web(original_web_pane);
             }
         });
-        if let Some(s) = self.auth_sessions.iter_mut().find(|s| s.originating_pane_id == pane_id) {
+        if let Some(s) = self
+            .auth_sessions
+            .iter_mut()
+            .find(|s| s.originating_pane_id == pane_id)
+        {
             s.status = AuthSessionStatus::Cancelled;
         }
     }
 
     pub fn resume_after_auth(&mut self, pane_id: PaneId) {
         self.update_pane(pane_id, |pane| {
-            if let PaneSurface::AuthHandoff { original_web_pane, .. } =
-                std::mem::replace(&mut pane.surface, PaneSurface::Launcher)
+            if let PaneSurface::AuthHandoff {
+                original_web_pane, ..
+            } = std::mem::replace(&mut pane.surface, PaneSurface::Launcher)
             {
                 pane.surface = PaneSurface::Web(original_web_pane);
             }
         });
-        if let Some(s) = self.auth_sessions.iter_mut().find(|s| s.originating_pane_id == pane_id) {
+        if let Some(s) = self
+            .auth_sessions
+            .iter_mut()
+            .find(|s| s.originating_pane_id == pane_id)
+        {
             s.status = AuthSessionStatus::Completed;
         }
     }
@@ -1440,7 +1693,10 @@ fn sidebar_icon_for_task(task: &TaskSet) -> SidebarTaskIconSpec {
                 SidebarTaskIconSpec::Monogram(short_label(&task.title))
             }
         },
-        PaneSurface::Native { .. } | PaneSurface::Launcher | PaneSurface::AuthHandoff { .. } => {
+        PaneSurface::Native { .. }
+        | PaneSurface::Inspector
+        | PaneSurface::Launcher
+        | PaneSurface::AuthHandoff { .. } => {
             SidebarTaskIconSpec::Monogram(short_label(&task.title))
         }
     }
@@ -1465,6 +1721,7 @@ fn task_route_label(task: &TaskSet) -> String {
     match &pane.surface {
         PaneSurface::Web(web) => web.route.to_string(),
         PaneSurface::Native { .. } => "Native settings panel".to_string(),
+        PaneSurface::Inspector => "Capsule inspector".to_string(),
         PaneSurface::Launcher => "Launchpad".to_string(),
         PaneSurface::AuthHandoff { origin, .. } => format!("Signing in to {origin}…"),
     }
@@ -1634,6 +1891,52 @@ mod tests {
         assert_eq!(prompt.pane_id, pane_id);
         assert_eq!(prompt.capability, "read-file");
         assert_eq!(prompt.command.as_deref(), Some("fs.read"));
+        let inspector = state.active_capsule_inspector().expect("inspector");
+        assert!(inspector
+            .logs
+            .iter()
+            .any(|entry| entry.stage == CapsuleLogStage::Permission));
+    }
+
+    #[test]
+    fn capsule_inspector_tracks_navigation_metadata_and_logs() {
+        let mut state = AppState::demo();
+
+        state.navigate_to_url("capsule://ato.run/koh0920/ato-onboarding");
+        let pane_id = state.active_web_pane().expect("pane").pane_id;
+        state.update_guest_route_metadata(
+            pane_id,
+            Some("capsule://ato.run/koh0920/ato-onboarding".to_string()),
+            Some("registry".to_string()),
+            Some("untrusted".to_string()),
+            true,
+            Some("version 0.1.0".to_string()),
+            Some("desky-session-1".to_string()),
+            Some("tauri".to_string()),
+            Some("/tmp/capsule.toml".to_string()),
+        );
+        state.push_capsule_log(
+            pane_id,
+            CapsuleLogStage::Launch,
+            ActivityTone::Info,
+            "Guest session ready",
+        );
+
+        let inspector = state.active_capsule_inspector().expect("inspector");
+        assert_eq!(inspector.handle, "capsule://ato.run/koh0920/ato-onboarding");
+        assert_eq!(
+            inspector.canonical_handle.as_deref(),
+            Some("capsule://ato.run/koh0920/ato-onboarding")
+        );
+        assert_eq!(inspector.source_label.as_deref(), Some("registry"));
+        assert_eq!(inspector.session_id.as_deref(), Some("desky-session-1"));
+        assert_eq!(inspector.adapter.as_deref(), Some("tauri"));
+        assert!(inspector.logs.iter().any(|entry| {
+            entry.stage == CapsuleLogStage::Resolve && entry.message.contains("Queued capsule")
+        }));
+        assert!(inspector.logs.iter().any(|entry| {
+            entry.stage == CapsuleLogStage::Launch && entry.message.contains("ready")
+        }));
     }
 
     #[test]

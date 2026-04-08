@@ -22,7 +22,7 @@ use crate::bridge::{BridgeProxy, GuestBridgeResponse, GuestSessionContext, Shell
 use crate::orchestrator::{resolve_and_start_guest, stop_guest_session, GuestLaunchSession};
 use crate::state::{
     ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry, AuthSessionStatus,
-    BrowserCommandKind, GuestRoute, PaneBounds, ShellMode, WebSessionState,
+    BrowserCommandKind, CapsuleLogStage, GuestRoute, PaneBounds, ShellMode, WebSessionState,
 };
 
 struct AuthHandoffSignal {
@@ -85,19 +85,36 @@ impl WebViewManager {
     pub fn sync_from_state(&mut self, window: &Window, state: &mut AppState) {
         // Drain auth handoff signals from navigation handlers before any other reconciliation.
         let auth_signals: Vec<AuthHandoffSignal> = {
-            let mut q = self.pending_auth_handoffs.lock().unwrap_or_else(|e| e.into_inner());
+            let mut q = self
+                .pending_auth_handoffs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             q.drain(..).collect()
         };
         for signal in auth_signals {
             let session_id = state.begin_auth_handoff(signal.pane_id, &signal.url);
-            if let Some(s) = state.auth_sessions.iter_mut().find(|s| s.session_id == session_id) {
+            if let Some(s) = state
+                .auth_sessions
+                .iter_mut()
+                .find(|s| s.session_id == session_id)
+            {
                 s.status = AuthSessionStatus::OpenedInBrowser;
             }
             let _ = Command::new("open").arg(&signal.url).status();
         }
 
         // Pull bridge activity into app state first so rebuilds always see the latest guest messages.
-        state.extend_activity(self.bridge.drain_activity());
+        for entry in self.bridge.drain_activity_entries() {
+            if let Some(pane_id) = entry.pane_id {
+                state.push_capsule_log(
+                    pane_id,
+                    CapsuleLogStage::Runtime,
+                    entry.tone.clone(),
+                    entry.message.clone(),
+                );
+            }
+            state.push_activity(entry.tone, entry.message);
+        }
         let shell_events = self.bridge.drain_shell_events();
         self.apply_shell_events(&shell_events);
         state.apply_shell_events(shell_events);
@@ -146,11 +163,22 @@ impl WebViewManager {
                         self.ensure_pending_local_launch(active.pane_id, &route_key, handle, state);
                     }
                 }
-                _ => match self.build_webview(window, &active, None, state.auth_policy_registry.clone()) {
+                _ => match self.build_webview(
+                    window,
+                    &active,
+                    None,
+                    state.auth_policy_registry.clone(),
+                ) {
                     Ok(webview) => {
                         if !route_requires_ready_signal(&active.route) {
                             state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
                         }
+                        state.push_capsule_log(
+                            active.pane_id,
+                            CapsuleLogStage::Launch,
+                            ActivityTone::Info,
+                            format!("Built webview for {}", active.route),
+                        );
                         self.bridge.log(
                             ActivityTone::Info,
                             format!("Built child webview for {}", active.route),
@@ -159,6 +187,12 @@ impl WebViewManager {
                     }
                     Err(error) => {
                         state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
+                        state.push_capsule_log(
+                            active.pane_id,
+                            CapsuleLogStage::Launch,
+                            ActivityTone::Error,
+                            format!("Failed to build child webview: {error}"),
+                        );
                         state.push_activity(
                             ActivityTone::Error,
                             format!("Failed to build child webview: {error}"),
@@ -379,18 +413,42 @@ impl WebViewManager {
             }
 
             match completed.session {
-                Ok(session) => match self.build_webview(window, &active, Some(session), state.auth_policy_registry.clone()) {
+                Ok(session) => match self.build_webview(
+                    window,
+                    &active,
+                    Some(session),
+                    state.auth_policy_registry.clone(),
+                ) {
                     Ok(webview) => {
                         state.sync_web_session_state(active.pane_id, WebSessionState::Launching);
                         if let Some(session) = webview.launched_session.as_ref() {
                             state.update_guest_route_metadata(
                                 active.pane_id,
+                                session.canonical_handle.clone(),
                                 session.source.clone(),
                                 Some(session.trust_state.clone()),
                                 session.restricted,
                                 session.snapshot_label.clone(),
+                                Some(session.session_id.clone()),
+                                Some(session.adapter.clone()),
+                                Some(session.manifest_path.display().to_string()),
+                            );
+                            state.push_capsule_log(
+                                active.pane_id,
+                                CapsuleLogStage::Launch,
+                                ActivityTone::Info,
+                                format!(
+                                    "Guest session {} is ready with adapter {}",
+                                    session.session_id, session.adapter
+                                ),
                             );
                         }
+                        state.push_capsule_log(
+                            active.pane_id,
+                            CapsuleLogStage::Launch,
+                            ActivityTone::Info,
+                            format!("Built webview for {}", active.route),
+                        );
                         self.bridge.log(
                             ActivityTone::Info,
                             format!("Built child webview for {}", active.route),
@@ -399,6 +457,12 @@ impl WebViewManager {
                     }
                     Err(error) => {
                         state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
+                        state.push_capsule_log(
+                            active.pane_id,
+                            CapsuleLogStage::Launch,
+                            ActivityTone::Error,
+                            format!("Failed to build child webview: {error}"),
+                        );
                         state.push_activity(
                             ActivityTone::Error,
                             format!("Failed to build child webview: {error}"),
@@ -407,6 +471,12 @@ impl WebViewManager {
                 },
                 Err(error) => {
                     state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
+                    state.push_capsule_log(
+                        active.pane_id,
+                        CapsuleLogStage::Launch,
+                        ActivityTone::Error,
+                        format!("Failed to start guest session: {error}"),
+                    );
                     state.push_activity(
                         ActivityTone::Error,
                         format!("Failed to start guest session: {error}"),
@@ -427,7 +497,19 @@ impl WebViewManager {
         if self.pending_launches.contains_key(&key) {
             return;
         }
+        state.push_capsule_log(
+            pane_id,
+            CapsuleLogStage::Resolve,
+            ActivityTone::Info,
+            format!("Resolved capsule handle {route_key}; invoking ato-cli session flow"),
+        );
         state.sync_web_session_state(pane_id, WebSessionState::Materializing);
+        state.push_capsule_log(
+            pane_id,
+            CapsuleLogStage::Materialize,
+            ActivityTone::Info,
+            format!("Materializing guest session for {route_key}"),
+        );
 
         let (sender, receiver) = channel();
         let route_key = route_key.to_string();
@@ -445,7 +527,10 @@ impl WebViewManager {
                 receiver,
             },
         );
-        state.push_activity(ActivityTone::Info, format!("Materializing guest for {route_key}"));
+        state.push_activity(
+            ActivityTone::Info,
+            format!("Materializing guest for {route_key}"),
+        );
 
         let launch_task = background_executor.spawn(async move {
             let result = PendingLaunchResult {
@@ -511,9 +596,11 @@ impl WebViewManager {
                     anyhow::anyhow!("capsule-handle webview build requires resolved guest session")
                 })?;
                 for note in &session.notes {
-                    self.bridge.log(ActivityTone::Info, note.clone());
+                    self.bridge
+                        .log_for_pane(Some(pane.pane_id), ActivityTone::Info, note.clone());
                 }
-                self.bridge.log(
+                self.bridge.log_for_pane(
+                    Some(pane.pane_id),
                     ActivityTone::Info,
                     format!(
                         "Started ato-cli guest session {} for {}",
@@ -1007,6 +1094,7 @@ fn active_web_session(state: &AppState, pane_id: usize) -> Option<WebSessionStat
         match &pane.surface {
             crate::state::PaneSurface::Web(web) => Some(web.session.clone()),
             crate::state::PaneSurface::Native { .. }
+            | crate::state::PaneSurface::Inspector
             | crate::state::PaneSurface::Launcher
             | crate::state::PaneSurface::AuthHandoff { .. } => None,
         }
@@ -1370,6 +1458,10 @@ mod tests {
             trust_state: None,
             restricted: false,
             snapshot_label: None,
+            canonical_handle: None,
+            session_id: None,
+            adapter: None,
+            manifest_path: None,
             bounds: PaneBounds::empty(),
         }
     }
