@@ -6,7 +6,12 @@ use serde::Serialize;
 
 use capsule_core::handle::{
     classify_surface_input, CanonicalHandle, HandleInput, InputSurface, LaunchPlan,
-    PermissionRequestPolicy, ResolvedSnapshot, SurfaceInput, TrustState,
+    LocalTrustDecisionRecord, PermissionRequestPolicy, ResolvedMetadataCacheEntry,
+    ResolvedSnapshot, SurfaceInput, TrustState,
+};
+use capsule_core::handle_store::{
+    load_metadata_cache, metadata_cache_is_fresh, metadata_cache_ttl_seconds,
+    resolve_trust_state, store_local_trust_decision, store_metadata_cache,
 };
 use capsule_core::launch_spec::{derive_launch_spec, LaunchSpecSource};
 use capsule_core::router::{
@@ -234,6 +239,11 @@ fn build_local_resolution(
         resolved_path: manifest_path.display().to_string(),
         fetched_at: chrono::Utc::now().to_rfc3339(),
     });
+    let trust_state = TrustState::Local;
+    if let Some(canonical) = canonical.as_ref() {
+        persist_metadata_cache(canonical, &normalized_handle, &plan, snapshot.clone())?;
+        persist_local_trust_state(canonical, trust_state.clone(), "local-path")?;
+    }
 
     Ok(HandleResolution {
         input,
@@ -242,12 +252,12 @@ fn build_local_resolution(
         render_strategy: render_strategy(&plan, guest.as_ref()),
         canonical_handle: canonical.as_ref().map(CanonicalHandle::display_string),
         source: canonical.as_ref().map(|handle| handle.source_label().to_string()),
-        trust_state: TrustState::Local,
+        trust_state: trust_state.clone(),
         restricted: true,
         launch_plan: Some(default_launch_plan(
             canonical,
             snapshot.clone(),
-            TrustState::Local,
+            trust_state,
         )),
         snapshot,
         guest: guest.as_ref().map(preview_guest_contract),
@@ -324,6 +334,10 @@ fn build_store_resolution(
     target_label: Option<&str>,
     registry: Option<&str>,
 ) -> Result<HandleResolution> {
+    let cached_metadata = load_metadata_cache(&canonical)
+        .with_context(|| format!("failed to load cached metadata for {normalized_handle}"))?;
+    let trust_state = resolve_trust_state(&canonical, TrustState::Untrusted)
+        .with_context(|| format!("failed to load trust state for {normalized_handle}"))?;
     let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
     let cli_ref = canonical
         .to_cli_ref()
@@ -347,6 +361,7 @@ fn build_store_resolution(
             version: version
                 .clone()
                 .or_else(|| detail.as_ref().and_then(|item| item.latest_version.clone()))
+                .or_else(|| cached_registry_version(cached_metadata.as_ref()))
                 .unwrap_or_else(|| "latest".to_string()),
             release_id: None,
             content_hash: None,
@@ -355,6 +370,16 @@ fn build_store_resolution(
     } else {
         None
     };
+    persist_metadata_cache(&canonical, &normalized_handle, &plan, snapshot.clone())?;
+    let mut notes = vec![
+        "Remote store handles currently resolve target metadata only. Launch details become concrete after local materialization.".to_string(),
+    ];
+    if let Some(cached) = cached_metadata.as_ref().filter(|entry| metadata_cache_is_fresh(entry)) {
+        notes.push(format!(
+            "Cached metadata was available from {}.",
+            cached.fetched_at
+        ));
+    }
 
     Ok(HandleResolution {
         input,
@@ -363,20 +388,18 @@ fn build_store_resolution(
         render_strategy: render_strategy(&plan, guest.as_ref()),
         canonical_handle: Some(canonical.display_string()),
         source: Some("registry".to_string()),
-        trust_state: TrustState::Untrusted,
+        trust_state: trust_state.clone(),
         restricted: true,
         launch_plan: Some(default_launch_plan(
             Some(canonical),
             snapshot.clone(),
-            TrustState::Untrusted,
+            trust_state,
         )),
         snapshot,
         guest: guest.as_ref().map(preview_guest_contract),
         target: Some(build_target_summary(&plan, None, None)),
         launch: None,
-        notes: vec![
-            "Remote store handles currently resolve target metadata only. Launch details become concrete after local materialization.".to_string(),
-        ],
+        notes,
     })
 }
 
@@ -386,6 +409,10 @@ fn build_github_resolution(
     canonical: CanonicalHandle,
     target_label: Option<&str>,
 ) -> Result<HandleResolution> {
+    let cached_metadata = load_metadata_cache(&canonical)
+        .with_context(|| format!("failed to load cached metadata for {normalized_handle}"))?;
+    let trust_state = resolve_trust_state(&canonical, TrustState::Untrusted)
+        .with_context(|| format!("failed to load trust state for {normalized_handle}"))?;
     let cli_ref = canonical
         .to_cli_ref()
         .ok_or_else(|| anyhow::anyhow!("github handle does not support CLI resolution"))?;
@@ -422,6 +449,17 @@ fn build_github_resolution(
         default_branch: Some(draft.repo.default_branch.clone()),
         fetched_at: chrono::Utc::now().to_rfc3339(),
     });
+    persist_metadata_cache(&canonical, &normalized_handle, &plan, snapshot.clone())?;
+    let mut notes = vec![format!(
+        "Resolved GitHub repository snapshot {} at {}.",
+        draft.resolved_ref.ref_name, draft.resolved_ref.sha
+    )];
+    if let Some(cached) = cached_metadata.as_ref().filter(|entry| metadata_cache_is_fresh(entry)) {
+        notes.push(format!(
+            "Cached metadata was available from {}.",
+            cached.fetched_at
+        ));
+    }
 
     Ok(HandleResolution {
         input,
@@ -430,21 +468,18 @@ fn build_github_resolution(
         render_strategy: render_strategy(&plan, guest.as_ref()),
         canonical_handle: Some(canonical.display_string()),
         source: Some("github".to_string()),
-        trust_state: TrustState::Untrusted,
+        trust_state: trust_state.clone(),
         restricted: true,
         launch_plan: Some(default_launch_plan(
             Some(canonical),
             snapshot.clone(),
-            TrustState::Untrusted,
+            trust_state,
         )),
         snapshot,
         guest: guest.as_ref().map(preview_guest_contract),
         target: Some(build_target_summary(&plan, None, None)),
         launch: None,
-        notes: vec![format!(
-            "Resolved GitHub repository snapshot {} at {}.",
-            draft.resolved_ref.ref_name, draft.resolved_ref.sha
-        )],
+        notes,
     })
 }
 
@@ -481,6 +516,64 @@ fn build_launch_preview(spec: capsule_core::launch_spec::LaunchSpec) -> LaunchPr
             LaunchSpecSource::Entrypoint => "entrypoint".to_string(),
             LaunchSpecSource::RunCommand => "run_command".to_string(),
         },
+    }
+}
+
+fn persist_metadata_cache(
+    canonical: &CanonicalHandle,
+    normalized_input: &str,
+    plan: &ManifestData,
+    snapshot: Option<ResolvedSnapshot>,
+) -> Result<()> {
+    let entry = ResolvedMetadataCacheEntry {
+        canonical: canonical.clone(),
+        normalized_input: normalized_input.to_string(),
+        manifest_summary: Some(build_manifest_summary(plan)),
+        snapshot,
+        fetched_at: chrono::Utc::now().to_rfc3339(),
+        ttl_seconds: metadata_cache_ttl_seconds(canonical),
+    };
+    store_metadata_cache(&entry)
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("failed to persist metadata cache for {normalized_input}"))
+}
+
+fn persist_local_trust_state(
+    canonical: &CanonicalHandle,
+    trust_state: TrustState,
+    reason: &str,
+) -> Result<()> {
+    let record = LocalTrustDecisionRecord {
+        canonical: canonical.clone(),
+        trust_state,
+        session_scoped: false,
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+        reason: Some(reason.to_string()),
+    };
+    store_local_trust_decision(&record)
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("failed to persist local trust state for {}", canonical.display_string()))
+}
+
+fn build_manifest_summary(plan: &ManifestData) -> String {
+    let mut parts = vec![format!("target={}", plan.selected_target_label())];
+    if let Some(runtime) = plan.execution_runtime() {
+        parts.push(format!("runtime={runtime}"));
+    }
+    if let Some(driver) = plan.execution_driver() {
+        parts.push(format!("driver={driver}"));
+    }
+    if let Some(language) = plan.execution_language() {
+        parts.push(format!("language={language}"));
+    }
+    parts.join(" ")
+}
+
+fn cached_registry_version(cache_entry: Option<&ResolvedMetadataCacheEntry>) -> Option<String> {
+    let snapshot = cache_entry?.snapshot.as_ref()?;
+    match snapshot {
+        ResolvedSnapshot::RegistryRelease { version, .. } => Some(version.clone()),
+        _ => None,
     }
 }
 
