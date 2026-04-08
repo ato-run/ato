@@ -2,6 +2,9 @@ mod chrome;
 mod panels;
 mod share;
 mod sidebar;
+mod theme;
+
+use theme::Theme;
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -9,9 +12,9 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, linear_color_stop, linear_gradient, point, px, rgb, AsyncWindowContext, BoxShadow,
-    Context, Entity, FocusHandle, Focusable, Image, ImageFormat, IntoElement, Render,
-    WeakEntity, Window,
+    div, hsla, linear_color_stop, linear_gradient, point, px, AsyncWindowContext, BoxShadow,
+    Context, Entity, FocusHandle, Focusable, FontWeight, Image, ImageFormat, IntoElement,
+    MouseButton, Render, WeakEntity, Window,
 };
 use gpui_component::input::{InputEvent, InputState};
 
@@ -21,13 +24,18 @@ use self::share::render_preview_card;
 use self::sidebar::{favicon_request_url, render_task_rail, FaviconState};
 
 use crate::app::{
-    BrowserBack, BrowserForward, BrowserReload, CycleHandle, DismissTransient, ExpandSplit,
-    FocusCommandBar, NavigateToUrl, NewTab, NextTask, NextWorkspace, PreviousTask,
-    PreviousWorkspace, SelectTask, ShrinkSplit, SplitPane, ToggleOverview,
-    ShowSettings,
+    AllowPermissionForSession, AllowPermissionOnce, BrowserBack, BrowserForward, BrowserReload,
+    CancelAuthHandoff, CycleHandle, DenyPermissionPrompt, DismissTransient, ExpandSplit,
+    FocusCommandBar, NativeCopy, NativeCut, NativePaste, NativeRedo, NativeSelectAll, NativeUndo,
+    NavigateToUrl, NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, PreviousTask,
+    PreviousWorkspace, ResumeAfterAuth, SelectTask, ShowSettings, ShrinkSplit, SplitPane,
+    ToggleOverview, ToggleTheme,
 };
 use crate::orchestrator::cleanup_stale_guest_sessions;
-use crate::state::{ActivityTone, AppState, PaneBounds, ShellMode, SidebarTaskIconSpec};
+use crate::state::{
+    ActivityTone, AppState, AuthSessionStatus, PaneBounds, PaneId, PaneSurface, ShellMode,
+    SidebarTaskIconSpec,
+};
 use crate::webview::WebViewManager;
 
 pub(super) const CHROME_HEIGHT: f32 = 48.0;
@@ -71,7 +79,9 @@ impl DesktopShell {
         let stage = compute_stage_bounds(&state, f32::from(size.width), f32::from(size.height));
         state.set_active_bounds(stage);
         webviews.sync_from_state(window, &mut state);
-        window.focus(&focus_handle, cx);
+        if webviews.wants_host_focus(&state) {
+            window.focus(&focus_handle, cx);
+        }
 
         cx.subscribe_in(
             &omnibar,
@@ -81,7 +91,15 @@ impl DesktopShell {
                     let url = omnibar.read(cx).value().to_string();
                     window.dispatch_action(Box::new(NavigateToUrl { url }), cx);
                 }
-                InputEvent::Change | InputEvent::Focus | InputEvent::Blur => {
+                InputEvent::Change | InputEvent::Focus => {
+                    this.sync_omnibar_with_state(window, cx, false);
+                    cx.notify();
+                }
+                InputEvent::Blur => {
+                    if matches!(this.state.shell_mode, ShellMode::CommandBar) {
+                        this.state.dismiss_transient();
+                        this.sync_focus_target(window, cx);
+                    }
                     this.sync_omnibar_with_state(window, cx, false);
                     cx.notify();
                 }
@@ -109,6 +127,11 @@ impl DesktopShell {
         }
     }
 
+    fn on_toggle_theme(&mut self, _: &ToggleTheme, _window: &mut Window, cx: &mut Context<Self>) {
+        self.state.toggle_theme();
+        cx.notify();
+    }
+
     fn on_focus_command_bar(
         &mut self,
         _: &FocusCommandBar,
@@ -117,57 +140,60 @@ impl DesktopShell {
     ) {
         self.state.focus_command_bar();
         self.sync_omnibar_with_state(window, cx, true);
-        window.focus(&self.omnibar.focus_handle(cx), cx);
+        self.sync_focus_target(window, cx);
         cx.notify();
     }
 
-    fn on_toggle_overview(&mut self, _: &ToggleOverview, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_toggle_overview(
+        &mut self,
+        _: &ToggleOverview,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.state.toggle_overview();
+        self.sync_focus_target(window, cx);
         cx.notify();
     }
 
-    fn on_next_workspace(&mut self, _: &NextWorkspace, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_next_workspace(
+        &mut self,
+        _: &NextWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.state.next_workspace();
+        self.sync_focus_target(window, cx);
         cx.notify();
     }
 
     fn on_previous_workspace(
         &mut self,
         _: &PreviousWorkspace,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.state.previous_workspace();
+        self.sync_focus_target(window, cx);
         cx.notify();
     }
 
     fn on_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
         self.state.create_new_tab();
         self.sync_omnibar_with_state(window, cx, false);
-        window.focus(&self.focus_handle, cx);
+        self.sync_focus_target(window, cx);
         cx.notify();
     }
 
-    fn on_show_settings(
-        &mut self,
-        _: &ShowSettings,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_show_settings(&mut self, _: &ShowSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.state.show_settings_panel();
         self.sync_omnibar_with_state(window, cx, true);
-        window.focus(&self.focus_handle, cx);
+        self.sync_focus_target(window, cx);
         cx.notify();
     }
 
-    fn on_select_task(
-        &mut self,
-        action: &SelectTask,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_select_task(&mut self, action: &SelectTask, window: &mut Window, cx: &mut Context<Self>) {
         self.state.select_task(action.task_id);
-        window.focus(&self.focus_handle, cx);
+        self.sync_focus_target(window, cx);
         cx.notify();
     }
 
@@ -179,53 +205,54 @@ impl DesktopShell {
     ) {
         self.state.navigate_to_url(&action.url);
         self.sync_omnibar_with_state(window, cx, true);
+        self.sync_focus_target(window, cx);
         cx.notify();
     }
 
-    fn on_previous_task(
-        &mut self,
-        _: &PreviousTask,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_previous_task(&mut self, _: &PreviousTask, window: &mut Window, cx: &mut Context<Self>) {
         self.state.previous_task();
-        window.focus(&self.focus_handle, cx);
+        self.sync_focus_target(window, cx);
         cx.notify();
     }
 
     fn on_next_task(&mut self, _: &NextTask, window: &mut Window, cx: &mut Context<Self>) {
         self.state.next_task();
-        window.focus(&self.focus_handle, cx);
+        self.sync_focus_target(window, cx);
         cx.notify();
     }
 
-    fn on_split_pane(&mut self, _: &SplitPane, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_split_pane(&mut self, _: &SplitPane, window: &mut Window, cx: &mut Context<Self>) {
         self.state.split_pane();
+        self.sync_focus_target(window, cx);
         cx.notify();
     }
 
-    fn on_expand_split(&mut self, _: &ExpandSplit, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_expand_split(&mut self, _: &ExpandSplit, window: &mut Window, cx: &mut Context<Self>) {
         self.state.expand_split();
+        self.sync_focus_target(window, cx);
         cx.notify();
     }
 
-    fn on_shrink_split(&mut self, _: &ShrinkSplit, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_shrink_split(&mut self, _: &ShrinkSplit, window: &mut Window, cx: &mut Context<Self>) {
         self.state.shrink_split();
+        self.sync_focus_target(window, cx);
         cx.notify();
     }
 
     fn on_dismiss_transient(
         &mut self,
         _: &DismissTransient,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.state.dismiss_transient();
+        self.sync_focus_target(window, cx);
         cx.notify();
     }
 
-    fn on_cycle_handle(&mut self, _: &CycleHandle, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_cycle_handle(&mut self, _: &CycleHandle, window: &mut Window, cx: &mut Context<Self>) {
         self.state.cycle_handle();
+        self.sync_focus_target(window, cx);
         cx.notify();
     }
 
@@ -242,6 +269,152 @@ impl DesktopShell {
     fn on_browser_reload(&mut self, _: &BrowserReload, _: &mut Window, cx: &mut Context<Self>) {
         self.state.browser_reload();
         cx.notify();
+    }
+
+    fn on_native_undo(&mut self, _: &NativeUndo, _: &mut Window, cx: &mut Context<Self>) {
+        cx.notify();
+    }
+
+    fn on_native_redo(&mut self, _: &NativeRedo, _: &mut Window, cx: &mut Context<Self>) {
+        cx.notify();
+    }
+
+    fn on_native_cut(&mut self, _: &NativeCut, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.webviews.wants_host_focus(&self.state) {
+            let _ = self.webviews.delegate_copy(&self.state, true);
+        }
+        cx.notify();
+    }
+
+    fn on_native_copy(&mut self, _: &NativeCopy, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.webviews.wants_host_focus(&self.state) {
+            let _ = self.webviews.delegate_copy(&self.state, false);
+        }
+        cx.notify();
+    }
+
+    fn on_native_paste(&mut self, _: &NativePaste, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.webviews.wants_host_focus(&self.state) {
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                let _ = self.webviews.delegate_paste(&self.state, &text);
+            }
+        }
+        cx.notify();
+    }
+
+    fn on_native_select_all(
+        &mut self,
+        _: &NativeSelectAll,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.webviews.wants_host_focus(&self.state) {
+            let _ = self.webviews.delegate_select_all(&self.state);
+        }
+        cx.notify();
+    }
+
+    fn on_open_auth_in_browser(
+        &mut self,
+        _: &OpenAuthInBrowser,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pane_id) = self.find_active_auth_handoff_pane_id() {
+            // Look up session_id from the pane surface
+            let start_url = self.state.active_panes().iter().find_map(|p| {
+                if p.id == pane_id {
+                    if let PaneSurface::AuthHandoff { session_id, .. } = &p.surface {
+                        self.state.auth_sessions.iter().find(|s| &s.session_id == session_id)
+                            .map(|s| s.start_url.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            });
+            if let Some(url) = start_url {
+                let _ = std::process::Command::new("open").arg(&url).status();
+                // Update session status
+                if let Some(pane) = self.state.active_panes().iter().find(|p| p.id == pane_id) {
+                    if let PaneSurface::AuthHandoff { session_id, .. } = &pane.surface {
+                        let sid = session_id.clone();
+                        if let Some(s) = self.state.auth_sessions.iter_mut().find(|s| s.session_id == sid) {
+                            s.status = AuthSessionStatus::OpenedInBrowser;
+                        }
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn on_cancel_auth_handoff(
+        &mut self,
+        _: &CancelAuthHandoff,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pane_id) = self.find_active_auth_handoff_pane_id() {
+            self.state.cancel_auth_handoff(pane_id);
+            self.sync_focus_target(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn on_resume_after_auth(
+        &mut self,
+        _: &ResumeAfterAuth,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pane_id) = self.find_active_auth_handoff_pane_id() {
+            self.state.resume_after_auth(pane_id);
+            self.sync_focus_target(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn on_allow_permission_once(
+        &mut self,
+        _: &AllowPermissionOnce,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.allow_permission_once();
+        self.sync_focus_target(window, cx);
+        cx.notify();
+    }
+
+    fn on_allow_permission_for_session(
+        &mut self,
+        _: &AllowPermissionForSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.allow_permission_for_session();
+        self.sync_focus_target(window, cx);
+        cx.notify();
+    }
+
+    fn on_deny_permission_prompt(
+        &mut self,
+        _: &DenyPermissionPrompt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.deny_permission_prompt();
+        self.sync_focus_target(window, cx);
+        cx.notify();
+    }
+
+    fn find_active_auth_handoff_pane_id(&self) -> Option<PaneId> {
+        self.state
+            .active_panes()
+            .iter()
+            .find(|p| matches!(p.surface, PaneSurface::AuthHandoff { .. }))
+            .map(|p| p.id)
     }
 
     fn sync_omnibar_with_state(
@@ -313,6 +486,19 @@ impl DesktopShell {
         )
         .detach();
     }
+
+    fn sync_focus_target(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.webviews.sync_responder_target(&mut self.state);
+
+        if self.webviews.wants_host_focus(&self.state) {
+            let handle = if matches!(self.state.shell_mode, ShellMode::CommandBar) {
+                self.omnibar.focus_handle(cx)
+            } else {
+                self.focus_handle.clone()
+            };
+            window.focus(&handle, cx);
+        }
+    }
 }
 
 impl Render for DesktopShell {
@@ -329,13 +515,14 @@ impl Render for DesktopShell {
         let active_pane_count = self.state.active_panes().len();
         let overview = matches!(self.state.shell_mode, ShellMode::Overview);
         let command_bar = matches!(self.state.shell_mode, ShellMode::CommandBar);
+        let theme = Theme::from_mode(self.state.theme_mode);
 
         let body = div()
             .flex_1()
             .size_full()
             .flex()
             .overflow_hidden()
-            .child(render_task_rail(&self.state, &self.favicon_cache))
+            .child(render_task_rail(&self.state, &self.favicon_cache, &theme))
             .child(
                 div()
                     .flex_1()
@@ -343,9 +530,12 @@ impl Render for DesktopShell {
                     .relative()
                     .flex()
                     .flex_col()
-                    .child(render_stage(&self.state, stage_bounds, active_pane_count))
+                    .child(render_stage(&self.state, stage_bounds, active_pane_count, &theme))
                     .when(overview, |this| {
-                        this.child(render_overview_overlay(&self.state))
+                        this.child(render_overview_overlay(&self.state, &theme))
+                    })
+                    .when(self.state.active_permission_prompt().is_some(), |this| {
+                        this.child(render_permission_prompt_overlay(&self.state, &theme))
                     }),
             );
 
@@ -355,9 +545,9 @@ impl Render for DesktopShell {
             .size_full()
             .flex()
             .flex_col()
-            // Base background matching mock: #1a1a1e
-            .bg(rgb(0x1a1a1e))
-            .text_color(rgb(0xf0f0f2))
+            .bg(theme.canvas_bg)
+            .text_color(theme.canvas_text)
+            .on_action(cx.listener(Self::on_toggle_theme))
             .on_action(cx.listener(Self::on_focus_command_bar))
             .on_action(cx.listener(Self::on_toggle_overview))
             .on_action(cx.listener(Self::on_show_settings))
@@ -376,20 +566,34 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_browser_back))
             .on_action(cx.listener(Self::on_browser_forward))
             .on_action(cx.listener(Self::on_browser_reload))
-            // Subtle ambient glow at the top
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .right_0()
-                    .h(px(200.0))
-                    .bg(linear_gradient(
-                        180.,
-                        linear_color_stop(hsla(220.0 / 360.0, 0.30, 0.20, 0.20), 0.),
-                        linear_color_stop(hsla(220.0 / 360.0, 0.30, 0.20, 0.0), 1.),
-                    )),
-            )
+            .on_action(cx.listener(Self::on_native_undo))
+            .on_action(cx.listener(Self::on_native_redo))
+            .on_action(cx.listener(Self::on_native_cut))
+            .on_action(cx.listener(Self::on_native_copy))
+            .on_action(cx.listener(Self::on_native_paste))
+            .on_action(cx.listener(Self::on_native_select_all))
+            .on_action(cx.listener(Self::on_open_auth_in_browser))
+            .on_action(cx.listener(Self::on_cancel_auth_handoff))
+            .on_action(cx.listener(Self::on_resume_after_auth))
+            .on_action(cx.listener(Self::on_allow_permission_once))
+            .on_action(cx.listener(Self::on_allow_permission_for_session))
+            .on_action(cx.listener(Self::on_deny_permission_prompt))
+            // Ambient glow — dark theme only
+            .when(theme.ambient_glow_top.a > 0.0, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(200.0))
+                        .bg(linear_gradient(
+                            180.,
+                            linear_color_stop(theme.ambient_glow_top, 0.),
+                            linear_color_stop(hsla(220.0 / 360.0, 0.30, 0.20, 0.0), 1.),
+                        )),
+                )
+            })
             .child(render_command_chrome(
                 window,
                 &self.state,
@@ -397,6 +601,7 @@ impl Render for DesktopShell {
                 &omnibar_value,
                 &omnibar_suggestions,
                 command_bar,
+                &theme,
             ))
             .child(body)
     }
@@ -489,18 +694,23 @@ fn compute_stage_bounds(state: &AppState, width: f32, height: f32) -> PaneBounds
 
 /// Overview overlay matching the mock's workspace-overlay with centered
 /// focus card and horizontal task rail.
-fn render_overview_overlay(state: &AppState) -> impl IntoElement {
+fn render_overview_overlay(state: &AppState, theme: &Theme) -> impl IntoElement {
     let tasks = state
         .active_workspace()
         .map(|workspace| workspace.tasks.clone())
         .unwrap_or_default();
     let active_id = state.active_task().map(|task| task.id).unwrap_or_default();
+    let accent = theme.accent;
+    let accent_subtle = theme.accent_subtle;
+    let card_active = theme.overview_card_bg_active;
+    let card_inactive = theme.overview_card_bg_inactive;
+    let card_border_inactive = theme.overview_card_border_inactive;
+    let overlay_header = theme.overlay_header_text;
 
     div()
         .absolute()
         .inset_0()
-        // Semi-transparent backdrop matching mock's rgba(0,0,0,0.6)
-        .bg(hsla(0.0, 0.0, 0.0, 0.60))
+        .bg(theme.overlay_bg)
         .flex()
         .items_center()
         .justify_center()
@@ -511,7 +721,6 @@ fn render_overview_overlay(state: &AppState) -> impl IntoElement {
                 .flex()
                 .flex_col()
                 .gap_5()
-                // Header
                 .child(
                     div()
                         .flex()
@@ -520,28 +729,27 @@ fn render_overview_overlay(state: &AppState) -> impl IntoElement {
                         .child(
                             div()
                                 .text_size(px(15.0))
-                                .text_color(hsla(0.0, 0.0, 1.0, 0.32))
+                                .text_color(theme.overlay_header_text)
                                 .child("⧉"),
                         )
                         .child(
                             div()
                                 .text_size(px(13.0))
                                 .font_weight(gpui::FontWeight(500.0))
-                                .text_color(hsla(0.0, 0.0, 1.0, 0.55))
+                                .text_color(overlay_header)
                                 .child("Workspaces"),
                         )
                         .child(
                             div()
                                 .text_size(px(11.0))
-                                .text_color(hsla(0.0, 0.0, 1.0, 0.32))
-                                .bg(hsla(0.0, 0.0, 1.0, 0.05))
+                                .text_color(theme.text_tertiary)
+                                .bg(theme.surface_hover)
                                 .px_2()
                                 .py(px(2.0))
                                 .rounded(px(10.0))
                                 .child(format!("{}", tasks.len())),
                         ),
                 )
-                // Task cards
                 .child(
                     div()
                         .flex()
@@ -551,22 +759,18 @@ fn render_overview_overlay(state: &AppState) -> impl IntoElement {
                             div()
                                 .flex_1()
                                 .rounded(px(18.0))
-                                .bg(if is_active {
-                                    hsla(225.0 / 360.0, 0.18, 0.18, 0.96)
-                                } else {
-                                    hsla(240.0 / 360.0, 0.06, 0.16, 0.96)
-                                })
+                                .bg(if is_active { card_active } else { card_inactive })
                                 .border_1()
                                 .when(is_active, |this| {
-                                    this.border_2().border_color(rgb(0x3b82f6)).shadow(vec![
+                                    this.border_2().border_color(accent).shadow(vec![
                                         BoxShadow {
-                                            color: hsla(217.0 / 360.0, 0.88, 0.60, 0.15),
+                                            color: accent_subtle,
                                             offset: point(px(0.), px(0.)),
                                             blur_radius: px(20.),
                                             spread_radius: px(0.),
                                         },
                                         BoxShadow {
-                                            color: hsla(0.0, 0.0, 0.0, 0.5),
+                                            color: hsla(0.0, 0.0, 0.0, 0.25),
                                             offset: point(px(0.), px(20.)),
                                             blur_radius: px(60.),
                                             spread_radius: px(0.),
@@ -574,9 +778,9 @@ fn render_overview_overlay(state: &AppState) -> impl IntoElement {
                                     ])
                                 })
                                 .when(!is_active, |this| {
-                                    this.border_color(hsla(0.0, 0.0, 1.0, 0.06)).shadow(vec![
+                                    this.border_color(card_border_inactive).shadow(vec![
                                         BoxShadow {
-                                            color: hsla(0.0, 0.0, 0.0, 0.4),
+                                            color: hsla(0.0, 0.0, 0.0, 0.08),
                                             offset: point(px(0.), px(12.)),
                                             blur_radius: px(32.),
                                             spread_radius: px(0.),
@@ -586,8 +790,126 @@ fn render_overview_overlay(state: &AppState) -> impl IntoElement {
                                 .overflow_hidden()
                                 .cursor_pointer()
                                 .p_4()
-                                .child(render_preview_card(is_active, &task.title, &task.preview))
+                                .child(render_preview_card(is_active, &task.title, &task.preview, theme))
                         })),
                 ),
         )
+}
+
+fn render_permission_prompt_overlay(state: &AppState, theme: &Theme) -> impl IntoElement {
+    let Some(prompt) = state.active_permission_prompt() else {
+        return div();
+    };
+
+    let command_label = prompt
+        .command
+        .as_deref()
+        .map(|command| format!("Command: {command}"))
+        .unwrap_or_else(|| "Command: capability probe".to_string());
+
+    div()
+        .absolute()
+        .inset_0()
+        .bg(hsla(0.0, 0.0, 0.0, 0.42))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .w(px(480.0))
+                .max_w(px(560.0))
+                .rounded(px(18.0))
+                .bg(theme.panel_bg)
+                .border_1()
+                .border_color(theme.accent_border)
+                .shadow(vec![BoxShadow {
+                    color: hsla(0.0, 0.0, 0.0, 0.22),
+                    offset: point(px(0.0), px(18.0)),
+                    blur_radius: px(48.0),
+                    spread_radius: px(0.0),
+                }])
+                .p_5()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(
+                    div()
+                        .text_size(px(15.0))
+                        .font_weight(FontWeight(600.0))
+                        .text_color(theme.text_primary)
+                        .child("Permission Request"),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(theme.text_secondary)
+                        .child(format!(
+                            "{} requested {}.",
+                            prompt.route_label, prompt.capability
+                        )),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_tertiary)
+                        .child(command_label),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_tertiary)
+                        .child("This overlay is drawn by the host. The guest cannot spoof or dismiss it."),
+                )
+                .child(
+                    div()
+                        .mt_2()
+                        .flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(render_permission_button(
+                            "Allow Once",
+                            theme.accent_subtle,
+                            theme.accent_border,
+                            theme.text_primary,
+                            AllowPermissionOnce,
+                        ))
+                        .child(render_permission_button(
+                            "Allow for Session",
+                            theme.omnibar_rest_bg,
+                            theme.omnibar_rest_border,
+                            theme.text_primary,
+                            AllowPermissionForSession,
+                        ))
+                        .child(render_permission_button(
+                            "Deny",
+                            theme.panel_bg,
+                            theme.border_default,
+                            theme.text_secondary,
+                            DenyPermissionPrompt,
+                        )),
+                ),
+        )
+}
+
+fn render_permission_button<A: gpui::Action + Clone + 'static>(
+    label: &'static str,
+    bg: gpui::Hsla,
+    border: gpui::Hsla,
+    text: gpui::Hsla,
+    action: A,
+) -> impl IntoElement {
+    div()
+        .rounded(px(10.0))
+        .px_3()
+        .py_2()
+        .border_1()
+        .border_color(border)
+        .bg(bg)
+        .cursor_pointer()
+        .text_size(px(11.5))
+        .text_color(text)
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            window.dispatch_action(Box::new(action.clone()), cx);
+        })
+        .child(label)
 }
