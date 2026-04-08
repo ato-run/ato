@@ -1,4 +1,5 @@
 mod auth_handoff;
+mod inspector;
 mod launcher;
 mod launcher_v2;
 mod settings;
@@ -15,6 +16,7 @@ use crate::state::{AppState, PaneBounds, PaneSurface, WebPane, WebSessionState};
 use super::theme::Theme;
 use super::STAGE_PADDING;
 use auth_handoff::render_auth_handoff_panel;
+use inspector::render_capsule_inspector_panel;
 use launcher_v2::render_launcher_panel_v2;
 use settings::render_settings_panel;
 
@@ -82,18 +84,19 @@ pub(super) fn render_stage(
         .child(content)
 }
 
-fn render_stage_pane(
-    pane: &crate::state::Pane,
-    state: &AppState,
-    theme: &Theme,
-) -> AnyElement {
+fn render_stage_pane(pane: &crate::state::Pane, state: &AppState, theme: &Theme) -> AnyElement {
     match &pane.surface {
         PaneSurface::Web(web) => render_web_pane(web, theme).into_any_element(),
         PaneSurface::Native { body } => {
             render_settings_panel(body, state, theme).into_any_element()
         }
+        PaneSurface::Inspector => render_capsule_inspector_panel(state, theme).into_any_element(),
         PaneSurface::AuthHandoff { session_id, .. } => {
-            if let Some(session) = state.auth_sessions.iter().find(|s| &s.session_id == session_id) {
+            if let Some(session) = state
+                .auth_sessions
+                .iter()
+                .find(|s| &s.session_id == session_id)
+            {
                 render_auth_handoff_panel(session, theme).into_any_element()
             } else {
                 div().flex_1().into_any_element()
