@@ -62,7 +62,11 @@ pub enum GuestBridgeResponse {
 #[serde(tag = "event", rename_all = "kebab-case")]
 pub enum ShellEvent {
     SessionReady { pane_id: usize },
-    PermissionDenied { pane_id: usize, capability: String },
+    PermissionDenied {
+        pane_id: usize,
+        capability: String,
+        command: Option<String>,
+    },
     SessionClosed { pane_id: usize },
     UrlChanged { pane_id: usize, url: String },
     TitleChanged { pane_id: usize, title: String },
@@ -139,6 +143,13 @@ impl BridgeProxy {
                         ActivityTone::Warning,
                         format!("Denied guest probe for {capability}"),
                     );
+                    if let Some(session) = session {
+                        self.push_shell_event(ShellEvent::PermissionDenied {
+                            pane_id: session.pane_id,
+                            capability: capability.clone(),
+                            command: None,
+                        });
+                    }
                     GuestBridgeResponse::Denied {
                         request_id: Some(request_id),
                         message: format!("capability {capability} is not granted"),
@@ -156,6 +167,13 @@ impl BridgeProxy {
                         ActivityTone::Warning,
                         format!("Fail-closed guest invoke denied: {command} requires {capability}"),
                     );
+                    if let Some(session) = session {
+                        self.push_shell_event(ShellEvent::PermissionDenied {
+                            pane_id: session.pane_id,
+                            capability: capability.clone(),
+                            command: Some(command.clone()),
+                        });
+                    }
                     return GuestBridgeResponse::Denied {
                         request_id: Some(request_id),
                         message: format!("capability {capability} is not granted"),
@@ -198,13 +216,11 @@ impl BridgeProxy {
     }
 
     pub fn log(&self, tone: ActivityTone, message: impl Into<String>) {
+        let message = message.into();
         self.activity
             .lock()
             .expect("bridge activity lock poisoned")
-            .push(ActivityEntry {
-                tone,
-                message: message.into(),
-            });
+            .push(ActivityEntry { tone, message });
     }
 
     pub fn drain_activity(&self) -> Vec<ActivityEntry> {
