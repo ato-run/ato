@@ -592,9 +592,9 @@ mod tests {
     use std::io::Read;
     use std::sync::Arc;
 
-    use super::{build_capsule_artifact, normalize_tag_version, semantic_publish_identity};
     #[cfg(target_os = "macos")]
     use super::build_capsule_artifact_with_output;
+    use super::{build_capsule_artifact, normalize_tag_version, semantic_publish_identity};
     use crate::application::producer_input::resolve_producer_authoritative_input;
     use crate::reporters::CliReporter;
 
