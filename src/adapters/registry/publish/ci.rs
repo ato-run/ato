@@ -588,12 +588,62 @@ Deploy latest ato-store (OIDC multipart CI publish), or point ATO_STORE_API_URL 
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io::Read;
     use std::sync::Arc;
 
-    use super::{build_capsule_artifact, normalize_tag_version, semantic_publish_identity};
+    use super::{
+        build_capsule_artifact, build_capsule_artifact_with_output, normalize_tag_version,
+        semantic_publish_identity,
+    };
     use crate::application::producer_input::resolve_producer_authoritative_input;
     use crate::reporters::CliReporter;
+
+    fn write_gpui_wry_native_command_fixture(root: &std::path::Path) {
+        fs::create_dir_all(root).expect("fixture dir");
+        fs::write(
+            root.join("capsule.toml"),
+            r#"schema_version = "0.2"
+name = "desktop-demo"
+version = "0.1.0"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source"
+driver = "native"
+entrypoint = "sh"
+cmd = ["build-app.sh"]
+working_dir = "."
+
+[artifact]
+framework = "gpui-wry"
+stage = "unsigned"
+target = "darwin/arm64"
+input = "dist/Desktop Demo.app"
+
+[finalize]
+tool = "codesign"
+args = ["--deep", "--force", "--sign", "-", "dist/Desktop Demo.app"]
+"#,
+        )
+        .expect("capsule.toml");
+        fs::write(
+            root.join("build-app.sh"),
+            "#!/bin/sh\nset -eu\nmkdir -p 'dist/Desktop Demo.app/Contents/MacOS'\nprintf '#!/bin/sh\necho native\n' > 'dist/Desktop Demo.app/Contents/MacOS/Desktop Demo'\nchmod 755 'dist/Desktop Demo.app/Contents/MacOS/Desktop Demo'\n",
+        )
+        .expect("build-app.sh");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(root.join("build-app.sh"))
+                .expect("metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(root.join("build-app.sh"), permissions).expect("chmod");
+        }
+    }
 
     fn read_artifact_manifest(path: &std::path::Path) -> String {
         let bytes = std::fs::read(path).expect("read artifact");
@@ -755,5 +805,92 @@ args = ["--from-export"]
             manifest.contains("args = [\"--from-export\"]"),
             "manifest was: {manifest}"
         );
+    }
+
+    #[test]
+    fn authoritative_ci_build_supports_gpui_wry_native_command_projects() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_gpui_wry_native_command_fixture(tmp.path());
+
+        let authoritative_input = resolve_producer_authoritative_input(
+            tmp.path(),
+            Arc::new(CliReporter::new(false)),
+            false,
+        )
+        .expect("authoritative input");
+        let (name, version) =
+            semantic_publish_identity(&authoritative_input.descriptor).expect("identity");
+
+        let artifact_path =
+            build_capsule_artifact(&name, &version, Some(&authoritative_input), None)
+                .expect("artifact");
+        assert!(artifact_path.exists(), "artifact must exist");
+        let manifest = read_artifact_manifest(&artifact_path);
+        assert!(
+            manifest.contains("name = \"desktop-demo\""),
+            "manifest was: {manifest}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn repository_ato_desktop_authoritative_ci_build_succeeds() {
+        let crate_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = crate_root
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repo root");
+        let desktop_root = repo_root.join("apps").join("ato-desktop");
+        assert!(
+            desktop_root.join("capsule.toml").is_file(),
+            "capsule.toml missing"
+        );
+
+        let authoritative_input = resolve_producer_authoritative_input(
+            &desktop_root,
+            Arc::new(CliReporter::new(false)),
+            false,
+        )
+        .expect("authoritative input");
+        authoritative_input
+            .ensure_desktop_source_publish_ready()
+            .expect("desktop source publish readiness");
+        let (name, version) =
+            semantic_publish_identity(&authoritative_input.descriptor).expect("identity");
+
+        let artifact_path =
+            build_capsule_artifact(&name, &version, Some(&authoritative_input), None)
+                .expect("artifact");
+        assert!(artifact_path.exists(), "artifact must exist");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn repository_ato_desktop_authoritative_ci_build_succeeds_with_stream_output() {
+        let crate_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = crate_root
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repo root");
+        let desktop_root = repo_root.join("apps").join("ato-desktop");
+
+        let authoritative_input = resolve_producer_authoritative_input(
+            &desktop_root,
+            Arc::new(CliReporter::new(false)),
+            false,
+        )
+        .expect("authoritative input");
+        let (name, version) =
+            semantic_publish_identity(&authoritative_input.descriptor).expect("identity");
+
+        let artifact_path = build_capsule_artifact_with_output(
+            &name,
+            &version,
+            Some(&authoritative_input),
+            None,
+            true,
+        )
+        .expect("artifact");
+        assert!(artifact_path.exists(), "artifact must exist");
     }
 }
