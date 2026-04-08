@@ -116,6 +116,18 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             reporter: Arc::new(reporters::CliReporter::new_run(json)),
         }),
 
+        Commands::Resolve {
+            handle,
+            target,
+            registry,
+            json: command_json,
+        } => crate::app_control::resolve_handle(
+            &handle,
+            target.as_deref(),
+            registry.as_deref(),
+            json || command_json,
+        ),
+
         Commands::Engine { command } => {
             engine::execute_engine_command(command, nacelle, reporter.clone())
         }

@@ -28,6 +28,7 @@ Usage: {usage}
 
 Primary Commands:
   run      Execute a .capsule archive or local project in a sandbox
+  resolve  Resolve a capsule handle or terse ref into a launch preview
   build    Pack a project into an immutable .capsule archive
   publish  Publish capsule artifacts to a registry
   install  Install a verified package from the registry
@@ -204,6 +205,27 @@ pub(crate) enum Commands {
         /// Arguments passed through to an exported CLI tool after `--`
         #[arg(allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+
+    #[command(
+        next_help_heading = "Troubleshooting",
+        about = "Resolve a capsule handle or terse ref into a launch preview"
+    )]
+    Resolve {
+        /// Canonical capsule handle, GitHub shorthand, registry scoped ID, or local path
+        handle: String,
+
+        /// Target label to resolve
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+
+        /// Registry URL override for registry-backed handles
+        #[arg(long)]
+        registry: Option<String>,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
     },
 
     #[command(
