@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::install::support::resolve_run_target_or_install;
 use crate::reporters;
-use crate::runtime::tree as runtime_tree;
 use crate::runtime::process::{ProcessInfo, ProcessManager, ProcessStatus};
+use crate::runtime::tree as runtime_tree;
 use crate::ProviderToolchain;
 
 use super::guest_contract::{parse_guest_contract, preview_guest_contract, GuestContractPreview};
@@ -305,7 +305,9 @@ fn resolve_session_launch_plan(
 
     let manifest_path = if resolved_path.is_dir() {
         resolved_path.join("capsule.toml")
-    } else if let Some(manifest_path) = runtime_tree::prepare_store_runtime_for_capsule(&resolved_path)? {
+    } else if let Some(manifest_path) =
+        runtime_tree::prepare_store_runtime_for_capsule(&resolved_path)?
+    {
         manifest_path
     } else {
         resolved_path.clone()
@@ -446,5 +448,56 @@ mod tests {
     fn reserve_port_returns_requested_port_when_available() {
         let port = reserve_port(Some(43291)).expect("reserve port");
         assert_eq!(port, 43291);
+    }
+
+    #[test]
+    fn session_start_envelope_serializes_snapshot_and_frontend_entry() {
+        let envelope = SessionStartEnvelope {
+            schema_version: "2026-02-01",
+            package_id: "ato.desktop",
+            action: SESSION_ACTION_START,
+            session: SessionInfo {
+                session_id: "desky-session-1".to_string(),
+                handle: "capsule://ato.run/koh0920/ato-onboarding".to_string(),
+                normalized_handle: "capsule://ato.run/koh0920/ato-onboarding".to_string(),
+                canonical_handle: Some("capsule://ato.run/koh0920/ato-onboarding".to_string()),
+                status: "ready".to_string(),
+                trust_state: TrustState::Untrusted,
+                source: Some("registry".to_string()),
+                restricted: true,
+                snapshot: Some(ResolvedSnapshot::RegistryRelease {
+                    version: "0.1.0".to_string(),
+                    release_id: None,
+                    content_hash: Some("sha256:abc123".to_string()),
+                    fetched_at: "2026-04-09T00:00:00Z".to_string(),
+                }),
+                adapter: "tauri".to_string(),
+                frontend_entry: "dist/index.html".to_string(),
+                transport: "http".to_string(),
+                healthcheck_url: "http://127.0.0.1:9000/health".to_string(),
+                invoke_url: "http://127.0.0.1:9000/rpc".to_string(),
+                capabilities: vec!["read-file".to_string()],
+                pid: 42,
+                log_path: "/tmp/desky-session.log".to_string(),
+                manifest_path: "/tmp/capsule.toml".to_string(),
+                target_label: "web".to_string(),
+                notes: vec!["materialized".to_string()],
+            },
+        };
+
+        let json = serde_json::to_value(&envelope).expect("serialize envelope");
+        assert_eq!(
+            json["session"]["snapshot"]["version"],
+            serde_json::json!("0.1.0")
+        );
+        assert_eq!(
+            json["session"]["frontend_entry"],
+            serde_json::json!("dist/index.html")
+        );
+        assert_eq!(
+            json["session"]["manifest_path"],
+            serde_json::json!("/tmp/capsule.toml")
+        );
+        assert_eq!(json["session"]["source"], serde_json::json!("registry"));
     }
 }
