@@ -16,9 +16,7 @@ use crate::application::pipeline::producer::{
     self, ProducerPipeline, PublishDryRunStageResult, PublishInstallResult, PublishPhaseOptions,
     PublishPipelineRequest, PublishPipelineState,
 };
-use crate::application::producer_input::{
-    rematerialize_source_authoritative_input, resolve_producer_authoritative_input,
-};
+use crate::application::producer_input::resolve_producer_authoritative_input;
 
 use super::Reporter;
 
@@ -401,7 +399,7 @@ impl<'a> PublishCommandExecution<'a> {
             return Ok(());
         }
 
-        self.authoritative_input = Some(rematerialize_source_authoritative_input(
+        self.authoritative_input = Some(resolve_producer_authoritative_input(
             &self.cwd,
             std::sync::Arc::new(crate::reporters::CliReporter::new(false)),
             false,
