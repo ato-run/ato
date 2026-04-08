@@ -2,7 +2,7 @@ mod window_controls;
 
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, point, px, rgb, BoxShadow, Entity, FontWeight, IntoElement, MouseButton, Window,
+    div, hsla, point, px, BoxShadow, Entity, FontWeight, IntoElement, MouseButton, Window,
 };
 use gpui_component::input::{Input, InputState};
 
@@ -10,6 +10,7 @@ use crate::app::{FocusCommandBar, NavigateToUrl, SelectTask, ShowSettings};
 use crate::state::{AppState, OmnibarSuggestion, OmnibarSuggestionAction, ShellMode};
 
 use self::window_controls::{default_window_control_buttons, render_window_controls};
+use super::theme::Theme;
 use super::CHROME_HEIGHT;
 
 pub(super) fn render_command_chrome(
@@ -19,6 +20,7 @@ pub(super) fn render_command_chrome(
     omnibar_value: &str,
     suggestions: &[OmnibarSuggestion],
     command_bar: bool,
+    theme: &Theme,
 ) -> impl IntoElement {
     div()
         .h(px(CHROME_HEIGHT))
@@ -26,19 +28,19 @@ pub(super) fn render_command_chrome(
         .flex()
         .items_center()
         .gap_3()
-        // Glass-heavy background matching mock: rgba(30, 30, 36, 0.85) + backdrop-blur
-        .bg(hsla(240.0 / 360.0, 0.09, 0.13, 0.85))
+        .bg(theme.panel_bg)
         .border_b_1()
-        .border_color(hsla(0.0, 0.0, 1.0, 0.06))
+        .border_color(theme.panel_border)
         .child(render_window_controls(default_window_control_buttons()))
-        .child(
-            div()
-                .flex_1()
-                .flex()
-                .justify_center()
-                .child(render_omnibar(omnibar, omnibar_value, suggestions, command_bar)),
-        )
-        .child(render_overview_toggle(state))
+        .child(div().flex_1().flex().justify_center().child(render_omnibar(
+            omnibar,
+            omnibar_value,
+            suggestions,
+            command_bar,
+            theme,
+        )))
+        .child(render_active_route_status(state, theme))
+        .child(render_overview_toggle(state, theme))
 }
 
 fn render_omnibar(
@@ -46,14 +48,20 @@ fn render_omnibar(
     omnibar_value: &str,
     suggestions: &[OmnibarSuggestion],
     command_bar: bool,
+    theme: &Theme,
 ) -> impl IntoElement {
-    let input_text = if command_bar {
-        rgb(0xffffff)
-    } else {
-        rgb(0xffffff)
-    };
-    let placeholder_text = rgb(0xc6cbd2);
     let show_placeholder = omnibar_value.is_empty();
+    let omnibar_text = theme.omnibar_text;
+    let placeholder_color = theme.omnibar_placeholder;
+    let rest_bg = theme.omnibar_rest_bg;
+    let active_bg = theme.omnibar_active_bg;
+    let rest_border = theme.omnibar_rest_border;
+    let active_border = theme.omnibar_active_border;
+    let icon_rest = theme.omnibar_icon_rest;
+    let icon_active = theme.omnibar_icon_active;
+    let shadow_color = theme.accent_border;
+    let kbd_bg = theme.omnibar_rest_bg;
+    let kbd_text = theme.omnibar_placeholder;
 
     div()
         .relative()
@@ -72,21 +80,13 @@ fn render_omnibar(
                 .on_mouse_down(MouseButton::Left, |_, window, cx| {
                     window.dispatch_action(Box::new(FocusCommandBar), cx);
                 })
-                .text_color(input_text)
-                .bg(if command_bar {
-                    hsla(221.0 / 360.0, 0.18, 0.20, 0.98)
-                } else {
-                    hsla(0.0, 0.0, 1.0, 0.05)
-                })
+                .text_color(omnibar_text)
+                .bg(if command_bar { active_bg } else { rest_bg })
                 .border_1()
-                .border_color(if command_bar {
-                    hsla(217.0 / 360.0, 0.88, 0.61, 0.44)
-                } else {
-                    hsla(0.0, 0.0, 1.0, 0.06)
-                })
-                .when(command_bar, |this| {
+                .border_color(if command_bar { active_border } else { rest_border })
+                .when(command_bar, move |this| {
                     this.shadow(vec![BoxShadow {
-                        color: hsla(217.0 / 360.0, 0.88, 0.61, 0.25),
+                        color: shadow_color,
                         offset: point(px(0.), px(0.)),
                         blur_radius: px(12.),
                         spread_radius: px(3.),
@@ -95,11 +95,7 @@ fn render_omnibar(
                 .child(
                     div()
                         .text_size(px(13.0))
-                        .text_color(if command_bar {
-                            hsla(217.0 / 360.0, 0.88, 0.60, 1.0)
-                        } else {
-                            rgb(0xc6cbd2).into()
-                        })
+                        .text_color(if command_bar { icon_active } else { icon_rest })
                         .child("⌕"),
                 )
                 .child(
@@ -117,9 +113,9 @@ fn render_omnibar(
                                 .bg(hsla(0.0, 0.0, 0.0, 0.0))
                                 .text_size(px(12.5))
                                 .font_weight(FontWeight(400.0))
-                                .text_color(input_text),
+                                .text_color(omnibar_text),
                         )
-                        .when(show_placeholder, |this| {
+                        .when(show_placeholder, move |this| {
                             this.child(
                                 div()
                                     .absolute()
@@ -130,39 +126,42 @@ fn render_omnibar(
                                     .items_center()
                                     .text_size(px(12.5))
                                     .font_weight(FontWeight(400.0))
-                                    .text_color(placeholder_text)
+                                    .text_color(placeholder_color)
                                     .child("Search files, run commands, or enter URL..."),
                             )
                         }),
                 )
-                .when(!command_bar, |this| {
+                .when(!command_bar, move |this| {
                     this.child(
                         div()
                             .rounded(px(4.0))
-                            .bg(hsla(0.0, 0.0, 1.0, 0.06))
+                            .bg(kbd_bg)
                             .px(px(5.0))
                             .py(px(1.0))
                             .text_size(px(10.0))
-                            .text_color(rgb(0xc6cbd2))
+                            .text_color(kbd_text)
                             .child("⌘ K"),
                     )
                 }),
         )
         .when(command_bar && !suggestions.is_empty(), |this| {
-            this.child(render_omnibar_suggestions(suggestions))
+            this.child(render_omnibar_suggestions(suggestions, theme))
         })
 }
 
-fn render_omnibar_suggestions(suggestions: &[OmnibarSuggestion]) -> impl IntoElement {
+fn render_omnibar_suggestions(suggestions: &[OmnibarSuggestion], theme: &Theme) -> impl IntoElement {
+    let dropdown_bg = theme.omnibar_dropdown_bg;
+    let dropdown_border = theme.omnibar_dropdown_border;
+
     div()
         .absolute()
         .top(px(36.0))
         .left_0()
         .right_0()
         .rounded(px(12.0))
-        .bg(hsla(224.0 / 360.0, 0.14, 0.12, 0.98))
+        .bg(dropdown_bg)
         .border_1()
-        .border_color(hsla(0.0, 0.0, 1.0, 0.08))
+        .border_color(dropdown_border)
         .shadow(vec![BoxShadow {
             color: hsla(0.0, 0.0, 0.0, 0.28),
             offset: point(px(0.), px(10.)),
@@ -173,14 +172,25 @@ fn render_omnibar_suggestions(suggestions: &[OmnibarSuggestion]) -> impl IntoEle
         .flex()
         .flex_col()
         .gap(px(2.0))
-        .children(suggestions.iter().cloned().enumerate().map(|(index, suggestion)| {
-            render_omnibar_suggestion(index, suggestion)
-        }))
+        .children(
+            suggestions
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, suggestion)| render_omnibar_suggestion(index, suggestion, theme)),
+        )
 }
 
-fn render_omnibar_suggestion(index: usize, suggestion: OmnibarSuggestion) -> impl IntoElement {
+fn render_omnibar_suggestion(
+    index: usize,
+    suggestion: OmnibarSuggestion,
+    theme: &Theme,
+) -> impl IntoElement {
     let title = suggestion.title.clone();
     let detail = suggestion.detail.clone();
+    let hover_bg = theme.omnibar_suggestion_hover;
+    let title_color = theme.omnibar_suggestion_title;
+    let detail_color = theme.omnibar_suggestion_detail;
 
     div()
         .id(("omnibar-suggestion", index))
@@ -191,35 +201,39 @@ fn render_omnibar_suggestion(index: usize, suggestion: OmnibarSuggestion) -> imp
         .flex_col()
         .gap(px(2.0))
         .cursor_pointer()
-        .hover(|style| style.bg(hsla(217.0 / 360.0, 0.60, 0.50, 0.14)))
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| match &suggestion.action {
-            OmnibarSuggestionAction::Navigate { url } => {
-                window.dispatch_action(Box::new(NavigateToUrl { url: url.clone() }), cx);
-            }
-            OmnibarSuggestionAction::SelectTask { task_id } => {
-                window.dispatch_action(Box::new(SelectTask { task_id: *task_id }), cx);
-            }
-            OmnibarSuggestionAction::ShowSettings => {
-                window.dispatch_action(Box::new(ShowSettings), cx);
+        .hover(move |style| style.bg(hover_bg))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            match &suggestion.action {
+                OmnibarSuggestionAction::Navigate { url } => {
+                    window.dispatch_action(Box::new(NavigateToUrl { url: url.clone() }), cx);
+                }
+                OmnibarSuggestionAction::SelectTask { task_id } => {
+                    window.dispatch_action(Box::new(SelectTask { task_id: *task_id }), cx);
+                }
+                OmnibarSuggestionAction::ShowSettings => {
+                    window.dispatch_action(Box::new(ShowSettings), cx);
+                }
             }
         })
         .child(
             div()
                 .text_size(px(12.5))
                 .font_weight(FontWeight(500.0))
-                .text_color(rgb(0xe6e8ec))
+                .text_color(title_color)
                 .child(title),
         )
         .child(
             div()
                 .text_size(px(10.5))
-                .text_color(rgb(0x8d929c))
+                .text_color(detail_color)
                 .child(detail),
         )
 }
 
-fn render_overview_toggle(state: &AppState) -> impl IntoElement {
+fn render_overview_toggle(state: &AppState, theme: &Theme) -> impl IntoElement {
     let active = matches!(state.shell_mode, ShellMode::Overview);
+    let accent_border = theme.accent_border;
+    let accent_subtle = theme.accent_subtle;
 
     div()
         .w(px(30.0))
@@ -231,32 +245,93 @@ fn render_overview_toggle(state: &AppState) -> impl IntoElement {
         .cursor_pointer()
         .border_1()
         .border_color(if active {
-            hsla(217.0 / 360.0, 0.60, 0.50, 0.3)
+            accent_border
         } else {
             hsla(0.0, 0.0, 0.0, 0.0)
         })
         .bg(if active {
-            hsla(217.0 / 360.0, 0.60, 0.50, 0.15)
+            accent_subtle
         } else {
             hsla(0.0, 0.0, 0.0, 0.0)
         })
-        .child(render_overview_icon(active))
+        .child(render_overview_icon(active, theme))
+}
+
+fn render_active_route_status(state: &AppState, theme: &Theme) -> impl IntoElement {
+    let Some(active) = state.active_web_pane() else {
+        return div().w(px(0.0));
+    };
+
+    let mut tags = Vec::new();
+
+    match active.session {
+        crate::state::WebSessionState::Resolving => tags.push(("Resolving".to_string(), true)),
+        crate::state::WebSessionState::Materializing => {
+            tags.push(("Materializing".to_string(), true))
+        }
+        crate::state::WebSessionState::Launching => tags.push(("Launching".to_string(), true)),
+        _ => {}
+    }
+
+    if let Some(source) = active.source_label {
+        tags.push((source, false));
+    }
+    if let Some(trust) = active.trust_state {
+        tags.push((trust, false));
+    }
+    if active.restricted {
+        tags.push(("restricted".to_string(), true));
+    }
+    if let Some(snapshot) = active.snapshot_label {
+        tags.push((snapshot, false));
+    }
+
+    if tags.is_empty() {
+        return div().w(px(0.0));
+    }
+
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .children(tags.into_iter().take(4).map(|(label, emphasized)| {
+            render_status_chip(&label, emphasized, theme)
+        }))
+}
+
+fn render_status_chip(label: &str, emphasized: bool, theme: &Theme) -> impl IntoElement {
+    let bg = if emphasized {
+        theme.accent_subtle
+    } else {
+        theme.omnibar_rest_bg
+    };
+    let border = if emphasized {
+        theme.accent_border
+    } else {
+        theme.omnibar_rest_border
+    };
+    let text = if emphasized {
+        theme.text_primary
+    } else {
+        theme.omnibar_placeholder
+    };
+
+    div()
+        .rounded(px(999.0))
+        .px(px(8.0))
+        .py(px(3.0))
+        .border_1()
+        .border_color(border)
+        .bg(bg)
+        .text_size(px(10.5))
+        .text_color(text)
+        .child(label.to_string())
 }
 
 /// Two stacked mini-window rectangles with traffic-light dots,
 /// matching the mock's overview toggle icon.
-fn render_overview_icon(active: bool) -> impl IntoElement {
-    let border_color = if active {
-        rgb(0x3b82f6)
-    } else {
-        hsla(0.0, 0.0, 1.0, 0.32).into()
-    };
-
-    let dot_color = if active {
-        rgb(0x3b82f6)
-    } else {
-        hsla(0.0, 0.0, 1.0, 0.32).into()
-    };
+fn render_overview_icon(active: bool, theme: &Theme) -> impl IntoElement {
+    let icon_color = if active { theme.accent } else { theme.text_tertiary };
 
     div()
         .w(px(20.0))
@@ -272,8 +347,7 @@ fn render_overview_icon(active: bool) -> impl IntoElement {
                 .h(px(11.0))
                 .rounded(px(2.5))
                 .border_1()
-                .border_color(border_color)
-                // Dots inside back window
+                .border_color(icon_color)
                 .child(
                     div()
                         .absolute()
@@ -281,9 +355,9 @@ fn render_overview_icon(active: bool) -> impl IntoElement {
                         .left(px(3.0))
                         .flex()
                         .gap(px(1.5))
-                        .child(div().size(px(2.5)).rounded_full().bg(dot_color))
-                        .child(div().size(px(2.5)).rounded_full().bg(dot_color))
-                        .child(div().size(px(2.5)).rounded_full().bg(dot_color)),
+                        .child(div().size(px(2.5)).rounded_full().bg(icon_color))
+                        .child(div().size(px(2.5)).rounded_full().bg(icon_color))
+                        .child(div().size(px(2.5)).rounded_full().bg(icon_color)),
                 ),
         )
         // Front window
@@ -296,8 +370,7 @@ fn render_overview_icon(active: bool) -> impl IntoElement {
                 .h(px(11.0))
                 .rounded(px(2.5))
                 .border_1()
-                .border_color(border_color)
-                // Dots inside front window
+                .border_color(icon_color)
                 .child(
                     div()
                         .absolute()
@@ -305,10 +378,9 @@ fn render_overview_icon(active: bool) -> impl IntoElement {
                         .left(px(3.0))
                         .flex()
                         .gap(px(1.5))
-                        .child(div().size(px(2.5)).rounded_full().bg(dot_color))
-                        .child(div().size(px(2.5)).rounded_full().bg(dot_color))
-                        .child(div().size(px(2.5)).rounded_full().bg(dot_color)),
+                        .child(div().size(px(2.5)).rounded_full().bg(icon_color))
+                        .child(div().size(px(2.5)).rounded_full().bg(icon_color))
+                        .child(div().size(px(2.5)).rounded_full().bg(icon_color)),
                 ),
         )
 }
-

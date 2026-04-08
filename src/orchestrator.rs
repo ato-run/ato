@@ -5,13 +5,17 @@ use std::process::{Command, Stdio};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-// ato-cli is launched through Cargo so this shell can reuse the workspace-local binary.
-const ATO_CLI_MANIFEST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../ato-cli/Cargo.toml");
+const ATO_BIN_ENV: &str = "ATO_DESKTOP_ATO_BIN";
 
 #[derive(Clone, Debug)]
 pub struct GuestLaunchSession {
     pub handle: String,
     pub normalized_handle: String,
+    pub canonical_handle: Option<String>,
+    pub source: Option<String>,
+    pub trust_state: String,
+    pub restricted: bool,
+    pub snapshot_label: Option<String>,
     pub session_id: String,
     pub adapter: String,
     pub frontend_entry: String,
@@ -50,6 +54,11 @@ struct ResolveEnvelope {
 #[derive(Debug, Deserialize)]
 struct ResolvePayload {
     render_strategy: String,
+    canonical_handle: Option<String>,
+    source: Option<String>,
+    trust_state: Option<String>,
+    restricted: Option<bool>,
+    snapshot: Option<serde_json::Value>,
     guest: Option<ResolveGuest>,
     target: Option<ResolveTarget>,
     notes: Vec<String>,
@@ -77,6 +86,11 @@ struct SessionStartInfo {
     session_id: String,
     handle: String,
     normalized_handle: String,
+    canonical_handle: Option<String>,
+    trust_state: String,
+    source: Option<String>,
+    restricted: bool,
+    snapshot: Option<serde_json::Value>,
     adapter: String,
     frontend_entry: String,
     healthcheck_url: String,
@@ -122,6 +136,11 @@ pub fn resolve_and_start_guest(handle: &str) -> Result<GuestLaunchSession> {
     Ok(GuestLaunchSession {
         handle: started.handle,
         normalized_handle: started.normalized_handle,
+        canonical_handle: resolved.canonical_handle,
+        source: resolved.source,
+        trust_state: started.trust_state,
+        restricted: started.restricted,
+        snapshot_label: started.snapshot.as_ref().map(snapshot_label),
         session_id: started.session_id,
         adapter: started.adapter,
         frontend_entry,
@@ -207,18 +226,6 @@ fn resolve_guest(handle: &str) -> Result<ResolvePayload> {
             handle
         );
     }
-    if envelope
-        .resolution
-        .target
-        .as_ref()
-        .and_then(|target| target.manifest_path.as_ref())
-        .is_none()
-    {
-        bail!(
-            "ato app resolve did not return manifest_path for {}",
-            handle
-        );
-    }
     Ok(envelope.resolution)
 }
 
@@ -232,21 +239,21 @@ fn run_ato_json<T>(args: &[&str]) -> Result<T>
 where
     T: for<'de> Deserialize<'de>,
 {
-    let output = Command::new("cargo")
-        .args([
-            "run",
-            "--quiet",
-            "--manifest-path",
-            ATO_CLI_MANIFEST_PATH,
-            "--",
-        ])
+    let ato_bin = resolve_ato_binary()?;
+    let output = Command::new(&ato_bin)
         .args(args)
         .output()
-        .with_context(|| format!("failed to run ato-cli with args {}", args.join(" ")))?;
+        .with_context(|| {
+            format!(
+                "failed to run ato helper '{}' with args {}",
+                ato_bin.display(),
+                args.join(" ")
+            )
+        })?;
 
     if !output.status.success() {
         bail!(
-            "ato-cli command failed: {}",
+            "ato helper command failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -257,6 +264,58 @@ where
             args.join(" ")
         )
     })
+}
+
+fn resolve_ato_binary() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os(ATO_BIN_ENV) {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Ok(path);
+        }
+        bail!(
+            "{} points to a missing ato helper binary: {}",
+            ATO_BIN_ENV,
+            path.display()
+        );
+    }
+
+    if let Some(path) = bundled_ato_binary()? {
+        return Ok(path);
+    }
+
+    if let Some(path) = which_in_path("ato") {
+        return Ok(path);
+    }
+
+    bail!(
+        "ato helper binary was not found. Bundle Helpers/ato, set {}, or install 'ato' on PATH.",
+        ATO_BIN_ENV
+    )
+}
+
+fn bundled_ato_binary() -> Result<Option<PathBuf>> {
+    let exe = std::env::current_exe().context("failed to resolve ato-desktop executable path")?;
+    let Some(macos_dir) = exe.parent() else {
+        return Ok(None);
+    };
+
+    let bundled = macos_dir
+        .parent()
+        .map(|contents| contents.join("Helpers").join("ato"));
+    if let Some(path) = bundled {
+        if path.is_file() {
+            return Ok(Some(path));
+        }
+    }
+
+    Ok(None)
+}
+
+fn which_in_path(binary: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    std::env::split_paths(&path_var)
+        .map(|entry| entry.join(binary))
+        .find(|candidate| candidate.is_file())
 }
 
 fn combine_notes(
@@ -272,6 +331,20 @@ fn combine_notes(
     }
     resolve_notes.push(format!("Resolved guest adapter {adapter} through ato-cli"));
     resolve_notes
+}
+
+fn snapshot_label(snapshot: &serde_json::Value) -> String {
+    if let Some(commit_sha) = snapshot.get("commit_sha").and_then(serde_json::Value::as_str) {
+        return format!("commit {}", short_id(commit_sha));
+    }
+    if let Some(version) = snapshot.get("version").and_then(serde_json::Value::as_str) {
+        return format!("version {version}");
+    }
+    "resolved".to_string()
+}
+
+fn short_id(value: &str) -> String {
+    value.chars().take(12).collect()
 }
 
 fn normalize_frontend_entry(app_root: &Path, primary: &str, fallback: &str) -> Result<String> {
@@ -325,4 +398,15 @@ fn process_is_alive(pid: i32) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::which_in_path;
+
+    #[test]
+    fn which_in_path_resolves_existing_binary() {
+        let sh = which_in_path("sh").expect("sh should exist on PATH in tests");
+        assert!(sh.is_file());
+    }
 }
