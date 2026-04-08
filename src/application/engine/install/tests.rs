@@ -2,8 +2,11 @@ use super::github_inference::{
     auto_fix_github_install_preview_toml, reassign_github_install_preview_toml_port,
 };
 use super::*;
+#[cfg(target_os = "macos")]
 use crate::application::producer_input::resolve_producer_authoritative_input;
+#[cfg(target_os = "macos")]
 use crate::publish_ci::build_capsule_artifact as build_publish_capsule_artifact;
+#[cfg(target_os = "macos")]
 use crate::reporters::CliReporter;
 use std::collections::HashMap;
 use std::sync::OnceLock;
