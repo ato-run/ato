@@ -1,33 +1,47 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use anyhow::{Context, Result};
 use gpui::{AnyWindowHandle, AppContext, AsyncApp, Window};
 use http::header::CONTENT_TYPE;
+use serde_json::Value;
 use wry::http::{Request, Response};
-use wry::{PageLoadEvent, Rect, RequestAsyncResponder, WebContext, WebView, WebViewBuilder};
+use wry::{
+    NewWindowResponse, PageLoadEvent, Rect, RequestAsyncResponder, WebContext, WebView,
+    WebViewBuilder,
+};
 
 use crate::bridge::{BridgeProxy, GuestBridgeResponse, GuestSessionContext, ShellEvent};
 use crate::orchestrator::{resolve_and_start_guest, stop_guest_session, GuestLaunchSession};
 use crate::state::{
-    ActiveWebPane, ActivityTone, AppState, BrowserCommandKind, GuestRoute, PaneBounds, ShellMode,
-    WebSessionState,
+    ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry, AuthSessionStatus,
+    BrowserCommandKind, GuestRoute, PaneBounds, ShellMode, WebSessionState,
 };
+
+struct AuthHandoffSignal {
+    pane_id: usize,
+    url: String,
+}
 
 pub struct WebViewManager {
     views: HashMap<usize, ManagedWebView>,
     pending_launches: HashMap<String, PendingLaunch>,
     active_pane_id: Option<usize>,
+    responder_target: Option<ResponderTarget>,
     async_app: AsyncApp,
     window_handle: AnyWindowHandle,
     preload_registry: PreloadRegistry,
     protocol_router: ProtocolRouter,
     bridge: BridgeProxy,
     visibility_cache: HashMap<usize, bool>,
+    pending_auth_handoffs: Arc<Mutex<Vec<AuthHandoffSignal>>>,
 }
 
 struct ManagedWebView {
@@ -57,16 +71,31 @@ impl WebViewManager {
             views: HashMap::new(),
             pending_launches: HashMap::new(),
             active_pane_id: None,
+            responder_target: None,
             async_app,
             window_handle,
             preload_registry: PreloadRegistry,
             protocol_router: ProtocolRouter,
             bridge: BridgeProxy::new(),
             visibility_cache: HashMap::new(),
+            pending_auth_handoffs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     pub fn sync_from_state(&mut self, window: &Window, state: &mut AppState) {
+        // Drain auth handoff signals from navigation handlers before any other reconciliation.
+        let auth_signals: Vec<AuthHandoffSignal> = {
+            let mut q = self.pending_auth_handoffs.lock().unwrap_or_else(|e| e.into_inner());
+            q.drain(..).collect()
+        };
+        for signal in auth_signals {
+            let session_id = state.begin_auth_handoff(signal.pane_id, &signal.url);
+            if let Some(s) = state.auth_sessions.iter_mut().find(|s| s.session_id == session_id) {
+                s.status = AuthSessionStatus::OpenedInBrowser;
+            }
+            let _ = Command::new("open").arg(&signal.url).status();
+        }
+
         // Pull bridge activity into app state first so rebuilds always see the latest guest messages.
         state.extend_activity(self.bridge.drain_activity());
         let shell_events = self.bridge.drain_shell_events();
@@ -80,6 +109,7 @@ impl WebViewManager {
                 self.bridge
                     .log(ActivityTone::Info, "Detached active child webview");
             }
+            self.sync_responder_target(state);
             return;
         };
 
@@ -111,12 +141,12 @@ impl WebViewManager {
             }
 
             match &active.route {
-                GuestRoute::LocalCapsule { handle, .. } => {
-                    if matches!(active.session, WebSessionState::Launching) {
+                GuestRoute::CapsuleHandle { handle, .. } => {
+                    if is_pending_guest_launch(&active.session) {
                         self.ensure_pending_local_launch(active.pane_id, &route_key, handle, state);
                     }
                 }
-                _ => match self.build_webview(window, &active, None) {
+                _ => match self.build_webview(window, &active, None, state.auth_policy_registry.clone()) {
                     Ok(webview) => {
                         if !route_requires_ready_signal(&active.route) {
                             state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
@@ -196,6 +226,98 @@ impl WebViewManager {
                 }
             }
         }
+
+        self.sync_responder_target(state);
+    }
+
+    pub fn sync_responder_target(&mut self, state: &mut AppState) {
+        let desired = self.desired_responder_target(state);
+        if self.responder_target == Some(desired) {
+            return;
+        }
+
+        let result = match desired {
+            ResponderTarget::Host => self.focus_host_view(),
+            ResponderTarget::WebView(pane_id) => self.focus_webview(pane_id),
+        };
+
+        match result {
+            Ok(()) => {
+                self.responder_target = Some(desired);
+            }
+            Err(error) => {
+                state.push_activity(
+                    ActivityTone::Error,
+                    format!("Failed to update focus target: {error}"),
+                );
+            }
+        }
+    }
+
+    pub fn wants_host_focus(&self, state: &AppState) -> bool {
+        matches!(self.desired_responder_target(state), ResponderTarget::Host)
+    }
+
+    pub fn delegate_select_all(&mut self, state: &AppState) -> Result<bool> {
+        let Some(pane_id) = self.active_webview_pane_id(state) else {
+            return Ok(false);
+        };
+        self.focus_webview(pane_id)?;
+        self.views
+            .get(&pane_id)
+            .context("active webview missing")?
+            .webview
+            .evaluate_script(select_all_script())?;
+        Ok(true)
+    }
+
+    pub fn delegate_paste(&mut self, state: &AppState, text: &str) -> Result<bool> {
+        let Some(pane_id) = self.active_webview_pane_id(state) else {
+            return Ok(false);
+        };
+        self.focus_webview(pane_id)?;
+        let script = paste_script(text);
+        self.views
+            .get(&pane_id)
+            .context("active webview missing")?
+            .webview
+            .evaluate_script(&script)?;
+        Ok(true)
+    }
+
+    pub fn delegate_copy(&mut self, state: &AppState, cut: bool) -> Result<bool> {
+        let Some(pane_id) = self.active_webview_pane_id(state) else {
+            return Ok(false);
+        };
+        self.focus_webview(pane_id)?;
+
+        let Some(view) = self.views.get(&pane_id) else {
+            return Ok(false);
+        };
+        let script = copy_script(cut);
+        view.webview
+            .evaluate_script_with_callback(&script, move |response| {
+                let Ok(value) = serde_json::from_str::<Value>(&response) else {
+                    return;
+                };
+                let text = value
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                if text.is_empty() {
+                    return;
+                }
+                let _ = write_text_to_system_clipboard(&text);
+            })?;
+        Ok(true)
+    }
+
+    fn active_webview_pane_id(&self, state: &AppState) -> Option<usize> {
+        if self.wants_host_focus(state) {
+            return None;
+        }
+        state.active_web_pane().map(|pane| pane.pane_id)
     }
 
     fn apply_shell_events(&mut self, events: &[ShellEvent]) {
@@ -257,8 +379,18 @@ impl WebViewManager {
             }
 
             match completed.session {
-                Ok(session) => match self.build_webview(window, &active, Some(session)) {
+                Ok(session) => match self.build_webview(window, &active, Some(session), state.auth_policy_registry.clone()) {
                     Ok(webview) => {
+                        state.sync_web_session_state(active.pane_id, WebSessionState::Launching);
+                        if let Some(session) = webview.launched_session.as_ref() {
+                            state.update_guest_route_metadata(
+                                active.pane_id,
+                                session.source.clone(),
+                                Some(session.trust_state.clone()),
+                                session.restricted,
+                                session.snapshot_label.clone(),
+                            );
+                        }
                         self.bridge.log(
                             ActivityTone::Info,
                             format!("Built child webview for {}", active.route),
@@ -295,6 +427,7 @@ impl WebViewManager {
         if self.pending_launches.contains_key(&key) {
             return;
         }
+        state.sync_web_session_state(pane_id, WebSessionState::Materializing);
 
         let (sender, receiver) = channel();
         let route_key = route_key.to_string();
@@ -312,10 +445,7 @@ impl WebViewManager {
                 receiver,
             },
         );
-        state.push_activity(
-            ActivityTone::Info,
-            format!("Launching guest session for {route_key}"),
-        );
+        state.push_activity(ActivityTone::Info, format!("Materializing guest for {route_key}"));
 
         let launch_task = background_executor.spawn(async move {
             let result = PendingLaunchResult {
@@ -343,6 +473,7 @@ impl WebViewManager {
         window: &Window,
         pane: &ActiveWebPane,
         local_session: Option<GuestLaunchSession>,
+        auth_policy: AuthPolicyRegistry,
     ) -> Result<ManagedWebView> {
         let scheme = self.protocol_router.scheme_for(&pane.partition_id);
         let mut launched_session = None;
@@ -375,9 +506,9 @@ impl WebViewManager {
                 RouteContent::External,
                 None,
             ),
-            GuestRoute::LocalCapsule { .. } => {
+            GuestRoute::CapsuleHandle { .. } => {
                 let session = local_session.ok_or_else(|| {
-                    anyhow::anyhow!("local capsule webview build requires resolved guest session")
+                    anyhow::anyhow!("capsule-handle webview build requires resolved guest session")
                 })?;
                 for note in &session.notes {
                     self.bridge.log(ActivityTone::Info, note.clone());
@@ -503,6 +634,26 @@ impl WebViewManager {
             });
         }
 
+        // For external URLs, intercept navigations that require browser-side auth.
+        if let GuestRoute::ExternalUrl(_) = &pane.route {
+            let pane_id = pane.pane_id;
+            let signals = self.pending_auth_handoffs.clone();
+            builder = builder.with_navigation_handler(move |uri: String| {
+                if auth_policy.classify(&uri) == AuthMode::BrowserRequired {
+                    if let Ok(mut q) = signals.lock() {
+                        if !q.iter().any(|s: &AuthHandoffSignal| s.pane_id == pane_id) {
+                            q.push(AuthHandoffSignal { pane_id, url: uri });
+                        }
+                    }
+                    false // block navigation inside WebView
+                } else {
+                    true
+                }
+            });
+        }
+
+        builder = builder.with_new_window_req_handler(|_, _| NewWindowResponse::Allow);
+
         let webview = builder
             .with_url(&url)
             .build_as_child(window)
@@ -569,6 +720,52 @@ impl WebViewManager {
 
         self.visibility_cache.insert(pane_id, visible);
     }
+
+    fn desired_responder_target(&self, state: &AppState) -> ResponderTarget {
+        if !matches!(state.shell_mode, ShellMode::Focus) {
+            return ResponderTarget::Host;
+        }
+
+        let Some(active) = state.active_web_pane() else {
+            return ResponderTarget::Host;
+        };
+
+        let is_visible = self
+            .visibility_cache
+            .get(&active.pane_id)
+            .copied()
+            .unwrap_or(false);
+
+        if is_visible && self.views.contains_key(&active.pane_id) {
+            ResponderTarget::WebView(active.pane_id)
+        } else {
+            ResponderTarget::Host
+        }
+    }
+
+    fn focus_host_view(&self) -> Result<()> {
+        let Some(ResponderTarget::WebView(pane_id)) = self.responder_target else {
+            return Ok(());
+        };
+
+        let Some(view) = self.views.get(&pane_id) else {
+            return Ok(());
+        };
+
+        view.webview
+            .focus_parent()
+            .with_context(|| format!("unable to focus host view from pane {pane_id}"))
+    }
+
+    fn focus_webview(&self, pane_id: usize) -> Result<()> {
+        let Some(view) = self.views.get(&pane_id) else {
+            return Ok(());
+        };
+
+        view.webview
+            .focus()
+            .with_context(|| format!("unable to focus child webview for pane {pane_id}"))
+    }
 }
 
 impl Drop for WebViewManager {
@@ -591,6 +788,12 @@ enum WebViewReuseAction {
     Rebuild,
     Navigate,
     Keep,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResponderTarget {
+    Host,
+    WebView(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -641,7 +844,7 @@ fn build_flags_for_route(route: &GuestRoute) -> BuildFlags {
             page_load_behavior: PageLoadBehavior::UpdateExternalUrl,
             observe_title_changes: true,
         },
-        GuestRoute::Capsule { .. } | GuestRoute::LocalCapsule { .. } => BuildFlags {
+        GuestRoute::Capsule { .. } | GuestRoute::CapsuleHandle { .. } => BuildFlags {
             inject_bridge: true,
             enable_ipc: true,
             enable_custom_protocol: true,
@@ -651,6 +854,120 @@ fn build_flags_for_route(route: &GuestRoute) -> BuildFlags {
     }
 }
 
+fn select_all_script() -> &'static str {
+    r#"(() => {
+  const active = document.activeElement;
+  const isTextInput = active && (
+    active.tagName === 'TEXTAREA' ||
+    (active.tagName === 'INPUT' && !['button','checkbox','color','file','hidden','image','radio','range','reset','submit'].includes((active.type || '').toLowerCase()))
+  );
+  if (isTextInput) {
+    active.focus();
+    active.select();
+    return;
+  }
+  if (active && active.isContentEditable) {
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(active);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return;
+  }
+  document.execCommand('selectAll');
+})();"#
+}
+
+fn paste_script(text: &str) -> String {
+    let text = serde_json::to_string(text).expect("clipboard text should serialize");
+    format!(
+        r#"(() => {{
+  const text = {text};
+  const active = document.activeElement;
+  const isTextInput = active && (
+    active.tagName === 'TEXTAREA' ||
+    (active.tagName === 'INPUT' && !['button','checkbox','color','file','hidden','image','radio','range','reset','submit'].includes((active.type || '').toLowerCase()))
+  );
+  if (isTextInput) {{
+    active.focus();
+    const start = active.selectionStart ?? active.value.length;
+    const end = active.selectionEnd ?? start;
+    active.setRangeText(text, start, end, 'end');
+    active.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: text }}));
+    return;
+  }}
+  if (active && active.isContentEditable) {{
+    active.focus();
+    const selection = window.getSelection();
+    if (!selection) return;
+    if (!selection.rangeCount) {{
+      const range = document.createRange();
+      range.selectNodeContents(active);
+      range.collapse(false);
+      selection.addRange(range);
+    }}
+    selection.deleteFromDocument();
+    selection.getRangeAt(0).insertNode(document.createTextNode(text));
+    selection.collapseToEnd();
+    return;
+  }}
+  document.execCommand('insertText', false, text);
+}})();"#,
+        text = text,
+    )
+}
+
+fn copy_script(cut: bool) -> String {
+    format!(
+        r#"(() => {{
+  const cut = {cut};
+  const active = document.activeElement;
+  const isTextInput = active && (
+    active.tagName === 'TEXTAREA' ||
+    (active.tagName === 'INPUT' && !['button','checkbox','color','file','hidden','image','radio','range','reset','submit'].includes((active.type || '').toLowerCase()))
+  );
+  if (isTextInput) {{
+    active.focus();
+    const start = active.selectionStart ?? 0;
+    const end = active.selectionEnd ?? start;
+    const text = active.value.slice(start, end);
+    if (cut && text && !active.readOnly && !active.disabled) {{
+      active.setRangeText('', start, end, 'start');
+      active.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'deleteByCut', data: null }}));
+    }}
+    return {{ text }};
+  }}
+  const selection = window.getSelection();
+  const text = selection ? selection.toString() : '';
+  if (cut && text) {{
+    if (active && active.isContentEditable) {{
+      selection.deleteFromDocument();
+    }}
+  }}
+  return {{ text }};
+}})();"#,
+        cut = if cut { "true" } else { "false" },
+    )
+}
+
+fn write_text_to_system_clipboard(text: &str) -> Result<()> {
+    let mut child = Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("failed to spawn pbcopy")?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(text.as_bytes())
+            .context("failed to write clipboard contents to pbcopy")?;
+    }
+    let status = child.wait().context("failed to wait for pbcopy")?;
+    if !status.success() {
+        anyhow::bail!("pbcopy exited with status {status}");
+    }
+    Ok(())
+}
+
 fn pending_launch_key(pane_id: usize, route_key: &str) -> String {
     format!("{pane_id}:{route_key}")
 }
@@ -658,7 +975,14 @@ fn pending_launch_key(pane_id: usize, route_key: &str) -> String {
 fn route_requires_ready_signal(route: &GuestRoute) -> bool {
     matches!(
         route,
-        GuestRoute::Capsule { .. } | GuestRoute::LocalCapsule { .. }
+        GuestRoute::Capsule { .. } | GuestRoute::CapsuleHandle { .. }
+    )
+}
+
+fn is_pending_guest_launch(session: &WebSessionState) -> bool {
+    matches!(
+        session,
+        WebSessionState::Resolving | WebSessionState::Materializing | WebSessionState::Launching
     )
 }
 
@@ -682,7 +1006,9 @@ fn active_web_session(state: &AppState, pane_id: usize) -> Option<WebSessionStat
 
         match &pane.surface {
             crate::state::PaneSurface::Web(web) => Some(web.session.clone()),
-            crate::state::PaneSurface::Native { .. } | crate::state::PaneSurface::Launcher => None,
+            crate::state::PaneSurface::Native { .. }
+            | crate::state::PaneSurface::Launcher
+            | crate::state::PaneSurface::AuthHandoff { .. } => None,
         }
     })
 }
@@ -1040,6 +1366,10 @@ mod tests {
             profile: "electron".to_string(),
             capabilities: vec![CapabilityGrant::OpenExternal],
             session: WebSessionState::Launching,
+            source_label: None,
+            trust_state: None,
+            restricted: false,
+            snapshot_label: None,
             bounds: PaneBounds::empty(),
         }
     }

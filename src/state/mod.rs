@@ -2,6 +2,10 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::path::PathBuf;
 
+use capsule_core::handle::{
+    classify_surface_input, HandleInput, InputSurface as CapsuleInputSurface,
+    SurfaceInput as CapsuleSurfaceInput,
+};
 use serde::{Deserialize, Serialize};
 use url::{form_urlencoded, Url};
 
@@ -16,6 +20,12 @@ pub enum ShellMode {
     Focus,
     Overview,
     CommandBar,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThemeMode {
+    Light,
+    Dark,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,7 +79,7 @@ impl CapabilityGrant {
 pub enum GuestRoute {
     Capsule { session: String, entry_path: String },
     ExternalUrl(Url),
-    LocalCapsule { handle: String, label: String },
+    CapsuleHandle { handle: String, label: String },
 }
 
 impl GuestRoute {
@@ -77,7 +87,7 @@ impl GuestRoute {
         match self {
             Self::Capsule { session, .. } => format!("capsule://{session}/index.html"),
             Self::ExternalUrl(url) => url.as_str().to_string(),
-            Self::LocalCapsule { label, .. } => format!("capsule://local/{label}"),
+            Self::CapsuleHandle { label, .. } => label.clone(),
         }
     }
 }
@@ -91,6 +101,8 @@ impl fmt::Display for GuestRoute {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WebSessionState {
     Detached,
+    Resolving,
+    Materializing,
     Launching,
     Mounted,
     Closed,
@@ -122,11 +134,93 @@ pub enum PaneRole {
     Agent,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthMode {
+    EmbedAllowed,
+    BrowserPreferred,
+    BrowserRequired,
+    FirstPartyNative, // treated as BrowserRequired for now
+    Deny,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuthPolicy {
+    pub origin_contains: String,
+    pub path_prefix: Option<String>,
+    pub mode: AuthMode,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuthPolicyRegistry {
+    pub policies: Vec<AuthPolicy>,
+    pub default_mode: AuthMode,
+}
+
+impl AuthPolicyRegistry {
+    pub fn default_third_party() -> Self {
+        Self {
+            default_mode: AuthMode::BrowserPreferred,
+            policies: vec![
+                // Google OAuth
+                AuthPolicy { origin_contains: "accounts.google.com".into(), path_prefix: None, mode: AuthMode::BrowserRequired },
+                // GitHub
+                AuthPolicy { origin_contains: "github.com".into(), path_prefix: Some("/login".into()), mode: AuthMode::BrowserRequired },
+                AuthPolicy { origin_contains: "github.com".into(), path_prefix: Some("/session".into()), mode: AuthMode::BrowserRequired },
+                // Microsoft
+                AuthPolicy { origin_contains: "login.microsoftonline.com".into(), path_prefix: None, mode: AuthMode::BrowserRequired },
+                AuthPolicy { origin_contains: "login.live.com".into(), path_prefix: None, mode: AuthMode::BrowserRequired },
+                // Generic OAuth paths
+                AuthPolicy { origin_contains: "".into(), path_prefix: Some("/oauth/".into()), mode: AuthMode::BrowserRequired },
+                AuthPolicy { origin_contains: "".into(), path_prefix: Some("/oauth2/".into()), mode: AuthMode::BrowserRequired },
+                AuthPolicy { origin_contains: "".into(), path_prefix: Some("/authorize".into()), mode: AuthMode::BrowserRequired },
+                AuthPolicy { origin_contains: "".into(), path_prefix: Some("/sso/".into()), mode: AuthMode::BrowserRequired },
+            ],
+        }
+    }
+
+    pub fn classify(&self, url: &str) -> AuthMode {
+        for policy in &self.policies {
+            let host_match = policy.origin_contains.is_empty() || url.contains(&policy.origin_contains);
+            let path_match = policy.path_prefix.as_ref()
+                .map(|p| url.contains(p.as_str()))
+                .unwrap_or(true);
+            if host_match && path_match {
+                return policy.mode;
+            }
+        }
+        self.default_mode
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthSessionStatus {
+    Created,
+    OpenedInBrowser,
+    Completed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuthSession {
+    pub session_id: String,
+    pub originating_pane_id: PaneId,
+    pub auth_mode: AuthMode,
+    pub origin: String,
+    pub start_url: String,
+    pub status: AuthSessionStatus,
+    pub created_at: std::time::SystemTime,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PaneSurface {
     Web(WebPane),
     Native { body: String },
     Launcher,
+    AuthHandoff {
+        session_id: String,
+        origin: String,
+        original_web_pane: WebPane,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,6 +230,10 @@ pub struct WebPane {
     pub session: WebSessionState,
     pub capabilities: Vec<CapabilityGrant>,
     pub profile: String,
+    pub source_label: Option<String>,
+    pub trust_state: Option<String>,
+    pub restricted: bool,
+    pub snapshot_label: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -234,6 +332,10 @@ pub struct ActiveWebPane {
     pub profile: String,
     pub capabilities: Vec<CapabilityGrant>,
     pub session: WebSessionState,
+    pub source_label: Option<String>,
+    pub trust_state: Option<String>,
+    pub restricted: bool,
+    pub snapshot_label: Option<String>,
     pub bounds: PaneBounds,
 }
 
@@ -245,6 +347,9 @@ pub struct AppState {
     pub command_bar_text: String,
     pub activity: Vec<ActivityEntry>,
     pub browser_commands: VecDeque<BrowserCommand>,
+    pub theme_mode: ThemeMode,
+    pub auth_sessions: Vec<AuthSession>,
+    pub auth_policy_registry: AuthPolicyRegistry,
     next_task_id: TaskSetId,
     next_pane_id: PaneId,
     next_new_tab_index: usize,
@@ -254,17 +359,17 @@ impl AppState {
     pub fn demo() -> Self {
         // The demo graph intentionally mixes local capsules, a bundled welcome page, and remote URLs
         // so the shell exercises every rendering path on boot.
-        let local_tauri = GuestRoute::LocalCapsule {
+        let local_tauri = GuestRoute::CapsuleHandle {
             handle: demo_local_capsule("desky-real-tauri"),
-            label: "desky-real-tauri".to_string(),
+            label: demo_local_capsule("desky-real-tauri"),
         };
-        let local_electron = GuestRoute::LocalCapsule {
+        let local_electron = GuestRoute::CapsuleHandle {
             handle: demo_local_capsule("desky-real-electron"),
-            label: "desky-real-electron".to_string(),
+            label: demo_local_capsule("desky-real-electron"),
         };
-        let local_wails = GuestRoute::LocalCapsule {
+        let local_wails = GuestRoute::CapsuleHandle {
             handle: demo_local_capsule("desky-real-wails"),
-            label: "desky-real-wails".to_string(),
+            label: demo_local_capsule("desky-real-wails"),
         };
         let welcome = GuestRoute::Capsule {
             session: "welcome".to_string(),
@@ -311,6 +416,10 @@ impl AppState {
                     session: WebSessionState::Launching,
                     capabilities: vec![CapabilityGrant::ReadFile, CapabilityGrant::WorkspaceInfo],
                     profile: route_profile(&local_tauri).to_string(),
+                    source_label: Some("local".to_string()),
+                    trust_state: Some("local".to_string()),
+                    restricted: true,
+                    snapshot_label: None,
                 }),
             }],
             split_ratio: 0.68,
@@ -343,6 +452,10 @@ impl AppState {
                     session: WebSessionState::Launching,
                     capabilities: vec![CapabilityGrant::OpenExternal],
                     profile: "electron".to_string(),
+                    source_label: Some("web".to_string()),
+                    trust_state: None,
+                    restricted: false,
+                    snapshot_label: None,
                 }),
             }],
             split_ratio: 0.68,
@@ -366,10 +479,20 @@ impl AppState {
                 message: "Phase 3 shell bootstrapped with ato-cli guest orchestration".to_string(),
             }],
             browser_commands: VecDeque::new(),
+            theme_mode: ThemeMode::Light,
+            auth_sessions: Vec::new(),
+            auth_policy_registry: AuthPolicyRegistry::default_third_party(),
             next_task_id: 4,
             next_pane_id: 4,
             next_new_tab_index: 2,
         }
+    }
+
+    pub fn toggle_theme(&mut self) {
+        self.theme_mode = match self.theme_mode {
+            ThemeMode::Light => ThemeMode::Dark,
+            ThemeMode::Dark => ThemeMode::Light,
+        };
     }
 
     pub fn focus_command_bar(&mut self) {
@@ -509,15 +632,79 @@ impl AppState {
 
     pub fn navigate_to_url(&mut self, input: &str) {
         let normalized = Self::normalize_input(input);
-        let Ok(url) = Url::parse(&normalized) else {
-            self.push_activity(
-                ActivityTone::Error,
-                format!("Unable to navigate to invalid URL: {input}"),
-            );
-            return;
-        };
-
-        let next_route = GuestRoute::ExternalUrl(url);
+        let (next_route, capabilities, profile, source_label, trust_state, restricted, session) =
+            match classify_surface_input(HandleInput {
+                raw: normalized.clone(),
+                surface: CapsuleInputSurface::DesktopOmnibar,
+            }) {
+                Ok(CapsuleSurfaceInput::Capsule { canonical }) => {
+                    let label = canonical.display_string();
+                    (
+                        GuestRoute::CapsuleHandle {
+                            handle: label.clone(),
+                            label,
+                        },
+                        vec![CapabilityGrant::ReadFile, CapabilityGrant::WorkspaceInfo],
+                        route_profile_for_source(canonical.source_label()).to_string(),
+                        Some(canonical.source_label().to_string()),
+                        Some(if canonical.source_label() == "local" {
+                            "local".to_string()
+                        } else {
+                            "untrusted".to_string()
+                        }),
+                        true,
+                        WebSessionState::Resolving,
+                    )
+                }
+                Ok(CapsuleSurfaceInput::HostRoute { route }) => {
+                    self.push_activity(
+                        ActivityTone::Info,
+                        format!("Host route {} is reserved for desktop callbacks", route.namespace),
+                    );
+                    return;
+                }
+                Ok(CapsuleSurfaceInput::WebUrl { url }) => {
+                    let Ok(url) = Url::parse(&url) else {
+                        self.push_activity(
+                            ActivityTone::Error,
+                            format!("Unable to navigate to invalid URL: {input}"),
+                        );
+                        return;
+                    };
+                    (
+                        GuestRoute::ExternalUrl(url),
+                        vec![CapabilityGrant::OpenExternal],
+                        "electron".to_string(),
+                        Some("web".to_string()),
+                        None,
+                        false,
+                        WebSessionState::Launching,
+                    )
+                }
+                Ok(CapsuleSurfaceInput::SearchQuery { query }) => {
+                    let fallback = Self::search_fallback(&query);
+                    let Ok(url) = Url::parse(&fallback) else {
+                        self.push_activity(
+                            ActivityTone::Error,
+                            format!("Unable to navigate to invalid URL: {input}"),
+                        );
+                        return;
+                    };
+                    (
+                        GuestRoute::ExternalUrl(url),
+                        vec![CapabilityGrant::OpenExternal],
+                        "electron".to_string(),
+                        Some("web".to_string()),
+                        None,
+                        false,
+                        WebSessionState::Launching,
+                    )
+                }
+                Err(error) => {
+                    self.push_activity(ActivityTone::Error, error.to_string());
+                    return;
+                }
+            };
         let label = next_route.to_string();
         let partition_id = sanitize(&label);
         let mut navigated = false;
@@ -528,9 +715,13 @@ impl AppState {
                 pane.surface = PaneSurface::Web(WebPane {
                     route: next_route.clone(),
                     partition_id,
-                    session: WebSessionState::Launching,
-                    capabilities: vec![CapabilityGrant::OpenExternal],
-                    profile: "electron".to_string(),
+                    session,
+                    capabilities,
+                    profile,
+                    source_label,
+                    trust_state,
+                    restricted,
+                    snapshot_label: None,
                 });
                 navigated = true;
             }
@@ -662,11 +853,15 @@ impl AppState {
                     };
                     let active_pane = self.active_web_pane().map(|pane| pane.pane_id);
                     self.update_pane(pane_id, |pane| {
-                        pane.title = url.clone();
                         if let PaneSurface::Web(web) = &mut pane.surface {
+                            pane.title = url.clone();
                             web.route = GuestRoute::ExternalUrl(parsed.clone());
                             web.partition_id = sanitize(&url);
                             web.session = WebSessionState::Mounted;
+                            web.source_label = Some("web".to_string());
+                            web.trust_state = None;
+                            web.restricted = false;
+                            web.snapshot_label = None;
                         }
                     });
                     if active_pane == Some(pane_id) {
@@ -699,6 +894,20 @@ impl AppState {
                     web.route = next_route;
                     web.partition_id = sanitize(&label);
                     web.session = WebSessionState::Launching;
+                    web.source_label = match &web.route {
+                        GuestRoute::CapsuleHandle { handle, .. } => Some(route_source_label(handle)),
+                        GuestRoute::Capsule { .. } => Some("embedded".to_string()),
+                        GuestRoute::ExternalUrl(_) => Some("web".to_string()),
+                    };
+                    web.trust_state = match &web.route {
+                        GuestRoute::CapsuleHandle { handle, .. } if handle.contains("samples") => {
+                            Some("local".to_string())
+                        }
+                        GuestRoute::CapsuleHandle { .. } => Some("untrusted".to_string()),
+                        _ => None,
+                    };
+                    web.restricted = !matches!(&web.route, GuestRoute::ExternalUrl(_));
+                    web.snapshot_label = None;
                 }
             }
             Some((label, task.preview.clone()))
@@ -806,9 +1015,13 @@ impl AppState {
                 profile: web.profile.clone(),
                 capabilities: web.capabilities.clone(),
                 session: web.session.clone(),
+                source_label: web.source_label.clone(),
+                trust_state: web.trust_state.clone(),
+                restricted: web.restricted,
+                snapshot_label: web.snapshot_label.clone(),
                 bounds: pane.bounds,
             }),
-            PaneSurface::Native { .. } | PaneSurface::Launcher => None,
+            PaneSurface::Native { .. } | PaneSurface::Launcher | PaneSurface::AuthHandoff { .. } => None,
         }
     }
 
@@ -894,6 +1107,14 @@ impl AppState {
             return "https://www.google.com".to_string();
         }
 
+        if trimmed.starts_with("capsule://")
+            || trimmed.starts_with("ato://")
+            || looks_like_registry_sugar(trimmed)
+            || trimmed.starts_with("github.com/")
+        {
+            return trimmed.to_string();
+        }
+
         if Url::parse(trimmed).is_ok() {
             return trimmed.to_string();
         }
@@ -905,6 +1126,10 @@ impl AppState {
             }
         }
 
+        Self::search_fallback(trimmed)
+    }
+
+    fn search_fallback(trimmed: &str) -> String {
         let encoded = form_urlencoded::byte_serialize(trimmed.as_bytes())
             .collect::<String>()
             .replace('+', "%20");
@@ -996,6 +1221,82 @@ impl AppState {
         }
     }
 
+    pub fn update_guest_route_metadata(
+        &mut self,
+        pane_id: PaneId,
+        source_label: Option<String>,
+        trust_state: Option<String>,
+        restricted: bool,
+        snapshot_label: Option<String>,
+    ) {
+        self.update_pane(pane_id, |pane| {
+            if let PaneSurface::Web(web) = &mut pane.surface {
+                web.source_label = source_label.clone();
+                web.trust_state = trust_state.clone();
+                web.restricted = restricted;
+                web.snapshot_label = snapshot_label.clone();
+            }
+        });
+    }
+
+    pub fn classify_url(&self, url: &str) -> AuthMode {
+        self.auth_policy_registry.classify(url)
+    }
+
+    /// Called when a nav intercept fires. Swaps the pane surface to AuthHandoff and returns the session_id.
+    pub fn begin_auth_handoff(&mut self, pane_id: PaneId, url: &str) -> String {
+        let origin = Url::parse(url)
+            .map(|u| u.host_str().unwrap_or("unknown").to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        let session_id = format!("auth-{}", uuid_v4_simple());
+        let auth_mode = self.classify_url(url);
+        self.auth_sessions.push(AuthSession {
+            session_id: session_id.clone(),
+            originating_pane_id: pane_id,
+            auth_mode,
+            origin: origin.clone(),
+            start_url: url.to_string(),
+            status: AuthSessionStatus::Created,
+            created_at: std::time::SystemTime::now(),
+        });
+        self.update_pane(pane_id, |pane| {
+            if let PaneSurface::Web(web) = std::mem::replace(&mut pane.surface, PaneSurface::Launcher) {
+                pane.surface = PaneSurface::AuthHandoff {
+                    session_id: session_id.clone(),
+                    origin: origin.clone(),
+                    original_web_pane: web,
+                };
+            }
+        });
+        session_id
+    }
+
+    pub fn cancel_auth_handoff(&mut self, pane_id: PaneId) {
+        self.update_pane(pane_id, |pane| {
+            if let PaneSurface::AuthHandoff { original_web_pane, .. } =
+                std::mem::replace(&mut pane.surface, PaneSurface::Launcher)
+            {
+                pane.surface = PaneSurface::Web(original_web_pane);
+            }
+        });
+        if let Some(s) = self.auth_sessions.iter_mut().find(|s| s.originating_pane_id == pane_id) {
+            s.status = AuthSessionStatus::Cancelled;
+        }
+    }
+
+    pub fn resume_after_auth(&mut self, pane_id: PaneId) {
+        self.update_pane(pane_id, |pane| {
+            if let PaneSurface::AuthHandoff { original_web_pane, .. } =
+                std::mem::replace(&mut pane.surface, PaneSurface::Launcher)
+            {
+                pane.surface = PaneSurface::Web(original_web_pane);
+            }
+        });
+        if let Some(s) = self.auth_sessions.iter_mut().find(|s| s.originating_pane_id == pane_id) {
+            s.status = AuthSessionStatus::Completed;
+        }
+    }
+
     fn sync_command_bar_with_active_route(&mut self) {
         self.command_bar_text = self
             .active_web_pane()
@@ -1028,6 +1329,15 @@ impl TaskSet {
     }
 }
 
+fn uuid_v4_simple() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    format!("{t:08x}")
+}
+
 fn sanitize(value: &str) -> String {
     value
         .chars()
@@ -1051,11 +1361,11 @@ fn sidebar_icon_for_task(task: &TaskSet) -> SidebarTaskIconSpec {
             GuestRoute::ExternalUrl(url) => external_origin(url)
                 .map(|origin| SidebarTaskIconSpec::ExternalUrl { origin })
                 .unwrap_or_else(|| SidebarTaskIconSpec::Monogram(short_label(&task.title))),
-            GuestRoute::Capsule { .. } | GuestRoute::LocalCapsule { .. } => {
+            GuestRoute::Capsule { .. } | GuestRoute::CapsuleHandle { .. } => {
                 SidebarTaskIconSpec::Monogram(short_label(&task.title))
             }
         },
-        PaneSurface::Native { .. } | PaneSurface::Launcher => {
+        PaneSurface::Native { .. } | PaneSurface::Launcher | PaneSurface::AuthHandoff { .. } => {
             SidebarTaskIconSpec::Monogram(short_label(&task.title))
         }
     }
@@ -1081,6 +1391,7 @@ fn task_route_label(task: &TaskSet) -> String {
         PaneSurface::Web(web) => web.route.to_string(),
         PaneSurface::Native { .. } => "Native settings panel".to_string(),
         PaneSurface::Launcher => "Launchpad".to_string(),
+        PaneSurface::AuthHandoff { origin, .. } => format!("Signing in to {origin}…"),
     }
 }
 
@@ -1094,11 +1405,43 @@ fn demo_local_capsule(name: &str) -> String {
 
 fn route_profile(route: &GuestRoute) -> &'static str {
     match route {
-        GuestRoute::LocalCapsule { label, .. } if label.contains("electron") => "electron",
-        GuestRoute::LocalCapsule { label, .. } if label.contains("wails") => "wails",
+        GuestRoute::CapsuleHandle { handle, .. } if handle.contains("electron") => "electron",
+        GuestRoute::CapsuleHandle { handle, .. } if handle.contains("wails") => "wails",
         GuestRoute::ExternalUrl(_) => "electron",
         _ => "tauri",
     }
+}
+
+fn route_profile_for_source(source: &str) -> &'static str {
+    match source {
+        "github" | "registry" | "local" => "tauri",
+        _ => "electron",
+    }
+}
+
+fn route_source_label(handle: &str) -> String {
+    if handle.starts_with("capsule://github.com/") {
+        "github".to_string()
+    } else if handle.starts_with("capsule://ato.run/") {
+        "registry".to_string()
+    } else {
+        "local".to_string()
+    }
+}
+
+fn looks_like_registry_sugar(value: &str) -> bool {
+    let candidate = value
+        .split_once('@')
+        .map(|(prefix, _)| prefix)
+        .unwrap_or(value);
+    let mut parts = candidate.split('/');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    let Some(second) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none() && !first.is_empty() && !second.is_empty()
 }
 
 #[cfg(test)]
@@ -1123,6 +1466,11 @@ mod tests {
             "https://example.com"
         );
         assert_eq!(
+            AppState::normalize_input("capsule://github.com/acme/chat"),
+            "capsule://github.com/acme/chat"
+        );
+        assert_eq!(AppState::normalize_input("acme/chat"), "acme/chat");
+        assert_eq!(
             AppState::normalize_input("example.com"),
             "https://example.com"
         );
@@ -1144,6 +1492,20 @@ mod tests {
         assert_eq!(pane.profile, "electron");
         assert_eq!(pane.session, WebSessionState::Launching);
         assert_eq!(state.command_bar_text, "https://example.com/");
+    }
+
+    #[test]
+    fn navigate_to_capsule_handle_uses_resolving_state_and_registry_metadata() {
+        let mut state = AppState::demo();
+        state.navigate_to_url("acme/chat");
+        let pane = state.active_web_pane().expect("pane");
+
+        assert_eq!(pane.route.to_string(), "capsule://ato.run/acme/chat");
+        assert_eq!(pane.session, WebSessionState::Resolving);
+        assert_eq!(pane.source_label.as_deref(), Some("registry"));
+        assert_eq!(pane.trust_state.as_deref(), Some("untrusted"));
+        assert!(pane.restricted);
+        assert_eq!(state.command_bar_text, "capsule://ato.run/acme/chat");
     }
 
     #[test]
@@ -1193,7 +1555,10 @@ mod tests {
         assert_eq!(workspace.tasks.len(), original_task_count + 1);
         assert_eq!(workspace.active_task().expect("task").title, "Settings");
 
-        let pane = workspace.active_task().and_then(|task| task.focused_pane()).expect("pane");
+        let pane = workspace
+            .active_task()
+            .and_then(|task| task.focused_pane())
+            .expect("pane");
         assert!(matches!(pane.surface, PaneSurface::Native { .. }));
         assert_eq!(state.command_bar_text, "");
 
@@ -1261,10 +1626,9 @@ mod tests {
 
         let suggestions = state.omnibar_suggestions("ato");
 
-        assert!(suggestions.iter().any(|item| matches!(
-            item.action,
-            OmnibarSuggestionAction::Navigate { .. }
-        )));
+        assert!(suggestions
+            .iter()
+            .any(|item| matches!(item.action, OmnibarSuggestionAction::Navigate { .. })));
         assert!(suggestions.iter().any(|item| matches!(
             item.action,
             OmnibarSuggestionAction::SelectTask { task_id: 3 }
@@ -1277,10 +1641,9 @@ mod tests {
 
         let suggestions = state.omnibar_suggestions("");
 
-        assert!(suggestions.iter().any(|item| matches!(
-            item.action,
-            OmnibarSuggestionAction::ShowSettings
-        )));
+        assert!(suggestions
+            .iter()
+            .any(|item| matches!(item.action, OmnibarSuggestionAction::ShowSettings)));
     }
 
     #[test]
