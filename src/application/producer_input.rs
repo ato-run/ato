@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use capsule_core::ato_lock::{compute_closure_digest, compute_lock_id};
 use capsule_core::input_resolver::{
-    resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ResolvedSourceOnly,
+    resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
 };
 use capsule_core::lock_runtime::resolve_lock_runtime_model;
 use capsule_core::router::{CompatManifestBridge, CompatProjectInput, ExecutionDescriptor};
@@ -67,19 +67,6 @@ pub(crate) fn resolve_producer_authoritative_input(
 ) -> Result<ProducerAuthoritativeInput> {
     let resolved = resolve_authoritative_input(project_root, ResolveInputOptions::default())?;
     producer_authoritative_input_from_resolved(resolved, reporter, assume_yes)
-}
-
-pub(crate) fn rematerialize_source_authoritative_input(
-    project_root: &Path,
-    reporter: Arc<CliReporter>,
-    assume_yes: bool,
-) -> Result<ProducerAuthoritativeInput> {
-    let source = ResolvedSourceOnly {
-        project_root: project_root.to_path_buf(),
-        single_script: None,
-    };
-    let materialized = materialize_run_from_source_only(&source, None, reporter, assume_yes)?;
-    ProducerAuthoritativeInput::from_materialized(materialized, Vec::new())
 }
 
 fn producer_authoritative_input_from_resolved(
@@ -378,43 +365,12 @@ impl ProducerAuthoritativeInput {
             return Ok(());
         };
 
-        if !matches!(contract.framework.as_str(), "tauri" | "electron" | "wails") {
+        if !desktop_source_publish_framework_supported(&contract.framework) {
             anyhow::bail!(
-                "desktop source publish currently supports only Tauri, Electron, or Wails (got '{}')",
+                "desktop source publish currently supports only Tauri, Electron, Wails, or GPUI/Wry (got '{}')",
                 contract.framework
             );
         }
-        if contract.mode != "source-derivation" {
-            anyhow::bail!(
-                "desktop source publish requires contract.delivery.mode=source-derivation (got '{}')",
-                contract.mode
-            );
-        }
-        if contract.closure_status != "complete" {
-            anyhow::bail!(
-                "desktop source publish requires contract.delivery.build.closure_status=complete (got '{}')",
-                contract.closure_status
-            );
-        }
-
-        let closure = self
-            .descriptor
-            .lock
-            .resolution
-            .entries
-            .get("closure")
-            .context("desktop source publish requires resolution.closure")?;
-        let info = capsule_core::ato_lock::closure_info(closure)
-            .map_err(anyhow::Error::from)
-            .context("desktop source publish requires a normalized resolution.closure")?;
-        if info.kind != "build_closure" || info.status != "complete" {
-            anyhow::bail!(
-                "desktop source publish requires resolution.closure.kind=build_closure and status=complete (got kind='{}', status='{}')",
-                info.kind,
-                info.status
-            );
-        }
-
         crate::build::native_delivery::ensure_current_host_delivery_target(
             &contract.target,
             "desktop source publish",
@@ -425,7 +381,7 @@ impl ProducerAuthoritativeInput {
         &self,
     ) -> Result<DesktopSourcePublishContract> {
         let contract = self.desktop_source_publish_contract().context(
-            "--finalize-local is only available for Tauri/Electron/Wails source publish",
+            "--finalize-local is only available for Tauri/Electron/Wails/GPUI-Wry source publish",
         )?;
         self.ensure_desktop_source_publish_ready()?;
         if !crate::build::native_delivery::host_supports_finalize() {
@@ -532,6 +488,13 @@ impl ProducerAuthoritativeInput {
     }
 }
 
+fn desktop_source_publish_framework_supported(framework: &str) -> bool {
+    matches!(
+        framework.trim(),
+        "tauri" | "electron" | "wails" | "gpui-wry"
+    )
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
 
@@ -579,6 +542,79 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    #[test]
+    fn desktop_source_publish_framework_support_includes_gpui_wry() {
+        assert!(desktop_source_publish_framework_supported("gpui-wry"));
+        assert!(desktop_source_publish_framework_supported("tauri"));
+        assert!(!desktop_source_publish_framework_supported("custom-native"));
+    }
+
+    #[test]
+    fn gpui_wry_native_command_project_is_publish_ready() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("capsule.toml"),
+            r#"schema_version = "0.2"
+name = "desktop-demo"
+version = "0.1.0"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source"
+driver = "native"
+entrypoint = "sh"
+cmd = ["build-app.sh"]
+working_dir = "."
+
+[artifact]
+framework = "gpui-wry"
+stage = "unsigned"
+target = "darwin/arm64"
+input = "dist/Desktop Demo.app"
+
+[finalize]
+tool = "codesign"
+args = ["--deep", "--force", "--sign", "-", "dist/Desktop Demo.app"]
+"#,
+        )
+        .expect("capsule.toml");
+        std::fs::write(
+            dir.path().join("build-app.sh"),
+            "#!/bin/sh\nset -eu\nmkdir -p 'dist/Desktop Demo.app/Contents/MacOS'\nprintf '#!/bin/sh\necho native\n' > 'dist/Desktop Demo.app/Contents/MacOS/Desktop Demo'\nchmod 755 'dist/Desktop Demo.app/Contents/MacOS/Desktop Demo'\n",
+        )
+        .expect("build-app.sh");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(dir.path().join("build-app.sh"))
+                .expect("metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(dir.path().join("build-app.sh"), permissions).expect("chmod");
+        }
+
+        let input = resolve_producer_authoritative_input(
+            dir.path(),
+            Arc::new(crate::reporters::CliReporter::new(false)),
+            false,
+        )
+        .expect("resolve producer input");
+
+        let contract = input
+            .desktop_source_publish_contract()
+            .expect("desktop source publish contract");
+        assert_eq!(contract.framework, "gpui-wry");
+        assert!(matches!(
+            contract.mode.as_str(),
+            "source-draft" | "source-derivation"
+        ));
+        input
+            .ensure_desktop_source_publish_ready()
+            .expect("gpui-wry native project should be publish ready");
+    }
 
     #[test]
     fn producer_bridge_validation_fails_closed_on_target_mismatch() {
