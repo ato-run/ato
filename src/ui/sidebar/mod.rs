@@ -3,11 +3,12 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, img, linear_color_stop, linear_gradient, point, px, rgb, BoxShadow, Div, FontWeight,
-    Image, InteractiveElement, IntoElement, MouseButton,
+    div, img, linear_color_stop, linear_gradient, point, px, BoxShadow, Div, FontWeight, Image,
+    InteractiveElement, IntoElement, MouseButton,
 };
 use gpui_component::{Icon, IconName};
 
+use super::theme::Theme;
 use crate::app::{NewTab, SelectTask, ShowSettings};
 use crate::state::{AppState, SidebarTaskIconSpec, SidebarTaskItem};
 
@@ -24,8 +25,11 @@ pub(super) enum FaviconState {
 pub(super) fn render_task_rail(
     state: &AppState,
     favicon_cache: &HashMap<String, FaviconState>,
+    theme: &Theme,
 ) -> impl IntoElement {
     let tasks = state.sidebar_task_items();
+    let panel_bg = theme.panel_bg;
+    let panel_border = theme.panel_border;
 
     div()
         .w(px(52.0))
@@ -36,20 +40,19 @@ pub(super) fn render_task_rail(
         .items_center()
         .py_3()
         .gap_1()
-        .bg(hsla(240.0 / 360.0, 0.09, 0.13, 0.85))
+        .bg(panel_bg)
         .border_r_1()
-        .border_color(hsla(0.0, 0.0, 1.0, 0.06))
+        .border_color(panel_border)
         .children(
             tasks
                 .into_iter()
                 .enumerate()
-                .map(move |(i, task)| render_nav_item(task, i, favicon_cache)),
+                .map(move |(i, task)| render_nav_item(task, i, favicon_cache, theme)),
         )
-        .child(render_nav_separator())
-        .child(render_new_tab_button())
-        // .child(render_branch_section())
+        .child(render_nav_separator(theme))
+        .child(render_new_tab_button(theme))
         .child(div().flex_1())
-        .child(render_settings_nav_item())
+        .child(render_settings_nav_item(theme))
 }
 
 pub(super) fn favicon_request_url(origin: &str) -> Option<String> {
@@ -64,8 +67,12 @@ fn render_nav_item(
     task: SidebarTaskItem,
     index: usize,
     favicon_cache: &HashMap<String, FaviconState>,
+    theme: &Theme,
 ) -> Div {
     let task_id = task.id;
+    let accent_subtle = theme.accent_subtle;
+    let accent = theme.accent;
+
     let item = div()
         .w(px(NAV_ITEM_SIZE))
         .h(px(NAV_ITEM_SIZE))
@@ -80,7 +87,7 @@ fn render_nav_item(
         });
 
     let item = if task.is_active {
-        item.bg(hsla(217.0 / 360.0, 0.60, 0.50, 0.15)).child(
+        item.bg(accent_subtle).child(
             div()
                 .absolute()
                 .left(px(-8.0))
@@ -89,7 +96,7 @@ fn render_nav_item(
                 .w(px(3.0))
                 .h(px(18.0))
                 .rounded_r(px(3.0))
-                .bg(rgb(0x3b82f6)),
+                .bg(accent),
         )
     } else {
         item
@@ -100,6 +107,7 @@ fn render_nav_item(
         index,
         task.is_active,
         favicon_cache,
+        theme,
     ))
 }
 
@@ -108,23 +116,25 @@ fn render_app_icon(
     hue_index: usize,
     active: bool,
     favicon_cache: &HashMap<String, FaviconState>,
+    theme: &Theme,
 ) -> Div {
     match icon {
         SidebarTaskIconSpec::Monogram(label) => {
-            render_monogram_icon(&label, workspace_hue(hue_index), active)
+            render_monogram_icon(&label, workspace_hue(hue_index), active, theme)
         }
         SidebarTaskIconSpec::ExternalUrl { origin } => match favicon_cache.get(&origin) {
-            Some(FaviconState::Ready(image)) => render_favicon_icon(image.clone(), active),
+            Some(FaviconState::Ready(image)) => render_favicon_icon(image.clone(), active, theme),
             Some(FaviconState::Loading) | Some(FaviconState::Failed) | None => {
-                render_globe_icon(active)
+                render_globe_icon(active, theme)
             }
         },
     }
 }
 
-fn render_monogram_icon(label: &str, hue: f32, active: bool) -> Div {
+fn render_monogram_icon(label: &str, hue: f32, active: bool, theme: &Theme) -> Div {
     let saturation = if active { 0.65 } else { 0.50 };
     let lightness = if active { 0.55 } else { 0.42 };
+    let border_color = theme.border_default;
 
     div()
         .w(px(APP_ICON_SIZE))
@@ -135,9 +145,9 @@ fn render_monogram_icon(label: &str, hue: f32, active: bool) -> Div {
         .justify_center()
         .bg(linear_gradient(
             135.,
-            linear_color_stop(hsla(hue / 360.0, saturation, lightness, 1.0), 0.),
+            linear_color_stop(gpui::hsla(hue / 360.0, saturation, lightness, 1.0), 0.),
             linear_color_stop(
-                hsla(
+                gpui::hsla(
                     ((hue + 30.0) % 360.0) / 360.0,
                     saturation * 0.9,
                     lightness * 0.85,
@@ -147,20 +157,27 @@ fn render_monogram_icon(label: &str, hue: f32, active: bool) -> Div {
             ),
         ))
         .shadow(vec![BoxShadow {
-            color: hsla(hue / 360.0, saturation, lightness, 0.35),
+            color: gpui::hsla(hue / 360.0, saturation, lightness, 0.35),
             offset: point(px(0.), px(2.)),
             blur_radius: px(6.),
             spread_radius: px(0.),
         }])
         .border_1()
-        .border_color(hsla(0.0, 0.0, 1.0, 0.10))
+        .border_color(border_color)
         .text_size(px(9.0))
         .font_weight(FontWeight::BOLD)
-        .text_color(rgb(0xffffff))
+        .text_color(gpui::hsla(0.0, 0.0, 1.0, 1.0))
         .child(label.to_string())
 }
 
-fn render_favicon_icon(image: Arc<Image>, active: bool) -> Div {
+fn render_favicon_icon(image: Arc<Image>, active: bool, theme: &Theme) -> Div {
+    let bg = if active {
+        theme.accent_subtle
+    } else {
+        theme.surface_hover
+    };
+    let border_color = theme.border_default;
+
     div()
         .w(px(APP_ICON_SIZE))
         .h(px(APP_ICON_SIZE))
@@ -169,17 +186,25 @@ fn render_favicon_icon(image: Arc<Image>, active: bool) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .bg(if active {
-            hsla(217.0 / 360.0, 0.60, 0.50, 0.16)
-        } else {
-            hsla(0.0, 0.0, 1.0, 0.05)
-        })
+        .bg(bg)
         .border_1()
-        .border_color(hsla(0.0, 0.0, 1.0, 0.10))
+        .border_color(border_color)
         .child(img(image).size_full())
 }
 
-fn render_globe_icon(active: bool) -> Div {
+fn render_globe_icon(active: bool, theme: &Theme) -> Div {
+    let bg = if active {
+        theme.accent_subtle
+    } else {
+        theme.surface_hover
+    };
+    let border_color = theme.border_default;
+    let text_color = if active {
+        theme.accent
+    } else {
+        theme.text_tertiary
+    };
+
     div()
         .w(px(APP_ICON_SIZE))
         .h(px(APP_ICON_SIZE))
@@ -187,31 +212,24 @@ fn render_globe_icon(active: bool) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .bg(if active {
-            hsla(217.0 / 360.0, 0.60, 0.50, 0.15)
-        } else {
-            hsla(0.0, 0.0, 1.0, 0.06)
-        })
+        .bg(bg)
         .border_1()
-        .border_color(hsla(0.0, 0.0, 1.0, 0.10))
-        .text_color(if active {
-            rgb(0x93c5fd)
-        } else {
-            hsla(0.0, 0.0, 1.0, 0.45).into()
-        })
+        .border_color(border_color)
+        .text_color(text_color)
         .text_size(px(12.0))
         .font_weight(FontWeight::BOLD)
         .child("◎")
 }
 
-fn render_nav_separator() -> Div {
+fn render_nav_separator(theme: &Theme) -> Div {
     div()
         .w(px(24.0))
         .h(px(1.0))
-        .bg(hsla(0.0, 0.0, 1.0, 0.06))
+        .bg(theme.border_subtle)
         .my_1p5()
 }
 
+#[allow(dead_code)]
 fn render_branch_section() -> Div {
     div()
         .flex()
@@ -221,37 +239,50 @@ fn render_branch_section() -> Div {
         .child(
             div()
                 .text_size(px(14.0))
-                .text_color(rgb(0xa78bfa))
+                .text_color(gpui::rgb(0xa78bfa))
                 .child("⑂"),
         )
-        .child(div().w(px(1.0)).h(px(12.0)).bg(hsla(0.0, 0.0, 1.0, 0.10)))
+        .child(
+            div()
+                .w(px(1.0))
+                .h(px(12.0))
+                .bg(gpui::hsla(0.0, 0.0, 1.0, 0.10)),
+        )
         .child(
             div()
                 .w(px(8.0))
                 .h(px(8.0))
                 .rounded_full()
-                .bg(rgb(0xa78bfa))
+                .bg(gpui::rgb(0xa78bfa))
                 .cursor_pointer()
                 .shadow(vec![BoxShadow {
-                    color: hsla(270.0 / 360.0, 0.73, 0.73, 0.3),
+                    color: gpui::hsla(270.0 / 360.0, 0.73, 0.73, 0.3),
                     offset: point(px(0.), px(0.)),
                     blur_radius: px(4.),
                     spread_radius: px(0.),
                 }]),
         )
-        .child(div().w(px(1.0)).h(px(12.0)).bg(hsla(0.0, 0.0, 1.0, 0.10)))
+        .child(
+            div()
+                .w(px(1.0))
+                .h(px(12.0))
+                .bg(gpui::hsla(0.0, 0.0, 1.0, 0.10)),
+        )
         .child(
             div()
                 .w(px(8.0))
                 .h(px(8.0))
                 .rounded_full()
                 .border_1()
-                .border_color(rgb(0xa78bfa))
+                .border_color(gpui::rgb(0xa78bfa))
                 .cursor_pointer(),
         )
 }
 
-fn render_settings_nav_item() -> Div {
+fn render_settings_nav_item(theme: &Theme) -> Div {
+    let bg = theme.surface_hover;
+    let icon_color = theme.text_tertiary;
+
     div()
         .w(px(NAV_ITEM_SIZE))
         .h(px(NAV_ITEM_SIZE))
@@ -271,14 +302,17 @@ fn render_settings_nav_item() -> Div {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(hsla(0.0, 0.0, 1.0, 0.06))
+                .bg(bg)
                 .text_size(px(14.0))
-                .text_color(hsla(0.0, 0.0, 1.0, 0.32))
+                .text_color(icon_color)
                 .child("⚙"),
         )
 }
 
-fn render_new_tab_button() -> Div {
+fn render_new_tab_button(theme: &Theme) -> Div {
+    let border_color = theme.border_strong;
+    let icon_color = theme.text_secondary;
+
     div()
         .w(px(NAV_ITEM_SIZE))
         .h(px(NAV_ITEM_SIZE))
@@ -299,8 +333,8 @@ fn render_new_tab_button() -> Div {
                 .items_center()
                 .justify_center()
                 .border_1()
-                .border_color(hsla(0.0, 0.0, 1.0, 0.15))
-                .text_color(hsla(0.0, 0.0, 1.0, 0.55))
+                .border_color(border_color)
+                .text_color(icon_color)
                 .child(Icon::new(IconName::Plus).size(px(16.0)).into_any_element()),
         )
 }

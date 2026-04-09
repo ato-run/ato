@@ -9,6 +9,7 @@ use theme::Theme;
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
@@ -27,11 +28,12 @@ use crate::app::{
     AllowPermissionForSession, AllowPermissionOnce, BrowserBack, BrowserForward, BrowserReload,
     CancelAuthHandoff, CycleHandle, DenyPermissionPrompt, DismissTransient, ExpandSplit,
     FocusCommandBar, NativeCopy, NativeCut, NativePaste, NativeRedo, NativeSelectAll, NativeUndo,
-    NavigateToUrl, NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, PreviousTask,
-    PreviousWorkspace, ResumeAfterAuth, SelectTask, ShowSettings, ShrinkSplit, SplitPane,
+    NavigateToUrl, NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, OpenCloudDock,
+    OpenLocalRegistry, OpenUrlBridge, PreviousTask, PreviousWorkspace, ResumeAfterAuth,
+    SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SplitPane, ToggleDevConsole,
     ToggleOverview, ToggleTheme,
 };
-use crate::orchestrator::cleanup_stale_guest_sessions;
+use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
     ActivityTone, AppState, AuthSessionStatus, PaneBounds, PaneId, PaneSurface, ShellMode,
     SidebarTaskIconSpec,
@@ -43,16 +45,46 @@ pub(super) const RAIL_WIDTH: f32 = 52.0;
 pub(super) const STAGE_PADDING: f32 = 0.0;
 pub(super) const OVERVIEW_HEIGHT: f32 = 210.0;
 
+const DEVTOOLS_DEBUG_ENV: &str = "ATO_DESKTOP_DEVTOOLS_DEBUG";
+const DEVTOOLS_RESYNC_DELAYS_MS: &[u64] = &[32, 96, 192];
+
+fn devtools_debug_enabled() -> bool {
+    std::env::var_os(DEVTOOLS_DEBUG_ENV)
+        .map(|value| {
+            let value = value.to_string_lossy();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
+fn log_devtools(message: impl AsRef<str>) {
+    if devtools_debug_enabled() {
+        eprintln!("[ato-desktop][devtools-ui] {}", message.as_ref());
+    }
+}
+
+fn format_bounds(bounds: PaneBounds) -> String {
+    format!(
+        "x={:.1} y={:.1} w={:.1} h={:.1}",
+        bounds.x, bounds.y, bounds.width, bounds.height
+    )
+}
+
 pub struct DesktopShell {
     state: AppState,
     omnibar: Entity<InputState>,
     focus_handle: FocusHandle,
     favicon_cache: HashMap<String, FaviconState>,
     webviews: WebViewManager,
+    open_url_bridge: Arc<OpenUrlBridge>,
 }
 
 impl DesktopShell {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        open_url_bridge: Arc<OpenUrlBridge>,
+    ) -> Self {
         let mut state = AppState::demo();
         let focus_handle = cx.focus_handle();
         let omnibar = cx.new(|cx| {
@@ -60,7 +92,7 @@ impl DesktopShell {
                 .placeholder("")
                 .default_value(state.command_bar_text.clone())
         });
-        match cleanup_stale_guest_sessions() {
+        match cleanup_stale_capsule_sessions() {
             Ok(notes) => {
                 for note in notes {
                     state.push_activity(ActivityTone::Info, note);
@@ -111,6 +143,13 @@ impl DesktopShell {
             let size = window.bounds().size;
             let stage =
                 compute_stage_bounds(&this.state, f32::from(size.width), f32::from(size.height));
+            log_devtools(format!(
+                "window_bounds_changed size=({:.1},{:.1}) stage={} shell_mode={:?}",
+                f32::from(size.width),
+                f32::from(size.height),
+                format_bounds(stage),
+                this.state.shell_mode
+            ));
             this.state.set_active_bounds(stage);
             this.webviews.sync_from_state(window, &mut this.state);
             this.sync_omnibar_with_state(window, cx, false);
@@ -124,6 +163,7 @@ impl DesktopShell {
             focus_handle,
             favicon_cache: HashMap::new(),
             webviews,
+            open_url_bridge,
         }
     }
 
@@ -189,6 +229,74 @@ impl DesktopShell {
         self.sync_omnibar_with_state(window, cx, true);
         self.sync_focus_target(window, cx);
         cx.notify();
+    }
+
+    fn on_toggle_dev_console(
+        &mut self,
+        _: &ToggleDevConsole,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let size = window.bounds().size;
+        let stage_bounds =
+            compute_stage_bounds(&self.state, f32::from(size.width), f32::from(size.height));
+        let active = self.state.active_web_pane();
+        log_devtools(format!(
+            "toggle_devtools shell_mode={:?} window=({:.1},{:.1}) stage={} active_pane={} active_route={}",
+            self.state.shell_mode,
+            f32::from(size.width),
+            f32::from(size.height),
+            format_bounds(stage_bounds),
+            active.as_ref().map(|pane| pane.pane_id.to_string()).unwrap_or_else(|| "<none>".to_string()),
+            active
+                .as_ref()
+                .map(|pane| pane.route.to_string())
+                .unwrap_or_else(|| "<none>".to_string())
+        ));
+
+        // Clear any lingering GPUI DevConsole pane — native Safari Web Inspector is used instead.
+        self.state.dismiss_dev_console();
+        self.webviews.open_devtools_for_active_pane(&mut self.state);
+        self.schedule_devtools_resyncs(window, cx);
+        cx.notify();
+    }
+
+    fn schedule_devtools_resyncs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for delay_ms in DEVTOOLS_RESYNC_DELAYS_MS {
+            cx.spawn_in(
+                window,
+                {
+                    let delay = Duration::from_millis(*delay_ms);
+                    move |this: WeakEntity<Self>, cx: &mut AsyncWindowContext| {
+                        let mut async_cx = cx.clone();
+                        async move {
+                            async_cx.background_executor().timer(delay).await;
+                            let _ = this.update_in(&mut async_cx, move |this, window, cx| {
+                                let size = window.bounds().size;
+                                let stage = compute_stage_bounds(
+                                    &this.state,
+                                    f32::from(size.width),
+                                    f32::from(size.height),
+                                );
+                                log_devtools(format!(
+                                    "scheduled_resync delay_ms={} window=({:.1},{:.1}) stage={} shell_mode={:?}",
+                                    delay_ms,
+                                    f32::from(size.width),
+                                    f32::from(size.height),
+                                    format_bounds(stage),
+                                    this.state.shell_mode
+                                ));
+                                this.state.set_active_bounds(stage);
+                                this.webviews.sync_from_state(window, &mut this.state);
+                                this.sync_omnibar_with_state(window, cx, false);
+                                cx.notify();
+                            });
+                        }
+                    }
+                },
+            )
+            .detach();
+        }
     }
 
     fn on_select_task(&mut self, action: &SelectTask, window: &mut Window, cx: &mut Context<Self>) {
@@ -350,6 +458,42 @@ impl DesktopShell {
         cx.notify();
     }
 
+    fn on_open_local_registry(
+        &mut self,
+        _: &OpenLocalRegistry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.open_local_registry();
+        self.sync_omnibar_with_state(window, cx, true);
+        self.sync_focus_target(window, cx);
+        cx.notify();
+    }
+
+    fn on_open_cloud_dock(
+        &mut self,
+        _: &OpenCloudDock,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.open_cloud_dock();
+        self.sync_omnibar_with_state(window, cx, true);
+        self.sync_focus_target(window, cx);
+        cx.notify();
+    }
+
+    fn on_sign_in_to_ato_run(
+        &mut self,
+        _: &SignInToAtoRun,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.open_cloud_dock();
+        self.sync_omnibar_with_state(window, cx, true);
+        self.sync_focus_target(window, cx);
+        cx.notify();
+    }
+
     fn on_cancel_auth_handoff(
         &mut self,
         _: &CancelAuthHandoff,
@@ -499,16 +643,32 @@ impl DesktopShell {
             window.focus(&handle, cx);
         }
     }
+
+    fn drain_open_urls(&mut self) -> bool {
+        let urls = self.open_url_bridge.drain_urls();
+        if urls.is_empty() {
+            return false;
+        }
+
+        for url in urls {
+            self.state.handle_host_route(&url);
+        }
+        true
+    }
 }
 
 impl Render for DesktopShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let handled_open_urls = self.drain_open_urls();
         let size = window.bounds().size;
         let stage_bounds =
             compute_stage_bounds(&self.state, f32::from(size.width), f32::from(size.height));
         self.state.set_active_bounds(stage_bounds);
         self.webviews.sync_from_state(window, &mut self.state);
         self.sync_omnibar_with_state(window, cx, false);
+        if handled_open_urls {
+            self.sync_focus_target(window, cx);
+        }
         self.sync_favicons(window, cx);
         let omnibar_value = self.omnibar.read(cx).value().to_string();
         let omnibar_suggestions = self.state.omnibar_suggestions(&omnibar_value);
@@ -551,6 +711,7 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_focus_command_bar))
             .on_action(cx.listener(Self::on_toggle_overview))
             .on_action(cx.listener(Self::on_show_settings))
+            .on_action(cx.listener(Self::on_toggle_dev_console))
             .on_action(cx.listener(Self::on_new_tab))
             .on_action(cx.listener(Self::on_select_task))
             .on_action(cx.listener(Self::on_navigate_to_url))
@@ -573,6 +734,9 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_native_paste))
             .on_action(cx.listener(Self::on_native_select_all))
             .on_action(cx.listener(Self::on_open_auth_in_browser))
+            .on_action(cx.listener(Self::on_open_local_registry))
+            .on_action(cx.listener(Self::on_open_cloud_dock))
+            .on_action(cx.listener(Self::on_sign_in_to_ato_run))
             .on_action(cx.listener(Self::on_cancel_auth_handoff))
             .on_action(cx.listener(Self::on_resume_after_auth))
             .on_action(cx.listener(Self::on_allow_permission_once))

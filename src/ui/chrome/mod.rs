@@ -258,7 +258,30 @@ fn render_overview_toggle(state: &AppState, theme: &Theme) -> impl IntoElement {
 }
 
 fn render_active_route_status(state: &AppState, theme: &Theme) -> impl IntoElement {
-    let Some(active) = state.active_web_pane() else {
+    let Some(active) = state
+        .active_capsule_pane()
+        .or_else(|| state.active_web_pane().map(|pane| crate::state::ActiveCapsulePane {
+            pane_id: pane.pane_id,
+            title: pane.title,
+            route: pane.route,
+            session: pane.session,
+            source_label: pane.source_label,
+            trust_state: pane.trust_state,
+            restricted: pane.restricted,
+            snapshot_label: pane.snapshot_label,
+            canonical_handle: pane.canonical_handle,
+            session_id: pane.session_id,
+            adapter: pane.adapter,
+            manifest_path: pane.manifest_path,
+            runtime_label: pane.runtime_label,
+            display_strategy: pane.display_strategy,
+            log_path: pane.log_path,
+            local_url: pane.local_url,
+            healthcheck_url: pane.healthcheck_url,
+            invoke_url: pane.invoke_url,
+            served_by: pane.served_by,
+        }))
+    else {
         return div().w(px(0.0));
     };
 
@@ -275,6 +298,12 @@ fn render_active_route_status(state: &AppState, theme: &Theme) -> impl IntoEleme
 
     if let Some(source) = active.source_label {
         tags.push((source, false));
+    }
+    if let Some(runtime) = active.runtime_label {
+        tags.push((runtime, false));
+    }
+    if let Some(display_strategy) = active.display_strategy {
+        tags.push((display_strategy, false));
     }
     if let Some(trust) = active.trust_state {
         tags.push((trust, false));

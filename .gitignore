@@ -1,6 +1,7 @@
 .DS_Store
 target/
 .tmp/
+dist/
 
 # Local Codex/Claude workspace settings
 .claude/settings.local.json

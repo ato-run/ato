@@ -6,6 +6,9 @@ authors = ["ato-run"]
 description = "The universal user plane for executing and orchestrating sandboxed app capsules."
 build = "build.rs"
 
+[features]
+gpui-inspector = ["gpui-component/inspector"]
+
 [dependencies]
 anyhow = "1.0"
 capsule-core = { path = "../ato-cli/core" }
@@ -17,4 +20,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ureq = "2.12.1"
 url = "2.5.4"
-wry = { version = "0.55.0", features = ["protocol"] }
+wry = { version = "0.55.0", features = ["protocol", "devtools"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = "0.3.2"
+objc2-foundation = "0.3.2"
+objc2-quartz-core = "0.3.2"
