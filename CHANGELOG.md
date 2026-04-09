@@ -4,6 +4,14 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.56] - 2026-04-10
+
+### What Changed
+
+#### Bug Fixes
+
+- Accept Store workspace share responses that expose `id` instead of `share_id`, so `ato encap --share` and share revision fetches continue to work against the current Store API payloads
+
 ## [0.4.55] - 2026-04-08
 
 ### What Changed
