@@ -6,6 +6,7 @@ use crate::error::{CapsuleError, Result};
 
 const OFFICIAL_REGISTRY_DISPLAY_AUTHORITY: &str = "ato.run";
 const OFFICIAL_REGISTRY_IDENTITY: &str = "ato-official";
+const LOOPBACK_REGISTRY_IDENTITY_PREFIX: &str = "ato-loopback";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,6 +45,26 @@ impl RegistryIdentity {
             registry_identity: OFFICIAL_REGISTRY_IDENTITY.to_string(),
             registry_endpoint: "https://api.ato.run".to_string(),
         }
+    }
+
+    pub fn loopback(display_authority: &str) -> Self {
+        Self {
+            display_authority: display_authority.to_string(),
+            registry_identity: format!(
+                "{LOOPBACK_REGISTRY_IDENTITY_PREFIX}:{}",
+                display_authority.to_ascii_lowercase()
+            ),
+            registry_endpoint: format!("http://{display_authority}"),
+        }
+    }
+
+    pub fn is_official(&self) -> bool {
+        self.registry_identity == OFFICIAL_REGISTRY_IDENTITY
+    }
+
+    pub fn is_loopback(&self) -> bool {
+        self.registry_identity
+            .starts_with(LOOPBACK_REGISTRY_IDENTITY_PREFIX)
     }
 }
 
@@ -124,6 +145,19 @@ impl CanonicalHandle {
             Self::LocalPath { .. } => "local",
         }
     }
+
+    pub fn registry(&self) -> Option<&RegistryIdentity> {
+        match self {
+            Self::RegistryCapsule { registry, .. } => Some(registry),
+            _ => None,
+        }
+    }
+
+    pub fn registry_url_override(&self) -> Option<&str> {
+        self.registry()
+            .filter(|registry| !registry.is_official())
+            .map(|registry| registry.registry_endpoint.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,18 +170,10 @@ pub struct HostRoute {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SurfaceInput {
-    Capsule {
-        canonical: CanonicalHandle,
-    },
-    HostRoute {
-        route: HostRoute,
-    },
-    WebUrl {
-        url: String,
-    },
-    SearchQuery {
-        query: String,
-    },
+    Capsule { canonical: CanonicalHandle },
+    HostRoute { route: HostRoute },
+    WebUrl { url: String },
+    SearchQuery { query: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,6 +258,37 @@ pub struct ResolvedHandle {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapsuleDisplayStrategy {
+    GuestWebview,
+    WebUrl,
+    TerminalStream,
+    ServiceBackground,
+    Unsupported,
+}
+
+impl CapsuleDisplayStrategy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::GuestWebview => "guest_webview",
+            Self::WebUrl => "web_url",
+            Self::TerminalStream => "terminal_stream",
+            Self::ServiceBackground => "service_background",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CapsuleRuntimeDescriptor {
+    pub target_label: String,
+    pub runtime: Option<String>,
+    pub driver: Option<String>,
+    pub language: Option<String>,
+    pub port: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchPlan {
     pub canonical: CanonicalHandle,
     pub snapshot: Option<ResolvedSnapshot>,
@@ -261,6 +318,15 @@ pub struct LocalTrustDecisionRecord {
 
 pub trait HandleResolutionHost {
     fn registry_identity_for_display_authority(&self, authority: &str) -> Option<RegistryIdentity>;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct StaticHandleResolutionHost;
+
+impl HandleResolutionHost for StaticHandleResolutionHost {
+    fn registry_identity_for_display_authority(&self, authority: &str) -> Option<RegistryIdentity> {
+        registry_identity_for_display_authority(authority)
+    }
 }
 
 pub fn classify_surface_input(input: HandleInput) -> Result<SurfaceInput> {
@@ -316,9 +382,13 @@ pub fn normalize_capsule_handle(raw: &str) -> Result<CanonicalHandle> {
         return parse_registry_rest(rest, RegistryIdentity::ato_official());
     }
 
-    if input.starts_with("capsule://") {
+    if let Some(rest) = input.strip_prefix("capsule://") {
+        let (authority, registry_rest) = split_capsule_authority(rest)?;
+        if let Some(registry) = registry_identity_for_display_authority(authority) {
+            return parse_registry_rest(registry_rest, registry);
+        }
         return Err(CapsuleError::Config(format!(
-            "unsupported capsule handle '{}': use capsule://ato.run/publisher/slug or capsule://github.com/owner/repo",
+            "unsupported capsule handle '{}': use capsule://ato.run/publisher/slug, capsule://github.com/owner/repo, or capsule://localhost:<port>/publisher/slug",
             input
         )));
     }
@@ -335,6 +405,13 @@ pub fn normalize_capsule_handle(raw: &str) -> Result<CanonicalHandle> {
         "unsupported handle '{}'",
         input
     )))
+}
+
+pub fn registry_identity_for_display_authority(authority: &str) -> Option<RegistryIdentity> {
+    if authority.eq_ignore_ascii_case(OFFICIAL_REGISTRY_DISPLAY_AUTHORITY) {
+        return Some(RegistryIdentity::ato_official());
+    }
+    loopback_registry_identity(authority)
 }
 
 pub fn parse_host_route(raw: &str) -> Result<HostRoute> {
@@ -408,8 +485,43 @@ fn parse_registry_rest(rest: &str, registry: RegistryIdentity) -> Result<Canonic
     })
 }
 
+fn split_capsule_authority(rest: &str) -> Result<(&str, &str)> {
+    rest.split_once('/').ok_or_else(|| {
+        CapsuleError::Config(
+            "capsule handle requires an authority and publisher/slug path".to_string(),
+        )
+    })
+}
+
+fn loopback_registry_identity(authority: &str) -> Option<RegistryIdentity> {
+    is_loopback_registry_authority(authority).then(|| RegistryIdentity::loopback(authority))
+}
+
+fn is_loopback_registry_authority(authority: &str) -> bool {
+    let trimmed = authority.trim();
+    matches_loopback_authority(trimmed, "localhost:")
+        || matches_loopback_authority(trimmed, "127.0.0.1:")
+        || matches_bracketed_loopback_ipv6(trimmed)
+}
+
+fn matches_loopback_authority(authority: &str, prefix: &str) -> bool {
+    authority.strip_prefix(prefix).is_some_and(has_numeric_port)
+}
+
+fn matches_bracketed_loopback_ipv6(authority: &str) -> bool {
+    authority
+        .strip_prefix("[::1]:")
+        .is_some_and(has_numeric_port)
+}
+
+fn has_numeric_port(port: &str) -> bool {
+    !port.is_empty() && port.chars().all(|ch| ch.is_ascii_digit())
+}
+
 fn looks_like_capsule_or_registry_ref(raw: &str) -> bool {
-    raw.starts_with("capsule://") || raw.starts_with("github.com/") || looks_like_scoped_registry_ref(raw)
+    raw.starts_with("capsule://")
+        || raw.starts_with("github.com/")
+        || looks_like_scoped_registry_ref(raw)
 }
 
 fn looks_like_scoped_registry_ref(raw: &str) -> bool {
@@ -444,7 +556,9 @@ fn expand_local_path(raw: &str) -> PathBuf {
 }
 
 fn should_treat_input_as_local(raw: &str, expanded_path: &Path) -> bool {
-    expanded_path.exists() || is_explicit_local_path_input(raw) || looks_like_local_capsule_artifact(raw)
+    expanded_path.exists()
+        || is_explicit_local_path_input(raw)
+        || looks_like_local_capsule_artifact(raw)
 }
 
 fn is_explicit_local_path_input(raw: &str) -> bool {
@@ -484,11 +598,11 @@ mod tests {
     #[test]
     fn normalizes_github_shorthand_to_canonical() {
         let canonical = normalize_capsule_handle("github.com/acme/chat").expect("normalize");
+        assert_eq!(canonical.display_string(), "capsule://github.com/acme/chat");
         assert_eq!(
-            canonical.display_string(),
-            "capsule://github.com/acme/chat"
+            canonical.to_cli_ref().as_deref(),
+            Some("github.com/acme/chat")
         );
-        assert_eq!(canonical.to_cli_ref().as_deref(), Some("github.com/acme/chat"));
     }
 
     #[test]
@@ -501,6 +615,35 @@ mod tests {
     #[test]
     fn rejects_registry_handle_without_authority() {
         let error = normalize_capsule_handle("capsule://acme/chat").expect_err("reject");
+        assert!(error.to_string().contains("unsupported capsule handle"));
+    }
+
+    #[test]
+    fn normalizes_loopback_registry_handle_to_canonical() {
+        let canonical =
+            normalize_capsule_handle("capsule://localhost:8787/acme/chat").expect("normalize");
+        assert_eq!(
+            canonical.display_string(),
+            "capsule://localhost:8787/acme/chat"
+        );
+        assert_eq!(canonical.to_cli_ref().as_deref(), Some("acme/chat"));
+        assert_eq!(
+            canonical.registry_url_override(),
+            Some("http://localhost:8787")
+        );
+    }
+
+    #[test]
+    fn accepts_ipv4_and_ipv6_loopback_registry_handles() {
+        let ipv4 = normalize_capsule_handle("capsule://127.0.0.1:8787/acme/chat").expect("ipv4");
+        let ipv6 = normalize_capsule_handle("capsule://[::1]:8787/acme/chat").expect("ipv6");
+        assert_eq!(ipv4.display_string(), "capsule://127.0.0.1:8787/acme/chat");
+        assert_eq!(ipv6.display_string(), "capsule://[::1]:8787/acme/chat");
+    }
+
+    #[test]
+    fn rejects_capsule_local_authority() {
+        let error = normalize_capsule_handle("capsule://local/path/to/dir").expect_err("reject");
         assert!(error.to_string().contains("unsupported capsule handle"));
     }
 

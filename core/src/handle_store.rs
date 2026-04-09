@@ -22,7 +22,9 @@ pub fn metadata_cache_ttl_seconds(canonical: &CanonicalHandle) -> u64 {
     }
 }
 
-pub fn load_metadata_cache(canonical: &CanonicalHandle) -> Result<Option<ResolvedMetadataCacheEntry>> {
+pub fn load_metadata_cache(
+    canonical: &CanonicalHandle,
+) -> Result<Option<ResolvedMetadataCacheEntry>> {
     let path = metadata_cache_path(canonical);
     if !path.exists() {
         return Ok(None);
@@ -192,7 +194,10 @@ mod tests {
             .expect("load trust")
             .expect("trust entry");
 
-        assert_eq!(loaded_cache.manifest_summary.as_deref(), Some("desktop target"));
+        assert_eq!(
+            loaded_cache.manifest_summary.as_deref(),
+            Some("desktop target")
+        );
         assert_eq!(loaded_trust.trust_state, TrustState::Trusted);
         assert!(metadata_cache_path(&canonical).exists());
         assert!(local_trust_path(&canonical).exists());

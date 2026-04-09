@@ -10,8 +10,8 @@ use capsule_core::handle::{
     ResolvedSnapshot, SurfaceInput, TrustState,
 };
 use capsule_core::handle_store::{
-    load_metadata_cache, metadata_cache_is_fresh, metadata_cache_ttl_seconds,
-    resolve_trust_state, store_local_trust_decision, store_metadata_cache,
+    load_metadata_cache, metadata_cache_is_fresh, metadata_cache_ttl_seconds, resolve_trust_state,
+    store_local_trust_decision, store_metadata_cache,
 };
 use capsule_core::launch_spec::{derive_launch_spec, LaunchSpecSource};
 use capsule_core::router::{
@@ -251,7 +251,9 @@ fn build_local_resolution(
         kind: HandleKind::LocalCapsule,
         render_strategy: render_strategy(&plan, guest.as_ref()),
         canonical_handle: canonical.as_ref().map(CanonicalHandle::display_string),
-        source: canonical.as_ref().map(|handle| handle.source_label().to_string()),
+        source: canonical
+            .as_ref()
+            .map(|handle| handle.source_label().to_string()),
         trust_state: trust_state.clone(),
         restricted: true,
         launch_plan: Some(default_launch_plan(
@@ -342,7 +344,11 @@ fn build_store_resolution(
     let cli_ref = canonical
         .to_cli_ref()
         .ok_or_else(|| anyhow::anyhow!("registry handle does not support CLI resolution"))?;
-    let manifest_toml = rt.block_on(fetch_capsule_manifest_toml(&cli_ref, registry))?;
+    let registry_override = effective_registry_override(&canonical, registry);
+    let manifest_toml = rt.block_on(fetch_capsule_manifest_toml(
+        &cli_ref,
+        registry_override.as_deref(),
+    ))?;
     let manifest_value: toml::Value = toml::from_str(&manifest_toml)
         .with_context(|| format!("failed to parse remote manifest for {normalized_handle}"))?;
     let guest = parse_guest_contract(&manifest_value, std::path::Path::new("."));
@@ -355,7 +361,9 @@ fn build_store_resolution(
         HashMap::new(),
     )
     .with_context(|| format!("failed to build execution descriptor for {normalized_handle}"))?;
-    let detail = rt.block_on(fetch_capsule_detail(&cli_ref, registry)).ok();
+    let detail = rt
+        .block_on(fetch_capsule_detail(&cli_ref, registry_override.as_deref()))
+        .ok();
     let snapshot = if let CanonicalHandle::RegistryCapsule { version, .. } = &canonical {
         Some(ResolvedSnapshot::RegistryRelease {
             version: version
@@ -374,7 +382,23 @@ fn build_store_resolution(
     let mut notes = vec![
         "Remote store handles currently resolve target metadata only. Launch details become concrete after local materialization.".to_string(),
     ];
-    if let Some(cached) = cached_metadata.as_ref().filter(|entry| metadata_cache_is_fresh(entry)) {
+    if let Some(registry) = canonical
+        .registry()
+        .filter(|registry| registry.is_loopback())
+    {
+        notes.push(format!(
+            "Loopback registry handle resolved via host-side developer endpoint {}.",
+            registry.registry_endpoint
+        ));
+        notes.push(
+            "Loopback registry capsules are untrusted by default; guest runtime permissions remain fail-closed until the host grants them."
+                .to_string(),
+        );
+    }
+    if let Some(cached) = cached_metadata
+        .as_ref()
+        .filter(|entry| metadata_cache_is_fresh(entry))
+    {
         notes.push(format!(
             "Cached metadata was available from {}.",
             cached.fetched_at
@@ -421,8 +445,10 @@ fn build_github_resolution(
     let manifest_toml = if let Some(preview_toml) = draft.preview_toml.clone() {
         preview_toml
     } else if draft.capsule_toml.exists {
-        let checkout =
-            rt.block_on(download_github_repository_at_ref(&cli_ref, Some(&draft.resolved_ref.ref_name)))?;
+        let checkout = rt.block_on(download_github_repository_at_ref(
+            &cli_ref,
+            Some(&draft.resolved_ref.ref_name),
+        ))?;
         std::fs::read_to_string(checkout.checkout_dir.join("capsule.toml")).with_context(|| {
             format!(
                 "failed to read inferred repository manifest for {}",
@@ -454,7 +480,10 @@ fn build_github_resolution(
         "Resolved GitHub repository snapshot {} at {}.",
         draft.resolved_ref.ref_name, draft.resolved_ref.sha
     )];
-    if let Some(cached) = cached_metadata.as_ref().filter(|entry| metadata_cache_is_fresh(entry)) {
+    if let Some(cached) = cached_metadata
+        .as_ref()
+        .filter(|entry| metadata_cache_is_fresh(entry))
+    {
         notes.push(format!(
             "Cached metadata was available from {}.",
             cached.fetched_at
@@ -552,7 +581,12 @@ fn persist_local_trust_state(
     };
     store_local_trust_decision(&record)
         .map_err(anyhow::Error::from)
-        .with_context(|| format!("failed to persist local trust state for {}", canonical.display_string()))
+        .with_context(|| {
+            format!(
+                "failed to persist local trust state for {}",
+                canonical.display_string()
+            )
+        })
 }
 
 fn build_manifest_summary(plan: &ManifestData) -> String {
@@ -642,7 +676,9 @@ pub(super) fn normalize_handle(raw: &str) -> Result<NormalizedHandle> {
             let kind = match &canonical {
                 CanonicalHandle::GithubRepo { .. } => NormalizedHandleKind::RemoteSourceRef,
                 CanonicalHandle::RegistryCapsule { .. } => NormalizedHandleKind::StoreCapsule,
-                CanonicalHandle::LocalPath { path } => NormalizedHandleKind::LocalPath(path.clone()),
+                CanonicalHandle::LocalPath { path } => {
+                    NormalizedHandleKind::LocalPath(path.clone())
+                }
             };
             Ok(NormalizedHandle {
                 normalized_handle,
@@ -664,8 +700,7 @@ pub(super) fn normalize_handle(raw: &str) -> Result<NormalizedHandle> {
         }),
         SurfaceInput::SearchQuery { .. } => {
             let normalized_handle = normalize_curated_store_alias(&input);
-            let canonical =
-                capsule_core::handle::normalize_capsule_handle(&normalized_handle)?;
+            let canonical = capsule_core::handle::normalize_capsule_handle(&normalized_handle)?;
             let _ = parse_capsule_request(&normalized_handle)
                 .with_context(|| format!("unsupported handle '{input}'"))?;
             Ok(NormalizedHandle {
@@ -726,6 +761,15 @@ fn default_launch_plan(
         initial_isolation: capsule_core::handle::InitialIsolationPolicy::fail_closed(),
         permission_requests: PermissionRequestPolicy::jit_default(),
     }
+}
+
+fn effective_registry_override(
+    canonical: &CanonicalHandle,
+    registry: Option<&str>,
+) -> Option<String> {
+    registry
+        .map(str::to_string)
+        .or_else(|| canonical.registry_url_override().map(str::to_string))
 }
 
 fn print_resolution(resolution: &HandleResolution) {
@@ -833,6 +877,20 @@ mod tests {
         assert!(matches!(
             normalized.kind,
             NormalizedHandleKind::RemoteSourceRef
+        ));
+    }
+
+    #[test]
+    fn normalize_loopback_registry_handle_marks_store_source() {
+        let normalized =
+            normalize_handle("capsule://localhost:8787/acme/editor").expect("normalize");
+        assert_eq!(
+            normalized.normalized_handle,
+            "capsule://localhost:8787/acme/editor"
+        );
+        assert!(matches!(
+            normalized.kind,
+            NormalizedHandleKind::StoreCapsule
         ));
     }
 
