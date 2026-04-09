@@ -1487,13 +1487,23 @@ impl RegistryStore {
             CREATE INDEX IF NOT EXISTS idx_chunks_tombstoned ON chunks(tombstoned_at);
             CREATE INDEX IF NOT EXISTS idx_registry_packages_publisher_slug ON registry_packages(publisher, slug);
             CREATE INDEX IF NOT EXISTS idx_registry_releases_manifest_hash ON registry_releases(manifest_hash);
-            CREATE INDEX IF NOT EXISTS idx_registry_releases_lock_id ON registry_releases(lock_id);
             CREATE INDEX IF NOT EXISTS idx_registry_store_metadata_updated_at ON registry_store_metadata(updated_at);
             CREATE INDEX IF NOT EXISTS idx_persistent_states_owner_scope ON persistent_states(owner_scope, state_name);
             CREATE INDEX IF NOT EXISTS idx_service_bindings_owner_scope ON service_bindings(owner_scope, service_name, binding_kind);
             ",
         )?;
         self.apply_schema_migrations(&mut conn)?;
+        self.ensure_post_migration_indexes(&conn)?;
+        Ok(())
+    }
+
+    fn ensure_post_migration_indexes(&self, conn: &Connection) -> Result<()> {
+        if self.column_exists(conn, "registry_releases", "lock_id")? {
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_registry_releases_lock_id ON registry_releases(lock_id)",
+                [],
+            )?;
+        }
         Ok(())
     }
 
