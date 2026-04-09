@@ -241,6 +241,51 @@ fn run_command_parses_agent_mode() {
 }
 
 #[test]
+fn encap_command_parses_primary_flags() {
+    let cli = Cli::try_parse_from(["ato", "encap", ".", "--share"]).expect("parse");
+    match cli.command {
+        Commands::Encap {
+            path,
+            share,
+            save_only,
+            print_plan,
+        } => {
+            assert_eq!(path, PathBuf::from("."));
+            assert!(share);
+            assert!(!save_only);
+            assert!(!print_plan);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn decap_command_requires_into_and_parses_plan() {
+    let cli = Cli::try_parse_from([
+        "ato",
+        "decap",
+        "https://ato.run/s/demo",
+        "--into",
+        "./demo",
+        "--plan",
+    ])
+    .expect("parse");
+    match cli.command {
+        Commands::Decap { input, into, plan } => {
+            assert_eq!(input, "https://ato.run/s/demo");
+            assert_eq!(into, PathBuf::from("./demo"));
+            assert!(plan);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+
+    let error = Cli::try_parse_from(["ato", "decap", "https://ato.run/s/demo"]);
+    assert!(error.is_err(), "missing --into must fail");
+    let rendered = error.err().expect("parse error").to_string();
+    assert!(rendered.contains("--into"));
+}
+
+#[test]
 fn run_command_parses_provider_toolchain_via_flag() {
     let cli = Cli::try_parse_from(["ato", "run", "npm:tsx", "--via", "pnpm", "--", "--help"])
         .expect("parse");

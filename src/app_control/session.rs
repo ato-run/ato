@@ -7,17 +7,27 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
-use capsule_core::handle::{normalize_capsule_handle, ResolvedSnapshot, TrustState};
+use capsule_core::handle::{
+    normalize_capsule_handle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
+    TrustState,
+};
 use capsule_core::launch_spec::derive_launch_spec;
 use serde::{Deserialize, Serialize};
 
+use crate::application::pipeline::phases::run::DerivedBridgeManifest;
+use crate::application::pipeline::phases::run::PreparedRunContext;
+use crate::executors::source::{CapsuleProcess, ExecuteMode};
+use crate::executors::target_runner::{
+    prepare_target_execution, resolve_launch_context, TargetLaunchOptions,
+};
 use crate::install::support::resolve_run_target_or_install;
 use crate::reporters;
+use crate::reporters::CliReporter;
 use crate::runtime::process::{ProcessInfo, ProcessManager, ProcessStatus};
 use crate::runtime::tree as runtime_tree;
 use crate::ProviderToolchain;
 
-use super::guest_contract::{parse_guest_contract, preview_guest_contract, GuestContractPreview};
+use super::guest_contract::parse_guest_contract;
 use super::resolve::{build_resolution, resolve_local_plan};
 
 const SESSION_ACTION_START: &str = "session_start";
@@ -53,17 +63,17 @@ pub struct SessionInfo {
     source: Option<String>,
     restricted: bool,
     snapshot: Option<ResolvedSnapshot>,
-    adapter: String,
-    frontend_entry: String,
-    transport: String,
-    healthcheck_url: String,
-    invoke_url: String,
-    capabilities: Vec<String>,
+    runtime: CapsuleRuntimeDescriptor,
+    display_strategy: CapsuleDisplayStrategy,
     pid: i32,
     log_path: String,
     manifest_path: String,
     target_label: String,
     notes: Vec<String>,
+    guest: Option<GuestSessionDisplay>,
+    web: Option<WebSessionDisplay>,
+    terminal: Option<TerminalSessionDisplay>,
+    service: Option<ServiceBackgroundDisplay>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,17 +86,44 @@ struct StoredSessionInfo {
     source: Option<String>,
     restricted: bool,
     snapshot: Option<ResolvedSnapshot>,
+    runtime: CapsuleRuntimeDescriptor,
+    display_strategy: CapsuleDisplayStrategy,
+    pid: i32,
+    log_path: String,
+    manifest_path: String,
+    target_label: String,
+    notes: Vec<String>,
+    guest: Option<GuestSessionDisplay>,
+    web: Option<WebSessionDisplay>,
+    terminal: Option<TerminalSessionDisplay>,
+    service: Option<ServiceBackgroundDisplay>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GuestSessionDisplay {
     adapter: String,
     frontend_entry: String,
     transport: String,
     healthcheck_url: String,
     invoke_url: String,
     capabilities: Vec<String>,
-    pid: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WebSessionDisplay {
+    local_url: String,
+    healthcheck_url: String,
+    served_by: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TerminalSessionDisplay {
     log_path: String,
-    manifest_path: String,
-    target_label: String,
-    notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ServiceBackgroundDisplay {
+    log_path: String,
 }
 
 pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Result<()> {
@@ -101,21 +138,53 @@ pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Re
     let guest = parse_guest_contract(
         &manifest_value,
         manifest_path.parent().unwrap_or_else(|| Path::new(".")),
-    )
-    .ok_or_else(|| {
-        anyhow::anyhow!(
-            "missing [metadata.desky_guest] contract in {}",
-            manifest_path.display()
-        )
-    })?;
+    );
+    let info = if let Some(guest) = guest {
+        start_guest_session(handle, &resolution, &manifest_path, &plan, guest, notes)?
+    } else {
+        start_runtime_session(
+            handle,
+            &resolution,
+            &manifest_path,
+            &plan,
+            &raw_manifest,
+            &launch,
+            notes,
+        )?
+    };
 
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&SessionStartEnvelope {
+                schema_version: super::SCHEMA_VERSION,
+                package_id: super::DESKY_PACKAGE_ID,
+                action: SESSION_ACTION_START,
+                session: info,
+            })?
+        );
+    } else {
+        print_session_info(&info);
+    }
+
+    Ok(())
+}
+
+fn start_guest_session(
+    handle: &str,
+    resolution: &super::resolve::HandleResolution,
+    manifest_path: &Path,
+    plan: &capsule_core::router::ManifestData,
+    guest: super::guest_contract::GuestContract,
+    notes: Vec<String>,
+) -> Result<SessionInfo> {
     let port = reserve_port(guest.default_port)?;
     let process_manager = ProcessManager::new()?;
     let session_root = session_root()?;
     fs::create_dir_all(&session_root)
         .with_context(|| format!("failed to create session root {}", session_root.display()))?;
 
-    let log_path = session_root.join(format!("session-{}.log", port));
+    let log_path = session_root.join(format!("session-{port}.log"));
     let stdout = OpenOptions::new()
         .create(true)
         .append(true)
@@ -125,6 +194,12 @@ pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Re
         .try_clone()
         .with_context(|| format!("failed to clone log file {}", log_path.display()))?;
 
+    let launch = derive_launch_spec(plan).with_context(|| {
+        format!(
+            "failed to derive launch spec for {}",
+            manifest_path.display()
+        )
+    })?;
     let mut command = Command::new(&launch.command);
     command
         .args(&launch.args)
@@ -153,20 +228,16 @@ pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Re
     })?;
 
     let session_id = format!("desky-session-{}", child.id());
+    let runtime = runtime_descriptor(plan);
     let process_info = ProcessInfo {
         id: session_id.clone(),
-        name: plan
-            .manifest
-            .get("name")
-            .and_then(|value| value.as_str())
-            .unwrap_or("desky-guest")
-            .to_string(),
+        name: session_name(plan, "desky-guest"),
         pid: child.id() as i32,
         workload_pid: None,
         status: ProcessStatus::Starting,
         runtime: SESSION_RUNTIME.to_string(),
         start_time: SystemTime::now(),
-        manifest_path: Some(manifest_path.clone()),
+        manifest_path: Some(manifest_path.to_path_buf()),
         scoped_id: None,
         target_label: Some(plan.selected_target_label().to_string()),
         requested_port: Some(port),
@@ -216,22 +287,169 @@ pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Re
         source: resolution.source.clone(),
         restricted: resolution.restricted,
         snapshot: resolution.snapshot.clone(),
-        adapter: guest.adapter.clone(),
-        frontend_entry: guest.frontend_entry.display().to_string(),
-        transport: guest.transport.clone(),
-        healthcheck_url: healthcheck_url.clone(),
-        invoke_url: invoke_url.clone(),
-        capabilities: guest.capabilities.clone(),
+        runtime: runtime.clone(),
+        display_strategy: CapsuleDisplayStrategy::GuestWebview,
         pid: child.id() as i32,
         log_path: log_path.display().to_string(),
         manifest_path: manifest_path.display().to_string(),
         target_label: plan.selected_target_label().to_string(),
         notes,
+        guest: Some(GuestSessionDisplay {
+            adapter: guest.adapter.clone(),
+            frontend_entry: guest.frontend_entry.display().to_string(),
+            transport: guest.transport.clone(),
+            healthcheck_url: healthcheck_url.clone(),
+            invoke_url: invoke_url.clone(),
+            capabilities: guest.capabilities.clone(),
+        }),
+        web: None,
+        terminal: None,
+        service: None,
     };
     write_session_record(&session_root, &session)?;
+    Ok(session_info_from_record(session))
+}
 
-    let info = SessionInfo {
+fn start_runtime_session(
+    handle: &str,
+    resolution: &super::resolve::HandleResolution,
+    manifest_path: &Path,
+    plan: &capsule_core::router::ManifestData,
+    raw_manifest: &str,
+    launch: &capsule_core::launch_spec::LaunchSpec,
+    mut notes: Vec<String>,
+) -> Result<SessionInfo> {
+    let display_strategy = display_strategy_for_runtime(plan);
+    if matches!(display_strategy, CapsuleDisplayStrategy::Unsupported) {
+        anyhow::bail!(
+            "session start does not support target '{}' (runtime={:?}, driver={:?})",
+            plan.selected_target_label(),
+            plan.execution_runtime(),
+            plan.execution_driver()
+        );
+    }
+
+    let process_manager = ProcessManager::new()?;
+    let session_root = session_root()?;
+    fs::create_dir_all(&session_root)
+        .with_context(|| format!("failed to create session root {}", session_root.display()))?;
+    let prepared = prepare_session_execution(plan, raw_manifest)?;
+    let mut runtime_process = spawn_runtime_process(plan, &prepared, &display_strategy)
+        .with_context(|| {
+            format!(
+                "failed to start capsule session for {}",
+                manifest_path.display()
+            )
+        })?;
+    let session_id = format!("desky-session-{}", runtime_process.child.id());
+    let log_path = session_root.join(format!("{}.log", session_id));
+    attach_process_logs(&mut runtime_process.child, &log_path)?;
+
+    let runtime = runtime_descriptor(plan);
+    let local_url = if matches!(display_strategy, CapsuleDisplayStrategy::WebUrl) {
+        let port = launch.port.ok_or_else(|| {
+            anyhow::anyhow!(
+                "runtime=web target '{}' requires targets.<label>.port",
+                plan.selected_target_label()
+            )
+        })?;
+        let health_path = "/";
+        match wait_for_http_ready(
+            &mut runtime_process.child,
+            port,
+            health_path,
+            SESSION_READY_TIMEOUT,
+        ) {
+            Ok(()) => Some(format!("http://127.0.0.1:{port}/")),
+            Err(err) => {
+                let _ = runtime_process.child.kill();
+                let _ = runtime_process.child.wait();
+                anyhow::bail!(
+                    "web runtime failed to become ready: {}. See logs at {}",
+                    err,
+                    log_path.display()
+                );
+            }
+        }
+    } else {
+        None
+    };
+
+    if matches!(display_strategy, CapsuleDisplayStrategy::WebUrl) {
+        notes.push(format!(
+            "Attached runtime=web target '{}' as a capsule-backed web session.",
+            plan.selected_target_label()
+        ));
+    } else {
+        notes.push(format!(
+            "Attached target '{}' as a non-web capsule session.",
+            plan.selected_target_label()
+        ));
+    }
+
+    let process_info = ProcessInfo {
+        id: session_id.clone(),
+        name: session_name(plan, "capsule-session"),
+        pid: runtime_process.child.id() as i32,
+        workload_pid: runtime_process.workload_pid.map(|value| value as i32),
+        status: ProcessStatus::Ready,
+        runtime: runtime
+            .runtime
+            .clone()
+            .unwrap_or_else(|| "source".to_string()),
+        start_time: SystemTime::now(),
+        manifest_path: Some(manifest_path.to_path_buf()),
+        scoped_id: None,
+        target_label: Some(plan.selected_target_label().to_string()),
+        requested_port: launch.port,
+        log_path: Some(log_path.clone()),
+        ready_at: Some(SystemTime::now()),
+        last_event: Some("ready".to_string()),
+        last_error: None,
+        exit_code: None,
+    };
+    process_manager.write_pid(&process_info)?;
+
+    let session = StoredSessionInfo {
         session_id,
+        handle: handle.to_string(),
+        normalized_handle: resolution.normalized_handle.clone(),
+        canonical_handle: resolution.canonical_handle.clone(),
+        trust_state: resolution.trust_state.clone(),
+        source: resolution.source.clone(),
+        restricted: resolution.restricted,
+        snapshot: resolution.snapshot.clone(),
+        runtime: runtime.clone(),
+        display_strategy: display_strategy.clone(),
+        pid: runtime_process.child.id() as i32,
+        log_path: log_path.display().to_string(),
+        manifest_path: manifest_path.display().to_string(),
+        target_label: plan.selected_target_label().to_string(),
+        notes,
+        guest: None,
+        web: local_url.as_ref().map(|url| WebSessionDisplay {
+            local_url: url.clone(),
+            healthcheck_url: url.clone(),
+            served_by: web_served_by(plan),
+        }),
+        terminal: matches!(display_strategy, CapsuleDisplayStrategy::TerminalStream).then(|| {
+            TerminalSessionDisplay {
+                log_path: log_path.display().to_string(),
+            }
+        }),
+        service: matches!(display_strategy, CapsuleDisplayStrategy::ServiceBackground).then(|| {
+            ServiceBackgroundDisplay {
+                log_path: log_path.display().to_string(),
+            }
+        }),
+    };
+    write_session_record(&session_root, &session)?;
+    Ok(session_info_from_record(session))
+}
+
+fn session_info_from_record(session: StoredSessionInfo) -> SessionInfo {
+    SessionInfo {
+        session_id: session.session_id,
         handle: session.handle,
         normalized_handle: session.normalized_handle,
         canonical_handle: session.canonical_handle,
@@ -240,34 +458,18 @@ pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Re
         source: session.source,
         restricted: session.restricted,
         snapshot: session.snapshot,
-        adapter: session.adapter,
-        frontend_entry: session.frontend_entry,
-        transport: session.transport,
-        healthcheck_url: session.healthcheck_url,
-        invoke_url: session.invoke_url,
-        capabilities: session.capabilities,
+        runtime: session.runtime,
+        display_strategy: session.display_strategy,
         pid: session.pid,
         log_path: session.log_path,
         manifest_path: session.manifest_path,
         target_label: session.target_label,
         notes: session.notes,
-    };
-
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&SessionStartEnvelope {
-                schema_version: super::SCHEMA_VERSION,
-                package_id: super::DESKY_PACKAGE_ID,
-                action: SESSION_ACTION_START,
-                session: info,
-            })?
-        );
-    } else {
-        print_session_info(&info, &preview_guest_contract(&guest));
+        guest: session.guest,
+        web: session.web,
+        terminal: session.terminal,
+        service: session.service,
     }
-
-    Ok(())
 }
 
 fn resolve_session_launch_plan(
@@ -284,6 +486,7 @@ fn resolve_session_launch_plan(
             let cli_ref = canonical
                 .to_cli_ref()
                 .ok_or_else(|| anyhow::anyhow!("handle cannot be launched through ato-cli"))?;
+            let registry_override = canonical.registry_url_override().map(str::to_string);
             let reporter = Arc::new(reporters::CliReporter::new(true));
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -295,7 +498,7 @@ fn resolve_session_launch_plan(
                 false,
                 None,
                 false,
-                None,
+                registry_override.as_deref(),
                 reporter,
             ))?
             .path
@@ -321,6 +524,235 @@ fn resolve_session_launch_plan(
         )
     })?;
     Ok((manifest_path, plan, launch, notes))
+}
+
+fn prepare_session_execution(
+    plan: &capsule_core::router::ManifestData,
+    raw_manifest: &str,
+) -> Result<crate::executors::target_runner::PreparedTargetExecution> {
+    let reporter = Arc::new(CliReporter::new(false));
+    let prepared = PreparedRunContext {
+        authoritative_lock: None,
+        lock_path: None,
+        workspace_root: plan.workspace_root.clone(),
+        effective_state: None,
+        execution_override: None,
+        bridge_manifest: DerivedBridgeManifest::new(
+            toml::from_str(raw_manifest)
+                .with_context(|| format!("failed to parse {}", plan.manifest_path.display()))?,
+        ),
+        validation_mode: capsule_core::types::ValidationMode::Strict,
+        engine_override_declared: false,
+        compatibility_legacy_lock: None,
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to create runtime for session execution preparation")?;
+    let launch_ctx = runtime.block_on(resolve_launch_context(plan, &prepared, &reporter))?;
+    prepare_target_execution(
+        plan,
+        &prepared,
+        launch_ctx,
+        &TargetLaunchOptions {
+            enforcement: "audit".to_string(),
+            sandbox_mode: true,
+            dangerously_skip_permissions: false,
+            assume_yes: true,
+            preview_mode: false,
+            defer_consent: true,
+        },
+    )
+}
+
+fn spawn_runtime_process(
+    plan: &capsule_core::router::ManifestData,
+    prepared: &crate::executors::target_runner::PreparedTargetExecution,
+    display_strategy: &CapsuleDisplayStrategy,
+) -> Result<CapsuleProcess> {
+    if matches!(display_strategy, CapsuleDisplayStrategy::WebUrl) {
+        let driver = plan
+            .execution_driver()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        return match driver.as_str() {
+            "static" => Ok(CapsuleProcess {
+                child: crate::executors::open_web::spawn_background(plan)?,
+                cleanup_paths: Vec::new(),
+                event_rx: None,
+                workload_pid: None,
+                log_path: None,
+            }),
+            "deno" => Ok(CapsuleProcess {
+                child: crate::executors::deno::spawn(
+                    plan,
+                    None,
+                    &prepared.execution_plan,
+                    &prepared.launch_ctx,
+                    false,
+                )?,
+                cleanup_paths: Vec::new(),
+                event_rx: None,
+                workload_pid: None,
+                log_path: None,
+            }),
+            "node" => Ok(CapsuleProcess {
+                child: crate::executors::node_compat::spawn(
+                    plan,
+                    None,
+                    &prepared.execution_plan,
+                    &prepared.launch_ctx,
+                    false,
+                )?,
+                cleanup_paths: Vec::new(),
+                event_rx: None,
+                workload_pid: None,
+                log_path: None,
+            }),
+            "python" => crate::executors::source::execute_host(
+                plan,
+                None,
+                Arc::new(CliReporter::new(false)),
+                ExecuteMode::Piped,
+                &prepared.launch_ctx,
+            ),
+            _ => anyhow::bail!("unsupported runtime=web driver '{driver}' for session start"),
+        };
+    }
+
+    if plan.is_orchestration_mode() {
+        return crate::executors::shell::execute(plan, ExecuteMode::Piped, &prepared.launch_ctx)
+            .or_else(|_| {
+                crate::executors::source::execute_host(
+                    plan,
+                    None,
+                    Arc::new(CliReporter::new(false)),
+                    ExecuteMode::Piped,
+                    &prepared.launch_ctx,
+                )
+            });
+    }
+
+    match prepared.guard_result.executor_kind {
+        capsule_core::execution_plan::guard::ExecutorKind::Deno => Ok(CapsuleProcess {
+            child: crate::executors::deno::spawn(
+                plan,
+                None,
+                &prepared.execution_plan,
+                &prepared.launch_ctx,
+                false,
+            )?,
+            cleanup_paths: Vec::new(),
+            event_rx: None,
+            workload_pid: None,
+            log_path: None,
+        }),
+        capsule_core::execution_plan::guard::ExecutorKind::NodeCompat => Ok(CapsuleProcess {
+            child: crate::executors::node_compat::spawn(
+                plan,
+                None,
+                &prepared.execution_plan,
+                &prepared.launch_ctx,
+                false,
+            )?,
+            cleanup_paths: Vec::new(),
+            event_rx: None,
+            workload_pid: None,
+            log_path: None,
+        }),
+        capsule_core::execution_plan::guard::ExecutorKind::WebStatic => Ok(CapsuleProcess {
+            child: crate::executors::open_web::spawn_background(plan)?,
+            cleanup_paths: Vec::new(),
+            event_rx: None,
+            workload_pid: None,
+            log_path: None,
+        }),
+        _ if plan.execution_run_command().is_some() => {
+            crate::executors::shell::execute(plan, ExecuteMode::Piped, &prepared.launch_ctx)
+        }
+        _ => crate::executors::source::execute_host(
+            plan,
+            None,
+            Arc::new(CliReporter::new(false)),
+            ExecuteMode::Piped,
+            &prepared.launch_ctx,
+        ),
+    }
+}
+
+fn display_strategy_for_runtime(
+    plan: &capsule_core::router::ManifestData,
+) -> CapsuleDisplayStrategy {
+    if plan.is_orchestration_mode() {
+        return CapsuleDisplayStrategy::ServiceBackground;
+    }
+
+    if plan
+        .execution_runtime()
+        .is_some_and(|runtime| runtime.eq_ignore_ascii_case("web"))
+    {
+        return CapsuleDisplayStrategy::WebUrl;
+    }
+
+    CapsuleDisplayStrategy::TerminalStream
+}
+
+fn runtime_descriptor(plan: &capsule_core::router::ManifestData) -> CapsuleRuntimeDescriptor {
+    CapsuleRuntimeDescriptor {
+        target_label: plan.selected_target_label().to_string(),
+        runtime: plan.execution_runtime(),
+        driver: plan.execution_driver(),
+        language: plan.execution_language(),
+        port: plan.execution_port(),
+    }
+}
+
+fn session_name(plan: &capsule_core::router::ManifestData, fallback: &str) -> String {
+    plan.manifest
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn web_served_by(plan: &capsule_core::router::ManifestData) -> String {
+    let driver = plan.execution_driver().unwrap_or_else(|| "web".to_string());
+    match driver.to_ascii_lowercase().as_str() {
+        "static" => "deno-static-server".to_string(),
+        value => value.to_string(),
+    }
+}
+
+fn attach_process_logs(child: &mut std::process::Child, log_path: &Path) -> Result<()> {
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let writer = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("failed to open log file {}", log_path.display()))?;
+    let stderr_writer = writer
+        .try_clone()
+        .with_context(|| format!("failed to clone log file {}", log_path.display()))?;
+
+    if let Some(mut stdout) = stdout {
+        let mut writer = writer;
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut stdout, &mut writer);
+        });
+    }
+    if let Some(mut stderr) = stderr {
+        let mut writer = stderr_writer;
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut stderr, &mut writer);
+        });
+    }
+    Ok(())
 }
 
 pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
@@ -429,13 +861,29 @@ fn http_get_ok(port: u16, path: &str) -> Result<bool> {
     Ok(response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200"))
 }
 
-fn print_session_info(info: &SessionInfo, guest: &GuestContractPreview) {
+fn print_session_info(info: &SessionInfo) {
     println!("Session: {}", info.session_id);
     println!("Handle: {}", info.handle);
-    println!("Adapter: {}", guest.adapter);
-    println!("Frontend: {}", guest.frontend_entry);
-    println!("Invoke URL: {}", info.invoke_url);
-    println!("Health URL: {}", info.healthcheck_url);
+    println!("Display: {}", info.display_strategy.as_str());
+    if let Some(runtime) = info.runtime.runtime.as_deref() {
+        println!("Runtime: {runtime}");
+    }
+    if let Some(web) = info.web.as_ref() {
+        println!("URL: {}", web.local_url);
+        println!("Health URL: {}", web.healthcheck_url);
+    }
+    if let Some(guest) = info.guest.as_ref() {
+        println!("Adapter: {}", guest.adapter);
+        println!("Frontend: {}", guest.frontend_entry);
+        println!("Invoke URL: {}", guest.invoke_url);
+        println!("Health URL: {}", guest.healthcheck_url);
+    }
+    if let Some(terminal) = info.terminal.as_ref() {
+        println!("Log: {}", terminal.log_path);
+    }
+    if let Some(service) = info.service.as_ref() {
+        println!("Log: {}", service.log_path);
+    }
     println!("PID: {}", info.pid);
     println!("Log: {}", info.log_path);
 }
@@ -443,6 +891,7 @@ fn print_session_info(info: &SessionInfo, guest: &GuestContractPreview) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use capsule_core::handle::normalize_capsule_handle;
 
     #[test]
     fn reserve_port_returns_requested_port_when_available() {
@@ -471,17 +920,30 @@ mod tests {
                     content_hash: Some("sha256:abc123".to_string()),
                     fetched_at: "2026-04-09T00:00:00Z".to_string(),
                 }),
-                adapter: "tauri".to_string(),
-                frontend_entry: "dist/index.html".to_string(),
-                transport: "http".to_string(),
-                healthcheck_url: "http://127.0.0.1:9000/health".to_string(),
-                invoke_url: "http://127.0.0.1:9000/rpc".to_string(),
-                capabilities: vec!["read-file".to_string()],
+                runtime: CapsuleRuntimeDescriptor {
+                    target_label: "web".to_string(),
+                    runtime: Some("source".to_string()),
+                    driver: Some("tauri".to_string()),
+                    language: Some("tauri".to_string()),
+                    port: Some(9000),
+                },
+                display_strategy: CapsuleDisplayStrategy::GuestWebview,
                 pid: 42,
                 log_path: "/tmp/desky-session.log".to_string(),
                 manifest_path: "/tmp/capsule.toml".to_string(),
                 target_label: "web".to_string(),
                 notes: vec!["materialized".to_string()],
+                guest: Some(GuestSessionDisplay {
+                    adapter: "tauri".to_string(),
+                    frontend_entry: "dist/index.html".to_string(),
+                    transport: "http".to_string(),
+                    healthcheck_url: "http://127.0.0.1:9000/health".to_string(),
+                    invoke_url: "http://127.0.0.1:9000/rpc".to_string(),
+                    capabilities: vec!["read-file".to_string()],
+                }),
+                web: None,
+                terminal: None,
+                service: None,
             },
         };
 
@@ -491,7 +953,7 @@ mod tests {
             serde_json::json!("0.1.0")
         );
         assert_eq!(
-            json["session"]["frontend_entry"],
+            json["session"]["guest"]["frontend_entry"],
             serde_json::json!("dist/index.html")
         );
         assert_eq!(
@@ -499,5 +961,20 @@ mod tests {
             serde_json::json!("/tmp/capsule.toml")
         );
         assert_eq!(json["session"]["source"], serde_json::json!("registry"));
+        assert_eq!(
+            json["session"]["display_strategy"],
+            serde_json::json!("guest_webview")
+        );
+    }
+
+    #[test]
+    fn loopback_registry_handle_exposes_registry_override_for_materialization() {
+        let canonical =
+            normalize_capsule_handle("capsule://localhost:8787/acme/chat").expect("canonical");
+        assert_eq!(canonical.to_cli_ref().as_deref(), Some("acme/chat"));
+        assert_eq!(
+            canonical.registry_url_override(),
+            Some("http://localhost:8787")
+        );
     }
 }
