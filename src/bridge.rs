@@ -11,14 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
 
-use crate::state::ActivityTone;
-
-#[derive(Clone, Debug)]
-pub struct BridgeActivityEntry {
-    pub pane_id: Option<usize>,
-    pub tone: ActivityTone,
-    pub message: String,
-}
+use crate::state::{ActivityEntry, ActivityTone};
 
 #[derive(Clone, Debug)]
 pub struct GuestSessionContext {
@@ -68,30 +61,37 @@ pub enum GuestBridgeResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case")]
 pub enum ShellEvent {
-    SessionReady {
-        pane_id: usize,
-    },
+    SessionReady { pane_id: usize },
     PermissionDenied {
         pane_id: usize,
         capability: String,
         command: Option<String>,
     },
-    SessionClosed {
+    SessionClosed { pane_id: usize },
+    UrlChanged { pane_id: usize, url: String },
+    TitleChanged { pane_id: usize, title: String },
+    GuestConsoleLog {
         pane_id: usize,
+        level: String,
+        message: String,
     },
-    UrlChanged {
+    GuestNetworkStart {
         pane_id: usize,
+        request_id: String,
+        method: String,
         url: String,
     },
-    TitleChanged {
+    GuestNetworkEnd {
         pane_id: usize,
-        title: String,
+        request_id: String,
+        status: u16,
+        duration_ms: u64,
     },
 }
 
 #[derive(Clone, Default)]
 pub struct BridgeProxy {
-    activity: Arc<Mutex<Vec<BridgeActivityEntry>>>,
+    activity: Arc<Mutex<Vec<ActivityEntry>>>,
     shell_events: Arc<Mutex<Vec<ShellEvent>>>,
 }
 
@@ -128,8 +128,7 @@ impl BridgeProxy {
             GuestBridgeRequest::Handshake {
                 session: guest_session,
             } => {
-                self.log_for_pane(
-                    session.map(|context| context.pane_id),
+                self.log(
                     ActivityTone::Info,
                     format!("Guest session {guest_session} attached"),
                 );
@@ -157,18 +156,10 @@ impl BridgeProxy {
                         payload: serde_json::json!({ "capability": capability }),
                     }
                 } else {
-                    self.log_for_pane(
-                        session.map(|context| context.pane_id),
+                    self.log(
                         ActivityTone::Warning,
                         format!("Denied guest probe for {capability}"),
                     );
-                    if let Some(session) = session {
-                        self.push_shell_event(ShellEvent::PermissionDenied {
-                            pane_id: session.pane_id,
-                            capability: capability.clone(),
-                            command: None,
-                        });
-                    }
                     GuestBridgeResponse::Denied {
                         request_id: Some(request_id),
                         message: format!("capability {capability} is not granted"),
@@ -182,26 +173,17 @@ impl BridgeProxy {
                 payload,
             } => {
                 if !capability_allowed(allowlist, &capability) {
-                    self.log_for_pane(
-                        session.map(|context| context.pane_id),
+                    self.log(
                         ActivityTone::Warning,
                         format!("Fail-closed guest invoke denied: {command} requires {capability}"),
                     );
-                    if let Some(session) = session {
-                        self.push_shell_event(ShellEvent::PermissionDenied {
-                            pane_id: session.pane_id,
-                            capability: capability.clone(),
-                            command: Some(command.clone()),
-                        });
-                    }
                     return GuestBridgeResponse::Denied {
                         request_id: Some(request_id),
                         message: format!("capability {capability} is not granted"),
                     };
                 }
 
-                self.log_for_pane(
-                    session.map(|context| context.pane_id),
+                self.log(
                     ActivityTone::Info,
                     format!("Guest invoke {command} accepted under {capability}"),
                 );
@@ -237,27 +219,14 @@ impl BridgeProxy {
     }
 
     pub fn log(&self, tone: ActivityTone, message: impl Into<String>) {
-        self.log_for_pane(None, tone, message);
-    }
-
-    pub fn log_for_pane(
-        &self,
-        pane_id: Option<usize>,
-        tone: ActivityTone,
-        message: impl Into<String>,
-    ) {
         let message = message.into();
         self.activity
             .lock()
             .expect("bridge activity lock poisoned")
-            .push(BridgeActivityEntry {
-                pane_id,
-                tone,
-                message,
-            });
+            .push(ActivityEntry { tone, message });
     }
 
-    pub fn drain_activity_entries(&self) -> Vec<BridgeActivityEntry> {
+    pub fn drain_activity(&self) -> Vec<ActivityEntry> {
         let mut activity = self.activity.lock().expect("bridge activity lock poisoned");
         std::mem::take(&mut *activity)
     }
@@ -291,11 +260,7 @@ impl BridgeProxy {
                     .and_then(Value::as_str)
                     .unwrap_or("Ato Desktop")
                     .to_string();
-                self.log_for_pane(
-                    session.map(|context| context.pane_id),
-                    ActivityTone::Info,
-                    format!("Host title request: {title}"),
-                );
+                self.log(ActivityTone::Info, format!("Host title request: {title}"));
                 if let Some(session) = session {
                     self.push_shell_event(ShellEvent::TitleChanged {
                         pane_id: session.pane_id,

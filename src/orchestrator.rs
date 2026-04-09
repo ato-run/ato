@@ -3,12 +3,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
+use capsule_core::handle::{
+    normalize_capsule_handle, CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor,
+};
 use serde::Deserialize;
 
 const ATO_BIN_ENV: &str = "ATO_DESKTOP_ATO_BIN";
 
 #[derive(Clone, Debug)]
-pub struct GuestLaunchSession {
+pub struct CapsuleLaunchSession {
     pub handle: String,
     pub normalized_handle: String,
     pub canonical_handle: Option<String>,
@@ -17,20 +20,27 @@ pub struct GuestLaunchSession {
     pub restricted: bool,
     pub snapshot_label: Option<String>,
     pub session_id: String,
-    pub adapter: String,
-    pub frontend_entry: String,
-    pub invoke_url: String,
-    pub healthcheck_url: String,
-    pub capabilities: Vec<String>,
+    pub runtime: CapsuleRuntimeDescriptor,
+    pub display_strategy: CapsuleDisplayStrategy,
     pub manifest_path: PathBuf,
     pub app_root: PathBuf,
     pub target_label: String,
+    pub adapter: Option<String>,
+    pub frontend_entry: Option<String>,
+    pub invoke_url: Option<String>,
+    pub healthcheck_url: Option<String>,
+    pub capabilities: Vec<String>,
+    pub local_url: Option<String>,
+    pub served_by: Option<String>,
+    pub log_path: Option<PathBuf>,
     pub notes: Vec<String>,
 }
 
-impl GuestLaunchSession {
-    pub fn frontend_url_path(&self) -> String {
-        format!("/{}", self.frontend_entry.trim_start_matches('/'))
+impl CapsuleLaunchSession {
+    pub fn frontend_url_path(&self) -> Option<String> {
+        self.frontend_entry
+            .as_ref()
+            .map(|entry| format!("/{}", entry.trim_start_matches('/')))
     }
 
     pub fn session_payload(&self) -> serde_json::Value {
@@ -44,6 +54,16 @@ impl GuestLaunchSession {
             "handle": self.handle,
         })
     }
+}
+
+pub type GuestLaunchSession = CapsuleLaunchSession;
+
+pub fn resolve_and_start_guest(handle: &str) -> Result<GuestLaunchSession> {
+    resolve_and_start_capsule(handle)
+}
+
+pub fn stop_guest_session(session_id: &str) -> Result<bool> {
+    stop_capsule_session(session_id)
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -91,14 +111,42 @@ struct SessionStartInfo {
     source: Option<String>,
     restricted: bool,
     snapshot: Option<serde_json::Value>,
+    runtime: CapsuleRuntimeDescriptor,
+    display_strategy: CapsuleDisplayStrategy,
+    manifest_path: String,
+    target_label: String,
+    log_path: String,
+    notes: Vec<String>,
+    guest: Option<GuestSessionDisplay>,
+    web: Option<WebSessionDisplay>,
+    terminal: Option<TerminalSessionDisplay>,
+    service: Option<ServiceBackgroundDisplay>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GuestSessionDisplay {
     adapter: String,
     frontend_entry: String,
     healthcheck_url: String,
     invoke_url: String,
     capabilities: Vec<String>,
-    manifest_path: String,
-    target_label: String,
-    notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct WebSessionDisplay {
+    local_url: String,
+    healthcheck_url: String,
+    served_by: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct TerminalSessionDisplay {
+    log_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ServiceBackgroundDisplay {
+    log_path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,25 +161,19 @@ struct StoredSessionRecord {
     log_path: String,
 }
 
-pub fn resolve_and_start_guest(handle: &str) -> Result<GuestLaunchSession> {
-    let resolved = resolve_guest(handle)?;
-    if !supports_resolved_guest_launch(&resolved)
-        && !allows_registry_guest_recovery(handle, &resolved)
-    {
-        bail!(unsupported_render_strategy_message(handle, &resolved));
-    }
-
-    let started = start_guest(handle)?;
+pub fn resolve_and_start_capsule(handle: &str) -> Result<CapsuleLaunchSession> {
+    let resolved = resolve_capsule(handle)?;
+    let started = start_capsule(handle)?;
     build_launch_session(handle, resolved, started)
 }
 
-pub fn stop_guest_session(session_id: &str) -> Result<bool> {
+pub fn stop_capsule_session(session_id: &str) -> Result<bool> {
     let stopped: SessionStopEnvelope =
         run_ato_json(&["app", "session", "stop", session_id, "--json"])?;
     Ok(stopped.stopped)
 }
 
-pub fn cleanup_stale_guest_sessions() -> Result<Vec<String>> {
+pub fn cleanup_stale_capsule_sessions() -> Result<Vec<String>> {
     let root = session_root()?;
     if !root.exists() {
         return Ok(Vec::new());
@@ -171,18 +213,18 @@ pub fn cleanup_stale_guest_sessions() -> Result<Vec<String>> {
         if log_path.exists() {
             let _ = fs::remove_file(&log_path);
         }
-        notes.push(format!("Removed stale guest session {}", record.session_id));
+        notes.push(format!("Removed stale capsule session {}", record.session_id));
     }
 
     Ok(notes)
 }
 
-fn resolve_guest(handle: &str) -> Result<ResolvePayload> {
+fn resolve_capsule(handle: &str) -> Result<ResolvePayload> {
     let envelope: ResolveEnvelope = run_ato_json(&["app", "resolve", handle, "--json"])?;
     Ok(envelope.resolution)
 }
 
-fn start_guest(handle: &str) -> Result<SessionStartInfo> {
+fn start_capsule(handle: &str) -> Result<SessionStartInfo> {
     let envelope: SessionStartEnvelope =
         run_ato_json(&["app", "session", "start", handle, "--json"])?;
     Ok(envelope.session)
@@ -271,23 +313,14 @@ fn which_in_path(binary: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-fn combine_notes(
-    mut resolve_notes: Vec<String>,
-    start_notes: Vec<String>,
-    adapter: &str,
-) -> Vec<String> {
+fn combine_notes(mut resolve_notes: Vec<String>, start_notes: Vec<String>) -> Vec<String> {
     // Preserve both resolve-time and launch-time notes, but avoid repeating the same line twice.
     for note in start_notes {
         if !resolve_notes.contains(&note) {
             resolve_notes.push(note);
         }
     }
-    resolve_notes.push(format!("Resolved guest adapter {adapter} through ato-cli"));
     resolve_notes
-}
-
-fn supports_resolved_guest_launch(resolved: &ResolvePayload) -> bool {
-    resolved.render_strategy == "guest-webview" && resolved.guest.is_some()
 }
 
 fn allows_registry_guest_recovery(handle: &str, resolved: &ResolvePayload) -> bool {
@@ -295,29 +328,23 @@ fn allows_registry_guest_recovery(handle: &str, resolved: &ResolvePayload) -> bo
     let canonical_is_registry = resolved
         .canonical_handle
         .as_deref()
-        .is_some_and(|value| value.starts_with("capsule://ato.run/"));
+        .is_some_and(is_registry_capsule_handle);
 
-    (source_is_registry || canonical_is_registry) && handle.starts_with("capsule://ato.run/")
+    (source_is_registry || canonical_is_registry) && is_registry_capsule_handle(handle)
 }
 
-fn unsupported_render_strategy_message(handle: &str, resolved: &ResolvePayload) -> String {
-    if resolved.guest.is_none() {
-        format!(
-            "ato app resolve did not return guest metadata for {handle}, and registry guest recovery is unavailable"
-        )
-    } else {
-        format!(
-            "ato app resolve returned unsupported render strategy '{}' for {handle}",
-            resolved.render_strategy
-        )
-    }
+fn is_registry_capsule_handle(handle: &str) -> bool {
+    matches!(
+        normalize_capsule_handle(handle),
+        Ok(CanonicalHandle::RegistryCapsule { .. })
+    )
 }
 
 fn build_launch_session(
     handle: &str,
     resolved: ResolvePayload,
     started: SessionStartInfo,
-) -> Result<GuestLaunchSession> {
+) -> Result<CapsuleLaunchSession> {
     let manifest_path = PathBuf::from(&started.manifest_path);
     let app_root = manifest_path
         .parent()
@@ -326,22 +353,16 @@ fn build_launch_session(
 
     let recover_from_materialized_manifest =
         resolved.guest.is_none() && allows_registry_guest_recovery(handle, &resolved);
-    let guest = resolved.guest.clone();
-    let guest_adapter = guest
-        .as_ref()
-        .map(|item| item.adapter.as_str())
-        .unwrap_or(&started.adapter);
-    let frontend_entry = normalize_frontend_entry(
-        &app_root,
-        &started.frontend_entry,
-        guest
-            .as_ref()
-            .map(|item| item.frontend_entry.as_str())
-            .unwrap_or(&started.frontend_entry),
-    )?;
+    let mut notes = combine_notes(resolved.notes, started.notes);
+    let display_strategy = started.display_strategy.clone();
+    let guest = started.guest.clone();
+    let web = started.web.clone();
+    let terminal = started.terminal.clone();
+    let service = started.service.clone();
+    let guest_metadata_missing = matches!(display_strategy, CapsuleDisplayStrategy::GuestWebview)
+        && guest.is_none();
 
-    let mut notes = combine_notes(resolved.notes, started.notes, guest_adapter);
-    if recover_from_materialized_manifest {
+    if recover_from_materialized_manifest && !guest_metadata_missing {
         notes.push(
             "Remote resolve was metadata-only; guest contract was recovered from the materialized session manifest."
                 .to_string(),
@@ -366,7 +387,22 @@ fn build_launch_session(
         started.trust_state.clone()
     };
 
-    Ok(GuestLaunchSession {
+    let frontend_entry = match guest.as_ref() {
+        Some(guest) => Some(normalize_frontend_entry(
+            &app_root,
+            &guest.frontend_entry,
+            &guest.frontend_entry,
+        )?),
+        None => None,
+    };
+
+    if guest_metadata_missing {
+        bail!(
+            "ato app session start returned guest_webview for {handle} without guest payload"
+        );
+    }
+
+    Ok(CapsuleLaunchSession {
         handle: started.handle,
         normalized_handle: started.normalized_handle,
         canonical_handle: started
@@ -382,18 +418,29 @@ fn build_launch_session(
             .or(resolved.snapshot.as_ref())
             .map(snapshot_label),
         session_id: started.session_id,
-        adapter: started.adapter.clone(),
-        frontend_entry,
-        invoke_url: started.invoke_url,
-        healthcheck_url: started.healthcheck_url,
-        capabilities: if started.capabilities.is_empty() {
-            guest.map(|item| item.capabilities).unwrap_or_default()
-        } else {
-            started.capabilities.clone()
-        },
+        runtime: started.runtime,
+        display_strategy: display_strategy.clone(),
         manifest_path,
         app_root,
         target_label: started.target_label,
+        adapter: guest.as_ref().map(|item| item.adapter.clone()),
+        frontend_entry,
+        invoke_url: guest.as_ref().map(|item| item.invoke_url.clone()),
+        healthcheck_url: guest
+            .as_ref()
+            .map(|item| item.healthcheck_url.clone())
+            .or_else(|| web.as_ref().map(|item| item.healthcheck_url.clone())),
+        capabilities: guest
+            .as_ref()
+            .map(|item| item.capabilities.clone())
+            .unwrap_or_default(),
+        local_url: web.as_ref().map(|item| item.local_url.clone()),
+        served_by: web.as_ref().map(|item| item.served_by.clone()),
+        log_path: terminal
+            .as_ref()
+            .map(|item| PathBuf::from(&item.log_path))
+            .or_else(|| service.as_ref().map(|item| PathBuf::from(&item.log_path)))
+            .or_else(|| Some(PathBuf::from(&started.log_path))),
         notes,
     })
 }
@@ -470,10 +517,9 @@ fn process_is_alive(pid: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        allows_registry_guest_recovery, build_launch_session, supports_resolved_guest_launch,
-        which_in_path, ResolvePayload, SessionStartInfo,
-    };
+    use capsule_core::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor};
+
+    use super::{allows_registry_guest_recovery, build_launch_session, which_in_path, ResolvePayload, SessionStartInfo};
 
     fn resolved_payload(
         render_strategy: &str,
@@ -507,14 +553,28 @@ mod tests {
             source: Some("registry".to_string()),
             restricted: true,
             snapshot: Some(serde_json::json!({ "version": "0.1.0" })),
-            adapter: "tauri".to_string(),
-            frontend_entry: "dist/index.html".to_string(),
-            healthcheck_url: "http://127.0.0.1:9000/health".to_string(),
-            invoke_url: "http://127.0.0.1:9000/rpc".to_string(),
-            capabilities: vec!["read-file".to_string()],
+            runtime: CapsuleRuntimeDescriptor {
+                target_label: "web".to_string(),
+                runtime: Some("source".to_string()),
+                driver: Some("tauri".to_string()),
+                language: Some("tauri".to_string()),
+                port: Some(9000),
+            },
+            display_strategy: CapsuleDisplayStrategy::GuestWebview,
             manifest_path: "/tmp/example/capsule.toml".to_string(),
             target_label: "web".to_string(),
+            log_path: "/tmp/example/session.log".to_string(),
             notes: vec!["started".to_string()],
+            guest: Some(super::GuestSessionDisplay {
+                adapter: "tauri".to_string(),
+                frontend_entry: "dist/index.html".to_string(),
+                healthcheck_url: "http://127.0.0.1:9000/health".to_string(),
+                invoke_url: "http://127.0.0.1:9000/rpc".to_string(),
+                capabilities: vec!["read-file".to_string()],
+            }),
+            web: None,
+            terminal: None,
+            service: None,
         }
     }
 
@@ -539,7 +599,7 @@ mod tests {
         )
         .expect("session");
 
-        assert_eq!(session.adapter, "tauri");
+        assert_eq!(session.adapter.as_deref(), Some("tauri"));
         assert_eq!(session.snapshot_label.as_deref(), Some("version 0.1.0"));
         assert!(session
             .notes
@@ -548,9 +608,47 @@ mod tests {
     }
 
     #[test]
-    fn guest_webview_without_guest_metadata_is_not_launchable_for_non_registry_sources() {
+    fn loopback_registry_capsule_can_recover_guest_from_materialized_session() {
+        let resolved = resolved_payload("terminal", Some("registry"), false);
+        assert!(allows_registry_guest_recovery(
+            "capsule://localhost:8787/acme/chat",
+            &resolved
+        ));
+    }
+
+    #[test]
+    fn web_url_sessions_keep_runtime_and_attach_url() {
+        let mut started = session_start();
+        started.display_strategy = CapsuleDisplayStrategy::WebUrl;
+        started.runtime = CapsuleRuntimeDescriptor {
+            target_label: "default".to_string(),
+            runtime: Some("web".to_string()),
+            driver: Some("deno".to_string()),
+            language: Some("deno".to_string()),
+            port: Some(4173),
+        };
+        started.guest = None;
+        started.web = Some(super::WebSessionDisplay {
+            local_url: "http://127.0.0.1:4173/".to_string(),
+            healthcheck_url: "http://127.0.0.1:4173/".to_string(),
+            served_by: "deno".to_string(),
+        });
+
+        let session = build_launch_session(
+            "capsule://localhost:8787/acme/chat",
+            resolved_payload("web", Some("registry"), false),
+            started,
+        )
+        .expect("session");
+
+        assert_eq!(session.display_strategy, CapsuleDisplayStrategy::WebUrl);
+        assert_eq!(session.local_url.as_deref(), Some("http://127.0.0.1:4173/"));
+        assert_eq!(session.runtime.runtime.as_deref(), Some("web"));
+    }
+
+    #[test]
+    fn registry_recovery_is_not_available_for_non_registry_handles() {
         let resolved = resolved_payload("terminal", Some("github"), false);
-        assert!(!supports_resolved_guest_launch(&resolved));
         assert!(!allows_registry_guest_recovery(
             "capsule://github.com/acme/chat",
             &resolved

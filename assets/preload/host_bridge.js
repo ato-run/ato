@@ -73,4 +73,78 @@
       session: window.location.host || "welcome",
     }).catch(() => {});
   }
+
+  // DevTools telemetry — send console and network events to the host panel.
+  // Uses sendOverProtocol directly (bypasses capability allowlist check).
+  function sendDevtools(command, payload) {
+    if (!endpoint) return;
+    void sendOverProtocol({
+      kind: "invoke",
+      request_id: nextId(),
+      command,
+      capability: "__devtools__",
+      payload: payload,
+    }).catch(() => {});
+  }
+
+  // Console interception
+  const __ato_console_orig = {};
+  ["log", "info", "warn", "error", "debug"].forEach(function (level) {
+    __ato_console_orig[level] = console[level];
+    console[level] = function () {
+      __ato_console_orig[level].apply(console, arguments);
+      var args = Array.prototype.slice.call(arguments);
+      var message = args
+        .map(function (a) {
+          try {
+            return typeof a === "object" ? JSON.stringify(a) : String(a);
+          } catch (_) {
+            return String(a);
+          }
+        })
+        .join(" ");
+      sendDevtools("devtools.console", { level: level, message: message });
+    };
+  });
+
+  // Fetch interception
+  var __ato_fetch_orig = window.fetch;
+  window.fetch = function (input, init) {
+    var reqId = Math.random().toString(36).slice(2);
+    var url =
+      typeof input === "string"
+        ? input
+        : input && input.url
+          ? input.url
+          : "";
+    var method = (
+      (init && init.method) ||
+      (typeof input === "object" && input && input.method) ||
+      "GET"
+    ).toUpperCase();
+    var t0 = Date.now();
+    sendDevtools("devtools.network.start", {
+      reqId: reqId,
+      method: method,
+      url: url,
+    });
+    return __ato_fetch_orig.call(this, input, init).then(
+      function (response) {
+        sendDevtools("devtools.network.end", {
+          reqId: reqId,
+          status: response.status,
+          durationMs: Date.now() - t0,
+        });
+        return response;
+      },
+      function (err) {
+        sendDevtools("devtools.network.end", {
+          reqId: reqId,
+          status: 0,
+          durationMs: Date.now() - t0,
+        });
+        throw err;
+      }
+    );
+  };
 })();
