@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::application::auth;
 use crate::application::ports::OutputPort;
+use crate::fs_copy;
 use crate::progressive_ui;
 use crate::reporters::CliReporter;
 
@@ -39,6 +40,18 @@ pub(crate) struct DecapArgs {
     pub(crate) plan: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct RunShareArgs {
+    pub(crate) input: String,
+    pub(crate) entry: Option<String>,
+    pub(crate) args: Vec<String>,
+    pub(crate) env_file: Option<PathBuf>,
+    pub(crate) prompt_env: bool,
+    pub(crate) watch: bool,
+    pub(crate) background: bool,
+    pub(crate) reporter: Arc<CliReporter>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ShareSpec {
     pub(crate) schema_version: String,
@@ -52,6 +65,8 @@ pub(crate) struct ShareSpec {
     pub(crate) env_requirements: Vec<EnvRequirementSpec>,
     #[serde(default)]
     pub(crate) install_steps: Vec<InstallStepSpec>,
+    #[serde(default)]
+    pub(crate) entries: Vec<ShareEntrySpec>,
     #[serde(default)]
     pub(crate) services: Vec<ServiceSpec>,
     #[serde(default)]
@@ -105,6 +120,32 @@ pub(crate) struct InstallStepSpec {
     pub(crate) depends_on: Vec<String>,
     #[serde(default)]
     pub(crate) evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ShareEntrySpec {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) cwd: String,
+    pub(crate) run: String,
+    pub(crate) kind: String,
+    pub(crate) primary: bool,
+    #[serde(default)]
+    pub(crate) depends_on: Vec<String>,
+    #[serde(default)]
+    pub(crate) env: EntryEnvSpec,
+    #[serde(default)]
+    pub(crate) evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct EntryEnvSpec {
+    #[serde(default)]
+    pub(crate) required: Vec<String>,
+    #[serde(default)]
+    pub(crate) optional: Vec<String>,
+    #[serde(default)]
+    pub(crate) files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +272,7 @@ struct ShareApiCreateRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ShareRevisionPayload {
+    #[serde(alias = "id")]
     share_id: String,
     title: String,
     visibility: String,
@@ -352,13 +394,102 @@ pub(crate) fn execute_encap(args: EncapArgs, reporter: Arc<CliReporter>) -> Resu
 pub(crate) fn execute_decap(args: DecapArgs, reporter: Arc<CliReporter>) -> Result<()> {
     let into = args.into;
     ensure_target_root_ready(&into)?;
-    let loaded = load_share_input(&args.input)?;
-
-    if args.plan {
-        println!("{}", serde_json::to_string_pretty(&loaded.spec)?);
+    if looks_like_share_run_input(&args.input) || looks_like_local_share_file(&args.input) {
+        let loaded = load_share_input(&args.input)?;
+        if args.plan {
+            println!("{}", serde_json::to_string_pretty(&loaded.spec)?);
+            return Ok(());
+        }
+        let state = materialize_loaded_share(&loaded, &into)?;
+        futures::executor::block_on(reporter.notify(build_decap_summary(&loaded.spec, &state)))?;
         return Ok(());
     }
 
+    if args.plan {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mode": "generic_target_materialization",
+                "input": args.input,
+                "into": into,
+            }))?
+        );
+        return Ok(());
+    }
+
+    let state = materialize_generic_target(&args.input, &into, &reporter)?;
+    futures::executor::block_on(reporter.notify(build_generic_decap_summary(
+        &args.input,
+        &into,
+        &state,
+    )))?;
+    Ok(())
+}
+
+pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
+    if args.watch {
+        anyhow::bail!("`ato run <share-url>` does not support --watch in this MVP.");
+    }
+    if args.background {
+        anyhow::bail!("`ato run <share-url>` does not support --background in this MVP.");
+    }
+
+    let loaded = load_share_input(&args.input)?;
+    let entries = effective_entries(&loaded.spec);
+    let entry = select_run_entry(&args.input, &loaded, &entries, args.entry.as_deref())?;
+    let temp_root = ephemeral_run_root(&loaded, &entry)?;
+    ensure_target_root_ready(&temp_root)?;
+    let state = materialize_loaded_share(&loaded, &temp_root)?;
+    let env_overlay = resolve_entry_env_overlay(
+        &args.input,
+        &entry,
+        args.env_file.as_deref(),
+        args.prompt_env,
+    )?;
+
+    let run_command = if args.args.is_empty() {
+        entry.run.clone()
+    } else {
+        format!(
+            "{} {}",
+            entry.run,
+            shell_words::join(args.args.iter().map(String::as_str))
+        )
+    };
+    let run_cwd = temp_root.join(&entry.cwd);
+    let next_command = loaded
+        .resolved_revision_url
+        .clone()
+        .unwrap_or_else(|| args.input.clone());
+
+    futures::executor::block_on(args.reporter.notify(format!(
+        "Try now: `{}`\nSet up locally later: ato decap {} --into ./{}",
+        run_command, next_command, loaded.spec.root
+    )))?;
+    if !state.verification.issues.is_empty() {
+        futures::executor::block_on(args.reporter.warn(format!(
+            "Workspace verification reported {} issue(s) before run.",
+            state.verification.issues.len()
+        )))?;
+    }
+
+    let status = run_shell_streaming(&run_command, &run_cwd, &env_overlay)?;
+    let _ = fs::remove_dir_all(&temp_root);
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "share entry `{}` exited with status {}",
+            entry.id,
+            status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "signal".to_string())
+        );
+    }
+}
+
+fn materialize_loaded_share(loaded: &LoadedShareInput, into: &Path) -> Result<WorkspaceShareState> {
     let mut state = WorkspaceShareState {
         share_url: loaded.share_url.clone(),
         resolved_revision_url: loaded.resolved_revision_url.clone(),
@@ -373,7 +504,7 @@ pub(crate) fn execute_decap(args: DecapArgs, reporter: Arc<CliReporter>) -> Resu
         last_verified_at: None,
     };
 
-    fs::create_dir_all(&into)
+    fs::create_dir_all(into)
         .with_context(|| format!("Failed to create target root {}", into.display()))?;
 
     for source in &loaded.spec.sources {
@@ -406,8 +537,7 @@ pub(crate) fn execute_decap(args: DecapArgs, reporter: Arc<CliReporter>) -> Resu
         }
     }
 
-    let missing_tools = verify_tools(&loaded.lock.resolved_tools);
-    for tool in missing_tools {
+    for tool in verify_tools(&loaded.lock.resolved_tools) {
         state
             .verification
             .issues
@@ -466,11 +596,85 @@ pub(crate) fn execute_decap(args: DecapArgs, reporter: Arc<CliReporter>) -> Resu
         "warning".to_string()
     };
     state.last_verified_at = Some(Utc::now().to_rfc3339());
-    write_share_state(&into, &state)?;
+    write_share_state(into, &state)?;
+    Ok(state)
+}
 
-    futures::executor::block_on(reporter.notify(build_decap_summary(&loaded.spec, &state)))?;
+fn materialize_generic_target(
+    input: &str,
+    into: &Path,
+    reporter: &Arc<CliReporter>,
+) -> Result<WorkspaceShareState> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build decap runtime")?;
+    let resolved = rt.block_on(crate::install::support::resolve_run_target_or_install(
+        PathBuf::from(input),
+        true,
+        crate::ProviderToolchain::Auto,
+        false,
+        None,
+        false,
+        None,
+        reporter.clone(),
+    ))?;
 
-    Ok(())
+    fs::create_dir_all(into)
+        .with_context(|| format!("Failed to create target root {}", into.display()))?;
+
+    if resolved.path.is_dir() {
+        fs_copy::copy_path_recursive(&resolved.path, into)?;
+    } else if resolved
+        .path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value == "capsule")
+        .unwrap_or(false)
+    {
+        extract_capsule_into(&resolved.path, into)?;
+    } else {
+        anyhow::bail!("unsupported decap target path: {}", resolved.path.display());
+    }
+
+    let state = WorkspaceShareState {
+        share_url: None,
+        resolved_revision_url: None,
+        workspace_root: into.display().to_string(),
+        sources: vec![ShareSourceState {
+            id: "target".to_string(),
+            status: "ok".to_string(),
+            current_rev: None,
+            last_error: None,
+        }],
+        install_steps: Vec::new(),
+        env: Vec::new(),
+        verification: VerificationState {
+            result: "ok".to_string(),
+            issues: Vec::new(),
+        },
+        last_verified_at: Some(Utc::now().to_rfc3339()),
+    };
+    write_share_state(into, &state)?;
+    Ok(state)
+}
+
+fn build_generic_decap_summary(input: &str, into: &Path, state: &WorkspaceShareState) -> String {
+    let mut lines = vec![
+        format!("Workspace materialized at {}", into.display()),
+        format!("Source target: {}", input),
+        format!("Verification: {}", state.verification.result),
+        "Next:".to_string(),
+        "  - Open the workspace locally".to_string(),
+        "  - Share it later with: ato encap --share".to_string(),
+    ];
+    if !state.verification.issues.is_empty() {
+        lines.push("Issues:".to_string());
+        for issue in &state.verification.issues {
+            lines.push(format!("  - {}", issue));
+        }
+    }
+    lines.join("\n")
 }
 
 fn capture_workspace(root: &Path) -> Result<CapturedWorkspace> {
@@ -502,6 +706,7 @@ fn capture_workspace(root: &Path) -> Result<CapturedWorkspace> {
     install_steps.sort_by(|left, right| left.id.cmp(&right.id));
     services.sort_by(|left, right| left.id.cmp(&right.id));
     env_requirements.sort_by(|left, right| left.path.cmp(&right.path));
+    let entries = derive_entries(&services, &env_requirements);
 
     let spec = ShareSpec {
         schema_version: SHARE_SCHEMA_VERSION.to_string(),
@@ -529,6 +734,7 @@ fn capture_workspace(root: &Path) -> Result<CapturedWorkspace> {
         tool_requirements: tool_requirements.into_values().collect(),
         env_requirements,
         install_steps,
+        entries,
         services,
         notes: ShareNotes::default(),
         generated_from: GeneratedFrom {
@@ -793,6 +999,83 @@ fn detect_tools(
     Ok(())
 }
 
+fn derive_entries(
+    services: &[ServiceSpec],
+    env_requirements: &[EnvRequirementSpec],
+) -> Vec<ShareEntrySpec> {
+    let mut entries = services
+        .iter()
+        .map(|service| {
+            let env_files = env_requirements
+                .iter()
+                .filter(|env_requirement| {
+                    env_requirement.path == format!("{}/.env", service.cwd)
+                        || env_requirement.path == format!("{}/.env.local", service.cwd)
+                        || env_requirement
+                            .path
+                            .starts_with(&format!("{}/", service.cwd))
+                })
+                .map(|env_requirement| env_requirement.path.clone())
+                .collect::<Vec<_>>();
+            ShareEntrySpec {
+                id: service.id.clone(),
+                label: service.id.clone(),
+                cwd: service.cwd.clone(),
+                run: service.run.clone(),
+                kind: "runnable".to_string(),
+                primary: false,
+                depends_on: service.depends_on.clone(),
+                env: EntryEnvSpec {
+                    required: Vec::new(),
+                    optional: Vec::new(),
+                    files: env_files,
+                },
+                evidence: service.evidence.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if entries.len() == 1 {
+        if let Some(entry) = entries.first_mut() {
+            entry.primary = true;
+        }
+        return entries;
+    }
+
+    for preferred in ["main", "dashboard", "docs", "web", "app"] {
+        if let Some(entry) = entries.iter_mut().find(|entry| entry.id == preferred) {
+            entry.primary = true;
+            return entries;
+        }
+    }
+
+    if let Some(entry) = entries.first_mut() {
+        entry.primary = true;
+    }
+
+    entries
+}
+
+fn ensure_single_primary_entry(entries: &mut [ShareEntrySpec]) {
+    let primary_indices = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| entry.primary.then_some(index))
+        .collect::<Vec<_>>();
+
+    if primary_indices.len() == 1 {
+        return;
+    }
+
+    for entry in entries.iter_mut() {
+        entry.primary = false;
+    }
+
+    if let Some(entry) = entries.first_mut() {
+        entry.primary = true;
+    }
+}
+
 fn add_tool_requirement(
     acc: &mut BTreeMap<String, ToolRequirementSpec>,
     tool: &str,
@@ -1048,11 +1331,12 @@ fn interactively_finalize_capture(spec: &mut ShareSpec, reporter: &Arc<CliReport
     }
 
     futures::executor::block_on(reporter.notify(format!(
-        "Detected workspace `{}` with {} repos, {} tools, {} install steps, {} services, {} env files.",
+        "Detected workspace `{}` with {} repos, {} tools, {} install steps, {} entries, {} services, {} env files.",
         spec.name,
         spec.sources.len(),
         spec.tool_requirements.len(),
         spec.install_steps.len(),
+        spec.entries.len(),
         spec.services.len(),
         spec.env_requirements.len()
     )))?;
@@ -1117,6 +1401,32 @@ fn interactively_finalize_capture(spec: &mut ShareSpec, reporter: &Arc<CliReport
     }
     spec.install_steps = kept_steps;
 
+    let mut kept_entries = Vec::new();
+    for entry in &spec.entries {
+        match prompt_editable_entry(
+            &format!("Run entry {} -> ({}) {}", entry.id, entry.cwd, entry.run),
+            use_tui,
+        )? {
+            PromptDecision::Keep => kept_entries.push(entry.clone()),
+            PromptDecision::Edit => {
+                let mut updated = entry.clone();
+                updated.label =
+                    prompt_text("New entry label (blank keeps current): ", &entry.label)?;
+                updated.cwd = prompt_text("New entry cwd (blank keeps current): ", &entry.cwd)?;
+                updated.run = prompt_text("New entry command (blank keeps current): ", &entry.run)?;
+                updated.primary = progressive_ui::confirm_with_fallback(
+                    &format!("Mark {} as primary? [y/N] ", updated.id),
+                    updated.primary,
+                    use_tui,
+                )?;
+                kept_entries.push(updated);
+            }
+            PromptDecision::Skip => {}
+        }
+    }
+    ensure_single_primary_entry(&mut kept_entries);
+    spec.entries = kept_entries;
+
     let mut kept_services = Vec::new();
     for service in &spec.services {
         match prompt_editable_entry(
@@ -1160,11 +1470,8 @@ fn interactively_finalize_capture(spec: &mut ShareSpec, reporter: &Arc<CliReport
 }
 
 fn prompt_editable_entry(label: &str, use_tui: bool) -> Result<PromptDecision> {
-    if use_tui {
-        eprint!("{label} [Y/e/n] ");
-    } else {
-        eprint!("{label} [Y/e/n] ");
-    }
+    let _ = use_tui;
+    eprint!("{label} [Y/e/n] ");
     io::stderr()
         .flush()
         .context("failed to flush editable prompt")?;
@@ -1316,9 +1623,22 @@ fn generate_guide(spec: &ShareSpec) -> String {
     }
     lines.push(String::new());
     lines.push("## Run Services".to_string());
-    if spec.services.is_empty() {
+    if spec.entries.is_empty() && spec.services.is_empty() {
         lines.push("- None detected".to_string());
     } else {
+        for entry in &spec.entries {
+            let mut suffix = String::new();
+            if entry.primary {
+                suffix.push_str(" (primary)");
+            }
+            if !entry.env.files.is_empty() {
+                suffix.push_str(&format!(" env_files={}", entry.env.files.join(",")));
+            }
+            lines.push(format!(
+                "- `run {}`: `{}` in `{}`{}",
+                entry.id, entry.run, entry.cwd, suffix
+            ));
+        }
         for service in &spec.services {
             let mut suffix = String::new();
             if service.optional {
@@ -1385,6 +1705,18 @@ struct LoadedShareInput {
     lock: ShareLock,
 }
 
+pub(crate) fn looks_like_share_run_input(input: &str) -> bool {
+    (input.starts_with("http://") || input.starts_with("https://")) && input.contains("/s/")
+}
+
+fn looks_like_local_share_file(input: &str) -> bool {
+    let path = Path::new(input);
+    matches!(
+        path.file_name().and_then(|value| value.to_str()),
+        Some(SHARE_SPEC_FILE | SHARE_LOCK_FILE)
+    )
+}
+
 fn load_share_input(input: &str) -> Result<LoadedShareInput> {
     if input.starts_with("http://") || input.starts_with("https://") {
         return fetch_share_url(input);
@@ -1441,7 +1773,7 @@ fn fetch_share_url(url: &str) -> Result<LoadedShareInput> {
     let parsed = reqwest::Url::parse(url).context("Invalid share URL")?;
     let segment = parsed
         .path_segments()
-        .and_then(|segments| segments.last())
+        .and_then(|mut segments| segments.next_back())
         .filter(|segment| !segment.is_empty())
         .context("Share URL is missing an id")?;
     let (share_id, revision) = parse_share_revision_segment(segment)?;
@@ -1480,6 +1812,312 @@ fn fetch_share_url(url: &str) -> Result<LoadedShareInput> {
         spec: share.spec,
         lock: share.lock,
     })
+}
+
+fn effective_entries(spec: &ShareSpec) -> Vec<ShareEntrySpec> {
+    if !spec.entries.is_empty() {
+        return spec.entries.clone();
+    }
+    derive_entries(&spec.services, &spec.env_requirements)
+}
+
+fn select_run_entry(
+    input: &str,
+    loaded: &LoadedShareInput,
+    entries: &[ShareEntrySpec],
+    requested_entry: Option<&str>,
+) -> Result<ShareEntrySpec> {
+    if entries.is_empty() {
+        anyhow::bail!(
+            "This target looks like a workspace but has no runnable entries. Set it up locally with: ato decap {} --into ./{}",
+            loaded
+                .resolved_revision_url
+                .as_deref()
+                .unwrap_or(input),
+            loaded.spec.root
+        );
+    }
+
+    if let Some(requested_entry) = requested_entry {
+        return entries
+            .iter()
+            .find(|entry| entry.id == requested_entry || entry.label == requested_entry)
+            .cloned()
+            .with_context(|| format!("Unknown entry `{}`", requested_entry));
+    }
+
+    if entries.len() == 1 {
+        return Ok(entries[0].clone());
+    }
+
+    let primaries = entries.iter().filter(|entry| entry.primary).count();
+    if primaries == 1 {
+        return entries
+            .iter()
+            .find(|entry| entry.primary)
+            .cloned()
+            .context("missing primary entry");
+    }
+
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        let mut choices = String::new();
+        for entry in entries {
+            choices.push_str(&format!("  - {}\n", entry.id));
+        }
+        anyhow::bail!(
+            "Multiple runnable entries detected. Re-run with --entry <id>.\n{}",
+            choices.trim_end()
+        );
+    }
+
+    eprintln!(
+        "Multiple runnable entries detected for {}:",
+        loaded.spec.name
+    );
+    for (index, entry) in entries.iter().enumerate() {
+        let env_hint = if entry.env.required.is_empty() && entry.env.files.is_empty() {
+            "no env required".to_string()
+        } else {
+            let mut parts = Vec::new();
+            if !entry.env.required.is_empty() {
+                parts.push(format!("required env: {}", entry.env.required.join(", ")));
+            }
+            if !entry.env.files.is_empty() {
+                parts.push(format!("env files: {}", entry.env.files.join(", ")));
+            }
+            parts.join(" · ")
+        };
+        eprintln!("  {}. {} ({})", index + 1, entry.id, env_hint);
+    }
+    eprint!("Choose an entry [1-{}]: ", entries.len());
+    io::stderr()
+        .flush()
+        .context("failed to flush entry prompt")?;
+    let mut input_line = String::new();
+    io::stdin()
+        .read_line(&mut input_line)
+        .context("failed to read entry prompt")?;
+    let selected = input_line.trim().parse::<usize>().unwrap_or(1);
+    entries
+        .get(selected.saturating_sub(1))
+        .cloned()
+        .or_else(|| entries.first().cloned())
+        .context("no runnable entry available")
+}
+
+fn ephemeral_run_root(loaded: &LoadedShareInput, entry: &ShareEntrySpec) -> Result<PathBuf> {
+    let cwd = std::env::current_dir().context("failed to resolve current working directory")?;
+    let suffix = loaded
+        .resolved_revision_url
+        .as_deref()
+        .or(loaded.share_url.as_deref())
+        .unwrap_or(&loaded.spec.name);
+    let digest = sha256_label(format!("{}:{}", suffix, entry.id).as_bytes());
+    Ok(cwd.join(".tmp").join("ato-run").join(digest))
+}
+
+fn resolve_entry_env_overlay(
+    input: &str,
+    entry: &ShareEntrySpec,
+    env_file: Option<&Path>,
+    prompt_env: bool,
+) -> Result<BTreeMap<String, String>> {
+    let fingerprint = target_env_fingerprint(input, Some(&entry.id));
+    let saved_path = saved_target_env_path(&fingerprint)?;
+    let mut envs = BTreeMap::new();
+
+    if saved_path.exists() {
+        envs.extend(load_env_map(&saved_path)?);
+    }
+    if let Some(env_file) = env_file {
+        envs.extend(load_env_map(env_file)?);
+    }
+
+    let missing_required = entry
+        .env
+        .required
+        .iter()
+        .filter(|key| !env_value_present(key, &envs))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if missing_required.is_empty() {
+        let missing_optional = entry
+            .env
+            .optional
+            .iter()
+            .filter(|key| !env_value_present(key, &envs))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing_optional.is_empty() {
+            eprintln!(
+                "Warning: continuing without optional environment variables: {}",
+                missing_optional.join(", ")
+            );
+        }
+        return Ok(envs);
+    }
+
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        anyhow::bail!(
+            "Missing required environment variables for entry `{}`: {}\nProvide them with --env-file or set them in your environment before rerunning.",
+            entry.id,
+            missing_required.join(", ")
+        );
+    }
+
+    eprintln!("Cannot run `{}` yet.", entry.id);
+    eprintln!(
+        "Missing required environment variables: {}",
+        missing_required.join(", ")
+    );
+    for file in &entry.env.files {
+        eprintln!("Expected env file: {}", file);
+    }
+    if !prompt_env {
+        eprint!("Enter values now? [Y/n] ");
+        io::stderr().flush().context("failed to flush env prompt")?;
+        let mut confirm = String::new();
+        io::stdin()
+            .read_line(&mut confirm)
+            .context("failed to read env prompt")?;
+        let normalized = confirm.trim().to_ascii_lowercase();
+        if matches!(normalized.as_str(), "n" | "no") {
+            anyhow::bail!(
+                "Cancelled before supplying required environment. Re-run with --env-file or use ato decap {} --into ./{}.",
+                input,
+                entry
+                    .cwd
+                    .split('/')
+                    .next()
+                    .unwrap_or("workspace")
+            );
+        }
+    }
+
+    for key in &missing_required {
+        eprint!("{key}: ");
+        io::stderr()
+            .flush()
+            .context("failed to flush env value prompt")?;
+        let mut value = String::new();
+        io::stdin()
+            .read_line(&mut value)
+            .context("failed to read env value")?;
+        envs.insert(key.clone(), value.trim().to_string());
+    }
+
+    eprint!("Save these values for this target? [y/N] ");
+    io::stderr()
+        .flush()
+        .context("failed to flush env save prompt")?;
+    let mut save = String::new();
+    io::stdin()
+        .read_line(&mut save)
+        .context("failed to read env save prompt")?;
+    let normalized = save.trim().to_ascii_lowercase();
+    if matches!(normalized.as_str(), "y" | "yes") {
+        save_env_map(&saved_path, &envs)?;
+    }
+
+    Ok(envs)
+}
+
+fn run_shell_streaming(
+    command: &str,
+    cwd: &Path,
+    env_overlay: &BTreeMap<String, String>,
+) -> Result<std::process::ExitStatus> {
+    let mut process = if cfg!(windows) {
+        let mut command_process = Command::new("cmd");
+        command_process.arg("/C").arg(command);
+        command_process
+    } else {
+        let mut command_process = Command::new("/bin/sh");
+        command_process.arg("-lc").arg(command);
+        command_process
+    };
+    process.current_dir(cwd);
+    for (key, value) in env_overlay {
+        process.env(key, value);
+    }
+    process
+        .status()
+        .with_context(|| format!("Failed to launch share entry in {}", cwd.display()))
+}
+
+fn extract_capsule_into(capsule_path: &Path, target_root: &Path) -> Result<()> {
+    let file = fs::File::open(capsule_path)
+        .with_context(|| format!("Failed to open capsule {}", capsule_path.display()))?;
+    let mut archive = tar::Archive::new(file);
+    archive
+        .unpack(target_root)
+        .with_context(|| format!("Failed to extract capsule into {}", target_root.display()))?;
+    let cas_provider = capsule_core::capsule_v3::CasProvider::from_env();
+    let _ = capsule_core::capsule_v3::unpack_payload_from_capsule_root_with_provider(
+        target_root,
+        target_root,
+        &cas_provider,
+    )
+    .with_context(|| "Failed to unpack capsule payload")?;
+    fs::remove_file(target_root.join("payload.tar.zst")).ok();
+    fs::remove_file(target_root.join("payload.tar")).ok();
+    Ok(())
+}
+
+fn target_env_fingerprint(input: &str, entry_id: Option<&str>) -> String {
+    let normalized = format!("{}::{}", input.trim(), entry_id.unwrap_or(""));
+    sha256_label(normalized.as_bytes())
+}
+
+fn saved_target_env_path(fingerprint: &str) -> Result<PathBuf> {
+    let home = dirs::home_dir().context("failed to resolve home directory for saved env store")?;
+    Ok(home
+        .join(".ato")
+        .join("env")
+        .join("targets")
+        .join(format!("{fingerprint}.env")))
+}
+
+fn load_env_map(path: &Path) -> Result<BTreeMap<String, String>> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read env file {}", path.display()))?;
+    let mut values = BTreeMap::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        values.insert(key.trim().to_string(), value.trim().to_string());
+    }
+    Ok(values)
+}
+
+fn save_env_map(path: &Path, values: &BTreeMap<String, String>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    let rendered = values
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(path, format!("{rendered}\n"))
+        .with_context(|| format!("Failed to write env store {}", path.display()))
+}
+
+fn env_value_present(key: &str, overlay: &BTreeMap<String, String>) -> bool {
+    overlay
+        .get(key)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+        || std::env::var(key)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
 }
 
 fn parse_share_revision_segment(segment: &str) -> Result<(&str, Option<u32>)> {
@@ -1598,6 +2236,7 @@ fn build_decap_summary(spec: &ShareSpec, state: &WorkspaceShareState) -> String 
         format!("Workspace ready at {}", state.workspace_root),
         format!("Sources: {}", state.sources.len()),
         format!("Install steps: {}", state.install_steps.len()),
+        format!("Run entries: {}", effective_entries(spec).len()),
         format!("Env files: {}", state.env.len()),
     ];
     if state.verification.issues.is_empty() {
@@ -1609,6 +2248,12 @@ fn build_decap_summary(spec: &ShareSpec, state: &WorkspaceShareState) -> String 
         }
     }
     lines.push("Next:".to_string());
+    for entry in effective_entries(spec) {
+        lines.push(format!(
+            "  - try {} -> {} ({})",
+            entry.id, entry.run, entry.cwd
+        ));
+    }
     for service in &spec.services {
         lines.push(format!(
             "  - {} -> {} ({})",
@@ -1795,6 +2440,119 @@ mod tests {
             .env_requirements
             .iter()
             .all(|env| !env.evidence.iter().any(|line| line.contains("SECRET="))));
+        assert!(capture.spec.entries.iter().any(|entry| entry.primary));
+        assert!(capture
+            .spec
+            .entries
+            .iter()
+            .any(|entry| entry.id == "dashboard"
+                && entry.env.files.iter().any(|path| path.ends_with(".env"))));
+    }
+
+    #[test]
+    fn derive_entries_prefers_dashboard_as_primary() {
+        let services = vec![
+            ServiceSpec {
+                id: "api".to_string(),
+                cwd: "api".to_string(),
+                run: "python main.py".to_string(),
+                depends_on: Vec::new(),
+                kind: "long_running".to_string(),
+                optional: false,
+                port: Some(8000),
+                healthcheck: None,
+                evidence: Vec::new(),
+            },
+            ServiceSpec {
+                id: "dashboard".to_string(),
+                cwd: "dashboard".to_string(),
+                run: "bun run dev".to_string(),
+                depends_on: vec!["api".to_string()],
+                kind: "long_running".to_string(),
+                optional: false,
+                port: Some(5173),
+                healthcheck: None,
+                evidence: vec!["package.json scripts.dev".to_string()],
+            },
+        ];
+        let env_requirements = vec![EnvRequirementSpec {
+            id: "dashboard-env".to_string(),
+            path: "dashboard/.env.local".to_string(),
+            required: true,
+            template_path: None,
+            note: None,
+            evidence: vec![".env.local present".to_string()],
+        }];
+
+        let entries = derive_entries(&services, &env_requirements);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry.primary)
+                .map(|entry| entry.id.as_str()),
+            Some("dashboard")
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry.id == "dashboard")
+                .map(|entry| entry.depends_on.clone())
+                .unwrap_or_default(),
+            vec!["api".to_string()]
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry.id == "dashboard")
+                .map(|entry| entry.env.files.clone())
+                .unwrap_or_default(),
+            vec!["dashboard/.env.local".to_string()]
+        );
+    }
+
+    #[test]
+    fn share_revision_payload_accepts_api_id_alias() {
+        let payload = serde_json::json!({
+            "id": "share-123",
+            "title": "demo",
+            "visibility": "unlisted",
+            "revision": 1,
+            "share_url": "https://api.ato.run/s/share-123",
+            "revision_url": "https://api.ato.run/s/share-123@r1",
+            "spec": {
+                "schema_version": "1",
+                "name": "demo",
+                "root": "demo",
+                "sources": [],
+                "tool_requirements": [],
+                "env_requirements": [],
+                "install_steps": [],
+                "entries": [],
+                "services": [],
+                "notes": { "team_notes": "" },
+                "generated_from": {
+                    "root_path": "/tmp/demo",
+                    "captured_at": "2026-04-10T00:00:00Z",
+                    "host_os": "macos"
+                }
+            },
+            "lock": {
+                "schema_version": "1",
+                "spec_digest": "sha256:abc",
+                "generated_guide_digest": "sha256:def",
+                "revision": 1,
+                "created_at": "2026-04-10T00:00:00Z",
+                "resolved_sources": [],
+                "resolved_tools": []
+            },
+            "guide_markdown": "# demo",
+            "updated_at": "2026-04-10T00:00:00Z"
+        });
+
+        let parsed = serde_json::from_value::<ShareRevisionPayload>(payload)
+            .expect("share payload should deserialize with id alias");
+        assert_eq!(parsed.share_id, "share-123");
     }
 
     fn init_git_repo(path: &Path, remote: &str) {
