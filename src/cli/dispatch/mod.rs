@@ -15,6 +15,7 @@ pub(crate) mod registry;
 mod run;
 mod scaffold;
 mod setup;
+mod share;
 mod source;
 mod state;
 
@@ -127,6 +128,28 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             registry.as_deref(),
             json || command_json,
         ),
+
+        Commands::Encap {
+            path,
+            share,
+            save_only,
+            print_plan,
+        } => share::execute_encap_command(share::EncapCommandArgs {
+            path,
+            share,
+            save_only,
+            print_plan,
+            reporter: reporter.clone(),
+        }),
+
+        Commands::Decap { input, into, plan } => {
+            share::execute_decap_command(share::DecapCommandArgs {
+                input,
+                into,
+                plan,
+                reporter: reporter.clone(),
+            })
+        }
 
         Commands::Engine { command } => {
             engine::execute_engine_command(command, nacelle, reporter.clone())

@@ -157,17 +157,19 @@ impl WellKnownResolver {
     /// Resolve registry from /.well-known/capsule.json
     pub async fn resolve(&self, domain: &str) -> Result<Option<RegistryInfo>> {
         // Try https first, then http for localhost
-        let urls = if domain.contains("localhost") || domain.starts_with("127.") {
-            vec![
-                format!("http://{}/.well-known/capsule.json", domain),
-                format!("https://{}/.well-known/capsule.json", domain),
-            ]
-        } else {
-            vec![
-                format!("https://{}/.well-known/capsule.json", domain),
-                format!("http://{}/.well-known/capsule.json", domain),
-            ]
-        };
+        let urls =
+            if domain.contains("localhost") || domain.starts_with("127.") || domain.contains("::1")
+            {
+                vec![
+                    format!("http://{}/.well-known/capsule.json", domain),
+                    format!("https://{}/.well-known/capsule.json", domain),
+                ]
+            } else {
+                vec![
+                    format!("https://{}/.well-known/capsule.json", domain),
+                    format!("http://{}/.well-known/capsule.json", domain),
+                ]
+            };
 
         for url in urls {
             let response = match self.client.get(&url).send().await {
@@ -260,7 +262,12 @@ impl RegistryResolver {
 
     /// Check if domain is localhost (skip DNS for beta/local development)
     fn is_localhost(domain: &str) -> bool {
-        domain == "localhost" || domain == "127.0.0.1" || domain.starts_with("127.0.0.")
+        domain == "localhost"
+            || domain == "127.0.0.1"
+            || domain.starts_with("127.0.0.")
+            || domain == "::1"
+            || domain == "[::1]"
+            || domain.starts_with("[::1]:")
     }
 
     /// Resolve registry for an app ID (DID)
