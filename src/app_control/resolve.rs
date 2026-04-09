@@ -4,20 +4,31 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+use capsule_core::handle::{
+    classify_surface_input, CanonicalHandle, HandleInput, InputSurface, LaunchPlan,
+    LocalTrustDecisionRecord, PermissionRequestPolicy, ResolvedMetadataCacheEntry,
+    ResolvedSnapshot, SurfaceInput, TrustState,
+};
+use capsule_core::handle_store::{
+    load_metadata_cache, metadata_cache_is_fresh, metadata_cache_ttl_seconds, resolve_trust_state,
+    store_local_trust_decision, store_metadata_cache,
+};
 use capsule_core::launch_spec::{derive_launch_spec, LaunchSpecSource};
 use capsule_core::router::{
     execution_descriptor_from_manifest_parts, route_manifest, ExecutionProfile, ManifestData,
 };
 
 use super::guest_contract::{parse_guest_contract, preview_guest_contract, GuestContract};
-use crate::install::{fetch_capsule_manifest_toml, parse_capsule_request};
-use crate::local_input::{expand_local_path, should_treat_input_as_local};
+use crate::install::{
+    download_github_repository_at_ref, fetch_capsule_detail, fetch_capsule_manifest_toml,
+    fetch_github_install_draft, parse_capsule_request,
+};
 
 const ACTION: &str = "resolve_handle";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum HandleKind {
+pub(super) enum HandleKind {
     WebUrl,
     LocalCapsule,
     StoreCapsule,
@@ -27,7 +38,7 @@ enum HandleKind {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-enum RenderStrategy {
+pub(super) enum RenderStrategy {
     Web,
     Terminal,
     GuestWebview,
@@ -43,19 +54,25 @@ struct ResolveEnvelope {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct HandleResolution {
-    input: String,
-    normalized_handle: String,
-    kind: HandleKind,
-    render_strategy: RenderStrategy,
-    guest: Option<super::guest_contract::GuestContractPreview>,
-    target: Option<TargetSummary>,
-    launch: Option<LaunchPreview>,
-    notes: Vec<String>,
+pub(super) struct HandleResolution {
+    pub(super) input: String,
+    pub(super) normalized_handle: String,
+    pub(super) kind: HandleKind,
+    pub(super) render_strategy: RenderStrategy,
+    pub(super) canonical_handle: Option<String>,
+    pub(super) source: Option<String>,
+    pub(super) trust_state: TrustState,
+    pub(super) restricted: bool,
+    pub(super) launch_plan: Option<LaunchPlan>,
+    pub(super) snapshot: Option<ResolvedSnapshot>,
+    pub(super) guest: Option<super::guest_contract::GuestContractPreview>,
+    pub(super) target: Option<TargetSummary>,
+    pub(super) launch: Option<LaunchPreview>,
+    pub(super) notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct TargetSummary {
+pub(super) struct TargetSummary {
     target_label: String,
     runtime: Option<String>,
     driver: Option<String>,
@@ -66,7 +83,7 @@ struct TargetSummary {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct LaunchPreview {
+pub(super) struct LaunchPreview {
     working_dir: String,
     command: String,
     args: Vec<String>,
@@ -93,6 +110,8 @@ pub(super) struct NormalizedHandle {
     input: String,
     normalized_handle: String,
     kind: NormalizedHandleKind,
+    canonical: Option<CanonicalHandle>,
+    cli_ref: Option<String>,
 }
 
 pub fn resolve_handle(
@@ -120,7 +139,7 @@ pub fn resolve_handle(
     Ok(())
 }
 
-fn build_resolution(
+pub(super) fn build_resolution(
     handle: &str,
     target_label: Option<&str>,
     registry: Option<&str>,
@@ -133,6 +152,12 @@ fn build_resolution(
             normalized_handle: normalized.normalized_handle,
             kind: HandleKind::WebUrl,
             render_strategy: RenderStrategy::Web,
+            canonical_handle: None,
+            source: Some("web".to_string()),
+            trust_state: TrustState::Unknown,
+            restricted: false,
+            launch_plan: None,
+            snapshot: None,
             guest: None,
             target: None,
             launch: None,
@@ -143,6 +168,12 @@ fn build_resolution(
             normalized_handle: normalized.normalized_handle,
             kind: HandleKind::StateUri,
             render_strategy: RenderStrategy::Unsupported,
+            canonical_handle: None,
+            source: Some("state".to_string()),
+            trust_state: TrustState::Unknown,
+            restricted: false,
+            launch_plan: None,
+            snapshot: None,
             guest: None,
             target: None,
             launch: None,
@@ -150,27 +181,27 @@ fn build_resolution(
                 "mag:// state views are not implemented yet; keep this handle in Desky as a future state-view route.".to_string(),
             ],
         }),
-        NormalizedHandleKind::RemoteSourceRef => Ok(HandleResolution {
-            input: normalized.input,
-            normalized_handle: normalized.normalized_handle,
-            kind: HandleKind::RemoteSourceRef,
-            render_strategy: RenderStrategy::Unsupported,
-            guest: None,
-            target: None,
-            launch: None,
-            notes: vec![
-                "Remote source handles are not resolved yet. Materialize or infer a capsule first, then retry with a local path or store-scoped handle.".to_string(),
-            ],
-        }),
+        NormalizedHandleKind::RemoteSourceRef => build_github_resolution(
+            normalized.input,
+            normalized.normalized_handle,
+            normalized
+                .canonical
+                .ok_or_else(|| anyhow::anyhow!("missing canonical GitHub handle"))?,
+            target_label,
+        ),
         NormalizedHandleKind::LocalPath(path) => build_local_resolution(
             normalized.input,
             normalized.normalized_handle,
+            normalized.canonical,
             path,
             target_label,
         ),
         NormalizedHandleKind::StoreCapsule => build_store_resolution(
             normalized.input,
             normalized.normalized_handle,
+            normalized
+                .canonical
+                .ok_or_else(|| anyhow::anyhow!("missing canonical registry handle"))?,
             target_label,
             registry,
         ),
@@ -180,6 +211,7 @@ fn build_resolution(
 fn build_local_resolution(
     input: String,
     normalized_handle: String,
+    canonical: Option<CanonicalHandle>,
     path: PathBuf,
     target_label: Option<&str>,
 ) -> Result<HandleResolution> {
@@ -203,11 +235,33 @@ fn build_local_resolution(
             )
         })?;
 
+    let snapshot = Some(ResolvedSnapshot::LocalPath {
+        resolved_path: manifest_path.display().to_string(),
+        fetched_at: chrono::Utc::now().to_rfc3339(),
+    });
+    let trust_state = TrustState::Local;
+    if let Some(canonical) = canonical.as_ref() {
+        persist_metadata_cache(canonical, &normalized_handle, &plan, snapshot.clone())?;
+        persist_local_trust_state(canonical, trust_state.clone(), "local-path")?;
+    }
+
     Ok(HandleResolution {
         input,
         normalized_handle,
         kind: HandleKind::LocalCapsule,
         render_strategy: render_strategy(&plan, guest.as_ref()),
+        canonical_handle: canonical.as_ref().map(CanonicalHandle::display_string),
+        source: canonical
+            .as_ref()
+            .map(|handle| handle.source_label().to_string()),
+        trust_state: trust_state.clone(),
+        restricted: true,
+        launch_plan: Some(default_launch_plan(
+            canonical,
+            snapshot.clone(),
+            trust_state,
+        )),
+        snapshot,
         guest: guest.as_ref().map(preview_guest_contract),
         target: Some(build_target_summary(
             &plan,
@@ -278,11 +332,23 @@ pub(super) fn resolve_local_plan(
 fn build_store_resolution(
     input: String,
     normalized_handle: String,
+    canonical: CanonicalHandle,
     target_label: Option<&str>,
     registry: Option<&str>,
 ) -> Result<HandleResolution> {
+    let cached_metadata = load_metadata_cache(&canonical)
+        .with_context(|| format!("failed to load cached metadata for {normalized_handle}"))?;
+    let trust_state = resolve_trust_state(&canonical, TrustState::Untrusted)
+        .with_context(|| format!("failed to load trust state for {normalized_handle}"))?;
     let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
-    let manifest_toml = rt.block_on(fetch_capsule_manifest_toml(&normalized_handle, registry))?;
+    let cli_ref = canonical
+        .to_cli_ref()
+        .ok_or_else(|| anyhow::anyhow!("registry handle does not support CLI resolution"))?;
+    let registry_override = effective_registry_override(&canonical, registry);
+    let manifest_toml = rt.block_on(fetch_capsule_manifest_toml(
+        &cli_ref,
+        registry_override.as_deref(),
+    ))?;
     let manifest_value: toml::Value = toml::from_str(&manifest_toml)
         .with_context(|| format!("failed to parse remote manifest for {normalized_handle}"))?;
     let guest = parse_guest_contract(&manifest_value, std::path::Path::new("."));
@@ -295,18 +361,154 @@ fn build_store_resolution(
         HashMap::new(),
     )
     .with_context(|| format!("failed to build execution descriptor for {normalized_handle}"))?;
+    let detail = rt
+        .block_on(fetch_capsule_detail(&cli_ref, registry_override.as_deref()))
+        .ok();
+    let snapshot = if let CanonicalHandle::RegistryCapsule { version, .. } = &canonical {
+        Some(ResolvedSnapshot::RegistryRelease {
+            version: version
+                .clone()
+                .or_else(|| detail.as_ref().and_then(|item| item.latest_version.clone()))
+                .or_else(|| cached_registry_version(cached_metadata.as_ref()))
+                .unwrap_or_else(|| "latest".to_string()),
+            release_id: None,
+            content_hash: None,
+            fetched_at: chrono::Utc::now().to_rfc3339(),
+        })
+    } else {
+        None
+    };
+    persist_metadata_cache(&canonical, &normalized_handle, &plan, snapshot.clone())?;
+    let mut notes = vec![
+        "Remote store handles currently resolve target metadata only. Launch details become concrete after local materialization.".to_string(),
+    ];
+    if let Some(registry) = canonical
+        .registry()
+        .filter(|registry| registry.is_loopback())
+    {
+        notes.push(format!(
+            "Loopback registry handle resolved via host-side developer endpoint {}.",
+            registry.registry_endpoint
+        ));
+        notes.push(
+            "Loopback registry capsules are untrusted by default; guest runtime permissions remain fail-closed until the host grants them."
+                .to_string(),
+        );
+    }
+    if let Some(cached) = cached_metadata
+        .as_ref()
+        .filter(|entry| metadata_cache_is_fresh(entry))
+    {
+        notes.push(format!(
+            "Cached metadata was available from {}.",
+            cached.fetched_at
+        ));
+    }
 
     Ok(HandleResolution {
         input,
         normalized_handle,
         kind: HandleKind::StoreCapsule,
         render_strategy: render_strategy(&plan, guest.as_ref()),
+        canonical_handle: Some(canonical.display_string()),
+        source: Some("registry".to_string()),
+        trust_state: trust_state.clone(),
+        restricted: true,
+        launch_plan: Some(default_launch_plan(
+            Some(canonical),
+            snapshot.clone(),
+            trust_state,
+        )),
+        snapshot,
         guest: guest.as_ref().map(preview_guest_contract),
         target: Some(build_target_summary(&plan, None, None)),
         launch: None,
-        notes: vec![
-            "Remote store handles currently resolve target metadata only. Launch details become concrete after local materialization.".to_string(),
-        ],
+        notes,
+    })
+}
+
+fn build_github_resolution(
+    input: String,
+    normalized_handle: String,
+    canonical: CanonicalHandle,
+    target_label: Option<&str>,
+) -> Result<HandleResolution> {
+    let cached_metadata = load_metadata_cache(&canonical)
+        .with_context(|| format!("failed to load cached metadata for {normalized_handle}"))?;
+    let trust_state = resolve_trust_state(&canonical, TrustState::Untrusted)
+        .with_context(|| format!("failed to load trust state for {normalized_handle}"))?;
+    let cli_ref = canonical
+        .to_cli_ref()
+        .ok_or_else(|| anyhow::anyhow!("github handle does not support CLI resolution"))?;
+    let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
+    let draft = rt.block_on(fetch_github_install_draft(&cli_ref))?;
+    let manifest_toml = if let Some(preview_toml) = draft.preview_toml.clone() {
+        preview_toml
+    } else if draft.capsule_toml.exists {
+        let checkout = rt.block_on(download_github_repository_at_ref(
+            &cli_ref,
+            Some(&draft.resolved_ref.ref_name),
+        ))?;
+        std::fs::read_to_string(checkout.checkout_dir.join("capsule.toml")).with_context(|| {
+            format!(
+                "failed to read inferred repository manifest for {}",
+                checkout.checkout_dir.display()
+            )
+        })?
+    } else {
+        anyhow::bail!("GitHub handle did not return previewToml or capsule.toml");
+    };
+    let manifest_value: toml::Value = toml::from_str(&manifest_toml)
+        .with_context(|| format!("failed to parse remote manifest for {normalized_handle}"))?;
+    let guest = parse_guest_contract(&manifest_value, std::path::Path::new("."));
+    let plan = execution_descriptor_from_manifest_parts(
+        manifest_value,
+        PathBuf::from("capsule.toml"),
+        PathBuf::from("."),
+        ExecutionProfile::Release,
+        target_label,
+        HashMap::new(),
+    )
+    .with_context(|| format!("failed to build execution descriptor for {normalized_handle}"))?;
+    let snapshot = Some(ResolvedSnapshot::GithubRepo {
+        commit_sha: draft.resolved_ref.sha.clone(),
+        default_branch: Some(draft.repo.default_branch.clone()),
+        fetched_at: chrono::Utc::now().to_rfc3339(),
+    });
+    persist_metadata_cache(&canonical, &normalized_handle, &plan, snapshot.clone())?;
+    let mut notes = vec![format!(
+        "Resolved GitHub repository snapshot {} at {}.",
+        draft.resolved_ref.ref_name, draft.resolved_ref.sha
+    )];
+    if let Some(cached) = cached_metadata
+        .as_ref()
+        .filter(|entry| metadata_cache_is_fresh(entry))
+    {
+        notes.push(format!(
+            "Cached metadata was available from {}.",
+            cached.fetched_at
+        ));
+    }
+
+    Ok(HandleResolution {
+        input,
+        normalized_handle,
+        kind: HandleKind::RemoteSourceRef,
+        render_strategy: render_strategy(&plan, guest.as_ref()),
+        canonical_handle: Some(canonical.display_string()),
+        source: Some("github".to_string()),
+        trust_state: trust_state.clone(),
+        restricted: true,
+        launch_plan: Some(default_launch_plan(
+            Some(canonical),
+            snapshot.clone(),
+            trust_state,
+        )),
+        snapshot,
+        guest: guest.as_ref().map(preview_guest_contract),
+        target: Some(build_target_summary(&plan, None, None)),
+        launch: None,
+        notes,
     })
 }
 
@@ -346,6 +548,69 @@ fn build_launch_preview(spec: capsule_core::launch_spec::LaunchSpec) -> LaunchPr
     }
 }
 
+fn persist_metadata_cache(
+    canonical: &CanonicalHandle,
+    normalized_input: &str,
+    plan: &ManifestData,
+    snapshot: Option<ResolvedSnapshot>,
+) -> Result<()> {
+    let entry = ResolvedMetadataCacheEntry {
+        canonical: canonical.clone(),
+        normalized_input: normalized_input.to_string(),
+        manifest_summary: Some(build_manifest_summary(plan)),
+        snapshot,
+        fetched_at: chrono::Utc::now().to_rfc3339(),
+        ttl_seconds: metadata_cache_ttl_seconds(canonical),
+    };
+    store_metadata_cache(&entry)
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("failed to persist metadata cache for {normalized_input}"))
+}
+
+fn persist_local_trust_state(
+    canonical: &CanonicalHandle,
+    trust_state: TrustState,
+    reason: &str,
+) -> Result<()> {
+    let record = LocalTrustDecisionRecord {
+        canonical: canonical.clone(),
+        trust_state,
+        session_scoped: false,
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+        reason: Some(reason.to_string()),
+    };
+    store_local_trust_decision(&record)
+        .map_err(anyhow::Error::from)
+        .with_context(|| {
+            format!(
+                "failed to persist local trust state for {}",
+                canonical.display_string()
+            )
+        })
+}
+
+fn build_manifest_summary(plan: &ManifestData) -> String {
+    let mut parts = vec![format!("target={}", plan.selected_target_label())];
+    if let Some(runtime) = plan.execution_runtime() {
+        parts.push(format!("runtime={runtime}"));
+    }
+    if let Some(driver) = plan.execution_driver() {
+        parts.push(format!("driver={driver}"));
+    }
+    if let Some(language) = plan.execution_language() {
+        parts.push(format!("language={language}"));
+    }
+    parts.join(" ")
+}
+
+fn cached_registry_version(cache_entry: Option<&ResolvedMetadataCacheEntry>) -> Option<String> {
+    let snapshot = cache_entry?.snapshot.as_ref()?;
+    match snapshot {
+        ResolvedSnapshot::RegistryRelease { version, .. } => Some(version.clone()),
+        _ => None,
+    }
+}
+
 fn render_strategy(plan: &ManifestData, guest: Option<&GuestContract>) -> RenderStrategy {
     if guest.is_some() {
         return RenderStrategy::GuestWebview;
@@ -378,6 +643,8 @@ pub(super) fn normalize_handle(raw: &str) -> Result<NormalizedHandle> {
             normalized_handle: input.clone(),
             input,
             kind: NormalizedHandleKind::WebUrl,
+            canonical: None,
+            cli_ref: None,
         });
     }
 
@@ -386,89 +653,65 @@ pub(super) fn normalize_handle(raw: &str) -> Result<NormalizedHandle> {
             normalized_handle: input.clone(),
             input,
             kind: NormalizedHandleKind::StateUri,
+            canonical: None,
+            cli_ref: None,
         });
     }
 
-    if let Some(rest) = input.strip_prefix("capsule://store/") {
-        return Ok(NormalizedHandle {
-            normalized_handle: normalize_curated_store_alias(rest),
-            input,
-            kind: NormalizedHandleKind::StoreCapsule,
-        });
+    if input.starts_with("ato://") {
+        anyhow::bail!(
+            "`ato://` is reserved for host routes and cannot be resolved as a capsule handle"
+        );
     }
 
-    if let Some(rest) = input.strip_prefix("capsule://github.com/") {
-        return Ok(NormalizedHandle {
-            normalized_handle: format!("github.com/{rest}"),
-            input,
-            kind: NormalizedHandleKind::RemoteSourceRef,
-        });
-    }
-
-    let expanded_path = expand_local_path(&input);
-    if should_treat_input_as_local(&input, &expanded_path) {
-        let canonical = expanded_path.canonicalize().with_context(|| {
-            format!("failed to resolve local path '{}'", expanded_path.display())
-        })?;
-        return Ok(NormalizedHandle {
-            normalized_handle: canonical.display().to_string(),
-            input,
-            kind: NormalizedHandleKind::LocalPath(canonical),
-        });
-    }
-
-    if input.starts_with("github.com/") {
-        return Ok(NormalizedHandle {
-            normalized_handle: input.clone(),
-            input,
-            kind: NormalizedHandleKind::RemoteSourceRef,
-        });
-    }
-
-    let normalized_handle = normalize_curated_store_alias(&input);
-    let _ = parse_capsule_request(&normalized_handle)
-        .with_context(|| format!("unsupported handle '{input}'"))?;
-
-    Ok(NormalizedHandle {
-        normalized_handle,
-        input,
-        kind: NormalizedHandleKind::StoreCapsule,
+    match classify_surface_input(HandleInput {
+        raw: input.clone(),
+        surface: InputSurface::CliResolve,
     })
-}
-
-pub(super) fn normalize_local_handle(raw: &str) -> Result<PathBuf> {
-    let normalized = normalize_handle(raw)?;
-    match normalized.kind {
-        NormalizedHandleKind::LocalPath(path) => Ok(path),
-        _ => anyhow::bail!(
-            "session start currently supports local capsule paths only; got '{}'",
-            raw
-        ),
+    .with_context(|| format!("unsupported handle '{input}'"))?
+    {
+        SurfaceInput::Capsule { canonical } => {
+            let normalized_handle = canonical.display_string();
+            let cli_ref = canonical.to_cli_ref();
+            let kind = match &canonical {
+                CanonicalHandle::GithubRepo { .. } => NormalizedHandleKind::RemoteSourceRef,
+                CanonicalHandle::RegistryCapsule { .. } => NormalizedHandleKind::StoreCapsule,
+                CanonicalHandle::LocalPath { path } => {
+                    NormalizedHandleKind::LocalPath(path.clone())
+                }
+            };
+            Ok(NormalizedHandle {
+                normalized_handle,
+                input,
+                kind,
+                canonical: Some(canonical),
+                cli_ref,
+            })
+        }
+        SurfaceInput::HostRoute { .. } => {
+            anyhow::bail!("host routes cannot be resolved as capsule handles")
+        }
+        SurfaceInput::WebUrl { url } => Ok(NormalizedHandle {
+            normalized_handle: url.clone(),
+            input,
+            kind: NormalizedHandleKind::WebUrl,
+            canonical: None,
+            cli_ref: None,
+        }),
+        SurfaceInput::SearchQuery { .. } => {
+            let normalized_handle = normalize_curated_store_alias(&input);
+            let canonical = capsule_core::handle::normalize_capsule_handle(&normalized_handle)?;
+            let _ = parse_capsule_request(&normalized_handle)
+                .with_context(|| format!("unsupported handle '{input}'"))?;
+            Ok(NormalizedHandle {
+                normalized_handle: normalized_handle.clone(),
+                input,
+                kind: NormalizedHandleKind::StoreCapsule,
+                canonical: Some(canonical),
+                cli_ref: Some(normalized_handle),
+            })
+        }
     }
-}
-
-pub(super) fn derive_local_launch_plan(
-    path: &std::path::Path,
-    target_label: Option<&str>,
-) -> Result<(
-    PathBuf,
-    ManifestData,
-    capsule_core::launch_spec::LaunchSpec,
-    Vec<String>,
-)> {
-    let manifest_path = if path.is_dir() {
-        path.join("capsule.toml")
-    } else {
-        path.to_path_buf()
-    };
-    let (plan, _guest, notes) = resolve_local_plan(&manifest_path, target_label)?;
-    let launch = derive_launch_spec(&plan).with_context(|| {
-        format!(
-            "failed to derive launch spec for {}",
-            manifest_path.display()
-        )
-    })?;
-    Ok((manifest_path, plan, launch, notes))
 }
 
 fn experimental_guest_driver_from_error(err: &anyhow::Error) -> Option<&'static str> {
@@ -504,14 +747,47 @@ fn normalize_curated_store_alias(input: &str) -> String {
     }
 }
 
+fn default_launch_plan(
+    canonical: Option<CanonicalHandle>,
+    snapshot: Option<ResolvedSnapshot>,
+    trust_state: TrustState,
+) -> LaunchPlan {
+    LaunchPlan {
+        canonical: canonical.unwrap_or(CanonicalHandle::LocalPath {
+            path: PathBuf::from("."),
+        }),
+        snapshot,
+        trust_state,
+        initial_isolation: capsule_core::handle::InitialIsolationPolicy::fail_closed(),
+        permission_requests: PermissionRequestPolicy::jit_default(),
+    }
+}
+
+fn effective_registry_override(
+    canonical: &CanonicalHandle,
+    registry: Option<&str>,
+) -> Option<String> {
+    registry
+        .map(str::to_string)
+        .or_else(|| canonical.registry_url_override().map(str::to_string))
+}
+
 fn print_resolution(resolution: &HandleResolution) {
     println!("Input: {}", resolution.input);
     println!("Normalized: {}", resolution.normalized_handle);
+    if let Some(canonical) = &resolution.canonical_handle {
+        println!("Canonical: {}", canonical);
+    }
     println!("Kind: {}", handle_kind_label(&resolution.kind));
     println!(
         "Render strategy: {}",
         render_strategy_label(&resolution.render_strategy)
     );
+    if let Some(source) = &resolution.source {
+        println!("Source: {}", source);
+    }
+    println!("Trust: {:?}", resolution.trust_state);
+    println!("Restricted: {}", resolution.restricted);
 
     if let Some(guest) = &resolution.guest {
         println!("Adapter: {}", guest.adapter);
@@ -544,6 +820,10 @@ fn print_resolution(resolution: &HandleResolution) {
             println!("Launch args: {}", launch.args.join(" "));
         }
         println!("Working dir: {}", launch.working_dir);
+    }
+
+    if let Some(snapshot) = &resolution.snapshot {
+        println!("Snapshot: {:?}", snapshot);
     }
 
     for note in &resolution.notes {
@@ -590,10 +870,27 @@ mod tests {
     #[test]
     fn normalize_github_source_ref_marks_remote_source() {
         let normalized = normalize_handle("capsule://github.com/acme/editor").expect("normalize");
-        assert_eq!(normalized.normalized_handle, "github.com/acme/editor");
+        assert_eq!(
+            normalized.normalized_handle,
+            "capsule://github.com/acme/editor"
+        );
         assert!(matches!(
             normalized.kind,
             NormalizedHandleKind::RemoteSourceRef
+        ));
+    }
+
+    #[test]
+    fn normalize_loopback_registry_handle_marks_store_source() {
+        let normalized =
+            normalize_handle("capsule://localhost:8787/acme/editor").expect("normalize");
+        assert_eq!(
+            normalized.normalized_handle,
+            "capsule://localhost:8787/acme/editor"
+        );
+        assert!(matches!(
+            normalized.kind,
+            NormalizedHandleKind::StoreCapsule
         ));
     }
 
