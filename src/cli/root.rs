@@ -29,6 +29,8 @@ Usage: {usage}
 Primary Commands:
   run      Execute a .capsule archive or local project in a sandbox
   resolve  Resolve a capsule handle or terse ref into a launch preview
+  encap    Capture a workspace into a shareable setup descriptor
+  decap    Materialize a shared workspace descriptor into a target directory
   build    Pack a project into an immutable .capsule archive
   publish  Publish capsule artifacts to a registry
   install  Install a verified package from the registry
@@ -226,6 +228,45 @@ pub(crate) enum Commands {
         /// Emit machine-readable JSON output
         #[arg(long)]
         json: bool,
+    },
+
+    #[command(
+        next_help_heading = "Primary Commands",
+        about = "Capture a local workspace into a shareable setup descriptor"
+    )]
+    Encap {
+        /// Local workspace path to capture
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Upload the captured share after writing local outputs
+        #[arg(long, default_value_t = false)]
+        share: bool,
+
+        /// Write local outputs only
+        #[arg(long, default_value_t = false)]
+        save_only: bool,
+
+        /// Print the detected capture plan without writing files
+        #[arg(long, default_value_t = false)]
+        print_plan: bool,
+    },
+
+    #[command(
+        next_help_heading = "Primary Commands",
+        about = "Materialize a shared workspace descriptor into a target directory"
+    )]
+    Decap {
+        /// Share URL, share.spec.json, or share.lock.json
+        input: String,
+
+        /// Target directory to materialize into
+        #[arg(long, value_name = "PATH")]
+        into: PathBuf,
+
+        /// Print the materialization plan without executing it
+        #[arg(long, default_value_t = false)]
+        plan: bool,
     },
 
     #[command(

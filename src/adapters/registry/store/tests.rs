@@ -1,5 +1,6 @@
 use super::*;
 use crate::application::ports::publish::{PublishArtifactIdentityClass, PublishArtifactMetadata};
+use rusqlite::Connection;
 use std::io::Cursor;
 use std::io::Write;
 
@@ -107,6 +108,56 @@ fn rollback_creates_forward_epoch_transition() {
         .expect("rollback response");
     assert_eq!(rolled.pointer.manifest_hash, first.pointer.manifest_hash);
     assert_eq!(rolled.pointer.epoch, second.pointer.epoch + 1);
+}
+
+#[test]
+fn open_migrates_legacy_registry_releases_before_creating_lock_id_index() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let db_path = temp.path().join(DB_FILE_NAME);
+    let conn = Connection::open(&db_path).expect("open legacy db");
+    conn.execute_batch(
+        "
+        CREATE TABLE registry_releases(
+          scoped_id TEXT NOT NULL,
+          version TEXT NOT NULL,
+          manifest_hash TEXT NOT NULL,
+          file_name TEXT NOT NULL,
+          sha256 TEXT NOT NULL,
+          blake3 TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL,
+          signature_status TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(scoped_id, version)
+        );
+        CREATE TABLE IF NOT EXISTS schema_migrations(
+          migration_id TEXT PRIMARY KEY,
+          applied_at TEXT NOT NULL
+        );
+        ",
+    )
+    .expect("seed legacy schema");
+    drop(conn);
+
+    let store = RegistryStore::open(temp.path()).expect("open migrated store");
+    let conn = store.connect().expect("connect migrated store");
+
+    let has_lock_id: bool = conn
+        .prepare("PRAGMA table_info(registry_releases)")
+        .expect("prepare table info")
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("query table info")
+        .filter_map(Result::ok)
+        .any(|column| column == "lock_id");
+    assert!(has_lock_id);
+
+    let has_lock_id_index: bool = conn
+        .prepare("PRAGMA index_list(registry_releases)")
+        .expect("prepare index list")
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("query index list")
+        .filter_map(Result::ok)
+        .any(|index| index == "idx_registry_releases_lock_id");
+    assert!(has_lock_id_index);
 }
 
 #[test]
