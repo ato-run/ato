@@ -41,6 +41,7 @@ pub(crate) struct DecapArgs {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct RunShareArgs {
     pub(crate) input: String,
     pub(crate) entry: Option<String>,
@@ -426,6 +427,7 @@ pub(crate) fn execute_decap(args: DecapArgs, reporter: Arc<CliReporter>) -> Resu
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
     if args.watch {
         anyhow::bail!("`ato run <share-url>` does not support --watch in this MVP.");
@@ -1821,6 +1823,7 @@ fn effective_entries(spec: &ShareSpec) -> Vec<ShareEntrySpec> {
     derive_entries(&spec.services, &spec.env_requirements)
 }
 
+#[allow(dead_code)]
 fn select_run_entry(
     input: &str,
     loaded: &LoadedShareInput,
@@ -1905,6 +1908,7 @@ fn select_run_entry(
         .context("no runnable entry available")
 }
 
+#[allow(dead_code)]
 fn ephemeral_run_root(loaded: &LoadedShareInput, entry: &ShareEntrySpec) -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("failed to resolve current working directory")?;
     let suffix = loaded
@@ -1916,6 +1920,7 @@ fn ephemeral_run_root(loaded: &LoadedShareInput, entry: &ShareEntrySpec) -> Resu
     Ok(cwd.join(".tmp").join("ato-run").join(digest))
 }
 
+#[allow(dead_code)]
 fn resolve_entry_env_overlay(
     input: &str,
     entry: &ShareEntrySpec,
@@ -2023,6 +2028,7 @@ fn resolve_entry_env_overlay(
     Ok(envs)
 }
 
+#[allow(dead_code)]
 fn run_shell_streaming(
     command: &str,
     cwd: &Path,
@@ -2065,11 +2071,13 @@ fn extract_capsule_into(capsule_path: &Path, target_root: &Path) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn target_env_fingerprint(input: &str, entry_id: Option<&str>) -> String {
     let normalized = format!("{}::{}", input.trim(), entry_id.unwrap_or(""));
     sha256_label(normalized.as_bytes())
 }
 
+#[allow(dead_code)]
 fn saved_target_env_path(fingerprint: &str) -> Result<PathBuf> {
     let home = dirs::home_dir().context("failed to resolve home directory for saved env store")?;
     Ok(home
@@ -2079,6 +2087,7 @@ fn saved_target_env_path(fingerprint: &str) -> Result<PathBuf> {
         .join(format!("{fingerprint}.env")))
 }
 
+#[allow(dead_code)]
 fn load_env_map(path: &Path) -> Result<BTreeMap<String, String>> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("Failed to read env file {}", path.display()))?;
@@ -2096,6 +2105,7 @@ fn load_env_map(path: &Path) -> Result<BTreeMap<String, String>> {
     Ok(values)
 }
 
+#[allow(dead_code)]
 fn save_env_map(path: &Path, values: &BTreeMap<String, String>) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -2110,6 +2120,7 @@ fn save_env_map(path: &Path, values: &BTreeMap<String, String>) -> Result<()> {
         .with_context(|| format!("Failed to write env store {}", path.display()))
 }
 
+#[allow(dead_code)]
 fn env_value_present(key: &str, overlay: &BTreeMap<String, String>) -> bool {
     overlay
         .get(key)
