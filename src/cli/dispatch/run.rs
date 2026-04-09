@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 #[cfg(test)]
 pub(crate) use crate::application::pipeline::hourglass::HourglassPhase as RunPhaseBoundary;
@@ -46,6 +46,13 @@ pub(crate) struct RunLikeCommandArgs {
 }
 
 pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
+    let raw_target = args.path.to_string_lossy();
+    if raw_target.trim_start().starts_with("capsule://") {
+        bail!(
+            "`ato run` does not accept canonical capsule handles in phase 1. Re-run with a terse ref such as `ato run github.com/owner/repo` or `ato run publisher/slug`."
+        );
+    }
+
     if let Some(warning) = args.deprecation_warning {
         eprintln!("{warning}");
     }
@@ -109,6 +116,8 @@ fn ato_log_requests_verbose() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use capsule_core::ato_lock::{self, AtoLock};
     use serde_json::json;
     use std::sync::{Mutex, OnceLock};
@@ -176,6 +185,46 @@ mod tests {
             .and_then(|value| value.to_str())
             .expect("file name")
             .starts_with("capsule.toml.invalid."));
+    }
+
+    #[test]
+    fn canonical_capsule_handles_are_rejected_by_run_surface() {
+        let reporter = Arc::new(crate::reporters::CliReporter::new(true));
+        let error = super::execute_run_like_command(super::RunLikeCommandArgs {
+            path: PathBuf::from("capsule://github.com/acme/chat"),
+            target: None,
+            args: Vec::new(),
+            watch: false,
+            background: false,
+            nacelle: None,
+            registry: None,
+            state: Vec::new(),
+            inject: Vec::new(),
+            enforcement: crate::EnforcementMode::Strict,
+            sandbox_mode: false,
+            unsafe_mode_legacy: false,
+            unsafe_bypass_sandbox_legacy: false,
+            dangerously_skip_permissions: false,
+            compatibility_fallback: None,
+            provider_toolchain: crate::ProviderToolchain::Auto,
+            yes: false,
+            verbose: false,
+            agent_mode: crate::RunAgentMode::Auto,
+            keep_failed_artifacts: false,
+            auto_fix_mode: None,
+            allow_unverified: false,
+            read: Vec::new(),
+            write: Vec::new(),
+            read_write: Vec::new(),
+            cwd: None,
+            deprecation_warning: None,
+            reporter,
+        })
+        .expect_err("canonical handle should be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("does not accept canonical capsule handles"));
     }
 
     #[test]
