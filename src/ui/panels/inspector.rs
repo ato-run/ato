@@ -118,6 +118,16 @@ fn render_metadata_card(inspector: &CapsuleInspectorView, theme: &Theme) -> Div 
                     theme,
                 ))
                 .child(render_optional_row(
+                    "Runtime",
+                    inspector.runtime_label.as_deref(),
+                    theme,
+                ))
+                .child(render_optional_row(
+                    "Display",
+                    inspector.display_strategy.as_deref(),
+                    theme,
+                ))
+                .child(render_optional_row(
                     "Trust",
                     inspector.trust_state.as_deref(),
                     theme,
@@ -150,6 +160,31 @@ fn render_metadata_card(inspector: &CapsuleInspectorView, theme: &Theme) -> Div 
                 .child(render_optional_row(
                     "Manifest",
                     inspector.manifest_path.as_deref(),
+                    theme,
+                ))
+                .child(render_optional_row(
+                    "URL",
+                    inspector.local_url.as_deref(),
+                    theme,
+                ))
+                .child(render_optional_row(
+                    "Health",
+                    inspector.healthcheck_url.as_deref(),
+                    theme,
+                ))
+                .child(render_optional_row(
+                    "Invoke",
+                    inspector.invoke_url.as_deref(),
+                    theme,
+                ))
+                .child(render_optional_row(
+                    "Served By",
+                    inspector.served_by.as_deref(),
+                    theme,
+                ))
+                .child(render_optional_row(
+                    "Log",
+                    inspector.log_path.as_deref(),
                     theme,
                 )),
         )

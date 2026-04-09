@@ -1,4 +1,6 @@
 mod auth_handoff;
+mod capsule_runtime;
+mod devtools;
 mod inspector;
 mod launcher;
 mod launcher_v2;
@@ -16,6 +18,8 @@ use crate::state::{AppState, PaneBounds, PaneSurface, WebPane, WebSessionState};
 use super::theme::Theme;
 use super::STAGE_PADDING;
 use auth_handoff::render_auth_handoff_panel;
+use capsule_runtime::render_capsule_runtime_panel;
+use devtools::render_dev_console_panel;
 use inspector::render_capsule_inspector_panel;
 use launcher_v2::render_launcher_panel_v2;
 use settings::render_settings_panel;
@@ -90,6 +94,10 @@ fn render_stage_pane(pane: &crate::state::Pane, state: &AppState, theme: &Theme)
         PaneSurface::Native { body } => {
             render_settings_panel(body, state, theme).into_any_element()
         }
+        PaneSurface::DevConsole => render_dev_console_panel(state, theme).into_any_element(),
+        PaneSurface::CapsuleStatus(capsule) => {
+            render_capsule_runtime_panel(capsule, theme).into_any_element()
+        }
         PaneSurface::Inspector => render_capsule_inspector_panel(state, theme).into_any_element(),
         PaneSurface::AuthHandoff { session_id, .. } => {
             if let Some(session) = state
@@ -118,7 +126,7 @@ fn render_stage_pane(pane: &crate::state::Pane, state: &AppState, theme: &Theme)
                     .flex_1()
                     .relative()
                     .size_full()
-                    .child(render_launcher_panel_v2(theme)),
+                    .child(render_launcher_panel_v2(state, theme)),
             )
             .into_any_element(),
     }

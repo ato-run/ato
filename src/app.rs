@@ -6,11 +6,16 @@ use gpui::{
 use gpui::{Menu, MenuItem, OsAction, SystemMenuType};
 #[cfg(target_os = "macos")]
 use gpui_component::input;
-use serde::Deserialize;
+use std::collections::VecDeque;
 use std::borrow::Cow;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use serde::Deserialize;
 
 use crate::ui::DesktopShell;
+use gpui::AsyncApp;
 use gpui_component::TitleBar;
 
 actions!(
@@ -39,12 +44,16 @@ actions!(
         NativePaste,
         NativeSelectAll,
         ToggleTheme,
+        OpenLocalRegistry,
+        OpenCloudDock,
+        SignInToAtoRun,
         OpenAuthInBrowser,
         CancelAuthHandoff,
         ResumeAfterAuth,
         AllowPermissionOnce,
         AllowPermissionForSession,
         DenyPermissionPrompt,
+        ToggleDevConsole,
         Quit
     ]
 );
@@ -62,6 +71,67 @@ pub struct SelectTask {
 }
 
 struct LocalAssetSource(std::path::PathBuf);
+
+#[derive(Default)]
+pub struct OpenUrlBridge {
+    pending: Mutex<VecDeque<String>>,
+    async_app: Mutex<Option<AsyncApp>>,
+    refresh_scheduled: Arc<AtomicBool>,
+}
+
+impl OpenUrlBridge {
+    pub fn push_urls(&self, urls: Vec<String>) {
+        if urls.is_empty() {
+            return;
+        }
+
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.extend(urls);
+        }
+
+        self.schedule_refresh();
+    }
+
+    pub fn install_async_app(&self, async_app: AsyncApp) {
+        if let Ok(mut slot) = self.async_app.lock() {
+            *slot = Some(async_app.clone());
+        }
+        self.schedule_refresh();
+    }
+
+    pub fn drain_urls(&self) -> Vec<String> {
+        let Ok(mut pending) = self.pending.lock() else {
+            return Vec::new();
+        };
+        pending.drain(..).collect()
+    }
+
+    fn schedule_refresh(&self) {
+        let async_app = self
+            .async_app
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().cloned());
+
+        let Some(async_app) = async_app else {
+            return;
+        };
+
+        if self.refresh_scheduled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let refresh_app = async_app.clone();
+        let refresh_scheduled = self.refresh_scheduled.clone();
+        async_app
+            .foreground_executor()
+            .spawn(async move {
+                refresh_app.refresh();
+                refresh_scheduled.store(false, Ordering::Release);
+            })
+            .detach();
+    }
+}
 
 impl AssetSource for LocalAssetSource {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
@@ -81,10 +151,17 @@ impl AssetSource for LocalAssetSource {
 
 pub fn run() {
     let assets_dir = resolve_assets_dir().expect("failed to resolve ato-desktop assets directory");
-    gpui_platform::application()
-        .with_assets(LocalAssetSource(assets_dir))
-        .run(|cx: &mut App| {
+    let open_url_bridge = Arc::new(OpenUrlBridge::default());
+    let application = gpui_platform::application().with_assets(LocalAssetSource(assets_dir));
+    application.on_open_urls({
+        let open_url_bridge = open_url_bridge.clone();
+        move |urls| {
+            open_url_bridge.push_urls(urls);
+        }
+    });
+    application.run(move |cx: &mut App| {
             gpui_component::init(cx);
+            open_url_bridge.install_async_app(cx.to_async());
 
             // Scope the shell shortcuts so guest webviews do not inherit host commands.
             cx.bind_keys([
@@ -107,6 +184,7 @@ pub fn run() {
                 KeyBinding::new("cmd-c", NativeCopy, Some("Pane")),
                 KeyBinding::new("cmd-v", NativePaste, Some("Pane")),
                 KeyBinding::new("cmd-a", NativeSelectAll, Some("Pane")),
+                KeyBinding::new("cmd-alt-i", ToggleDevConsole, None),
                 KeyBinding::new("cmd-q", Quit, None),
             ]);
 
@@ -139,15 +217,19 @@ pub fn run() {
                     window_decorations: Some(WindowDecorations::Client),
                     ..Default::default()
                 },
-                |window, cx| {
-                    let shell = cx.new(|cx| DesktopShell::new(window, cx));
-                    cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+                {
+                    let open_url_bridge = open_url_bridge.clone();
+                    move |window, cx| {
+                        let shell =
+                            cx.new(|cx| DesktopShell::new(window, cx, open_url_bridge.clone()));
+                        cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+                    }
                 },
             )
             .expect("failed to open ato-desktop window");
 
             cx.activate(true);
-        });
+    });
 }
 
 #[cfg(target_os = "macos")]

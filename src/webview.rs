@@ -11,19 +11,61 @@ use std::thread;
 use anyhow::{Context, Result};
 use gpui::{AnyWindowHandle, AppContext, AsyncApp, Window};
 use http::header::CONTENT_TYPE;
+#[cfg(target_os = "macos")]
+use objc2::rc::Retained;
+#[cfg(target_os = "macos")]
+use objc2::runtime::AnyObject;
+#[cfg(target_os = "macos")]
+use objc2::{msg_send, sel, ClassType};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::NSView;
+#[cfg(target_os = "macos")]
+use objc2_foundation::MainThreadMarker;
 use serde_json::Value;
 use wry::http::{Request, Response};
 use wry::{
     NewWindowResponse, PageLoadEvent, Rect, RequestAsyncResponder, WebContext, WebView,
     WebViewBuilder,
 };
+#[cfg(target_os = "macos")]
+use wry::WebViewExtMacOS;
 
 use crate::bridge::{BridgeProxy, GuestBridgeResponse, GuestSessionContext, ShellEvent};
 use crate::orchestrator::{resolve_and_start_guest, stop_guest_session, GuestLaunchSession};
 use crate::state::{
     ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry, AuthSessionStatus,
-    BrowserCommandKind, CapsuleLogStage, GuestRoute, PaneBounds, ShellMode, WebSessionState,
+    BrowserCommandKind, GuestRoute, PaneBounds, ShellMode, WebSessionState,
 };
+
+const DEVTOOLS_DEBUG_ENV: &str = "ATO_DESKTOP_DEVTOOLS_DEBUG";
+
+fn devtools_debug_enabled() -> bool {
+    std::env::var_os(DEVTOOLS_DEBUG_ENV)
+        .map(|value| {
+            let value = value.to_string_lossy();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
+fn log_devtools(message: impl AsRef<str>) {
+    if devtools_debug_enabled() {
+        eprintln!("[ato-desktop][devtools] {}", message.as_ref());
+    }
+}
+
+fn format_bounds(bounds: PaneBounds) -> String {
+    format!(
+        "x={:.1} y={:.1} w={:.1} h={:.1}",
+        bounds.x, bounds.y, bounds.width, bounds.height
+    )
+}
+
+fn format_optional_bounds(bounds: Option<PaneBounds>) -> String {
+    bounds
+        .map(format_bounds)
+        .unwrap_or_else(|| "<unavailable>".to_string())
+}
 
 struct AuthHandoffSignal {
     pane_id: usize,
@@ -51,7 +93,53 @@ struct ManagedWebView {
     bounds: PaneBounds,
     launched_session: Option<GuestLaunchSession>,
     webview: WebView,
+    #[cfg(target_os = "macos")]
+    frame_host: Option<Retained<NSView>>,
     _context: WebContext,
+}
+
+impl ManagedWebView {
+    fn actual_bounds(&self) -> Option<PaneBounds> {
+        #[cfg(target_os = "macos")]
+        if let Some(frame_host) = &self.frame_host {
+            return Some(bounds_from_ns_view(frame_host));
+        }
+
+        self.webview.bounds().ok().map(rect_to_bounds)
+    }
+
+    fn apply_bounds(&mut self, bounds: PaneBounds) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        if let Some(frame_host) = &self.frame_host {
+            apply_bounds_to_macos_frame_host(frame_host, &self.webview, bounds)?;
+            self.bounds = bounds;
+            return Ok(());
+        }
+
+        self.webview.set_bounds(bounds_to_rect(bounds))?;
+        self.bounds = bounds;
+        Ok(())
+    }
+
+    fn set_visible(&self, visible: bool) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        if let Some(frame_host) = &self.frame_host {
+            frame_host.setHidden(!visible);
+            return Ok(());
+        }
+
+        self.webview.set_visible(visible)?;
+        Ok(())
+    }
+}
+
+impl Drop for ManagedWebView {
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let Some(frame_host) = &self.frame_host {
+            frame_host.removeFromSuperview();
+        }
+    }
 }
 
 struct PendingLaunch {
@@ -85,36 +173,19 @@ impl WebViewManager {
     pub fn sync_from_state(&mut self, window: &Window, state: &mut AppState) {
         // Drain auth handoff signals from navigation handlers before any other reconciliation.
         let auth_signals: Vec<AuthHandoffSignal> = {
-            let mut q = self
-                .pending_auth_handoffs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut q = self.pending_auth_handoffs.lock().unwrap_or_else(|e| e.into_inner());
             q.drain(..).collect()
         };
         for signal in auth_signals {
             let session_id = state.begin_auth_handoff(signal.pane_id, &signal.url);
-            if let Some(s) = state
-                .auth_sessions
-                .iter_mut()
-                .find(|s| s.session_id == session_id)
-            {
+            if let Some(s) = state.auth_sessions.iter_mut().find(|s| s.session_id == session_id) {
                 s.status = AuthSessionStatus::OpenedInBrowser;
             }
             let _ = Command::new("open").arg(&signal.url).status();
         }
 
         // Pull bridge activity into app state first so rebuilds always see the latest guest messages.
-        for entry in self.bridge.drain_activity_entries() {
-            if let Some(pane_id) = entry.pane_id {
-                state.push_capsule_log(
-                    pane_id,
-                    CapsuleLogStage::Runtime,
-                    entry.tone.clone(),
-                    entry.message.clone(),
-                );
-            }
-            state.push_activity(entry.tone, entry.message);
-        }
+        state.extend_activity(self.bridge.drain_activity());
         let shell_events = self.bridge.drain_shell_events();
         self.apply_shell_events(&shell_events);
         state.apply_shell_events(shell_events);
@@ -159,26 +230,13 @@ impl WebViewManager {
 
             match &active.route {
                 GuestRoute::CapsuleHandle { handle, .. } => {
-                    if is_pending_guest_launch(&active.session) {
-                        self.ensure_pending_local_launch(active.pane_id, &route_key, handle, state);
-                    }
+                    self.ensure_pending_local_launch(active.pane_id, &route_key, handle, state);
                 }
-                _ => match self.build_webview(
-                    window,
-                    &active,
-                    None,
-                    state.auth_policy_registry.clone(),
-                ) {
+                _ => match self.build_webview(window, &active, None, state.auth_policy_registry.clone()) {
                     Ok(webview) => {
                         if !route_requires_ready_signal(&active.route) {
                             state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
                         }
-                        state.push_capsule_log(
-                            active.pane_id,
-                            CapsuleLogStage::Launch,
-                            ActivityTone::Info,
-                            format!("Built webview for {}", active.route),
-                        );
                         self.bridge.log(
                             ActivityTone::Info,
                             format!("Built child webview for {}", active.route),
@@ -187,12 +245,6 @@ impl WebViewManager {
                     }
                     Err(error) => {
                         state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
-                        state.push_capsule_log(
-                            active.pane_id,
-                            CapsuleLogStage::Launch,
-                            ActivityTone::Error,
-                            format!("Failed to build child webview: {error}"),
-                        );
                         state.push_activity(
                             ActivityTone::Error,
                             format!("Failed to build child webview: {error}"),
@@ -218,14 +270,41 @@ impl WebViewManager {
         let webview_bounds = content_bounds(active.bounds);
 
         if let Some(existing) = self.views.get_mut(&active.pane_id) {
-            if bounds_changed(existing.bounds, webview_bounds) {
-                if let Err(error) = existing.webview.set_bounds(bounds_to_rect(webview_bounds)) {
+            let actual_bounds = existing.actual_bounds();
+            let needs_resize = actual_bounds
+                .map(|bounds| bounds_changed(bounds, webview_bounds))
+                .unwrap_or_else(|| bounds_changed(existing.bounds, webview_bounds));
+
+            if devtools_debug_enabled() && (needs_resize || bounds_changed(existing.bounds, webview_bounds)) {
+                log_devtools(format!(
+                    "sync pane={} route={} desired={} cached={} actual={} shell_mode={:?} needs_resize={}",
+                    active.pane_id,
+                    active.route,
+                    format_bounds(webview_bounds),
+                    format_bounds(existing.bounds),
+                    format_optional_bounds(actual_bounds),
+                    state.shell_mode,
+                    needs_resize
+                ));
+            }
+
+            if needs_resize {
+                if let Err(error) = existing.apply_bounds(webview_bounds) {
                     state.push_activity(
                         ActivityTone::Error,
                         format!("Failed to resize child webview: {error}"),
                     );
+                    log_devtools(format!(
+                        "sync resize failed pane={} desired={} error={error}",
+                        active.pane_id,
+                        format_bounds(webview_bounds)
+                    ));
                 } else {
-                    existing.bounds = webview_bounds;
+                    log_devtools(format!(
+                        "sync resize applied pane={} desired={}",
+                        active.pane_id,
+                        format_bounds(webview_bounds)
+                    ));
                 }
             }
         }
@@ -290,6 +369,73 @@ impl WebViewManager {
 
     pub fn wants_host_focus(&self, state: &AppState) -> bool {
         matches!(self.desired_responder_target(state), ResponderTarget::Host)
+    }
+
+    pub fn open_devtools_for_active_pane(&mut self, state: &mut AppState) {
+        if let Some(pane_id) = self.active_pane_id {
+            if let Some(view) = self.views.get_mut(&pane_id) {
+                let expected_bounds = state
+                    .active_web_pane()
+                    .filter(|active| active.pane_id == pane_id)
+                    .map(|active| content_bounds(active.bounds));
+                let before_open = view.actual_bounds();
+                log_devtools(format!(
+                    "open_devtools start pane={} route={} cached={} actual_before={} expected={}",
+                    pane_id,
+                    view.route,
+                    format_bounds(view.bounds),
+                    format_optional_bounds(before_open),
+                    format_optional_bounds(expected_bounds)
+                ));
+
+                view.webview.open_devtools();
+
+                #[cfg(target_os = "macos")]
+                detach_macos_devtools_if_supported(&view.webview);
+
+                let after_open = view.actual_bounds();
+                log_devtools(format!(
+                    "open_devtools shown pane={} actual_after_open={} expected={}",
+                    pane_id,
+                    format_optional_bounds(after_open),
+                    format_optional_bounds(expected_bounds)
+                ));
+
+                if let Some(expected_bounds) = expected_bounds {
+                    if let Err(error) = view.apply_bounds(expected_bounds) {
+                        state.push_activity(
+                            ActivityTone::Error,
+                            format!("Failed to restore child webview bounds after opening DevTools: {error}"),
+                        );
+                        log_devtools(format!(
+                            "open_devtools restore failed pane={} expected={} error={error}",
+                            pane_id,
+                            format_bounds(expected_bounds)
+                        ));
+                    } else {
+                        let after_restore = view.actual_bounds();
+                        log_devtools(format!(
+                            "open_devtools restore applied pane={} expected={} actual_after_restore={}",
+                            pane_id,
+                            format_bounds(expected_bounds),
+                            format_optional_bounds(after_restore)
+                        ));
+                    }
+                } else {
+                    log_devtools(format!(
+                        "open_devtools skipped restore pane={} reason=no-active-pane-bounds",
+                        pane_id
+                    ));
+                }
+            } else {
+                log_devtools(format!(
+                    "open_devtools skipped pane={} reason=missing-webview",
+                    pane_id
+                ));
+            }
+        } else {
+            log_devtools("open_devtools skipped reason=no-active-pane");
+        }
     }
 
     pub fn delegate_select_all(&mut self, state: &AppState) -> Result<bool> {
@@ -413,42 +559,8 @@ impl WebViewManager {
             }
 
             match completed.session {
-                Ok(session) => match self.build_webview(
-                    window,
-                    &active,
-                    Some(session),
-                    state.auth_policy_registry.clone(),
-                ) {
+                Ok(session) => match self.build_webview(window, &active, Some(session), state.auth_policy_registry.clone()) {
                     Ok(webview) => {
-                        state.sync_web_session_state(active.pane_id, WebSessionState::Launching);
-                        if let Some(session) = webview.launched_session.as_ref() {
-                            state.update_guest_route_metadata(
-                                active.pane_id,
-                                session.canonical_handle.clone(),
-                                session.source.clone(),
-                                Some(session.trust_state.clone()),
-                                session.restricted,
-                                session.snapshot_label.clone(),
-                                Some(session.session_id.clone()),
-                                Some(session.adapter.clone()),
-                                Some(session.manifest_path.display().to_string()),
-                            );
-                            state.push_capsule_log(
-                                active.pane_id,
-                                CapsuleLogStage::Launch,
-                                ActivityTone::Info,
-                                format!(
-                                    "Guest session {} is ready with adapter {}",
-                                    session.session_id, session.adapter
-                                ),
-                            );
-                        }
-                        state.push_capsule_log(
-                            active.pane_id,
-                            CapsuleLogStage::Launch,
-                            ActivityTone::Info,
-                            format!("Built webview for {}", active.route),
-                        );
                         self.bridge.log(
                             ActivityTone::Info,
                             format!("Built child webview for {}", active.route),
@@ -457,12 +569,6 @@ impl WebViewManager {
                     }
                     Err(error) => {
                         state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
-                        state.push_capsule_log(
-                            active.pane_id,
-                            CapsuleLogStage::Launch,
-                            ActivityTone::Error,
-                            format!("Failed to build child webview: {error}"),
-                        );
                         state.push_activity(
                             ActivityTone::Error,
                             format!("Failed to build child webview: {error}"),
@@ -471,12 +577,6 @@ impl WebViewManager {
                 },
                 Err(error) => {
                     state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
-                    state.push_capsule_log(
-                        active.pane_id,
-                        CapsuleLogStage::Launch,
-                        ActivityTone::Error,
-                        format!("Failed to start guest session: {error}"),
-                    );
                     state.push_activity(
                         ActivityTone::Error,
                         format!("Failed to start guest session: {error}"),
@@ -497,19 +597,6 @@ impl WebViewManager {
         if self.pending_launches.contains_key(&key) {
             return;
         }
-        state.push_capsule_log(
-            pane_id,
-            CapsuleLogStage::Resolve,
-            ActivityTone::Info,
-            format!("Resolved capsule handle {route_key}; invoking ato-cli session flow"),
-        );
-        state.sync_web_session_state(pane_id, WebSessionState::Materializing);
-        state.push_capsule_log(
-            pane_id,
-            CapsuleLogStage::Materialize,
-            ActivityTone::Info,
-            format!("Materializing guest session for {route_key}"),
-        );
 
         let (sender, receiver) = channel();
         let route_key = route_key.to_string();
@@ -529,7 +616,7 @@ impl WebViewManager {
         );
         state.push_activity(
             ActivityTone::Info,
-            format!("Materializing guest for {route_key}"),
+            format!("Launching guest session for {route_key}"),
         );
 
         let launch_task = background_executor.spawn(async move {
@@ -591,16 +678,24 @@ impl WebViewManager {
                 RouteContent::External,
                 None,
             ),
+            GuestRoute::CapsuleUrl { url, .. } => (
+                url.as_str().to_string(),
+                None,
+                pane.capabilities
+                    .iter()
+                    .map(|capability| capability.as_str().to_string())
+                    .collect::<Vec<_>>(),
+                RouteContent::External,
+                None,
+            ),
             GuestRoute::CapsuleHandle { .. } => {
                 let session = local_session.ok_or_else(|| {
-                    anyhow::anyhow!("capsule-handle webview build requires resolved guest session")
+                    anyhow::anyhow!("capsule webview build requires resolved guest session")
                 })?;
                 for note in &session.notes {
-                    self.bridge
-                        .log_for_pane(Some(pane.pane_id), ActivityTone::Info, note.clone());
+                    self.bridge.log(ActivityTone::Info, note.clone());
                 }
-                self.bridge.log_for_pane(
-                    Some(pane.pane_id),
+                self.bridge.log(
                     ActivityTone::Info,
                     format!(
                         "Started ato-cli guest session {} for {}",
@@ -609,16 +704,19 @@ impl WebViewManager {
                 );
 
                 let session_id = session.session_id.clone();
+                let frontend_path = session
+                    .frontend_url_path()
+                    .unwrap_or_else(|| "/index.html".to_string());
                 session_context = Some(GuestSessionContext {
                     pane_id: pane.pane_id,
                     session_id: session.session_id.clone(),
-                    adapter: session.adapter.clone(),
-                    invoke_url: session.invoke_url.clone(),
+                    adapter: session.adapter.clone().unwrap_or_default(),
+                    invoke_url: session.invoke_url.clone().unwrap_or_default(),
                     app_root: session.app_root.clone(),
                 });
                 launched_session = Some(session.clone());
                 (
-                    format!("{scheme}://{session_id}{}", session.frontend_url_path()),
+                    format!("{scheme}://{session_id}{frontend_path}"),
                     Some(format!("{scheme}://{session_id}/__ato/bridge")),
                     session.capabilities.clone(),
                     RouteContent::GuestAssets(session.clone()),
@@ -746,6 +844,9 @@ impl WebViewManager {
             .build_as_child(window)
             .with_context(|| format!("unable to create Wry child webview for {url}"))?;
 
+        #[cfg(target_os = "macos")]
+        let frame_host = Some(install_macos_frame_host(&webview)?);
+
         Ok(ManagedWebView {
             pane_id: pane.pane_id,
             route: pane.route.clone(),
@@ -753,6 +854,8 @@ impl WebViewManager {
             bounds: webview_bounds,
             launched_session,
             webview,
+            #[cfg(target_os = "macos")]
+            frame_host,
             _context: context,
         })
     }
@@ -795,12 +898,21 @@ impl WebViewManager {
             return;
         }
 
+        log_devtools(format!(
+            "visibility change pane={} from={} to={}",
+            pane_id, cached, visible
+        ));
+
         if let Some(view) = self.views.get_mut(&pane_id) {
-            if let Err(error) = view.webview.set_visible(visible) {
+            if let Err(error) = view.set_visible(visible) {
                 state.push_activity(
                     ActivityTone::Error,
                     format!("Failed to update child webview visibility: {error}"),
                 );
+                log_devtools(format!(
+                    "visibility change failed pane={} to={} error={error}",
+                    pane_id, visible
+                ));
                 return;
             }
         }
@@ -859,7 +971,7 @@ impl Drop for WebViewManager {
     fn drop(&mut self) {
         // Best-effort shutdown so orphaned guest sessions do not survive process exit.
         for existing in self.views.drain().map(|(_, existing)| existing) {
-            if let Some(session) = existing.launched_session {
+            if let Some(session) = existing.launched_session.as_ref() {
                 let _ = stop_guest_session(&session.session_id);
             }
         }
@@ -924,7 +1036,7 @@ fn reuse_action(
 
 fn build_flags_for_route(route: &GuestRoute) -> BuildFlags {
     match route {
-        GuestRoute::ExternalUrl(_) => BuildFlags {
+        GuestRoute::ExternalUrl(_) | GuestRoute::CapsuleUrl { .. } => BuildFlags {
             inject_bridge: false,
             enable_ipc: false,
             enable_custom_protocol: false,
@@ -1060,17 +1172,7 @@ fn pending_launch_key(pane_id: usize, route_key: &str) -> String {
 }
 
 fn route_requires_ready_signal(route: &GuestRoute) -> bool {
-    matches!(
-        route,
-        GuestRoute::Capsule { .. } | GuestRoute::CapsuleHandle { .. }
-    )
-}
-
-fn is_pending_guest_launch(session: &WebSessionState) -> bool {
-    matches!(
-        session,
-        WebSessionState::Resolving | WebSessionState::Materializing | WebSessionState::Launching
-    )
+    matches!(route, GuestRoute::Capsule { .. } | GuestRoute::CapsuleHandle { .. })
 }
 
 fn should_show_webview(
@@ -1094,7 +1196,9 @@ fn active_web_session(state: &AppState, pane_id: usize) -> Option<WebSessionStat
         match &pane.surface {
             crate::state::PaneSurface::Web(web) => Some(web.session.clone()),
             crate::state::PaneSurface::Native { .. }
+            | crate::state::PaneSurface::CapsuleStatus(_)
             | crate::state::PaneSurface::Inspector
+            | crate::state::PaneSurface::DevConsole
             | crate::state::PaneSurface::Launcher
             | crate::state::PaneSurface::AuthHandoff { .. } => None,
         }
@@ -1321,6 +1425,127 @@ fn bounds_to_rect(bounds: PaneBounds) -> Rect {
     }
 }
 
+fn rect_to_bounds(rect: Rect) -> PaneBounds {
+    let (x, y): (f64, f64) = rect.position.to_logical::<f64>(1.0).into();
+    let (width, height): (f64, f64) = rect.size.to_logical::<f64>(1.0).into();
+
+    PaneBounds {
+        x: x as f32,
+        y: y as f32,
+        width: width as f32,
+        height: height as f32,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos_frame_host(webview: &WebView) -> Result<Retained<NSView>> {
+    let mtm = MainThreadMarker::new().context("macOS frame host must be created on the main thread")?;
+    let native_webview = webview.webview();
+    let native_view: &NSView = native_webview.as_super().as_super();
+    let content_view = unsafe { native_view.superview() }
+        .context("child WKWebView is missing its content view parent")?;
+
+    let frame_host = NSView::new(mtm);
+    frame_host.setFrame(native_view.frame());
+    frame_host.setAutoresizesSubviews(false);
+    frame_host.setClipsToBounds(true);
+    frame_host.setWantsLayer(true);
+    if let Some(layer) = frame_host.layer() {
+        layer.setMasksToBounds(true);
+    }
+
+    native_view.removeFromSuperview();
+    frame_host.addSubview(native_view);
+    native_view.setFrame(frame_host.bounds());
+    content_view.addSubview(&frame_host);
+
+    log_devtools(format!(
+        "installed frame host bounds={}",
+        format_bounds(bounds_from_ns_view(&frame_host))
+    ));
+
+    Ok(frame_host)
+}
+
+#[cfg(target_os = "macos")]
+fn apply_bounds_to_macos_frame_host(
+    frame_host: &NSView,
+    webview: &WebView,
+    bounds: PaneBounds,
+) -> Result<()> {
+    let parent_view = unsafe { frame_host.superview() }
+        .context("frame host is missing its parent content view")?;
+    let parent_frame = parent_view.frame();
+    let mut frame = frame_host.frame();
+
+    frame.origin.x = bounds.x as f64;
+    frame.origin.y = parent_frame.size.height - bounds.y as f64 - bounds.height as f64;
+    frame.size.width = bounds.width as f64;
+    frame.size.height = bounds.height as f64;
+    frame_host.setFrame(frame);
+
+    let native_webview = webview.webview();
+    let native_view: &NSView = native_webview.as_super().as_super();
+    native_view.setFrame(frame_host.bounds());
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn bounds_from_ns_view(view: &NSView) -> PaneBounds {
+    let frame = view.frame();
+    let parent_height = unsafe { view.superview() }
+        .map(|parent| parent.frame().size.height)
+        .unwrap_or(frame.size.height);
+
+    PaneBounds {
+        x: frame.origin.x as f32,
+        y: (parent_height - frame.origin.y - frame.size.height) as f32,
+        width: frame.size.width as f32,
+        height: frame.size.height as f32,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn detach_macos_devtools_if_supported(webview: &WebView) {
+    unsafe {
+        let native_webview = webview.webview();
+        let inspector: Retained<AnyObject> = msg_send![&*native_webview, _inspector];
+        let detach = sel!(detach);
+        let supports_detach: bool = msg_send![&*inspector, respondsToSelector: detach];
+        if !supports_detach {
+            log_devtools("open_devtools detach unsupported by current WebKit inspector");
+            return;
+        }
+
+        let is_attached = sel!(isAttached);
+        let supports_is_attached: bool = msg_send![&*inspector, respondsToSelector: is_attached];
+        let was_attached = if supports_is_attached {
+            let attached: bool = msg_send![&*inspector, isAttached];
+            attached
+        } else {
+            false
+        };
+
+        let (): () = msg_send![&*inspector, detach];
+
+        let now_attached = if supports_is_attached {
+            let attached: bool = msg_send![&*inspector, isAttached];
+            Some(attached)
+        } else {
+            None
+        };
+
+        log_devtools(format!(
+            "open_devtools detach requested was_attached={} now_attached={}",
+            was_attached,
+            now_attached
+                .map(|attached| attached.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string())
+        ));
+    }
+}
+
 fn compact(value: &str) -> String {
     value
         .chars()
@@ -1385,7 +1610,9 @@ fn serve_guest_asset(
     }
 
     let requested_path = if path == "/" {
-        session.frontend_url_path()
+        session
+            .frontend_url_path()
+            .unwrap_or_else(|| "/index.html".to_string())
     } else {
         path.to_string()
     };
@@ -1454,14 +1681,6 @@ mod tests {
             profile: "electron".to_string(),
             capabilities: vec![CapabilityGrant::OpenExternal],
             session: WebSessionState::Launching,
-            source_label: None,
-            trust_state: None,
-            restricted: false,
-            snapshot_label: None,
-            canonical_handle: None,
-            session_id: None,
-            adapter: None,
-            manifest_path: None,
             bounds: PaneBounds::empty(),
         }
     }
