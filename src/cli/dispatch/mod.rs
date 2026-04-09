@@ -15,6 +15,7 @@ pub(crate) mod registry;
 mod run;
 mod scaffold;
 mod setup;
+mod share;
 mod source;
 mod state;
 
@@ -115,6 +116,40 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             deprecation_warning: None,
             reporter: Arc::new(reporters::CliReporter::new_run(json)),
         }),
+
+        Commands::Resolve {
+            handle,
+            target,
+            registry,
+            json: command_json,
+        } => crate::app_control::resolve_handle(
+            &handle,
+            target.as_deref(),
+            registry.as_deref(),
+            json || command_json,
+        ),
+
+        Commands::Encap {
+            path,
+            share,
+            save_only,
+            print_plan,
+        } => share::execute_encap_command(share::EncapCommandArgs {
+            path,
+            share,
+            save_only,
+            print_plan,
+            reporter: reporter.clone(),
+        }),
+
+        Commands::Decap { input, into, plan } => {
+            share::execute_decap_command(share::DecapCommandArgs {
+                input,
+                into,
+                plan,
+                reporter: reporter.clone(),
+            })
+        }
 
         Commands::Engine { command } => {
             engine::execute_engine_command(command, nacelle, reporter.clone())
