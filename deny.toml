@@ -7,12 +7,12 @@ yanked = "deny"
 unmaintained = "workspace"
 ignore = [
     { id = "RUSTSEC-2024-0438", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
-    { id = "RUSTSEC-2024-0442", reason = "wasmtime-jit-debug unsound advisory; part of the pinned wasmtime 16 stack." },
     { id = "RUSTSEC-2024-0445", reason = "cap-primitives is pulled in by the same pinned wasmtime 16 stack and is being handled in that upgrade." },
     { id = "RUSTSEC-2025-0046", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
     { id = "RUSTSEC-2025-0118", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
     { id = "RUSTSEC-2026-0020", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
     { id = "RUSTSEC-2026-0021", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
+    { id = "RUSTSEC-2026-0094", reason = "Wasmtime Winch table.grow return value vulnerability; non-Windows runtime pinned to wasmtime 16 pending planned upgrade." },
     { id = "RUSTSEC-2026-0095", reason = "Wasmtime Winch compiler sandbox escape; non-Windows runtime pinned to wasmtime 16 pending planned upgrade." },
     { id = "RUSTSEC-2026-0096", reason = "Wasmtime aarch64 Cranelift miscompile; non-Windows runtime pinned to wasmtime 16 pending planned upgrade." },
 ]
