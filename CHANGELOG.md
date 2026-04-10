@@ -10,23 +10,38 @@ All notable changes to `ato-cli` will be documented in this file.
 
 #### Bug Fixes
 
-- Fix `encap` interactive entry edit: setting a new primary entry now clears all prior primaries immediately, so the saved spec always reflects user intent instead of silently reverting to the first entry
-- Add recipient-side tool detection in `decap`: missing tools are now reported as two distinct issues — "missing tool in lock" (gap between spec and lock) and "missing tool on this machine" (tool present in lock but absent locally)
-- Add spec/lock digest validation: `decap` emits a verification warning when the spec file has changed since the lock was created (digest mismatch)
+- Fix `encap` interactive primary entry edit: setting a new primary entry now clears all prior primaries immediately, so the saved spec always reflects user intent instead of silently reverting to the first entry
+- Add recipient-side tool detection in `decap`: verification now distinguishes between "missing tool in lock" (spec vs lock gap) and "missing tool on this machine" (tool present in lock but absent locally)
+- Add spec/lock digest validation: `decap` emits a verification warning when the spec file has changed since the lock was created (sha256 digest mismatch)
 
 #### Tests
 
 - T6: `run <share-url> --watch` is explicitly rejected
 - T7: `run <share-url> --background` is explicitly rejected
 - T8: digest mismatch surfaces as verification issue
-- T9: source present in spec but absent in lock errors at materialize time
+- T9: source present in spec but absent in lock errors at materialize
 - T10: tool present in spec but absent in lock is flagged by verify_tools
 - T11: verify_local_tools detects tools not installed on current machine
 - T12: `--into` path with spaces is accepted by `ensure_target_root_ready`
 - Primary entry edit loop clears prior primaries in kept_entries
 - `ensure_single_primary_entry` leaves a single primary untouched
 
-## [0.4.56] - 2026-04-10
+## [0.4.57] - 2026-04-10
+
+### What Changed
+
+#### Bug Fixes
+
+- Strip `sha256:` prefix from ephemeral run root directory name to prevent uv/path-separator crash on production share URLs (Fix1)
+- Remove stale temp root before re-materializing on share-run rerun, eliminating non-empty directory error after interrupted runs (Fix2)
+- Fix zero-primary entry ordering bug in interactive encap; prompt user to select primary entry instead of silently reverting to first entry (Fix3)
+- Cross-check spec `tool_requirements` against lock `resolved_tools` in `verify_tools` to surface missing-tool issues at decap time (Fix4)
+
+#### New Features
+
+- Add `--entry`, `--env-file`, `--prompt-env` flags to `ato run` for multi-entry share selection, env file injection, and interactive env prompting with save/reuse lifecycle
+
+
 
 ### What Changed
 
