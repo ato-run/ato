@@ -6,13 +6,24 @@ version = 2
 yanked = "deny"
 unmaintained = "workspace"
 ignore = [
-    { id = "RUSTSEC-2024-0438", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
-    { id = "RUSTSEC-2024-0445", reason = "cap-primitives is pulled in by the same pinned wasmtime 16 stack and is being handled in that upgrade." },
-    { id = "RUSTSEC-2025-0046", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
-    { id = "RUSTSEC-2025-0118", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
-    { id = "RUSTSEC-2026-0049", reason = "The current axum-server/rustls stack still pulls the vulnerable rustls-webpki path until the next TLS dependency refresh lands." },
+    # --- wasmtime 16.0.0 vulnerabilities (runtime pinned until planned upgrade) ---
+    { id = "RUSTSEC-2026-0085", reason = "Wasmtime 16 vulnerability; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0086", reason = "Wasmtime 16 vulnerability; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0087", reason = "Wasmtime 16 vulnerability; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0088", reason = "Wasmtime 16 vulnerability; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0089", reason = "Wasmtime 16 vulnerability; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0091", reason = "Wasmtime 16 vulnerability; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0092", reason = "Wasmtime 16 UTF-16 transcoding panic; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0093", reason = "Wasmtime 16 UTF-16 heap OOB; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0094", reason = "Wasmtime Winch table.grow return value vulnerability; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0095", reason = "Wasmtime Winch compiler sandbox escape; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0096", reason = "Wasmtime aarch64 Cranelift miscompile; pinned pending planned upgrade." },
     { id = "RUSTSEC-2026-0020", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
     { id = "RUSTSEC-2026-0021", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
+    { id = "RUSTSEC-2024-0438", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
+    { id = "RUSTSEC-2024-0445", reason = "cap-primitives is pulled in by the same pinned wasmtime 16 stack." },
+    { id = "RUSTSEC-2025-0046", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
+    { id = "RUSTSEC-2025-0118", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
 ]
 
 [licenses]
