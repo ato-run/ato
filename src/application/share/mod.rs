@@ -440,7 +440,12 @@ pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
     let entries = effective_entries(&loaded.spec);
     let entry = select_run_entry(&args.input, &loaded, &entries, args.entry.as_deref())?;
     let temp_root = ephemeral_run_root(&loaded, &entry)?;
-    ensure_target_root_ready(&temp_root)?;
+    // Ephemeral roots are always fully re-materialized; clean up any stale remnant
+    // from a previous interrupted run before proceeding.
+    if temp_root.exists() {
+        fs::remove_dir_all(&temp_root)
+            .with_context(|| format!("Failed to clean stale run root {}", temp_root.display()))?;
+    }
     let state = materialize_loaded_share(&loaded, &temp_root)?;
     let env_overlay = resolve_entry_env_overlay(
         &args.input,
@@ -539,7 +544,7 @@ fn materialize_loaded_share(loaded: &LoadedShareInput, into: &Path) -> Result<Wo
         }
     }
 
-    for tool in verify_tools(&loaded.lock.resolved_tools) {
+    for tool in verify_tools(&loaded.spec.tool_requirements, &loaded.lock.resolved_tools) {
         state
             .verification
             .issues
@@ -1426,6 +1431,30 @@ fn interactively_finalize_capture(spec: &mut ShareSpec, reporter: &Arc<CliReport
             PromptDecision::Skip => {}
         }
     }
+    // If user de-selected the only primary without explicitly activating another,
+    // prompt the user to choose which entry should be the default run target.
+    // This must run BEFORE ensure_single_primary_entry, which would otherwise
+    // silently assign the first entry and prevent the prompt from ever triggering.
+    // Check stdin.is_terminal() rather than use_tui so the prompt also fires in
+    // text-mode (e.g. --json) when stdin is still interactive.
+    let has_primary = kept_entries.iter().any(|e| e.primary);
+    if !has_primary && !kept_entries.is_empty() && io::stdin().is_terminal() {
+        eprintln!("No entry is marked as primary. Choose which entry to run by default:");
+        for (i, e) in kept_entries.iter().enumerate() {
+            eprintln!("  {}: {} ({})", i + 1, e.id, e.run);
+        }
+        eprint!("Primary entry [1]: ");
+        io::stderr()
+            .flush()
+            .context("failed to flush primary entry prompt")?;
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("failed to read primary entry choice")?;
+        let chosen = input.trim().parse::<usize>().unwrap_or(1).saturating_sub(1);
+        let idx = chosen.min(kept_entries.len().saturating_sub(1));
+        kept_entries[idx].primary = true;
+    }
     ensure_single_primary_entry(&mut kept_entries);
     spec.entries = kept_entries;
 
@@ -1916,7 +1945,10 @@ fn ephemeral_run_root(loaded: &LoadedShareInput, entry: &ShareEntrySpec) -> Resu
         .as_deref()
         .or(loaded.share_url.as_deref())
         .unwrap_or(&loaded.spec.name);
-    let digest = sha256_label(format!("{}:{}", suffix, entry.id).as_bytes());
+    let raw = sha256_label(format!("{}:{}", suffix, entry.id).as_bytes());
+    // sha256_label returns "sha256:<hex>"; strip the prefix so the directory
+    // name contains no colon (some tools reject CWD paths with ':' in them).
+    let digest = raw.trim_start_matches("sha256:");
     Ok(cwd.join(".tmp").join("ato-run").join(digest))
 }
 
@@ -2191,12 +2223,21 @@ fn materialize_source(
     Ok(current_rev)
 }
 
-fn verify_tools(resolved_tools: &[ResolvedToolLock]) -> Vec<String> {
-    resolved_tools
-        .iter()
-        .filter(|tool| tool.binary_path.is_none())
-        .map(|tool| tool.tool.clone())
-        .collect()
+fn verify_tools(
+    spec_tools: &[ToolRequirementSpec],
+    resolved_tools: &[ResolvedToolLock],
+) -> Vec<String> {
+    let mut missing = Vec::new();
+    for spec_tool in spec_tools {
+        match resolved_tools.iter().find(|r| r.tool == spec_tool.tool) {
+            None => missing.push(spec_tool.tool.clone()),
+            Some(resolved) if resolved.binary_path.is_none() => {
+                missing.push(spec_tool.tool.clone())
+            }
+            Some(_) => {}
+        }
+    }
+    missing
 }
 
 struct ShellOutput {
