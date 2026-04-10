@@ -1803,7 +1803,9 @@ fn load_share_input(input: &str) -> Result<LoadedShareInput> {
             .with_context(|| format!("Failed to read {}", spec_path.display()))?;
         let spec = serde_json::from_str::<ShareSpec>(&spec_raw)
             .with_context(|| format!("Failed to parse {}", spec_path.display()))?;
-        let spec_digest_verified = sha256_label(spec_raw.as_bytes()) == lock.spec_digest;
+        let spec_canonical =
+            serde_json::to_vec(&spec).context("Failed to serialize share spec for digest")?;
+        let spec_digest_verified = sha256_label(&spec_canonical) == lock.spec_digest;
         return Ok(LoadedShareInput {
             share_url: None,
             resolved_revision_url: None,
@@ -1823,7 +1825,9 @@ fn load_share_input(input: &str) -> Result<LoadedShareInput> {
         .with_context(|| format!("Failed to read {}", lock_path.display()))?;
     let lock = serde_json::from_str::<ShareLock>(&lock_raw)
         .with_context(|| format!("Failed to parse {}", lock_path.display()))?;
-    let spec_digest_verified = sha256_label(raw.as_bytes()) == lock.spec_digest;
+    let spec_canonical =
+        serde_json::to_vec(&spec).context("Failed to serialize share spec for digest")?;
+    let spec_digest_verified = sha256_label(&spec_canonical) == lock.spec_digest;
     Ok(LoadedShareInput {
         share_url: None,
         resolved_revision_url: None,
@@ -2789,6 +2793,111 @@ mod tests {
         );
     }
 
+    // ── T8b: valid digest matches (local spec path) ───────────────────────
+
+    #[test]
+    fn load_share_input_valid_digest_matches_for_local_spec() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path();
+        let spec_json = serde_json::json!({
+            "schema_version": "1",
+            "name": "valid-digest",
+            "root": "valid-digest",
+            "sources": [],
+            "tool_requirements": [],
+            "env_requirements": [],
+            "install_steps": [],
+            "entries": [],
+            "services": [],
+            "notes": {"team_notes": ""},
+            "generated_from": {"root_path": "/tmp", "captured_at": "2026-01-01T00:00:00Z", "host_os": "macos"}
+        });
+        let spec_raw = serde_json::to_string_pretty(&spec_json).expect("serialize spec");
+        fs::write(dir.join("share.spec.json"), &spec_raw).expect("write spec");
+        // Build canonical digest the same way build_share_lock does
+        let spec_parsed: ShareSpec =
+            serde_json::from_str(&spec_raw).expect("parse spec for digest");
+        let spec_canonical = serde_json::to_vec(&spec_parsed).expect("canonical bytes");
+        let correct_digest = sha256_label(&spec_canonical);
+        let lock_json = serde_json::json!({
+            "schema_version": "1",
+            "spec_digest": correct_digest,
+            "generated_guide_digest": "sha256:guide",
+            "revision": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "resolved_sources": [],
+            "resolved_tools": []
+        });
+        fs::write(
+            dir.join("share.lock.json"),
+            serde_json::to_string_pretty(&lock_json).expect("serialize lock"),
+        )
+        .expect("write lock");
+
+        let loaded = load_share_input(
+            dir.join("share.spec.json")
+                .to_str()
+                .expect("spec path utf8"),
+        )
+        .expect("load should succeed");
+        assert!(
+            loaded.spec_digest_verified,
+            "valid digest should be verified for local spec path"
+        );
+    }
+
+    // ── T8c: valid digest matches (local lock path) ───────────────────────
+
+    #[test]
+    fn load_share_input_valid_digest_matches_for_local_lock() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path();
+        let spec_json = serde_json::json!({
+            "schema_version": "1",
+            "name": "valid-digest-lock",
+            "root": "valid-digest-lock",
+            "sources": [],
+            "tool_requirements": [],
+            "env_requirements": [],
+            "install_steps": [],
+            "entries": [],
+            "services": [],
+            "notes": {"team_notes": ""},
+            "generated_from": {"root_path": "/tmp", "captured_at": "2026-01-01T00:00:00Z", "host_os": "macos"}
+        });
+        let spec_raw = serde_json::to_string_pretty(&spec_json).expect("serialize spec");
+        fs::write(dir.join("share.spec.json"), &spec_raw).expect("write spec");
+        let spec_parsed: ShareSpec =
+            serde_json::from_str(&spec_raw).expect("parse spec for digest");
+        let spec_canonical = serde_json::to_vec(&spec_parsed).expect("canonical bytes");
+        let correct_digest = sha256_label(&spec_canonical);
+        let lock_json = serde_json::json!({
+            "schema_version": "1",
+            "spec_digest": correct_digest,
+            "generated_guide_digest": "sha256:guide",
+            "revision": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "resolved_sources": [],
+            "resolved_tools": []
+        });
+        fs::write(
+            dir.join("share.lock.json"),
+            serde_json::to_string_pretty(&lock_json).expect("serialize lock"),
+        )
+        .expect("write lock");
+
+        let loaded = load_share_input(
+            dir.join("share.lock.json")
+                .to_str()
+                .expect("lock path utf8"),
+        )
+        .expect("load from lock path should succeed");
+        assert!(
+            loaded.spec_digest_verified,
+            "valid digest should be verified when loading from lock path"
+        );
+    }
+
     // ── T9: spec source not in lock ───────────────────────────────────────
 
     #[test]
@@ -2816,7 +2925,11 @@ mod tests {
         });
         let spec_raw = serde_json::to_string_pretty(&spec_json).expect("serialize spec");
         fs::write(dir.join("share.spec.json"), &spec_raw).expect("write spec");
-        let computed_digest = sha256_label(spec_raw.as_bytes());
+        // Compute digest via canonical serialization (must match load_share_input / build_share_lock)
+        let spec_parsed: ShareSpec =
+            serde_json::from_str(&spec_raw).expect("parse spec for digest");
+        let spec_canonical = serde_json::to_vec(&spec_parsed).expect("canonical spec bytes");
+        let computed_digest = sha256_label(&spec_canonical);
         let lock_json = serde_json::json!({
             "schema_version": "1",
             "spec_digest": computed_digest,
