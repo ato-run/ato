@@ -4,6 +4,28 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.58] - 2026-04-11
+
+### What Changed
+
+#### Bug Fixes
+
+- Fix `encap` interactive entry edit: setting a new primary entry now clears all prior primaries immediately, so the saved spec always reflects user intent instead of silently reverting to the first entry
+- Add recipient-side tool detection in `decap`: missing tools are now reported as two distinct issues — "missing tool in lock" (gap between spec and lock) and "missing tool on this machine" (tool present in lock but absent locally)
+- Add spec/lock digest validation: `decap` emits a verification warning when the spec file has changed since the lock was created (digest mismatch)
+
+#### Tests
+
+- T6: `run <share-url> --watch` is explicitly rejected
+- T7: `run <share-url> --background` is explicitly rejected
+- T8: digest mismatch surfaces as verification issue
+- T9: source present in spec but absent in lock errors at materialize time
+- T10: tool present in spec but absent in lock is flagged by verify_tools
+- T11: verify_local_tools detects tools not installed on current machine
+- T12: `--into` path with spaces is accepted by `ensure_target_root_ready`
+- Primary entry edit loop clears prior primaries in kept_entries
+- `ensure_single_primary_entry` leaves a single primary untouched
+
 ## [0.4.56] - 2026-04-10
 
 ### What Changed

@@ -8,7 +8,7 @@ resolver = "2"
 
 [package]
 name = "ato-cli"
-version = "0.4.56"
+version = "0.4.58"
 edition = "2021"
 description = "ato CLI (meta-runtime)"
 license = "Apache-2.0"
