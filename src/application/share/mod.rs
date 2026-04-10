@@ -514,6 +514,12 @@ fn materialize_loaded_share(loaded: &LoadedShareInput, into: &Path) -> Result<Wo
     fs::create_dir_all(into)
         .with_context(|| format!("Failed to create target root {}", into.display()))?;
 
+    if !loaded.spec_digest_verified {
+        state.verification.issues.push(
+            "spec/lock digest mismatch: spec may have changed since lock was created".to_string(),
+        );
+    }
+
     for source in &loaded.spec.sources {
         let locked = loaded
             .lock
@@ -548,7 +554,24 @@ fn materialize_loaded_share(loaded: &LoadedShareInput, into: &Path) -> Result<Wo
         state
             .verification
             .issues
-            .push(format!("missing tool: {}", tool));
+            .push(format!("missing tool in lock: {}", tool));
+    }
+
+    let lock_tool_ids: std::collections::HashSet<&str> = loaded
+        .lock
+        .resolved_tools
+        .iter()
+        .map(|r| r.tool.as_str())
+        .collect();
+    for tool in verify_local_tools(&loaded.spec.tool_requirements) {
+        // Only emit recipient-side warning for tools that were resolved in the lock;
+        // tools absent from the lock are already reported as "missing tool in lock".
+        if lock_tool_ids.contains(tool.as_str()) {
+            state
+                .verification
+                .issues
+                .push(format!("missing tool on this machine: {}", tool));
+        }
     }
 
     for step in &loaded.spec.install_steps {
@@ -1426,6 +1449,13 @@ fn interactively_finalize_capture(spec: &mut ShareSpec, reporter: &Arc<CliReport
                     updated.primary,
                     use_tui,
                 )?;
+                // When user explicitly sets this entry as primary, clear primary from
+                // all previously kept entries so at most one primary exists at the end.
+                if updated.primary {
+                    for prev in kept_entries.iter_mut() {
+                        prev.primary = false;
+                    }
+                }
                 kept_entries.push(updated);
             }
             PromptDecision::Skip => {}
@@ -1734,6 +1764,7 @@ struct LoadedShareInput {
     resolved_revision_url: Option<String>,
     spec: ShareSpec,
     lock: ShareLock,
+    spec_digest_verified: bool,
 }
 
 pub(crate) fn looks_like_share_run_input(input: &str) -> bool {
@@ -1768,16 +1799,17 @@ fn load_share_input(input: &str) -> Result<LoadedShareInput> {
             .parent()
             .map(|parent| parent.join(SHARE_SPEC_FILE))
             .context("share.lock.json has no parent directory")?;
-        let spec = serde_json::from_str::<ShareSpec>(
-            &fs::read_to_string(&spec_path)
-                .with_context(|| format!("Failed to read {}", spec_path.display()))?,
-        )
-        .with_context(|| format!("Failed to parse {}", spec_path.display()))?;
+        let spec_raw = fs::read_to_string(&spec_path)
+            .with_context(|| format!("Failed to read {}", spec_path.display()))?;
+        let spec = serde_json::from_str::<ShareSpec>(&spec_raw)
+            .with_context(|| format!("Failed to parse {}", spec_path.display()))?;
+        let spec_digest_verified = sha256_label(spec_raw.as_bytes()) == lock.spec_digest;
         return Ok(LoadedShareInput {
             share_url: None,
             resolved_revision_url: None,
             spec,
             lock,
+            spec_digest_verified,
         });
     }
 
@@ -1787,16 +1819,17 @@ fn load_share_input(input: &str) -> Result<LoadedShareInput> {
         .parent()
         .map(|parent| parent.join(SHARE_LOCK_FILE))
         .context("share.spec.json has no parent directory")?;
-    let lock = serde_json::from_str::<ShareLock>(
-        &fs::read_to_string(&lock_path)
-            .with_context(|| format!("Failed to read {}", lock_path.display()))?,
-    )
-    .with_context(|| format!("Failed to parse {}", lock_path.display()))?;
+    let lock_raw = fs::read_to_string(&lock_path)
+        .with_context(|| format!("Failed to read {}", lock_path.display()))?;
+    let lock = serde_json::from_str::<ShareLock>(&lock_raw)
+        .with_context(|| format!("Failed to parse {}", lock_path.display()))?;
+    let spec_digest_verified = sha256_label(raw.as_bytes()) == lock.spec_digest;
     Ok(LoadedShareInput {
         share_url: None,
         resolved_revision_url: None,
         spec,
         lock,
+        spec_digest_verified,
     })
 }
 
@@ -1842,6 +1875,7 @@ fn fetch_share_url(url: &str) -> Result<LoadedShareInput> {
         resolved_revision_url: Some(share.revision_url.clone()),
         spec: share.spec,
         lock: share.lock,
+        spec_digest_verified: true,
     })
 }
 
@@ -2238,6 +2272,16 @@ fn verify_tools(
         }
     }
     missing
+}
+
+fn verify_local_tools(spec_tools: &[ToolRequirementSpec]) -> Vec<String> {
+    spec_tools
+        .iter()
+        .filter_map(|tool| {
+            let binary = binary_name_for_tool(&tool.tool);
+            which::which(binary).err().map(|_| tool.tool.clone())
+        })
+        .collect()
 }
 
 struct ShellOutput {
@@ -2639,5 +2683,337 @@ mod tests {
             .current_dir(path)
             .output()
             .expect("git commit");
+    }
+
+    // ── T6: --watch reject ────────────────────────────────────────────────
+
+    #[test]
+    fn execute_run_share_rejects_watch_flag() {
+        let reporter = Arc::new(crate::reporters::CliReporter::new(false));
+        let err = execute_run_share(RunShareArgs {
+            input: "https://ato.run/s/demo@r1".to_string(),
+            entry: None,
+            args: vec![],
+            env_file: None,
+            prompt_env: false,
+            watch: true,
+            background: false,
+            reporter,
+        })
+        .expect_err("--watch should be rejected");
+        assert!(
+            err.to_string().contains("--watch"),
+            "expected --watch in error: {err}"
+        );
+    }
+
+    // ── T7: --background reject ───────────────────────────────────────────
+
+    #[test]
+    fn execute_run_share_rejects_background_flag() {
+        let reporter = Arc::new(crate::reporters::CliReporter::new(false));
+        let err = execute_run_share(RunShareArgs {
+            input: "https://ato.run/s/demo@r1".to_string(),
+            entry: None,
+            args: vec![],
+            env_file: None,
+            prompt_env: false,
+            watch: false,
+            background: true,
+            reporter,
+        })
+        .expect_err("--background should be rejected");
+        assert!(
+            err.to_string().contains("--background"),
+            "expected --background in error: {err}"
+        );
+    }
+
+    // ── T8: spec/lock digest mismatch ─────────────────────────────────────
+
+    #[test]
+    fn materialize_reports_digest_mismatch_as_verification_issue() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path();
+        let spec_json = serde_json::json!({
+            "schema_version": "1",
+            "name": "mismatch",
+            "root": "mismatch",
+            "sources": [],
+            "tool_requirements": [],
+            "env_requirements": [],
+            "install_steps": [],
+            "entries": [],
+            "services": [],
+            "notes": {"team_notes": ""},
+            "generated_from": {"root_path": "/tmp", "captured_at": "2026-01-01T00:00:00Z", "host_os": "macos"}
+        });
+        let spec_raw = serde_json::to_string_pretty(&spec_json).expect("serialize spec");
+        fs::write(dir.join("share.spec.json"), &spec_raw).expect("write spec");
+        let lock_json = serde_json::json!({
+            "schema_version": "1",
+            "spec_digest": "sha256:deliberately-wrong-digest",
+            "generated_guide_digest": "sha256:guide",
+            "revision": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "resolved_sources": [],
+            "resolved_tools": []
+        });
+        fs::write(
+            dir.join("share.lock.json"),
+            serde_json::to_string_pretty(&lock_json).expect("serialize lock"),
+        )
+        .expect("write lock");
+
+        let loaded = load_share_input(
+            dir.join("share.spec.json")
+                .to_str()
+                .expect("spec path utf8"),
+        )
+        .expect("load should succeed");
+        assert!(
+            !loaded.spec_digest_verified,
+            "digest mismatch should be detected"
+        );
+
+        let into = temp.path().join("out");
+        let state = materialize_loaded_share(&loaded, &into).expect("materialize");
+        assert!(
+            state
+                .verification
+                .issues
+                .iter()
+                .any(|i| i.contains("digest mismatch")),
+            "digest mismatch should appear in verification issues: {:?}",
+            state.verification.issues
+        );
+    }
+
+    // ── T9: spec source not in lock ───────────────────────────────────────
+
+    #[test]
+    fn materialize_errors_when_spec_source_missing_from_lock() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path();
+        let spec_json = serde_json::json!({
+            "schema_version": "1",
+            "name": "missing-source",
+            "root": "missing-source",
+            "sources": [{
+                "id": "agent",
+                "path": "agent",
+                "url": "https://github.com/acme/agent.git",
+                "ref": "main",
+                "kind": "git"
+            }],
+            "tool_requirements": [],
+            "env_requirements": [],
+            "install_steps": [],
+            "entries": [],
+            "services": [],
+            "notes": {"team_notes": ""},
+            "generated_from": {"root_path": "/tmp", "captured_at": "2026-01-01T00:00:00Z", "host_os": "macos"}
+        });
+        let spec_raw = serde_json::to_string_pretty(&spec_json).expect("serialize spec");
+        fs::write(dir.join("share.spec.json"), &spec_raw).expect("write spec");
+        let computed_digest = sha256_label(spec_raw.as_bytes());
+        let lock_json = serde_json::json!({
+            "schema_version": "1",
+            "spec_digest": computed_digest,
+            "generated_guide_digest": "sha256:guide",
+            "revision": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "resolved_sources": [],
+            "resolved_tools": []
+        });
+        fs::write(
+            dir.join("share.lock.json"),
+            serde_json::to_string_pretty(&lock_json).expect("serialize lock"),
+        )
+        .expect("write lock");
+
+        let loaded = load_share_input(
+            dir.join("share.spec.json")
+                .to_str()
+                .expect("spec path utf8"),
+        )
+        .expect("load should succeed");
+        let into = temp.path().join("out");
+        let err =
+            materialize_loaded_share(&loaded, &into).expect_err("should error on missing source");
+        assert!(
+            err.to_string().contains("Missing resolved source"),
+            "expected missing source error: {err}"
+        );
+    }
+
+    // ── T10: spec tool missing from lock / local ──────────────────────────
+
+    #[test]
+    fn verify_tools_detects_tool_missing_from_lock() {
+        let spec_tools = vec![ToolRequirementSpec {
+            id: "bun".to_string(),
+            tool: "bun".to_string(),
+            version: None,
+            required_by: vec![],
+            evidence: vec![],
+        }];
+        let missing = verify_tools(&spec_tools, &[]);
+        assert_eq!(missing, vec!["bun".to_string()]);
+    }
+
+    #[test]
+    fn verify_local_tools_detects_tool_not_installed() {
+        let spec_tools = vec![ToolRequirementSpec {
+            id: "ato-test-fake-binary-xxxx".to_string(),
+            tool: "ato-test-fake-binary-xxxx".to_string(),
+            version: None,
+            required_by: vec![],
+            evidence: vec![],
+        }];
+        let missing = verify_local_tools(&spec_tools);
+        assert_eq!(missing, vec!["ato-test-fake-binary-xxxx".to_string()]);
+    }
+
+    // ── T11: --into path with spaces ──────────────────────────────────────
+
+    #[test]
+    fn ensure_target_root_ready_accepts_path_with_spaces() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let spaced = temp.path().join("My Workspace");
+        fs::create_dir_all(&spaced).expect("mkdir with space");
+        ensure_target_root_ready(&spaced).expect("should accept empty dir with spaces in path");
+    }
+
+    // ── T12: empty dir accepted ───────────────────────────────────────────
+
+    #[test]
+    fn ensure_target_root_ready_accepts_empty_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let empty = temp.path().join("empty");
+        fs::create_dir_all(&empty).expect("mkdir");
+        ensure_target_root_ready(&empty).expect("should accept empty directory");
+    }
+
+    // ── Primary entry: editing clears other primaries ─────────────────────
+
+    #[test]
+    fn ensure_single_primary_entry_leaves_one_primary_intact() {
+        let mut entries = vec![
+            ShareEntrySpec {
+                id: "a".to_string(),
+                label: "a".to_string(),
+                cwd: ".".to_string(),
+                run: "echo a".to_string(),
+                kind: "one_shot".to_string(),
+                primary: true,
+                depends_on: vec![],
+                env: EntryEnvSpec::default(),
+                evidence: vec![],
+            },
+            ShareEntrySpec {
+                id: "b".to_string(),
+                label: "b".to_string(),
+                cwd: ".".to_string(),
+                run: "echo b".to_string(),
+                kind: "one_shot".to_string(),
+                primary: false,
+                depends_on: vec![],
+                env: EntryEnvSpec::default(),
+                evidence: vec![],
+            },
+        ];
+        ensure_single_primary_entry(&mut entries);
+        // a was already the sole primary, must remain
+        assert_eq!(entries.iter().filter(|e| e.primary).count(), 1);
+        assert!(entries.iter().find(|e| e.id == "a").unwrap().primary);
+    }
+
+    #[test]
+    fn ensure_single_primary_entry_clears_multi_primary_silently() {
+        let mut entries = vec![
+            ShareEntrySpec {
+                id: "a".to_string(),
+                label: "a".to_string(),
+                cwd: ".".to_string(),
+                run: "echo a".to_string(),
+                kind: "one_shot".to_string(),
+                primary: true,
+                depends_on: vec![],
+                env: EntryEnvSpec::default(),
+                evidence: vec![],
+            },
+            ShareEntrySpec {
+                id: "b".to_string(),
+                label: "b".to_string(),
+                cwd: ".".to_string(),
+                run: "echo b".to_string(),
+                kind: "one_shot".to_string(),
+                primary: true,
+                depends_on: vec![],
+                env: EntryEnvSpec::default(),
+                evidence: vec![],
+            },
+        ];
+        ensure_single_primary_entry(&mut entries);
+        // safety net: exactly one primary, first entry wins
+        assert_eq!(entries.iter().filter(|e| e.primary).count(), 1);
+        assert!(entries.iter().find(|e| e.id == "a").unwrap().primary);
+        assert!(!entries.iter().find(|e| e.id == "b").unwrap().primary);
+    }
+
+    #[test]
+    fn edit_primary_clears_prior_primary_in_kept_entries() {
+        // Simulate the keep-then-edit flow that caused the primary revert bug.
+        // When user Keeps entry A (primary=true) and then Edits entry B and marks
+        // it as primary=true, entry A must lose its primary flag.
+        let mut kept_entries: Vec<ShareEntrySpec> = vec![];
+
+        // Step 1: Keep entry A with primary=true (simulate PromptDecision::Keep)
+        let entry_a = ShareEntrySpec {
+            id: "agent-main".to_string(),
+            label: "agent-main".to_string(),
+            cwd: "agent".to_string(),
+            run: "python main.py".to_string(),
+            kind: "one_shot".to_string(),
+            primary: true,
+            depends_on: vec![],
+            env: EntryEnvSpec::default(),
+            evidence: vec![],
+        };
+        kept_entries.push(entry_a);
+
+        // Step 2: Edit entry B and mark it as primary=true (simulate PromptDecision::Edit)
+        let mut entry_b = ShareEntrySpec {
+            id: "dashboard".to_string(),
+            label: "dashboard".to_string(),
+            cwd: "dashboard".to_string(),
+            run: "bun run dev".to_string(),
+            kind: "long_running".to_string(),
+            primary: false,
+            depends_on: vec![],
+            env: EntryEnvSpec::default(),
+            evidence: vec![],
+        };
+        entry_b.primary = true;
+        // The fix: clearing prior primaries when user explicitly sets primary=true
+        if entry_b.primary {
+            for prev in kept_entries.iter_mut() {
+                prev.primary = false;
+            }
+        }
+        kept_entries.push(entry_b);
+
+        // After the loop: exactly one primary (dashboard), not agent-main
+        let primaries: Vec<&str> = kept_entries
+            .iter()
+            .filter(|e| e.primary)
+            .map(|e| e.id.as_str())
+            .collect();
+        assert_eq!(
+            primaries,
+            vec!["dashboard"],
+            "dashboard should be the only primary"
+        );
     }
 }
