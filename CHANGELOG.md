@@ -4,6 +4,20 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.59] - 2026-04-11
+
+### What Changed
+
+#### Bug Fixes
+
+- Fix spec/lock digest validation: `load_share_input` now computes the spec digest using canonical serialization (`serde_json::to_vec`) to match `build_share_lock`, preventing false-positive digest mismatch warnings on valid local `share.spec.json` / `share.lock.json` files
+
+#### Tests
+
+- T8b: valid digest verified when loading from local spec path
+- T8c: valid digest verified when loading from local lock path
+- Fix T9 test to use canonical digest computation
+
 ## [0.4.58] - 2026-04-11
 
 ### What Changed
