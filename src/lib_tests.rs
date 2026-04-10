@@ -159,7 +159,12 @@ fn resolve_run_target_rejects_via_for_local_paths() {
         ))
         .expect_err("non-provider target must reject --via");
 
-    assert!(error.to_string().contains("`--via` is only supported"));
+    assert!(
+        error
+            .to_string()
+            .contains("is only supported for provider-backed"),
+        "error={error:#}"
+    );
 }
 
 #[test]
@@ -236,6 +241,37 @@ fn run_command_parses_agent_mode() {
 
     match cli.command {
         Commands::Run { agent, .. } => assert_eq!(agent, RunAgentMode::Force),
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn run_command_parses_entry_and_env_flags() {
+    let cli = Cli::try_parse_from([
+        "ato",
+        "run",
+        "https://ato.run/s/demo",
+        "--entry",
+        "dashboard",
+        "--env-file",
+        "./local.env",
+        "--prompt-env",
+    ])
+    .expect("parse");
+
+    match cli.command {
+        Commands::Run {
+            path,
+            entry,
+            env_file,
+            prompt_env,
+            ..
+        } => {
+            assert_eq!(path, PathBuf::from("https://ato.run/s/demo"));
+            assert_eq!(entry.as_deref(), Some("dashboard"));
+            assert_eq!(env_file, Some(PathBuf::from("./local.env")));
+            assert!(prompt_env);
+        }
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 }
