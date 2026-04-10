@@ -27,15 +27,13 @@ use super::state::StateCommands;
 Usage: {usage}
 
 Primary Commands:
-  run      Execute a .capsule archive or local project in a sandbox
-  resolve  Resolve a capsule handle or terse ref into a launch preview
-  encap    Capture a workspace into a shareable setup descriptor
-  decap    Materialize a shared workspace descriptor into a target directory
+  run      Try something now
+  decap    Set up a workspace locally
+  encap    Share your current workspace
+
+Build & Publish:
   build    Pack a project into an immutable .capsule archive
   publish  Publish capsule artifacts to a registry
-  install  Install a verified package from the registry
-    setup    Fetch declared development dependencies for the current project
-  init     Materialize a durable ato.lock.json baseline for the current project
   search   Search the registry for agent skills and packages
 
 Management:
@@ -46,12 +44,18 @@ Management:
   state    Inspect or register persistent state bindings
   binding  Inspect or register host-side service bindings
 
+Compatibility:
+  install  Install a verified package from the registry
+  setup    Fetch declared development dependencies for the current project
+  init     Materialize a durable ato.lock.json baseline for the current project
+
 Auth:
   login    Login to Ato registry
   logout   Logout
   whoami   Show current authentication status
 
 Troubleshooting:
+  resolve  Resolve a capsule handle or terse ref into a launch preview
   inspect  Inspect lock-first metadata, preview write-back, diagnostics, and runtime requirements
 
 Options:
@@ -76,17 +80,29 @@ pub(crate) struct Cli {
 pub(crate) enum Commands {
     #[command(
         next_help_heading = "Primary Commands",
-        about = "Run a capsule app or local project",
+        about = "Try something now",
         trailing_var_arg = true
     )]
     Run {
-        /// Local path (./, ../, ~/, /...), provider target (pypi:<package>, pypi:<package>[extra], npm:<package>, npm:@scope/package), store scoped ID (publisher/slug), or GitHub repo (github.com/owner/repo). Default: current directory
+        /// Local path (./, ../, ~/, /...), share URL (https://ato.run/s/...), provider target (pypi:<package>, pypi:<package>[extra], npm:<package>, npm:@scope/package), store scoped ID (publisher/slug), or GitHub repo (github.com/owner/repo). Default: current directory
         #[arg(default_value = ".")]
         path: PathBuf,
 
         /// Target label to execute (e.g. static, cli, widget)
         #[arg(short = 't', long = "target")]
         target: Option<String>,
+
+        /// Workspace entry to execute when the target exposes multiple runnable entries
+        #[arg(long = "entry")]
+        entry: Option<String>,
+
+        /// Load environment variables for this run from a dotenv-style file
+        #[arg(long = "env-file", value_name = "PATH")]
+        env_file: Option<PathBuf>,
+
+        /// Prompt for missing required environment variables before running
+        #[arg(long = "prompt-env", default_value_t = false)]
+        prompt_env: bool,
 
         /// Run in development mode (foreground) with hot-reloading on file changes
         #[arg(long)]
@@ -210,7 +226,7 @@ pub(crate) enum Commands {
     },
 
     #[command(
-        next_help_heading = "Troubleshooting",
+        next_help_heading = "Advanced",
         about = "Resolve a capsule handle or terse ref into a launch preview"
     )]
     Resolve {
@@ -270,7 +286,7 @@ pub(crate) enum Commands {
     },
 
     #[command(
-        next_help_heading = "Primary Commands",
+        next_help_heading = "Compatibility",
         about = "Install a package from the store"
     )]
     Install {
@@ -359,7 +375,7 @@ pub(crate) enum Commands {
     },
 
     #[command(
-        next_help_heading = "Primary Commands",
+        next_help_heading = "Compatibility",
         about = "Fetch declared development dependencies for a local project"
     )]
     Setup {
@@ -385,7 +401,7 @@ pub(crate) enum Commands {
     },
 
     #[command(
-        next_help_heading = "Primary Commands",
+        next_help_heading = "Compatibility",
         about = "Materialize a durable ato.lock.json baseline for a local workspace"
     )]
     Init {
@@ -399,7 +415,7 @@ pub(crate) enum Commands {
     },
 
     #[command(
-        next_help_heading = "Primary Commands",
+        next_help_heading = "Build & Publish",
         about = "Build project into a capsule archive",
         alias = "pack"
     )]
@@ -455,7 +471,7 @@ pub(crate) enum Commands {
     },
 
     #[command(
-        next_help_heading = "Primary Commands",
+        next_help_heading = "Build & Publish",
         about = "Search the store for packages"
     )]
     Search {
