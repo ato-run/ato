@@ -56,6 +56,9 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         Commands::Run {
             path,
             target,
+            entry,
+            env_file,
+            prompt_env,
             watch,
             background,
             nacelle,
@@ -85,6 +88,9 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         } => run::execute_run_like_command(run::RunLikeCommandArgs {
             path,
             target,
+            entry,
+            env_file,
+            prompt_env,
             args,
             watch,
             background,

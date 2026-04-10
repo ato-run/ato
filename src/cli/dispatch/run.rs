@@ -1,13 +1,19 @@
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
+use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::CapsuleReporter;
 
 #[cfg(test)]
 pub(crate) use crate::application::pipeline::hourglass::HourglassPhase as RunPhaseBoundary;
+use crate::application::ports::OutputPort;
+use crate::application::share;
 use crate::install::support::{enforce_sandbox_mode_flags, execute_run_command};
 #[cfg(test)]
 pub(crate) use crate::install::support::{LocalRunManifestPreparationOutcome, ResolvedRunTarget};
+use crate::progressive_ui;
 use crate::reporters;
 use crate::{
     CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, ProviderToolchain,
@@ -17,6 +23,9 @@ use crate::{
 pub(crate) struct RunLikeCommandArgs {
     pub(crate) path: PathBuf,
     pub(crate) target: Option<String>,
+    pub(crate) entry: Option<String>,
+    pub(crate) env_file: Option<PathBuf>,
+    pub(crate) prompt_env: bool,
     pub(crate) args: Vec<String>,
     pub(crate) watch: bool,
     pub(crate) background: bool,
@@ -66,36 +75,292 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
         args.compatibility_fallback,
         args.reporter.clone(),
     )?;
-    execute_run_command(
-        args.path,
-        args.target,
-        args.args,
-        args.watch,
-        args.background,
-        args.nacelle,
-        args.registry,
-        effective_enforcement,
-        sandbox_requested,
-        args.dangerously_skip_permissions,
-        args.compatibility_fallback
-            .map(CompatibilityFallbackBackend::as_str)
-            .map(str::to_string),
-        args.provider_toolchain,
-        args.yes,
-        resolve_run_verbose(args.verbose),
-        args.agent_mode,
-        None,
-        args.keep_failed_artifacts,
-        args.auto_fix_mode,
-        args.allow_unverified,
-        args.read,
-        args.write,
-        args.read_write,
-        args.cwd,
-        args.state,
-        args.inject,
-        args.reporter,
+    if share::looks_like_share_run_input(raw_target.as_ref())
+        || looks_like_local_share_artifact(raw_target.as_ref())
+    {
+        return share::execute_run_share(share::RunShareArgs {
+            input: raw_target.into_owned(),
+            entry: args.entry,
+            args: args.args,
+            env_file: args.env_file,
+            prompt_env: args.prompt_env,
+            watch: args.watch,
+            background: args.background,
+            reporter: args.reporter,
+        });
+    }
+
+    execute_standard_run_with_env_assistance(args, effective_enforcement, sandbox_requested)
+}
+
+fn execute_standard_run_with_env_assistance(
+    args: RunLikeCommandArgs,
+    effective_enforcement: EnforcementMode,
+    sandbox_requested: bool,
+) -> Result<()> {
+    let raw_target = args.path.to_string_lossy().to_string();
+    let mut injected_env = ScopedEnv::default();
+    let saved_env_path =
+        saved_target_env_path(&fingerprint_target(&raw_target, args.target.as_deref()))?;
+
+    if saved_env_path.exists() {
+        injected_env.apply_map(load_env_file(&saved_env_path)?);
+    }
+    if let Some(env_file) = args.env_file.as_deref() {
+        injected_env.apply_map(load_env_file(env_file)?);
+    }
+
+    let run_once = |args: &RunLikeCommandArgs, effective_enforcement, sandbox_requested| {
+        execute_run_command(
+            args.path.clone(),
+            args.target.clone(),
+            args.args.clone(),
+            args.watch,
+            args.background,
+            args.nacelle.clone(),
+            args.registry.clone(),
+            effective_enforcement,
+            sandbox_requested,
+            args.dangerously_skip_permissions,
+            args.compatibility_fallback
+                .map(CompatibilityFallbackBackend::as_str)
+                .map(str::to_string),
+            args.provider_toolchain,
+            args.yes,
+            resolve_run_verbose(args.verbose),
+            args.agent_mode,
+            None,
+            args.keep_failed_artifacts,
+            args.auto_fix_mode,
+            args.allow_unverified,
+            args.read.clone(),
+            args.write.clone(),
+            args.read_write.clone(),
+            args.cwd.clone(),
+            args.state.clone(),
+            args.inject.clone(),
+            args.reporter.clone(),
+        )
+    };
+
+    match run_once(&args, effective_enforcement, sandbox_requested) {
+        Ok(()) => {
+            report_next_step(&args, &raw_target)?;
+            Ok(())
+        }
+        Err(error) => {
+            let Some(missing_keys) = missing_required_env_keys(&error) else {
+                return Err(error);
+            };
+
+            if args.env_file.is_some() {
+                return Err(error.context(format!(
+                    "Required environment is still missing after loading --env-file: {}",
+                    missing_keys.join(", ")
+                )));
+            }
+
+            if !io_available_for_prompt() {
+                return Err(error.context(format!(
+                    "Provide the required environment with --env-file and rerun. Missing: {}",
+                    missing_keys.join(", ")
+                )));
+            }
+
+            if !args.prompt_env {
+                futures::executor::block_on(args.reporter.warn(format!(
+                    "Missing required environment for this run: {}",
+                    missing_keys.join(", ")
+                )))?;
+                if !progressive_ui::confirm_with_fallback(
+                    "Enter values now for this run? [Y/n] ",
+                    true,
+                    progressive_ui::can_use_progressive_ui(args.reporter.is_json()),
+                )? {
+                    return Err(error);
+                }
+            }
+
+            let prompted = prompt_for_missing_env(&missing_keys)?;
+            injected_env.apply_map(prompted.clone());
+            if progressive_ui::confirm_with_fallback(
+                "Save these values for this target? [y/N] ",
+                false,
+                progressive_ui::can_use_progressive_ui(args.reporter.is_json()),
+            )? {
+                persist_env_file(&saved_env_path, &prompted)?;
+            }
+
+            run_once(&args, effective_enforcement, sandbox_requested)?;
+            report_next_step(&args, &raw_target)?;
+            Ok(())
+        }
+    }
+}
+
+fn report_next_step(args: &RunLikeCommandArgs, raw_target: &str) -> Result<()> {
+    let expanded_local = crate::local_input::expand_local_path(raw_target);
+    let message = if crate::local_input::should_treat_input_as_local(raw_target, &expanded_local)
+        && expanded_local.is_dir()
+    {
+        Some("Share it next: ato encap --share".to_string())
+    } else if looks_like_remote_try_target(raw_target) {
+        Some(format!(
+            "Set it up locally next: ato decap {} --into ./{}",
+            raw_target,
+            suggested_into_dir(raw_target)
+        ))
+    } else {
+        None
+    };
+
+    if let Some(message) = message {
+        futures::executor::block_on(args.reporter.notify(message))?;
+    }
+    Ok(())
+}
+
+fn looks_like_local_share_artifact(raw_target: &str) -> bool {
+    let path = PathBuf::from(raw_target);
+    matches!(
+        path.file_name().and_then(|value| value.to_str()),
+        Some("share.spec.json" | "share.lock.json")
     )
+}
+
+fn looks_like_remote_try_target(raw_target: &str) -> bool {
+    raw_target.starts_with("github.com/")
+        || raw_target.contains("/s/")
+        || (raw_target.contains('/')
+            && !crate::local_input::is_explicit_local_path_input(raw_target))
+}
+
+fn suggested_into_dir(raw_target: &str) -> String {
+    if let Some(last) = raw_target.rsplit('/').next() {
+        let trimmed = last.split("@r").next().unwrap_or(last).trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "workspace".to_string()
+}
+
+fn fingerprint_target(raw_target: &str, target: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(raw_target.as_bytes());
+    if let Some(target) = target {
+        hasher.update(b"::");
+        hasher.update(target.as_bytes());
+    }
+    hex::encode(hasher.finalize())
+}
+
+fn saved_target_env_path(fingerprint: &str) -> Result<PathBuf> {
+    let home = dirs::home_dir().context("failed to resolve home directory for env cache")?;
+    Ok(home
+        .join(".ato")
+        .join("env")
+        .join("targets")
+        .join(format!("{fingerprint}.env")))
+}
+
+fn load_env_file(path: &std::path::Path) -> Result<Vec<(String, String)>> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read env file {}", path.display()))?;
+    Ok(raw
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                return None;
+            }
+            let (key, value) = trimmed.split_once('=')?;
+            Some((key.trim().to_string(), value.trim().to_string()))
+        })
+        .collect())
+}
+
+fn persist_env_file(path: &std::path::Path, envs: &[(String, String)]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let rendered = envs
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(path, format!("{rendered}\n"))
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn prompt_for_missing_env(missing_keys: &[String]) -> Result<Vec<(String, String)>> {
+    let mut values = Vec::new();
+    for key in missing_keys {
+        eprint!("{key}: ");
+        std::io::stderr()
+            .flush()
+            .context("failed to flush env prompt")?;
+        let mut value = String::new();
+        std::io::stdin()
+            .read_line(&mut value)
+            .context("failed to read env prompt")?;
+        values.push((key.clone(), value.trim().to_string()));
+    }
+    Ok(values)
+}
+
+fn io_available_for_prompt() -> bool {
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+fn missing_required_env_keys(error: &anyhow::Error) -> Option<Vec<String>> {
+    let execution_error = error.downcast_ref::<AtoExecutionError>()?;
+    if execution_error.name != "missing_required_env" {
+        return None;
+    }
+    execution_error
+        .details
+        .as_ref()
+        .and_then(|details| details.get("missing_keys"))
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .filter(|items| !items.is_empty())
+}
+
+#[derive(Default)]
+struct ScopedEnv {
+    previous: Vec<(String, Option<String>)>,
+}
+
+impl ScopedEnv {
+    fn apply_map(&mut self, envs: Vec<(String, String)>) {
+        for (key, value) in envs {
+            if self.previous.iter().all(|(existing, _)| existing != &key) {
+                self.previous.push((key.clone(), std::env::var(&key).ok()));
+            }
+            std::env::set_var(key, value);
+        }
+    }
+}
+
+impl Drop for ScopedEnv {
+    fn drop(&mut self) {
+        for (key, previous) in self.previous.drain(..).rev() {
+            if let Some(previous) = previous {
+                std::env::set_var(key, previous);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+    }
 }
 
 fn resolve_run_verbose(explicit_verbose: bool) -> bool {
@@ -193,6 +458,9 @@ mod tests {
         let error = super::execute_run_like_command(super::RunLikeCommandArgs {
             path: PathBuf::from("capsule://github.com/acme/chat"),
             target: None,
+            entry: None,
+            env_file: None,
+            prompt_env: false,
             args: Vec::new(),
             watch: false,
             background: false,
