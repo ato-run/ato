@@ -18,6 +18,7 @@ ignore = [
     { id = "RUSTSEC-2026-0094", reason = "Wasmtime Winch table.grow return value vulnerability; pinned pending planned upgrade." },
     { id = "RUSTSEC-2026-0095", reason = "Wasmtime Winch compiler sandbox escape; pinned pending planned upgrade." },
     { id = "RUSTSEC-2026-0096", reason = "Wasmtime aarch64 Cranelift miscompile; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0097", reason = "rand 0.8.5 unsound with custom logger; transitive dep via wasmtime/opentelemetry stack, upgrade blocked until dependency refresh." },
     { id = "RUSTSEC-2026-0020", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
     { id = "RUSTSEC-2026-0021", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
     { id = "RUSTSEC-2024-0438", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
