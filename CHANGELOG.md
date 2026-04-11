@@ -4,6 +4,18 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.61] - 2026-04-13
+
+### What Changed
+
+#### Tests
+
+- Strengthen E2E-9 (trailing args): assert each argument appears as its own output line, catching splits that `echo ok` would hide
+- Strengthen E2E-1 (prompt-env save → reuse): assert the saved env file exists on disk after `Save=yes` before verifying non-TTY reuse
+- Strengthen E2E-2 (prompt-env use-once): assert the first PTY run actually produced `DEMO_TOKEN=once-only-value` output, preventing false passes when the run silently fails
+- Fix `write_no_env_fixture` entry command: replaced `echo ok` with a shell loop that echoes each `$@` argument on its own line, making argv passthrough meaningful to test
+- Add E2E-6 (multi-entry chooser): PTY test that verifies `ato run` shows a numbered chooser when no single primary exists, and runs only the selected entry
+
 ## [0.4.60] - 2026-04-12
 
 ### What Changed
