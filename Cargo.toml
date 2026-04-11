@@ -8,7 +8,7 @@ resolver = "2"
 
 [package]
 name = "ato-cli"
-version = "0.4.59"
+version = "0.4.60"
 edition = "2021"
 description = "ato CLI (meta-runtime)"
 license = "Apache-2.0"
@@ -90,6 +90,8 @@ assert_cmd = "2"
 predicates = "3"
 wat = "1.0"
 serial_test = "3"
+expectrl = "0.8"
+rexpect = "0.7"
 
 [target.'cfg(windows)'.dependencies]
 junction = "1.4.2"

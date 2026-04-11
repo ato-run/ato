@@ -2516,6 +2516,7 @@ mod tests {
         )
         .expect("package.json");
         fs::write(web.join("bun.lock"), "").expect("bun.lock");
+        fs::write(web.join(".env"), "VITE_API_URL=\n").expect("env");
         init_git_repo(&web, "git@github.com:acme/dashboard.git");
 
         let capture = capture_workspace(root).expect("capture");
@@ -2545,7 +2546,7 @@ mod tests {
             .spec
             .entries
             .iter()
-            .any(|entry| entry.id == "dashboard"
+            .any(|entry| entry.id == "dashboard-dev"
                 && entry.env.files.iter().any(|path| path.ends_with(".env"))));
     }
 
