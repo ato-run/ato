@@ -4,7 +4,22 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
-## [0.4.61] - 2026-04-13
+## [0.4.62] - 2026-04-14
+
+### What Changed
+
+#### Distribution
+
+- Add Homebrew tap support: `brew tap ato-run/ato && brew install ato` now works after the first release
+- Auto-generate and push `Formula/ato.rb` to `ato-run/homebrew-ato` on each release via cargo-dist
+- Exclude `capsule-core` from cargo-dist release artifacts (prevents `tar_pack_bench` binary from polluting release builds)
+
+#### Installer
+
+- Add `wget` fallback to `install.sh`: prefers `curl` but falls back to `wget` if curl is unavailable
+- `wget -qO- https://ato.run/install.sh | sh` now works
+
+
 
 ### What Changed
 
