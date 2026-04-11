@@ -4,6 +4,19 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.60] - 2026-04-12
+
+### What Changed
+
+#### Tests
+
+- Add 10 E2E / interactive integration tests for `encap`, `run`, and `decap` share workflows:
+  - `share_run_e2e`: `--watch` reject, `--background` reject, non-TTY missing required env fails closed, failed share-run then rerun (no stale-dir error)
+  - `share_interactive_e2e` (PTY): `--prompt-env` save → reuse, use-once, cancel, trailing args passthrough via `--entry ... -- --arg`
+  - `share_encap_interactive_e2e` (PTY): primary entry switch persists to `share.spec.json`, zero-primary chooser selection persists
+- Fix pre-existing test bug: `capture_workspace_detects_sources_steps_services_and_env` now uses the correct entry ID (`dashboard-dev`) and adds a `.env` fixture to the dashboard repo so the env-file linkage assertion is exercised end-to-end
+- Add `expectrl` PTY harness (`expectrl = "0.8"`) as a dev dependency for interactive test automation
+
 ## [0.4.59] - 2026-04-11
 
 ### What Changed
