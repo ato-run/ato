@@ -63,6 +63,9 @@ fn write_prompt_env_fixture(dir: &std::path::Path) {
 #[cfg(unix)]
 fn write_no_env_fixture(dir: &std::path::Path) {
     // Entry echoes each positional arg on its own line (supports trailing args test).
+    // The run command is: sh -c 'for x in "$@"; do echo "$x"; done' --
+    // With trailing args appended by ato via shell_words::join, this lets us
+    // verify that each arg arrives as a distinct line (testing no word-splitting).
     let spec = r#"{
   "schema_version": "1",
   "name": "test-share-args",
@@ -71,20 +74,20 @@ fn write_no_env_fixture(dir: &std::path::Path) {
   "tool_requirements": [],
   "env_requirements": [],
   "install_steps": [],
-  "services": [],
-  "notes": {"team_notes": ""},
-  "generated_from": {"root_path": ".", "captured_at": "2025-01-01T00:00:00Z", "host_os": "test"},
   "entries": [{
     "id": "main",
     "label": "Main",
     "cwd": ".",
-    "run": "echo ok",
+    "run": "sh -c 'for x in \"$@\"; do echo \"$x\"; done' --",
     "kind": "task",
     "primary": true,
     "depends_on": [],
     "env": {"required": [], "optional": [], "files": []},
     "evidence": []
-  }]
+  }],
+  "services": [],
+  "notes": {"team_notes": ""},
+  "generated_from": {"root_path": ".", "captured_at": "2025-01-01T00:00:00Z", "host_os": "test"}
 }"#;
     let lock = r#"{
   "schema_version": "1",
@@ -140,6 +143,20 @@ fn test_e2e_1_prompt_env_save_then_reuse() {
         .expect("DEMO_TOKEN=test-secret-value")
         .expect("echo output with saved token");
     session.expect(Eof).ok();
+
+    // Verify that the env store now has a saved file.
+    let env_store = tmp_home.path().join(".ato").join("env").join("targets");
+    assert!(
+        env_store.exists(),
+        "env store directory should exist after saving"
+    );
+    let any_saved = fs::read_dir(&env_store)
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false);
+    assert!(
+        any_saved,
+        "at least one env file should be written after save=yes"
+    );
 
     // --- Reuse run: non-PTY, saved env must be loaded automatically ---
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ato"))
@@ -200,6 +217,11 @@ fn test_e2e_2_prompt_env_use_once() {
 
     session.expect("Save these values").expect("save prompt");
     session.send_line("n").expect("decline save");
+
+    // The entry should still run and echo the token, even when save is declined.
+    session
+        .expect("DEMO_TOKEN=once-only-value")
+        .expect("entry must echo the token on the first run");
 
     // Drain so the process can exit cleanly.
     session.expect(Eof).ok();
@@ -313,5 +335,120 @@ fn test_e2e_9_trailing_args() {
     assert!(
         output.status.success(),
         "run with trailing args should exit 0. stderr: {stderr}"
+    );
+
+    // Verify argv passthrough: each arg must appear as its own line.
+    // If arg-splitting occurred, "arg with spaces" would become three separate lines.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines.contains(&"firstarg"),
+        "firstarg should appear as its own output line; got lines: {lines:?}"
+    );
+    assert!(
+        lines.contains(&"arg with spaces"),
+        "'arg with spaces' should appear as a single line (not split into words); got lines: {lines:?}"
+    );
+}
+
+#[cfg(unix)]
+fn write_multi_entry_fixture(dir: &std::path::Path) {
+    // Two entries, both primary=false so the interactive chooser is triggered.
+    // First entry echoes "first-entry-ran"; second echoes "second-entry-ran".
+    let spec = r#"{
+  "schema_version": "1",
+  "name": "test-multi-entry",
+  "root": ".",
+  "sources": [],
+  "tool_requirements": [],
+  "env_requirements": [],
+  "install_steps": [],
+  "entries": [
+    {
+      "id": "first-entry",
+      "label": "First Entry",
+      "cwd": ".",
+      "run": "echo first-entry-ran",
+      "kind": "task",
+      "primary": false,
+      "depends_on": [],
+      "env": {"required": [], "optional": [], "files": []},
+      "evidence": []
+    },
+    {
+      "id": "second-entry",
+      "label": "Second Entry",
+      "cwd": ".",
+      "run": "echo second-entry-ran",
+      "kind": "task",
+      "primary": false,
+      "depends_on": [],
+      "env": {"required": [], "optional": [], "files": []},
+      "evidence": []
+    }
+  ],
+  "services": [],
+  "notes": {"team_notes": ""},
+  "generated_from": {"root_path": ".", "captured_at": "2025-01-01T00:00:00Z", "host_os": "test"}
+}"#;
+    let lock = r#"{
+  "schema_version": "1",
+  "spec_digest": "sha256:dummy",
+  "generated_guide_digest": "sha256:dummy",
+  "revision": 1,
+  "created_at": "2025-01-01T00:00:00Z",
+  "resolved_sources": [],
+  "resolved_tools": []
+}"#;
+    fs::write(dir.join("share.spec.json"), spec).unwrap();
+    fs::write(dir.join("share.lock.json"), lock).unwrap();
+}
+
+/// E2E-6: Multi-entry chooser selects the intended entry via PTY interaction.
+///
+/// When a share spec has multiple entries with no single primary, `ato run`
+/// must show a numbered chooser and run whichever entry the user picks.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_e2e_6_multi_entry_chooser() {
+    let tmp = workspace_tempdir("e2e6-chooser-");
+    let tmp_home = workspace_tempdir("e2e6-home-");
+    write_multi_entry_fixture(tmp.path());
+    let spec_path = tmp.path().join("share.spec.json");
+
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_ato"));
+    cmd.arg("run")
+        .arg(spec_path.to_str().unwrap())
+        .env("HOME", tmp_home.path())
+        .current_dir(tmp.path());
+
+    let mut session = Session::spawn(cmd).expect("spawn PTY session for chooser");
+    session.set_expect_timeout(Some(Duration::from_secs(30)));
+
+    // The chooser prompt lists entries and asks for a selection.
+    session
+        .expect("Choose an entry [1-")
+        .expect("chooser prompt");
+
+    // Select entry 2 ("second-entry").
+    session.send_line("2").expect("send entry selection");
+
+    // Only the second entry's output should appear.
+    session
+        .expect("second-entry-ran")
+        .expect("second entry output after selection");
+
+    session.expect(Eof).ok();
+
+    use expectrl::process::unix::WaitStatus;
+    let status = session
+        .get_process()
+        .wait()
+        .expect("wait for process after chooser");
+    assert!(
+        matches!(status, WaitStatus::Exited(_, 0)),
+        "selected entry should exit 0. got: {:?}",
+        status
     );
 }
