@@ -38,6 +38,12 @@ ato run @publisher/tool -- --help
 
 # Run a single script safely with zero configuration.
 ato run scrape.py
+
+# Run directly from a shared workspace URL.
+ato run https://ato.run/s/demo@r1
+ato run https://ato.run/s/demo@r1 --entry dashboard
+ato run https://ato.run/s/demo@r1 --env-file ./demo.env
+ato run https://ato.run/s/demo@r1 --prompt-env
 ```
 
 ### Phase 1: exported CLI entries
@@ -50,6 +56,26 @@ Phase 1 adds one-shot exported CLI execution through `ato run @publisher/tool --
 - The export must point at a `runtime = "source"` and `driver = "python"` target.
 - Export prefix args and user trailing args are both applied to consent, execution planning, and the final launch.
 - Persistent installed CLI shims are not part of Phase 1. This is one-shot execution only.
+
+### Share workflow: `ato encap` + `ato decap`
+
+Capture a local workspace and share it as a URL. Recipients can materialize the full environment on any supported machine in one command.
+
+```bash
+# Capture the current workspace and upload it as a shareable URL.
+ato encap . --share
+
+# Preview what will be captured without writing anything.
+ato encap . --print-plan
+
+# Materialize a shared workspace into a local directory.
+ato decap https://ato.run/s/demo@r1 --into ./my-project
+
+# Materialize from a local descriptor file.
+ato decap .ato/share/share.spec.json --into ./my-project
+```
+
+`ato encap` records sources, toolchains, install steps, services, and env variable requirements — without capturing secret values. `ato decap` verifies missing tools and required env vars before materializing. To supply required env vars interactively at run time, pass `--prompt-env` to `ato run`.
 
 ### 2. Materialize a fully reproducible dev environment from someone else's repo in one second: `ato init`
 
@@ -135,7 +161,9 @@ cargo build -p ato-cli
 ## Key Command Reference
 
 ```bash
-ato run [path|publisher/slug|github.com/owner/repo] [--registry <url>]
+ato run [path|github.com/owner/repo|https://ato.run/s/...|publisher/slug] [--entry <name>] [--env-file <path>] [--prompt-env] [--registry <url>] [-- <args>]
+ato encap [path] [--share] [--save-only] [--print-plan]
+ato decap <url|spec|lock> --into <dir> [--plan]
 ato init [path] [--yes]
 ato install <publisher/slug> [--registry <url>]
 ato install --from-gh-repo <github.com/owner/repo>

@@ -35,6 +35,12 @@ ato run @publisher/tool -- --help
 
 # 単一のスクリプトを、設定ゼロで安全に実行。
 ato run scrape.py
+
+# 共有ワークスペース URL から直接実行。
+ato run https://ato.run/s/demo@r1
+ato run https://ato.run/s/demo@r1 --entry dashboard
+ato run https://ato.run/s/demo@r1 --env-file ./demo.env
+ato run https://ato.run/s/demo@r1 --prompt-env
 ```
 
 ### Phase 1: exported CLI エントリ
@@ -47,6 +53,26 @@ Phase 1 では `ato run @publisher/tool -- ...` による one-shot exported CLI 
 - export は `runtime = "source"` かつ `driver = "python"` の target を参照している必要があります。
 - export prefix args とユーザーの trailing args は、consent、execution plan、最終 launch のすべてに反映されます。
 - persistent な install 済み CLI shim は Phase 1 の対象外です。今回は one-shot 実行のみです。
+
+### シェアワークフロー: `ato encap` + `ato decap`
+
+ローカルのワークスペースを URL として共有します。受け取った人はたった 1 コマンドで同じ環境を任意のマシン上に具現化できます。
+
+```bash
+# 現在のワークスペースをキャプチャし、共有 URL としてアップロード。
+ato encap . --share
+
+# 実際にファイルを書き出さずに、キャプチャ内容をプレビュー。
+ato encap . --print-plan
+
+# 共有 URL からローカルディレクトリへワークスペースを具現化。
+ato decap https://ato.run/s/demo@r1 --into ./my-project
+
+# ローカルのディスクリプタファイルを使って具現化。
+ato decap .ato/share/share.spec.json --into ./my-project
+```
+
+`ato encap` はソース・ツールチェーン・インストールステップ・サービス・環境変数の要件を記録しますが、**シークレットの値は一切保存しません**。`ato decap` は具現化の前に不足しているツールや必須の環境変数を検証します。実行時に対話的に環境変数を入力するには、`ato run` に `--prompt-env` を付けてください。
 
 ### 2. 他人のリポジトリから、完璧な開発環境を1秒で錬成 (`ato init`)
 
@@ -132,7 +158,9 @@ cargo build -p ato-cli
 ## 📖 主要コマンドリファレンス
 
 ```bash
-ato run [path|publisher/slug|github.com/owner/repo] [--registry <url>]
+ato run [path|github.com/owner/repo|https://ato.run/s/...|publisher/slug] [--entry <name>] [--env-file <path>] [--prompt-env] [--registry <url>] [-- <args>]
+ato encap [path] [--share] [--save-only] [--print-plan]
+ato decap <url|spec|lock> --into <dir> [--plan]
 ato init [path] [--yes]
 ato install <publisher/slug> [--registry <url>]
 ato install --from-gh-repo <github.com/owner/repo>
