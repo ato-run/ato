@@ -308,7 +308,9 @@ fn decap_command_requires_into_and_parses_plan() {
     ])
     .expect("parse");
     match cli.command {
-        Commands::Decap { input, into, plan, .. } => {
+        Commands::Decap {
+            input, into, plan, ..
+        } => {
             assert_eq!(input, "https://ato.run/s/demo");
             assert_eq!(into, PathBuf::from("./demo"));
             assert!(plan);
