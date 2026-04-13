@@ -505,8 +505,13 @@ fn extract_host(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::fs;
+    use std::sync::Arc;
+
     use tempfile::TempDir;
+
+    use super::write_lockfile;
+    use crate::reporter::NoOpReporter;
 
     #[test]
     fn writes_lockfile_with_allowlist() {

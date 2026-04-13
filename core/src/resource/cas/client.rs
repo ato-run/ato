@@ -378,8 +378,13 @@ pub fn create_cas_client_from_env() -> Result<Box<dyn CasClient>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use crate::error::CapsuleError;
+
+    use super::LocalCasClient;
+
+    use super::parse_digest;
 
     #[tokio::test]
     async fn test_local_cas_store_and_fetch() {

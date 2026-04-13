@@ -153,7 +153,7 @@ pub fn validate_blake3_digest(label: &str, value: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{blake3_digest, CapsuleManifestV3, ChunkMeta};
 
     #[test]
     fn validate_rejects_invalid_schema_version() {

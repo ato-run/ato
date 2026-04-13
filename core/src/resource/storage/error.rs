@@ -48,8 +48,9 @@ pub type StorageResult<T> = Result<T, StorageError>;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::io;
+
+    use super::{StorageError, StorageResult};
 
     #[test]
     fn test_error_display() {
