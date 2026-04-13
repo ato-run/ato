@@ -1,10 +1,20 @@
-name: Release PR
+name: Release / Release PR
 
+# release-pr: Opens a version-bump PR (weekly or on demand).
+# release:    Pushes the version tag after main CI is green, triggering release.yml.
 on:
-  push:
-    branches:
-      - main
+  schedule:
+    - cron: '0 0 * * 1'  # Weekly Monday 00:00 UTC — creates Release PR
   workflow_dispatch:
+    inputs:
+      command:
+        description: 'release-pr: Create/update Release PR  |  release: Tag after main CI passes'
+        required: false
+        default: 'release-pr'
+        type: choice
+        options:
+          - release-pr
+          - release
 
 permissions:
   contents: write
@@ -25,22 +35,46 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-      - name: Resolve release-plz token
+
+      # PAT is required so the pushed tag triggers release.yml.
+      # GITHUB_TOKEN-pushed tags do not trigger downstream workflows.
+      - name: Validate PAT for release
+        if: ${{ github.event.inputs.command == 'release' }}
+        shell: bash
+        run: |
+          if [[ -z "${RELEASE_PLZ_TOKEN}" ]]; then
+            echo "::error::RELEASE_PLZ_TOKEN secret is required for the release command."
+            echo "::error::Without a PAT, the pushed tag will not trigger release.yml."
+            exit 1
+          fi
+
+      - name: Resolve token for release-pr
+        if: ${{ github.event.inputs.command != 'release' }}
         id: release_plz_token
         shell: bash
         run: |
           if [[ -n "${RELEASE_PLZ_TOKEN}" ]]; then
             echo "token=${RELEASE_PLZ_TOKEN}" >> "$GITHUB_OUTPUT"
-            echo "Using RELEASE_PLZ_TOKEN for release PR operations"
           else
             echo "token=${{ secrets.GITHUB_TOKEN }}" >> "$GITHUB_OUTPUT"
-            echo "Using default GITHUB_TOKEN for release PR operations"
           fi
+
+      - name: Tag and release
+        if: ${{ github.event.inputs.command == 'release' }}
+        uses: release-plz/action@v0.5.128
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
       - name: Create or update release PR
+        if: ${{ github.event.inputs.command != 'release' }}
         uses: release-plz/action@v0.5.128
         with:
           command: release-pr
