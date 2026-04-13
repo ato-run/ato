@@ -61,7 +61,7 @@ zip = "2.1"
 zstd = { version = "0.13", features = ["zstdmt"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time", "net", "signal"] }
 tempfile = "3.8"
-rust-embed = "8.5"
+rust-embed = { version = "8.5", optional = true }
 mime_guess = "2.0"
 chrono = { version = "0.4", default-features = true }
 thiserror = "2.0"
@@ -111,6 +111,7 @@ openssl-sys = { version = "0.9.112", features = ["vendored"] }
 [features]
 default = []
 provisioning-tests = []
+webui = ["dep:rust-embed"]
 
 # The profile that 'dist' will build with
 [profile.dist]

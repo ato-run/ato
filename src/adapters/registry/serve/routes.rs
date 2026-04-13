@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg_attr(not(feature = "webui"), allow(unused_variables))]
 pub(super) fn build_app_router(ui_enabled: bool) -> Router<AppState> {
     let mut app = Router::new();
     app = app.route("/.well-known/capsule.json", get(handle_well_known));
@@ -122,6 +123,7 @@ pub(super) fn build_app_router(ui_enabled: bool) -> Router<AppState> {
         get(handle_get_process_logs).delete(handle_clear_process_logs),
     );
 
+    #[cfg(feature = "webui")]
     if ui_enabled {
         app = app.fallback(handle_ui_request);
     }
