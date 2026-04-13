@@ -279,6 +279,14 @@ pub(crate) enum Commands {
         /// Allow encap even when repositories have uncommitted changes
         #[arg(long, default_value_t = false)]
         allow_dirty: bool,
+
+        /// Accept all detected items without prompting (CI-friendly)
+        #[arg(long, short = 'y', default_value_t = false)]
+        yes: bool,
+
+        /// Write detected share settings to capsule.toml [share] after capture
+        #[arg(long, default_value_t = false)]
+        save_config: bool,
     },
 
     #[command(
