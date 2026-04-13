@@ -2435,7 +2435,14 @@ fn materialize_source(
     } else {
         run_git(Some(target), &["fetch", "--all", "--tags"])?;
     }
-    run_git(Some(target), &["checkout", "--force", &locked.rev])?;
+    run_git(Some(target), &["checkout", "--force", &locked.rev]).with_context(|| {
+        format!(
+            "Commit {} is not reachable from {}. \
+             The sender may not have pushed this commit. \
+             Ask the sender to push, or re-share using `ato encap --git-mode latest-at-encap`.",
+            &locked.rev, &source.url
+        )
+    })?;
     let current_rev = git_output(target, &["rev-parse", "HEAD"])?
         .unwrap_or_else(|| locked.rev.clone())
         .trim()
@@ -2451,7 +2458,8 @@ fn verify_tools(
     for spec_tool in spec_tools {
         match resolved_tools.iter().find(|r| r.tool == spec_tool.tool) {
             None => missing.push(spec_tool.tool.clone()),
-            Some(resolved) if resolved.binary_path.is_none() => {
+            // binary_path is None for ato-managed tools; don't treat that as missing.
+            Some(resolved) if resolved.binary_path.is_none() && resolved.runtime_source == "system" => {
                 missing.push(spec_tool.tool.clone())
             }
             Some(_) => {}
@@ -2463,6 +2471,9 @@ fn verify_tools(
 fn verify_local_tools(spec_tools: &[ToolRequirementSpec]) -> Vec<String> {
     spec_tools
         .iter()
+        // Skip local-tool check for tools that ato manages (uv/npm already present at paths
+        // we control, or we will inject them via env vars).
+        .filter(|t| matches!(t.runtime_source.as_str(), "system" | ""))
         .filter_map(|tool| {
             let binary = binary_name_for_tool(&tool.tool);
             which::which(binary).err().map(|_| tool.tool.clone())
@@ -2778,7 +2789,8 @@ mod tests {
         fs::write(web.join(".env"), "VITE_API_URL=\n").expect("env");
         init_git_repo(&web, "git@github.com:acme/dashboard.git");
 
-        let capture = capture_workspace(root).expect("capture");
+        let reporter = Arc::new(crate::reporters::CliReporter::new(false));
+        let capture = capture_workspace(root, GitMode::SameCommit, false, &reporter).expect("capture");
         assert_eq!(capture.spec.sources.len(), 2);
         assert!(capture
             .spec
@@ -3041,7 +3053,7 @@ mod tests {
         );
 
         let into = temp.path().join("out");
-        let state = materialize_loaded_share(&loaded, &into).expect("materialize");
+        let state = materialize_loaded_share(&loaded, &into, ShareToolRuntime::System, false).expect("materialize");
         assert!(
             state
                 .verification
@@ -3213,7 +3225,7 @@ mod tests {
         .expect("load should succeed");
         let into = temp.path().join("out");
         let err =
-            materialize_loaded_share(&loaded, &into).expect_err("should error on missing source");
+            materialize_loaded_share(&loaded, &into, ShareToolRuntime::System, false).expect_err("should error on missing source");
         assert!(
             err.to_string().contains("Missing resolved source"),
             "expected missing source error: {err}"
@@ -3391,6 +3403,162 @@ mod tests {
             primaries,
             vec!["dashboard"],
             "dashboard should be the only primary"
+        );
+    }
+
+    // --- v2 schema backward compatibility ---
+
+    #[test]
+    fn share_source_spec_v1_json_defaults_git_mode() {
+        let json = r#"{"id":"api","kind":"git","url":"https://github.com/org/api","path":"api"}"#;
+        let spec: ShareSourceSpec = serde_json::from_str(json).expect("parse v1 source spec");
+        assert_eq!(spec.git_mode, "same-commit", "v1 should default to same-commit");
+    }
+
+    #[test]
+    fn tool_requirement_spec_v1_json_defaults_runtime_source() {
+        let json =
+            r#"{"id":"python3-req","tool":"python3","required_by":["api"]}"#;
+        let spec: ToolRequirementSpec = serde_json::from_str(json).expect("parse v1 tool spec");
+        assert_eq!(
+            spec.runtime_source, "system",
+            "v1 tool spec should default to system"
+        );
+        assert!(spec.provider_toolchain.is_none());
+    }
+
+    #[test]
+    fn resolved_tool_lock_v1_json_defaults_runtime_source() {
+        let json =
+            r#"{"tool":"python3","resolved_version":"3.11","binary_path":"/usr/bin/python3"}"#;
+        let lock: ResolvedToolLock = serde_json::from_str(json).expect("parse v1 tool lock");
+        assert_eq!(lock.runtime_source, "system");
+        assert!(lock.provider_toolchain.is_none());
+        assert!(lock.provider_version.is_none());
+    }
+
+    // --- prepare_share_runtime_env ---
+
+    #[test]
+    fn prepare_runtime_env_system_mode_returns_empty() {
+        let tools = vec![ToolRequirementSpec {
+            id: "python3-req".to_string(),
+            tool: "python3".to_string(),
+            version: None,
+            required_by: vec![],
+            evidence: vec![],
+            runtime_source: "system".to_string(),
+            provider_toolchain: None,
+        }];
+        let env = prepare_share_runtime_env(&tools, ShareToolRuntime::System);
+        assert!(env.is_empty(), "system mode must not inject env vars");
+    }
+
+    #[test]
+    fn prepare_runtime_env_auto_mode_injects_uv_python_env() {
+        let tools = vec![ToolRequirementSpec {
+            id: "uv-req".to_string(),
+            tool: "uv".to_string(),
+            version: None,
+            required_by: vec![],
+            evidence: vec![],
+            runtime_source: "auto".to_string(),
+            provider_toolchain: None,
+        }];
+        let env = prepare_share_runtime_env(&tools, ShareToolRuntime::Auto);
+        assert_eq!(env.get("UV_MANAGED_PYTHON").map(|s| s.as_str()), Some("1"));
+        assert!(
+            env.get("UV_PYTHON").map(|v| !v.is_empty()).unwrap_or(false),
+            "UV_PYTHON must be set for python tools"
+        );
+    }
+
+    #[test]
+    fn prepare_runtime_env_auto_mode_injects_node_version() {
+        let tools = vec![ToolRequirementSpec {
+            id: "npm-req".to_string(),
+            tool: "npm".to_string(),
+            version: None,
+            required_by: vec![],
+            evidence: vec![],
+            runtime_source: "auto".to_string(),
+            provider_toolchain: None,
+        }];
+        let env = prepare_share_runtime_env(&tools, ShareToolRuntime::Auto);
+        assert!(
+            env.get("NODE_VERSION").map(|v| !v.is_empty()).unwrap_or(false),
+            "NODE_VERSION must be set for node tools"
+        );
+    }
+
+    // --- strict mode ---
+
+    #[test]
+    fn strict_mode_collects_issues_then_bails() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let spec = ShareSpec {
+            schema_version: SHARE_SCHEMA_VERSION.to_string(),
+            name: "test".to_string(),
+            root: ".".to_string(),
+            sources: vec![],
+            tool_requirements: vec![],
+            install_steps: vec![InstallStepSpec {
+                id: "fail-step".to_string(),
+                cwd: ".".to_string(),
+                run: "false".to_string(),
+                depends_on: vec![],
+                evidence: vec![],
+            }],
+            env_requirements: vec![],
+            entries: vec![],
+            services: vec![],
+            notes: ShareNotes::default(),
+            generated_from: GeneratedFrom {
+                root_path: ".".to_string(),
+                captured_at: "2024-01-01T00:00:00Z".to_string(),
+                host_os: "test".to_string(),
+            },
+        };
+        let spec_json = serde_json::to_string(&spec).unwrap();
+        let spec_digest = sha256_label(spec_json.as_bytes());
+        let lock = ShareLock {
+            schema_version: SHARE_SCHEMA_VERSION.to_string(),
+            spec_digest: spec_digest.clone(),
+            generated_guide_digest: String::new(),
+            revision: 1,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            resolved_sources: vec![],
+            resolved_tools: vec![],
+        };
+        let loaded = LoadedShareInput {
+            share_url: None,
+            resolved_revision_url: None,
+            spec: spec.clone(),
+            lock: lock.clone(),
+            spec_digest_verified: true,
+        };
+
+        // non-strict: should succeed but leave verification issues
+        let state =
+            materialize_loaded_share(&loaded, temp.path(), ShareToolRuntime::System, false)
+                .expect("non-strict should not bail");
+        assert!(!state.verification.issues.is_empty(), "issues must be present");
+
+        // strict mode with same input should bail
+        let temp2 = tempfile::tempdir().expect("tempdir2");
+        let loaded2 = LoadedShareInput {
+            share_url: None,
+            resolved_revision_url: None,
+            spec,
+            lock,
+            spec_digest_verified: true,
+        };
+        let err =
+            materialize_loaded_share(&loaded2, temp2.path(), ShareToolRuntime::System, true)
+                .expect_err("strict mode must bail with issues");
+        assert!(
+            err.to_string().contains("--strict"),
+            "error message must mention --strict"
         );
     }
 }
