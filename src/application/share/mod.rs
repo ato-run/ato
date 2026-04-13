@@ -25,6 +25,10 @@ const SHARE_GUIDE_FILE: &str = "guide.md";
 const SHARE_STATE_FILE: &str = "state.json";
 const SHARE_SCHEMA_VERSION: &str = "2";
 const DEFAULT_API_TIMEOUT_SECS: u64 = 20;
+/// Pinned Python version used by ato-managed runtimes for decap install steps.
+const SHARE_PROVIDER_PYTHON_VERSION: &str = "3.11.10";
+/// Pinned Node version signalled to fnm/nvm/mise for decap install steps.
+const SHARE_PROVIDER_NODE_VERSION: &str = "20.11.0";
 
 fn default_git_mode_str() -> String {
     "same-commit".to_string()
@@ -391,7 +395,7 @@ pub(crate) fn execute_encap(args: EncapArgs, reporter: Arc<CliReporter>) -> Resu
         .path
         .canonicalize()
         .with_context(|| format!("Failed to resolve workspace root {}", args.path.display()))?;
-    let capture = capture_workspace(&root)?;
+    let capture = capture_workspace(&root, args.git_mode, args.allow_dirty, &reporter)?;
 
     if args.print_plan {
         println!("{}", serde_json::to_string_pretty(&capture.spec)?);
@@ -440,7 +444,7 @@ pub(crate) fn execute_decap(args: DecapArgs, reporter: Arc<CliReporter>) -> Resu
             println!("{}", serde_json::to_string_pretty(&loaded.spec)?);
             return Ok(());
         }
-        let state = materialize_loaded_share(&loaded, &into)?;
+        let state = materialize_loaded_share(&loaded, &into, args.tool_runtime, args.strict)?;
         futures::executor::block_on(reporter.notify(build_decap_summary(&loaded.spec, &state)))?;
         return Ok(());
     }
@@ -485,7 +489,7 @@ pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
         fs::remove_dir_all(&temp_root)
             .with_context(|| format!("Failed to clean stale run root {}", temp_root.display()))?;
     }
-    let state = materialize_loaded_share(&loaded, &temp_root)?;
+    let state = materialize_loaded_share(&loaded, &temp_root, ShareToolRuntime::System, false)?;
     let env_overlay = resolve_entry_env_overlay(
         &args.input,
         &entry,
@@ -535,7 +539,7 @@ pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
     }
 }
 
-fn materialize_loaded_share(loaded: &LoadedShareInput, into: &Path) -> Result<WorkspaceShareState> {
+fn materialize_loaded_share(loaded: &LoadedShareInput, into: &Path, tool_runtime: ShareToolRuntime, strict: bool) -> Result<WorkspaceShareState> {
     let mut state = WorkspaceShareState {
         share_url: loaded.share_url.clone(),
         resolved_revision_url: loaded.resolved_revision_url.clone(),
@@ -613,10 +617,12 @@ fn materialize_loaded_share(loaded: &LoadedShareInput, into: &Path) -> Result<Wo
         }
     }
 
+    let runtime_env = prepare_share_runtime_env(&loaded.spec.tool_requirements, tool_runtime);
+
     for step in &loaded.spec.install_steps {
         let started_at = Utc::now().to_rfc3339();
         let step_root = into.join(&step.cwd);
-        match run_shell_command(&step.run, &step_root) {
+        match run_shell_command_with_env(&step.run, &step_root, &runtime_env) {
             Ok(output) => state.install_steps.push(InstallStepState {
                 id: step.id.clone(),
                 status: "ok".to_string(),
@@ -666,6 +672,15 @@ fn materialize_loaded_share(loaded: &LoadedShareInput, into: &Path) -> Result<Wo
     };
     state.last_verified_at = Some(Utc::now().to_rfc3339());
     write_share_state(into, &state)?;
+
+    if strict && !state.verification.issues.is_empty() {
+        let issues = state.verification.issues.join("\n  - ");
+        anyhow::bail!(
+            "decap completed with verification issues (--strict):\n  - {}",
+            issues
+        );
+    }
+
     Ok(state)
 }
 
@@ -746,18 +761,43 @@ fn build_generic_decap_summary(input: &str, into: &Path, state: &WorkspaceShareS
     lines.join("\n")
 }
 
-fn capture_workspace(root: &Path) -> Result<CapturedWorkspace> {
+fn capture_workspace(
+    root: &Path,
+    git_mode: GitMode,
+    allow_dirty: bool,
+    reporter: &Arc<CliReporter>,
+) -> Result<CapturedWorkspace> {
     let ignore = IgnoreMatcher::load(root)?;
     let repos = discover_repositories(root, &ignore)?;
+
+    // Dirty-state check: warn or fail if any repo has uncommitted changes.
+    for repo in &repos {
+        let dirty_output = git_output(&repo.abs_path, &["status", "--porcelain"])?;
+        let is_dirty = dirty_output.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+        if is_dirty {
+            if allow_dirty {
+                futures::executor::block_on(reporter.warn(format!(
+                    "⚠️  Repository {} has uncommitted changes. \
+                     Recipients will not see these changes after decap.",
+                    repo.rel_path
+                )))?;
+            } else {
+                anyhow::bail!(
+                    "Repository {} has uncommitted changes. \
+                     Commit or stash your changes before encap, \
+                     or pass --allow-dirty to proceed anyway.",
+                    repo.rel_path
+                );
+            }
+        }
+    }
+
+    // Resolve the pinned rev for each repo according to git_mode.
     let repo_locks = repos
         .iter()
-        .map(|repo| ResolvedSourceLock {
-            id: repo_id_from_path(&repo.rel_path),
-            rev: repo.rev.clone(),
-            git_mode: default_git_mode_str(),
-            remote_branch: None,
-        })
-        .collect::<Vec<_>>();
+        .map(|repo| resolve_source_lock(repo, git_mode))
+        .collect::<Result<Vec<_>>>()?;
+
     let mut tool_requirements = BTreeMap::<String, ToolRequirementSpec>::new();
     let mut env_requirements = Vec::new();
     let mut install_steps = Vec::new();
@@ -800,7 +840,7 @@ fn capture_workspace(root: &Path) -> Result<CapturedWorkspace> {
                 path: repo.rel_path.clone(),
                 branch: repo.branch.clone(),
                 evidence: repo.evidence.clone(),
-                git_mode: default_git_mode_str(),
+                git_mode: git_mode.as_str().to_string(),
             })
             .collect(),
         tool_requirements: tool_requirements.into_values().collect(),
@@ -822,6 +862,104 @@ fn capture_workspace(root: &Path) -> Result<CapturedWorkspace> {
         repo_locks,
         resolved_tools,
     })
+}
+
+/// Resolve the pinned rev for a repo according to the requested git_mode.
+/// For `same-commit`: verifies the local HEAD is reachable from the remote (warns if not).
+/// For `latest-at-encap`: fetches the remote branch HEAD and pins that rev.
+fn resolve_source_lock(repo: &CandidateRepo, git_mode: GitMode) -> Result<ResolvedSourceLock> {
+    match git_mode {
+        GitMode::SameCommit => {
+            // Verify the local rev exists on the remote; warn if not reachable.
+            let rev = repo.rev.trim().to_string();
+            let is_reachable = check_rev_reachable_on_remote(&repo.url, &rev);
+            if !is_reachable {
+                eprintln!(
+                    "⚠️  Warning: commit {} in {} was not found on the remote.\n\
+                     Recipients may fail to check out this revision.\n\
+                     Push to the remote first, or use --git-mode latest-at-encap.",
+                    &rev[..rev.len().min(12)],
+                    repo.rel_path,
+                );
+            }
+            Ok(ResolvedSourceLock {
+                id: repo_id_from_path(&repo.rel_path),
+                rev,
+                git_mode: git_mode.as_str().to_string(),
+                remote_branch: repo.branch.clone(),
+            })
+        }
+        GitMode::LatestAtEncap => {
+            let branch = repo
+                .branch
+                .as_deref()
+                .unwrap_or("HEAD");
+            let remote_rev = fetch_remote_rev(&repo.url, branch)?;
+            Ok(ResolvedSourceLock {
+                id: repo_id_from_path(&repo.rel_path),
+                rev: remote_rev,
+                git_mode: git_mode.as_str().to_string(),
+                remote_branch: repo.branch.clone(),
+            })
+        }
+    }
+}
+
+/// Return `true` if the given rev SHA is advertised by the remote (i.e. is the tip of some ref).
+/// This is a lightweight check: it does not guarantee the object is fetchable for arbitrary SHAs,
+/// but it catches the common "local-only commit" case where the commit is not yet pushed.
+fn check_rev_reachable_on_remote(url: &str, rev: &str) -> bool {
+    let output = Command::new("git")
+        .args(["ls-remote", url])
+        .output();
+    let Ok(output) = output else { return false };
+    if !output.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // ls-remote output: "<sha>\t<refname>\n"
+    // The rev is reachable if any advertised tip SHA starts with the given prefix
+    // (typically a full 40-char SHA, but we match a prefix for safety).
+    stdout
+        .lines()
+        .any(|line| line.split('\t').next().map(|sha| sha.starts_with(rev)).unwrap_or(false))
+}
+
+/// Fetch the current HEAD of `branch` from the remote and return the SHA.
+fn fetch_remote_rev(url: &str, branch: &str) -> Result<String> {
+    // Normalise: "HEAD" → ask for HEAD, otherwise ask for refs/heads/<branch>
+    let refspec = if branch == "HEAD" {
+        "HEAD".to_string()
+    } else {
+        format!("refs/heads/{branch}")
+    };
+    let output = Command::new("git")
+        .args(["ls-remote", url, &refspec])
+        .output()
+        .with_context(|| format!("Failed to run git ls-remote {url}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git ls-remote {} {} failed: {}",
+            url,
+            refspec,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let rev = stdout
+        .lines()
+        .next()
+        .and_then(|line| line.split('\t').next())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Remote {} has no ref {refspec}. \
+                 Make sure the branch is pushed.",
+                url
+            )
+        })?;
+    Ok(rev.to_string())
 }
 
 struct CapturedWorkspace {
@@ -2338,20 +2476,47 @@ struct ShellOutput {
 }
 
 fn run_shell_command(command: &str, cwd: &Path) -> Result<ShellOutput> {
-    let output = if cfg!(windows) {
-        Command::new("cmd")
-            .arg("/C")
-            .arg(command)
-            .current_dir(cwd)
-            .output()
+    run_shell_command_with_env(command, cwd, &std::collections::HashMap::new())
+}
+
+/// Run a shell command with additional environment variable overrides prepended.
+/// Keys in `env_overrides` that already exist in the process environment are
+/// replaced; PATH values are prepended (not replaced) to preserve system tools.
+fn run_shell_command_with_env(
+    command: &str,
+    cwd: &Path,
+    env_overrides: &std::collections::HashMap<String, String>,
+) -> Result<ShellOutput> {
+    let mut builder = if cfg!(windows) {
+        let mut b = Command::new("cmd");
+        b.arg("/C").arg(command);
+        b
     } else {
-        Command::new("/bin/sh")
-            .arg("-lc")
-            .arg(command)
-            .current_dir(cwd)
-            .output()
+        let mut b = Command::new("/bin/sh");
+        b.arg("-lc").arg(command);
+        b
+    };
+    builder.current_dir(cwd);
+
+    for (key, value) in env_overrides {
+        if key == "PATH" {
+            // Prepend to existing PATH so system tools remain available.
+            let existing = std::env::var("PATH").unwrap_or_default();
+            let merged = if existing.is_empty() {
+                value.clone()
+            } else {
+                format!("{value}:{existing}")
+            };
+            builder.env("PATH", merged);
+        } else {
+            builder.env(key, value);
+        }
     }
-    .with_context(|| format!("Failed to launch shell command in {}", cwd.display()))?;
+
+    let output = builder
+        .output()
+        .with_context(|| format!("Failed to launch shell command in {}", cwd.display()))?;
+
     if output.status.success() {
         Ok(ShellOutput {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
@@ -2364,6 +2529,53 @@ fn run_shell_command(command: &str, cwd: &Path) -> Result<ShellOutput> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+/// Build an environment overlay for install step execution based on the tool_runtime
+/// setting and the tools declared in the spec.
+///
+/// For `auto`/`ato` mode:
+/// - Python tools: sets `UV_MANAGED_PYTHON=1` and `UV_PYTHON=<pinned version>` so
+///   that `uv` automatically downloads and uses the correct Python without requiring
+///   a system Python installation.
+/// - Node tools: sets `NODE_VERSION=<pinned version>` for fnm/nvm compatibility.
+///
+/// For `system` mode: returns an empty map (existing behavior).
+fn prepare_share_runtime_env(
+    tool_requirements: &[ToolRequirementSpec],
+    tool_runtime: ShareToolRuntime,
+) -> std::collections::HashMap<String, String> {
+    let mut env = std::collections::HashMap::new();
+
+    if matches!(tool_runtime, ShareToolRuntime::System) {
+        return env;
+    }
+
+    let has_python = tool_requirements
+        .iter()
+        .any(|t| matches!(t.tool.as_str(), "python" | "python3" | "uv"));
+    let has_node = tool_requirements
+        .iter()
+        .any(|t| matches!(t.tool.as_str(), "node" | "npm" | "bun" | "pnpm"));
+
+    if has_python {
+        // UV_MANAGED_PYTHON instructs uv to download Python if it's missing.
+        env.insert("UV_MANAGED_PYTHON".to_string(), "1".to_string());
+        env.insert(
+            "UV_PYTHON".to_string(),
+            SHARE_PROVIDER_PYTHON_VERSION.to_string(),
+        );
+    }
+
+    if has_node {
+        // fnm / nvm / mise / asdf all honour NODE_VERSION for version selection.
+        env.insert(
+            "NODE_VERSION".to_string(),
+            SHARE_PROVIDER_NODE_VERSION.to_string(),
+        );
+    }
+
+    env
 }
 
 fn write_share_state(root: &Path, state: &WorkspaceShareState) -> Result<()> {
