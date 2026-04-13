@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::ErrorKind;
 use std::io::{BufRead, BufReader, Cursor, Read};
 use std::net::{SocketAddr, TcpListener};
 #[cfg(unix)]
@@ -12,17 +11,19 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+#[cfg(feature = "webui")]
+use axum::http::Uri;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use capsule_core::capsule_v3::manifest::validate_blake3_digest;
 use capsule_core::capsule_v3::{verify_artifact_hash, CasStore};
 use chrono::Utc;
+#[cfg(feature = "webui")]
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -40,7 +41,6 @@ use crate::registry::store::{
     LeaseReleaseRequest, NegotiateRequest, RegistryStore, RollbackRequest, YankRequest,
 };
 use crate::runtime::process::{ProcessInfo, ProcessManager, ProcessStatus};
-use crate::state::{ensure_registered_state_binding_in_store, load_manifest};
 
 mod auth;
 mod http;
@@ -51,6 +51,7 @@ mod metadata_api;
 mod registry_storage;
 mod routes;
 mod runtime_support;
+#[cfg(feature = "webui")]
 mod ui;
 
 use auth::*;
@@ -62,12 +63,15 @@ use metadata_api::*;
 use registry_storage::*;
 use routes::*;
 use runtime_support::*;
+#[cfg(feature = "webui")]
 use ui::*;
 
 const README_CANDIDATES: [&str; 4] = ["README.md", "README.mdx", "README.txt", "README"];
 const README_MAX_BYTES: usize = 512 * 1024;
+#[cfg(feature = "webui")]
 const LOCAL_REGISTRY_DISABLE_UI_ENV: &str = "ATO_LOCAL_REGISTRY_DISABLE_UI";
 
+#[cfg(feature = "webui")]
 #[derive(RustEmbed)]
 #[folder = "apps/ato-store-local/dist"]
 struct LocalRegistryUiAssets;
@@ -563,7 +567,10 @@ pub async fn serve(config: RegistryServerConfig) -> Result<()> {
     };
     spawn_registry_gc_worker(state.data_dir.clone());
 
+    #[cfg(feature = "webui")]
     let ui_enabled = std::env::var_os(LOCAL_REGISTRY_DISABLE_UI_ENV).is_none();
+    #[cfg(not(feature = "webui"))]
+    let ui_enabled = false;
 
     let mut app = build_app_router(ui_enabled).with_state(state);
 
@@ -596,8 +603,9 @@ pub async fn serve(config: RegistryServerConfig) -> Result<()> {
     if ui_enabled {
         println!("🌐 Web UI: {}/", access_base_url);
     }
+    #[cfg(feature = "webui")]
     if ui_enabled && LocalRegistryUiAssets::get("index.html").is_none() {
-        println!("⚠️  Web UI assets are missing. Rebuild with `cargo build` after installing npm deps in apps/ato-store-local.");
+        println!("⚠️  Web UI assets are missing. Rebuild with `cargo build --features webui` after installing npm deps in apps/ato-store-local.");
     }
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
