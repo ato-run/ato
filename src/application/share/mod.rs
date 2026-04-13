@@ -3654,11 +3654,16 @@ mod tests {
                 kind: "git".to_string(),
                 url: "https://github.com/example/a".to_string(),
                 path: "repo-a".to_string(),
+                branch: None,
+                evidence: Vec::new(),
                 git_mode: default_git_mode_str(),
             }],
             tool_requirements: vec![ToolRequirementSpec {
+                id: "node".to_string(),
                 tool: "node".to_string(),
                 version: None,
+                required_by: Vec::new(),
+                evidence: Vec::new(),
                 runtime_source: default_runtime_source_str(),
                 provider_toolchain: None,
             }],
@@ -3668,23 +3673,25 @@ mod tests {
                 cwd: "repo-a".to_string(),
                 run: "npm ci".to_string(),
                 depends_on: Vec::new(),
+                evidence: Vec::new(),
             }],
             entries: vec![ShareEntrySpec {
                 id: "dev".to_string(),
                 label: "dev".to_string(),
                 cwd: "repo-a".to_string(),
                 run: "npm run dev".to_string(),
+                kind: "short_lived".to_string(),
                 primary: false,
-                env: Vec::new(),
                 depends_on: Vec::new(),
+                env: EntryEnvSpec::default(),
+                evidence: Vec::new(),
             }],
             services: Vec::new(),
             notes: ShareNotes::default(),
             generated_from: GeneratedFrom {
-                tool: "ato".to_string(),
-                version: "test".to_string(),
+                root_path: ".".to_string(),
                 captured_at: chrono::Utc::now().to_rfc3339(),
-                workspace_path: ".".to_string(),
+                host_os: "test".to_string(),
             },
         };
         // yes=true should auto-accept without requiring a TTY
@@ -3692,22 +3699,57 @@ mod tests {
         assert_eq!(spec.sources.len(), 1, "source should be kept");
         assert_eq!(spec.entries.len(), 1, "entry should be kept");
         // ensure_single_primary_entry should have assigned primary
-        assert!(spec.entries[0].primary, "entry should be primary after auto-accept");
+        assert!(
+            spec.entries[0].primary,
+            "entry should be primary after auto-accept"
+        );
     }
 
     #[test]
     fn apply_share_exclude_removes_named_ids() {
-        let mut spec = ShareSpec {
+        let make_spec = || ShareSpec {
             schema_version: SHARE_SCHEMA_VERSION.to_string(),
             name: "ws".to_string(),
             root: ".".to_string(),
             sources: vec![
-                ShareSourceSpec { id: "keep-repo".to_string(), kind: "git".to_string(), url: "u".to_string(), path: "keep-repo".to_string(), git_mode: default_git_mode_str() },
-                ShareSourceSpec { id: "skip-repo".to_string(), kind: "git".to_string(), url: "u2".to_string(), path: "skip-repo".to_string(), git_mode: default_git_mode_str() },
+                ShareSourceSpec {
+                    id: "keep-repo".to_string(),
+                    kind: "git".to_string(),
+                    url: "u".to_string(),
+                    path: "keep-repo".to_string(),
+                    branch: None,
+                    evidence: Vec::new(),
+                    git_mode: default_git_mode_str(),
+                },
+                ShareSourceSpec {
+                    id: "skip-repo".to_string(),
+                    kind: "git".to_string(),
+                    url: "u2".to_string(),
+                    path: "skip-repo".to_string(),
+                    branch: None,
+                    evidence: Vec::new(),
+                    git_mode: default_git_mode_str(),
+                },
             ],
             tool_requirements: vec![
-                ToolRequirementSpec { tool: "node".to_string(), version: None, runtime_source: default_runtime_source_str(), provider_toolchain: None },
-                ToolRequirementSpec { tool: "bun".to_string(), version: None, runtime_source: default_runtime_source_str(), provider_toolchain: None },
+                ToolRequirementSpec {
+                    id: "node".to_string(),
+                    tool: "node".to_string(),
+                    version: None,
+                    required_by: Vec::new(),
+                    evidence: Vec::new(),
+                    runtime_source: default_runtime_source_str(),
+                    provider_toolchain: None,
+                },
+                ToolRequirementSpec {
+                    id: "bun".to_string(),
+                    tool: "bun".to_string(),
+                    version: None,
+                    required_by: Vec::new(),
+                    evidence: Vec::new(),
+                    runtime_source: default_runtime_source_str(),
+                    provider_toolchain: None,
+                },
             ],
             env_requirements: Vec::new(),
             install_steps: Vec::new(),
@@ -3715,12 +3757,12 @@ mod tests {
             services: Vec::new(),
             notes: ShareNotes::default(),
             generated_from: GeneratedFrom {
-                tool: "ato".to_string(),
-                version: "test".to_string(),
+                root_path: ".".to_string(),
                 captured_at: chrono::Utc::now().to_rfc3339(),
-                workspace_path: ".".to_string(),
+                host_os: "test".to_string(),
             },
         };
+        let mut spec = make_spec();
         let exclude = ShareExcludeConfig {
             sources: vec!["skip-repo".to_string()],
             tools: vec!["bun".to_string()],
@@ -3738,7 +3780,11 @@ mod tests {
     fn load_share_config_returns_none_when_no_share_section() {
         let dir = tempfile::tempdir().unwrap();
         // capsule.toml with no [share] section
-        std::fs::write(dir.path().join("capsule.toml"), "[package]\nname = \"test\"\n").unwrap();
+        std::fs::write(
+            dir.path().join("capsule.toml"),
+            "[package]\nname = \"test\"\n",
+        )
+        .unwrap();
         let result = load_share_config(dir.path());
         assert!(result.is_none(), "no [share] section should return None");
     }
