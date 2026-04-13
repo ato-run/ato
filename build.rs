@@ -232,6 +232,11 @@ fn main() {
         }
     }
 
+    if env::var("CARGO_FEATURE_WEBUI").is_err() {
+        println!("cargo:warning=Skipping UI build because the 'webui' feature is not enabled. Pass --features webui to include the Web UI.");
+        return;
+    }
+
     if env::var("ATO_SKIP_UI_BUILD")
         .ok()
         .as_deref()
