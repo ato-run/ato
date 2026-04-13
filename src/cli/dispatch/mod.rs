@@ -143,6 +143,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             git_mode,
             tool_runtime,
             allow_dirty,
+            yes,
+            save_config,
         } => share::execute_encap_command(share::EncapCommandArgs {
             path,
             share,
@@ -151,6 +153,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             git_mode,
             tool_runtime,
             allow_dirty,
+            yes,
+            save_config,
             reporter: reporter.clone(),
         }),
 
