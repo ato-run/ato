@@ -285,6 +285,7 @@ fn encap_command_parses_primary_flags() {
             share,
             save_only,
             print_plan,
+            ..
         } => {
             assert_eq!(path, PathBuf::from("."));
             assert!(share);
@@ -307,7 +308,7 @@ fn decap_command_requires_into_and_parses_plan() {
     ])
     .expect("parse");
     match cli.command {
-        Commands::Decap { input, into, plan } => {
+        Commands::Decap { input, into, plan, .. } => {
             assert_eq!(input, "https://ato.run/s/demo");
             assert_eq!(into, PathBuf::from("./demo"));
             assert!(plan);
