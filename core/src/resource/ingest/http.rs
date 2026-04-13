@@ -63,7 +63,7 @@ pub async fn download_file(url: &str, destination: &str, allowed_paths: &[String
 #[cfg(test)]
 #[cfg(feature = "provisioning-tests")]
 mod tests {
-    use super::*;
+    use super::download_file;
 
     #[tokio::test]
     async fn test_download_file_security_check() {

@@ -161,8 +161,15 @@ fn is_next_standalone_node_modules(rel: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::types::PackConfig;
+    // std
+    use std::default::Default;
+    use std::path::Path;
+
+    // external crates
+
+    // internal crates
+    use super::PackFilter;
+    use crate::types::{CapsuleManifest, PackConfig};
 
     #[test]
     fn defaults_exclude_workspace_local_and_ephemeral_outputs() {

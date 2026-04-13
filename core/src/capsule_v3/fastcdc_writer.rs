@@ -461,7 +461,9 @@ fn process_chunk_task(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use tempfile;
+
+    use super::{CasStore, FastCdcWriter, FastCdcWriterConfig};
 
     fn deterministic_bytes(len: usize, mut seed: u64) -> Vec<u8> {
         let mut out = Vec::with_capacity(len);

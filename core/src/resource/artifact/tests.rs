@@ -1,11 +1,13 @@
 #![cfg(feature = "provisioning-tests")]
 
-use super::*;
-use crate::resource::artifact::manager::{ArtifactConfig, ArtifactError};
+use std::io::Write;
+
 use axum::{body::Body, response::IntoResponse, routing::get, Router};
 use sha2::{Digest, Sha256};
-use std::io::Write;
 use tokio::net::TcpListener;
+
+use super::{ArtifactManager, Registry};
+use crate::resource::artifact::manager::{ArtifactConfig, ArtifactError};
 
 async fn start_mock_server() -> (String, tokio::task::JoinHandle<()>) {
     let app = Router::new()

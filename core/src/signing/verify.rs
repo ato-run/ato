@@ -93,9 +93,10 @@ pub fn verify_bundle(bundle_path: &Path, trusted_public_keys: &[String]) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::signing::sign::{generate_keypair, sign_bundle};
     use tempfile::tempdir;
+
+    use super::verify_bundle;
+    use crate::signing::sign::{generate_keypair, sign_bundle};
 
     #[test]
     fn test_verify_valid_signature() {
