@@ -89,6 +89,45 @@ impl ProviderToolchain {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub(crate) enum GitMode {
+    /// Pin the current local commit (must be pushed to remote)
+    #[default]
+    SameCommit,
+    /// Fetch the remote branch HEAD at encap time and pin that rev
+    LatestAtEncap,
+}
+
+impl GitMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            GitMode::SameCommit => "same-commit",
+            GitMode::LatestAtEncap => "latest-at-encap",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ShareToolRuntime {
+    /// Use ato-managed runtimes for Python/Node; fall back to system for others
+    #[default]
+    Auto,
+    /// Always use ato-managed runtimes (error if not supported)
+    Ato,
+    /// Always use the system PATH (current v1 behavior)
+    System,
+}
+
+impl ShareToolRuntime {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            ShareToolRuntime::Auto => "auto",
+            ShareToolRuntime::Ato => "ato",
+            ShareToolRuntime::System => "system",
+        }
+    }
+}
+
 pub(super) fn cli_styles() -> clap::builder::Styles {
     use clap::builder::styling::{AnsiColor, Effects};
 
