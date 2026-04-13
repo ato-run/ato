@@ -1,7 +1,20 @@
 //! Lockfile support helpers for tool bootstrap, downloads, and atomic filesystem writes.
 
-use super::*;
+use std::fs;
+use std::future::Future;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use fs2::FileExt;
+
 use crate::bootstrap::{BootstrapBoundary, BootstrapVerificationKind};
+use crate::common::paths::{nacelle_home_dir, toolchain_cache_dir};
+use crate::error::{CapsuleError, Result};
+use crate::packers::runtime_fetcher::RuntimeFetcher;
+use crate::reporter::CapsuleReporter;
+
+use super::{platform_triple, METADATA_CACHE_DIR_NAME, PNPM_VERSION, UV_VERSION};
 
 pub(super) struct PnpmCommand {
     pub(super) program: PathBuf,

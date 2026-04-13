@@ -895,7 +895,7 @@ fn find_nacelle_binary(explicit_path: Option<&PathBuf>) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{build_bundle, create_bundle_archive, PackBundleArgs};
     use std::collections::BTreeSet;
     use tar::Archive;
 

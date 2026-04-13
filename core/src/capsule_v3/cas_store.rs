@@ -383,11 +383,16 @@ fn sync_parent_directory(parent: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io::{Read, Write};
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    use super::*;
-    use crate::capsule_v3::manifest::{blake3_digest, CdcParams, ChunkMeta};
+    use tempfile;
+    use zstd;
+
+    use super::{sync_parent_directory, CasStore};
+    use crate::capsule_v3::manifest::{blake3_digest, CapsuleManifestV3, CdcParams, ChunkMeta};
 
     fn compress(data: &[u8]) -> Vec<u8> {
         let mut encoder = zstd::Encoder::new(Vec::new(), 3).unwrap();

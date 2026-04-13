@@ -280,9 +280,6 @@ entrypoint = "main.py"
     #[cfg(unix)]
     #[test]
     fn normalize_relative_utf8_path_rejects_non_utf8() {
-        use std::ffi::OsString;
-        use std::os::unix::ffi::OsStringExt;
-
         let raw = OsString::from_vec(vec![0x66, 0x6f, 0x80]);
         let path = Path::new(&raw);
         let err = normalize_relative_utf8_path(path).expect_err("must fail");

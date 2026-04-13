@@ -478,7 +478,7 @@ fn validate_artifact(value: Option<&Value>, errors: &mut Vec<String>) {
 mod tests {
     use serde_json::json;
 
-    use super::*;
+    use super::{compute_closure_digest, normalize_closure_value, validate_closure_value};
 
     #[test]
     fn normalizes_metadata_only_legacy_shape() {

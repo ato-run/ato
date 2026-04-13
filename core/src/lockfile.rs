@@ -1,15 +1,12 @@
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::OsString;
 use std::fs;
-use std::future::Future;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, UNIX_EPOCH};
 
 use chrono::Utc;
-use fs2::FileExt;
-use futures::future::try_join_all;
+
 use lock_draft_engine::{
     evaluate_lock_draft, LockDraft, LockDraftInput, LockDraftReadiness,
     LockDraftRuntimePlatform as DraftRuntimePlatform, ManifestSource as DraftManifestSource,
@@ -17,14 +14,9 @@ use lock_draft_engine::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tempfile::TempDir;
-use tracing::debug;
 use url::form_urlencoded::byte_serialize;
 
-use crate::common::paths::{
-    nacelle_home_dir, toolchain_cache_dir, workspace_artifacts_dir, workspace_derived_dir,
-    workspace_tmp_dir,
-};
+use crate::common::paths::{workspace_artifacts_dir, workspace_derived_dir, workspace_tmp_dir};
 use crate::error::{CapsuleError, Result};
 use crate::packers::payload;
 use crate::packers::runtime_fetcher::RuntimeFetcher;
@@ -37,8 +29,12 @@ mod lockfile_runtime;
 #[path = "lockfile_support.rs"]
 mod lockfile_support;
 
-use lockfile_runtime::*;
-use lockfile_support::*;
+use lockfile_runtime::{
+    deno_artifact_filename, generate_deno_lock, generate_pnpm_lock, generate_uv_lock,
+    prepare_node_artifacts, prepare_python_artifacts, resolve_deno_runtime, resolve_node_runtime,
+    resolve_pnpm_tool_targets, resolve_python_runtime, resolve_uv_tool_targets, uv_artifact_url,
+};
+use lockfile_support::{capsule_error_config, capsule_error_pack, write_atomic_bytes_with_os_lock};
 
 // This module owns Ato-native canonical lock generation.
 // Ecosystem lockfiles and framework metadata are observed through importer probes
