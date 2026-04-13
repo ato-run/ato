@@ -235,8 +235,9 @@ struct StoredKeyRef {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::{generate_keypair, sign_bundle};
 
     #[test]
     fn test_generate_keypair() {

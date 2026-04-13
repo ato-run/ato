@@ -257,8 +257,11 @@ impl StorageManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use crate::resource::storage::StorageConfig;
+
+    use super::StorageManager;
 
     #[test]
     fn test_sanitize_dir_name() {

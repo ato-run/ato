@@ -409,12 +409,27 @@ impl Read for ChainedChunkReader {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::capsule_v3::manifest::{blake3_digest, CdcParams};
-    use crate::capsule_v3::set_artifact_hash;
-    use crate::capsule_v3::ChunkMeta;
-    use std::collections::BTreeMap;
     use std::io::{Read, Write};
+
+    use tar;
+    use tempfile;
+    use zstd;
+
+    use super::{
+        unpack_payload_from_capsule_root_with_cas, unpack_payload_from_capsule_root_with_provider,
+        unpack_payload_from_manifest_file_with_cas, unpack_payload_from_v3_manifest,
+        ChainedChunkReader, PayloadUnpackOutcome, V3_PAYLOAD_MANIFEST_PATH, V3_STAGING_PREFIX,
+    };
+    use crate::capsule_v3::manifest::{blake3_digest, CapsuleManifestV3, CdcParams, ChunkMeta};
+    use crate::capsule_v3::set_artifact_hash;
+
+    use crate::capsule_v3::{CasDisableReason, CasProvider, CasStore};
+
+    use std::collections::BTreeMap;
+
+    use std::fs;
+
+    use std::path::{Path, PathBuf};
 
     fn compress(bytes: &[u8]) -> Vec<u8> {
         let mut encoder = zstd::Encoder::new(Vec::new(), 3).unwrap();

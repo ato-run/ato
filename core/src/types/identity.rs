@@ -281,7 +281,10 @@ fn base58_decode(s: &str) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        base58_decode, base58_encode, did_short_fingerprint, did_to_public_key,
+        format_internal_key, from_did_key, is_valid_did_key, public_key_to_did, to_did_key,
+    };
 
     #[test]
     fn test_public_key_to_did_roundtrip() {

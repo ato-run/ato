@@ -1,4 +1,12 @@
-use super::*;
+use std::path::{Path, PathBuf};
+
+use anyhow::Result;
+
+use crate::binding;
+use crate::registry::store::RegistryStore;
+use crate::state::{ensure_registered_state_binding_in_store, load_manifest};
+
+use super::AppState;
 
 pub(super) struct LocalRegistryService {
     state_dir: PathBuf,

@@ -1,9 +1,29 @@
 //! Lockfile runtime/tool resolution, generation, and artifact prefetch helpers.
 
-use super::*;
+use std::collections::HashMap;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use futures::future::try_join_all;
+use tempfile::TempDir;
+use tracing::debug;
+
+use crate::error::{CapsuleError, Result};
 use crate::importer::{
     probe_required_deno_lockfile, probe_required_node_lockfile, probe_required_python_lockfile,
     ImporterId, ProbeResult,
+};
+use crate::packers::runtime_fetcher::RuntimeFetcher;
+use crate::reporter::CapsuleReporter;
+
+use super::lockfile_support::{
+    cached_sha256, ensure_node, ensure_pnpm, ensure_uv, metadata_cache_path,
+};
+use super::{
+    artifact_root, read_dependencies_path, read_target_entrypoint, reset_dir, sha256_dir,
+    sha256_hex, ArtifactEntry, RuntimeArtifact, RuntimeEntry, RuntimePlatform, ToolArtifact,
+    ToolTargets, PNPM_VERSION, UV_VERSION,
 };
 
 pub(super) async fn generate_uv_lock(

@@ -308,7 +308,10 @@ fn port_list(port: Option<u16>) -> Vec<Port> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
+    use serde_json;
+
+    use super::CapsuleManifest;
 
     const SAMPLE_PYTHON_TOML: &str = r#"
 schema_version = "0.2"

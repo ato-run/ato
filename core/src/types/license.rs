@@ -305,7 +305,12 @@ impl From<&LicenseInfo> for LicensePayload {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use chrono::{DateTime, Duration, Utc};
+
+    use super::{
+        LicenseInfo, LicenseManifest, LicenseMeta, LicensePermissions, LicensePolicy, LicenseSync,
+        LicenseType, LicenseVerificationResult,
+    };
 
     #[test]
     fn test_license_type_grace_period() {
