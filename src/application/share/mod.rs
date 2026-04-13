@@ -395,7 +395,7 @@ pub(crate) fn execute_encap(args: EncapArgs, reporter: Arc<CliReporter>) -> Resu
         .path
         .canonicalize()
         .with_context(|| format!("Failed to resolve workspace root {}", args.path.display()))?;
-    let capture = capture_workspace(&root, args.git_mode, args.allow_dirty, &reporter)?;
+    let capture = capture_workspace(&root, args.git_mode, args.allow_dirty, args.tool_runtime, &reporter)?;
 
     if args.print_plan {
         println!("{}", serde_json::to_string_pretty(&capture.spec)?);
@@ -765,6 +765,7 @@ fn capture_workspace(
     root: &Path,
     git_mode: GitMode,
     allow_dirty: bool,
+    tool_runtime: ShareToolRuntime,
     reporter: &Arc<CliReporter>,
 ) -> Result<CapturedWorkspace> {
     let ignore = IgnoreMatcher::load(root)?;
@@ -843,7 +844,19 @@ fn capture_workspace(
                 git_mode: git_mode.as_str().to_string(),
             })
             .collect(),
-        tool_requirements: tool_requirements.into_values().collect(),
+        tool_requirements: {
+            let runtime_source = tool_runtime.as_str().to_string();
+            tool_requirements
+                .into_values()
+                .map(|mut t| {
+                    // For ato/auto mode, mark tools that ato can manage with the chosen runtime.
+                    if !matches!(tool_runtime, ShareToolRuntime::System) {
+                        t.runtime_source = runtime_source.clone();
+                    }
+                    t
+                })
+                .collect()
+        },
         env_requirements,
         install_steps,
         entries,
@@ -2790,7 +2803,7 @@ mod tests {
         init_git_repo(&web, "git@github.com:acme/dashboard.git");
 
         let reporter = Arc::new(crate::reporters::CliReporter::new(false));
-        let capture = capture_workspace(root, GitMode::SameCommit, false, &reporter).expect("capture");
+        let capture = capture_workspace(root, GitMode::SameCommit, false, ShareToolRuntime::System, &reporter).expect("capture");
         assert_eq!(capture.spec.sources.len(), 2);
         assert!(capture
             .spec
