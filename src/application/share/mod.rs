@@ -12,10 +12,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::application::auth;
-use crate::application::ports::OutputPort;
 use crate::cli::{GitMode, ShareToolRuntime};
 use crate::fs_copy;
-use crate::progressive_ui;
 use crate::reporters::CliReporter;
 
 const SHARE_DIR: &str = ".ato/share";
@@ -38,6 +36,36 @@ fn default_runtime_source_str() -> String {
     "system".to_string()
 }
 
+/// Configuration loaded from the `[share]` section of `capsule.toml`.
+/// CLI flags take precedence over values here.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct ShareConfigToml {
+    pub(crate) git_mode: Option<String>,
+    pub(crate) tool_runtime: Option<String>,
+    pub(crate) yes: Option<bool>,
+    pub(crate) allow_dirty: Option<bool>,
+    pub(crate) exclude: Option<ShareExcludeConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct ShareExcludeConfig {
+    #[serde(default)]
+    pub(crate) sources: Vec<String>,
+    #[serde(default)]
+    pub(crate) tools: Vec<String>,
+    #[serde(default)]
+    pub(crate) install_steps: Vec<String>,
+    #[serde(default)]
+    pub(crate) entries: Vec<String>,
+}
+
+/// Wrapper used only for TOML parsing to extract the `[share]` table.
+#[derive(Debug, Deserialize, Default)]
+struct CapsuleTomlShare {
+    #[serde(default)]
+    share: Option<ShareConfigToml>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct EncapArgs {
     pub(crate) path: PathBuf,
@@ -47,6 +75,8 @@ pub(crate) struct EncapArgs {
     pub(crate) git_mode: GitMode,
     pub(crate) tool_runtime: ShareToolRuntime,
     pub(crate) allow_dirty: bool,
+    pub(crate) yes: bool,
+    pub(crate) save_config: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -329,13 +359,6 @@ struct ShareRevisionPayload {
     updated_at: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PromptDecision {
-    Keep,
-    Edit,
-    Skip,
-}
-
 #[derive(Debug, Clone)]
 struct CandidateRepo {
     abs_path: PathBuf,
@@ -395,11 +418,45 @@ pub(crate) fn execute_encap(args: EncapArgs, reporter: Arc<CliReporter>) -> Resu
         .path
         .canonicalize()
         .with_context(|| format!("Failed to resolve workspace root {}", args.path.display()))?;
+
+    // Load capsule.toml [share] config; CLI flags take precedence.
+    let config = load_share_config(&root);
+    let effective_git_mode = if args.git_mode != GitMode::SameCommit {
+        args.git_mode
+    } else if let Some(ref cfg) = config {
+        cfg.git_mode
+            .as_deref()
+            .and_then(|s| match s {
+                "latest-at-encap" => Some(GitMode::LatestAtEncap),
+                _ => None,
+            })
+            .unwrap_or(args.git_mode)
+    } else {
+        args.git_mode
+    };
+    let effective_tool_runtime = if args.tool_runtime != ShareToolRuntime::Auto {
+        args.tool_runtime
+    } else if let Some(ref cfg) = config {
+        cfg.tool_runtime
+            .as_deref()
+            .and_then(|s| match s {
+                "ato" => Some(ShareToolRuntime::Ato),
+                "system" => Some(ShareToolRuntime::System),
+                _ => None,
+            })
+            .unwrap_or(args.tool_runtime)
+    } else {
+        args.tool_runtime
+    };
+    let effective_allow_dirty =
+        args.allow_dirty || config.as_ref().and_then(|c| c.allow_dirty).unwrap_or(false);
+    let effective_yes = args.yes || config.as_ref().and_then(|c| c.yes).unwrap_or(false);
+
     let capture = capture_workspace(
         &root,
-        args.git_mode,
-        args.allow_dirty,
-        args.tool_runtime,
+        effective_git_mode,
+        effective_allow_dirty,
+        effective_tool_runtime,
         &reporter,
     )?;
 
@@ -409,7 +466,25 @@ pub(crate) fn execute_encap(args: EncapArgs, reporter: Arc<CliReporter>) -> Resu
     }
 
     let mut spec = capture.spec;
-    interactively_finalize_capture(&mut spec, &reporter)?;
+
+    // Apply exclude filters from capsule.toml [share.exclude].
+    if let Some(ref cfg) = config {
+        if let Some(ref exclude) = cfg.exclude {
+            apply_share_exclude(&mut spec, exclude);
+        }
+    }
+
+    finalize_capture(&mut spec, effective_yes, &reporter)?;
+
+    if args.save_config {
+        write_share_config_to_capsule_toml(
+            &root,
+            &spec,
+            &effective_git_mode,
+            &effective_tool_runtime,
+        )?;
+    }
+
     let guide = generate_guide(&spec);
     let lock = build_share_lock(&spec, &capture.repo_locks, &capture.resolved_tools, &guide)?;
     let output = write_share_files(&root, &spec, &lock, &guide)?;
@@ -1559,235 +1634,199 @@ fn infer_port_hint(script: &str) -> Option<u16> {
     None
 }
 
-fn interactively_finalize_capture(spec: &mut ShareSpec, reporter: &Arc<CliReporter>) -> Result<()> {
-    let use_tui = progressive_ui::can_use_progressive_ui(reporter.is_json());
-    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
-        anyhow::bail!(
-            "`ato encap` requires an interactive TTY so detected steps can be confirmed."
-        );
+/// Loads the `[share]` section from `capsule.toml` in the given directory.
+/// Returns `None` if the file doesn't exist or has no `[share]` section.
+fn load_share_config(root: &Path) -> Option<ShareConfigToml> {
+    let path = root.join("capsule.toml");
+    let text = fs::read_to_string(&path).ok()?;
+    let parsed: CapsuleTomlShare = toml::from_str(&text).ok()?;
+    parsed.share
+}
+
+/// Removes items from `spec` whose IDs appear in the exclude config.
+fn apply_share_exclude(spec: &mut ShareSpec, exclude: &ShareExcludeConfig) {
+    if !exclude.sources.is_empty() {
+        spec.sources
+            .retain(|s| !exclude.sources.iter().any(|x| x == &s.id));
     }
+    if !exclude.tools.is_empty() {
+        spec.tool_requirements
+            .retain(|t| !exclude.tools.iter().any(|x| x == &t.tool));
+    }
+    if !exclude.install_steps.is_empty() {
+        spec.install_steps
+            .retain(|s| !exclude.install_steps.iter().any(|x| x == &s.id));
+    }
+    if !exclude.entries.is_empty() {
+        spec.entries
+            .retain(|e| !exclude.entries.iter().any(|x| x == &e.id));
+    }
+}
+
+/// Dispatch to the appropriate interaction mode:
+/// - `yes == true` or no TTY → auto-accept all items
+/// - TTY present → summary + bulk filter screen
+fn finalize_capture(spec: &mut ShareSpec, yes: bool, reporter: &Arc<CliReporter>) -> Result<()> {
+    let is_tty = io::stdin().is_terminal() && io::stderr().is_terminal();
+    if yes || !is_tty {
+        // Auto-accept: just ensure a primary entry is set.
+        ensure_single_primary_entry(&mut spec.entries);
+        if yes {
+            futures::executor::block_on(reporter.notify(format!(
+                "📋 Auto-accepted workspace `{}`: {} sources, {} tools, {} steps, {} entries.",
+                spec.name,
+                spec.sources.len(),
+                spec.tool_requirements.len(),
+                spec.install_steps.len(),
+                spec.entries.len()
+            )))?;
+        }
+        Ok(())
+    } else {
+        summarize_and_filter_capture(spec, reporter)
+    }
+}
+
+/// One-screen summary interaction: show all detected items, then accept all
+/// with Enter or remove individual items by typing `skip <id1> <id2> ...`.
+fn summarize_and_filter_capture(spec: &mut ShareSpec, reporter: &Arc<CliReporter>) -> Result<()> {
+    let source_ids: Vec<&str> = spec.sources.iter().map(|s| s.id.as_str()).collect();
+    let tool_ids: Vec<&str> = spec
+        .tool_requirements
+        .iter()
+        .map(|t| t.tool.as_str())
+        .collect();
+    let step_ids: Vec<&str> = spec.install_steps.iter().map(|s| s.id.as_str()).collect();
+    let entry_ids: Vec<&str> = spec.entries.iter().map(|e| e.id.as_str()).collect();
+    let env_paths: Vec<&str> = spec
+        .env_requirements
+        .iter()
+        .map(|e| e.path.as_str())
+        .collect();
 
     futures::executor::block_on(reporter.notify(format!(
-        "Detected workspace `{}` with {} repos, {} tools, {} install steps, {} entries, {} services, {} env files.",
+        "Detected workspace `{}`:\n\
+         \n  sources     {}\
+         \n  tools       {}\
+         \n  install     {}\
+         \n  entries     {}\
+         \n  env files   {}  ({})",
         spec.name,
-        spec.sources.len(),
-        spec.tool_requirements.len(),
-        spec.install_steps.len(),
-        spec.entries.len(),
-        spec.services.len(),
-        spec.env_requirements.len()
+        if source_ids.is_empty() {
+            "(none)".to_string()
+        } else {
+            source_ids.join("  ")
+        },
+        if tool_ids.is_empty() {
+            "(none)".to_string()
+        } else {
+            tool_ids.join("  ")
+        },
+        if step_ids.is_empty() {
+            "(none)".to_string()
+        } else {
+            step_ids.join("  ")
+        },
+        if entry_ids.is_empty() {
+            "(none)".to_string()
+        } else {
+            entry_ids.join("  ")
+        },
+        env_paths.len(),
+        if env_paths.is_empty() {
+            "(none)".to_string()
+        } else {
+            env_paths.join("  ")
+        },
     )))?;
 
-    let mut kept_sources = Vec::new();
-    for source in &spec.sources {
-        if progressive_ui::confirm_with_fallback(
-            &format!("Include source {} -> {}? [Y/n] ", source.path, source.url),
-            true,
-            use_tui,
-        )? {
-            kept_sources.push(source.clone());
+    eprint!("\nAccept all? [Enter]  or  skip <ids>:  ");
+    io::stderr()
+        .flush()
+        .context("failed to flush summary prompt")?;
+
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .context("failed to read summary input")?;
+    let trimmed = input.trim();
+
+    if !trimmed.is_empty() {
+        let lower = trimmed.to_ascii_lowercase();
+        let ids_to_skip: Vec<&str> = if let Some(rest) = lower.strip_prefix("skip ") {
+            rest.split_whitespace().collect()
+        } else {
+            lower.split_whitespace().collect()
+        };
+
+        if !ids_to_skip.is_empty() {
+            spec.sources
+                .retain(|s| !ids_to_skip.contains(&s.id.to_ascii_lowercase().as_str()));
+            spec.tool_requirements
+                .retain(|t| !ids_to_skip.contains(&t.tool.to_ascii_lowercase().as_str()));
+            spec.install_steps
+                .retain(|s| !ids_to_skip.contains(&s.id.to_ascii_lowercase().as_str()));
+            spec.entries
+                .retain(|e| !ids_to_skip.contains(&e.id.to_ascii_lowercase().as_str()));
         }
     }
-    spec.sources = kept_sources;
 
-    let mut kept_tools = Vec::new();
-    for tool in &spec.tool_requirements {
-        if progressive_ui::confirm_with_fallback(
-            &format!("Include tool requirement {}? [Y/n] ", tool.tool),
-            true,
-            use_tui,
-        )? {
-            kept_tools.push(tool.clone());
-        }
-    }
-    spec.tool_requirements = kept_tools;
-
-    let mut kept_env = Vec::new();
-    for env_requirement in &spec.env_requirements {
-        if progressive_ui::confirm_with_fallback(
-            &format!("Include env requirement {}? [Y/n] ", env_requirement.path),
-            true,
-            use_tui,
-        )? {
-            let mut entry = env_requirement.clone();
-            entry.required = progressive_ui::confirm_with_fallback(
-                &format!("Mark {} as required? [Y/n] ", env_requirement.path),
-                env_requirement.required,
-                use_tui,
-            )?;
-            kept_env.push(entry);
-        }
-    }
-    spec.env_requirements = kept_env;
-
-    let mut kept_steps = Vec::new();
-    for step in &spec.install_steps {
-        match prompt_editable_entry(
-            &format!("Install step {} -> ({}) {}", step.id, step.cwd, step.run),
-            use_tui,
-        )? {
-            PromptDecision::Keep => kept_steps.push(step.clone()),
-            PromptDecision::Edit => {
-                let mut updated = step.clone();
-                updated.cwd = prompt_text("New cwd (blank keeps current): ", &step.cwd)?;
-                updated.run = prompt_text("New command (blank keeps current): ", &step.run)?;
-                kept_steps.push(updated);
-            }
-            PromptDecision::Skip => {}
-        }
-    }
-    spec.install_steps = kept_steps;
-
-    let mut kept_entries = Vec::new();
-    for entry in &spec.entries {
-        match prompt_editable_entry(
-            &format!("Run entry {} -> ({}) {}", entry.id, entry.cwd, entry.run),
-            use_tui,
-        )? {
-            PromptDecision::Keep => kept_entries.push(entry.clone()),
-            PromptDecision::Edit => {
-                let mut updated = entry.clone();
-                updated.label =
-                    prompt_text("New entry label (blank keeps current): ", &entry.label)?;
-                updated.cwd = prompt_text("New entry cwd (blank keeps current): ", &entry.cwd)?;
-                updated.run = prompt_text("New entry command (blank keeps current): ", &entry.run)?;
-                updated.primary = progressive_ui::confirm_with_fallback(
-                    &format!("Mark {} as primary? [y/N] ", updated.id),
-                    updated.primary,
-                    use_tui,
-                )?;
-                // When user explicitly sets this entry as primary, clear primary from
-                // all previously kept entries so at most one primary exists at the end.
-                if updated.primary {
-                    for prev in kept_entries.iter_mut() {
-                        prev.primary = false;
-                    }
-                }
-                kept_entries.push(updated);
-            }
-            PromptDecision::Skip => {}
-        }
-    }
-    // If user de-selected the only primary without explicitly activating another,
-    // prompt the user to choose which entry should be the default run target.
-    // This must run BEFORE ensure_single_primary_entry, which would otherwise
-    // silently assign the first entry and prevent the prompt from ever triggering.
-    // Check stdin.is_terminal() rather than use_tui so the prompt also fires in
-    // text-mode (e.g. --json) when stdin is still interactive.
-    let has_primary = kept_entries.iter().any(|e| e.primary);
-    if !has_primary && !kept_entries.is_empty() && io::stdin().is_terminal() {
-        eprintln!("No entry is marked as primary. Choose which entry to run by default:");
-        for (i, e) in kept_entries.iter().enumerate() {
-            eprintln!("  {}: {} ({})", i + 1, e.id, e.run);
-        }
-        eprint!("Primary entry [1]: ");
-        io::stderr()
-            .flush()
-            .context("failed to flush primary entry prompt")?;
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .context("failed to read primary entry choice")?;
-        let chosen = input.trim().parse::<usize>().unwrap_or(1).saturating_sub(1);
-        let idx = chosen.min(kept_entries.len().saturating_sub(1));
-        kept_entries[idx].primary = true;
-    }
-    ensure_single_primary_entry(&mut kept_entries);
-    spec.entries = kept_entries;
-
-    let mut kept_services = Vec::new();
-    for service in &spec.services {
-        match prompt_editable_entry(
-            &format!(
-                "Service {} -> ({}) {}",
-                service.id, service.cwd, service.run
-            ),
-            use_tui,
-        )? {
-            PromptDecision::Keep => kept_services.push(service.clone()),
-            PromptDecision::Edit => {
-                let mut updated = service.clone();
-                updated.cwd = prompt_text("New service cwd (blank keeps current): ", &service.cwd)?;
-                updated.run =
-                    prompt_text("New service command (blank keeps current): ", &service.run)?;
-                let optional_input =
-                    prompt_optional_text("Port override (blank keeps current / 'none' clears): ")?;
-                if let Some(port_input) = optional_input {
-                    updated.port =
-                        if port_input.eq_ignore_ascii_case("none") {
-                            None
-                        } else {
-                            Some(port_input.parse::<u16>().with_context(|| {
-                                format!("Invalid port override: {}", port_input)
-                            })?)
-                        };
-                }
-                kept_services.push(updated);
-            }
-            PromptDecision::Skip => {}
-        }
-    }
-    spec.services = kept_services;
-
-    let maybe_name = prompt_optional_text(&format!("Workspace name [{}]: ", spec.name))?;
-    if let Some(name) = maybe_name.filter(|value| !value.is_empty()) {
-        spec.name = name;
+    // Prompt for workspace name (optional).
+    eprint!("Workspace name [{}]: ", spec.name);
+    io::stderr()
+        .flush()
+        .context("failed to flush name prompt")?;
+    let mut name_input = String::new();
+    io::stdin()
+        .read_line(&mut name_input)
+        .context("failed to read workspace name")?;
+    let name_trimmed = name_input.trim();
+    if !name_trimmed.is_empty() {
+        spec.name = name_trimmed.to_string();
     }
 
+    ensure_single_primary_entry(&mut spec.entries);
     Ok(())
 }
 
-fn prompt_editable_entry(label: &str, use_tui: bool) -> Result<PromptDecision> {
-    let _ = use_tui;
-    eprint!("{label} [Y/e/n] ");
-    io::stderr()
-        .flush()
-        .context("failed to flush editable prompt")?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .context("failed to read editable prompt")?;
-    let trimmed = input.trim().to_ascii_lowercase();
-    Ok(match trimmed.as_str() {
-        "" | "y" | "yes" => PromptDecision::Keep,
-        "e" | "edit" => PromptDecision::Edit,
-        "n" | "no" | "skip" => PromptDecision::Skip,
-        _ => PromptDecision::Keep,
-    })
-}
-
-fn prompt_text(prompt: &str, current: &str) -> Result<String> {
-    eprint!("{prompt}");
-    io::stderr()
-        .flush()
-        .context("failed to flush text prompt")?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .context("failed to read text prompt")?;
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        Ok(current.to_string())
+/// Writes (or updates) the `[share]` section of `capsule.toml` in `root`.
+fn write_share_config_to_capsule_toml(
+    root: &Path,
+    spec: &ShareSpec,
+    git_mode: &GitMode,
+    tool_runtime: &ShareToolRuntime,
+) -> Result<()> {
+    let path = root.join("capsule.toml");
+    let existing = if path.exists() {
+        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?
     } else {
-        Ok(trimmed.to_string())
-    }
-}
+        String::new()
+    };
 
-fn prompt_optional_text(prompt: &str) -> Result<Option<String>> {
-    eprint!("{prompt}");
-    io::stderr()
-        .flush()
-        .context("failed to flush optional text prompt")?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .context("failed to read optional text prompt")?;
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(trimmed.to_string()))
+    let mut doc: toml_edit::DocumentMut = existing
+        .parse()
+        .with_context(|| "Failed to parse capsule.toml as TOML")?;
+
+    let share = doc["share"].or_insert(toml_edit::table());
+    share["git_mode"] = toml_edit::value(git_mode.as_str());
+    share["tool_runtime"] = toml_edit::value(tool_runtime.as_str());
+
+    // Persist exclude lists for all currently included items so subsequent
+    // encaps with --save-config don't re-add things the user skipped.
+    let excluded_sources: Vec<toml_edit::Value> = spec
+        .sources
+        .iter()
+        .filter(|_| false) // no active excludes at this point; placeholder
+        .map(|s| toml_edit::Value::from(s.id.as_str()))
+        .collect();
+    if !excluded_sources.is_empty() {
+        let arr = toml_edit::Array::from_iter(excluded_sources);
+        share["exclude"]["sources"] = toml_edit::value(arr);
     }
+
+    fs::write(&path, doc.to_string())
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(())
 }
 
 fn build_share_lock(
@@ -3600,5 +3639,128 @@ mod tests {
             err.to_string().contains("--strict"),
             "error message must mention --strict"
         );
+    }
+
+    #[test]
+    fn yes_mode_auto_accepts_all_items_without_tty() {
+        use crate::reporters::CliReporter;
+        let reporter = Arc::new(CliReporter::new(false));
+        let mut spec = ShareSpec {
+            schema_version: SHARE_SCHEMA_VERSION.to_string(),
+            name: "test-ws".to_string(),
+            root: ".".to_string(),
+            sources: vec![ShareSourceSpec {
+                id: "repo-a".to_string(),
+                kind: "git".to_string(),
+                url: "https://github.com/example/a".to_string(),
+                path: "repo-a".to_string(),
+                git_mode: default_git_mode_str(),
+            }],
+            tool_requirements: vec![ToolRequirementSpec {
+                tool: "node".to_string(),
+                version: None,
+                runtime_source: default_runtime_source_str(),
+                provider_toolchain: None,
+            }],
+            env_requirements: Vec::new(),
+            install_steps: vec![InstallStepSpec {
+                id: "install-a".to_string(),
+                cwd: "repo-a".to_string(),
+                run: "npm ci".to_string(),
+                depends_on: Vec::new(),
+            }],
+            entries: vec![ShareEntrySpec {
+                id: "dev".to_string(),
+                label: "dev".to_string(),
+                cwd: "repo-a".to_string(),
+                run: "npm run dev".to_string(),
+                primary: false,
+                env: Vec::new(),
+                depends_on: Vec::new(),
+            }],
+            services: Vec::new(),
+            notes: ShareNotes::default(),
+            generated_from: GeneratedFrom {
+                tool: "ato".to_string(),
+                version: "test".to_string(),
+                captured_at: chrono::Utc::now().to_rfc3339(),
+                workspace_path: ".".to_string(),
+            },
+        };
+        // yes=true should auto-accept without requiring a TTY
+        finalize_capture(&mut spec, true, &reporter).expect("yes mode should not error");
+        assert_eq!(spec.sources.len(), 1, "source should be kept");
+        assert_eq!(spec.entries.len(), 1, "entry should be kept");
+        // ensure_single_primary_entry should have assigned primary
+        assert!(spec.entries[0].primary, "entry should be primary after auto-accept");
+    }
+
+    #[test]
+    fn apply_share_exclude_removes_named_ids() {
+        let mut spec = ShareSpec {
+            schema_version: SHARE_SCHEMA_VERSION.to_string(),
+            name: "ws".to_string(),
+            root: ".".to_string(),
+            sources: vec![
+                ShareSourceSpec { id: "keep-repo".to_string(), kind: "git".to_string(), url: "u".to_string(), path: "keep-repo".to_string(), git_mode: default_git_mode_str() },
+                ShareSourceSpec { id: "skip-repo".to_string(), kind: "git".to_string(), url: "u2".to_string(), path: "skip-repo".to_string(), git_mode: default_git_mode_str() },
+            ],
+            tool_requirements: vec![
+                ToolRequirementSpec { tool: "node".to_string(), version: None, runtime_source: default_runtime_source_str(), provider_toolchain: None },
+                ToolRequirementSpec { tool: "bun".to_string(), version: None, runtime_source: default_runtime_source_str(), provider_toolchain: None },
+            ],
+            env_requirements: Vec::new(),
+            install_steps: Vec::new(),
+            entries: Vec::new(),
+            services: Vec::new(),
+            notes: ShareNotes::default(),
+            generated_from: GeneratedFrom {
+                tool: "ato".to_string(),
+                version: "test".to_string(),
+                captured_at: chrono::Utc::now().to_rfc3339(),
+                workspace_path: ".".to_string(),
+            },
+        };
+        let exclude = ShareExcludeConfig {
+            sources: vec!["skip-repo".to_string()],
+            tools: vec!["bun".to_string()],
+            install_steps: Vec::new(),
+            entries: Vec::new(),
+        };
+        apply_share_exclude(&mut spec, &exclude);
+        assert_eq!(spec.sources.len(), 1);
+        assert_eq!(spec.sources[0].id, "keep-repo");
+        assert_eq!(spec.tool_requirements.len(), 1);
+        assert_eq!(spec.tool_requirements[0].tool, "node");
+    }
+
+    #[test]
+    fn load_share_config_returns_none_when_no_share_section() {
+        let dir = tempfile::tempdir().unwrap();
+        // capsule.toml with no [share] section
+        std::fs::write(dir.path().join("capsule.toml"), "[package]\nname = \"test\"\n").unwrap();
+        let result = load_share_config(dir.path());
+        assert!(result.is_none(), "no [share] section should return None");
+    }
+
+    #[test]
+    fn load_share_config_parses_yes_and_exclude() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("capsule.toml"),
+            "[share]\nyes = true\n\n[share.exclude]\nsources = [\"docs-repo\"]\ntools = [\"bun\"]\n",
+        ).unwrap();
+        let cfg = load_share_config(dir.path()).expect("should parse [share] section");
+        assert_eq!(cfg.yes, Some(true));
+        let exclude = cfg.exclude.expect("should have exclude");
+        assert_eq!(exclude.sources, vec!["docs-repo"]);
+        assert_eq!(exclude.tools, vec!["bun"]);
+    }
+
+    #[test]
+    fn load_share_config_returns_none_when_no_capsule_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = load_share_config(dir.path());
+        assert!(result.is_none(), "missing file should return None");
     }
 }

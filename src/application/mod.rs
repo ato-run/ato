@@ -8,6 +8,7 @@ pub(crate) mod preview;
 pub(crate) mod producer_input;
 pub(crate) mod search;
 pub(crate) mod services;
+#[allow(dead_code)]
 pub(crate) mod share;
 pub(crate) mod source_inference;
 pub(crate) mod types;
