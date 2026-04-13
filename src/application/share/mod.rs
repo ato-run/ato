@@ -395,7 +395,13 @@ pub(crate) fn execute_encap(args: EncapArgs, reporter: Arc<CliReporter>) -> Resu
         .path
         .canonicalize()
         .with_context(|| format!("Failed to resolve workspace root {}", args.path.display()))?;
-    let capture = capture_workspace(&root, args.git_mode, args.allow_dirty, args.tool_runtime, &reporter)?;
+    let capture = capture_workspace(
+        &root,
+        args.git_mode,
+        args.allow_dirty,
+        args.tool_runtime,
+        &reporter,
+    )?;
 
     if args.print_plan {
         println!("{}", serde_json::to_string_pretty(&capture.spec)?);
@@ -539,7 +545,12 @@ pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
     }
 }
 
-fn materialize_loaded_share(loaded: &LoadedShareInput, into: &Path, tool_runtime: ShareToolRuntime, strict: bool) -> Result<WorkspaceShareState> {
+fn materialize_loaded_share(
+    loaded: &LoadedShareInput,
+    into: &Path,
+    tool_runtime: ShareToolRuntime,
+    strict: bool,
+) -> Result<WorkspaceShareState> {
     let mut state = WorkspaceShareState {
         share_url: loaded.share_url.clone(),
         resolved_revision_url: loaded.resolved_revision_url.clone(),
@@ -774,7 +785,10 @@ fn capture_workspace(
     // Dirty-state check: warn or fail if any repo has uncommitted changes.
     for repo in &repos {
         let dirty_output = git_output(&repo.abs_path, &["status", "--porcelain"])?;
-        let is_dirty = dirty_output.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+        let is_dirty = dirty_output
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
         if is_dirty {
             if allow_dirty {
                 futures::executor::block_on(reporter.warn(format!(
@@ -903,10 +917,7 @@ fn resolve_source_lock(repo: &CandidateRepo, git_mode: GitMode) -> Result<Resolv
             })
         }
         GitMode::LatestAtEncap => {
-            let branch = repo
-                .branch
-                .as_deref()
-                .unwrap_or("HEAD");
+            let branch = repo.branch.as_deref().unwrap_or("HEAD");
             let remote_rev = fetch_remote_rev(&repo.url, branch)?;
             Ok(ResolvedSourceLock {
                 id: repo_id_from_path(&repo.rel_path),
@@ -922,9 +933,7 @@ fn resolve_source_lock(repo: &CandidateRepo, git_mode: GitMode) -> Result<Resolv
 /// This is a lightweight check: it does not guarantee the object is fetchable for arbitrary SHAs,
 /// but it catches the common "local-only commit" case where the commit is not yet pushed.
 fn check_rev_reachable_on_remote(url: &str, rev: &str) -> bool {
-    let output = Command::new("git")
-        .args(["ls-remote", url])
-        .output();
+    let output = Command::new("git").args(["ls-remote", url]).output();
     let Ok(output) = output else { return false };
     if !output.status.success() {
         return false;
@@ -933,9 +942,12 @@ fn check_rev_reachable_on_remote(url: &str, rev: &str) -> bool {
     // ls-remote output: "<sha>\t<refname>\n"
     // The rev is reachable if any advertised tip SHA starts with the given prefix
     // (typically a full 40-char SHA, but we match a prefix for safety).
-    stdout
-        .lines()
-        .any(|line| line.split('\t').next().map(|sha| sha.starts_with(rev)).unwrap_or(false))
+    stdout.lines().any(|line| {
+        line.split('\t')
+            .next()
+            .map(|sha| sha.starts_with(rev))
+            .unwrap_or(false)
+    })
 }
 
 /// Fetch the current HEAD of `branch` from the remote and return the SHA.
@@ -2472,7 +2484,9 @@ fn verify_tools(
         match resolved_tools.iter().find(|r| r.tool == spec_tool.tool) {
             None => missing.push(spec_tool.tool.clone()),
             // binary_path is None for ato-managed tools; don't treat that as missing.
-            Some(resolved) if resolved.binary_path.is_none() && resolved.runtime_source == "system" => {
+            Some(resolved)
+                if resolved.binary_path.is_none() && resolved.runtime_source == "system" =>
+            {
                 missing.push(spec_tool.tool.clone())
             }
             Some(_) => {}
@@ -2803,7 +2817,14 @@ mod tests {
         init_git_repo(&web, "git@github.com:acme/dashboard.git");
 
         let reporter = Arc::new(crate::reporters::CliReporter::new(false));
-        let capture = capture_workspace(root, GitMode::SameCommit, false, ShareToolRuntime::System, &reporter).expect("capture");
+        let capture = capture_workspace(
+            root,
+            GitMode::SameCommit,
+            false,
+            ShareToolRuntime::System,
+            &reporter,
+        )
+        .expect("capture");
         assert_eq!(capture.spec.sources.len(), 2);
         assert!(capture
             .spec
@@ -3066,7 +3087,8 @@ mod tests {
         );
 
         let into = temp.path().join("out");
-        let state = materialize_loaded_share(&loaded, &into, ShareToolRuntime::System, false).expect("materialize");
+        let state = materialize_loaded_share(&loaded, &into, ShareToolRuntime::System, false)
+            .expect("materialize");
         assert!(
             state
                 .verification
@@ -3237,8 +3259,8 @@ mod tests {
         )
         .expect("load should succeed");
         let into = temp.path().join("out");
-        let err =
-            materialize_loaded_share(&loaded, &into, ShareToolRuntime::System, false).expect_err("should error on missing source");
+        let err = materialize_loaded_share(&loaded, &into, ShareToolRuntime::System, false)
+            .expect_err("should error on missing source");
         assert!(
             err.to_string().contains("Missing resolved source"),
             "expected missing source error: {err}"
@@ -3425,13 +3447,15 @@ mod tests {
     fn share_source_spec_v1_json_defaults_git_mode() {
         let json = r#"{"id":"api","kind":"git","url":"https://github.com/org/api","path":"api"}"#;
         let spec: ShareSourceSpec = serde_json::from_str(json).expect("parse v1 source spec");
-        assert_eq!(spec.git_mode, "same-commit", "v1 should default to same-commit");
+        assert_eq!(
+            spec.git_mode, "same-commit",
+            "v1 should default to same-commit"
+        );
     }
 
     #[test]
     fn tool_requirement_spec_v1_json_defaults_runtime_source() {
-        let json =
-            r#"{"id":"python3-req","tool":"python3","required_by":["api"]}"#;
+        let json = r#"{"id":"python3-req","tool":"python3","required_by":["api"]}"#;
         let spec: ToolRequirementSpec = serde_json::from_str(json).expect("parse v1 tool spec");
         assert_eq!(
             spec.runtime_source, "system",
@@ -3499,7 +3523,9 @@ mod tests {
         }];
         let env = prepare_share_runtime_env(&tools, ShareToolRuntime::Auto);
         assert!(
-            env.get("NODE_VERSION").map(|v| !v.is_empty()).unwrap_or(false),
+            env.get("NODE_VERSION")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false),
             "NODE_VERSION must be set for node tools"
         );
     }
@@ -3552,10 +3578,12 @@ mod tests {
         };
 
         // non-strict: should succeed but leave verification issues
-        let state =
-            materialize_loaded_share(&loaded, temp.path(), ShareToolRuntime::System, false)
-                .expect("non-strict should not bail");
-        assert!(!state.verification.issues.is_empty(), "issues must be present");
+        let state = materialize_loaded_share(&loaded, temp.path(), ShareToolRuntime::System, false)
+            .expect("non-strict should not bail");
+        assert!(
+            !state.verification.issues.is_empty(),
+            "issues must be present"
+        );
 
         // strict mode with same input should bail
         let temp2 = tempfile::tempdir().expect("tempdir2");
@@ -3566,9 +3594,8 @@ mod tests {
             lock,
             spec_digest_verified: true,
         };
-        let err =
-            materialize_loaded_share(&loaded2, temp2.path(), ShareToolRuntime::System, true)
-                .expect_err("strict mode must bail with issues");
+        let err = materialize_loaded_share(&loaded2, temp2.path(), ShareToolRuntime::System, true)
+            .expect_err("strict mode must bail with issues");
         assert!(
             err.to_string().contains("--strict"),
             "error message must mention --strict"
