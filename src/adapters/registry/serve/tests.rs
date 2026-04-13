@@ -1,6 +1,6 @@
 use super::*;
 use axum::body::to_bytes;
-use std::io::{Cursor, Write};
+use std::io::{Cursor, ErrorKind, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Mutex as StdMutex, OnceLock};
 
@@ -734,6 +734,7 @@ repository = "koh0920/sample"
     assert_eq!(readme_source.as_deref(), Some("artifact"));
 }
 
+#[cfg(feature = "webui")]
 #[test]
 fn normalize_ui_path_maps_root_to_index() {
     assert_eq!(normalize_ui_path("/").as_deref(), Some("index.html"),);
@@ -744,6 +745,7 @@ fn normalize_ui_path_maps_root_to_index() {
     assert!(normalize_ui_path("/../../etc/passwd").is_none());
 }
 
+#[cfg(feature = "webui")]
 #[test]
 fn cache_control_for_ui_path_respects_spa_policy() {
     assert_eq!(
