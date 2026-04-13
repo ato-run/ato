@@ -13,7 +13,8 @@ use super::profile::ProfileCommands;
 use super::project::{ProjectCommands, ScaffoldCommands};
 use super::registry::RegistryCommands;
 use super::shared::{
-    cli_styles, CompatibilityFallbackBackend, EnforcementMode, ProviderToolchain, RunAgentMode,
+    cli_styles, CompatibilityFallbackBackend, EnforcementMode, GitMode, ProviderToolchain,
+    RunAgentMode, ShareToolRuntime,
 };
 use super::source::SourceCommands;
 use super::state::StateCommands;
@@ -266,6 +267,18 @@ pub(crate) enum Commands {
         /// Print the detected capture plan without writing files
         #[arg(long, default_value_t = false)]
         print_plan: bool,
+
+        /// How to resolve the git revision: same-commit (default) or latest-at-encap
+        #[arg(long, value_enum, default_value_t = GitMode::SameCommit)]
+        git_mode: GitMode,
+
+        /// Runtime strategy for install steps: auto (default), ato, or system
+        #[arg(long, value_enum, default_value_t = ShareToolRuntime::Auto)]
+        tool_runtime: ShareToolRuntime,
+
+        /// Allow encap even when repositories have uncommitted changes
+        #[arg(long, default_value_t = false)]
+        allow_dirty: bool,
     },
 
     #[command(
@@ -283,6 +296,14 @@ pub(crate) enum Commands {
         /// Print the materialization plan without executing it
         #[arg(long, default_value_t = false)]
         plan: bool,
+
+        /// Runtime strategy for install steps: auto (default), ato, or system
+        #[arg(long, value_enum, default_value_t = ShareToolRuntime::Auto)]
+        tool_runtime: ShareToolRuntime,
+
+        /// Treat any verification issue as a fatal error (exit 1)
+        #[arg(long, default_value_t = false)]
+        strict: bool,
     },
 
     #[command(
