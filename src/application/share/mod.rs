@@ -1771,20 +1771,6 @@ fn summarize_and_filter_capture(spec: &mut ShareSpec, reporter: &Arc<CliReporter
         }
     }
 
-    // Prompt for workspace name (optional).
-    eprint!("Workspace name [{}]: ", spec.name);
-    io::stderr()
-        .flush()
-        .context("failed to flush name prompt")?;
-    let mut name_input = String::new();
-    io::stdin()
-        .read_line(&mut name_input)
-        .context("failed to read workspace name")?;
-    let name_trimmed = name_input.trim();
-    if !name_trimmed.is_empty() {
-        spec.name = name_trimmed.to_string();
-    }
-
     ensure_single_primary_entry(&mut spec.entries);
     Ok(())
 }
