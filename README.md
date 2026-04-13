@@ -1,4 +1,4 @@
-# Ato: The Agentic Meta-Runtime
+# Ato
 
 [![CI](https://github.com/ato-run/ato-cli/actions/workflows/build-multi-os.yml/badge.svg?branch=dev)](https://github.com/ato-run/ato-cli/actions/workflows/build-multi-os.yml)
 [![GitHub Release](https://img.shields.io/github/v/release/ato-run/ato-cli)](https://github.com/ato-run/ato-cli/releases)
@@ -10,284 +10,286 @@
 
 English | [日本語](README_JA.md)
 
-> The Nix alternative for the AI era. A next-generation meta-runtime that autonomously spins up a secure execution environment from nothing more than a URL, in about a second.
+> Capture any multi-repo workspace as a capsule. Share a URL. Anyone rebuilds the exact same environment in one command.
 
-Ato leaves behind Docker's long image-build waits and Nix's hard-to-learn configuration language.
-It autonomously infers the runtime and dependencies a project needs, then safely materializes and runs them inside a Zero-Trust sandbox, [Nacelle](https://github.com/ato-run/nacelle).
+Ato introduces the **capsule** — a portable, self-describing workspace descriptor that records your git sources, toolchains, install steps, run entries, and env-file contracts without capturing any secrets. `ato encap` creates one from your local workspace. `ato decap` materializes it anywhere.
 
 ---
 
-## Ato's Three Magic Tricks
-
-### 1. No install. No clone. Just run from a URL in isolation: `ato run`
-
-`ato run` executes a GitHub repository, registry package, or single script immediately without polluting your local environment. Dependencies are resolved in a temporary area, giving you an ephemeral execution path.
+## 30-second demo
 
 ```bash
-# Run a GitHub repository directly. Fetch, infer, and execute in isolation in one step.
-ato run github.com/user/my-app
+# On your machine: capture the workspace and get a shareable URL
+ato encap . --share
+# → https://ato.run/s/myproject@r1
 
-# Run a package from a registry immediately without installing it first.
-ato run publisher/awesome-tool
-
-# Run a provider-backed PyPI package in one shot.
-ato run pypi:markitdown -- --help
-
-# Run an exported CLI entry in one shot.
-ato run @publisher/tool -- --help
-
-# Run a single script safely with zero configuration.
-ato run scrape.py
-
-# Run directly from a shared workspace URL.
-ato run https://ato.run/s/demo@r1
-ato run https://ato.run/s/demo@r1 --entry dashboard
-ato run https://ato.run/s/demo@r1 --env-file ./demo.env
-ato run https://ato.run/s/demo@r1 --prompt-env
+# On any other machine: rebuild the full workspace from that URL
+ato decap https://ato.run/s/myproject@r1 --into ./myproject
 ```
 
-### Phase 1: exported CLI entries
+That is the entire workflow. No Dockerfile. No manual README steps. No "works on my machine."
 
-Phase 1 adds one-shot exported CLI execution through `ato run @publisher/tool -- ...`.
+---
 
-- The published capsule must define `exports.cli.<name>` in `capsule.toml`.
-- Phase 1 supports only `kind = "python-tool"`.
-- The export name must match the package slug. For `@publisher/tool`, the capsule slug and export name must both be `tool`.
-- The export must point at a `runtime = "source"` and `driver = "python"` target.
-- Export prefix args and user trailing args are both applied to consent, execution planning, and the final launch.
-- Persistent installed CLI shims are not part of Phase 1. This is one-shot execution only.
+## What is a capsule?
 
-### Share workflow: `ato encap` + `ato decap`
+A capsule is a pair of JSON files written to `.ato/share/` inside your workspace root:
 
-Capture a local workspace and share it as a URL. Recipients can materialize the full environment on any supported machine in one command.
+| File | Purpose |
+|------|---------|
+| `share.spec.json` | Human-readable declaration: sources, tools, install steps, run entries, env file contracts |
+| `share.lock.json` | Resolved snapshot: exact commit SHAs, detected tool versions, computed digests |
+| `guide.md` | Auto-generated quick-reference for recipients |
+
+`ato encap` writes both files. `ato decap` reads the spec (or lock) and materializes the full environment. The lock is what makes reconstruction byte-for-byte reproducible.
+
+### What a capsule records
+
+| Layer | Example |
+|-------|---------|
+| **Sources** | `git@github.com:org/api.git` at commit `abc123` |
+| **Tools** | `node`, `python`, `uv`, `bun` — versions detected from lockfiles |
+| **Install steps** | `npm ci` in `frontend/`, `uv sync` in `server/` |
+| **Run entries** | `npm run dev`, `uv run bot.py`, `bun run dev` |
+| **Env contracts** | paths to `.env.example` files; no secret values are ever stored |
+
+### What a capsule does NOT record
+
+- Secret values (`.env` files, tokens, passwords)
+- Build artifacts or binaries
+- The contents of `node_modules`, `.venv`, or any generated directory
+
+---
+
+## `ato encap` — capture a workspace
 
 ```bash
-# Capture the current workspace and upload it as a shareable URL.
-ato encap . --share
-
-# Preview what will be captured without writing anything.
+# Preview detected items without writing anything
 ato encap . --print-plan
 
-# Materialize a shared workspace into a local directory.
-ato decap https://ato.run/s/demo@r1 --into ./my-project
+# Capture locally (writes .ato/share/)
+ato encap .
 
-# Materialize from a local descriptor file.
-ato decap .ato/share/share.spec.json --into ./my-project
+# Capture and upload to get a shareable URL
+ato encap . --share
+
+# CI / non-interactive: accept all detected items automatically
+ato encap . --yes --share
+
+# Save detected settings into capsule.toml [share] for future runs
+ato encap . --yes --save-config
 ```
 
-`ato encap` records sources, toolchains, install steps, services, and env variable requirements — without capturing secret values. `ato decap` verifies missing tools and required env vars before materializing. To supply required env vars interactively at run time, pass `--prompt-env` to `ato run`.
+### Encap flags
 
-### 2. Materialize a fully reproducible dev environment from someone else's repo in one second: `ato init`
+| Flag | Description |
+|------|-------------|
+| `--yes` / `-y` | Accept all detected items without prompting. Required in CI. |
+| `--share` | Upload the capsule after writing local files and print the share URL. |
+| `--save-only` | Write local files only; do not upload even if authenticated. |
+| `--print-plan` | Print the detected spec as JSON and exit; writes nothing. |
+| `--git-mode` | `same-commit` (default) — lock to the current HEAD SHA. `latest-at-encap` — record the branch and resolve HEAD at encap time. |
+| `--tool-runtime` | `auto` (default) — ato manages toolchains. `system` — use whatever is on `PATH`. |
+| `--allow-dirty` | Allow encap when a repo has uncommitted changes (warns by default). |
+| `--save-config` | Write `git_mode`, `tool_runtime`, and any excludes into `capsule.toml [share]`. |
 
-You do not even need `git clone`. Pass a URL and Ato fetches and analyzes the source, then materializes a real development workspace with full reproducibility, including LSPs and toolchains.
+### Interactive summary screen
 
-```bash
-# From fetch to environment setup and dev shell preparation.
-ato init github.com/user/repo my-project
+When a TTY is present and `--yes` is not set, `ato encap` shows a single summary screen:
+
+```
+Detected workspace `myproject`:
+
+  sources   api  frontend  dashboard
+  tools     node  python  uv  bun
+  install   frontend-install  server-install  dashboard-install
+  entries   frontend-dev  server-bot  dashboard-dev
+  env files 2  (frontend/.env.example  server/.env.example)
+
+Accept all? [Enter]  or  skip <ids>:
 ```
 
-### 3. Publish apps securely and integrate them into the desktop: `ato publish / install`
+Press **Enter** to accept everything, or type `skip api server-bot` to exclude specific items by ID.
 
-Use `ato publish` to register the tool you built in a registry. Users can then run `ato install` to pin it locally and project it into the OS as a native desktop app or CLI they can use every day.
+### Reachability check
+
+`ato encap` checks that every git source's current HEAD commit is reachable on the remote before locking it. If a commit has not been pushed, encap stops with an actionable message:
+
+```
+error: source `api` has unpushed commits (HEAD abc1234 not found on remote)
+hint: push first, or use --git-mode latest-at-encap to record the branch instead
+```
+
+### `capsule.toml [share]` — project-level config
+
+Run `ato encap --save-config` once to persist settings for your workspace. After that, plain `ato encap` picks them up automatically:
+
+```toml
+# capsule.toml
+[share]
+git_mode     = "same-commit"   # or "latest-at-encap"
+tool_runtime = "auto"          # or "system"
+yes          = false           # set true to always skip the summary screen
+
+[share.exclude]
+sources       = []             # IDs to always skip
+tools         = []
+install_steps = []
+entries       = []
+```
+
+CLI flags always override `capsule.toml`.
+
+---
+
+## `ato decap` — materialize a workspace
 
 ```bash
-# Register your tool in a registry as an immutable artifact.
-ato publish
+# From a share URL
+ato decap https://ato.run/s/myproject@r1 --into ./myproject
 
-# Pin the package locally and register it as a desktop app.
-ato install publisher/awesome-app
+# From a local spec or lock file
+ato decap .ato/share/share.spec.json --into ./myproject
+
+# Preview the materialization plan without executing
+ato decap https://ato.run/s/myproject@r1 --into ./myproject --plan
+
+# Treat any verification issue as fatal
+ato decap https://ato.run/s/myproject@r1 --into ./myproject --strict
+```
+
+`ato decap` works in four phases:
+
+1. **Resolve** — fetch and validate the spec/lock (digest check)
+2. **Checkout** — `git clone` + `git checkout <sha>` for each source
+3. **Verify** — check tool availability, env file presence
+4. **Install** — run each install step (e.g. `npm ci`, `uv sync`)
+
+Verification issues are reported as a summary after all steps complete. Use `--strict` to exit with code 1 if any issue is found.
+
+### Decap flags
+
+| Flag | Description |
+|------|-------------|
+| `--into <dir>` | Target directory for materialization. Must be empty or not yet exist. |
+| `--plan` | Print the materialization plan as JSON and exit. |
+| `--tool-runtime` | `auto` (default) or `system`. Overrides the value recorded in the spec. |
+| `--strict` | Exit with code 1 if any verification issue is found. |
+
+### After `ato decap`
+
+The materialized directory contains:
+
+```
+myproject/
+  api/                  ← git checkout at locked SHA
+  frontend/             ← git checkout at locked SHA
+  dashboard/            ← git checkout at locked SHA
+  .ato/share/
+    share.spec.json
+    share.lock.json
+    guide.md            ← quick-reference for the workspace
+```
+
+Run entries are printed at the end of `ato decap`. To launch one:
+
+```bash
+ato run https://ato.run/s/myproject@r1 --entry frontend-dev
 ```
 
 ---
 
-## Supported Tools and Languages
+## `ato run` with share URLs
 
-Ato's inference engine autonomously detects the following languages and project structures, then builds the best-fit runtime environment.
-Even when none of these apply, `ato run` still works as a general-purpose process executor, with `ato.lock.json` preserving reproducibility for arbitrary binaries.
+`ato run` accepts any share URL and executes the primary entry directly, without a full `decap`:
 
-- Single-file execution
-  - Python (`.py`): parses PEP 723 inline metadata and resolves libraries automatically.
-  - TypeScript / TSX (`.ts`, `.tsx`): infers dependencies automatically on top of Deno.
-- Programming languages and runtimes
-  - TypeScript / JavaScript:
-    - Deno (recommended): standard `deno.json` execution with URL imports and `npm:` support.
-    - Node.js: detects `package.json` and lockfiles, with compatibility-mode support.
-  - Python: standardizes on `uv`, infers from files such as `pyproject.toml`, and builds an isolated virtual environment.
-  - Rust / Go: detects `Cargo.toml` and `go.mod`.
-  - WebAssembly / OCI: direct execution of `.wasm` binaries and sandboxed execution of existing Docker images.
-- Desktop / web frameworks
-  - Tauri / Electron / Wails: native desktop integration through projection.
-  - Static Web: preview for `index.html`-centric sites with a built-in web server.
+```bash
+ato run https://ato.run/s/myproject@r1
+ato run https://ato.run/s/myproject@r1 --entry dashboard-dev
+ato run https://ato.run/s/myproject@r1 --env-file ./local.env
+ato run https://ato.run/s/myproject@r1 --prompt-env
+```
 
 ---
 
-## Quick Start
-
-Install `ato` with the one-line installer:
+## Install
 
 ```bash
 curl -fsSL https://ato.run/install.sh | sh
 ```
 
-Alternatively, download a pre-built binary from the [GitHub Releases page](https://github.com/ato-run/ato-cli/releases/latest) and place it on your `PATH`.
+Or download a pre-built binary from the [GitHub Releases page](https://github.com/ato-run/ato-cli/releases/latest) and place it on your `PATH`.
 
-The following shows the workflow for building from source (contributors / CI):
+### Build from source
 
 ```bash
-# Build
 cargo build -p ato-cli
 
-# If the nacelle engine is not installed yet (recommended)
+# Install the Nacelle sandbox engine (required for Python / native targets)
 ./target/debug/ato config engine install --engine nacelle
-
-# Compatibility command
-./target/debug/ato setup --engine nacelle
-
-# Run a local directory
-./target/debug/ato run .
-
-# Hot reload during development
-./target/debug/ato run . --watch
-
-# Background management
-./target/debug/ato run . --background
-./target/debug/ato ps
-./target/debug/ato logs --id <capsule-id> --follow
-./target/debug/ato close --id <capsule-id>
 ```
 
 ---
 
-## Key Command Reference
+## Other commands
 
 ```bash
-ato run [path|github.com/owner/repo|https://ato.run/s/...|publisher/slug] [--entry <name>] [--env-file <path>] [--prompt-env] [--registry <url>] [-- <args>]
-ato encap [path] [--share] [--save-only] [--print-plan]
-ato decap <url|spec|lock> --into <dir> [--plan]
-ato init [path] [--yes]
-ato install <publisher/slug> [--registry <url>]
-ato install --from-gh-repo <github.com/owner/repo>
-ato build [dir] [--strict-v3] [--force-large-payload]
-ato publish [--registry <url>] [--artifact <file.capsule>] [--scoped-id <publisher/slug>]
+# Run anything — local path, GitHub repo, registry package, or share URL
+ato run [path|github.com/owner/repo|publisher/slug|https://ato.run/s/...] [-- <args>]
+
+# Build and publish a capsule artifact
+ato build [dir]
+ato publish [--registry <url>]
+
+# Install a package from the registry as a persistent local capsule
+ato install <publisher/slug>
+
+# Process management
 ato ps
-ato close --id <capsule-id> | --name <name> [--all] [--force]
-ato logs --id <capsule-id> [--follow]
-ato inspect lock [path] [--json]
-ato inspect preview [path] [--json]
-ato inspect diagnostics [path] [--json]
-ato inspect requirements <path|publisher/slug> [--json]
-ato source sync-status --source-id <id> --sync-run-id <id>
-ato source rebuild --source-id <id> [--ref <branch|tag|sha>] [--wait]
+ato logs --id <id> [--follow]
+ato close --id <id>
+
+# Inspect lock-first metadata and diagnostics
+ato inspect lock [path]
+ato inspect preview [path]
+ato inspect diagnostics [path]
+
+# Registry
 ato search [query]
-ato registry serve --host 127.0.0.1 --port 18787 [--auth-token <token>]
-```
-
-> `ato inspect` includes useful commands for debugging and development support, such as configuration preview (`preview`), issue diagnosis (`diagnostics`), remediation suggestions (`remediation`), and requirements JSON output (`requirements`).
-
----
-
-## Architecture and Core Features
-
-### Lock-native input model
-
-Instead of relying on ambiguous human-written config, Ato treats machine-readable `ato.lock.json` as the single source of truth (SSOT). When this file is present, it guarantees the same environment regardless of machine differences.
-
-Projects that still use a `capsule.toml` from older versions of Ato continue to work through a compatibility path — no manual changes required. Running `ato init` inside such a project writes a durable `ato.lock.json` and moves the project to the canonical flow.
-
-### Unified delivery pipeline
-
-Ato unifies consumer flows (`run` / `install`) and producer flows (`build` / `publish`). Instead of downloading a huge image during `ato build`, it hard-links only the required binaries from CAS (Content-Addressable Storage), keeping overhead effectively near zero.
-
-### Native Delivery: projecting desktop apps
-
-This is Ato's native app delivery and integration feature. From project structures such as Tauri and Electron, Ato automatically infers the entrypoint (such as `.app` on macOS) and records all native delivery settings into `ato.lock.json`. No separate configuration file is required.
-
-When a user runs `ato install` on an artifact that includes native delivery metadata, Ato projects it into the OS application area so it is accessible like a normal native app. Projection is enabled by default when the artifact supports it; pass `--no-project` to skip it or `--project` to force it explicitly.
-
-### Dynamic app capsules: Web plus services supervisor
-
-You can package multiple services, such as an API, dashboard, and worker, into a single capsule. When `[services]` is defined, `ato run` orchestrates them by starting them in DAG order, waiting on readiness probes, prefixing logs, and shutting everything down together if any service exits.
-
-### Registry and publish model
-
-`ato publish` behaves differently depending on where you publish. Publishing runs up to six stages in order: Prepare, Build, Verify, Install, Dry-run, Publish.
-
-1. Personal Dock
-   If you are already logged in with `ato login`, publishing without `--registry` uploads automatically to your Personal Dock and runs Prepare through Publish.
-2. Custom or private registry
-   You can upload to your own internal store with `--registry <url>`. This is also useful for E2E development against a local HTTP registry created by `ato registry serve`.
-3. Official Store (`https://api.ato.run`)
-   To keep the pipeline secure, the official Store is always published through CI with OIDC authentication. Local direct upload is not used. Local execution stops at the handoff immediately before Publish by sending diagnostics. You can generate the integration GitHub Actions with `ato gen-ci`.
-
----
-
-## Security and Execution Policy: Zero-Trust
-
-Ato is strict by default and fail-closed, protecting your system from unintended execution.
-
-- Process isolation: even for desktop apps projected into the OS or for local source code, Ato launches the target inside its lightweight sandbox, [Nacelle](https://github.com/ato-run/nacelle).
-- Filesystem protection: access is restricted to read-only by default, so AI-generated code and unknown libraries can be tested within a safe boundary.
-- Network control: communication to domains that were not explicitly allowed is blocked at runtime.
-- Strict environment-variable handling: if a required variable listed in `required_env` is missing, Ato warns and stops immediately before launch.
-
----
-
-## Runtime Isolation Policy (Tiers)
-
-Different runtimes require different isolation levels. Node and Deno run as Tier 1, while Python and native environments require a stronger sandbox for safety.
-
-| Runtime         | Tier  | Required setup                                                                         |
-| --------------- | ----- | -------------------------------------------------------------------------------------- |
-| `web/static`    | Tier1 | `driver = "static"` + free port assignment (no lockfile required)                      |
-| `web/deno`      | Tier1 | `ato.lock.json` or `deno.lock` / `package-lock.json`                                   |
-| `web/node`      | Tier1 | `ato.lock.json` or `package-lock.json` (runs automatically through Deno compatibility) |
-| `web/python`    | Tier2 | `uv.lock` + sandbox launch recommended                                                 |
-| `source/deno`   | Tier1 | `ato.lock.json` or `deno.lock` / `package-lock.json`                                   |
-| `source/node`   | Tier1 | `ato.lock.json` or `package-lock.json` (runs automatically through Deno compatibility) |
-| `source/python` | Tier2 | `uv.lock` + sandbox launch recommended                                                 |
-| `source/native` | Tier2 | compiled executable binary                                                             |
-
-Tier 1 runs without special flags. Node is also Tier 1, so you do not need bypass flags such as `--unsafe`.
-
-Tier 2 (`source/native`, `source/python`, `web/python`) requires the [Nacelle](https://github.com/ato-run/nacelle) engine. If it is not installed, Ato stops fail-closed. Prepare it with one of the following:
-
-```bash
-ato config engine install --engine nacelle
-ato run --nacelle <path>
-# or set the NACELLE_PATH environment variable
+ato registry serve --host 127.0.0.1 --port 18787
 ```
 
 ---
 
-## Environment Variables and Authentication
+## Security
 
-The CLI behavior and default endpoints are controlled by the following environment variables.
+Ato is fail-closed by default.
 
-| Variable                    | Description                                          | Default               |
-| --------------------------- | ---------------------------------------------------- | --------------------- |
-| `CAPSULE_WATCH_DEBOUNCE_MS` | Debounce interval for `run --watch` in milliseconds  | `300`                 |
-| `CAPSULE_ALLOW_UNSAFE`      | Set to `1` to allow `--dangerously-skip-permissions` | —                     |
-| `ATO_TOKEN`                 | Auth token for local/private publishing and CI       | —                     |
-| `ATO_STORE_API_URL`         | API endpoint used by `ato search` and `install`      | `https://api.ato.run` |
-| `ATO_STORE_SITE_URL`        | Base URL of the Store web app                        | `https://ato.run`     |
+- **No secrets in capsules** — env file paths are recorded; values are never captured.
+- **Reachability enforcement** — `ato encap` refuses to lock a commit that has not been pushed.
+- **Digest verification** — `ato decap` checks SHA-256 digests before materializing.
+- **Sandbox isolation** — `ato run` executes inside [Nacelle](https://github.com/ato-run/nacelle) for Python and native targets.
+- **Strict env handling** — missing required env vars stop execution before launch.
 
-### How authentication works: `ato login`
+---
 
-By default, credentials are stored in `${XDG_CONFIG_HOME:-~/.config}/ato/credentials.toml`. `ato` resolves authentication in the following order:
+## Environment Variables
 
-1. `ATO_TOKEN` environment variable
-2. OS secure keyring
-3. `~/.config/ato/credentials.toml`
-4. Legacy `~/.ato/credentials.json` as a fallback
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ATO_TOKEN` | Auth token for publishing and CI | — |
+| `ATO_STORE_API_URL` | API endpoint for `search` and `install` | `https://api.ato.run` |
+| `ATO_STORE_SITE_URL` | Base URL of the Store web app | `https://ato.run` |
+| `CAPSULE_WATCH_DEBOUNCE_MS` | Debounce for `run --watch` in ms | `300` |
+| `CAPSULE_ALLOW_UNSAFE` | Set `1` to allow `--dangerously-skip-permissions` | — |
+
+Credentials are stored in `~/.config/ato/credentials.toml` and resolved in this order: `ATO_TOKEN` env var → OS keyring → credentials file.
 
 ---
 
 ## Contributing
 
-Thanks for your interest in contributing. For development details and internal architecture, refer to the core project documentation.
-
-- Bug reports and feature requests are welcome in GitHub Issues.
-- For discussion and questions, join the Discord community.
+Bug reports and feature requests are welcome in [GitHub Issues](https://github.com/ato-run/ato-cli/issues).
 
 ## License
 
