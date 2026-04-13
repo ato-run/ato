@@ -140,22 +140,34 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             share,
             save_only,
             print_plan,
+            git_mode,
+            tool_runtime,
+            allow_dirty,
         } => share::execute_encap_command(share::EncapCommandArgs {
             path,
             share,
             save_only,
             print_plan,
+            git_mode,
+            tool_runtime,
+            allow_dirty,
             reporter: reporter.clone(),
         }),
 
-        Commands::Decap { input, into, plan } => {
-            share::execute_decap_command(share::DecapCommandArgs {
-                input,
-                into,
-                plan,
-                reporter: reporter.clone(),
-            })
-        }
+        Commands::Decap {
+            input,
+            into,
+            plan,
+            tool_runtime,
+            strict,
+        } => share::execute_decap_command(share::DecapCommandArgs {
+            input,
+            into,
+            plan,
+            tool_runtime,
+            strict,
+            reporter: reporter.clone(),
+        }),
 
         Commands::Engine { command } => {
             engine::execute_engine_command(command, nacelle, reporter.clone())

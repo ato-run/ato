@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::application::auth;
 use crate::application::ports::OutputPort;
+use crate::cli::{GitMode, ShareToolRuntime};
 use crate::fs_copy;
 use crate::progressive_ui;
 use crate::reporters::CliReporter;
@@ -22,8 +23,16 @@ const SHARE_SPEC_FILE: &str = "share.spec.json";
 const SHARE_LOCK_FILE: &str = "share.lock.json";
 const SHARE_GUIDE_FILE: &str = "guide.md";
 const SHARE_STATE_FILE: &str = "state.json";
-const SHARE_SCHEMA_VERSION: &str = "1";
+const SHARE_SCHEMA_VERSION: &str = "2";
 const DEFAULT_API_TIMEOUT_SECS: u64 = 20;
+
+fn default_git_mode_str() -> String {
+    "same-commit".to_string()
+}
+
+fn default_runtime_source_str() -> String {
+    "system".to_string()
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct EncapArgs {
@@ -31,6 +40,9 @@ pub(crate) struct EncapArgs {
     pub(crate) share: bool,
     pub(crate) save_only: bool,
     pub(crate) print_plan: bool,
+    pub(crate) git_mode: GitMode,
+    pub(crate) tool_runtime: ShareToolRuntime,
+    pub(crate) allow_dirty: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +50,8 @@ pub(crate) struct DecapArgs {
     pub(crate) input: String,
     pub(crate) into: PathBuf,
     pub(crate) plan: bool,
+    pub(crate) tool_runtime: ShareToolRuntime,
+    pub(crate) strict: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +99,9 @@ pub(crate) struct ShareSourceSpec {
     pub(crate) branch: Option<String>,
     #[serde(default)]
     pub(crate) evidence: Vec<String>,
+    /// "same-commit" | "latest-at-encap"  (v2; defaults to "same-commit" for v1 lock reads)
+    #[serde(default = "default_git_mode_str")]
+    pub(crate) git_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +114,12 @@ pub(crate) struct ToolRequirementSpec {
     pub(crate) required_by: Vec<String>,
     #[serde(default)]
     pub(crate) evidence: Vec<String>,
+    /// "auto" | "ato" | "system"  (v2; defaults to "system" for v1 lock reads)
+    #[serde(default = "default_runtime_source_str")]
+    pub(crate) runtime_source: String,
+    /// "uv" | "npm" | "bun" | "pnpm"  (populated when runtime_source != "system")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_toolchain: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,6 +217,12 @@ pub(crate) struct ShareLock {
 pub(crate) struct ResolvedSourceLock {
     pub(crate) id: String,
     pub(crate) rev: String,
+    /// "same-commit" | "latest-at-encap"  (v2)
+    #[serde(default = "default_git_mode_str")]
+    pub(crate) git_mode: String,
+    /// Remote branch used when git_mode is "latest-at-encap"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) remote_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,8 +230,18 @@ pub(crate) struct ResolvedToolLock {
     pub(crate) tool: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resolved_version: Option<String>,
+    /// Kept for backward-compat with v1; not used by v2 decap logic
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) binary_path: Option<String>,
+    /// "auto" | "ato" | "system"  (v2)
+    #[serde(default = "default_runtime_source_str")]
+    pub(crate) runtime_source: String,
+    /// Provider toolchain used at encap time, e.g. "uv", "npm"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_toolchain: Option<String>,
+    /// Version of the ato-managed runtime recorded at encap time
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -715,6 +754,8 @@ fn capture_workspace(root: &Path) -> Result<CapturedWorkspace> {
         .map(|repo| ResolvedSourceLock {
             id: repo_id_from_path(&repo.rel_path),
             rev: repo.rev.clone(),
+            git_mode: default_git_mode_str(),
+            remote_branch: None,
         })
         .collect::<Vec<_>>();
     let mut tool_requirements = BTreeMap::<String, ToolRequirementSpec>::new();
@@ -759,6 +800,7 @@ fn capture_workspace(root: &Path) -> Result<CapturedWorkspace> {
                 path: repo.rel_path.clone(),
                 branch: repo.branch.clone(),
                 evidence: repo.evidence.clone(),
+                git_mode: default_git_mode_str(),
             })
             .collect(),
         tool_requirements: tool_requirements.into_values().collect(),
@@ -1121,6 +1163,8 @@ fn add_tool_requirement(
             version,
             required_by: Vec::new(),
             evidence: Vec::new(),
+            runtime_source: default_runtime_source_str(),
+            provider_toolchain: None,
         });
     if !entry.required_by.iter().any(|value| value == required_by) {
         entry.required_by.push(required_by.to_string());
@@ -2378,6 +2422,9 @@ fn resolve_tools(requirements: &[ToolRequirementSpec]) -> Vec<ResolvedToolLock> 
                 tool: tool.tool.clone(),
                 resolved_version,
                 binary_path,
+                runtime_source: tool.runtime_source.clone(),
+                provider_toolchain: tool.provider_toolchain.clone(),
+                provider_version: None,
             }
         })
         .collect()
@@ -2971,6 +3018,8 @@ mod tests {
             version: None,
             required_by: vec![],
             evidence: vec![],
+            runtime_source: "system".to_string(),
+            provider_toolchain: None,
         }];
         let missing = verify_tools(&spec_tools, &[]);
         assert_eq!(missing, vec!["bun".to_string()]);
@@ -2984,6 +3033,8 @@ mod tests {
             version: None,
             required_by: vec![],
             evidence: vec![],
+            runtime_source: "system".to_string(),
+            provider_toolchain: None,
         }];
         let missing = verify_local_tools(&spec_tools);
         assert_eq!(missing, vec!["ato-test-fake-binary-xxxx".to_string()]);
