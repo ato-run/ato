@@ -152,11 +152,11 @@ Ato はデフォルトで Fail-Closed です。
 
 ランタイムの種類によって必要な隔離レベルは異なります。
 
-| ランタイム系 | Tier | 補足 |
-| --- | --- | --- |
-| `web/static` | Tier 1 | Static preview やシンプルな Web ターゲット |
-| `web/deno`, `web/node`, `source/deno`, `source/node` | Tier 1 | 通常の経路では手動サンドボックス準備なしで実行 |
-| `source/python`, `web/python`, `source/native` | Tier 2 | Nacelle が必要。CI やオフライン以外では通常自動ブートストラップ対象 |
+| ランタイム系                                         | Tier   | 補足                                                                |
+| ---------------------------------------------------- | ------ | ------------------------------------------------------------------- |
+| `web/static`                                         | Tier 1 | Static preview やシンプルな Web ターゲット                          |
+| `web/deno`, `web/node`, `source/deno`, `source/node` | Tier 1 | 通常の経路では手動サンドボックス準備なしで実行                      |
+| `source/python`, `web/python`, `source/native`       | Tier 2 | Nacelle が必要。CI やオフライン以外では通常自動ブートストラップ対象 |
 
 Tier 1 は権限バイパス用の特別なフラグなしで実行します。Tier 2 はより強いサンドボックス経路を通ります。
 
