@@ -4,6 +4,12 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.64] - 2026-04-14
+
+### What Changed
+
+- Bump the patch release after `v0.4.63` was already tagged and published
+
 ## [0.4.62] - 2026-04-14
 
 ### What Changed
