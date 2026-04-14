@@ -67,6 +67,7 @@ fn build_hash_core(manifest: &CapsuleManifestV3) -> CapsuleManifestV3HashCore<'_
 mod tests {
     use super::{compute_artifact_hash_jcs_blake3, set_artifact_hash, verify_artifact_hash};
     use crate::capsule_v3::manifest::{blake3_digest, CdcParams, ChunkMeta};
+    use crate::capsule_v3::CapsuleManifestV3;
 
     fn sample_manifest() -> CapsuleManifestV3 {
         CapsuleManifestV3 {

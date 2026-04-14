@@ -257,6 +257,8 @@ mod tests {
         normalize_relative_utf8_path, reconstruct_from_chunks,
     };
     use crate::types::CapsuleManifest;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
     use std::path::Path;
 
     const VALID_TOML: &str = r#"

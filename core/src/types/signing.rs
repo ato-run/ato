@@ -269,6 +269,7 @@ pub fn verify_signature_file(sig: &SignatureFile, message: &[u8]) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use ed25519_dalek::Signer;
     use std::collections::BTreeMap;
     use tempfile::tempdir;
 

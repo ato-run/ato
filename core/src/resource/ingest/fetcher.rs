@@ -121,6 +121,7 @@ fn normalize_hex(value: &str) -> String {
 #[cfg(test)]
 #[cfg(feature = "provisioning-tests")]
 mod tests {
+    use std::fs;
     use std::net::SocketAddr;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -130,7 +131,7 @@ mod tests {
     use axum::Router;
     use tokio::net::TcpListener;
 
-    use super::{FetchError, Fetcher};
+    use super::{fetch_resource, FetcherConfig, ResourceFetchRequest};
 
     async fn start_bytes_server(
         body: &'static [u8],
