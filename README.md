@@ -152,11 +152,11 @@ For normal local runs, Ato will usually bootstrap a compatible Nacelle release a
 
 Different runtimes require different isolation levels.
 
-| Runtime family | Tier | Notes |
-| --- | --- | --- |
-| `web/static` | Tier 1 | Static preview and simple web targets |
-| `web/deno`, `web/node`, `source/deno`, `source/node` | Tier 1 | Runs without manual sandbox bootstrap in the common path |
-| `source/python`, `web/python`, `source/native` | Tier 2 | Requires Nacelle; normally auto-bootstrapped outside CI and offline modes |
+| Runtime family                                       | Tier   | Notes                                                                     |
+| ---------------------------------------------------- | ------ | ------------------------------------------------------------------------- |
+| `web/static`                                         | Tier 1 | Static preview and simple web targets                                     |
+| `web/deno`, `web/node`, `source/deno`, `source/node` | Tier 1 | Runs without manual sandbox bootstrap in the common path                  |
+| `source/python`, `web/python`, `source/native`       | Tier 2 | Requires Nacelle; normally auto-bootstrapped outside CI and offline modes |
 
 Tier 1 targets run without bypass flags. Tier 2 targets use the stronger sandbox path.
 
