@@ -381,6 +381,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::error::CapsuleError;
+    use crate::resource::cas::client::CasClient;
 
     use super::LocalCasClient;
 

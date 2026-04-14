@@ -408,7 +408,6 @@ mod tests {
 
     // external crates
     use serde_json;
-    use serde_json;
     use tar::Builder;
     use tempfile;
 
