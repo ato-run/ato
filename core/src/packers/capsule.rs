@@ -965,7 +965,6 @@ mod tests {
     use crate::packers::sbom::{extract_and_verify_embedded_sbom, SBOM_PATH};
     use crate::r3_config::{generate_config, write_config};
     use crate::reporter::NoOpReporter;
-    use crate::resource::cas::{CasStore, FastCdcWriterConfig};
     use crate::router::{
         execution_descriptor_from_manifest_parts, route_manifest, ExecutionProfile,
     };
@@ -974,10 +973,12 @@ mod tests {
     use super::{
         build_payload_v3_manifest_bytes_with_cas, collect_payload_entries,
         find_nearest_readme_candidate, pack, parse_bool_env, select_payload_roots,
-        select_payload_source_root, CapsulePackOptions,
+        select_payload_source_root, CapsulePackOptions, CasStore, FastCdcWriterConfig,
     };
 
     fn sha256_hex(data: &[u8]) -> String {
+        use sha2::Digest;
+
         let mut hasher = sha2::Sha256::new();
         hasher.update(data);
         hex::encode(hasher.finalize())
@@ -1143,7 +1144,7 @@ entrypoint = "source/main.sh"
     #[test]
     fn build_payload_v3_manifest_populates_cas_and_produces_valid_manifest() {
         let cas_root = tempfile::tempdir().expect("cas tempdir");
-        let cas = CasStore::create(cas_root.path()).expect("cas store");
+        let cas = CasStore::new(cas_root.path()).expect("cas store");
 
         let manifest_bytes = build_payload_v3_manifest_bytes_with_cas(
             b"payload bytes for v3",
