@@ -1,7 +1,31 @@
-use super::*;
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::sync::Arc;
+use std::time::Duration;
+
 use axum::{routing::get, Json, Router};
 use serde_json::json;
-use std::time::Duration;
+use tempfile::TempDir;
+
+use crate::packers::runtime_fetcher::RuntimeFetcher;
+use crate::reporter::CapsuleReporter;
+
+use super::lockfile_runtime::{
+    deno_artifact_filename, required_env_keys_from_manifest, run_command_inner, uv_artifact_url,
+};
+use super::lockfile_support::{
+    capsule_error_pack, create_atomic_temp_file, write_atomic_bytes_with_os_lock,
+};
+use super::{
+    ensure_lockfile, ensure_lockfile_for_compat_input, generate_lockfile,
+    lockfile_has_required_platform_coverage, lockfile_inputs_snapshot_path, lockfile_output_path,
+    lockfile_runtime_platforms, orchestration_service_target_labels, read_lockfile,
+    read_runtime_tools, required_runtime_version, resolve_external_capsule_dependencies,
+    semantic_manifest_hash_from_text, verify_lockfile_external_dependencies,
+    verify_lockfile_manifest, CapsuleLock, LockMeta, LockedCapsuleDependency, RuntimeArtifact,
+    RuntimeEntry, RuntimeSection, ToolArtifact, ToolSection, ToolTargets, CAPSULE_LOCK_FILE_NAME,
+    ENV_STORE_API_URL, LOCKFILE_INPUT_SNAPSHOT_NAME, SUPPORTED_RUNTIME_PLATFORMS, UV_VERSION,
+};
 
 struct EnvGuard {
     key: &'static str,

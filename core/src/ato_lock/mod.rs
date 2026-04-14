@@ -134,7 +134,15 @@ mod tests {
     use serde_json::json;
     use tempfile::NamedTempFile;
 
-    use super::*;
+    use super::validate::AtoLockValidationError;
+    use super::{
+        canonical_projection_bytes, canonical_signature_payload_bytes, compute_lock_id,
+        delivery_environment, is_canonical_identity_section, load_unvalidated_from_path,
+        load_unvalidated_from_str, recompute_lock_id, to_pretty_json, validate_persisted_strict,
+        validate_structural_non_strict, validate_structural_strict, write_pretty_to_path, AtoLock,
+        FeatureName, KnownFeature, LockId, LockSignature, UnresolvedReason, UnresolvedValue,
+        ATO_LOCK_SCHEMA_VERSION, CANONICAL_IDENTITY_EXCLUDED_SECTIONS,
+    };
 
     fn sample_lock() -> AtoLock {
         let mut lock = AtoLock {

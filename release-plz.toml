@@ -4,6 +4,26 @@ changelog_update = true
 dependencies_update = true
 pr_branch_prefix = "release-plz-"
 pr_labels = ["release"]
+# Use git tags only; this repo does not publish to crates.io.
+git_only = true
+# Only release when an unreleased version is detected (not on every run).
+release_always = false
+
+# ato-cli is the sole dist-able binary; use plain v<version> tag format
+# so cargo-dist's trigger pattern (**[0-9]+.[0-9]+.[0-9]+*) matches correctly.
+[[package]]
+name = "ato-cli"
+git_tag_name = "v{{ version }}"
+
+# Library crates are versioned manually; release-plz updates their
+# changelogs in the Release PR but does not create tags for them.
+[[package]]
+name = "capsule-core"
+release = false
+
+[[package]]
+name = "lock-draft-engine"
+release = false
 
 [changelog]
 header = """

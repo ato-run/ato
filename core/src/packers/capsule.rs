@@ -945,15 +945,31 @@ fn parse_bool_env(key: &str, raw: &str) -> CapsuleResult<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::io::Read;
+    use std::sync::Arc;
+
+    use hex;
+    use serde_json;
+    use tempfile;
+    use toml;
+
     use crate::capsule_v3::{verify_artifact_hash, CapsuleManifestV3};
+    use crate::packers::pack_filter::PackFilter;
     use crate::packers::payload::reconstruct_from_chunks;
+    use crate::packers::sbom::SBOM_PATH;
     use crate::reporter::NoOpReporter;
     use crate::router::ExecutionProfile;
     use crate::types::CapsuleManifest;
-    use std::io::Read;
+
+    use super::{
+        build_payload_v3_manifest_bytes_with_cas, collect_payload_entries,
+        find_nearest_readme_candidate, pack, parse_bool_env, select_payload_roots,
+        select_payload_source_root, CapsulePackOptions, CasStore, FastCdcWriterConfig,
+    };
 
     fn sha256_hex(data: &[u8]) -> String {
+        use sha2::Digest;
+
         let mut hasher = sha2::Sha256::new();
         hasher.update(data);
         hex::encode(hasher.finalize())
