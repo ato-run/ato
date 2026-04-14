@@ -24,7 +24,6 @@ use super::state::StateCommands;
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(styles = cli_styles())]
 #[command(help_template = "\
-{about-with-newline}
 Usage: {usage}
 
 Primary Commands:
@@ -32,32 +31,10 @@ Primary Commands:
   decap    Set up a workspace locally
   encap    Share your current workspace
 
-Build & Publish:
-  build    Pack a project into an immutable .capsule archive
-  publish  Publish capsule artifacts to a registry
-  search   Search the registry for agent skills and packages
-
 Management:
   ps       List running capsules
   stop     Stop a running capsule
   logs     Show logs of a running capsule
-    app      Inspect or adapt app-scoped bootstrap state
-  state    Inspect or register persistent state bindings
-  binding  Inspect or register host-side service bindings
-
-Compatibility:
-  install  Install a verified package from the registry
-  setup    Fetch declared development dependencies for the current project
-  init     Materialize a durable ato.lock.json baseline for the current project
-
-Auth:
-  login    Login to Ato registry
-  logout   Logout
-  whoami   Show current authentication status
-
-Troubleshooting:
-  resolve  Resolve a capsule handle or terse ref into a launch preview
-  inspect  Inspect lock-first metadata, preview write-back, diagnostics, and runtime requirements
 
 Options:
 {options}
@@ -226,10 +203,7 @@ pub(crate) enum Commands {
         args: Vec<String>,
     },
 
-    #[command(
-        next_help_heading = "Advanced",
-        about = "Resolve a capsule handle or terse ref into a launch preview"
-    )]
+    #[command(hide = true, about = "Resolve a capsule handle or terse ref into a launch preview")]
     Resolve {
         /// Canonical capsule handle, GitHub shorthand, registry scoped ID, or local path
         handle: String,
@@ -249,7 +223,7 @@ pub(crate) enum Commands {
 
     #[command(
         next_help_heading = "Primary Commands",
-        about = "Capture a local workspace into a shareable setup descriptor"
+        about = "Share your current workspace"
     )]
     Encap {
         /// Local workspace path to capture
@@ -314,10 +288,7 @@ pub(crate) enum Commands {
         strict: bool,
     },
 
-    #[command(
-        next_help_heading = "Compatibility",
-        about = "Install a package from the store"
-    )]
+    #[command(hide = true, about = "Install a package from the store")]
     Install {
         /// Capsule scoped ID (publisher/slug)
         #[arg(required_unless_present = "from_gh_repo")]
@@ -403,10 +374,7 @@ pub(crate) enum Commands {
         auto_fix_all: bool,
     },
 
-    #[command(
-        next_help_heading = "Compatibility",
-        about = "Fetch declared development dependencies for a local project"
-    )]
+    #[command(hide = true, about = "Fetch declared development dependencies for a local project")]
     Setup {
         /// Local workspace path to prepare
         #[arg(default_value = ".")]
@@ -430,7 +398,7 @@ pub(crate) enum Commands {
     },
 
     #[command(
-        next_help_heading = "Compatibility",
+        hide = true,
         about = "Materialize a durable ato.lock.json baseline for a local workspace"
     )]
     Init {
@@ -443,11 +411,7 @@ pub(crate) enum Commands {
         yes: bool,
     },
 
-    #[command(
-        next_help_heading = "Build & Publish",
-        about = "Build project into a capsule archive",
-        alias = "pack"
-    )]
+    #[command(hide = true, about = "Build project into a capsule archive", alias = "pack")]
     Build {
         #[arg(default_value = ".")]
         dir: PathBuf,
@@ -473,10 +437,7 @@ pub(crate) enum Commands {
         strict_v3: bool,
     },
 
-    #[command(
-        next_help_heading = "Troubleshooting",
-        about = "Validate capsule build/run inputs without executing"
-    )]
+    #[command(hide = true, about = "Validate capsule build/run inputs without executing")]
     Validate {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -484,14 +445,11 @@ pub(crate) enum Commands {
         json: bool,
     },
 
-    #[command(
-        next_help_heading = "Troubleshooting",
-        about = "Update ato CLI to the latest version"
-    )]
+    #[command(hide = true, about = "Update ato CLI to the latest version")]
     Update,
 
     #[command(
-        next_help_heading = "Troubleshooting",
+        hide = true,
         about = "Inspect lock-first metadata, preview write-back, diagnostics, remediation, and runtime requirements"
     )]
     Inspect {
@@ -499,10 +457,7 @@ pub(crate) enum Commands {
         command: InspectCommands,
     },
 
-    #[command(
-        next_help_heading = "Build & Publish",
-        about = "Search the store for packages"
-    )]
+    #[command(hide = true, about = "Search the store for packages")]
     Search {
         query: Option<String>,
         #[arg(long)]
@@ -616,34 +571,25 @@ pub(crate) enum Commands {
         tail: Option<usize>,
     },
 
-    #[command(
-        next_help_heading = "Management",
-        about = "Inspect or adapt app-scoped bootstrap state"
-    )]
+    #[command(hide = true, about = "Inspect or adapt app-scoped bootstrap state")]
     App {
         #[command(subcommand)]
         command: AppCommands,
     },
 
-    #[command(
-        next_help_heading = "Management",
-        about = "Inspect or register persistent state bindings"
-    )]
+    #[command(hide = true, about = "Inspect or register persistent state bindings")]
     State {
         #[command(subcommand)]
         command: StateCommands,
     },
 
-    #[command(
-        next_help_heading = "Management",
-        about = "Inspect or register host-side service bindings"
-    )]
+    #[command(hide = true, about = "Inspect or register host-side service bindings")]
     Binding {
         #[command(subcommand)]
         command: BindingCommands,
     },
 
-    #[command(next_help_heading = "Auth", about = "Login to Ato registry")]
+    #[command(hide = true, about = "Login to Ato registry")]
     Login {
         #[arg(long)]
         token: Option<String>,
@@ -651,14 +597,10 @@ pub(crate) enum Commands {
         headless: bool,
     },
 
-    #[command(next_help_heading = "Auth", about = "Logout")]
+    #[command(hide = true, about = "Logout")]
     Logout,
 
-    #[command(
-        next_help_heading = "Auth",
-        about = "Show current authentication status",
-        alias = "auth"
-    )]
+    #[command(hide = true, about = "Show current authentication status", alias = "auth")]
     Whoami,
 
     #[command(hide = true)]
@@ -674,7 +616,7 @@ pub(crate) enum Commands {
     },
 
     #[command(
-        next_help_heading = "Advanced Commands",
+        hide = true,
         about = "Publish capsule artifacts through the unified pipeline (My Dock direct upload by default, official registry is CI-first)"
     )]
     Publish {

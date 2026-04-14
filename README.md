@@ -231,32 +231,12 @@ cargo build -p ato-cli
 
 ---
 
-## Other commands
+## Process management
 
 ```bash
-# Run anything — local path, GitHub repo, registry package, or share URL
-ato run [path|github.com/owner/repo|publisher/slug|https://ato.run/s/...] [-- <args>]
-
-# Build and publish a capsule artifact
-ato build [dir]
-ato publish [--registry <url>]
-
-# Install a package from the registry as a persistent local capsule
-ato install <publisher/slug>
-
-# Process management
 ato ps
 ato logs --id <id> [--follow]
-ato close --id <id>
-
-# Inspect lock-first metadata and diagnostics
-ato inspect lock [path]
-ato inspect preview [path]
-ato inspect diagnostics [path]
-
-# Registry
-ato search [query]
-ato registry serve --host 127.0.0.1 --port 18787
+ato stop --id <id>
 ```
 
 ---
@@ -278,8 +258,6 @@ Ato is fail-closed by default.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `ATO_TOKEN` | Auth token for publishing and CI | — |
-| `ATO_STORE_API_URL` | API endpoint for `search` and `install` | `https://api.ato.run` |
-| `ATO_STORE_SITE_URL` | Base URL of the Store web app | `https://ato.run` |
 | `CAPSULE_WATCH_DEBOUNCE_MS` | Debounce for `run --watch` in ms | `300` |
 | `CAPSULE_ALLOW_UNSAFE` | Set `1` to allow `--dangerously-skip-permissions` | — |
 
