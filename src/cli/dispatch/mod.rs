@@ -15,6 +15,7 @@ pub(crate) mod registry;
 mod run;
 mod scaffold;
 mod setup;
+mod share;
 mod source;
 mod state;
 
@@ -55,6 +56,9 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         Commands::Run {
             path,
             target,
+            entry,
+            env_file,
+            prompt_env,
             watch,
             background,
             nacelle,
@@ -84,6 +88,9 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         } => run::execute_run_like_command(run::RunLikeCommandArgs {
             path,
             target,
+            entry,
+            env_file,
+            prompt_env,
             args,
             watch,
             background,
@@ -114,6 +121,56 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             cwd,
             deprecation_warning: None,
             reporter: Arc::new(reporters::CliReporter::new_run(json)),
+        }),
+
+        Commands::Resolve {
+            handle,
+            target,
+            registry,
+            json: command_json,
+        } => crate::app_control::resolve_handle(
+            &handle,
+            target.as_deref(),
+            registry.as_deref(),
+            json || command_json,
+        ),
+
+        Commands::Encap {
+            path,
+            share,
+            save_only,
+            print_plan,
+            git_mode,
+            tool_runtime,
+            allow_dirty,
+            yes,
+            save_config,
+        } => share::execute_encap_command(share::EncapCommandArgs {
+            path,
+            share,
+            save_only,
+            print_plan,
+            git_mode,
+            tool_runtime,
+            allow_dirty,
+            yes,
+            save_config,
+            reporter: reporter.clone(),
+        }),
+
+        Commands::Decap {
+            input,
+            into,
+            plan,
+            tool_runtime,
+            strict,
+        } => share::execute_decap_command(share::DecapCommandArgs {
+            input,
+            into,
+            plan,
+            tool_runtime,
+            strict,
+            reporter: reporter.clone(),
         }),
 
         Commands::Engine { command } => {

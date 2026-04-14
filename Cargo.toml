@@ -8,9 +8,10 @@ resolver = "2"
 
 [package]
 name = "ato-cli"
-version = "0.4.54"
+version = "0.4.62"
 edition = "2021"
 description = "ato CLI (meta-runtime)"
+homepage = "https://ato.run"
 license = "Apache-2.0"
 repository = "https://github.com/Koh0920/ato-cli"
 build = "build.rs"
@@ -60,7 +61,7 @@ zip = "2.1"
 zstd = { version = "0.13", features = ["zstdmt"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time", "net", "signal"] }
 tempfile = "3.8"
-rust-embed = "8.5"
+rust-embed = { version = "8.5", optional = true }
 mime_guess = "2.0"
 chrono = { version = "0.4", default-features = true }
 thiserror = "2.0"
@@ -91,6 +92,10 @@ predicates = "3"
 wat = "1.0"
 serial_test = "3"
 
+[target.'cfg(unix)'.dev-dependencies]
+expectrl = "0.8"
+rexpect = "0.7"
+
 [target.'cfg(windows)'.dependencies]
 junction = "1.4.2"
 mslnk = "0.1.8"
@@ -106,6 +111,7 @@ openssl-sys = { version = "0.9.112", features = ["vendored"] }
 [features]
 default = []
 provisioning-tests = []
+webui = ["dep:rust-embed"]
 
 # The profile that 'dist' will build with
 [profile.dist]

@@ -165,7 +165,10 @@ impl BootstrapBoundary {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        BootstrapAuthorityKind, BootstrapBoundary, BootstrapCacheScope, BootstrapClosureRole,
+        BootstrapSubjectKind, BootstrapVerificationKind,
+    };
 
     #[test]
     fn finalize_helper_is_treated_as_build_environment_claim() {

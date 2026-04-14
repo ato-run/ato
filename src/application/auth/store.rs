@@ -97,6 +97,12 @@ pub fn default_store_registry_url() -> String {
     store_api_base_url()
 }
 
+/// Returns the canonical human-readable base URL for share display links
+/// (e.g., `https://ato.run`). Respects `ATO_STORE_SITE_URL` override.
+pub(crate) fn share_display_base_url() -> String {
+    store_site_base_url()
+}
+
 fn trim_trailing_slash(value: &str) -> String {
     value.trim_end_matches('/').to_string()
 }

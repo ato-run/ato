@@ -9,6 +9,8 @@ pub mod engine;
 pub mod error;
 pub mod execution_plan;
 pub mod executors;
+pub mod handle;
+pub mod handle_store;
 pub mod hardware;
 pub mod importer;
 pub mod input_resolver;

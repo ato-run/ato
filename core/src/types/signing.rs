@@ -268,9 +268,15 @@ pub fn verify_signature_file(sig: &SignatureFile, message: &[u8]) -> Result<()> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use chrono::Utc;
     use ed25519_dalek::Signer;
+    use std::collections::BTreeMap;
     use tempfile::tempdir;
+
+    use super::{
+        ensure_signature_matches_manifest, parse_developer_key, read_signature_file,
+        verify_signature_file, write_signature_file, SignatureMetadata, StoredKey,
+    };
 
     #[test]
     fn stored_key_roundtrip_signature() {
