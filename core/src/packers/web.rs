@@ -452,11 +452,8 @@ fn reproducible_mtime_epoch() -> u64 {
 #[cfg(test)]
 mod tests {
     // std
-    use std::ffi::OsString;
     use std::fs;
     use std::io::Read;
-    #[cfg(unix)]
-    use std::os::unix::ffi::OsStringExt;
     #[cfg(unix)]
     use std::os::unix::fs as unix_fs;
     use std::sync::Arc;
