@@ -896,7 +896,17 @@ fn capture_workspace(
     for repo in &repos {
         let repo_scan_dirs = discover_repo_scan_dirs(&repo.abs_path)?;
         for scan_dir in repo_scan_dirs {
-            let relative_dir = relative_display(root, &scan_dir);
+            // Compute relative_dir using repo.rel_path as a prefix so that
+            // entry.cwd / step.cwd values are always consistent with source.path.
+            // Without this, when the workspace root IS the git repo,
+            // relative_display(root, scan_dir) returns "." while source.path
+            // stores the folder name (e.g., "browser-daw"), causing ENOENT on run.
+            let within_repo = relative_display(&repo.abs_path, &scan_dir);
+            let relative_dir = if within_repo == "." {
+                repo.rel_path.clone()
+            } else {
+                format!("{}/{}", repo.rel_path, within_repo)
+            };
             detect_tools(&scan_dir, &relative_dir, &mut tool_requirements)?;
             detect_env_requirements(&scan_dir, &relative_dir, &mut env_requirements)?;
             detect_install_steps(&scan_dir, &relative_dir, &mut install_steps)?;
@@ -2878,6 +2888,56 @@ mod tests {
             .iter()
             .any(|entry| entry.id == "dashboard-dev"
                 && entry.env.files.iter().any(|path| path.ends_with(".env"))));
+    }
+
+    // When the workspace root IS the single git repo (single-repo encap), entry.cwd
+    // and step.cwd must be prefixed with the repo folder name to match source.path.
+    // Regression test for: npm ENOENT on `ato run` because cwd was "." while the
+    // repo was cloned into `<temp>/<folder>/`.
+    #[test]
+    fn capture_workspace_single_repo_cwds_match_source_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        // The workspace root is itself the git repo (single-repo encap scenario).
+        let root = temp.path();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"browser-daw","scripts":{"dev":"vite"}}"#,
+        )
+        .expect("package.json");
+        fs::write(root.join("package-lock.json"), "{}").expect("package-lock.json");
+        init_git_repo(root, "git@github.com:acme/browser-daw.git");
+
+        let reporter = Arc::new(crate::reporters::CliReporter::new(false));
+        let capture = capture_workspace(
+            root,
+            GitMode::SameCommit,
+            false,
+            ShareToolRuntime::System,
+            &reporter,
+        )
+        .expect("capture");
+
+        // There is exactly one source.
+        assert_eq!(capture.spec.sources.len(), 1);
+        let source_path = &capture.spec.sources[0].path;
+
+        // All install steps and entries must have cwd == source.path (the folder
+        // name), never ".".  A cwd of "." would point to the parent of the cloned
+        // repo and cause ENOENT when npm/bun runs.
+        for step in &capture.spec.install_steps {
+            assert_eq!(
+                &step.cwd, source_path,
+                "install step `{}` cwd `{}` must equal source path `{}`",
+                step.id, step.cwd, source_path
+            );
+        }
+        for entry in &capture.spec.entries {
+            assert_eq!(
+                &entry.cwd, source_path,
+                "entry `{}` cwd `{}` must equal source path `{}`",
+                entry.id, entry.cwd, source_path
+            );
+        }
     }
 
     #[test]
