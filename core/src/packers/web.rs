@@ -451,12 +451,26 @@ fn reproducible_mtime_epoch() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // std
+    use std::fs;
+    use std::io::Read;
+    #[cfg(unix)]
+    use std::os::unix::fs as unix_fs;
+    use std::sync::Arc;
+
+    // external
+    use hex;
+    use sha2::{Digest, Sha256};
+    use tar;
+    use toml;
+
+    // internal
+    use super::{
+        pack, WebPackOptions, CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME, SBOM_PATH,
+    };
     use crate::reporter::NoOpReporter;
     use crate::router::ExecutionProfile;
     use crate::types::CapsuleManifest;
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
 
     fn sha256_hex(data: &[u8]) -> String {
         let mut hasher = Sha256::new();
@@ -609,8 +623,6 @@ port = 8080
     #[cfg(unix)]
     #[test]
     fn pack_static_rejects_symlink_escape() {
-        use std::os::unix::fs as unix_fs;
-
         let tmp = tempfile::tempdir().expect("tempdir");
         let manifest_path = tmp.path().join("capsule.toml");
         std::fs::create_dir_all(tmp.path().join("dist")).expect("mkdir");

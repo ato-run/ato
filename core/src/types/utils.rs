@@ -50,7 +50,7 @@ pub fn parse_memory_string(s: &str) -> Result<u64, ParseError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::parse_memory_string;
 
     #[test]
     fn test_parse_memory() {

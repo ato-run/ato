@@ -4,6 +4,113 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.62] - 2026-04-14
+
+### What Changed
+
+#### Distribution
+
+- Add Homebrew tap support: `brew tap ato-run/ato && brew install ato` now works after the first release
+- Auto-generate and push `Formula/ato.rb` to `ato-run/homebrew-ato` on each release via cargo-dist
+- Exclude `capsule-core` from cargo-dist release artifacts (prevents `tar_pack_bench` binary from polluting release builds)
+
+#### Installer
+
+- Add `wget` fallback to `install.sh`: prefers `curl` but falls back to `wget` if curl is unavailable
+- `wget -qO- https://ato.run/install.sh | sh` now works
+
+
+
+### What Changed
+
+#### Tests
+
+- Strengthen E2E-9 (trailing args): assert each argument appears as its own output line, catching splits that `echo ok` would hide
+- Strengthen E2E-1 (prompt-env save → reuse): assert the saved env file exists on disk after `Save=yes` before verifying non-TTY reuse
+- Strengthen E2E-2 (prompt-env use-once): assert the first PTY run actually produced `DEMO_TOKEN=once-only-value` output, preventing false passes when the run silently fails
+- Fix `write_no_env_fixture` entry command: replaced `echo ok` with a shell loop that echoes each `$@` argument on its own line, making argv passthrough meaningful to test
+- Add E2E-6 (multi-entry chooser): PTY test that verifies `ato run` shows a numbered chooser when no single primary exists, and runs only the selected entry
+
+## [0.4.60] - 2026-04-12
+
+### What Changed
+
+#### Tests
+
+- Add 10 E2E / interactive integration tests for `encap`, `run`, and `decap` share workflows:
+  - `share_run_e2e`: `--watch` reject, `--background` reject, non-TTY missing required env fails closed, failed share-run then rerun (no stale-dir error)
+  - `share_interactive_e2e` (PTY): `--prompt-env` save → reuse, use-once, cancel, trailing args passthrough via `--entry ... -- --arg`
+  - `share_encap_interactive_e2e` (PTY): primary entry switch persists to `share.spec.json`, zero-primary chooser selection persists
+- Fix pre-existing test bug: `capture_workspace_detects_sources_steps_services_and_env` now uses the correct entry ID (`dashboard-dev`) and adds a `.env` fixture to the dashboard repo so the env-file linkage assertion is exercised end-to-end
+- Add `expectrl` PTY harness (`expectrl = "0.8"`) as a dev dependency for interactive test automation
+
+## [0.4.59] - 2026-04-11
+
+### What Changed
+
+#### Bug Fixes
+
+- Fix spec/lock digest validation: `load_share_input` now computes the spec digest using canonical serialization (`serde_json::to_vec`) to match `build_share_lock`, preventing false-positive digest mismatch warnings on valid local `share.spec.json` / `share.lock.json` files
+
+#### Tests
+
+- T8b: valid digest verified when loading from local spec path
+- T8c: valid digest verified when loading from local lock path
+- Fix T9 test to use canonical digest computation
+
+## [0.4.58] - 2026-04-11
+
+### What Changed
+
+#### Bug Fixes
+
+- Fix `encap` interactive primary entry edit: setting a new primary entry now clears all prior primaries immediately, so the saved spec always reflects user intent instead of silently reverting to the first entry
+- Add recipient-side tool detection in `decap`: verification now distinguishes between "missing tool in lock" (spec vs lock gap) and "missing tool on this machine" (tool present in lock but absent locally)
+- Add spec/lock digest validation: `decap` emits a verification warning when the spec file has changed since the lock was created (sha256 digest mismatch)
+
+#### Tests
+
+- T6: `run <share-url> --watch` is explicitly rejected
+- T7: `run <share-url> --background` is explicitly rejected
+- T8: digest mismatch surfaces as verification issue
+- T9: source present in spec but absent in lock errors at materialize
+- T10: tool present in spec but absent in lock is flagged by verify_tools
+- T11: verify_local_tools detects tools not installed on current machine
+- T12: `--into` path with spaces is accepted by `ensure_target_root_ready`
+- Primary entry edit loop clears prior primaries in kept_entries
+- `ensure_single_primary_entry` leaves a single primary untouched
+
+## [0.4.57] - 2026-04-10
+
+### What Changed
+
+#### Bug Fixes
+
+- Strip `sha256:` prefix from ephemeral run root directory name to prevent uv/path-separator crash on production share URLs (Fix1)
+- Remove stale temp root before re-materializing on share-run rerun, eliminating non-empty directory error after interrupted runs (Fix2)
+- Fix zero-primary entry ordering bug in interactive encap; prompt user to select primary entry instead of silently reverting to first entry (Fix3)
+- Cross-check spec `tool_requirements` against lock `resolved_tools` in `verify_tools` to surface missing-tool issues at decap time (Fix4)
+
+#### New Features
+
+- Add `--entry`, `--env-file`, `--prompt-env` flags to `ato run` for multi-entry share selection, env file injection, and interactive env prompting with save/reuse lifecycle
+
+
+
+### What Changed
+
+#### Bug Fixes
+
+- Accept Store workspace share responses that expose `id` instead of `share_id`, so `ato encap --share` and share revision fetches continue to work against the current Store API payloads
+
+## [0.4.55] - 2026-04-08
+
+### What Changed
+
+#### CI
+
+- Bump the patch release after `v0.4.54` was already tagged and published
+
 ## [0.4.54] - 2026-04-04
 
 ### What Changed

@@ -492,9 +492,9 @@ fn is_supported_feature(_feature: KnownFeature) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, Value};
 
-    use super::*;
+    use super::{validate_structural, AtoLock, ValidationMode};
 
     fn lock_with_delivery(delivery: Value, closure: Option<Value>) -> AtoLock {
         let mut lock = AtoLock::default();
