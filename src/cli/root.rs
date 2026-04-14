@@ -203,7 +203,10 @@ pub(crate) enum Commands {
         args: Vec<String>,
     },
 
-    #[command(hide = true, about = "Resolve a capsule handle or terse ref into a launch preview")]
+    #[command(
+        hide = true,
+        about = "Resolve a capsule handle or terse ref into a launch preview"
+    )]
     Resolve {
         /// Canonical capsule handle, GitHub shorthand, registry scoped ID, or local path
         handle: String,
@@ -374,7 +377,10 @@ pub(crate) enum Commands {
         auto_fix_all: bool,
     },
 
-    #[command(hide = true, about = "Fetch declared development dependencies for a local project")]
+    #[command(
+        hide = true,
+        about = "Fetch declared development dependencies for a local project"
+    )]
     Setup {
         /// Local workspace path to prepare
         #[arg(default_value = ".")]
@@ -411,7 +417,11 @@ pub(crate) enum Commands {
         yes: bool,
     },
 
-    #[command(hide = true, about = "Build project into a capsule archive", alias = "pack")]
+    #[command(
+        hide = true,
+        about = "Build project into a capsule archive",
+        alias = "pack"
+    )]
     Build {
         #[arg(default_value = ".")]
         dir: PathBuf,
@@ -437,7 +447,10 @@ pub(crate) enum Commands {
         strict_v3: bool,
     },
 
-    #[command(hide = true, about = "Validate capsule build/run inputs without executing")]
+    #[command(
+        hide = true,
+        about = "Validate capsule build/run inputs without executing"
+    )]
     Validate {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -600,7 +613,11 @@ pub(crate) enum Commands {
     #[command(hide = true, about = "Logout")]
     Logout,
 
-    #[command(hide = true, about = "Show current authentication status", alias = "auth")]
+    #[command(
+        hide = true,
+        about = "Show current authentication status",
+        alias = "auth"
+    )]
     Whoami,
 
     #[command(hide = true)]

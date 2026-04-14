@@ -501,7 +501,8 @@ pub(crate) fn execute_encap(args: EncapArgs, reporter: Arc<CliReporter>) -> Resu
             Ok(uploaded) => {
                 futures::executor::block_on(reporter.notify(format!(
                     "🔗 Share URL: {}\n🔒 Revision URL: {}",
-                    uploaded.share_url, uploaded.revision_url
+                    rewrite_api_to_site_url(&uploaded.share_url),
+                    rewrite_api_to_site_url(&uploaded.revision_url)
                 )))?;
             }
             Err(error) => {
@@ -1971,6 +1972,46 @@ fn generate_guide(spec: &ShareSpec) -> String {
     lines.join("\n")
 }
 
+/// Rewrites a server-returned share URL to use the canonical user-facing domain.
+///
+/// The API server (`api.ato.run`) returns `share_url`/`revision_url` fields using its
+/// own host. For user-facing display we always show the site domain (`ato.run/s/...`)
+/// instead. Respects `ATO_STORE_SITE_URL` for staging / dev overrides.
+fn rewrite_api_to_site_url(url: &str) -> String {
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return url.to_string();
+    };
+    let api_base = auth::default_store_registry_url();
+    let Ok(api_parsed) = reqwest::Url::parse(&api_base) else {
+        return url.to_string();
+    };
+    if parsed.host_str() == api_parsed.host_str() && parsed.path().starts_with("/s/") {
+        let site_base = auth::share_display_base_url();
+        let Ok(site_parsed) = reqwest::Url::parse(&site_base) else {
+            return url.to_string();
+        };
+        if let Some(host) = site_parsed.host_str() {
+            let _ = parsed.set_host(Some(host));
+        }
+    }
+    parsed.to_string()
+}
+
+/// Maps the host of a share URL to the correct API base URL for server calls.
+///
+/// Users receive `ato.run/s/...` URLs but API calls must go to `api.ato.run`.
+/// This avoids a 404 when `fetch_share_url` is handed a site-domain URL.
+fn api_base_for_share_host(host: &str) -> String {
+    let site_base = auth::share_display_base_url();
+    if let Ok(site_parsed) = reqwest::Url::parse(&site_base) {
+        if site_parsed.host_str() == Some(host) {
+            return auth::default_store_registry_url();
+        }
+    }
+    // Preserve scheme-less host references (e.g. staging.api.ato.run) as-is.
+    format!("https://{}", host)
+}
+
 fn upload_share(spec: &ShareSpec, lock: &ShareLock, guide: &str) -> Result<ShareRevisionPayload> {
     let token = auth::require_session_token()?;
     let client = reqwest::blocking::Client::builder()
@@ -2087,15 +2128,13 @@ fn fetch_share_url(url: &str) -> Result<LoadedShareInput> {
         .filter(|segment| !segment.is_empty())
         .context("Share URL is missing an id")?;
     let (share_id, revision) = parse_share_revision_segment(segment)?;
-    let base = format!(
-        "{}://{}",
-        parsed.scheme(),
-        parsed.host_str().unwrap_or("ato.run")
-    );
+    // Always route API calls to the correct API base, never to the site domain.
+    // Users receive ato.run/s/... URLs, but the REST API lives at api.ato.run.
+    let api_base = api_base_for_share_host(parsed.host_str().unwrap_or("api.ato.run"));
     let endpoint = if let Some(revision) = revision {
-        format!("{}/v1/shares/{}/revisions/{}", base, share_id, revision)
+        format!("{}/v1/shares/{}/revisions/{}", api_base, share_id, revision)
     } else {
-        format!("{}/v1/shares/{}", base, share_id)
+        format!("{}/v1/shares/{}", api_base, share_id)
     };
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(DEFAULT_API_TIMEOUT_SECS))
@@ -2117,8 +2156,8 @@ fn fetch_share_url(url: &str) -> Result<LoadedShareInput> {
     let share = serde_json::from_value::<ShareRevisionPayload>(body["share"].clone())
         .context("Invalid share response payload")?;
     Ok(LoadedShareInput {
-        share_url: Some(share.share_url.clone()),
-        resolved_revision_url: Some(share.revision_url.clone()),
+        share_url: Some(rewrite_api_to_site_url(&share.share_url)),
+        resolved_revision_url: Some(rewrite_api_to_site_url(&share.revision_url)),
         spec: share.spec,
         lock: share.lock,
         spec_digest_verified: true,
@@ -3044,6 +3083,51 @@ mod tests {
         let parsed = serde_json::from_value::<ShareRevisionPayload>(payload)
             .expect("share payload should deserialize with id alias");
         assert_eq!(parsed.share_id, "share-123");
+    }
+
+    #[test]
+    fn rewrite_api_to_site_url_rewrites_api_host() {
+        // api.ato.run/s/... should become ato.run/s/...
+        let result = rewrite_api_to_site_url("https://api.ato.run/s/share-123");
+        assert_eq!(result, "https://ato.run/s/share-123");
+
+        let result = rewrite_api_to_site_url("https://api.ato.run/s/share-123@r1");
+        assert_eq!(result, "https://ato.run/s/share-123@r1");
+    }
+
+    #[test]
+    fn rewrite_api_to_site_url_leaves_site_url_unchanged() {
+        // ato.run/s/... is already the correct display URL
+        let result = rewrite_api_to_site_url("https://ato.run/s/share-123");
+        assert_eq!(result, "https://ato.run/s/share-123");
+    }
+
+    #[test]
+    fn rewrite_api_to_site_url_leaves_non_share_paths_unchanged() {
+        // Only /s/ paths should be rewritten
+        let result = rewrite_api_to_site_url("https://api.ato.run/v1/shares/share-123");
+        assert_eq!(result, "https://api.ato.run/v1/shares/share-123");
+    }
+
+    #[test]
+    fn api_base_for_share_host_maps_site_host_to_api() {
+        // ato.run (site domain) must resolve to api.ato.run for API calls
+        let result = api_base_for_share_host("ato.run");
+        assert_eq!(result, "https://api.ato.run");
+    }
+
+    #[test]
+    fn api_base_for_share_host_passes_api_host_through() {
+        // api.ato.run is already the API host; should not change
+        let result = api_base_for_share_host("api.ato.run");
+        assert_eq!(result, "https://api.ato.run");
+    }
+
+    #[test]
+    fn api_base_for_share_host_passes_staging_host_through() {
+        // Staging or custom hosts are passed through unchanged
+        let result = api_base_for_share_host("staging.api.ato.run");
+        assert_eq!(result, "https://staging.api.ato.run");
     }
 
     fn init_git_repo(path: &Path, remote: &str) {

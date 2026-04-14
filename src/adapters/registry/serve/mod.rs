@@ -11,9 +11,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 #[cfg(feature = "webui")]
 use axum::http::Uri;
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
