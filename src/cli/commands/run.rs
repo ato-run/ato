@@ -2294,6 +2294,7 @@ target = "/var/lib/app"
             "default_target".to_string(),
             toml::Value::String("default".to_string()),
         );
+        manifest.insert("type".to_string(), toml::Value::String("app".to_string()));
 
         let mut target = toml::map::Map::new();
         for (key, value) in entries {

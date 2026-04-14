@@ -402,8 +402,20 @@ fn sanitize_spdx_id(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // std
+    use std::fs;
+    use std::path::PathBuf;
+
+    // external crates
+    use serde_json;
     use tar::Builder;
+    use tempfile;
+
+    // internal crates
+    use super::{
+        extract_and_verify_embedded_sbom, generate_embedded_sbom,
+        generate_embedded_sbom_from_inputs, sha256_hex, SbomFileInput, SBOM_PATH,
+    };
 
     #[test]
     fn sbom_generation_fails_closed_for_missing_files() {

@@ -851,7 +851,7 @@ fn toolchain_cache_dir() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::RuntimeFetcher;
 
     #[test]
     fn test_normalize_semverish() {

@@ -13,7 +13,8 @@ use super::profile::ProfileCommands;
 use super::project::{ProjectCommands, ScaffoldCommands};
 use super::registry::RegistryCommands;
 use super::shared::{
-    cli_styles, CompatibilityFallbackBackend, EnforcementMode, ProviderToolchain, RunAgentMode,
+    cli_styles, CompatibilityFallbackBackend, EnforcementMode, GitMode, ProviderToolchain,
+    RunAgentMode, ShareToolRuntime,
 };
 use super::source::SourceCommands;
 use super::state::StateCommands;
@@ -23,33 +24,17 @@ use super::state::StateCommands;
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(styles = cli_styles())]
 #[command(help_template = "\
-{about-with-newline}
 Usage: {usage}
 
 Primary Commands:
-  run      Execute a .capsule archive or local project in a sandbox
-  build    Pack a project into an immutable .capsule archive
-  publish  Publish capsule artifacts to a registry
-  install  Install a verified package from the registry
-    setup    Fetch declared development dependencies for the current project
-  init     Materialize a durable ato.lock.json baseline for the current project
-  search   Search the registry for agent skills and packages
+  run      Try something now
+  decap    Set up a workspace locally
+  encap    Share your current workspace
 
 Management:
   ps       List running capsules
   stop     Stop a running capsule
   logs     Show logs of a running capsule
-    app      Inspect or adapt app-scoped bootstrap state
-  state    Inspect or register persistent state bindings
-  binding  Inspect or register host-side service bindings
-
-Auth:
-  login    Login to Ato registry
-  logout   Logout
-  whoami   Show current authentication status
-
-Troubleshooting:
-  inspect  Inspect lock-first metadata, preview write-back, diagnostics, and runtime requirements
 
 Options:
 {options}
@@ -73,17 +58,29 @@ pub(crate) struct Cli {
 pub(crate) enum Commands {
     #[command(
         next_help_heading = "Primary Commands",
-        about = "Run a capsule app or local project",
+        about = "Try something now",
         trailing_var_arg = true
     )]
     Run {
-        /// Local path (./, ../, ~/, /...), provider target (pypi:<package>, pypi:<package>[extra], npm:<package>, npm:@scope/package), store scoped ID (publisher/slug), or GitHub repo (github.com/owner/repo). Default: current directory
+        /// Local path (./, ../, ~/, /...), share URL (https://ato.run/s/...), provider target (pypi:<package>, pypi:<package>[extra], npm:<package>, npm:@scope/package), store scoped ID (publisher/slug), or GitHub repo (github.com/owner/repo). Default: current directory
         #[arg(default_value = ".")]
         path: PathBuf,
 
         /// Target label to execute (e.g. static, cli, widget)
         #[arg(short = 't', long = "target")]
         target: Option<String>,
+
+        /// Workspace entry to execute when the target exposes multiple runnable entries
+        #[arg(long = "entry")]
+        entry: Option<String>,
+
+        /// Load environment variables for this run from a dotenv-style file
+        #[arg(long = "env-file", value_name = "PATH")]
+        env_file: Option<PathBuf>,
+
+        /// Prompt for missing required environment variables before running
+        #[arg(long = "prompt-env", default_value_t = false)]
+        prompt_env: bool,
 
         /// Run in development mode (foreground) with hot-reloading on file changes
         #[arg(long)]
@@ -207,9 +204,94 @@ pub(crate) enum Commands {
     },
 
     #[command(
-        next_help_heading = "Primary Commands",
-        about = "Install a package from the store"
+        hide = true,
+        about = "Resolve a capsule handle or terse ref into a launch preview"
     )]
+    Resolve {
+        /// Canonical capsule handle, GitHub shorthand, registry scoped ID, or local path
+        handle: String,
+
+        /// Target label to resolve
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+
+        /// Registry URL override for registry-backed handles
+        #[arg(long)]
+        registry: Option<String>,
+
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    #[command(
+        next_help_heading = "Primary Commands",
+        about = "Share your current workspace"
+    )]
+    Encap {
+        /// Local workspace path to capture
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Upload the captured share after writing local outputs
+        #[arg(long, default_value_t = false)]
+        share: bool,
+
+        /// Write local outputs only
+        #[arg(long, default_value_t = false)]
+        save_only: bool,
+
+        /// Print the detected capture plan without writing files
+        #[arg(long, default_value_t = false)]
+        print_plan: bool,
+
+        /// How to resolve the git revision: same-commit (default) or latest-at-encap
+        #[arg(long, value_enum, default_value_t = GitMode::SameCommit)]
+        git_mode: GitMode,
+
+        /// Runtime strategy for install steps: auto (default), ato, or system
+        #[arg(long, value_enum, default_value_t = ShareToolRuntime::Auto)]
+        tool_runtime: ShareToolRuntime,
+
+        /// Allow encap even when repositories have uncommitted changes
+        #[arg(long, default_value_t = false)]
+        allow_dirty: bool,
+
+        /// Accept all detected items without prompting (CI-friendly)
+        #[arg(long, short = 'y', default_value_t = false)]
+        yes: bool,
+
+        /// Write detected share settings to capsule.toml [share] after capture
+        #[arg(long, default_value_t = false)]
+        save_config: bool,
+    },
+
+    #[command(
+        next_help_heading = "Primary Commands",
+        about = "Materialize a shared workspace descriptor into a target directory"
+    )]
+    Decap {
+        /// Share URL, share.spec.json, or share.lock.json
+        input: String,
+
+        /// Target directory to materialize into
+        #[arg(long, value_name = "PATH")]
+        into: PathBuf,
+
+        /// Print the materialization plan without executing it
+        #[arg(long, default_value_t = false)]
+        plan: bool,
+
+        /// Runtime strategy for install steps: auto (default), ato, or system
+        #[arg(long, value_enum, default_value_t = ShareToolRuntime::Auto)]
+        tool_runtime: ShareToolRuntime,
+
+        /// Treat any verification issue as a fatal error (exit 1)
+        #[arg(long, default_value_t = false)]
+        strict: bool,
+    },
+
+    #[command(hide = true, about = "Install a package from the store")]
     Install {
         /// Capsule scoped ID (publisher/slug)
         #[arg(required_unless_present = "from_gh_repo")]
@@ -296,7 +378,7 @@ pub(crate) enum Commands {
     },
 
     #[command(
-        next_help_heading = "Primary Commands",
+        hide = true,
         about = "Fetch declared development dependencies for a local project"
     )]
     Setup {
@@ -322,7 +404,7 @@ pub(crate) enum Commands {
     },
 
     #[command(
-        next_help_heading = "Primary Commands",
+        hide = true,
         about = "Materialize a durable ato.lock.json baseline for a local workspace"
     )]
     Init {
@@ -336,7 +418,7 @@ pub(crate) enum Commands {
     },
 
     #[command(
-        next_help_heading = "Primary Commands",
+        hide = true,
         about = "Build project into a capsule archive",
         alias = "pack"
     )]
@@ -366,7 +448,7 @@ pub(crate) enum Commands {
     },
 
     #[command(
-        next_help_heading = "Troubleshooting",
+        hide = true,
         about = "Validate capsule build/run inputs without executing"
     )]
     Validate {
@@ -376,14 +458,11 @@ pub(crate) enum Commands {
         json: bool,
     },
 
-    #[command(
-        next_help_heading = "Troubleshooting",
-        about = "Update ato CLI to the latest version"
-    )]
+    #[command(hide = true, about = "Update ato CLI to the latest version")]
     Update,
 
     #[command(
-        next_help_heading = "Troubleshooting",
+        hide = true,
         about = "Inspect lock-first metadata, preview write-back, diagnostics, remediation, and runtime requirements"
     )]
     Inspect {
@@ -391,10 +470,7 @@ pub(crate) enum Commands {
         command: InspectCommands,
     },
 
-    #[command(
-        next_help_heading = "Primary Commands",
-        about = "Search the store for packages"
-    )]
+    #[command(hide = true, about = "Search the store for packages")]
     Search {
         query: Option<String>,
         #[arg(long)]
@@ -508,34 +584,25 @@ pub(crate) enum Commands {
         tail: Option<usize>,
     },
 
-    #[command(
-        next_help_heading = "Management",
-        about = "Inspect or adapt app-scoped bootstrap state"
-    )]
+    #[command(hide = true, about = "Inspect or adapt app-scoped bootstrap state")]
     App {
         #[command(subcommand)]
         command: AppCommands,
     },
 
-    #[command(
-        next_help_heading = "Management",
-        about = "Inspect or register persistent state bindings"
-    )]
+    #[command(hide = true, about = "Inspect or register persistent state bindings")]
     State {
         #[command(subcommand)]
         command: StateCommands,
     },
 
-    #[command(
-        next_help_heading = "Management",
-        about = "Inspect or register host-side service bindings"
-    )]
+    #[command(hide = true, about = "Inspect or register host-side service bindings")]
     Binding {
         #[command(subcommand)]
         command: BindingCommands,
     },
 
-    #[command(next_help_heading = "Auth", about = "Login to Ato registry")]
+    #[command(hide = true, about = "Login to Ato registry")]
     Login {
         #[arg(long)]
         token: Option<String>,
@@ -543,11 +610,11 @@ pub(crate) enum Commands {
         headless: bool,
     },
 
-    #[command(next_help_heading = "Auth", about = "Logout")]
+    #[command(hide = true, about = "Logout")]
     Logout,
 
     #[command(
-        next_help_heading = "Auth",
+        hide = true,
         about = "Show current authentication status",
         alias = "auth"
     )]
@@ -566,7 +633,7 @@ pub(crate) enum Commands {
     },
 
     #[command(
-        next_help_heading = "Advanced Commands",
+        hide = true,
         about = "Publish capsule artifacts through the unified pipeline (My Dock direct upload by default, official registry is CI-first)"
     )]
     Publish {

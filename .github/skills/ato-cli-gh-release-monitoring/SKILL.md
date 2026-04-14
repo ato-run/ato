@@ -1,6 +1,6 @@
 ---
 name: ato-cli-gh-release-monitoring
-description: "Deploy and release ato-cli using gh and sleep across dev, main, and tagged GitHub Releases. Use when pushing release-related changes, creating dev-to-main PRs, monitoring required GitHub checks, merging after green, handling release-plz PRs, creating patch bump PRs after version collisions, tagging a release version, and verifying the published GitHub Release assets."
+description: "Deploy and release ato-cli using gh and sleep across dev, main, and tagged GitHub Releases. Use when pushing release-related changes, creating dev-to-main PRs, monitoring required GitHub checks, merging after green, dispatching the Release PR or release-tag workflow via workflow_dispatch, handling release-plz PRs, creating patch bump PRs after version collisions, and verifying the published GitHub Release assets."
 argument-hint: "Describe the ato-cli change or release target to ship"
 user-invocable: true
 ---
@@ -18,11 +18,11 @@ It covers:
 - monitoring required checks until green
 - merging with the correct GitHub CLI strategy
 - monitoring the post-merge workflows on `main`
-- following the release-plz PR
-- merging the release PR after green
+- dispatching the `Release / Release PR` workflow with command `release-pr` to open the Release PR
+- monitoring and merging the release PR
 - confirming the release version on `main`
 - creating a follow-up patch bump PR when the release version already exists
-- creating and pushing the version tag
+- dispatching the `Release / Release PR` workflow with command `release` to push the version tag via release-plz
 - monitoring the Release workflow and published GitHub Release
 - recovering safely when version/tag/release state is inconsistent by moving to the next patch release
 
@@ -35,8 +35,8 @@ Use this skill when the user asks to:
 - create a PR and monitor checks with `gh`
 - wait for CI using `sleep`
 - merge after GitHub checks pass
-- follow release-plz output
-- tag and publish a GitHub Release
+- dispatch the release-plz workflow to create or trigger a Release PR
+- dispatch the release-plz workflow to push the version tag
 - verify release assets after tag push
 
 Do not use this skill for general coding or debugging. Use it only for the repo shipping workflow.
@@ -125,7 +125,7 @@ env -u GH_TOKEN -u GITHUB_TOKEN gh pr merge <pr> --merge --delete-branch=false -
 env -u GH_TOKEN -u GITHUB_TOKEN gh pr view <pr> --json mergedAt,mergeCommit,url,baseRefName,headRefName
 ```
 
-## Phase 4: Monitor Post-Merge main Workflows And Poll For release-plz Early
+## Phase 4: Monitor Post-Merge main Workflows
 
 1. Immediately list workflows for the merge commit:
 
@@ -133,39 +133,43 @@ env -u GH_TOKEN -u GITHUB_TOKEN gh pr view <pr> --json mergedAt,mergeCommit,url,
 env -u GH_TOKEN -u GITHUB_TOKEN gh run list --commit <merge-sha> --json databaseId,status,conclusion,workflowName,url
 ```
 
-2. In parallel, poll for the release-plz PR instead of waiting for every main workflow to finish before looking for it:
-
-```bash
-until env -u GH_TOKEN -u GITHUB_TOKEN gh pr list --base main --state open --search 'chore: release in:title' --json number,url | jq -e 'length > 0' >/dev/null; do
-	echo "Waiting for release-plz PR..."
-	sleep 30
-done
-```
-
-3. Wait and re-check with `sleep` until the required workflows on `main` are complete and green:
+2. Wait and re-check with `sleep` until the required workflows on `main` are complete and green:
 
 ```bash
 sleep 120 && env -u GH_TOKEN -u GITHUB_TOKEN gh run list --commit <merge-sha> --json databaseId,status,conclusion,workflowName,url
 ```
 
-4. For ato-cli, the workflows to watch on `main` in the shortened release path usually include:
+3. For ato-cli, the workflows to watch on `main` after a change PR merge are:
 
+- `Build (Multi OS)`
 - `Security Audit`
-- `Release PR`
+- `Secret Scan (gitleaks)`
 
-`Build (Multi OS)`, `V3 Parity Matrix`, and `Secret Scan (gitleaks)` are expected to run from pull request or scheduled/manual paths rather than every `main` push.
+4. Once all required checks are green, move to Phase 5 to create the Release PR.
 
-5. Once the release-plz PR exists, move to Phase 5 immediately while only the remaining `main` jobs continue in the background.
+Note: `Release / Release PR` no longer triggers automatically on pushes to `main`. The Release PR must be created explicitly via `workflow_dispatch` in Phase 5.
 
-## Phase 5: Follow The release-plz PR
+## Phase 5: Dispatch And Follow The Release PR
 
-1. Find the open release PR, typically titled `chore: release`:
+1. Dispatch the `Release / Release PR` workflow with command `release-pr` to open the Release PR:
+
+```bash
+env -u GH_TOKEN -u GITHUB_TOKEN gh workflow run release-plz.yml --ref main --field command=release-pr
+```
+
+2. Confirm the workflow started and wait a moment for release-plz to open the PR:
+
+```bash
+sleep 30 && env -u GH_TOKEN -u GITHUB_TOKEN gh run list --workflow release-plz.yml --limit 3 --json databaseId,status,conclusion,displayTitle,url
+```
+
+3. Find the open release PR, typically titled `chore: release`:
 
 ```bash
 env -u GH_TOKEN -u GITHUB_TOKEN gh pr list --base main --state open --search 'chore: release in:title' --json number,title,url,headRefName,baseRefName
 ```
 
-2. Before monitoring it to completion, extract the proposed version and check for collisions immediately:
+4. Before monitoring it to completion, extract the proposed version and check for collisions immediately:
 
 ```bash
 env -u GH_TOKEN -u GITHUB_TOKEN gh pr diff <release-pr> --repo ato-run/ato-cli | rg '^\+version\s*=\s*"'
@@ -175,16 +179,16 @@ env -u GH_TOKEN -u GITHUB_TOKEN gh release view v<version> --json tagName,publis
 
 If the proposed version already exists as a tag or published GitHub Release, do not merge the colliding release PR. Jump directly to the patch bump flow in Phase 7.
 
-3. Inspect it directly:
+5. Inspect it directly:
 
 ```bash
 env -u GH_TOKEN -u GITHUB_TOKEN gh pr view <release-pr> --json number,title,state,mergeable,mergeStateStatus,headRefName,baseRefName,statusCheckRollup,url
 ```
 
-4. Monitor it with `gh pr checks <release-pr>` and adaptive `sleep` exactly like the earlier change PR.
-5. In the current shortened workflow set, the release PR checks usually include `Build (Multi OS)`, `Security Audit`, and `Release/plan`.
-6. Merge it once checks are green, again preferring normal merge first and `--admin` only if policy requires it.
-7. Capture the release PR merge commit SHA.
+6. Monitor it with `gh pr checks <release-pr>` and adaptive `sleep` exactly like the earlier change PR.
+7. In the current shortened workflow set, the release PR checks usually include `Build (Multi OS)`, `Security Audit`, and `Release/plan`.
+8. Merge it once checks are green, again preferring normal merge first and `--admin` only if policy requires it.
+9. Capture the release PR merge commit SHA.
 
 ## Phase 6: Confirm The Version Before Tagging
 
@@ -231,7 +235,7 @@ If a collision exists, the correct next step is a patch bump and a fresh release
 7. Merge it after checks are green, using `--admin` only if branch policy still blocks a green PR.
 8. Monitor the post-merge `main` workflows for the bump merge commit until green.
 9. Re-check whether release-plz opened a new `chore: release` PR for the bumped version.
-10. If release-plz does not open a follow-up PR and `origin/main` already contains the bumped version, treat the bumped merge commit itself as the release commit and continue to tagging after its `main` workflows are green.
+10. If release-plz does not open a follow-up PR and `origin/main` already contains the bumped version, treat the bumped merge commit itself as the release commit and continue to Phase 8 (dispatch release tag) after its `main` workflows are green.
 11. Otherwise follow the new release PR through the same monitoring and merge flow.
 
 Useful commands for the bump PR path:
@@ -245,16 +249,29 @@ env -u GH_TOKEN -u GITHUB_TOKEN gh pr create --base main --head release-bump-v<n
 - unblock release tagging for the next release-plz cycle"
 ```
 
-## Phase 8: Tag And Push The Release
+## Phase 8: Dispatch The Release Tag
 
 Only do this after the release PR merge commit is fully green on `main` and the tag does not already exist.
 
+Dispatch the `Release / Release PR` workflow with command `release`. release-plz detects the merged Release PR, creates the version tag, and pushes it — which triggers the cargo-dist `release.yml` pipeline.
+
 ```bash
-git tag -a v<version> <release-merge-sha> -m "ato-cli v<version>"
-git push origin v<version>
+env -u GH_TOKEN -u GITHUB_TOKEN gh workflow run release-plz.yml --ref main --field command=release
 ```
 
-This tag push is what triggers the GitHub Release publication workflow for ato-cli.
+Confirm the workflow started and watch for it to push the tag:
+
+```bash
+sleep 30 && env -u GH_TOKEN -u GITHUB_TOKEN gh run list --workflow release-plz.yml --limit 3 --json databaseId,status,conclusion,displayTitle,url
+```
+
+Verify the tag was created:
+
+```bash
+env -u GH_TOKEN -u GITHUB_TOKEN gh api repos/ato-run/ato-cli/git/refs/tags/v<version>
+```
+
+The tag push is what triggers the GitHub Release publication workflow for ato-cli.
 
 ## Phase 9: Monitor Release Publication
 
@@ -332,11 +349,12 @@ The workflow is complete only when all of the following are true:
 
 ## Notes For This Repo
 
-- `Release PR` success on `main` does not publish the current version by itself.
-- Publication starts from the pushed version tag.
+- `Release / Release PR` with command `release-pr` must be dispatched manually (or waits for the Monday schedule) — it no longer fires automatically on every push to `main`.
+- `Release / Release PR` with command `release` requires `RELEASE_PLZ_TOKEN` (PAT). If the secret is missing, the workflow fails before pushing any tag and `release.yml` will not trigger.
+- Publication starts from the tag that release-plz pushes via the `release` dispatch.
 - The repo has shown branch-policy cases where admin merge is required even after checks are green.
 - **PR checks are intentionally lightweight:** `Build (Multi OS)` on `pull_request` runs only `clippy`. The full 4-platform build matrix, `smoke`, `native_delivery_e2e_windows`, and `tar_pack_benchmark` run only on `push` to `dev` and `workflow_dispatch`. `V3 Parity` runs only on schedule and `workflow_dispatch`.
 - This means PR check time is ~5-7 minutes, making the full release cycle achievable in under 1 hour.
-- Expected timing: dev→main PR (~7 min) + post-merge (~3 min) + release-plz PR (~7 min) + post-merge (~3 min) + tag + Release workflow (~20 min) = ~40 min total (no collision).
-- With one version collision: +bump PR (~7 min + ~3 min) = ~50 min, still under 1 hour.
+- Expected timing: dev→main PR (~7 min) + post-merge (~3 min) + dispatch release-pr + release PR checks (~7 min) + post-merge (~3 min) + dispatch release (~2 min) + Release workflow (~20 min) = ~42 min total (no collision).
+- With one version collision: +bump PR (~7 min + ~3 min) = ~52 min, still under 1 hour.
 - Windows native delivery jobs and tar_pack_benchmark run on `dev` push and `workflow_dispatch` only (not PRs).

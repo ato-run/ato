@@ -123,11 +123,14 @@ pub fn parse_allowed_host_paths_csv(value: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{fs, path::PathBuf};
 
     #[cfg(unix)]
     use std::os::unix::fs as unix_fs;
-    use std::{fs, path::PathBuf};
+
+    use tempfile::tempdir;
+
+    use super::{parse_allowed_host_paths_csv, validate_path};
 
     #[test]
     fn validate_path_allows_path_in_allowlist() {
