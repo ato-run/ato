@@ -305,7 +305,7 @@ impl From<&LicenseInfo> for LicensePayload {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{DateTime, Duration, Utc};
+    use chrono::{Duration, Utc};
 
     use super::{
         LicenseInfo, LicenseManifest, LicenseMeta, LicensePermissions, LicensePolicy, LicenseSync,

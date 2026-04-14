@@ -429,7 +429,7 @@ mod tests {
 
     use std::fs;
 
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     fn compress(bytes: &[u8]) -> Vec<u8> {
         let mut encoder = zstd::Encoder::new(Vec::new(), 3).unwrap();
