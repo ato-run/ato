@@ -18,7 +18,7 @@ const DEFAULT_YARN_CLASSIC_VERSION: &str = "1.22.22";
 const DEFAULT_BUN_VERSION: &str = "1.2.10";
 const DEFAULT_NODE_VERSION: &str = "20.12.0";
 const DEFAULT_PYTHON_VERSION: &str = "3.11.9";
-const DEFAULT_DENO_VERSION: &str = "1.46.3";
+pub const DEFAULT_DENO_VERSION: &str = "1.46.3";
 
 const DEFAULT_ALLOWLIST: &[&str] = &["nodejs.org", "registry.npmjs.org", "github.com"];
 

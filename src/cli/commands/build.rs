@@ -74,8 +74,12 @@ fn build_decision_from_manifest_text(
     manifest_text: &str,
     validation_mode: ValidationMode,
 ) -> Result<(RuntimeDecision, CompatManifestBridge)> {
-    let parsed_manifest = CapsuleManifest::from_toml(manifest_text)
+    let mut parsed_manifest = CapsuleManifest::from_toml(manifest_text)
         .map_err(|err| anyhow::anyhow!("Failed to parse manifest bridge: {err}"))?;
+    // Ensure the serialized form uses schema_version=0.2 so that the to_toml() output
+    // (which contains v0.2 target fields like `entrypoint`) does not re-trigger v0.3
+    // legacy-field validation when from_normalized_toml re-parses it.
+    parsed_manifest.schema_version = "0.2".to_string();
     let normalized_manifest_text = parsed_manifest
         .to_toml()
         .map_err(|err| anyhow::anyhow!("Failed to normalize manifest bridge: {err}"))?;
