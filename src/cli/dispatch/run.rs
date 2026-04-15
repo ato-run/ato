@@ -160,6 +160,45 @@ fn execute_standard_run_with_env_assistance(
                 )));
             }
 
+            if crate::application::secrets::is_ci_environment() {
+                return Err(error.context(format!(
+                    "CI environment detected — provide secrets via --env-file or process env. Missing: {}",
+                    missing_keys.join(", ")
+                )));
+            }
+
+            // Phase 2: Try the global SecretStore before falling back to interactive prompt.
+            let missing_keys = {
+                if let Ok(store) = crate::application::secrets::SecretStore::open() {
+                    let mut loaded = Vec::new();
+                    for key in &missing_keys {
+                        if let Ok(Some(value)) = store.load(key, None) {
+                            loaded.push((key.clone(), value));
+                        }
+                    }
+                    if !loaded.is_empty() {
+                        injected_env.apply_map(loaded);
+                        match run_once(&args, effective_enforcement, sandbox_requested) {
+                            Ok(()) => {
+                                report_next_step(&args, &raw_target)?;
+                                return Ok(());
+                            }
+                            Err(retry_err) => {
+                                if let Some(still_missing) = missing_required_env_keys(&retry_err) {
+                                    still_missing
+                                } else {
+                                    return Err(retry_err);
+                                }
+                            }
+                        }
+                    } else {
+                        missing_keys
+                    }
+                } else {
+                    missing_keys
+                }
+            };
+
             if !io_available_for_prompt() {
                 return Err(error.context(format!(
                     "Provide the required environment with --env-file and rerun. Missing: {}",
@@ -297,26 +336,42 @@ fn persist_env_file(path: &std::path::Path, envs: &[(String, String)]) -> Result
         .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>()
         .join("\n");
-    std::fs::write(path, format!("{rendered}\n"))
-        .with_context(|| format!("failed to write {}", path.display()))
+    crate::application::secrets::store::write_secure_file(path, format!("{rendered}\n").as_bytes())
 }
 
 fn prompt_for_missing_env(missing_keys: &[String]) -> Result<Vec<(String, String)>> {
     let mut values = Vec::new();
     for key in missing_keys {
-        eprint!("{key}: ");
-        std::io::stderr()
-            .flush()
-            .context("failed to flush env prompt")?;
-        let mut value = String::new();
-        std::io::stdin()
-            .read_line(&mut value)
-            .context("failed to read env prompt")?;
-        let value = value.trim().to_string();
+        let value = if is_likely_secret_key(key) {
+            rpassword::prompt_password(format!("{key} (hidden): "))
+                .context("failed to read secret value")?
+        } else {
+            eprint!("{key}: ");
+            std::io::stderr()
+                .flush()
+                .context("failed to flush env prompt")?;
+            let mut value = String::new();
+            std::io::stdin()
+                .read_line(&mut value)
+                .context("failed to read env prompt")?;
+            value.trim().to_string()
+        };
         crate::common::env_security::check_user_env_safety(key, &value)?;
         values.push((key.clone(), value));
     }
     Ok(values)
+}
+
+fn is_likely_secret_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    upper.contains("KEY")
+        || upper.contains("SECRET")
+        || upper.contains("TOKEN")
+        || upper.contains("PASSWORD")
+        || upper.contains("PWD")
+        || upper.contains("PRIVATE")
+        || upper.contains("CREDENTIAL")
+        || upper.contains("API_KEY")
 }
 
 fn io_available_for_prompt() -> bool {
