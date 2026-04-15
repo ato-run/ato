@@ -11,8 +11,8 @@ use nacelle::internal_api::{
     validate_spec_version, NacelleEvent, CURRENT_SPEC_VERSION, NEXT_SPEC_VERSION,
 };
 use nacelle::launcher::environment::{
-    prepare_environment, DerivedOutputMountSpec, EnvironmentPrepareRequest,
-    EnvironmentWorkspace, OverlayMountSpec, RuntimeArtifactReference,
+    prepare_environment, DerivedOutputMountSpec, EnvironmentPrepareRequest, EnvironmentWorkspace,
+    OverlayMountSpec, RuntimeArtifactReference,
 };
 use nacelle::launcher::source::{
     NativeSandboxCapabilityReport, SourceRuntime, SourceRuntimeConfig,
@@ -1007,13 +1007,13 @@ fn parse_exec_request(raw: &str) -> Result<ParsedExecRequest> {
     validate_spec_version(spec_version).map_err(anyhow::Error::msg)?;
 
     if spec_version == NEXT_SPEC_VERSION {
-        let envelope: ExecEnvelopeV2 = serde_json::from_value(value)
-            .context("Failed to deserialize exec request v2 JSON")?;
+        let envelope: ExecEnvelopeV2 =
+            serde_json::from_value(value).context("Failed to deserialize exec request v2 JSON")?;
         return Ok(ParsedExecRequest::V2(envelope));
     }
 
-    let envelope: ExecEnvelope = serde_json::from_value(value)
-        .context("Failed to deserialize exec request JSON")?;
+    let envelope: ExecEnvelope =
+        serde_json::from_value(value).context("Failed to deserialize exec request JSON")?;
     Ok(ParsedExecRequest::V1(envelope))
 }
 
@@ -1054,7 +1054,10 @@ async fn execute_prepared_launch(prepared: EnvironmentWorkspace) -> Result<()> {
 
     let source_target = SourceTarget {
         language: resolution.language.unwrap_or_else(|| "generic".to_string()),
-        version: manifest.language.as_ref().and_then(|language| language.version.clone()),
+        version: manifest
+            .language
+            .as_ref()
+            .and_then(|language| language.version.clone()),
         entrypoint: resolution.entrypoint_file.clone(),
         dependencies: None,
         args: vec![],
@@ -1092,7 +1095,10 @@ async fn execute_prepared_launch(prepared: EnvironmentWorkspace) -> Result<()> {
         prepared.spec_version.clone(),
         ExecResult {
             pid: result.pid,
-            log_path: result.log_path.as_ref().map(|path| path.display().to_string()),
+            log_path: result
+                .log_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
         },
     );
 
