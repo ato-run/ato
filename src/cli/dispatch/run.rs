@@ -269,17 +269,22 @@ fn saved_target_env_path(fingerprint: &str) -> Result<PathBuf> {
 fn load_env_file(path: &std::path::Path) -> Result<Vec<(String, String)>> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read env file {}", path.display()))?;
-    Ok(raw
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                return None;
-            }
-            let (key, value) = trimmed.split_once('=')?;
-            Some((key.trim().to_string(), value.trim().to_string()))
-        })
-        .collect())
+    let mut pairs = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_string();
+        let value = value.trim().to_string();
+        crate::common::env_security::check_user_env_safety(&key, &value)
+            .with_context(|| format!("rejected env key in {}", path.display()))?;
+        pairs.push((key, value));
+    }
+    Ok(pairs)
 }
 
 fn persist_env_file(path: &std::path::Path, envs: &[(String, String)]) -> Result<()> {
@@ -307,7 +312,9 @@ fn prompt_for_missing_env(missing_keys: &[String]) -> Result<Vec<(String, String
         std::io::stdin()
             .read_line(&mut value)
             .context("failed to read env prompt")?;
-        values.push((key.clone(), value.trim().to_string()));
+        let value = value.trim().to_string();
+        crate::common::env_security::check_user_env_safety(key, &value)?;
+        values.push((key.clone(), value));
     }
     Ok(values)
 }
