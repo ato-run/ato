@@ -12,6 +12,7 @@ mod project;
 mod registry;
 mod root;
 pub(crate) mod scoped_id_prompt;
+mod secrets;
 mod shared;
 mod source;
 mod state;
@@ -39,6 +40,8 @@ pub(crate) use project::{ProjectCommands, ScaffoldCommands};
 #[allow(unused_imports)]
 pub(crate) use registry::RegistryCommands;
 pub(crate) use root::{Cli, Commands};
+#[allow(unused_imports)]
+pub(crate) use secrets::SecretsCommands;
 #[allow(unused_imports)]
 pub(crate) use shared::{
     CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, GitMode, ProviderToolchain,
