@@ -319,6 +319,11 @@ impl ProcessManager {
                 }
             }
         }
+        // Clean stale port allocations for dead processes
+        if let Ok(port_mgr) = super::port_manager::PortManager::new() {
+            let _ = port_mgr.gc();
+        }
+
         Ok(cleaned)
     }
 }
