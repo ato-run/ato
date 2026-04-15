@@ -231,12 +231,7 @@ mod tests {
         let a = preferred_port("test/capsule");
         let b = preferred_port("test/capsule");
         assert_eq!(a, b);
-        assert!(a >= PORT_RANGE_START && a <= PORT_RANGE_END);
-    }
-
-    #[test]
-    fn preferred_port_differs_for_different_ids() {
-        let a = preferred_port("test/capsule-a");
+        assert!((PORT_RANGE_START..=PORT_RANGE_END).contains(&a));
         let b = preferred_port("test/capsule-b");
         // Could theoretically collide but extremely unlikely with 10000 range
         assert_ne!(a, b);
@@ -246,7 +241,7 @@ mod tests {
     fn resolve_port_returns_port_in_range() {
         let (mgr, _dir) = test_manager();
         let port = mgr.resolve_port("test/my-app").unwrap();
-        assert!(port >= PORT_RANGE_START && port <= PORT_RANGE_END);
+        assert!((PORT_RANGE_START..=PORT_RANGE_END).contains(&port));
     }
 
     #[test]
