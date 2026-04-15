@@ -827,6 +827,7 @@ pub(crate) async fn resolve_run_target_or_install(
 
             let checkout = install::download_github_repository_at_ref(&repository, None).await?;
             let checkout_root = checkout.checkout_dir.clone();
+            maybe_copy_env_example(&checkout_root, json_mode);
             if checkout_root.join("capsule.toml").exists() {
                 let preserved_root = relocate_github_run_checkout(&checkout_root)?;
                 return Ok(ResolvedRunTarget {
@@ -2253,6 +2254,48 @@ fn ensure_supported_github_auto_fix_mode(auto_fix_mode: Option<GitHubAutoFixMode
         );
     }
     Ok(())
+}
+
+/// D2: Copy `.env.example` / `.env.template` / `.env.sample` → `.env` if `.env` is absent.
+/// Also checks one level of subdirectories that contain a `package.json` (monorepo apps/).
+fn maybe_copy_env_example(dir: &Path, json: bool) {
+    const EXAMPLE_NAMES: &[&str] = &[".env.example", ".env.template", ".env.sample"];
+
+    copy_env_example_in_dir(dir, json);
+
+    // Check one level of subdirs for monorepo layouts (apps/, packages/, etc.)
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let sub = entry.path();
+            if sub.is_dir()
+                && sub.join("package.json").exists()
+                && !sub.join(".env").exists()
+                && EXAMPLE_NAMES.iter().any(|n| sub.join(n).exists())
+            {
+                copy_env_example_in_dir(&sub, json);
+            }
+        }
+    }
+}
+
+fn copy_env_example_in_dir(dir: &Path, json: bool) {
+    const EXAMPLE_NAMES: &[&str] = &[".env.example", ".env.template", ".env.sample"];
+    if dir.join(".env").exists() {
+        return;
+    }
+    for name in EXAMPLE_NAMES {
+        let src = dir.join(name);
+        if src.exists() {
+            if std::fs::copy(&src, dir.join(".env")).is_ok() && !json {
+                eprintln!(
+                    "ℹ️  Copied {} → .env in {} (edit with your values before running)",
+                    name,
+                    dir.display()
+                );
+            }
+            return;
+        }
+    }
 }
 
 #[cfg(test)]
