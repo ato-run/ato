@@ -245,6 +245,10 @@ pub(crate) enum Commands {
         #[arg(long, default_value_t = false)]
         print_plan: bool,
 
+        /// Scan workspace for secret patterns and show what would be included; no files written
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+
         /// How to resolve the git revision: same-commit (default) or latest-at-encap
         #[arg(long, value_enum, default_value_t = GitMode::SameCommit)]
         git_mode: GitMode,
@@ -600,6 +604,15 @@ pub(crate) enum Commands {
     Binding {
         #[command(subcommand)]
         command: BindingCommands,
+    },
+
+    #[command(
+        hide = true,
+        about = "Manage secrets stored in OS keychain or secure local store"
+    )]
+    Secrets {
+        #[command(subcommand)]
+        command: crate::cli::SecretsCommands,
     },
 
     #[command(hide = true, about = "Login to Ato registry")]

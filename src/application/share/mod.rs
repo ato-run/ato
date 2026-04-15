@@ -72,6 +72,7 @@ pub(crate) struct EncapArgs {
     pub(crate) share: bool,
     pub(crate) save_only: bool,
     pub(crate) print_plan: bool,
+    pub(crate) dry_run: bool,
     pub(crate) git_mode: GitMode,
     pub(crate) tool_runtime: ShareToolRuntime,
     pub(crate) allow_dirty: bool,
@@ -413,6 +414,120 @@ impl IgnoreMatcher {
     }
 }
 
+fn execute_encap_dry_run(
+    root: &Path,
+    capture: &CapturedWorkspace,
+    reporter: &Arc<CliReporter>,
+) -> Result<()> {
+    use crate::application::secrets::scanner::{scan_for_secret_patterns, SecretScanHit};
+    use capsule_core::packers::pack_filter::PackFilter;
+
+    futures::executor::block_on(
+        reporter
+            .notify("🔍 Dry run — showing what would be included (no files written)".to_string()),
+    )?;
+
+    // List sources
+    futures::executor::block_on(
+        reporter.notify(format!("Sources ({}):", capture.spec.sources.len())),
+    )?;
+    for source in &capture.spec.sources {
+        futures::executor::block_on(
+            reporter.notify(format!("  • {} ({})", source.id, source.url)),
+        )?;
+    }
+
+    // Required env
+    if !capture.spec.env_requirements.is_empty() {
+        futures::executor::block_on(reporter.notify(format!(
+            "Required env vars ({}):",
+            capture.spec.env_requirements.len()
+        )))?;
+        for req in &capture.spec.env_requirements {
+            futures::executor::block_on(reporter.notify(format!("  • {}", req.id)))?;
+        }
+    }
+
+    // Scan workspace files for secret patterns
+    let manifest_path = root.join("capsule.toml");
+    let filter = PackFilter::from_manifest_path(&manifest_path).ok();
+
+    let mut all_hits: Vec<SecretScanHit> = Vec::new();
+    let walk_result: Result<Vec<_>> = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .map(|e| {
+            let abs = e.path().to_path_buf();
+            let rel = abs.strip_prefix(root).unwrap_or(&abs).to_path_buf();
+            Ok::<_, anyhow::Error>((abs, rel))
+        })
+        .collect();
+
+    if let Ok(entries) = walk_result {
+        for (abs_path, rel_path) in entries {
+            let include = match &filter {
+                Some(f) => f.should_include_file(&rel_path),
+                None => !is_dry_run_skip_path(&rel_path),
+            };
+            if !include {
+                continue;
+            }
+            let rel_str = rel_path.display().to_string();
+            if let Ok(content) = std::fs::read_to_string(&abs_path) {
+                let hits = scan_for_secret_patterns(&content, &rel_str);
+                all_hits.extend(hits);
+            }
+        }
+    }
+
+    if all_hits.is_empty() {
+        futures::executor::block_on(
+            reporter.notify("✅ No secret patterns detected in workspace files.".to_string()),
+        )?;
+    } else {
+        futures::executor::block_on(reporter.warn(format!(
+            "⚠️  {} potential secret(s) found in files that would be included:",
+            all_hits.len()
+        )))?;
+        for hit in &all_hits {
+            futures::executor::block_on(reporter.warn(format!(
+                "  {}:{} — {} ({})",
+                hit.file, hit.line, hit.prefix, hit.snippet
+            )))?;
+        }
+        futures::executor::block_on(reporter.warn(
+            "Add these files to [pack] exclude in capsule.toml or .atoignore before running ato encap.".to_string(),
+        ))?;
+    }
+
+    Ok(())
+}
+
+/// Fallback path filter for dry-run when no capsule.toml exists.
+/// Returns `true` if the path should be skipped during scanning.
+fn is_dry_run_skip_path(rel: &std::path::Path) -> bool {
+    let s = rel.to_string_lossy().to_ascii_lowercase();
+    s.contains("node_modules/")
+        || s.contains("/.git/")
+        || s.starts_with(".git/")
+        || s.contains("/.next/")
+        || s.contains("/target/")
+        || s.contains("/dist/")
+        || s.contains("/__pycache__/")
+        || s.ends_with(".lock")
+        || s.ends_with(".png")
+        || s.ends_with(".jpg")
+        || s.ends_with(".jpeg")
+        || s.ends_with(".gif")
+        || s.ends_with(".ico")
+        || s.ends_with(".woff")
+        || s.ends_with(".woff2")
+        || s.ends_with(".ttf")
+        || s.ends_with(".eot")
+}
+
 pub(crate) fn execute_encap(args: EncapArgs, reporter: Arc<CliReporter>) -> Result<()> {
     let root = args
         .path
@@ -459,6 +574,10 @@ pub(crate) fn execute_encap(args: EncapArgs, reporter: Arc<CliReporter>) -> Resu
         effective_tool_runtime,
         &reporter,
     )?;
+
+    if args.dry_run {
+        return execute_encap_dry_run(&root, &capture, &reporter);
+    }
 
     if args.print_plan {
         println!("{}", serde_json::to_string_pretty(&capture.spec)?);
