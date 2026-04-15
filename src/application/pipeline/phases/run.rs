@@ -1690,6 +1690,21 @@ where
     };
 
     let run_scoped_id = runtime_overrides::scoped_id_override();
+
+    // Auto-assign a unique port if none specified via manifest or override
+    if runtime_overrides::override_port(decision.plan.execution_port()).is_none() {
+        let identity = build_port_identity(
+            &decision.plan.manifest_path,
+            decision.plan.selected_target_label(),
+            run_scoped_id.as_deref(),
+        );
+        if let Ok(mgr) = crate::runtime::port_manager::PortManager::new() {
+            if let Ok(port) = mgr.resolve_port(&identity) {
+                std::env::set_var("ATO_UI_OVERRIDE_PORT", port.to_string());
+            }
+        }
+    }
+
     if request.background {
         if let Some(scoped_id) = run_scoped_id.as_deref() {
             hooks
@@ -1739,7 +1754,7 @@ where
                 manifest_path: Some(decision.plan.manifest_path.clone()),
                 scoped_id: run_scoped_id.clone(),
                 target_label: Some(decision.plan.selected_target_label().to_string()),
-                requested_port: None,
+                requested_port: runtime_overrides::override_port(decision.plan.execution_port()),
                 log_path: None,
                 ready_at: Some(now),
                 last_event: Some("spawned".to_string()),
@@ -2055,7 +2070,7 @@ where
                     manifest_path: Some(decision.plan.manifest_path.clone()),
                     scoped_id: run_scoped_id.clone(),
                     target_label: Some(decision.plan.selected_target_label().to_string()),
-                    requested_port: None,
+                    requested_port: runtime_overrides::override_port(decision.plan.execution_port()),
                     log_path: None,
                     ready_at: Some(now),
                     last_event: Some("spawned".to_string()),
@@ -2805,5 +2820,23 @@ url = "http://127.0.0.1:8787/health"
             "Resolved against effective cwd: {}",
             effective.path().display()
         )));
+    }
+}
+
+/// Build a stable identity key for port allocation.
+/// Uses scoped_id (publisher/slug) when available, otherwise manifest path.
+/// Appends target label when non-default to give each target its own port.
+fn build_port_identity(
+    manifest_path: &std::path::Path,
+    target_label: &str,
+    scoped_id: Option<&str>,
+) -> String {
+    let base = scoped_id
+        .map(String::from)
+        .unwrap_or_else(|| manifest_path.to_string_lossy().to_string());
+    if target_label.is_empty() || target_label == "default" {
+        base
+    } else {
+        format!("{}:{}", base, target_label)
     }
 }
