@@ -227,7 +227,11 @@ async fn launch_with_windows_sandbox(
 /// - LogonCommand: Execute the script on sandbox startup
 /// - Networking: Enable (for dev mode)
 /// - vGPU: Disable (not needed for scripts)
-fn generate_wsb_config(target: &SourceTarget, toolchain_path: &PathBuf, source_read_only: bool) -> String {
+fn generate_wsb_config(
+    target: &SourceTarget,
+    toolchain_path: &PathBuf,
+    source_read_only: bool,
+) -> String {
     let source_dir = target.source_dir.to_string_lossy();
     let toolchain = toolchain_path.to_string_lossy();
 
