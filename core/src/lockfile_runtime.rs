@@ -23,7 +23,7 @@ use super::lockfile_support::{
 use super::{
     artifact_root, read_dependencies_path, read_target_entrypoint, reset_dir, sha256_dir,
     sha256_hex, ArtifactEntry, RuntimeArtifact, RuntimeEntry, RuntimePlatform, ToolArtifact,
-    ToolTargets, PNPM_VERSION, UV_VERSION,
+    ToolTargets, BUN_VERSION, PNPM_VERSION, UV_VERSION, YARN_CLASSIC_VERSION,
 };
 
 pub(super) async fn generate_uv_lock(
@@ -81,7 +81,7 @@ pub(super) async fn generate_uv_lock(
     )))
 }
 
-pub(super) async fn generate_pnpm_lock(
+pub(super) async fn generate_node_lockfile(
     manifest_dir: &Path,
     manifest: &toml::Value,
     _node_version: &str,
@@ -132,21 +132,10 @@ pub(super) async fn generate_pnpm_lock(
                 }
                 ImporterId::Pnpm => return Ok(Some(primary.primary_path.clone())),
                 ImporterId::Yarn => {
-                    reporter
-                        .notify(
-                            "ℹ️  yarn.lock detected; skipping pnpm-lock.yaml generation"
-                                .to_string(),
-                        )
-                        .await?;
-                    return Ok(None);
+                    return Ok(Some(primary.primary_path.clone()));
                 }
                 ImporterId::Bun => {
-                    reporter
-                        .notify(
-                            "ℹ️  bun.lock detected; skipping pnpm-lock.yaml generation".to_string(),
-                        )
-                        .await?;
-                    return Ok(None);
+                    return Ok(Some(primary.primary_path.clone()));
                 }
                 _ => return Ok(None),
             }
@@ -814,4 +803,58 @@ pub(super) fn uv_artifact_url(target_triple: &str) -> Option<String> {
         "https://github.com/astral-sh/uv/releases/download/{0}/uv-{1}.{2}",
         UV_VERSION, target_triple, extension
     ))
+}
+
+/// Yarn Classic is a plain Node.js package — same URL for all platforms.
+pub(super) fn resolve_yarn_tool_targets(platforms: &[RuntimePlatform]) -> ToolTargets {
+    let targets = platforms
+        .iter()
+        .map(|platform| {
+            (
+                platform.target_triple.to_string(),
+                ToolArtifact {
+                    url: format!(
+                        "https://registry.npmjs.org/yarn/-/yarn-{}.tgz",
+                        YARN_CLASSIC_VERSION
+                    ),
+                    sha256: None,
+                    version: Some(YARN_CLASSIC_VERSION.to_string()),
+                },
+            )
+        })
+        .collect();
+    ToolTargets { targets }
+}
+
+/// Bun is a native binary; the download URL is platform-specific.
+pub(super) fn resolve_bun_tool_targets(platforms: &[RuntimePlatform]) -> ToolTargets {
+    let targets = platforms
+        .iter()
+        .filter_map(|platform| {
+            let bun_triple = bun_platform_triple(platform.target_triple)?;
+            Some((
+                platform.target_triple.to_string(),
+                ToolArtifact {
+                    url: format!(
+                        "https://github.com/oven-sh/bun/releases/download/bun-v{}/bun-{}.zip",
+                        BUN_VERSION, bun_triple
+                    ),
+                    sha256: None,
+                    version: Some(BUN_VERSION.to_string()),
+                },
+            ))
+        })
+        .collect();
+    ToolTargets { targets }
+}
+
+fn bun_platform_triple(rust_triple: &str) -> Option<&'static str> {
+    match rust_triple {
+        "aarch64-apple-darwin" => Some("darwin-aarch64"),
+        "x86_64-apple-darwin" => Some("darwin-x86_64"),
+        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" => Some("linux-x64"),
+        "aarch64-unknown-linux-gnu" | "aarch64-unknown-linux-musl" => Some("linux-aarch64"),
+        "x86_64-pc-windows-msvc" => Some("windows-x64.exe"),
+        _ => None,
+    }
 }

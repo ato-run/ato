@@ -386,13 +386,11 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
                 targets: host_only_tool_targets,
             }),
             pnpm: None,
+            yarn: None,
+            bun: None,
         }),
         runtimes: Some(RuntimeSection {
-            python: Some(RuntimeEntry {
-                provider: "python-build-standalone".to_string(),
-                version: "3.11.10".to_string(),
-                targets: host_only_targets.clone(),
-            }),
+            python: None,
             deno: Some(RuntimeEntry {
                 provider: "official".to_string(),
                 version: "1.46.3".to_string(),
@@ -468,6 +466,8 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
                 targets: tool_targets,
             }),
             pnpm: None,
+            yarn: None,
+            bun: None,
         }),
         runtimes: Some(RuntimeSection {
             python: Some(RuntimeEntry {
@@ -563,6 +563,8 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
                 targets: tool_targets,
             }),
             pnpm: None,
+            yarn: None,
+            bun: None,
         }),
         runtimes: Some(RuntimeSection {
             python: Some(RuntimeEntry {
@@ -664,6 +666,8 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
                 targets: uv_targets,
             }),
             pnpm: None,
+            yarn: None,
+            bun: None,
         }),
         runtimes: Some(RuntimeSection {
             python: Some(RuntimeEntry {
