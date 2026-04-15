@@ -46,6 +46,31 @@ pub fn execute(
     verify_execution_plan_hashes(execution_plan)?;
 
     let launch_spec = derive_launch_spec(plan)?;
+
+    // Package manager entrypoints (npm, yarn, pnpm, bun) run scripts directly — no lockfile needed.
+    if is_package_manager_entrypoint(&launch_spec.command) {
+        let PreparedCommand {
+            mut cmd,
+            #[cfg(unix)]
+            _secret_fd_guard,
+        } = build_package_manager_command(
+            plan,
+            authoritative_lock,
+            execution_plan,
+            &launch_spec.working_dir,
+            &launch_spec.command,
+            &launch_spec.args,
+            launch_ctx,
+        )?;
+        let status = cmd
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("Failed to execute package manager for node compat")?;
+        return Ok(status.code().unwrap_or(1));
+    }
+
     let Some(_) = launch_spec.required_lockfile.as_ref() else {
         return Err(AtoExecutionError::lock_incomplete(
             "source/node Tier1 execution requires a Node lockfile",
@@ -123,6 +148,30 @@ pub fn spawn(
     verify_execution_plan_hashes(execution_plan)?;
 
     let launch_spec = derive_launch_spec(plan)?;
+
+    // Package manager entrypoints (npm, yarn, pnpm, bun) run scripts directly — no lockfile needed.
+    if is_package_manager_entrypoint(&launch_spec.command) {
+        let PreparedCommand {
+            mut cmd,
+            #[cfg(unix)]
+            _secret_fd_guard,
+        } = build_package_manager_command(
+            plan,
+            authoritative_lock,
+            execution_plan,
+            &launch_spec.working_dir,
+            &launch_spec.command,
+            &launch_spec.args,
+            launch_ctx,
+        )?;
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        return cmd
+            .spawn()
+            .context("Failed to spawn package manager for node compat orchestration");
+    }
+
     let Some(_) = launch_spec.required_lockfile.as_ref() else {
         return Err(AtoExecutionError::lock_incomplete(
             "source/node Tier1 execution requires a Node lockfile",
@@ -444,6 +493,68 @@ fn build_host_node_entrypoint_command(
 
     let mut cmd = Command::new(node_bin);
     cmd.current_dir(command_cwd).arg(entrypoint_path);
+
+    for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
+        cmd.env(key, value);
+    }
+    if let Some(port) = runtime_overrides::override_port(plan.execution_port()) {
+        cmd.env("PORT", port.to_string());
+    }
+
+    launch_ctx.apply_allowlisted_env(&mut cmd)?;
+    if let Some(proxy_env) = proxy::proxy_env_from_env(&[])? {
+        proxy::apply_proxy_env(&mut cmd, &proxy_env);
+    }
+
+    let args = direct_node_args(plan, execution_plan, explicit_script_args, launch_ctx);
+    if !args.is_empty() {
+        cmd.args(args);
+    }
+
+    Ok(PreparedCommand {
+        cmd,
+        #[cfg(unix)]
+        _secret_fd_guard: None,
+    })
+}
+
+fn is_package_manager_entrypoint(entrypoint: &str) -> bool {
+    matches!(entrypoint, "npm" | "npx" | "yarn" | "pnpm" | "bun" | "deno")
+}
+
+fn resolve_package_manager_bin(node_bin: &Path, pm: &str) -> std::path::PathBuf {
+    // npm, npx, etc. are bundled alongside node — try sibling first.
+    if let Some(dir) = node_bin.parent() {
+        let candidate = dir.join(pm);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    std::path::PathBuf::from(pm)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_package_manager_command(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
+    runtime_dir: &Path,
+    entrypoint: &str,
+    explicit_script_args: &[String],
+    launch_ctx: &RuntimeLaunchContext,
+) -> Result<PreparedCommand> {
+    let node_bin = runtime_manager::ensure_node_binary_with_authority(plan, authoritative_lock)?;
+    let pm_bin = resolve_package_manager_bin(&node_bin, entrypoint);
+
+    let mut cmd = Command::new(&pm_bin);
+    // Package managers must run in the project root (manifest_dir), not the caller's CWD.
+    cmd.current_dir(runtime_dir);
+
+    // Ensure the managed node binary directory is on PATH so npm can invoke node.
+    if let Some(node_dir) = node_bin.parent() {
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        cmd.env("PATH", format!("{}:{}", node_dir.display(), current_path));
+    }
 
     for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
         cmd.env(key, value);
