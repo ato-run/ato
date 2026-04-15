@@ -1623,6 +1623,14 @@ pub(crate) async fn install_github_repository(
     let mut install_draft = preview_preparation.install_draft;
     let mut preview_session = preview_preparation.preview_session;
     if let Some(draft) = install_draft.as_mut() {
+        // Normalize the store-generated draft BEFORE the first build so that
+        // schema_version=0.3 drafts that still use the legacy `entrypoint`/`cmd`
+        // fields inside `[targets.*]` are migrated to `run` up-front.  Previously
+        // this call only happened inside the retry loop (line ~1914), which meant
+        // the very first build attempt always saw un-normalized TOML and hit
+        // `reject_v03_legacy_fields`, making every store-draft install fail on the
+        // first try.
+        *draft = draft.normalize_preview_toml_for_checkout(&checkout.checkout_dir)?;
         apply_github_auto_fix_to_draft(draft, &checkout.checkout_dir, auto_fix_mode, false, json)?;
         preview_session.update_from_install_draft(draft);
     }
@@ -1763,6 +1771,7 @@ pub(crate) async fn install_github_repository(
             anyhow::bail!("Installation cancelled by user");
         }
     }
+    maybe_copy_env_example_with_prompts(&checkout.checkout_dir, json);
     let mut latest_install_draft = install_draft.clone();
     let build_result = match build_github_repository_checkout(
         checkout.checkout_dir.clone(),
@@ -2261,7 +2270,7 @@ fn ensure_supported_github_auto_fix_mode(auto_fix_mode: Option<GitHubAutoFixMode
 fn maybe_copy_env_example(dir: &Path, json: bool) {
     const EXAMPLE_NAMES: &[&str] = &[".env.example", ".env.template", ".env.sample"];
 
-    copy_env_example_in_dir(dir, json);
+    copy_env_example_in_dir(dir, json, false);
 
     // Check one level of subdirs for monorepo layouts (apps/, packages/, etc.)
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -2272,29 +2281,183 @@ fn maybe_copy_env_example(dir: &Path, json: bool) {
                 && !sub.join(".env").exists()
                 && EXAMPLE_NAMES.iter().any(|n| sub.join(n).exists())
             {
-                copy_env_example_in_dir(&sub, json);
+                copy_env_example_in_dir(&sub, json, false);
             }
         }
     }
 }
 
-fn copy_env_example_in_dir(dir: &Path, json: bool) {
+/// Like `maybe_copy_env_example` but also detects secret-looking keys and prompts for them.
+fn maybe_copy_env_example_with_prompts(dir: &Path, json: bool) {
+    const EXAMPLE_NAMES: &[&str] = &[".env.example", ".env.template", ".env.sample"];
+
+    copy_env_example_in_dir(dir, json, true);
+
+    // Check one level of subdirs for monorepo layouts (apps/, packages/, etc.)
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let sub = entry.path();
+            if sub.is_dir()
+                && sub.join("package.json").exists()
+                && !sub.join(".env").exists()
+                && EXAMPLE_NAMES.iter().any(|n| sub.join(n).exists())
+            {
+                copy_env_example_in_dir(&sub, json, true);
+            }
+        }
+    }
+}
+
+fn is_secret_key_name(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    [
+        "_KEY",
+        "_SECRET",
+        "_TOKEN",
+        "_PASSWORD",
+        "_API_",
+        "_AUTH",
+        "_CREDENTIAL",
+        "_PRIVATE",
+    ]
+    .iter()
+    .any(|pat| upper.contains(pat))
+        || upper.ends_with("_API")
+        || upper.ends_with("_KEY")
+        || upper.ends_with("_SECRET")
+        || upper.ends_with("_TOKEN")
+        || upper.ends_with("_PASSWORD")
+}
+
+fn is_placeholder_value(value: &str) -> bool {
+    let v = value.trim();
+    if v.is_empty() {
+        return true;
+    }
+    let lower = v.to_ascii_lowercase();
+    lower.starts_with("your_")
+        || lower.starts_with("your-")
+        || lower.starts_with("<")
+        || lower.starts_with("${")
+        || lower == "change_me"
+        || lower == "changeme"
+        || lower == "replace_me"
+        || lower == "replaceme"
+        || lower.contains("example")
+        || lower.contains("placeholder")
+        || lower.contains("todo")
+}
+
+/// Parse secret key names from a `.env` content that need values filled in.
+fn detect_secret_placeholders(content: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if let Some(eq_pos) = line.find('=') {
+            let key = line[..eq_pos].trim();
+            let value = line[eq_pos + 1..]
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            if !key.is_empty() && is_secret_key_name(key) && is_placeholder_value(value) {
+                keys.push(key.to_string());
+            }
+        }
+    }
+    keys
+}
+
+fn copy_env_example_in_dir(dir: &Path, json: bool, prompt_for_secrets: bool) {
     const EXAMPLE_NAMES: &[&str] = &[".env.example", ".env.template", ".env.sample"];
     if dir.join(".env").exists() {
         return;
     }
     for name in EXAMPLE_NAMES {
         let src = dir.join(name);
-        if src.exists() {
+        if !src.exists() {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&src) else {
+            let _ = std::fs::copy(&src, dir.join(".env"));
+            return;
+        };
+
+        let secret_keys = if prompt_for_secrets {
+            detect_secret_placeholders(&content)
+        } else {
+            Vec::new()
+        };
+
+        let can_prompt = prompt_for_secrets && io::stdin().is_terminal() && !json;
+
+        if can_prompt && !secret_keys.is_empty() {
+            // Prompt interactively for each secret key and write enriched .env
+            let mut lines_out: Vec<String> = Vec::new();
+            let mut prompted: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with('#') || trimmed.is_empty() {
+                    lines_out.push(line.to_string());
+                    continue;
+                }
+                if let Some(eq_pos) = trimmed.find('=') {
+                    let key = trimmed[..eq_pos].trim().to_string();
+                    let value = trimmed[eq_pos + 1..]
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'');
+                    if secret_keys.contains(&key) && is_placeholder_value(value) {
+                        let prompt = format!("🔑  Enter value for {} (hidden): ", key);
+                        match rpassword::prompt_password(&prompt) {
+                            Ok(entered) => {
+                                prompted.insert(key.clone(), entered.clone());
+                                lines_out.push(format!("{}={}", key, entered));
+                            }
+                            Err(_) => {
+                                lines_out.push(line.to_string());
+                            }
+                        }
+                        continue;
+                    }
+                }
+                lines_out.push(line.to_string());
+            }
+
+            let out_content = lines_out.join("\n");
+            if std::fs::write(dir.join(".env"), out_content).is_ok() && !json {
+                if prompted.is_empty() {
+                    eprintln!("ℹ️  Copied {} → .env in {}", name, dir.display());
+                } else {
+                    eprintln!(
+                        "ℹ️  Copied {} → .env in {} (filled: {})",
+                        name,
+                        dir.display(),
+                        prompted.keys().cloned().collect::<Vec<_>>().join(", ")
+                    );
+                }
+            }
+        } else {
+            // Non-interactive or no secrets: copy as-is, then announce any secrets
             if std::fs::copy(&src, dir.join(".env")).is_ok() && !json {
                 eprintln!(
                     "ℹ️  Copied {} → .env in {} (edit with your values before running)",
                     name,
                     dir.display()
                 );
+                if !secret_keys.is_empty() {
+                    eprintln!(
+                        "🔑  Secret env var(s) required — set before running: {}",
+                        secret_keys.join(", ")
+                    );
+                }
             }
-            return;
         }
+        return;
     }
 }
 
