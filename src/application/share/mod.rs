@@ -526,6 +526,14 @@ fn is_dry_run_skip_path(rel: &std::path::Path) -> bool {
         || s.ends_with(".woff2")
         || s.ends_with(".ttf")
         || s.ends_with(".eot")
+        || {
+            // Exclude .env and .env.* files (same as SMART_DEFAULT_EXCLUDES in PackFilter)
+            let filename = rel
+                .file_name()
+                .map(|n| n.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            filename == ".env" || filename.starts_with(".env.") || filename == ".envrc"
+        }
 }
 
 pub(crate) fn execute_encap(args: EncapArgs, reporter: Arc<CliReporter>) -> Result<()> {

@@ -265,7 +265,22 @@ pub fn ensure_deno_binary_with_authority(
     plan: &ManifestData,
     authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
 ) -> Result<PathBuf> {
-    let _ = authoritative_lock;
+    let version = required_runtime_tool_version(plan, "deno")?;
+    if authoritative_lock.is_some() {
+        // For source runs (authoritative AtoLock present), use RuntimeFetcher directly
+        // since there is no capsule.lock.json. Deno is used as the Node.js compat runtime,
+        // so no explicit version is required — fall back to the well-known default.
+        let version_str = version
+            .unwrap_or_else(|| capsule_core::packers::lockfile::DEFAULT_DENO_VERSION.to_string());
+        return block_on_runtime_fetch(async move {
+            RuntimeFetcher::new()?.ensure_deno(&version_str).await
+        });
+    }
+    if let Some(version) = version {
+        return block_on_runtime_fetch(async move {
+            RuntimeFetcher::new()?.ensure_deno(&version).await
+        });
+    }
     ensure_deno_binary(plan)
 }
 
@@ -277,15 +292,22 @@ pub fn ensure_python_binary_with_authority(
     plan: &ManifestData,
     authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
 ) -> Result<PathBuf> {
+    let version = required_runtime_tool_version(plan, "python")?
+        .or(required_runtime_version(plan, &["python"])?);
     if authoritative_lock.is_some() {
-        let version = required_runtime_tool_version(plan, "python")?
-            .or(required_runtime_version(plan, &["python"])?);
         let version = version.ok_or_else(|| {
             anyhow::anyhow!(
                 "targets.{}.runtime_version or runtime_tools.python is required for authoritative python execution",
                 plan.selected_target_label()
             )
         })?;
+        return block_on_runtime_fetch(async move {
+            RuntimeFetcher::new()?.ensure_python(&version).await
+        });
+    }
+    // For local source runs (no authoritative_lock), use runtime_version from the manifest
+    // if available, before falling back to capsule.lock.json.
+    if let Some(version) = version {
         return block_on_runtime_fetch(async move {
             RuntimeFetcher::new()?.ensure_python(&version).await
         });
@@ -301,15 +323,22 @@ pub fn ensure_node_binary_with_authority(
     plan: &ManifestData,
     authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
 ) -> Result<PathBuf> {
+    let version =
+        required_runtime_tool_version(plan, "node")?.or(required_runtime_version(plan, &["node"])?);
     if authoritative_lock.is_some() {
-        let version = required_runtime_tool_version(plan, "node")?
-            .or(required_runtime_version(plan, &["node"])?);
         let version = version.ok_or_else(|| {
             anyhow::anyhow!(
                 "targets.{}.runtime_version or runtime_tools.node is required for authoritative node execution",
                 plan.selected_target_label()
             )
         })?;
+        return block_on_runtime_fetch(async move {
+            RuntimeFetcher::new()?.ensure_node(&version).await
+        });
+    }
+    // For local source runs (no authoritative_lock), use runtime_version from the manifest
+    // if available (e.g., auto-provisioned capsule.toml), before falling back to capsule.lock.json.
+    if let Some(version) = version {
         return block_on_runtime_fetch(async move {
             RuntimeFetcher::new()?.ensure_node(&version).await
         });

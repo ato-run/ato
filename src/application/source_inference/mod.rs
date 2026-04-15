@@ -292,6 +292,10 @@ pub(crate) fn materialize_run_from_source_only(
 ) -> Result<RunMaterialization> {
     let mut scope = scope;
     let adapter = prepare_run_materialization_adapter(source, scope.as_deref_mut())?;
+    // Auto-copy .env.example → .env for directory-based projects (D2 feature).
+    if source.single_script.is_none() {
+        maybe_copy_env_example_for_source_run(&adapter.project_root);
+    }
     let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
         project_root: adapter.project_root.clone(),
         explicit_native_artifact: None,
@@ -301,6 +305,19 @@ pub(crate) fn materialize_run_from_source_only(
     let result =
         execute_shared_engine(input, MaterializationMode::RunAttempt, assume_yes, reporter)?;
     materialize_run_model(adapter, scope, result)
+}
+
+fn maybe_copy_env_example_for_source_run(project_root: &Path) {
+    const EXAMPLE_NAMES: &[&str] = &[".env.example", ".env.template", ".env.sample"];
+    for name in EXAMPLE_NAMES {
+        let src = project_root.join(name);
+        if src.exists() && !project_root.join(".env").exists() {
+            if fs::copy(&src, project_root.join(".env")).is_ok() {
+                eprintln!("✓ Copied {} → .env", name);
+            }
+            return;
+        }
+    }
 }
 
 pub(crate) fn materialize_run_from_explicit_native_artifact(
@@ -3334,6 +3351,11 @@ fn resolve_node_script_process(
     if first == "node" {
         let entrypoint = tokens.get(1)?.trim();
         if entrypoint.is_empty() {
+            return None;
+        }
+        // Skip inline eval scripts (node -e "...") — they are not file entrypoints
+        // and cannot be used with deno cache. Fall back to npm run dev.
+        if entrypoint.starts_with('-') {
             return None;
         }
         let args = tokens.iter().skip(2).cloned().collect::<Vec<_>>();
