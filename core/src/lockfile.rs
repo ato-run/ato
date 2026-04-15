@@ -30,9 +30,10 @@ mod lockfile_runtime;
 mod lockfile_support;
 
 use lockfile_runtime::{
-    deno_artifact_filename, generate_deno_lock, generate_pnpm_lock, generate_uv_lock,
-    prepare_node_artifacts, prepare_python_artifacts, resolve_deno_runtime, resolve_node_runtime,
-    resolve_pnpm_tool_targets, resolve_python_runtime, resolve_uv_tool_targets, uv_artifact_url,
+    deno_artifact_filename, generate_deno_lock, generate_node_lockfile, generate_uv_lock,
+    prepare_node_artifacts, prepare_python_artifacts, resolve_bun_tool_targets,
+    resolve_deno_runtime, resolve_node_runtime, resolve_pnpm_tool_targets, resolve_python_runtime,
+    resolve_uv_tool_targets, resolve_yarn_tool_targets, uv_artifact_url,
 };
 use lockfile_support::{capsule_error_config, capsule_error_pack, write_atomic_bytes_with_os_lock};
 
@@ -42,6 +43,8 @@ use lockfile_support::{capsule_error_config, capsule_error_pack, write_atomic_by
 
 const UV_VERSION: &str = "0.4.19";
 const PNPM_VERSION: &str = "9.9.0";
+const YARN_CLASSIC_VERSION: &str = "1.22.22";
+const BUN_VERSION: &str = "1.2.10";
 const LOCKFILE_INPUT_SNAPSHOT_VERSION: u32 = 1;
 const LOCKFILE_INPUT_SNAPSHOT_NAME: &str = ".capsule.lock.inputs.json";
 const METADATA_CACHE_DIR_NAME: &str = "metadata-cache";
@@ -81,6 +84,10 @@ pub struct ToolSection {
     pub uv: Option<ToolTargets>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pnpm: Option<ToolTargets>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yarn: Option<ToolTargets>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bun: Option<ToolTargets>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -603,6 +610,48 @@ fn lockfile_has_required_platform_coverage(
         }
     }
 
+    if let Some(targets) = lockfile
+        .tools
+        .as_ref()
+        .and_then(|tools| tools.pnpm.as_ref())
+        .map(|entry| &entry.targets)
+    {
+        if required_platforms
+            .iter()
+            .any(|platform| !targets.contains_key(platform.target_triple))
+        {
+            return Ok(false);
+        }
+    }
+
+    if let Some(targets) = lockfile
+        .tools
+        .as_ref()
+        .and_then(|tools| tools.yarn.as_ref())
+        .map(|entry| &entry.targets)
+    {
+        if required_platforms
+            .iter()
+            .any(|platform| !targets.contains_key(platform.target_triple))
+        {
+            return Ok(false);
+        }
+    }
+
+    if let Some(targets) = lockfile
+        .tools
+        .as_ref()
+        .and_then(|tools| tools.bun.as_ref())
+        .map(|entry| &entry.targets)
+    {
+        if required_platforms
+            .iter()
+            .any(|platform| !targets.contains_key(platform.target_triple))
+        {
+            return Ok(false);
+        }
+    }
+
     Ok(true)
 }
 
@@ -793,6 +842,10 @@ fn collect_lockfile_input_paths(
         "package.json",
         "package-lock.json",
         "pnpm-lock.yaml",
+        "yarn.lock",
+        ".yarnrc.yml",
+        "bun.lock",
+        "bun.lockb",
         "pyproject.toml",
         "requirements.txt",
         "deno.lock",
@@ -1247,6 +1300,8 @@ async fn finalize_lockfile_from_draft(
     let mut tools = ToolSection {
         uv: None,
         pnpm: None,
+        yarn: None,
+        bun: None,
     };
     let mut runtimes = RuntimeSection {
         python: None,
@@ -1311,7 +1366,11 @@ async fn finalize_lockfile_from_draft(
     )
     .await?;
 
-    let tools = if tools.uv.is_none() && tools.pnpm.is_none() {
+    let tools = if tools.uv.is_none()
+        && tools.pnpm.is_none()
+        && tools.yarn.is_none()
+        && tools.bun.is_none()
+    {
         None
     } else {
         Some(tools)
@@ -1431,11 +1490,11 @@ async fn configure_node_lockfile(
         .unwrap_or_else(|| read_language_version(manifest_raw, "node", "20"));
     let step_started = Instant::now();
     let node_lockfile =
-        generate_pnpm_lock(manifest_dir, manifest_raw, &version, reporter.clone()).await?;
+        generate_node_lockfile(manifest_dir, manifest_raw, &version, reporter.clone()).await?;
     maybe_report_timing(
         reporter,
         timings,
-        "lockfile.generate_pnpm_lock",
+        "lockfile.generate_node_lockfile",
         step_started.elapsed(),
     )
     .await?;
@@ -1465,7 +1524,7 @@ async fn configure_node_lockfile(
         runtimes.deno = Some(deno_runtime);
     }
 
-    if node_lockfile.is_some() {
+    if let Some(ref lockfile_path) = node_lockfile {
         let node_artifacts = match prepare_node_artifacts(
             manifest_raw,
             manifest_dir,
@@ -1484,12 +1543,22 @@ async fn configure_node_lockfile(
                 None
             }
         };
+        let lockfile_name = lockfile_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("pnpm-lock.yaml");
         let target_entry = targets.entry(target_key.to_string()).or_default();
-        target_entry.node_lockfile = Some(format!("locks/{}/pnpm-lock.yaml", target_key));
+        target_entry.node_lockfile = Some(format!("locks/{}/{}", target_key, lockfile_name));
         if let Some(artifacts) = node_artifacts {
             target_entry.artifacts.extend(artifacts);
         }
-        tools.pnpm = Some(resolve_pnpm_tool_targets(runtime_platforms));
+        if lockfile_name == "yarn.lock" {
+            tools.yarn = Some(resolve_yarn_tool_targets(runtime_platforms));
+        } else if lockfile_name == "bun.lock" || lockfile_name == "bun.lockb" {
+            tools.bun = Some(resolve_bun_tool_targets(runtime_platforms));
+        } else {
+            tools.pnpm = Some(resolve_pnpm_tool_targets(runtime_platforms));
+        }
     }
 
     Ok(())

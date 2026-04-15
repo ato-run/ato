@@ -14,6 +14,7 @@ pub(crate) mod publish;
 pub(crate) mod registry;
 mod run;
 mod scaffold;
+mod secrets;
 mod setup;
 mod share;
 mod source;
@@ -140,6 +141,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             share,
             save_only,
             print_plan,
+            dry_run,
             git_mode,
             tool_runtime,
             allow_dirty,
@@ -150,6 +152,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             share,
             save_only,
             print_plan,
+            dry_run,
             git_mode,
             tool_runtime,
             allow_dirty,
@@ -504,6 +507,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         }
 
         Commands::Ipc { command } => execute_ipc_command(command),
+
+        Commands::Secrets { command } => secrets::execute_secrets_command(command),
 
         Commands::Login { token, headless } => {
             let rt = tokio::runtime::Runtime::new()?;

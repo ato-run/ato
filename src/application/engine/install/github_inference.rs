@@ -490,20 +490,27 @@ fn infer_node_package_manager_command_prefix(
     checkout_dir: &Path,
     package_json: &serde_json::Value,
 ) -> &'static str {
-    if checkout_dir.join("pnpm-lock.yaml").exists()
-        || package_json
-            .get("packageManager")
-            .and_then(serde_json::Value::as_str)
-            .map(|value| value.trim().starts_with("pnpm@"))
-            .unwrap_or(false)
-    {
+    let declared_pm = package_json
+        .get("packageManager")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if checkout_dir.join("pnpm-lock.yaml").exists() || declared_pm.starts_with("pnpm@") {
         return "pnpm";
+    }
+    if checkout_dir.join("yarn.lock").exists() || declared_pm.starts_with("yarn@") {
+        return "yarn";
+    }
+    if checkout_dir.join("bun.lock").exists()
+        || checkout_dir.join("bun.lockb").exists()
+        || declared_pm.starts_with("bun@")
+    {
+        return "bun";
     }
     if checkout_dir.join("package-lock.json").exists() {
         return "npm";
-    }
-    if checkout_dir.join("bun.lock").exists() || checkout_dir.join("bun.lockb").exists() {
-        return "bun";
     }
     "npm"
 }

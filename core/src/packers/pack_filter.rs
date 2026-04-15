@@ -46,6 +46,23 @@ const SMART_DEFAULT_EXCLUDES: &[&str] = &[
     "payload.v3.manifest.json",
     "payload.tar",
     "payload.tar.zst",
+    // Secret / config files — never include in capsule archives
+    ".env",
+    "**/.env",
+    ".env.*",
+    "**/.env.*",
+    ".envrc",
+    "**/.envrc",
+    // Private keys and credentials
+    "**/*.pem",
+    "**/*.key",
+    "**/*.p12",
+    "**/*.pfx",
+    "**/credentials.json",
+    "**/service-account*.json",
+    "**/.netrc",
+    "**/.npmrc",
+    "**/.pypirc",
 ];
 
 #[derive(Debug, Clone)]
@@ -104,6 +121,12 @@ impl PackFilter {
             return true;
         }
 
+        // .env.example / .env.template / .env.sample are safe template files and must
+        // always be included so recipients know which variables to configure.
+        if is_env_template_file(&rel) {
+            return true;
+        }
+
         !self.exclude.is_match(&rel)
     }
 }
@@ -157,6 +180,23 @@ fn is_next_standalone_node_modules(rel: &str) -> bool {
     } else {
         false
     }
+}
+
+/// Returns `true` for `.env.example`, `.env.template`, `.env.sample`, `.env.dist`,
+/// and similar template files that document required env keys but contain no secrets.
+/// These must always be included in capsule archives even though `.env.*` is in the
+/// default exclude list.
+fn is_env_template_file(rel: &str) -> bool {
+    let basename = rel.rsplit('/').next().unwrap_or(rel).to_ascii_lowercase();
+    matches!(
+        basename.as_str(),
+        ".env.example"
+            | ".env.template"
+            | ".env.sample"
+            | ".env.dist"
+            | ".env.default"
+            | ".env.schema"
+    )
 }
 
 #[cfg(test)]
@@ -416,5 +456,78 @@ mod tests {
         assert!(filter.should_include_file(Path::new(
             "apps/dashboard/.next/standalone/apps/dashboard/node_modules/next/package.json"
         )));
+    }
+
+    fn empty_filter() -> PackFilter {
+        PackFilter::from_manifest(&CapsuleManifest {
+            schema_version: "0.2".to_string(),
+            name: "test".to_string(),
+            version: "0.1.0".to_string(),
+            capsule_type: crate::types::CapsuleType::App,
+            default_target: "cli".to_string(),
+            metadata: Default::default(),
+            capabilities: None,
+            requirements: Default::default(),
+            execution: Default::default(),
+            storage: Default::default(),
+            state: Default::default(),
+            state_owner_scope: None,
+            service_binding_scope: None,
+            routing: Default::default(),
+            network: None,
+            model: None,
+            transparency: None,
+            pool: None,
+            build: None,
+            pack: None,
+            isolation: None,
+            polymorphism: None,
+            targets: None,
+            exports: None,
+            services: None,
+            workspace: None,
+            distribution: None,
+        })
+        .expect("filter")
+    }
+
+    #[test]
+    fn defaults_exclude_dotenv_files() {
+        let filter = empty_filter();
+        // Root-level .env variants
+        assert!(!filter.should_include_file(Path::new(".env")));
+        assert!(!filter.should_include_file(Path::new(".env.local")));
+        assert!(!filter.should_include_file(Path::new(".env.production")));
+        assert!(!filter.should_include_file(Path::new(".env.staging")));
+        assert!(!filter.should_include_file(Path::new(".env.development")));
+        assert!(!filter.should_include_file(Path::new(".envrc")));
+        // Nested .env variants
+        assert!(!filter.should_include_file(Path::new("apps/api/.env")));
+        assert!(!filter.should_include_file(Path::new("apps/web/.env.local")));
+        assert!(!filter.should_include_file(Path::new("services/backend/.envrc")));
+        // Regular source files are still included
+        assert!(filter.should_include_file(Path::new("src/config.ts")));
+        // Template / documentation files are always included
+        assert!(filter.should_include_file(Path::new(".env.example")));
+        assert!(filter.should_include_file(Path::new(".env.template")));
+        assert!(filter.should_include_file(Path::new(".env.sample")));
+        assert!(filter.should_include_file(Path::new("apps/web/.env.example")));
+    }
+
+    #[test]
+    fn defaults_exclude_secret_key_files() {
+        let filter = empty_filter();
+        assert!(!filter.should_include_file(Path::new("server.pem")));
+        assert!(!filter.should_include_file(Path::new("private.key")));
+        assert!(!filter.should_include_file(Path::new("certs/ca.pem")));
+        assert!(!filter.should_include_file(Path::new("keys/signing.key")));
+        assert!(!filter.should_include_file(Path::new("credentials.json")));
+        assert!(!filter.should_include_file(Path::new("service-account.json")));
+        assert!(!filter.should_include_file(Path::new("service-account-prod.json")));
+        assert!(!filter.should_include_file(Path::new("config/.npmrc")));
+        assert!(!filter.should_include_file(Path::new(".netrc")));
+        // Regular JSON files are still included
+        assert!(filter.should_include_file(Path::new("src/data.json")));
+        assert!(filter.should_include_file(Path::new("package.json")));
     }
 }
