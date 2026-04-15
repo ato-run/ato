@@ -4,6 +4,45 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.65] - 2026-04-15
+
+### What Changed
+
+
+#### Bug Fixes
+
+- Update rustls-webpki 0.103.11 → 0.103.12 (RUSTSEC-2026-0098)
+
+- B2 — add yarn.lock and packageManager yarn@ detection
+
+
+#### Features
+
+- D2 — auto-copy .env.example → .env in GitHub checkout
+
+- Phase 2 — ato secrets subcommand with SecretStore module
+
+- Phase 1e — --dry-run flag with secret pattern scanner
+
+- Phase 1d — rpassword masked input for secret-like env keys
+
+- Phase 1c — SecretStorage abstraction, chmod 600 on env files, CI detection
+
+- Add automatic port assignment for capsules
+
+
+#### Other Changes
+
+- Bump capsule-core 0.9.2 → 0.10.0 for semver-compatible release
+
+- Cargo fmt fixes for env_security tests and Cargo.lock update
+
+
+#### Security
+
+- A1+A2 — env* exclusions and injection denylist
+
+
 ## [0.4.64] - 2026-04-14
 
 ### What Changed
