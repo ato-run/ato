@@ -7,6 +7,7 @@ pub(crate) mod ports;
 pub(crate) mod preview;
 pub(crate) mod producer_input;
 pub(crate) mod search;
+pub(crate) mod secrets;
 pub(crate) mod services;
 #[allow(dead_code)]
 pub(crate) mod share;
