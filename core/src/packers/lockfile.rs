@@ -14,6 +14,8 @@ use crate::reporter::CapsuleReporter;
 const LOCKFILE_VERSION: &str = "1";
 const DEFAULT_UV_VERSION: &str = "0.4.19";
 const DEFAULT_PNPM_VERSION: &str = "9.9.0";
+const DEFAULT_YARN_CLASSIC_VERSION: &str = "1.22.22";
+const DEFAULT_BUN_VERSION: &str = "1.2.10";
 const DEFAULT_NODE_VERSION: &str = "20.12.0";
 const DEFAULT_PYTHON_VERSION: &str = "3.11.9";
 const DEFAULT_DENO_VERSION: &str = "1.46.3";
@@ -46,6 +48,10 @@ pub struct LockTools {
     pub uv: Option<LockTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pnpm: Option<LockTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yarn: Option<LockTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bun: Option<LockTool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -111,6 +117,8 @@ pub fn write_lockfile(
     let mut tools = LockTools {
         uv: None,
         pnpm: None,
+        yarn: None,
+        bun: None,
     };
     if languages.contains("python") {
         let uv_url = format!(
@@ -249,8 +257,50 @@ pub fn write_lockfile(
     }
     if languages.contains("node") {
         let pnpm_lock = manifest_dir.join("pnpm-lock.yaml");
+        let yarn_lock = manifest_dir.join("yarn.lock");
+        let bun_lock = manifest_dir.join("bun.lock");
+        let bun_lockb = manifest_dir.join("bun.lockb");
         if pnpm_lock.exists() {
             target.node_lockfile = Some("pnpm-lock.yaml".to_string());
+        } else if yarn_lock.exists() {
+            target.node_lockfile = Some("yarn.lock".to_string());
+            let yarn_url = format!(
+                "https://registry.npmjs.org/yarn/-/yarn-{}.tgz",
+                DEFAULT_YARN_CLASSIC_VERSION
+            );
+            let mut targets = HashMap::new();
+            targets.insert(
+                triple.to_string(),
+                LockToolArtifact {
+                    version: Some(DEFAULT_YARN_CLASSIC_VERSION.to_string()),
+                    url: yarn_url,
+                    sha256: None,
+                },
+            );
+            tools.yarn = Some(LockTool { targets });
+        } else if bun_lock.exists() || bun_lockb.exists() {
+            let lockfile_name = if bun_lockb.exists() {
+                "bun.lockb"
+            } else {
+                "bun.lock"
+            };
+            target.node_lockfile = Some(lockfile_name.to_string());
+            if let Some(bun_triple) = bun_platform_triple(&triple) {
+                let bun_url = format!(
+                    "https://github.com/oven-sh/bun/releases/download/bun-v{}/bun-{}.zip",
+                    DEFAULT_BUN_VERSION, bun_triple
+                );
+                let mut targets = HashMap::new();
+                targets.insert(
+                    triple.to_string(),
+                    LockToolArtifact {
+                        version: Some(DEFAULT_BUN_VERSION.to_string()),
+                        url: bun_url,
+                        sha256: None,
+                    },
+                );
+                tools.bun = Some(LockTool { targets });
+            }
         }
     }
     if target.python_lockfile.is_some() || target.node_lockfile.is_some() {
@@ -267,7 +317,11 @@ pub fn write_lockfile(
                 })?,
             allowlist: Some(allowlist.clone()),
         },
-        tools: if tools.uv.is_some() || tools.pnpm.is_some() {
+        tools: if tools.uv.is_some()
+            || tools.pnpm.is_some()
+            || tools.yarn.is_some()
+            || tools.bun.is_some()
+        {
             Some(tools)
         } else {
             None
@@ -348,6 +402,17 @@ fn target_triple(os: &str, arch: &str) -> Result<String> {
         }
     };
     Ok(triple.to_string())
+}
+
+fn bun_platform_triple(rust_triple: &str) -> Option<&'static str> {
+    match rust_triple {
+        "aarch64-apple-darwin" => Some("darwin-aarch64"),
+        "x86_64-apple-darwin" => Some("darwin-x86_64"),
+        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" => Some("linux-x64"),
+        "aarch64-unknown-linux-gnu" | "aarch64-unknown-linux-musl" => Some("linux-aarch64"),
+        "x86_64-pc-windows-msvc" => Some("windows-x64.exe"),
+        _ => None,
+    }
 }
 
 fn detect_languages(
