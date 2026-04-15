@@ -26,6 +26,10 @@ pub struct ToolSection {
     pub uv: Option<ToolTargets>,
     #[serde(default)]
     pub pnpm: Option<ToolTargets>,
+    #[serde(default)]
+    pub yarn: Option<ToolTargets>,
+    #[serde(default)]
+    pub bun: Option<ToolTargets>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +90,8 @@ pub struct UrlEntry {
 struct StagedArtifacts {
     python_cache_dir: Option<PathBuf>,
     pnpm_store_dir: Option<PathBuf>,
+    yarn_cache_dir: Option<PathBuf>,
+    bun_cache_dir: Option<PathBuf>,
 }
 
 pub async fn hydrate_bundle(bundle_root: &Path) -> Result<(), String> {
@@ -121,6 +127,8 @@ pub async fn hydrate_bundle(bundle_root: &Path) -> Result<(), String> {
             bundle_root,
             &target_triple,
             staged.pnpm_store_dir.as_deref(),
+            staged.yarn_cache_dir.as_deref(),
+            staged.bun_cache_dir.as_deref(),
         )
         .await?;
     }
@@ -182,6 +190,8 @@ fn stage_bundle_artifacts(
         return Ok(StagedArtifacts {
             python_cache_dir: None,
             pnpm_store_dir: None,
+            yarn_cache_dir: None,
+            bun_cache_dir: None,
         });
     }
 
@@ -195,6 +205,8 @@ fn stage_bundle_artifacts(
 
     let mut python_cache_dir = None;
     let mut pnpm_store_dir = None;
+    let mut yarn_cache_dir = None;
+    let mut bun_cache_dir = None;
 
     for artifact in &target.artifacts {
         let rel_path = artifact_relative_path(artifact)?;
@@ -216,6 +228,12 @@ fn stage_bundle_artifacts(
         let is_pnpm_store = artifact_type == Some("pnpm-store")
             || filename_hint == Some("pnpm-store")
             || rel_path.as_os_str() == "pnpm-store";
+        let is_yarn_cache = artifact_type == Some("yarn-cache")
+            || filename_hint == Some("yarn-cache")
+            || rel_path.as_os_str() == "yarn-cache";
+        let is_bun_cache = artifact_type == Some("bun-cache")
+            || filename_hint == Some("bun-cache")
+            || rel_path.as_os_str() == "bun-cache";
 
         if python_cache_dir.is_none() && is_uv_cache {
             python_cache_dir = Some(cache_dir.join(&rel_path));
@@ -223,11 +241,19 @@ fn stage_bundle_artifacts(
         if pnpm_store_dir.is_none() && is_pnpm_store {
             pnpm_store_dir = Some(cache_dir.join(&rel_path));
         }
+        if yarn_cache_dir.is_none() && is_yarn_cache {
+            yarn_cache_dir = Some(cache_dir.join(&rel_path));
+        }
+        if bun_cache_dir.is_none() && is_bun_cache {
+            bun_cache_dir = Some(cache_dir.join(&rel_path));
+        }
     }
 
     Ok(StagedArtifacts {
         python_cache_dir,
         pnpm_store_dir,
+        yarn_cache_dir,
+        bun_cache_dir,
     })
 }
 
@@ -326,54 +352,89 @@ async fn hydrate_node(
     bundle_root: &Path,
     target_triple: &str,
     pnpm_store_dir: Option<&Path>,
+    yarn_cache_dir: Option<&Path>,
+    bun_cache_dir: Option<&Path>,
 ) -> Result<(), String> {
-    let node_path = ensure_node(lock).await?;
-    let pnpm_cmd = ensure_pnpm(lock, &node_path, target_triple).await?;
+    let lockfile_path = match target.node_lockfile.as_deref() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    let lockfile_name = std::path::Path::new(lockfile_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("pnpm-lock.yaml");
+
+    let lock_src = bundle_root.join(lockfile_path);
+    let lock_dest = source_dir.join(lockfile_name);
+    if lock_src.exists() {
+        std::fs::copy(&lock_src, &lock_dest)
+            .map_err(|e| format!("Failed to copy {}: {}", lockfile_name, e))?;
+    }
+
     let cache_dir = toolchain_cache_dir()
         .map_err(|e| format!("Failed to resolve toolchain cache: {}", e))?
         .join("cache");
     std::fs::create_dir_all(&cache_dir)
         .map_err(|e| format!("Failed to create cache dir: {}", e))?;
-    let store_dir = pnpm_store_dir
-        .map(|dir| dir.to_path_buf())
-        .unwrap_or_else(|| cache_dir.join("pnpm-store"));
-    std::fs::create_dir_all(&store_dir)
-        .map_err(|e| format!("Failed to create pnpm store dir: {}", e))?;
 
-    if let Some(lockfile) = target.node_lockfile.as_ref() {
-        let lock_src = bundle_root.join(lockfile);
-        let lock_dest = source_dir.join("pnpm-lock.yaml");
-        if lock_src.exists() {
-            std::fs::copy(&lock_src, &lock_dest)
-                .map_err(|e| format!("Failed to copy pnpm-lock.yaml: {}", e))?;
-        }
-    }
-
-    let mut install_cmd = Command::new(&pnpm_cmd.program);
-    install_cmd
-        .args(&pnpm_cmd.args_prefix)
-        .args([
-            "install",
-            "--ignore-scripts",
-            "--frozen-lockfile",
-            "--force",
-        ])
-        .current_dir(source_dir);
-    inject_node_path(&mut install_cmd, &node_path);
-    if pnpm_store_dir.is_none() {
-        let mut fetch_cmd = Command::new(&pnpm_cmd.program);
-        fetch_cmd
-            .args(&pnpm_cmd.args_prefix)
-            .args(["fetch", "--store-dir", store_dir.to_string_lossy().as_ref()])
+    if lockfile_name == "yarn.lock" {
+        let node_path = ensure_node(lock).await?;
+        let yarn_cmd = ensure_yarn_classic(lock, &node_path, target_triple).await?;
+        let mut install_cmd = Command::new(&yarn_cmd.program);
+        install_cmd
+            .args(&yarn_cmd.args_prefix)
+            .args(["install", "--frozen-lockfile"])
             .current_dir(source_dir);
-        inject_node_path(&mut fetch_cmd, &node_path);
-        run_command(fetch_cmd, "pnpm fetch")?;
+        if let Some(cache) = yarn_cache_dir {
+            install_cmd.args(["--cache-folder", cache.to_string_lossy().as_ref()]);
+        }
+        inject_node_path(&mut install_cmd, &node_path);
+        run_command(install_cmd, "yarn install")?;
+    } else if lockfile_name == "bun.lock" || lockfile_name == "bun.lockb" {
+        let bun_path = ensure_bun(lock, target_triple).await?;
+        let mut install_cmd = Command::new(&bun_path);
+        install_cmd
+            .args(["install", "--frozen-lockfile"])
+            .current_dir(source_dir);
+        if let Some(cache) = bun_cache_dir {
+            install_cmd.env("BUN_INSTALL_CACHE_DIR", cache);
+        }
+        run_command(install_cmd, "bun install")?;
+    } else {
+        // pnpm (default)
+        let node_path = ensure_node(lock).await?;
+        let pnpm_cmd = ensure_pnpm(lock, &node_path, target_triple).await?;
+        let store_dir = pnpm_store_dir
+            .map(|dir| dir.to_path_buf())
+            .unwrap_or_else(|| cache_dir.join("pnpm-store"));
+        std::fs::create_dir_all(&store_dir)
+            .map_err(|e| format!("Failed to create pnpm store dir: {}", e))?;
+        let mut install_cmd = Command::new(&pnpm_cmd.program);
+        install_cmd
+            .args(&pnpm_cmd.args_prefix)
+            .args([
+                "install",
+                "--ignore-scripts",
+                "--frozen-lockfile",
+                "--force",
+            ])
+            .current_dir(source_dir);
+        inject_node_path(&mut install_cmd, &node_path);
+        if pnpm_store_dir.is_none() {
+            let mut fetch_cmd = Command::new(&pnpm_cmd.program);
+            fetch_cmd
+                .args(&pnpm_cmd.args_prefix)
+                .args(["fetch", "--store-dir", store_dir.to_string_lossy().as_ref()])
+                .current_dir(source_dir);
+            inject_node_path(&mut fetch_cmd, &node_path);
+            run_command(fetch_cmd, "pnpm fetch")?;
+        }
+        install_cmd.args(["--store-dir", store_dir.to_string_lossy().as_ref()]);
+        if pnpm_store_dir.is_some() {
+            install_cmd.arg("--offline");
+        }
+        run_command(install_cmd, "pnpm install")?;
     }
-    install_cmd.args(["--store-dir", store_dir.to_string_lossy().as_ref()]);
-    if pnpm_store_dir.is_some() {
-        install_cmd.arg("--offline");
-    }
-    run_command(install_cmd, "pnpm install")?;
     Ok(())
 }
 
@@ -477,6 +538,76 @@ async fn ensure_pnpm(
     })
 }
 
+async fn ensure_yarn_classic(
+    lock: &CapsuleLock,
+    node_path: &Path,
+    target_triple: &str,
+) -> Result<PnpmCommand, String> {
+    if let Ok(found) = which::which("yarn") {
+        return Ok(PnpmCommand {
+            program: found,
+            args_prefix: Vec::new(),
+        });
+    }
+    let yarn = lock
+        .tools
+        .as_ref()
+        .and_then(|t| t.yarn.as_ref())
+        .and_then(|y| y.targets.get(target_triple))
+        .ok_or_else(|| "yarn tool entry missing from capsule.lock".to_string())?;
+    let tools_dir = toolchain_cache_dir()
+        .map_err(|e| format!("Failed to resolve toolchain cache: {}", e))?
+        .join("tools")
+        .join("yarn-classic");
+    std::fs::create_dir_all(&tools_dir)
+        .map_err(|e| format!("Failed to create yarn tools dir: {}", e))?;
+    let archive_path = tools_dir.join("yarn.tgz");
+    download_file(&yarn.url, &archive_path).await?;
+    extract_tgz(&archive_path, &tools_dir)?;
+    let script = tools_dir.join("package").join("bin").join("yarn.js");
+    if !script.exists() {
+        return Err("yarn.js not found after extraction".to_string());
+    }
+    Ok(PnpmCommand {
+        program: node_path.to_path_buf(),
+        args_prefix: vec![script.to_string_lossy().to_string()],
+    })
+}
+
+async fn ensure_bun(lock: &CapsuleLock, target_triple: &str) -> Result<PathBuf, String> {
+    if let Ok(found) = which::which("bun") {
+        return Ok(found);
+    }
+    let bun = lock
+        .tools
+        .as_ref()
+        .and_then(|t| t.bun.as_ref())
+        .and_then(|b| b.targets.get(target_triple))
+        .ok_or_else(|| "bun tool entry missing from capsule.lock".to_string())?;
+    let tools_dir = toolchain_cache_dir()
+        .map_err(|e| format!("Failed to resolve toolchain cache: {}", e))?
+        .join("tools")
+        .join("bun");
+    std::fs::create_dir_all(&tools_dir)
+        .map_err(|e| format!("Failed to create bun tools dir: {}", e))?;
+    let archive_path = tools_dir.join("bun.zip");
+    download_file(&bun.url, &archive_path).await?;
+    extract_zip(&archive_path, &tools_dir)?;
+    let bun_bin = find_binary_recursive(&tools_dir, &["bun", "bun.exe"])
+        .ok_or_else(|| "bun binary not found after extraction".to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&bun_bin)
+            .map_err(|e| format!("Failed to stat bun binary: {}", e))?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bun_bin, perms)
+            .map_err(|e| format!("Failed to chmod bun binary: {}", e))?;
+    }
+    Ok(bun_bin)
+}
+
 fn inject_node_path(cmd: &mut Command, node_path: &Path) {
     if let Some(parent) = node_path.parent() {
         let current = std::env::var_os("PATH").unwrap_or_default();
@@ -524,6 +655,33 @@ fn extract_tgz(archive_path: &Path, dest: &Path) -> Result<(), String> {
     archive
         .unpack(dest)
         .map_err(|e| format!("Failed to extract archive: {}", e))?;
+    Ok(())
+}
+
+fn extract_zip(archive: &Path, dest: &Path) -> Result<(), String> {
+    let file = std::fs::File::open(archive)
+        .map_err(|e| format!("Failed to open zip {}: {}", archive.display(), e))?;
+    let mut zip = zip::ZipArchive::new(file)
+        .map_err(|e| format!("Failed to read zip {}: {}", archive.display(), e))?;
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| format!("Failed to read zip entry {}: {}", i, e))?;
+        let out_path = dest.join(entry.name());
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out_path)
+                .map_err(|e| format!("Failed to create dir {}: {}", out_path.display(), e))?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create dir {}: {}", parent.display(), e))?;
+            }
+            let mut out_file = std::fs::File::create(&out_path)
+                .map_err(|e| format!("Failed to create {}: {}", out_path.display(), e))?;
+            std::io::copy(&mut entry, &mut out_file)
+                .map_err(|e| format!("Failed to extract {}: {}", out_path.display(), e))?;
+        }
+    }
     Ok(())
 }
 
@@ -662,6 +820,12 @@ impl CapsuleLock {
             }
             if let Some(pnpm) = &tools.pnpm {
                 urls.extend(pnpm.targets.values().map(|u| u.url.clone()));
+            }
+            if let Some(yarn) = &tools.yarn {
+                urls.extend(yarn.targets.values().map(|u| u.url.clone()));
+            }
+            if let Some(bun) = &tools.bun {
+                urls.extend(bun.targets.values().map(|u| u.url.clone()));
             }
         }
         if let Some(runtimes) = &self.runtimes {

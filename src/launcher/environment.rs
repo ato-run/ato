@@ -452,8 +452,12 @@ fn allocate_runtime_dirs(run_id: &str) -> Result<RuntimeDirs> {
     let log_dir = base_root.join("logs");
     let state_dir = base_root.join("state");
 
-    fs::create_dir_all(&workspace_root)
-        .with_context(|| format!("Failed to create workspace root: {}", workspace_root.display()))?;
+    fs::create_dir_all(&workspace_root).with_context(|| {
+        format!(
+            "Failed to create workspace root: {}",
+            workspace_root.display()
+        )
+    })?;
     fs::create_dir_all(&log_dir)
         .with_context(|| format!("Failed to create log dir: {}", log_dir.display()))?;
     fs::create_dir_all(&state_dir)
@@ -471,9 +475,12 @@ fn canonical_manifest_path(manifest_path: &Path) -> Result<PathBuf> {
         anyhow::bail!("manifest not found: {}", manifest_path.display());
     }
 
-    manifest_path
-        .canonicalize()
-        .with_context(|| format!("Failed to canonicalize manifest: {}", manifest_path.display()))
+    manifest_path.canonicalize().with_context(|| {
+        format!(
+            "Failed to canonicalize manifest: {}",
+            manifest_path.display()
+        )
+    })
 }
 
 fn normalize_workspace_target(path: &Path) -> Result<PathBuf> {
@@ -553,7 +560,11 @@ fn apply_runtime_artifact_env(
                 artifact
                     .name
                     .chars()
-                    .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_uppercase() } else { '_' })
+                    .map(|ch| if ch.is_ascii_alphanumeric() {
+                        ch.to_ascii_uppercase()
+                    } else {
+                        '_'
+                    })
                     .collect::<String>()
             )
         });
@@ -628,7 +639,8 @@ fn copy_tree(source: &Path, destination: &Path, use_clonefile: bool) -> Result<(
     for entry in fs::read_dir(source)
         .with_context(|| format!("Failed to read directory: {}", source.display()))?
     {
-        let entry = entry.with_context(|| format!("Failed to read entry in {}", source.display()))?;
+        let entry =
+            entry.with_context(|| format!("Failed to read entry in {}", source.display()))?;
         let file_type = entry
             .file_type()
             .with_context(|| format!("Failed to inspect entry type: {}", entry.path().display()))?;
@@ -705,8 +717,9 @@ fn try_clonefile(source: &Path, destination: &Path) -> std::io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
-    let src = CString::new(source.as_os_str().as_bytes())
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid source path"))?;
+    let src = CString::new(source.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid source path")
+    })?;
     let dst = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid destination path")
     })?;
@@ -787,7 +800,8 @@ fn collect_output_path_artifacts(
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) => {
-            return Err(err).with_context(|| format!("Failed to read output metadata: {}", path.display()))
+            return Err(err)
+                .with_context(|| format!("Failed to read output metadata: {}", path.display()))
         }
     };
 
@@ -795,7 +809,8 @@ fn collect_output_path_artifacts(
         for entry in fs::read_dir(path)
             .with_context(|| format!("Failed to read output directory: {}", path.display()))?
         {
-            let entry = entry.with_context(|| format!("Failed to read entry in {}", path.display()))?;
+            let entry =
+                entry.with_context(|| format!("Failed to read entry in {}", path.display()))?;
             collect_output_path_artifacts(root, &entry.path(), kind, artifacts)?;
         }
         return Ok(());
@@ -947,14 +962,24 @@ sandbox = false
         })
         .unwrap();
 
-        assert_eq!(workspace.cleanup_policy(), CleanupPolicyApplied::DeleteWorkspacePreserveOutputs);
+        assert_eq!(
+            workspace.cleanup_policy(),
+            CleanupPolicyApplied::DeleteWorkspacePreserveOutputs
+        );
         assert!(workspace.source_dir.join(".env").exists());
-        assert_eq!(fs::read_link(workspace.source_dir.join(".env")).unwrap(), overlay_file);
+        assert_eq!(
+            fs::read_link(workspace.source_dir.join(".env")).unwrap(),
+            overlay_file
+        );
         assert_eq!(
             fs::read_link(workspace.source_dir.join(".derived")).unwrap(),
             derived_root
         );
-        assert!(workspace.requested_cwd.as_ref().unwrap().starts_with(&workspace.source_dir));
+        assert!(workspace
+            .requested_cwd
+            .as_ref()
+            .unwrap()
+            .starts_with(&workspace.source_dir));
         workspace.cleanup();
     }
 
@@ -998,11 +1023,14 @@ sandbox = false
         assert!(workspace
             .injected_mounts
             .iter()
-            .any(|mount| mount.source == overlay_file && mount.target == PathBuf::from("/app/config/settings.json")));
+            .any(|mount| mount.source == overlay_file
+                && mount.target == PathBuf::from("/app/config/settings.json")));
         assert!(workspace
             .injected_mounts
             .iter()
-            .any(|mount| mount.source == derived_root && mount.target == PathBuf::from("/app/.derived") && !mount.readonly));
+            .any(|mount| mount.source == derived_root
+                && mount.target == PathBuf::from("/app/.derived")
+                && !mount.readonly));
         assert_eq!(workspace.requested_cwd, Some(PathBuf::from("/app/src")));
         workspace.cleanup();
     }
@@ -1047,11 +1075,15 @@ sandbox = false
             .env
             .iter()
             .any(|(key, value)| key == "NACELLE_WORKSPACE_WRITABLE" && value == "1"));
-        assert!(workspace.source_dir.join("config").join("settings.json").exists());
         assert!(workspace
-            .derived_outputs
-            .iter()
-            .any(|output| output.staged_path.as_ref().is_some_and(|path| path.ends_with(".derived"))));
+            .source_dir
+            .join("config")
+            .join("settings.json")
+            .exists());
+        assert!(workspace.derived_outputs.iter().any(|output| output
+            .staged_path
+            .as_ref()
+            .is_some_and(|path| path.ends_with(".derived"))));
         workspace.cleanup();
     }
 }
