@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::io::IsTerminal;
 
 use crate::application::secrets::store::SecretEntry;
 use crate::application::secrets::SecretStore;
@@ -12,8 +13,18 @@ pub(crate) fn execute_secrets_command(command: SecretsCommands) -> Result<()> {
             allow,
             deny,
         } => {
-            let value = rpassword::prompt_password(format!("{key} (hidden): "))
-                .context("failed to read secret value")?;
+            let value = if std::io::stdin().is_terminal() {
+                rpassword::prompt_password(format!("{key} (hidden): "))
+                    .context("failed to read secret value")?
+            } else {
+                use std::io::BufRead;
+                let mut line = String::new();
+                std::io::stdin()
+                    .lock()
+                    .read_line(&mut line)
+                    .context("failed to read secret value from stdin")?;
+                line.trim_end_matches(['\n', '\r']).to_string()
+            };
             let store = SecretStore::open()?;
             store.set(
                 &key,
