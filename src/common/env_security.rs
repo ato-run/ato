@@ -95,7 +95,10 @@ mod tests {
         for key in HARD_DENIED_ENV_KEYS {
             let result = check_user_env_safety(key, "anything");
             assert!(result.is_err(), "expected '{}' to be denied", key);
-            assert!(result.unwrap_err().to_string().contains("blocked for security"));
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("blocked for security"));
         }
     }
 
@@ -126,8 +129,9 @@ mod tests {
             "--no-experimental-fetch",
         ];
         for value in &safe {
-            check_user_env_safety("NODE_OPTIONS", value)
-                .unwrap_or_else(|e| panic!("expected NODE_OPTIONS='{}' to be allowed: {}", value, e));
+            check_user_env_safety("NODE_OPTIONS", value).unwrap_or_else(|e| {
+                panic!("expected NODE_OPTIONS='{}' to be allowed: {}", value, e)
+            });
         }
     }
 
@@ -150,7 +154,10 @@ mod tests {
         let pairs = vec![
             ("OPENAI_API_KEY".to_string(), "sk-ok".to_string()),
             ("LD_PRELOAD".to_string(), "/evil.so".to_string()),
-            ("DATABASE_URL".to_string(), "postgres://localhost".to_string()),
+            (
+                "DATABASE_URL".to_string(),
+                "postgres://localhost".to_string(),
+            ),
         ];
         let result = check_user_env_pairs(&pairs);
         assert!(result.is_err());
