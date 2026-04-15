@@ -2360,7 +2360,9 @@ fn resolve_entry_env_overlay(
         io::stdin()
             .read_line(&mut value)
             .context("failed to read env value")?;
-        envs.insert(key.clone(), value.trim().to_string());
+        let value = value.trim().to_string();
+        crate::common::env_security::check_user_env_safety(key, &value)?;
+        envs.insert(key.clone(), value);
     }
 
     eprint!("Save these values for this target? [y/N] ");
@@ -2451,7 +2453,11 @@ fn load_env_map(path: &Path) -> Result<BTreeMap<String, String>> {
         let Some((key, value)) = trimmed.split_once('=') else {
             continue;
         };
-        values.insert(key.trim().to_string(), value.trim().to_string());
+        let key = key.trim().to_string();
+        let value = value.trim().to_string();
+        crate::common::env_security::check_user_env_safety(&key, &value)
+            .with_context(|| format!("rejected env key in {}", path.display()))?;
+        values.insert(key, value);
     }
     Ok(values)
 }
