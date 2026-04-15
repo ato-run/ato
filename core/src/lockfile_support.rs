@@ -14,7 +14,10 @@ use crate::error::{CapsuleError, Result};
 use crate::packers::runtime_fetcher::RuntimeFetcher;
 use crate::reporter::CapsuleReporter;
 
-use super::{platform_triple, METADATA_CACHE_DIR_NAME, PNPM_VERSION, UV_VERSION};
+use super::{
+    platform_triple, BUN_VERSION, METADATA_CACHE_DIR_NAME, PNPM_VERSION, UV_VERSION,
+    YARN_CLASSIC_VERSION,
+};
 
 pub(super) struct PnpmCommand {
     pub(super) program: PathBuf,
@@ -450,4 +453,158 @@ where
         capsule_error_pack,
     )?;
     Ok(value)
+}
+
+/// Bootstrap Yarn Classic (v1) by downloading its npm tarball and running it via Node.
+#[allow(dead_code)]
+pub(super) async fn ensure_yarn_classic(
+    node_path: &Path,
+    reporter: Arc<dyn CapsuleReporter + 'static>,
+) -> Result<PnpmCommand> {
+    if let Ok(found) = which::which("yarn") {
+        return Ok(PnpmCommand {
+            program: found,
+            args_prefix: Vec::new(),
+        });
+    }
+    let boundary = BootstrapBoundary::network_tool(
+        "yarn-classic",
+        BootstrapVerificationKind::ChecksumUnavailable,
+    );
+    let version = YARN_CLASSIC_VERSION;
+    reporter
+        .notify(format!("⬇️  Downloading Yarn Classic {}", version))
+        .await?;
+    let tools_dir = toolchain_cache_dir()?
+        .join("tools")
+        .join(boundary.subject_name.as_str())
+        .join(version);
+    std::fs::create_dir_all(&tools_dir)
+        .map_err(|e| CapsuleError::Pack(format!("Failed to create yarn tools directory: {}", e)))?;
+    let archive_path = tools_dir.join(format!("yarn-{}.tgz", version));
+    let url = format!("https://registry.npmjs.org/yarn/-/yarn-{}.tgz", version);
+    download_file(&url, &archive_path).await?;
+    extract_tgz(&archive_path, &tools_dir)?;
+
+    let script = tools_dir.join("package").join("bin").join("yarn.js");
+    if !script.exists() {
+        return Err(CapsuleError::Pack(
+            "yarn.js not found after extraction".to_string(),
+        ));
+    }
+
+    Ok(PnpmCommand {
+        program: node_path.to_path_buf(),
+        args_prefix: vec![script.to_string_lossy().to_string()],
+    })
+}
+
+/// Bootstrap Bun by downloading its native binary zip.
+#[allow(dead_code)]
+pub(super) async fn ensure_bun(reporter: Arc<dyn CapsuleReporter + 'static>) -> Result<PathBuf> {
+    if let Ok(found) = which::which("bun") {
+        return Ok(found);
+    }
+    let boundary =
+        BootstrapBoundary::network_tool("bun", BootstrapVerificationKind::ChecksumUnavailable);
+    let version = BUN_VERSION;
+    reporter
+        .notify(format!("⬇️  Downloading Bun {}", version))
+        .await?;
+    let target_triple = platform_triple()?;
+    let bun_triple = bun_platform_triple(&target_triple).ok_or_else(|| {
+        CapsuleError::Pack(format!(
+            "Bun does not support target platform: {}",
+            target_triple
+        ))
+    })?;
+    let tools_dir = toolchain_cache_dir()?
+        .join("tools")
+        .join(boundary.subject_name.as_str())
+        .join(version);
+    std::fs::create_dir_all(&tools_dir)
+        .map_err(|e| CapsuleError::Pack(format!("Failed to create bun tools directory: {}", e)))?;
+    let archive_name = format!("bun-{}.zip", bun_triple);
+    let archive_path = tools_dir.join(&archive_name);
+    let url = format!(
+        "https://github.com/oven-sh/bun/releases/download/bun-v{}/bun-{}.zip",
+        version, bun_triple
+    );
+    download_file(&url, &archive_path).await?;
+    extract_zip(&archive_path, &tools_dir)?;
+    let bun_bin = find_binary_recursive(&tools_dir, &["bun", "bun.exe"])
+        .ok_or_else(|| CapsuleError::Pack("bun binary not found after extraction".to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&bun_bin)
+            .map_err(|e| CapsuleError::Pack(format!("Failed to stat bun binary: {}", e)))?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bun_bin, perms)
+            .map_err(|e| CapsuleError::Pack(format!("Failed to chmod bun binary: {}", e)))?;
+    }
+    Ok(bun_bin)
+}
+
+#[allow(dead_code)]
+fn bun_platform_triple(rust_triple: &str) -> Option<&'static str> {
+    match rust_triple {
+        "aarch64-apple-darwin" => Some("darwin-aarch64"),
+        "x86_64-apple-darwin" => Some("darwin-x86_64"),
+        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" => Some("linux-x64"),
+        "aarch64-unknown-linux-gnu" | "aarch64-unknown-linux-musl" => Some("linux-aarch64"),
+        "x86_64-pc-windows-msvc" => Some("windows-x64.exe"),
+        _ => None,
+    }
+}
+
+#[allow(dead_code)]
+fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
+    let file = std::fs::File::open(archive).map_err(|e| {
+        CapsuleError::Pack(format!(
+            "Failed to open zip archive {}: {}",
+            archive.display(),
+            e
+        ))
+    })?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| {
+        CapsuleError::Pack(format!(
+            "Failed to read zip archive {}: {}",
+            archive.display(),
+            e
+        ))
+    })?;
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| CapsuleError::Pack(format!("Failed to read zip entry {}: {}", i, e)))?;
+        let out_path = dest.join(entry.name());
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out_path).map_err(|e| {
+                CapsuleError::Pack(format!(
+                    "Failed to create dir {}: {}",
+                    out_path.display(),
+                    e
+                ))
+            })?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    CapsuleError::Pack(format!("Failed to create dir {}: {}", parent.display(), e))
+                })?;
+            }
+            let mut out_file = std::fs::File::create(&out_path).map_err(|e| {
+                CapsuleError::Pack(format!(
+                    "Failed to create file {}: {}",
+                    out_path.display(),
+                    e
+                ))
+            })?;
+            std::io::copy(&mut entry, &mut out_file).map_err(|e| {
+                CapsuleError::Pack(format!("Failed to extract {}: {}", out_path.display(), e))
+            })?;
+        }
+    }
+    Ok(())
 }
