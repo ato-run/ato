@@ -1677,7 +1677,15 @@ fn detect_services(scan_dir: &Path, relative_dir: &str, acc: &mut Vec<ServiceSpe
                 .unwrap_or_default()
                 .to_ascii_lowercase();
             if let Some(scripts) = scripts {
-                let runner = if package_manager.starts_with("bun@")
+                let runner = if package_manager.starts_with("pnpm@")
+                    || scan_dir.join("pnpm-lock.yaml").exists()
+                {
+                    "pnpm run"
+                } else if package_manager.starts_with("yarn@")
+                    || scan_dir.join("yarn.lock").exists()
+                {
+                    "yarn"
+                } else if package_manager.starts_with("bun@")
                     || scan_dir.join("bun.lock").exists()
                     || scan_dir.join("bun.lockb").exists()
                 {
