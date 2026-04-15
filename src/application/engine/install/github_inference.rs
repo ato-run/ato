@@ -127,6 +127,12 @@ pub(super) fn normalize_github_install_preview_toml(
             .context("Failed to serialize normalized GitHub install draft");
     }
 
+    let schema_is_v03 = parsed
+        .get("schema_version")
+        .and_then(toml::Value::as_str)
+        .map(|v| v.trim() == "0.3")
+        .unwrap_or(false);
+
     let Some(targets) = parsed
         .get_mut("targets")
         .and_then(toml::Value::as_table_mut)
@@ -139,6 +145,19 @@ pub(super) fn normalize_github_install_preview_toml(
         let Some(target) = target_value.as_table_mut() else {
             continue;
         };
+
+        // schema_version=0.3 targets must not use legacy 'entrypoint' or 'cmd'; migrate to 'run'.
+        if schema_is_v03 {
+            for legacy_field in ["entrypoint", "cmd"] {
+                if let Some(value) = target.remove(legacy_field) {
+                    if !target.contains_key("run") {
+                        target.insert("run".to_string(), value);
+                    }
+                    changed = true;
+                }
+            }
+        }
+
         let runtime = target
             .get("runtime")
             .and_then(toml::Value::as_str)
