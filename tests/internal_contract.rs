@@ -547,7 +547,11 @@ sandbox = false
     );
 
     let lines = stdout_lines(&output.stdout);
-    assert!(lines.len() >= 3, "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        lines.len() >= 3,
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 
     let response: Value = serde_json::from_str(&lines[0]).unwrap();
     assert_eq!(response["ok"], true);
@@ -561,8 +565,14 @@ sandbox = false
 
     assert_eq!(completed["service"], "v2-contract");
     assert!(completed["run_id"].as_str().unwrap().starts_with("exec-"));
-    assert_eq!(completed["derived_output_path"], derived_dir.display().to_string());
-    assert_eq!(completed["cleanup_policy_applied"], "delete_workspace_preserve_outputs");
+    assert_eq!(
+        completed["derived_output_path"],
+        derived_dir.display().to_string()
+    );
+    assert_eq!(
+        completed["cleanup_policy_applied"],
+        "delete_workspace_preserve_outputs"
+    );
 
     let derived_file = temp_dir.path().join("derived").join("result.txt");
     assert_eq!(
