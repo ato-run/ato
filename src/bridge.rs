@@ -38,6 +38,17 @@ pub enum GuestBridgeRequest {
         request_id: u64,
         capability: String,
     },
+    /// Forward keyboard/text input to PTY master (base64-encoded bytes)
+    TerminalInput {
+        session_id: String,
+        data_b64: String,
+    },
+    /// Resize the PTY
+    TerminalResize {
+        session_id: String,
+        cols: u16,
+        rows: u16,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -86,6 +97,17 @@ pub enum ShellEvent {
         request_id: String,
         status: u16,
         duration_ms: u64,
+    },
+    /// Forward keyboard input from xterm.js to nacelle PTY stdin
+    TerminalInput {
+        session_id: String,
+        data_b64: String,
+    },
+    /// Notify nacelle of a PTY resize from xterm.js
+    TerminalResize {
+        session_id: String,
+        cols: u16,
+        rows: u16,
     },
 }
 
@@ -198,6 +220,23 @@ impl BridgeProxy {
                         request_id: Some(request_id),
                         message: error.to_string(),
                     },
+                }
+            }
+            // Terminal IPC messages are forwarded to the orchestrator via shell events.
+            GuestBridgeRequest::TerminalInput { session_id, data_b64 } => {
+                self.push_shell_event(ShellEvent::TerminalInput { session_id, data_b64 });
+                GuestBridgeResponse::Ok {
+                    request_id: None,
+                    message: "terminal input forwarded".to_string(),
+                    payload: Value::Null,
+                }
+            }
+            GuestBridgeRequest::TerminalResize { session_id, cols, rows } => {
+                self.push_shell_event(ShellEvent::TerminalResize { session_id, cols, rows });
+                GuestBridgeResponse::Ok {
+                    request_id: None,
+                    message: "terminal resize forwarded".to_string(),
+                    payload: Value::Null,
                 }
             }
         }

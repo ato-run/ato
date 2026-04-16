@@ -14,8 +14,8 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::{
     div, hsla, linear_color_stop, linear_gradient, point, px, AsyncWindowContext, BoxShadow,
-    Context, Entity, FocusHandle, Focusable, FontWeight, Image, ImageFormat, IntoElement,
-    MouseButton, Render, WeakEntity, Window,
+    Context, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, Image, ImageFormat,
+    IntoElement, MouseButton, Render, WeakEntity, Window,
 };
 use gpui_component::input::{InputEvent, InputState};
 
@@ -38,6 +38,7 @@ use crate::state::{
     ActivityTone, AppState, AuthSessionStatus, PaneBounds, PaneId, PaneSurface, ShellMode,
     SidebarTaskIconSpec,
 };
+use crate::terminal::TerminalSessionManager;
 use crate::webview::WebViewManager;
 
 pub(super) const CHROME_HEIGHT: f32 = 48.0;
@@ -76,6 +77,7 @@ pub struct DesktopShell {
     focus_handle: FocusHandle,
     favicon_cache: HashMap<String, FaviconState>,
     webviews: WebViewManager,
+    terminal_sessions: TerminalSessionManager,
     open_url_bridge: Arc<OpenUrlBridge>,
 }
 
@@ -163,6 +165,7 @@ impl DesktopShell {
             focus_handle,
             favicon_cache: HashMap::new(),
             webviews,
+            terminal_sessions: TerminalSessionManager::new(),
             open_url_bridge,
         }
     }
@@ -742,6 +745,10 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_allow_permission_once))
             .on_action(cx.listener(Self::on_allow_permission_for_session))
             .on_action(cx.listener(Self::on_deny_permission_prompt))
+            .on_drop::<ExternalPaths>(cx.listener(|this, paths: &ExternalPaths, _window, _cx| {
+                let path_vec = paths.paths().to_vec();
+                this.state.launch_dropped_paths(path_vec);
+            }))
             // Ambient glow — dark theme only
             .when(theme.ambient_glow_top.a > 0.0, |d| {
                 d.child(
