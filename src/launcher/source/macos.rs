@@ -660,10 +660,17 @@ fn generate_production_seatbelt_profile(
     // =========================================================================
     if target.interactive {
         profile.push_str("; PTY device access (interactive terminal)\n");
-        profile.push_str("(allow file-read* file-write* (subpath \"/dev/ptmx\"))\n");
-        profile.push_str("(allow file-read* file-write* (subpath \"/dev/pty\"))\n");
-        profile.push_str("(allow file-read* file-write* (regex #\"^/dev/tty[a-z0-9]+\"))\n");
-        profile.push_str("(allow ioctl*)\n");
+        // /dev/ptmx is a character device file, not a directory — use literal
+        profile.push_str("(allow file-read* file-write* (literal \"/dev/ptmx\"))\n");
+        // /dev/pty* slave devices use regex, not subpath
+        profile.push_str("(allow file-read* file-write* (regex #\"^/dev/pty[a-z][0-9a-f]+$\"))\n");
+        profile.push_str("(allow file-read* file-write* (regex #\"^/dev/ttys[0-9]+$\"))\n");
+        profile.push_str("(allow file-read* file-write* (literal \"/dev/tty\"))\n");
+        // Restrict ioctl to TTY/PTY devices only — do not use (allow ioctl*) globally
+        profile.push_str("(allow file-ioctl\n");
+        profile.push_str("    (literal \"/dev/tty\")\n");
+        profile.push_str("    (regex #\"^/dev/ttys[0-9]+$\")\n");
+        profile.push_str("    (regex #\"^/dev/pty[a-z][0-9a-f]+$\"))\n");
         profile.push('\n');
     }
 
@@ -726,11 +733,7 @@ mod tests {
             isolation: None,
             ipc_socket_paths: vec![],
             injected_mounts: vec![],
-            interactive: false,
-            terminal_cols: 80,
-            terminal_rows: 24,
-            terminal_shell: None,
-            terminal_env_filter: "safe".to_string(),
+            ..Default::default()
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
@@ -755,11 +758,7 @@ mod tests {
             isolation: None,
             ipc_socket_paths: vec![],
             injected_mounts: vec![],
-            interactive: false,
-            terminal_cols: 80,
-            terminal_rows: 24,
-            terminal_shell: None,
-            terminal_env_filter: "safe".to_string(),
+            ..Default::default()
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
@@ -804,11 +803,7 @@ mod tests {
             isolation: Some(isolation),
             ipc_socket_paths: vec![],
             injected_mounts: vec![],
-            interactive: false,
-            terminal_cols: 80,
-            terminal_rows: 24,
-            terminal_shell: None,
-            terminal_env_filter: "safe".to_string(),
+            ..Default::default()
         };
         let toolchain = PathBuf::from("/usr/local/bin/node");
 
@@ -858,11 +853,7 @@ mod tests {
             isolation: Some(isolation),
             ipc_socket_paths: vec![],
             injected_mounts: vec![],
-            interactive: false,
-            terminal_cols: 80,
-            terminal_rows: 24,
-            terminal_shell: None,
-            terminal_env_filter: "safe".to_string(),
+            ..Default::default()
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
@@ -891,11 +882,7 @@ mod tests {
             isolation: None,
             ipc_socket_paths: vec![socket_path.clone()],
             injected_mounts: vec![],
-            interactive: false,
-            terminal_cols: 80,
-            terminal_rows: 24,
-            terminal_shell: None,
-            terminal_env_filter: "safe".to_string(),
+            ..Default::default()
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
@@ -972,11 +959,7 @@ mod tests {
             }),
             ipc_socket_paths: vec![],
             injected_mounts: vec![],
-            interactive: false,
-            terminal_cols: 80,
-            terminal_rows: 24,
-            terminal_shell: None,
-            terminal_env_filter: "safe".to_string(),
+            ..Default::default()
         };
 
         let request = LaunchRequest {

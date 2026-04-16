@@ -449,11 +449,7 @@ mod tests {
             isolation: None,
             ipc_socket_paths: vec![],
             injected_mounts: vec![],
-            interactive: false,
-            terminal_cols: 80,
-            terminal_rows: 24,
-            terminal_shell: None,
-            terminal_env_filter: "safe".to_string(),
+            ..Default::default()
         };
         let toolchain = PathBuf::from(r"C:\Python311\python.exe");
 

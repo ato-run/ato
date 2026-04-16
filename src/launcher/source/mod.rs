@@ -24,6 +24,7 @@ mod windows;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Child;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -552,7 +553,7 @@ impl SourceRuntime {
         // ── Thread A: PTY master → stdout NDJSON (TerminalData events) ──────────
         let session_id_a = session_id.clone();
         let mut pty_reader = pty_reader;
-        let _reader_thread = std::thread::spawn(move || {
+        let reader_thread = std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
             loop {
                 match pty_reader.read(&mut buf) {
@@ -569,14 +570,22 @@ impl SourceRuntime {
             }
         });
 
+        // Stop flag shared between the stdin thread and main task.
+        // When the PTY child exits, we set this to signal the stdin thread to exit.
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let stop_flag_stdin = Arc::clone(&stop_flag);
+
         // ── Thread B: stdin JSON commands → PTY master write / resize / signal ──
         let session_id_b = session_id.clone();
         let master_b = Arc::clone(&master);
         let mut pty_writer = pty_writer;
-        let _stdin_thread = std::thread::spawn(move || {
+        let stdin_thread = std::thread::spawn(move || {
             let stdin = std::io::stdin();
             let reader = stdin.lock();
             for line in reader.lines() {
+                if stop_flag_stdin.load(Ordering::Relaxed) {
+                    break;
+                }
                 let Ok(line) = line else { break };
                 let Ok(cmd) = serde_json::from_str::<TerminalCommand>(&line) else {
                     continue;
@@ -624,7 +633,11 @@ impl SourceRuntime {
                             }
                         }
                     }
-                    _ => {} // wrong session_id or unrecognised variant
+                    _ => {
+                        // Mismatched session_id or unrecognised variant — could indicate
+                        // an attempt to inject input into another session.
+                        warn!(expected = %session_id_b, "TerminalCommand dropped: unrecognised variant or wrong session_id");
+                    }
                 }
             }
         });
@@ -639,6 +652,15 @@ impl SourceRuntime {
         .flatten();
 
         let exit_code = exit_status.map(|s| s.exit_code() as i32);
+
+        // Signal stdin thread to stop, then join reader thread (exits when PTY closes).
+        // stdin_thread blocks on stdin.lock().lines() until the parent closes the pipe;
+        // we set the stop flag so it exits on the next line boundary.
+        stop_flag.store(true, Ordering::Relaxed);
+        let _ = reader_thread.join();
+        // stdin_thread will exit when stop_flag is checked or stdin pipe closes.
+        // We do not join it here as it may block waiting for the next stdin line.
+        drop(stdin_thread);
 
         NacelleEvent::TerminalExited {
             session_id,
