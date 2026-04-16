@@ -74,11 +74,43 @@
       });
     });
 
+    // ─── Fit xterm.js to fill the container ──────────────────────────────
+    // Derives cell size from the canvas CSS dimensions (avoids private APIs).
+    // Called on open and whenever the WebView is resized.
+    function fitTerminal() {
+      var container = document.getElementById('terminal');
+      var canvas = container.querySelector('.xterm-screen canvas');
+      if (!canvas || canvas.clientWidth <= 0 || canvas.clientHeight <= 0) return false;
+      var cellW = canvas.clientWidth / term.cols;
+      var cellH = canvas.clientHeight / term.rows;
+      if (cellW <= 0 || cellH <= 0) return false;
+      var newCols = Math.max(2, Math.floor(container.clientWidth / cellW));
+      var newRows = Math.max(1, Math.floor(container.clientHeight / cellH));
+      if (newCols !== term.cols || newRows !== term.rows) {
+        term.resize(newCols, newRows);
+        sendToBridge('TerminalResize', { cols: newCols, rows: newRows });
+      }
+      return true;
+    }
+
+    // ─── Initial fit + TerminalReady ──────────────────────────────────────
+    // The CanvasAddon initializes its canvas in the next animation frame after
+    // term.open(), so we retry until the canvas is available.
+    var fitAttempts = 0;
+    function tryInitialFit() {
+      if (fitTerminal()) {
+        sendToBridge('TerminalReady', { cols: term.cols, rows: term.rows });
+      } else if (fitAttempts++ < 10) {
+        requestAnimationFrame(tryInitialFit);
+      } else {
+        // Canvas never appeared — send ready with default dimensions
+        sendToBridge('TerminalReady', { cols: term.cols, rows: term.rows });
+      }
+    }
+    requestAnimationFrame(tryInitialFit);
+
     // ─── Handle resize ────────────────────────────────────────────────────
-    var resizeObserver = new ResizeObserver(function() {
-      term.refresh(0, term.rows - 1);
-      sendToBridge('TerminalResize', { cols: term.cols, rows: term.rows });
-    });
+    var resizeObserver = new ResizeObserver(fitTerminal);
     resizeObserver.observe(document.getElementById('terminal'));
 
     // ─── Receive terminal output from WebView host ────────────────────────
@@ -101,9 +133,6 @@
         ']\x1b[0m');
       term.options.disableStdin = true;
     };
-
-    // Signal ready to host
-    sendToBridge('TerminalReady', { cols: term.cols, rows: term.rows });
   </script>
 </body>
 </html>
