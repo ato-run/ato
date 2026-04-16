@@ -305,6 +305,14 @@ fn write_env_file(path: &Path, pairs: &[(String, String)]) -> Result<()> {
 }
 
 /// Write a file with 0600 permissions (owner-read/write only), using an atomic temp-rename.
+///
+/// # Platform notes
+/// On Unix the file is created with `O_CREAT | mode 0600` and an explicit `chmod` to
+/// prevent any window where another process could read a world-readable temp file.
+///
+/// On Windows (`#[cfg(not(unix))]`) no equivalent ACL restriction is applied — the
+/// file inherits the default NTFS ACL from its parent directory.  This tool is
+/// primarily targeted at macOS/Linux; Windows support is best-effort.
 pub(crate) fn write_secure_file(path: &Path, contents: &[u8]) -> Result<()> {
     let parent = path
         .parent()
