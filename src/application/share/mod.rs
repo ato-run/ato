@@ -8,6 +8,12 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use capsule_core::share::{
+    self as share_types, EntryEnvSpec, EnvRequirementSpec, EnvState, GeneratedFrom,
+    InstallStepSpec, InstallStepState, LoadedShareInput, ResolvedSourceLock, ResolvedToolLock,
+    ServiceSpec, ShareEntrySpec, ShareLock, ShareNotes, ShareSourceSpec, ShareSourceState, ShareSpec,
+    ToolRequirementSpec, VerificationState, WorkspaceShareState,
+};
 use capsule_core::CapsuleReporter;
 use chrono::Utc;
 use flate2::read::GzDecoder;
@@ -21,12 +27,16 @@ use crate::cli::{GitMode, ShareToolRuntime};
 use crate::fs_copy;
 use crate::reporters::CliReporter;
 
-const SHARE_DIR: &str = ".ato/share";
-const SHARE_SPEC_FILE: &str = "share.spec.json";
-const SHARE_LOCK_FILE: &str = "share.lock.json";
+use share_types::{SHARE_DIR, SHARE_LOCK_FILE, SHARE_SCHEMA_VERSION, SHARE_SPEC_FILE, SHARE_STATE_FILE};
 const SHARE_GUIDE_FILE: &str = "guide.md";
-const SHARE_STATE_FILE: &str = "state.json";
-const SHARE_SCHEMA_VERSION: &str = "2";
+
+fn default_git_mode_str() -> String {
+    "same-commit".to_string()
+}
+
+fn default_runtime_source_str() -> String {
+    "system".to_string()
+}
 const DEFAULT_API_TIMEOUT_SECS: u64 = 20;
 /// Pinned Python version used by ato-managed runtimes for decap install steps.
 const SHARE_PROVIDER_PYTHON_VERSION: &str = "3.11.10";
@@ -36,14 +46,6 @@ const SHARE_PROVIDER_NODE_VERSION: &str = "20.11.0";
 const ARCHIVE_MAX_COMPRESSED_BYTES: u64 = 10 * 1024 * 1024;
 /// Maximum number of files in a kind="archive" source.
 const ARCHIVE_MAX_FILE_COUNT: usize = 5_000;
-
-fn default_git_mode_str() -> String {
-    "same-commit".to_string()
-}
-
-fn default_runtime_source_str() -> String {
-    "system".to_string()
-}
 
 /// Configuration loaded from the `[share]` section of `capsule.toml`.
 /// CLI flags take precedence over values here.
@@ -109,243 +111,6 @@ pub(crate) struct RunShareArgs {
     pub(crate) watch: bool,
     pub(crate) background: bool,
     pub(crate) reporter: Arc<CliReporter>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ShareSpec {
-    pub(crate) schema_version: String,
-    pub(crate) name: String,
-    pub(crate) root: String,
-    #[serde(default)]
-    pub(crate) sources: Vec<ShareSourceSpec>,
-    #[serde(default)]
-    pub(crate) tool_requirements: Vec<ToolRequirementSpec>,
-    #[serde(default)]
-    pub(crate) env_requirements: Vec<EnvRequirementSpec>,
-    #[serde(default)]
-    pub(crate) install_steps: Vec<InstallStepSpec>,
-    #[serde(default)]
-    pub(crate) entries: Vec<ShareEntrySpec>,
-    #[serde(default)]
-    pub(crate) services: Vec<ServiceSpec>,
-    #[serde(default)]
-    pub(crate) notes: ShareNotes,
-    pub(crate) generated_from: GeneratedFrom,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ShareSourceSpec {
-    pub(crate) id: String,
-    pub(crate) kind: String,
-    pub(crate) url: String,
-    pub(crate) path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) branch: Option<String>,
-    #[serde(default)]
-    pub(crate) evidence: Vec<String>,
-    /// "same-commit" | "latest-at-encap" | "archive"
-    #[serde(default = "default_git_mode_str")]
-    pub(crate) git_mode: String,
-    /// Base64-encoded gzip tar of the directory — present only when kind = "archive".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) archive_content: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ToolRequirementSpec {
-    pub(crate) id: String,
-    pub(crate) tool: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) version: Option<String>,
-    #[serde(default)]
-    pub(crate) required_by: Vec<String>,
-    #[serde(default)]
-    pub(crate) evidence: Vec<String>,
-    /// "auto" | "ato" | "system"  (v2; defaults to "system" for v1 lock reads)
-    #[serde(default = "default_runtime_source_str")]
-    pub(crate) runtime_source: String,
-    /// "uv" | "npm" | "bun" | "pnpm"  (populated when runtime_source != "system")
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) provider_toolchain: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct EnvRequirementSpec {
-    pub(crate) id: String,
-    pub(crate) path: String,
-    pub(crate) required: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) template_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) note: Option<String>,
-    #[serde(default)]
-    pub(crate) evidence: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct InstallStepSpec {
-    pub(crate) id: String,
-    pub(crate) cwd: String,
-    pub(crate) run: String,
-    #[serde(default)]
-    pub(crate) depends_on: Vec<String>,
-    #[serde(default)]
-    pub(crate) evidence: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ShareEntrySpec {
-    pub(crate) id: String,
-    pub(crate) label: String,
-    pub(crate) cwd: String,
-    pub(crate) run: String,
-    pub(crate) kind: String,
-    pub(crate) primary: bool,
-    #[serde(default)]
-    pub(crate) depends_on: Vec<String>,
-    #[serde(default)]
-    pub(crate) env: EntryEnvSpec,
-    #[serde(default)]
-    pub(crate) evidence: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub(crate) struct EntryEnvSpec {
-    #[serde(default)]
-    pub(crate) required: Vec<String>,
-    #[serde(default)]
-    pub(crate) optional: Vec<String>,
-    #[serde(default)]
-    pub(crate) files: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ServiceSpec {
-    pub(crate) id: String,
-    pub(crate) cwd: String,
-    pub(crate) run: String,
-    #[serde(default)]
-    pub(crate) depends_on: Vec<String>,
-    pub(crate) kind: String,
-    pub(crate) optional: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) port: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) healthcheck: Option<String>,
-    #[serde(default)]
-    pub(crate) evidence: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub(crate) struct ShareNotes {
-    #[serde(default)]
-    pub(crate) team_notes: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct GeneratedFrom {
-    pub(crate) root_path: String,
-    pub(crate) captured_at: String,
-    pub(crate) host_os: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ShareLock {
-    pub(crate) schema_version: String,
-    pub(crate) spec_digest: String,
-    pub(crate) generated_guide_digest: String,
-    pub(crate) revision: u32,
-    pub(crate) created_at: String,
-    pub(crate) resolved_sources: Vec<ResolvedSourceLock>,
-    pub(crate) resolved_tools: Vec<ResolvedToolLock>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ResolvedSourceLock {
-    pub(crate) id: String,
-    pub(crate) rev: String,
-    /// "same-commit" | "latest-at-encap"  (v2)
-    #[serde(default = "default_git_mode_str")]
-    pub(crate) git_mode: String,
-    /// Remote branch used when git_mode is "latest-at-encap"
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) remote_branch: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ResolvedToolLock {
-    pub(crate) tool: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) resolved_version: Option<String>,
-    /// Kept for backward-compat with v1; not used by v2 decap logic
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) binary_path: Option<String>,
-    /// "auto" | "ato" | "system"  (v2)
-    #[serde(default = "default_runtime_source_str")]
-    pub(crate) runtime_source: String,
-    /// Provider toolchain used at encap time, e.g. "uv", "npm"
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) provider_toolchain: Option<String>,
-    /// Version of the ato-managed runtime recorded at encap time
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) provider_version: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct WorkspaceShareState {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) share_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) resolved_revision_url: Option<String>,
-    pub(crate) workspace_root: String,
-    #[serde(default)]
-    pub(crate) sources: Vec<ShareSourceState>,
-    #[serde(default)]
-    pub(crate) install_steps: Vec<InstallStepState>,
-    #[serde(default)]
-    pub(crate) env: Vec<EnvState>,
-    pub(crate) verification: VerificationState,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) last_verified_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ShareSourceState {
-    pub(crate) id: String,
-    pub(crate) status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) current_rev: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) last_error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct InstallStepState {
-    pub(crate) id: String,
-    pub(crate) status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) started_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) finished_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) stdout_digest: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) stderr_digest: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) last_error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct EnvState {
-    pub(crate) id: String,
-    pub(crate) status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct VerificationState {
-    pub(crate) result: String,
-    #[serde(default)]
-    pub(crate) issues: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2520,14 +2285,6 @@ fn upload_share(spec: &ShareSpec, lock: &ShareLock, guide: &str) -> Result<Share
         .json::<serde_json::Value>()
         .context("Failed to parse share upload response")?;
     serde_json::from_value(body["share"].clone()).context("Invalid share upload response payload")
-}
-
-struct LoadedShareInput {
-    share_url: Option<String>,
-    resolved_revision_url: Option<String>,
-    spec: ShareSpec,
-    lock: ShareLock,
-    spec_digest_verified: bool,
 }
 
 pub(crate) fn looks_like_share_run_input(input: &str) -> bool {
