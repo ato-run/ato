@@ -97,6 +97,8 @@ legacy-manifest-tests = []
 sync-runtime = []
 
 [dev-dependencies]
+base64 = "0.22"
+serde_json = "1.0"
 tempfile = "3.8"
 
 [build-dependencies]
