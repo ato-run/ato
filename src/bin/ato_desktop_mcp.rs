@@ -127,11 +127,13 @@ fn handle_initialize(id: serde_json::Value) -> serde_json::Value {
 }
 
 fn handle_tools_list(id: serde_json::Value) -> serde_json::Value {
+    let tools: serde_json::Value =
+        serde_json::from_str(TOOLS).expect("TOOLS is valid JSON");
     serde_json::json!({
         "jsonrpc": "2.0",
         "id": id,
         "result": {
-            "tools": TOOLS
+            "tools": tools
         }
     })
 }
