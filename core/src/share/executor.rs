@@ -142,10 +142,7 @@ fn decap_into(ato_bin: &Path, input: &str, workspace: &Path) -> Result<()> {
     if state_path.exists() {
         if let Ok(raw) = std::fs::read_to_string(&state_path) {
             if let Ok(state) = serde_json::from_str::<WorkspaceShareState>(&raw) {
-                let all_ok = state
-                    .sources
-                    .iter()
-                    .all(|s| s.status == "ok");
+                let all_ok = state.sources.iter().all(|s| s.status == "ok");
                 if all_ok && !state.sources.is_empty() {
                     info!(input, "reusing cached decap workspace");
                     return Ok(());
@@ -300,7 +297,12 @@ fn spawn_nacelle_inherited(
 
     info!(cmd = run_command, cwd = %cwd.display(), "spawning nacelle (inherited)");
     let status = Command::new(nacelle_bin)
-        .args(["internal", "--input", &envelope_path.to_string_lossy(), "exec"])
+        .args([
+            "internal",
+            "--input",
+            &envelope_path.to_string_lossy(),
+            "exec",
+        ])
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -331,7 +333,12 @@ fn spawn_nacelle_piped(
 
     info!(cmd = run_command, cwd = %cwd.display(), cols, rows, "spawning nacelle (piped)");
     let mut child = Command::new(nacelle_bin)
-        .args(["internal", "--input", &envelope_path.to_string_lossy(), "exec"])
+        .args([
+            "internal",
+            "--input",
+            &envelope_path.to_string_lossy(),
+            "exec",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -350,6 +357,7 @@ fn spawn_nacelle_piped(
     let envelope_cleanup = envelope_path.clone();
 
     // Thread: nacelle stdout → output_tx
+    // Nacelle emits externally-tagged serde JSON: {"TerminalData":{...}} / {"TerminalExited":{...}}
     std::thread::spawn(move || {
         let reader = BufReader::new(nacelle_stdout);
         for line in reader.lines() {
@@ -357,20 +365,46 @@ fn spawn_nacelle_piped(
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
                 continue;
             };
-            match value.get("event").and_then(|e| e.as_str()) {
-                Some("terminal_data") => {
-                    if let Some(b64) = value.get("data_b64").and_then(|d| d.as_str()) {
+            // Check nacelle's externally-tagged serde format first, then fall back to
+            // the legacy flat format in case the binary is older.
+            let variant = value
+                .as_object()
+                .and_then(|o| o.keys().next())
+                .map(|k| k.as_str());
+            match variant {
+                Some("TerminalData") => {
+                    if let Some(b64) = value["TerminalData"]
+                        .get("data_b64")
+                        .and_then(|d| d.as_str())
+                    {
                         if output_tx.send(b64.to_string()).is_err() {
                             break;
                         }
                     }
                 }
-                Some("terminal_exited") => {
-                    let code = value.get("exit_code").and_then(|c| c.as_i64());
+                Some("TerminalExited") => {
+                    let code = value["TerminalExited"]
+                        .get("exit_code")
+                        .and_then(|c| c.as_i64());
                     info!(session_id = %sid, exit_code = ?code, "share terminal session exited");
                     break;
                 }
-                _ => {}
+                // Legacy flat format: {"event":"terminal_data","data_b64":"..."} 
+                _ => match value.get("event").and_then(|e| e.as_str()) {
+                    Some("terminal_data") => {
+                        if let Some(b64) = value.get("data_b64").and_then(|d| d.as_str()) {
+                            if output_tx.send(b64.to_string()).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Some("terminal_exited") => {
+                        let code = value.get("exit_code").and_then(|c| c.as_i64());
+                        info!(session_id = %sid, exit_code = ?code, "share terminal session exited (legacy)");
+                        break;
+                    }
+                    _ => {}
+                },
             }
         }
         let _ = std::fs::remove_file(&envelope_cleanup);
@@ -470,7 +504,14 @@ mod tests {
     #[test]
     fn build_envelope_inherited() {
         let env = vec![("FOO".to_string(), "bar".to_string())];
-        let envelope = build_envelope("python main.py", Path::new("/workspace"), &env, false, 80, 24);
+        let envelope = build_envelope(
+            "python main.py",
+            Path::new("/workspace"),
+            &env,
+            false,
+            80,
+            24,
+        );
         assert_eq!(envelope["workload"]["type"], "shell");
         assert_eq!(envelope["workload"]["cmd"][2], "python main.py");
         assert_eq!(envelope["interactive"], false);
@@ -479,7 +520,14 @@ mod tests {
 
     #[test]
     fn build_envelope_piped() {
-        let envelope = build_envelope("python main.py", Path::new("/workspace"), &[], true, 120, 40);
+        let envelope = build_envelope(
+            "python main.py",
+            Path::new("/workspace"),
+            &[],
+            true,
+            120,
+            40,
+        );
         assert_eq!(envelope["interactive"], true);
         assert_eq!(envelope["terminal"]["cols"], 120);
         assert_eq!(envelope["terminal"]["rows"], 40);

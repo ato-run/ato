@@ -261,6 +261,26 @@ pub fn ensure_deno_binary(plan: &ManifestData) -> Result<PathBuf> {
     RuntimeManager::for_plan(plan)?.ensure_deno_binary_for_plan(plan)
 }
 
+/// Like `ensure_deno_binary`, but falls back to the default Deno version when
+/// `capsule.lock.json` is absent (e.g., decap'd shared workspaces that have no
+/// published lock file). Used by the static file-server path where any Deno version
+/// is acceptable.
+pub fn ensure_deno_binary_for_file_server(plan: &ManifestData) -> Result<PathBuf> {
+    match RuntimeManager::for_plan(plan) {
+        Ok(manager) => manager.ensure_deno_binary_for_plan(plan),
+        Err(e) => {
+            if e.to_string().contains(CAPSULE_LOCK_FILE_NAME) {
+                let version = capsule_core::packers::lockfile::DEFAULT_DENO_VERSION;
+                block_on_runtime_fetch(
+                    async move { RuntimeFetcher::new()?.ensure_deno(version).await },
+                )
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
 pub fn ensure_deno_binary_with_authority(
     plan: &ManifestData,
     authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,

@@ -11,8 +11,8 @@ use base64::Engine as _;
 use capsule_core::share::{
     self as share_types, EntryEnvSpec, EnvRequirementSpec, EnvState, GeneratedFrom,
     InstallStepSpec, InstallStepState, LoadedShareInput, ResolvedSourceLock, ResolvedToolLock,
-    ServiceSpec, ShareEntrySpec, ShareLock, ShareNotes, ShareSourceSpec, ShareSourceState, ShareSpec,
-    ToolRequirementSpec, VerificationState, WorkspaceShareState,
+    ServiceSpec, ShareEntrySpec, ShareLock, ShareNotes, ShareSourceSpec, ShareSourceState,
+    ShareSpec, ToolRequirementSpec, VerificationState, WorkspaceShareState,
 };
 use capsule_core::CapsuleReporter;
 use chrono::Utc;
@@ -874,10 +874,7 @@ fn capture_workspace(
         kind: "archive".to_string(),
         // Embed content as a data URI — this survives the API round-trip because
         // the `url` field is a known spec field that the server stores verbatim.
-        url: format!(
-            "data:application/x-tar+gzip;base64,{}",
-            arc.content_base64
-        ),
+        url: format!("data:application/x-tar+gzip;base64,{}", arc.content_base64),
         path: arc.rel_path.clone(),
         branch: None,
         evidence: vec![format!("archive: {}", arc.content_digest)],
@@ -1077,10 +1074,7 @@ fn discover_archive_sources(
             continue;
         }
         // Skip well-known non-source dirs.
-        let dir_name = candidate
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let dir_name = candidate.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if matches!(
             dir_name,
             ".git" | ".ato" | ".tmp" | "target" | "node_modules" | ".venv" | "__pycache__"
@@ -1115,10 +1109,9 @@ fn discover_archive_sources(
                 // Directory had no non-trivial files — skip silently.
             }
             Err(err) => {
-                futures::executor::block_on(reporter.warn(format!(
-                    "⚠️  Could not bundle {}: {}",
-                    rel_path, err
-                )))?;
+                futures::executor::block_on(
+                    reporter.warn(format!("⚠️  Could not bundle {}: {}", rel_path, err)),
+                )?;
             }
         }
     }
@@ -1150,10 +1143,7 @@ fn is_archive_excluded_path(rel: &str) -> bool {
 
 /// Pack a directory into a gzip tar and return (base64_content, sha256_digest).
 /// Returns `None` if the directory contains no packable files.
-fn pack_archive_source(
-    root: &Path,
-    dir: &Path,
-) -> Result<Option<(String, String)>> {
+fn pack_archive_source(root: &Path, dir: &Path) -> Result<Option<(String, String)>> {
     let mut file_count: usize = 0;
     let gz_buf: Vec<u8> = Vec::new();
     let enc = GzEncoder::new(gz_buf, Compression::best());
@@ -1171,8 +1161,8 @@ fn pack_archive_source(
         if is_archive_excluded_path(rel_str) {
             continue;
         }
-        let metadata = fs::metadata(abs_path)
-            .with_context(|| format!("stat {}", abs_path.display()))?;
+        let metadata =
+            fs::metadata(abs_path).with_context(|| format!("stat {}", abs_path.display()))?;
         if !metadata.is_file() {
             continue;
         }
@@ -1217,9 +1207,7 @@ fn collect_archive_entries(
     out: &mut Vec<(PathBuf, String)>,
     _workspace_root: &Path,
 ) -> Result<()> {
-    for entry in fs::read_dir(dir)
-        .with_context(|| format!("Failed to read {}", dir.display()))?
-    {
+    for entry in fs::read_dir(dir).with_context(|| format!("Failed to read {}", dir.display()))? {
         let entry = entry.with_context(|| format!("Failed to read entry in {}", dir.display()))?;
         let path = entry.path();
         let rel = relative_display(archive_root, &path);
@@ -1242,8 +1230,7 @@ fn extract_archive_source(content_base64: &str, target: &Path) -> Result<()> {
         .decode(content_base64)
         .context("Failed to base64-decode archive content")?;
 
-    fs::create_dir_all(target)
-        .with_context(|| format!("Failed to create {}", target.display()))?;
+    fs::create_dir_all(target).with_context(|| format!("Failed to create {}", target.display()))?;
 
     let gz = GzDecoder::new(gz_bytes.as_slice());
     let mut archive = tar::Archive::new(gz);
@@ -1251,7 +1238,10 @@ fn extract_archive_source(content_base64: &str, target: &Path) -> Result<()> {
     archive.set_unpack_xattrs(false);
     archive.set_overwrite(true);
 
-    for entry_result in archive.entries().context("Failed to read archive entries")? {
+    for entry_result in archive
+        .entries()
+        .context("Failed to read archive entries")?
+    {
         let mut entry = entry_result.context("Failed to read archive entry")?;
         let header = entry.header();
 
@@ -1304,11 +1294,7 @@ fn extract_archive_source(content_base64: &str, target: &Path) -> Result<()> {
     Ok(())
 }
 
-
-fn discover_repositories(
-    root: &Path,
-    ignore: &IgnoreMatcher,
-) -> Result<Vec<CandidateRepo>> {
+fn discover_repositories(root: &Path, ignore: &IgnoreMatcher) -> Result<Vec<CandidateRepo>> {
     let mut candidates = Vec::new();
     let mut seen = BTreeSet::new();
 
@@ -3274,8 +3260,7 @@ mod tests {
 
         // Extract into a new temp dir and verify files round-trip correctly.
         let out = tempfile::tempdir().expect("tempdir out");
-        extract_archive_source(src.archive_content.as_ref().unwrap(), out.path())
-            .expect("extract");
+        extract_archive_source(src.archive_content.as_ref().unwrap(), out.path()).expect("extract");
 
         // capsule.toml and source/main.py should be present.
         assert!(
