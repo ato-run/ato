@@ -101,6 +101,30 @@ pub struct SourceTarget {
     pub terminal_env_filter: String,
 }
 
+impl Default for SourceTarget {
+    fn default() -> Self {
+        SourceTarget {
+            language: String::new(),
+            version: None,
+            entrypoint: String::new(),
+            dependencies: None,
+            args: Vec::new(),
+            source_dir: PathBuf::new(),
+            requested_cwd: None,
+            cmd: None,
+            dev_mode: false,
+            isolation: None,
+            ipc_socket_paths: Vec::new(),
+            injected_mounts: Vec::new(),
+            interactive: false,
+            terminal_cols: 80,
+            terminal_rows: 24,
+            terminal_shell: None,
+            terminal_env_filter: "safe".to_string(),
+        }
+    }
+}
+
 /// Isolation policy derived from capsule.toml [isolation] section
 #[derive(Debug, Clone, Default)]
 pub struct IsolationPolicy {
