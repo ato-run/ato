@@ -6,11 +6,11 @@
 
 use serde::{Deserialize, Serialize};
 
-fn default_git_mode_str() -> String {
+pub fn default_git_mode_str() -> String {
     "same-commit".to_string()
 }
 
-fn default_runtime_source_str() -> String {
+pub fn default_runtime_source_str() -> String {
     "system".to_string()
 }
 

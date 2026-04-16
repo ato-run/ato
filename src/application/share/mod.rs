@@ -27,16 +27,11 @@ use crate::cli::{GitMode, ShareToolRuntime};
 use crate::fs_copy;
 use crate::reporters::CliReporter;
 
-use share_types::{SHARE_DIR, SHARE_LOCK_FILE, SHARE_SCHEMA_VERSION, SHARE_SPEC_FILE, SHARE_STATE_FILE};
+use share_types::{
+    default_git_mode_str, default_runtime_source_str, SHARE_DIR, SHARE_LOCK_FILE,
+    SHARE_SCHEMA_VERSION, SHARE_SPEC_FILE, SHARE_STATE_FILE,
+};
 const SHARE_GUIDE_FILE: &str = "guide.md";
-
-fn default_git_mode_str() -> String {
-    "same-commit".to_string()
-}
-
-fn default_runtime_source_str() -> String {
-    "system".to_string()
-}
 const DEFAULT_API_TIMEOUT_SECS: u64 = 20;
 /// Pinned Python version used by ato-managed runtimes for decap install steps.
 const SHARE_PROVIDER_PYTHON_VERSION: &str = "3.11.10";
@@ -654,6 +649,23 @@ fn materialize_loaded_share(
     };
     state.last_verified_at = Some(Utc::now().to_rfc3339());
     write_share_state(into, &state)?;
+
+    // Persist spec and lock alongside state.json so downstream consumers
+    // (e.g. capsule-core ShareExecutor) can read them from the workspace
+    // without needing a separate API fetch.
+    let share_dir = into.join(SHARE_DIR);
+    fs::write(
+        share_dir.join(SHARE_SPEC_FILE),
+        serde_json::to_string_pretty(&loaded.spec)
+            .context("failed to serialize spec for workspace")?,
+    )
+    .context("failed to write share.spec.json to workspace")?;
+    fs::write(
+        share_dir.join(SHARE_LOCK_FILE),
+        serde_json::to_string_pretty(&loaded.lock)
+            .context("failed to serialize lock for workspace")?,
+    )
+    .context("failed to write share.lock.json to workspace")?;
 
     if strict && !state.verification.issues.is_empty() {
         let issues = state.verification.issues.join("\n  - ");
