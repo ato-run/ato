@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -133,6 +133,8 @@ pub struct WebViewManager {
     pending_auth_handoffs: Arc<Mutex<Vec<AuthHandoffSignal>>>,
     /// Live PTY sessions keyed by session_id.
     terminal_sessions: HashMap<String, TerminalProcess>,
+    /// Session IDs that have already exited — prevents re-spawning a shell after a share terminal ends.
+    completed_terminal_sessions: HashSet<String>,
     /// Automation host — handles AI-agent socket requests.
     automation: AutomationHost,
 }
@@ -242,6 +244,7 @@ impl WebViewManager {
             visibility_cache: HashMap::new(),
             pending_auth_handoffs: Arc::new(Mutex::new(Vec::new())),
             terminal_sessions: HashMap::new(),
+            completed_terminal_sessions: HashSet::new(),
             automation,
         }
     }
@@ -419,7 +422,9 @@ impl WebViewManager {
         // Spawn a PTY terminal session if this is a Terminal pane and no session exists yet.
         if let GuestRoute::Terminal { session_id } = &active.route {
             let session_id = session_id.clone();
-            if !self.terminal_sessions.contains_key(&session_id) {
+            if !self.terminal_sessions.contains_key(&session_id)
+                && !self.completed_terminal_sessions.contains(&session_id)
+            {
                 // Priority 1: pending share terminal (spawned by capsule-core executor).
                 if let Some(proc) = take_pending_share_terminal(&session_id) {
                     info!(session_id = %session_id, "Using share-spawned terminal session");
@@ -483,6 +488,7 @@ impl WebViewManager {
                         }
                         if disconnected {
                             self.terminal_sessions.remove(&session_id);
+                            self.completed_terminal_sessions.insert(session_id.clone());
                         }
                     }
                 }
