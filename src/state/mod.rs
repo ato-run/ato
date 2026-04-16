@@ -7,7 +7,7 @@ use capsule_core::handle::{
     InputSurface as CapsuleInputSurface, SurfaceInput as CapsuleSurfaceInput,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 use url::{form_urlencoded, Url};
 
 use crate::bridge::ShellEvent;
