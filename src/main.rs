@@ -1,4 +1,5 @@
 mod app;
+mod automation;
 mod bridge;
 mod orchestrator;
 mod state;
