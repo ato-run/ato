@@ -14,7 +14,9 @@ use gpui::{
 use gpui_component::resizable::h_resizable;
 use gpui_component::skeleton::Skeleton;
 
-use crate::state::{ActivityTone, AppState, GuestRoute, PaneBounds, PaneSurface, WebPane, WebSessionState};
+use crate::state::{
+    ActivityTone, AppState, GuestRoute, PaneBounds, PaneSurface, WebPane, WebSessionState,
+};
 
 use super::theme::Theme;
 use super::STAGE_PADDING;
@@ -292,24 +294,18 @@ fn render_step_indicator(active_step: usize, theme: &Theme) -> impl IntoElement 
         .items_center()
         .gap(px(8.0))
         .child(render_step_dot(active_step >= 1, "Download", theme))
-        .child(
-            div()
-                .w(px(24.0))
-                .h(px(1.0))
-                .bg(theme.border_subtle),
-        )
+        .child(div().w(px(24.0)).h(px(1.0)).bg(theme.border_subtle))
         .child(render_step_dot(active_step >= 2, "Install", theme))
-        .child(
-            div()
-                .w(px(24.0))
-                .h(px(1.0))
-                .bg(theme.border_subtle),
-        )
+        .child(div().w(px(24.0)).h(px(1.0)).bg(theme.border_subtle))
         .child(render_step_dot(active_step >= 3, "Start", theme))
 }
 
 fn render_step_dot(active: bool, label: &'static str, theme: &Theme) -> impl IntoElement {
-    let dot_color = if active { theme.accent } else { theme.text_disabled };
+    let dot_color = if active {
+        theme.accent
+    } else {
+        theme.text_disabled
+    };
     let label_color = if active {
         theme.text_secondary
     } else {
@@ -321,13 +317,7 @@ fn render_step_dot(active: bool, label: &'static str, theme: &Theme) -> impl Int
         .flex_col()
         .items_center()
         .gap(px(4.0))
-        .child(
-            div()
-                .w(px(8.0))
-                .h(px(8.0))
-                .rounded_full()
-                .bg(dot_color),
-        )
+        .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(dot_color))
         .child(
             div()
                 .text_size(px(11.0))
@@ -377,11 +367,7 @@ fn render_launch_failed_overlay(
                 .items_center()
                 .gap(px(12.0))
                 .w(px(400.0))
-                .child(
-                    div()
-                        .text_size(px(28.0))
-                        .child("⚠"),
-                )
+                .child(div().text_size(px(28.0)).child("⚠"))
                 .child(
                     div()
                         .text_size(px(17.0))
@@ -390,12 +376,7 @@ fn render_launch_failed_overlay(
                         .child("Failed to open capsule"),
                 )
                 .when_some(share_id, |this, id| {
-                    this.child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme.accent)
-                            .child(id),
-                    )
+                    this.child(div().text_size(px(12.0)).text_color(theme.accent).child(id))
                 })
                 .child(
                     div()

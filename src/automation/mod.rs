@@ -84,7 +84,10 @@ impl AutomationHost {
 
     /// Drain all pending requests. Called from the GPUI main thread in `sync_from_state`.
     pub fn drain_requests(&self) -> Vec<PendingAutomationRequest> {
-        self.pending.lock().map(|mut q| q.drain(..).collect()).unwrap_or_default()
+        self.pending
+            .lock()
+            .map(|mut q| q.drain(..).collect())
+            .unwrap_or_default()
     }
 
     /// Prepend requests back onto the queue (for WaitFor retries).
@@ -106,8 +109,7 @@ impl AutomationHost {
                 Ok(q) => q,
                 Err(_) => return,
             };
-            let (failed, keep): (Vec<_>, Vec<_>) =
-                q.drain(..).partition(|r| r.pane_id == pane_id);
+            let (failed, keep): (Vec<_>, Vec<_>) = q.drain(..).partition(|r| r.pane_id == pane_id);
             *q = keep;
             failed
         };

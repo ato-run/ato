@@ -94,7 +94,8 @@ fn render_console_section(state: &AppState, theme: &Theme) -> Div {
                 .flex_col()
                 .gap_1()
                 .children(if logs.is_empty() {
-                    vec![render_empty_placeholder("No console output yet.", theme).into_any_element()]
+                    vec![render_empty_placeholder("No console output yet.", theme)
+                        .into_any_element()]
                 } else {
                     logs.iter()
                         .rev()
@@ -107,11 +108,7 @@ fn render_console_section(state: &AppState, theme: &Theme) -> Div {
 
 fn render_console_row(entry: &ConsoleLogEntry, theme: &Theme) -> Div {
     let (badge_bg, badge_text, msg_color) = console_level_colors(&entry.level, theme);
-    let label_text = entry
-        .source_label
-        .as_deref()
-        .unwrap_or("guest")
-        .to_string();
+    let label_text = entry.source_label.as_deref().unwrap_or("guest").to_string();
 
     div()
         .rounded(px(6.0))
@@ -151,7 +148,10 @@ fn render_console_row(entry: &ConsoleLogEntry, theme: &Theme) -> Div {
         )
 }
 
-fn console_level_colors(level: &ConsoleLevel, theme: &Theme) -> (gpui::Hsla, gpui::Hsla, gpui::Hsla) {
+fn console_level_colors(
+    level: &ConsoleLevel,
+    theme: &Theme,
+) -> (gpui::Hsla, gpui::Hsla, gpui::Hsla) {
     match level {
         ConsoleLevel::Error => (
             hsla(0.0, 0.85, 0.45, 0.15),
@@ -164,8 +164,16 @@ fn console_level_colors(level: &ConsoleLevel, theme: &Theme) -> (gpui::Hsla, gpu
             hsla(38.0 / 360.0, 0.70, 0.45, 1.0),
         ),
         ConsoleLevel::Info => (theme.accent_subtle, theme.accent, theme.text_secondary),
-        ConsoleLevel::Debug => (theme.surface_hover, theme.text_tertiary, theme.text_tertiary),
-        ConsoleLevel::Log => (theme.surface_hover, theme.text_disabled, theme.text_secondary),
+        ConsoleLevel::Debug => (
+            theme.surface_hover,
+            theme.text_tertiary,
+            theme.text_tertiary,
+        ),
+        ConsoleLevel::Log => (
+            theme.surface_hover,
+            theme.text_disabled,
+            theme.text_secondary,
+        ),
     }
 }
 
@@ -210,7 +218,8 @@ fn render_network_section(state: &AppState, theme: &Theme) -> Div {
                 .flex_col()
                 .gap_1()
                 .children(if logs.is_empty() {
-                    vec![render_empty_placeholder("No network requests yet.", theme).into_any_element()]
+                    vec![render_empty_placeholder("No network requests yet.", theme)
+                        .into_any_element()]
                 } else {
                     logs.iter()
                         .rev()
@@ -349,18 +358,10 @@ fn render_application_section(state: &AppState, theme: &Theme) -> Div {
                 .children(if let Some(insp) = inspector {
                     vec![
                         render_app_row("Handle", &insp.handle, theme).into_any_element(),
-                        render_app_row(
-                            "Session",
-                            &format!("{:?}", insp.session_state),
-                            theme,
-                        )
-                        .into_any_element(),
-                        render_app_row(
-                            "Adapter",
-                            insp.adapter.as_deref().unwrap_or("—"),
-                            theme,
-                        )
-                        .into_any_element(),
+                        render_app_row("Session", &format!("{:?}", insp.session_state), theme)
+                            .into_any_element(),
+                        render_app_row("Adapter", insp.adapter.as_deref().unwrap_or("—"), theme)
+                            .into_any_element(),
                         render_app_row(
                             "Session ID",
                             insp.session_id.as_deref().unwrap_or("—"),
@@ -373,18 +374,15 @@ fn render_application_section(state: &AppState, theme: &Theme) -> Div {
                             theme,
                         )
                         .into_any_element(),
-                        render_app_row(
-                            "Trust",
-                            insp.trust_state.as_deref().unwrap_or("—"),
-                            theme,
-                        )
-                        .into_any_element(),
-                    ]
-                } else {
-                    vec![
-                        render_empty_placeholder("Focus a capsule tab to see application info.", theme)
+                        render_app_row("Trust", insp.trust_state.as_deref().unwrap_or("—"), theme)
                             .into_any_element(),
                     ]
+                } else {
+                    vec![render_empty_placeholder(
+                        "Focus a capsule tab to see application info.",
+                        theme,
+                    )
+                    .into_any_element()]
                 }),
         )
 }

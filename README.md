@@ -64,3 +64,24 @@ Runtime asset resolution order:
 1. `ATO_DESKTOP_ASSETS_DIR`
 2. `./assets` from the current working directory
 3. bundled `Contents/Resources/assets`
+
+## Deep links
+
+`ato-desktop` registers the `ato://` URL scheme. The following host routes are
+recognised:
+
+| URL | Behaviour |
+|-----|-----------|
+| `ato://open?handle=<capsule-url>` | Open a capsule by handle in the active pane. |
+| `ato://cli` | Open a bare interactive CLI panel in a new tab. The default REPL wraps every input line in `ato run -- <command>` so dependencies are resolved automatically. `Ctrl-C` cancels the running command / clears the line; `Ctrl-D` on an empty line closes the panel. |
+| `ato://cli?cmd=ato` | Same panel, but runs the `ato` binary directly (useful for `ato --help`, subcommand exploration, etc.). |
+| `ato://cli?cmd=bash` (or `zsh` / `/bin/sh` / …) | Raw interactive shell. Intended for debugging; commands do **not** go through `ato run`. |
+
+### CLI mode notes
+
+Capsules that declare `display_strategy = "terminal_stream"` are attached in
+read-only log-tail mode. If a keystroke is sent to such a pane, a one-shot
+warning banner is emitted suggesting `ato://cli` for interactive work. Fully
+interactive capsule terminals are out of scope for the shell and should be
+driven through dedicated PTY capsules.
+

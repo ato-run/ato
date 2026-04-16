@@ -29,9 +29,9 @@ use crate::app::{
     CancelAuthHandoff, CycleHandle, DenyPermissionPrompt, DismissTransient, ExpandSplit,
     FocusCommandBar, NativeCopy, NativeCut, NativePaste, NativeRedo, NativeSelectAll, NativeUndo,
     NavigateToUrl, NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, OpenCloudDock,
-    OpenLocalRegistry, OpenUrlBridge, PreviousTask, PreviousWorkspace, ResumeAfterAuth,
-    SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SplitPane, ToggleDevConsole,
-    ToggleOverview, ToggleTheme,
+    OpenLocalRegistry, OpenUrlBridge, PreviousTask, PreviousWorkspace, ResumeAfterAuth, SelectTask,
+    ShowSettings, ShrinkSplit, SignInToAtoRun, SplitPane, ToggleDevConsole, ToggleOverview,
+    ToggleTheme,
 };
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
@@ -436,7 +436,10 @@ impl DesktopShell {
             let start_url = self.state.active_panes().iter().find_map(|p| {
                 if p.id == pane_id {
                     if let PaneSurface::AuthHandoff { session_id, .. } = &p.surface {
-                        self.state.auth_sessions.iter().find(|s| &s.session_id == session_id)
+                        self.state
+                            .auth_sessions
+                            .iter()
+                            .find(|s| &s.session_id == session_id)
                             .map(|s| s.start_url.clone())
                     } else {
                         None
@@ -451,7 +454,12 @@ impl DesktopShell {
                 if let Some(pane) = self.state.active_panes().iter().find(|p| p.id == pane_id) {
                     if let PaneSurface::AuthHandoff { session_id, .. } = &pane.surface {
                         let sid = session_id.clone();
-                        if let Some(s) = self.state.auth_sessions.iter_mut().find(|s| s.session_id == sid) {
+                        if let Some(s) = self
+                            .state
+                            .auth_sessions
+                            .iter_mut()
+                            .find(|s| s.session_id == sid)
+                        {
                             s.status = AuthSessionStatus::OpenedInBrowser;
                         }
                     }
@@ -693,7 +701,12 @@ impl Render for DesktopShell {
                     .relative()
                     .flex()
                     .flex_col()
-                    .child(render_stage(&self.state, stage_bounds, active_pane_count, &theme))
+                    .child(render_stage(
+                        &self.state,
+                        stage_bounds,
+                        active_pane_count,
+                        &theme,
+                    ))
                     .when(overview, |this| {
                         this.child(render_overview_overlay(&self.state, &theme))
                     })
@@ -751,19 +764,13 @@ impl Render for DesktopShell {
             }))
             // Ambient glow — dark theme only
             .when(theme.ambient_glow_top.a > 0.0, |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .right_0()
-                        .h(px(200.0))
-                        .bg(linear_gradient(
-                            180.,
-                            linear_color_stop(theme.ambient_glow_top, 0.),
-                            linear_color_stop(hsla(220.0 / 360.0, 0.30, 0.20, 0.0), 1.),
-                        )),
-                )
+                d.child(div().absolute().top_0().left_0().right_0().h(px(200.0)).bg(
+                    linear_gradient(
+                        180.,
+                        linear_color_stop(theme.ambient_glow_top, 0.),
+                        linear_color_stop(hsla(220.0 / 360.0, 0.30, 0.20, 0.0), 1.),
+                    ),
+                ))
             })
             .child(render_command_chrome(
                 window,
@@ -930,7 +937,11 @@ fn render_overview_overlay(state: &AppState, theme: &Theme) -> impl IntoElement 
                             div()
                                 .flex_1()
                                 .rounded(px(18.0))
-                                .bg(if is_active { card_active } else { card_inactive })
+                                .bg(if is_active {
+                                    card_active
+                                } else {
+                                    card_inactive
+                                })
                                 .border_1()
                                 .when(is_active, |this| {
                                     this.border_2().border_color(accent).shadow(vec![
@@ -961,7 +972,12 @@ fn render_overview_overlay(state: &AppState, theme: &Theme) -> impl IntoElement 
                                 .overflow_hidden()
                                 .cursor_pointer()
                                 .p_4()
-                                .child(render_preview_card(is_active, &task.title, &task.preview, theme))
+                                .child(render_preview_card(
+                                    is_active,
+                                    &task.title,
+                                    &task.preview,
+                                    theme,
+                                ))
                         })),
                 ),
         )
@@ -1029,7 +1045,9 @@ fn render_permission_prompt_overlay(state: &AppState, theme: &Theme) -> impl Int
                     div()
                         .text_size(px(11.0))
                         .text_color(theme.text_tertiary)
-                        .child("This overlay is drawn by the host. The guest cannot spoof or dismiss it."),
+                        .child(
+                        "This overlay is drawn by the host. The guest cannot spoof or dismiss it.",
+                    ),
                 )
                 .child(
                     div()
