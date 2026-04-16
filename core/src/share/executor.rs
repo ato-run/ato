@@ -12,12 +12,9 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
-use super::types::{
-    LoadedShareInput, ShareEntrySpec, ShareSpec, WorkspaceShareState, SHARE_STATE_FILE,
-};
+use super::types::{ShareEntrySpec, ShareSpec, WorkspaceShareState, SHARE_STATE_FILE};
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -88,7 +85,9 @@ pub fn execute_share(request: ShareRunRequest) -> Result<ShareExecutionResult> {
     let mut run_command = entry.run.clone();
     if !request.extra_args.is_empty() {
         run_command.push(' ');
-        run_command.push_str(&request.extra_args.join(" "));
+        run_command.push_str(&shell_words::join(
+            request.extra_args.iter().map(String::as_str),
+        ));
     }
     let run_cwd = workspace.join(&entry.cwd);
 
@@ -102,11 +101,14 @@ pub fn execute_share(request: ShareRunRequest) -> Result<ShareExecutionResult> {
         ShareExecutionMode::Inherited => {
             let exit_code =
                 spawn_nacelle_inherited(&nacelle_bin, &run_command, &run_cwd, &env_pairs)?;
-            // Cleanup workspace after completion
-            let _ = std::fs::remove_dir_all(&workspace);
+            // Workspace is intentionally kept for caching — decap_into reuses it
+            // on the next invocation if state.json shows all sources are ok.
             Ok(ShareExecutionResult::Completed { exit_code })
         }
         ShareExecutionMode::Piped { cols, rows } => {
+            // NOTE: workspace cleanup for Piped mode is the caller's responsibility.
+            // The workspace must remain alive while the nacelle process runs.
+            // The caller should clean up when the terminal session ends.
             let session =
                 spawn_nacelle_piped(&nacelle_bin, &run_command, &run_cwd, &env_pairs, cols, rows)?;
             Ok(ShareExecutionResult::Spawned(session))
