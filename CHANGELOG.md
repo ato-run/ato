@@ -4,6 +4,16 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.67] - 2026-04-16
+
+### What Changed
+
+
+#### Security
+
+- Harden env validation
+
+
 ## [0.4.66] - 2026-04-15
 
 ### What Changed
