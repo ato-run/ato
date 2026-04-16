@@ -252,6 +252,12 @@ pub struct WorkloadSpec {
     #[allow(dead_code)]
     pub kind: String,
     pub manifest: Option<PathBuf>,
+    /// Explicit command to run inside the sandbox (shell workload only).
+    /// When present with `type: "shell"`, nacelle runs this command instead
+    /// of launching an interactive shell. Allows non-interactive sandboxed
+    /// execution of share-run entries (e.g. `["python", "main.py"]`).
+    #[serde(default)]
+    pub cmd: Option<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -1061,15 +1067,19 @@ async fn handle_exec_v1(envelope: ExecEnvelope) -> Result<()> {
 
 /// Launch an interactive shell session without a capsule manifest.
 ///
-/// Used when ato-desktop requests a terminal session via:
+/// Used when ato-desktop or capsule-core requests a shell session via:
 /// `{ "workload": { "type": "shell" }, "interactive": true, "terminal": { ... } }`
+///
+/// Also supports non-interactive command execution with an explicit `cmd`:
+/// `{ "workload": { "type": "shell", "cmd": ["python", "main.py"] }, "cwd": "/workspace" }`
 ///
 /// Bypasses capsule manifest requirements but still routes through nacelle's
 /// sandbox (shell allowlist, env filter, output sanitizer, Seatbelt/bwrap/Landlock).
 async fn handle_exec_v1_shell(envelope: ExecEnvelope) -> Result<()> {
+    let has_cmd = envelope.workload.cmd.is_some();
     anyhow::ensure!(
-        envelope.interactive,
-        "type:shell workload requires interactive:true"
+        envelope.interactive || has_cmd,
+        "type:shell workload requires interactive:true or a cmd"
     );
 
     let terminal = envelope.terminal.unwrap_or(TerminalConfig {
@@ -1088,18 +1098,26 @@ async fn handle_exec_v1_shell(envelope: ExecEnvelope) -> Result<()> {
         None => default_shell(),
     };
 
-    let source_dir = std::env::var("HOME")
+    let source_dir = envelope
+        .cwd
+        .as_ref()
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/"));
+        .unwrap_or_else(|| {
+            std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("/"))
+        });
+
+    let env_pairs = merge_workload_env(envelope.env, envelope.ipc_env);
 
     let source_target = SourceTarget {
         language: "shell".to_string(),
         entrypoint: shell.clone(),
-        cmd: Some(vec![shell, "-i".to_string()]),
-        source_dir,
+        cmd: envelope.workload.cmd.clone(),
+        source_dir: source_dir.clone(),
         dev_mode: true,
         isolation: None,
-        interactive: true,
+        interactive: envelope.interactive,
         terminal_cols: terminal.cols,
         terminal_rows: terminal.rows,
         terminal_shell: terminal.shell,
@@ -1107,14 +1125,18 @@ async fn handle_exec_v1_shell(envelope: ExecEnvelope) -> Result<()> {
         ..SourceTarget::default()
     };
 
-    info!("Launching interactive shell session");
+    if has_cmd {
+        info!(cmd = ?envelope.workload.cmd, cwd = %source_dir.display(), "Launching shell command");
+    } else {
+        info!("Launching interactive shell session");
+    }
     let config = SourceRuntimeConfig::default();
     let runtime = SourceRuntime::new(config);
     let run_id = format!("shell-{}", std::process::id());
     let request = LaunchRequest {
         workload_id: &run_id,
-        bundle_root: source_target.source_dir.clone(),
-        env: None,
+        bundle_root: source_dir,
+        env: if env_pairs.is_empty() { None } else { Some(env_pairs) },
         args: None,
         source_target: Some(source_target),
         socket_manager: None,
@@ -1480,5 +1502,54 @@ http_get = "/health"
             }
             _ => panic!("Expected IpcReady event"),
         }
+    }
+
+    #[test]
+    fn test_shell_workload_with_cmd() {
+        let json = r#"{
+            "spec_version": "1.0",
+            "workload": { "type": "shell", "cmd": ["python", "main.py"] },
+            "interactive": true,
+            "terminal": { "cols": 120, "rows": 40, "env_filter": "safe" },
+            "cwd": "/tmp/workspace",
+            "env": [["PYTHONPATH", "."]]
+        }"#;
+
+        let envelope: ExecEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(envelope.workload.kind, "shell");
+        assert_eq!(
+            envelope.workload.cmd.as_ref().unwrap(),
+            &vec!["python".to_string(), "main.py".to_string()]
+        );
+        assert!(envelope.interactive);
+        assert_eq!(envelope.cwd.as_deref(), Some("/tmp/workspace"));
+    }
+
+    #[test]
+    fn test_shell_workload_cmd_without_interactive() {
+        let json = r#"{
+            "spec_version": "1.0",
+            "workload": { "type": "shell", "cmd": ["python", "main.py"] },
+            "cwd": "/tmp/workspace"
+        }"#;
+
+        let envelope: ExecEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(envelope.workload.kind, "shell");
+        assert!(envelope.workload.cmd.is_some());
+        assert!(!envelope.interactive);
+        assert!(envelope.workload.manifest.is_none());
+    }
+
+    #[test]
+    fn test_shell_workload_without_cmd_defaults_none() {
+        let json = r#"{
+            "spec_version": "1.0",
+            "workload": { "type": "shell" },
+            "interactive": true
+        }"#;
+
+        let envelope: ExecEnvelope = serde_json::from_str(json).unwrap();
+        assert!(envelope.workload.cmd.is_none());
+        assert!(envelope.interactive);
     }
 }
