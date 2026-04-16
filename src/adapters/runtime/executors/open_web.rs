@@ -67,17 +67,21 @@ fn build_static_server_command(plan: &ManifestData) -> Result<(PathBuf, Vec<Stri
     })?;
 
     let serve_dir = resolve_static_serve_dir(&plan.manifest_dir, &entrypoint)?;
-    let deno_bin = runtime_manager::ensure_deno_binary(plan)?;
+    let deno_bin = runtime_manager::ensure_deno_binary_for_file_server(plan)?;
     let script_path = ensure_static_server_script()?;
     let args = build_deno_file_server_args(&script_path, &serve_dir, port);
     Ok((deno_bin, args))
 }
 
 fn resolve_static_serve_dir(manifest_dir: &Path, entrypoint: &str) -> Result<PathBuf> {
-    let path = manifest_dir.join(entrypoint.trim());
+    // Canonicalize manifest_dir first so all subsequent comparisons use a consistent,
+    // symlink-resolved root. On macOS, paths under /Users may resolve to /private/Users
+    // after canonicalization, so computing `path` from the canonical root prevents a
+    // false "resolves outside manifest directory" mismatch in the pre-existence check.
     let root = manifest_dir
         .canonicalize()
         .unwrap_or_else(|_| manifest_dir.to_path_buf());
+    let path = root.join(entrypoint.trim());
     let normalized_path = normalize_path(&path);
 
     if !normalized_path.starts_with(&root) {
