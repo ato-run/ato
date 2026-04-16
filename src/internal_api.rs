@@ -66,10 +66,14 @@ pub enum NacelleEvent {
 
 impl NacelleEvent {
     pub fn emit(&self) {
+        use std::io::Write;
         if let Ok(json) = serde_json::to_string(self) {
-            println!("{}", json);
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
+            let stdout = std::io::stdout();
+            let mut lock = stdout.lock();
+            // Use writeln! instead of println! to avoid panicking on broken pipe.
+            if writeln!(lock, "{json}").is_ok() {
+                let _ = lock.flush();
+            }
         }
     }
 }
