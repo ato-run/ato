@@ -1634,6 +1634,60 @@ mod tests {
     }
 
     #[test]
+    fn find_ato_toolchain_binary_finds_real_python_if_installed() {
+        // Integration-ish: only asserts when the real ~/.ato/toolchains
+        // contains a python install. Otherwise skipped.
+        let home = match dirs::home_dir() {
+            Some(h) => h,
+            None => return,
+        };
+        let has_python = std::fs::read_dir(home.join(".ato/toolchains"))
+            .map(|it| {
+                it.filter_map(|e| e.ok())
+                    .any(|e| e.file_name().to_string_lossy().starts_with("python-"))
+            })
+            .unwrap_or(false);
+        if !has_python {
+            return;
+        }
+        let found = super::find_ato_toolchain_binary("python");
+        assert!(
+            found.is_some(),
+            "python toolchain installed but find_ato_toolchain_binary returned None"
+        );
+        let path = found.unwrap();
+        assert!(path.exists(), "resolved path does not exist: {path:?}");
+        assert_eq!(path.file_name().and_then(|s| s.to_str()), Some("python"));
+    }
+
+    #[test]
+    fn find_ato_toolchain_binary_rejects_invalid_names() {
+        assert!(super::find_ato_toolchain_binary("").is_none());
+        assert!(super::find_ato_toolchain_binary("foo/bar").is_none());
+    }
+
+    #[test]
+    fn find_executable_named_in_bin_subdir() {
+        let base = std::env::temp_dir()
+            .join(format!("ato-desktop-test-{}", std::process::id()));
+        let bin = base.join("x").join("bin");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&bin).expect("mkdir");
+        let exe = bin.join("mytool");
+        std::fs::write(&exe, b"#!/bin/sh\n").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = std::fs::metadata(&exe).unwrap().permissions();
+            p.set_mode(0o755);
+            std::fs::set_permissions(&exe, p).unwrap();
+            let found = super::find_executable_named(&base, "mytool", 4);
+            assert_eq!(found.as_deref(), Some(exe.as_path()));
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn shell_split_parses_plain_args() {
         let argv = super::shell_split("ls -la /tmp").expect("parse");
         assert_eq!(argv, vec!["ls", "-la", "/tmp"]);
@@ -2004,7 +2058,8 @@ pub fn spawn_ato_run_repl(session_id: String, _cols: u16, _rows: u16) -> Result<
 
         // Initial banner + prompt.
         let banner = "\x1b[36m┌─ ato CLI ──────────────────────────────────────────┐\x1b[0m\r\n\
-             \x1b[36m│\x1b[0m Every command runs as \x1b[1mato run -- <command>\x1b[0m\r\n\
+             \x1b[36m│\x1b[0m Capsules: \x1b[1m<slug>\x1b[0m or \x1b[1m<publisher>/<slug>\x1b[0m (via \x1b[1mato run\x1b[0m)\r\n\
+             \x1b[36m│\x1b[0m Toolchains: \x1b[1mpython\x1b[0m \x1b[1mnode\x1b[0m \x1b[1mdeno\x1b[0m \x1b[1muv\x1b[0m (from ~/.ato/toolchains)\r\n\
              \x1b[36m│\x1b[0m Ctrl-C cancels; Ctrl-D exits.\r\n\
              \x1b[36m└────────────────────────────────────────────────────┘\x1b[0m\r\n";
         if !send(&output_tx, banner.as_bytes()) {
@@ -2053,11 +2108,31 @@ pub fn spawn_ato_run_repl(session_id: String, _cols: u16, _rows: u16) -> Result<
                             }
                         };
 
-                        let mut proc_cmd = std::process::Command::new(&ato_bin);
+                        let mut proc_cmd;
+                        let command_label: String;
+                        if let Some(tc) = find_ato_toolchain_binary(&argv[0]) {
+                            // Toolchain found under ~/.ato/toolchains: invoke
+                            // the binary directly with the remaining args.
+                            // Note: the same mental model as `ato run` is
+                            // preserved in intent (Ato-managed binary, Ato
+                            // layered storage), but for toolchains we skip
+                            // the capsule-manifest wrapping that `ato run`
+                            // requires.
+                            command_label = format!("{} (toolchain)", argv[0]);
+                            debug!(
+                                session_id = %sid,
+                                name = %argv[0],
+                                path = %tc.display(),
+                                "ato-run REPL: resolved toolchain binary"
+                            );
+                            proc_cmd = std::process::Command::new(&tc);
+                            proc_cmd.args(&argv[1..]);
+                        } else {
+                            command_label = "ato run".to_string();
+                            proc_cmd = std::process::Command::new(&ato_bin);
+                            proc_cmd.arg("run").arg("--").args(&argv);
+                        }
                         proc_cmd
-                            .arg("run")
-                            .arg("--")
-                            .args(&argv)
                             .env("FORCE_COLOR", "1")
                             .env("CLICOLOR_FORCE", "1")
                             .stdin(Stdio::null())
@@ -2068,8 +2143,9 @@ pub fn spawn_ato_run_repl(session_id: String, _cols: u16, _rows: u16) -> Result<
                         let mut child = match spawned {
                             Ok(c) => c,
                             Err(e) => {
-                                let msg =
-                                    format!("\x1b[31mfailed to spawn ato run: {e}\x1b[0m\r\n");
+                                let msg = format!(
+                                    "\x1b[31mfailed to spawn {command_label}: {e}\x1b[0m\r\n"
+                                );
                                 let _ = send(&output_tx, msg.as_bytes());
                                 let _ = send(&output_tx, b"\x1b[32mato>\x1b[0m ");
                                 continue;
@@ -2179,7 +2255,7 @@ pub fn spawn_ato_run_repl(session_id: String, _cols: u16, _rows: u16) -> Result<
                             if !status.success() {
                                 let code = status.code().unwrap_or(-1);
                                 let msg = format!(
-                                    "\x1b[31m[ato run exited with status {code}]\x1b[0m\r\n"
+                                    "\x1b[31m[{command_label} exited with status {code}]\x1b[0m\r\n"
                                 );
                                 let _ = send(&output_tx, msg.as_bytes());
                             }
@@ -2257,6 +2333,101 @@ pub fn spawn_ato_run_repl(session_id: String, _cols: u16, _rows: u16) -> Result<
 ///
 /// This is intentionally small — full POSIX expansion (globs, variables) is
 /// the responsibility of `ato run` itself. Unmatched quotes return an error.
+/// Resolve a bare command name against `~/.ato/toolchains/<name>-<version>/`.
+///
+/// Returns the path to an executable file named `name` inside the newest
+/// matching toolchain directory, or `None` if no toolchain is installed.
+///
+/// Walks up to ~4 levels deep to accommodate toolchain-specific layouts:
+///   - python: `python-3.11.10/python/bin/python`
+///   - node:   `node-20.11.0/node-v20.11.0-darwin-arm64/bin/node`
+///   - deno:   `deno-2.6.8/deno`
+///   - uv:     `uv-0.4.19/uv-aarch64-apple-darwin/uv`
+fn find_ato_toolchain_binary(name: &str) -> Option<PathBuf> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
+        return None;
+    }
+    let home = dirs::home_dir()?;
+    let toolchains = home.join(".ato").join("toolchains");
+    let prefix = format!("{name}-");
+
+    // Collect candidate toolchain roots (`<name>-<version>/`), sorted desc so
+    // the newest-looking version wins. We rely on lexicographic sort here —
+    // good enough for semver-ish names. Skip archive files (.tar.gz, .zip).
+    let mut roots: Vec<PathBuf> = fs::read_dir(&toolchains)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let path = e.path();
+            if !path.is_dir() {
+                return None;
+            }
+            let n = path.file_name()?.to_str()?.to_string();
+            if n.starts_with(&prefix) {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+    roots.sort();
+    roots.reverse();
+
+    for root in roots {
+        if let Some(bin) = find_executable_named(&root, name, 4) {
+            return Some(bin);
+        }
+    }
+    None
+}
+
+/// Shallow recursive search for an executable file named exactly `name`
+/// inside `root`, up to `max_depth` levels. Prefers `bin/<name>` over
+/// top-level files.
+fn find_executable_named(root: &Path, name: &str, max_depth: usize) -> Option<PathBuf> {
+    if max_depth == 0 {
+        return None;
+    }
+    let entries: Vec<_> = fs::read_dir(root).ok()?.filter_map(|e| e.ok()).collect();
+
+    // First pass: direct file named `name` at this level.
+    for e in &entries {
+        let path = e.path();
+        if path.is_file() && path.file_name().and_then(|s| s.to_str()) == Some(name) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = path.metadata() {
+                    if meta.permissions().mode() & 0o111 != 0 {
+                        return Some(path);
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                return Some(path);
+            }
+        }
+    }
+
+    // Second pass: recurse into subdirs (prefer `bin`, then others).
+    let mut subdirs: Vec<PathBuf> = entries
+        .iter()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.path())
+        .collect();
+    subdirs.sort_by_key(|p| {
+        let is_bin = p.file_name().and_then(|s| s.to_str()) == Some("bin");
+        (!is_bin, p.clone())
+    });
+    for sub in subdirs {
+        if let Some(hit) = find_executable_named(&sub, name, max_depth - 1) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
 fn shell_split(input: &str) -> std::result::Result<Vec<String>, String> {
     let mut args: Vec<String> = Vec::new();
     let mut current = String::new();
