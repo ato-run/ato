@@ -6,8 +6,13 @@ use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use capsule_core::CapsuleReporter;
 use chrono::Utc;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -27,6 +32,10 @@ const DEFAULT_API_TIMEOUT_SECS: u64 = 20;
 const SHARE_PROVIDER_PYTHON_VERSION: &str = "3.11.10";
 /// Pinned Node version signalled to fnm/nvm/mise for decap install steps.
 const SHARE_PROVIDER_NODE_VERSION: &str = "20.11.0";
+/// Maximum compressed archive size for kind="archive" sources (10 MB).
+const ARCHIVE_MAX_COMPRESSED_BYTES: u64 = 10 * 1024 * 1024;
+/// Maximum number of files in a kind="archive" source.
+const ARCHIVE_MAX_FILE_COUNT: usize = 5_000;
 
 fn default_git_mode_str() -> String {
     "same-commit".to_string()
@@ -134,9 +143,12 @@ pub(crate) struct ShareSourceSpec {
     pub(crate) branch: Option<String>,
     #[serde(default)]
     pub(crate) evidence: Vec<String>,
-    /// "same-commit" | "latest-at-encap"  (v2; defaults to "same-commit" for v1 lock reads)
+    /// "same-commit" | "latest-at-encap" | "archive"
     #[serde(default = "default_git_mode_str")]
     pub(crate) git_mode: String,
+    /// Base64-encoded gzip tar of the directory — present only when kind = "archive".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) archive_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -368,6 +380,17 @@ struct CandidateRepo {
     branch: Option<String>,
     rev: String,
     evidence: Vec<String>,
+}
+
+/// A directory without a git remote that is bundled inline as a gzip tar archive.
+#[derive(Debug)]
+struct CandidateArchiveSource {
+    abs_path: PathBuf,
+    rel_path: String,
+    /// Base64-encoded gzip tar content.
+    content_base64: String,
+    /// sha256:<hex> of the raw (pre-base64) gzip bytes.
+    content_digest: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1016,6 +1039,21 @@ fn capture_workspace(
         .map(|repo| resolve_source_lock(repo, git_mode))
         .collect::<Result<Vec<_>>>()?;
 
+    // Discover directories not covered by any git repo and pack them inline.
+    let archive_sources = discover_archive_sources(root, &repos, &ignore, reporter)?;
+    let archive_locks: Vec<ResolvedSourceLock> = archive_sources
+        .iter()
+        .map(|arc| ResolvedSourceLock {
+            id: repo_id_from_path(&arc.rel_path),
+            rev: arc.content_digest.clone(),
+            git_mode: "archive".to_string(),
+            remote_branch: None,
+        })
+        .collect();
+
+    let mut all_locks = repo_locks;
+    all_locks.extend(archive_locks);
+
     let mut tool_requirements = BTreeMap::<String, ToolRequirementSpec>::new();
     let mut env_requirements = Vec::new();
     let mut install_steps = Vec::new();
@@ -1042,10 +1080,54 @@ fn capture_workspace(
         }
     }
 
+    // Also scan archive source directories so tools/steps/services are detected.
+    for arc in &archive_sources {
+        let scan_dirs = discover_repo_scan_dirs(&arc.abs_path)?;
+        for scan_dir in scan_dirs {
+            let within = relative_display(&arc.abs_path, &scan_dir);
+            let relative_dir = if within == "." {
+                arc.rel_path.clone()
+            } else {
+                format!("{}/{}", arc.rel_path, within)
+            };
+            detect_tools(&scan_dir, &relative_dir, &mut tool_requirements)?;
+            detect_env_requirements(&scan_dir, &relative_dir, &mut env_requirements)?;
+            detect_install_steps(&scan_dir, &relative_dir, &mut install_steps)?;
+            detect_services(&scan_dir, &relative_dir, &mut services)?;
+        }
+    }
+
     install_steps.sort_by(|left, right| left.id.cmp(&right.id));
     services.sort_by(|left, right| left.id.cmp(&right.id));
     env_requirements.sort_by(|left, right| left.path.cmp(&right.path));
     let entries = derive_entries(&services, &env_requirements);
+
+    let git_sources = repos.iter().map(|repo| ShareSourceSpec {
+        id: repo_id_from_path(&repo.rel_path),
+        kind: "git".to_string(),
+        url: repo.url.clone(),
+        path: repo.rel_path.clone(),
+        branch: repo.branch.clone(),
+        evidence: repo.evidence.clone(),
+        git_mode: git_mode.as_str().to_string(),
+        archive_content: None,
+    });
+    let inline_sources = archive_sources.iter().map(|arc| ShareSourceSpec {
+        id: repo_id_from_path(&arc.rel_path),
+        kind: "archive".to_string(),
+        // Embed content as a data URI — this survives the API round-trip because
+        // the `url` field is a known spec field that the server stores verbatim.
+        url: format!(
+            "data:application/x-tar+gzip;base64,{}",
+            arc.content_base64
+        ),
+        path: arc.rel_path.clone(),
+        branch: None,
+        evidence: vec![format!("archive: {}", arc.content_digest)],
+        git_mode: "archive".to_string(),
+        // Also populate archive_content for local-only workflows (before upload).
+        archive_content: Some(arc.content_base64.clone()),
+    });
 
     let spec = ShareSpec {
         schema_version: SHARE_SCHEMA_VERSION.to_string(),
@@ -1059,18 +1141,7 @@ fn capture_workspace(
             .and_then(|value| value.to_str())
             .unwrap_or("workspace")
             .to_string(),
-        sources: repos
-            .iter()
-            .map(|repo| ShareSourceSpec {
-                id: repo_id_from_path(&repo.rel_path),
-                kind: "git".to_string(),
-                url: repo.url.clone(),
-                path: repo.rel_path.clone(),
-                branch: repo.branch.clone(),
-                evidence: repo.evidence.clone(),
-                git_mode: git_mode.as_str().to_string(),
-            })
-            .collect(),
+        sources: git_sources.chain(inline_sources).collect(),
         tool_requirements: {
             let runtime_source = tool_runtime.as_str().to_string();
             tool_requirements
@@ -1099,7 +1170,7 @@ fn capture_workspace(
 
     Ok(CapturedWorkspace {
         spec,
-        repo_locks,
+        repo_locks: all_locks,
         resolved_tools,
     })
 }
@@ -1206,7 +1277,281 @@ struct CapturedWorkspace {
     resolved_tools: Vec<ResolvedToolLock>,
 }
 
-fn discover_repositories(root: &Path, ignore: &IgnoreMatcher) -> Result<Vec<CandidateRepo>> {
+/// Returns directories at or directly under `root` that are not covered by any
+/// discovered git repo and contain at least one non-trivial file. These directories
+/// are bundled as inline gzip tar archives embedded in the share spec.
+fn discover_archive_sources(
+    root: &Path,
+    repos: &[CandidateRepo],
+    ignore: &IgnoreMatcher,
+    reporter: &Arc<CliReporter>,
+) -> Result<Vec<CandidateArchiveSource>> {
+    // Compute the set of absolute paths already owned by git repos.
+    let repo_paths: BTreeSet<PathBuf> = repos.iter().map(|r| r.abs_path.clone()).collect();
+
+    let mut result = Vec::new();
+
+    // When there are no repos, the root itself is the archive candidate (e.g., a single
+    // non-git project directory).  When repos exist, only check direct children that are
+    // not already a repo or inside one — the root is just a workspace container.
+    let candidates: Vec<PathBuf> = if repos.is_empty() {
+        vec![root.to_path_buf()]
+    } else {
+        fs::read_dir(root)
+            .with_context(|| format!("Failed to read {}", root.display()))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect()
+    };
+
+    for candidate in candidates {
+        if ignore.matches(root, &candidate) {
+            continue;
+        }
+        if repo_paths.contains(&candidate) {
+            continue;
+        }
+        // Skip dirs already owned by a git repo (candidate is inside a repo's tree).
+        let inside_repo = repos
+            .iter()
+            .any(|r| candidate.starts_with(&r.abs_path) && candidate != r.abs_path);
+        if inside_repo {
+            continue;
+        }
+        // Skip well-known non-source dirs.
+        let dir_name = candidate
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        if matches!(
+            dir_name,
+            ".git" | ".ato" | ".tmp" | "target" | "node_modules" | ".venv" | "__pycache__"
+        ) {
+            continue;
+        }
+
+        let rel_path = relative_display(root, &candidate);
+        let rel_path = if rel_path == "." {
+            root.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("workspace")
+                .to_string()
+        } else {
+            rel_path
+        };
+
+        match pack_archive_source(root, &candidate) {
+            Ok(Some((content_base64, content_digest))) => {
+                futures::executor::block_on(reporter.notify(format!(
+                    "📦 Bundling archive source: {} ({})",
+                    rel_path, content_digest
+                )))?;
+                result.push(CandidateArchiveSource {
+                    abs_path: candidate,
+                    rel_path,
+                    content_base64,
+                    content_digest,
+                });
+            }
+            Ok(None) => {
+                // Directory had no non-trivial files — skip silently.
+            }
+            Err(err) => {
+                futures::executor::block_on(reporter.warn(format!(
+                    "⚠️  Could not bundle {}: {}",
+                    rel_path, err
+                )))?;
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Returns true if `filename` looks like a secret/env file that must not be bundled.
+fn is_env_file_path(filename: &str) -> bool {
+    let lower = filename.to_ascii_lowercase();
+    lower == ".env" || lower.starts_with(".env.") || lower == ".envrc"
+}
+
+/// Paths to exclude when packing archive sources (relative to the archive root).
+fn is_archive_excluded_path(rel: &str) -> bool {
+    let parts: Vec<&str> = rel.split('/').collect();
+    let first = parts.first().copied().unwrap_or("");
+    // Skip build artifacts, virtual environments, and generated lock dirs.
+    if matches!(
+        first,
+        ".git" | ".ato" | ".tmp" | "target" | "node_modules" | ".venv" | "__pycache__"
+    ) {
+        return true;
+    }
+    // Skip environment / secret files at any path level.
+    let filename = parts.last().copied().unwrap_or("");
+    is_env_file_path(filename)
+}
+
+/// Pack a directory into a gzip tar and return (base64_content, sha256_digest).
+/// Returns `None` if the directory contains no packable files.
+fn pack_archive_source(
+    root: &Path,
+    dir: &Path,
+) -> Result<Option<(String, String)>> {
+    let mut file_count: usize = 0;
+    let gz_buf: Vec<u8> = Vec::new();
+    let enc = GzEncoder::new(gz_buf, Compression::best());
+    let mut builder = tar::Builder::new(enc);
+    builder.follow_symlinks(false);
+
+    let mut entries: Vec<(PathBuf, String)> = Vec::new();
+    collect_archive_entries(dir, dir, &mut entries, root)?;
+
+    if entries.is_empty() {
+        return Ok(None);
+    }
+
+    for (abs_path, rel_str) in &entries {
+        if is_archive_excluded_path(rel_str) {
+            continue;
+        }
+        let metadata = fs::metadata(abs_path)
+            .with_context(|| format!("stat {}", abs_path.display()))?;
+        if !metadata.is_file() {
+            continue;
+        }
+        file_count += 1;
+        if file_count > ARCHIVE_MAX_FILE_COUNT {
+            anyhow::bail!(
+                "Archive source exceeds {} file limit. \
+                 Add a .atoignore to exclude large directories.",
+                ARCHIVE_MAX_FILE_COUNT
+            );
+        }
+        builder
+            .append_path_with_name(abs_path, rel_str)
+            .with_context(|| format!("Failed to add {} to archive", abs_path.display()))?;
+    }
+
+    if file_count == 0 {
+        return Ok(None);
+    }
+
+    let enc = builder.into_inner().context("Failed to finish tar")?;
+    let gz_bytes = enc.finish().context("Failed to finish gzip")?;
+
+    if gz_bytes.len() as u64 > ARCHIVE_MAX_COMPRESSED_BYTES {
+        anyhow::bail!(
+            "Archive source compressed size ({} bytes) exceeds {} byte limit. \
+             Add a .atoignore to reduce the workspace size.",
+            gz_bytes.len(),
+            ARCHIVE_MAX_COMPRESSED_BYTES
+        );
+    }
+
+    let digest = sha256_label(&gz_bytes);
+    let content_base64 = BASE64.encode(&gz_bytes);
+    Ok(Some((content_base64, digest)))
+}
+
+/// Recursively collect (abs_path, archive-relative path) for all entries under `dir`.
+fn collect_archive_entries(
+    archive_root: &Path,
+    dir: &Path,
+    out: &mut Vec<(PathBuf, String)>,
+    _workspace_root: &Path,
+) -> Result<()> {
+    for entry in fs::read_dir(dir)
+        .with_context(|| format!("Failed to read {}", dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("Failed to read entry in {}", dir.display()))?;
+        let path = entry.path();
+        let rel = relative_display(archive_root, &path);
+        if is_archive_excluded_path(&rel) {
+            continue;
+        }
+        if path.is_dir() {
+            collect_archive_entries(archive_root, &path, out, _workspace_root)?;
+        } else if path.is_file() {
+            out.push((path, rel));
+        }
+    }
+    Ok(())
+}
+
+/// Safely extract a base64-encoded gzip tar archive into `target`.
+/// Rejects absolute paths, `..` components, symlinks, hardlinks, and device files.
+fn extract_archive_source(content_base64: &str, target: &Path) -> Result<()> {
+    let gz_bytes = BASE64
+        .decode(content_base64)
+        .context("Failed to base64-decode archive content")?;
+
+    fs::create_dir_all(target)
+        .with_context(|| format!("Failed to create {}", target.display()))?;
+
+    let gz = GzDecoder::new(gz_bytes.as_slice());
+    let mut archive = tar::Archive::new(gz);
+    archive.set_preserve_permissions(false);
+    archive.set_unpack_xattrs(false);
+    archive.set_overwrite(true);
+
+    for entry_result in archive.entries().context("Failed to read archive entries")? {
+        let mut entry = entry_result.context("Failed to read archive entry")?;
+        let header = entry.header();
+
+        // Reject non-regular-file entries (symlinks, hardlinks, devices, directories).
+        let entry_type = header.entry_type();
+        if !entry_type.is_file() {
+            if entry_type.is_dir() {
+                // Directories are fine — let them through.
+            } else {
+                // Reject symlinks, hardlinks, block/char devices, etc.
+                anyhow::bail!(
+                    "Archive contains a non-regular entry type {:?}; rejected for security",
+                    entry_type
+                );
+            }
+        }
+
+        let entry_path = entry
+            .path()
+            .context("Archive entry has non-UTF-8 path")?
+            .into_owned();
+
+        // Reject absolute paths and `..` traversal.
+        if entry_path.is_absolute() {
+            anyhow::bail!(
+                "Archive contains absolute path {}: rejected for security",
+                entry_path.display()
+            );
+        }
+        for component in entry_path.components() {
+            use std::path::Component;
+            if matches!(component, Component::ParentDir) {
+                anyhow::bail!(
+                    "Archive contains path traversal in {}: rejected for security",
+                    entry_path.display()
+                );
+            }
+        }
+
+        let dest = target.join(&entry_path);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        entry
+            .unpack(&dest)
+            .with_context(|| format!("Failed to extract {}", entry_path.display()))?;
+    }
+
+    Ok(())
+}
+
+
+fn discover_repositories(
+    root: &Path,
+    ignore: &IgnoreMatcher,
+) -> Result<Vec<CandidateRepo>> {
     let mut candidates = Vec::new();
     let mut seen = BTreeSet::new();
 
@@ -2657,6 +3002,28 @@ fn materialize_source(
     locked: &ResolvedSourceLock,
     target: &Path,
 ) -> Result<String> {
+    // Archive sources embed their content directly — extract inline, no git needed.
+    if source.kind == "archive" {
+        // Prefer explicit archive_content field; fall back to data URI in url field.
+        let content: String = if let Some(c) = source.archive_content.as_deref() {
+            c.to_string()
+        } else if let Some(b64) = source
+            .url
+            .strip_prefix("data:application/x-tar+gzip;base64,")
+        {
+            b64.to_string()
+        } else {
+            anyhow::bail!(
+                "archive source '{}' has no extractable content (no archive_content field \
+                 and url is not a data URI)",
+                source.id
+            )
+        };
+        extract_archive_source(&content, target)
+            .with_context(|| format!("Failed to extract archive source {}", source.id))?;
+        return Ok(locked.rev.clone());
+    }
+
     if !target.exists() {
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)
@@ -3118,6 +3485,64 @@ mod tests {
                 entry.id, entry.cwd, source_path
             );
         }
+    }
+
+    #[test]
+    fn archive_source_round_trip_no_git_repo() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+
+        // Set up a non-git directory with a capsule.toml and a source file.
+        fs::write(
+            root.join("capsule.toml"),
+            "[capsule]\nname = \"python-script\"\nruntime = \"source\"\n",
+        )
+        .expect("capsule.toml");
+        fs::create_dir_all(root.join("source")).expect("mkdir source");
+        fs::write(
+            root.join("source/main.py"),
+            "print('hello from python script')\n",
+        )
+        .expect("main.py");
+        // A .env file that must NOT appear in the archive.
+        fs::write(root.join(".env"), "SECRET=hunter2\n").expect(".env");
+
+        let reporter = Arc::new(crate::reporters::CliReporter::new(false));
+        let capture = capture_workspace(
+            root,
+            GitMode::SameCommit,
+            false,
+            ShareToolRuntime::System,
+            &reporter,
+        )
+        .expect("capture");
+
+        // Exactly one archive source, no git sources.
+        assert_eq!(capture.spec.sources.len(), 1);
+        let src = &capture.spec.sources[0];
+        assert_eq!(src.kind, "archive");
+        assert!(src.archive_content.is_some(), "archive_content must be set");
+
+        // Extract into a new temp dir and verify files round-trip correctly.
+        let out = tempfile::tempdir().expect("tempdir out");
+        extract_archive_source(src.archive_content.as_ref().unwrap(), out.path())
+            .expect("extract");
+
+        // capsule.toml and source/main.py should be present.
+        assert!(
+            out.path().join("capsule.toml").exists(),
+            "capsule.toml missing after extract"
+        );
+        assert!(
+            out.path().join("source/main.py").exists(),
+            "source/main.py missing after extract"
+        );
+
+        // .env must NOT have been included.
+        assert!(
+            !out.path().join(".env").exists(),
+            ".env must be excluded from archive"
+        );
     }
 
     #[test]
@@ -3928,6 +4353,7 @@ mod tests {
                 branch: None,
                 evidence: Vec::new(),
                 git_mode: default_git_mode_str(),
+                archive_content: None,
             }],
             tool_requirements: vec![ToolRequirementSpec {
                 id: "node".to_string(),
@@ -3991,6 +4417,7 @@ mod tests {
                     branch: None,
                     evidence: Vec::new(),
                     git_mode: default_git_mode_str(),
+                    archive_content: None,
                 },
                 ShareSourceSpec {
                     id: "skip-repo".to_string(),
@@ -4000,6 +4427,7 @@ mod tests {
                     branch: None,
                     evidence: Vec::new(),
                     git_mode: default_git_mode_str(),
+                    archive_content: None,
                 },
             ],
             tool_requirements: vec![
