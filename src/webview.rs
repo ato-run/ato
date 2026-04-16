@@ -32,7 +32,7 @@ use wry::{
 use wry::WebViewExtMacOS;
 
 use crate::bridge::{BridgeProxy, GuestBridgeResponse, GuestSessionContext, ShellEvent};
-use crate::orchestrator::{resolve_and_start_guest, spawn_terminal_session, stop_guest_session, GuestLaunchSession, TerminalProcess};
+use crate::orchestrator::{resolve_and_start_guest, spawn_log_tail_session, spawn_terminal_session, stop_guest_session, take_pending_share_terminal, GuestLaunchSession, TerminalProcess};
 use crate::state::{
     ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry, AuthSessionStatus,
     BrowserCommandKind, GuestRoute, PaneBounds, ShellMode, WebSessionState,
@@ -330,16 +330,24 @@ impl WebViewManager {
         if let GuestRoute::Terminal { session_id } = &active.route {
             let session_id = session_id.clone();
             if !self.terminal_sessions.contains_key(&session_id) {
-                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-                match spawn_terminal_session(session_id.clone(), &shell, 80, 24) {
-                    Ok(proc) => {
-                        info!(session_id = %session_id, "Spawned terminal PTY session");
-                        self.terminal_sessions.insert(session_id.clone(), proc);
-                        state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
-                    }
-                    Err(e) => {
-                        error!(session_id = %session_id, error = %e, "Failed to spawn terminal PTY");
-                        state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
+                // Check for a pending share terminal (spawned by capsule-core executor)
+                if let Some(proc) = take_pending_share_terminal(&session_id) {
+                    info!(session_id = %session_id, "Using share-spawned terminal session");
+                    self.terminal_sessions.insert(session_id.clone(), proc);
+                    state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
+                } else {
+                    // Fallback: spawn a new interactive shell via nacelle
+                    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                    match spawn_terminal_session(session_id.clone(), &shell, 80, 24) {
+                        Ok(proc) => {
+                            info!(session_id = %session_id, "Spawned terminal PTY session");
+                            self.terminal_sessions.insert(session_id.clone(), proc);
+                            state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
+                        }
+                        Err(e) => {
+                            error!(session_id = %session_id, error = %e, "Failed to spawn terminal PTY");
+                            state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
+                        }
                     }
                 }
             }
@@ -643,29 +651,114 @@ impl WebViewManager {
             match completed.session {
                 Ok(session) => {
                     let is_web_url = session.display_strategy == CapsuleDisplayStrategy::WebUrl;
-                    match self.build_webview(window, &active, Some(session), state.auth_policy_registry.clone()) {
-                        Ok(webview) => {
-                            info!(pane_id, route = %active.route, "child webview built");
-                            self.bridge.log(
-                                ActivityTone::Info,
-                                format!("Built child webview for {}", active.route),
-                            );
-                            // WebUrl sessions stay in Launching until PageLoadEvent::Finished
-                            // fires SessionReady → Mounted.  This keeps the GPUI loading
-                            // screen visible while the web app (e.g. Next.js) compiles and
-                            // renders its first frame, preventing a blank white flash.
-                            if is_web_url {
-                                state.sync_web_session_state(active.pane_id, WebSessionState::Launching);
+                    let is_terminal_stream = session.display_strategy == CapsuleDisplayStrategy::TerminalStream;
+
+                    if is_terminal_stream {
+                        // Switch the pane from Web(CapsuleHandle) → Terminal so the render
+                        // loop drains output via window.__ato_write_terminal.
+                        let terminal_session_id = session.session_id.clone();
+                        let title = session.normalized_handle.clone();
+                        let log_path = session.log_path.clone();
+                        state.mount_terminal_stream_pane(pane_id, terminal_session_id.clone(), title.clone());
+
+                        // Check for a pending share terminal (piped PTY from capsule-core executor)
+                        // before falling back to log-tail.
+                        let terminal_ok = if let Some(proc) = take_pending_share_terminal(&terminal_session_id) {
+                            info!(pane_id, session_id = %terminal_session_id, "using share-spawned piped terminal session");
+                            self.terminal_sessions.insert(terminal_session_id.clone(), proc);
+                            true
+                        } else {
+                            // Fallback: log-tail for capsule sessions managed by ato-cli
+                            match log_path {
+                                Some(lp) => {
+                                    match spawn_log_tail_session(terminal_session_id.clone(), lp) {
+                                        Ok(proc) => {
+                                            info!(pane_id, session_id = %terminal_session_id, "log-tail session spawned for terminal_stream");
+                                            self.terminal_sessions.insert(terminal_session_id.clone(), proc);
+                                            true
+                                        }
+                                        Err(e) => {
+                                            error!(pane_id, error = %e, "failed to spawn log-tail session");
+                                            false
+                                        }
+                                    }
+                                }
+                                None => {
+                                    error!(pane_id, "terminal_stream session has no log_path and no pending share terminal");
+                                    false
+                                }
                             }
-                            self.views.insert(active.pane_id, webview);
+                        };
+
+                        if terminal_ok {
+                            // Build a terminal:// webview by creating a synthetic ActiveWebPane
+                            // with GuestRoute::Terminal so build_webview uses the right protocol.
+                            let terminal_pane = ActiveWebPane {
+                                workspace_id: active.workspace_id,
+                                task_id: active.task_id,
+                                pane_id: active.pane_id,
+                                title: title.clone(),
+                                route: GuestRoute::Terminal { session_id: terminal_session_id.clone() },
+                                partition_id: terminal_session_id.clone(),
+                                profile: "terminal".to_string(),
+                                capabilities: vec![],
+                                session: WebSessionState::Launching,
+                                source_label: None,
+                                trust_state: None,
+                                restricted: false,
+                                snapshot_label: None,
+                                canonical_handle: None,
+                                session_id: Some(terminal_session_id.clone()),
+                                adapter: None,
+                                manifest_path: None,
+                                runtime_label: None,
+                                display_strategy: None,
+                                log_path: None,
+                                local_url: None,
+                                healthcheck_url: None,
+                                invoke_url: None,
+                                served_by: None,
+                                bounds: active.bounds.clone(),
+                            };
+                            match self.build_webview(window, &terminal_pane, None, state.auth_policy_registry.clone()) {
+                                Ok(webview) => {
+                                    info!(pane_id, session_id = %terminal_session_id, "terminal webview built for terminal_stream");
+                                    self.bridge.log(ActivityTone::Info, format!("Terminal stream started for {title}"));
+                                    self.views.insert(active.pane_id, webview);
+                                }
+                                Err(error) => {
+                                    error!(pane_id, %error, "failed to build terminal webview for terminal_stream");
+                                    state.push_activity(ActivityTone::Error, format!("Failed to build terminal view: {error}"));
+                                }
+                            }
+                        } else {
+                            state.push_activity(ActivityTone::Error, format!("Failed to start log-tail for {title}"));
                         }
-                        Err(error) => {
-                            error!(pane_id, %error, "failed to build child webview");
-                            state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
-                            state.push_activity(
-                                ActivityTone::Error,
-                                format!("Failed to build child webview: {error}"),
-                            );
+                    } else {
+                        match self.build_webview(window, &active, Some(session), state.auth_policy_registry.clone()) {
+                            Ok(webview) => {
+                                info!(pane_id, route = %active.route, "child webview built");
+                                self.bridge.log(
+                                    ActivityTone::Info,
+                                    format!("Built child webview for {}", active.route),
+                                );
+                                // WebUrl sessions stay in Launching until PageLoadEvent::Finished
+                                // fires SessionReady → Mounted.  This keeps the GPUI loading
+                                // screen visible while the web app (e.g. Next.js) compiles and
+                                // renders its first frame, preventing a blank white flash.
+                                if is_web_url {
+                                    state.sync_web_session_state(active.pane_id, WebSessionState::Launching);
+                                }
+                                self.views.insert(active.pane_id, webview);
+                            }
+                            Err(error) => {
+                                error!(pane_id, %error, "failed to build child webview");
+                                state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
+                                state.push_activity(
+                                    ActivityTone::Error,
+                                    format!("Failed to build child webview: {error}"),
+                                );
+                            }
                         }
                     }
                 }
