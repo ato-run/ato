@@ -392,12 +392,361 @@ pub fn is_sandbox_supported() -> bool {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Terminal Security: Shell Allowlist
+// ═══════════════════════════════════════════════════════════════════════════
+
+const ALLOWED_SHELLS: &[&str] = &[
+    "/bin/bash",
+    "/bin/zsh",
+    "/bin/sh",
+    "/usr/bin/bash",
+    "/usr/bin/zsh",
+    "/usr/local/bin/bash",
+    "/usr/local/bin/zsh",
+    "/usr/local/bin/fish",
+    "/opt/homebrew/bin/fish",
+    "/opt/homebrew/bin/bash",
+    "/opt/homebrew/bin/zsh",
+];
+
+/// Validate a shell path against the allowlist.
+///
+/// Returns `Ok(())` if the shell is allowed, or an error describing the violation.
+/// Callers should exit with code 10 on error (policy violation).
+pub fn validate_shell(shell: &str) -> Result<()> {
+    if ALLOWED_SHELLS.contains(&shell) {
+        return Ok(());
+    }
+    // Also allow shells that resolve to an allowed path
+    if let Ok(resolved) = std::fs::canonicalize(shell) {
+        let resolved_str = resolved.to_string_lossy();
+        if ALLOWED_SHELLS.iter().any(|s| *s == resolved_str.as_ref()) {
+            return Ok(());
+        }
+    }
+    anyhow::bail!(
+        "Shell '{}' is not in the allowed shells list. Allowed: {:?}",
+        shell,
+        ALLOWED_SHELLS
+    )
+}
+
+/// Return the default shell from `$SHELL`, validated against the allowlist.
+/// Falls back to `/bin/sh` if `$SHELL` is unset or not in the allowlist.
+pub fn default_shell() -> String {
+    if let Ok(shell) = std::env::var("SHELL") {
+        if validate_shell(&shell).is_ok() {
+            return shell;
+        }
+    }
+    "/bin/sh".to_string()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Terminal Security: Environment Variable Filtering
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Environment variables blocked in "safe" mode (pattern matching — suffix/substring)
+const SECRET_PATTERNS: &[&str] = &[
+    "API_KEY",
+    "API_SECRET",
+    "SECRET_KEY",
+    "ACCESS_KEY",
+    "AUTH_TOKEN",
+    "PRIVATE_KEY",
+    "PASSWORD",
+    "CREDENTIAL",
+    "AWS_SECRET",
+    "AWS_SESSION_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITLAB_TOKEN",
+    "NPM_TOKEN",
+    "DOCKER_PASSWORD",
+    "DATABASE_URL",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+];
+
+/// Environment variables always blocked (injection vectors)
+const DANGEROUS_VARS: &[&str] = &[
+    "LD_PRELOAD",
+    "DYLD_INSERT_LIBRARIES",
+    "BASH_ENV",
+    "ENV",
+    "CDPATH",
+    "PROMPT_COMMAND",
+];
+
+/// Environment variables always allowed in "minimal" mode
+const ALWAYS_ALLOW: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "SHELL",
+    "TERM",
+    "LANG",
+    "LC_ALL",
+    "EDITOR",
+    "VISUAL",
+    "PAGER",
+    "TMPDIR",
+    "XDG_RUNTIME_DIR",
+    "COLORTERM",
+    "TERM_PROGRAM",
+    "CAPSULE_IPC_SERVICE_URL",
+];
+
+/// Filter environment variables for a terminal session.
+///
+/// - `"safe"`: Remove vars matching `SECRET_PATTERNS` or `DANGEROUS_VARS`
+/// - `"minimal"`: Keep only vars in `ALWAYS_ALLOW`
+/// - `"passthrough"`: No filtering (development mode only)
+pub fn filter_terminal_env(
+    env: Vec<(String, String)>,
+    mode: &str,
+) -> Vec<(String, String)> {
+    match mode {
+        "minimal" => env
+            .into_iter()
+            .filter(|(k, _)| ALWAYS_ALLOW.iter().any(|allowed| *allowed == k.as_str()))
+            .collect(),
+        "passthrough" => env,
+        // "safe" is the default
+        _ => env
+            .into_iter()
+            .filter(|(k, _)| {
+                let upper = k.to_uppercase();
+                let is_dangerous = DANGEROUS_VARS.iter().any(|d| upper == *d);
+                let is_secret = SECRET_PATTERNS.iter().any(|p| upper.contains(p));
+                !is_dangerous && !is_secret
+            })
+            .collect(),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Terminal Security: PTY Output Sanitizer
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Sanitize PTY output before forwarding to xterm.js.
+///
+/// Removes terminal escape sequences that could compromise the host:
+/// - DCS (Device Control String): removed entirely (keystroke injection CVE-2019-0542)
+/// - OSC 52 (clipboard write): removed
+/// - OSC 777 (custom private): removed
+/// - OSC 8 (hyperlink): allowed only for http/https URIs
+/// - All standard SGR/CSI sequences: passed through (needed for rendering)
+pub fn sanitize_pty_output(data: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        if data[i] == 0x1b && i + 1 < data.len() {
+            match data[i + 1] {
+                b'P' => {
+                    // DCS: skip to String Terminator (ST = ESC \)
+                    i = skip_to_st(data, i + 2);
+                    continue;
+                }
+                b']' => {
+                    // OSC: selective removal
+                    let end = find_osc_end(data, i);
+                    let osc = &data[i..end];
+                    if is_safe_osc(osc) {
+                        output.extend_from_slice(osc);
+                    }
+                    i = end;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        output.push(data[i]);
+        i += 1;
+    }
+    output
+}
+
+fn skip_to_st(data: &[u8], start: usize) -> usize {
+    let mut i = start;
+    while i + 1 < data.len() {
+        if data[i] == 0x1b && data[i + 1] == b'\\' {
+            return i + 2;
+        }
+        if data[i] == 0x07 {
+            return i + 1;
+        }
+        i += 1;
+    }
+    data.len()
+}
+
+fn find_osc_end(data: &[u8], start: usize) -> usize {
+    let mut i = start + 2; // skip ESC ]
+    while i < data.len() {
+        if data[i] == 0x07 {
+            return i + 1;
+        }
+        if i + 1 < data.len() && data[i] == 0x1b && data[i + 1] == b'\\' {
+            return i + 2;
+        }
+        i += 1;
+    }
+    data.len()
+}
+
+fn is_safe_osc(osc: &[u8]) -> bool {
+    // osc starts with ESC ]
+    let body = if osc.len() >= 2 { &osc[2..] } else { return false };
+
+    // Parse OSC number
+    let semi = body.iter().position(|&b| b == b';');
+    let num_bytes = match semi {
+        Some(pos) => &body[..pos],
+        None => body,
+    };
+    let num_str = std::str::from_utf8(num_bytes).unwrap_or("");
+
+    match num_str.trim() {
+        // OSC 52: clipboard write — BLOCKED
+        "52" => false,
+        // OSC 777: private — BLOCKED
+        "777" => false,
+        // OSC 8: hyperlink — allow only http/https
+        "8" => {
+            if let Some(semi_pos) = semi {
+                let rest = &body[semi_pos + 1..];
+                // Format: params ; URI (second semicolon separates params from URI)
+                if let Some(uri_start) = rest.iter().position(|&b| b == b';') {
+                    let uri = &rest[uri_start + 1..];
+                    // Strip trailing ST (BEL or ESC \)
+                    let uri = uri.strip_suffix(&[0x07u8]).unwrap_or(uri);
+                    let uri = uri.strip_suffix(&[0x1bu8, b'\\']).unwrap_or(uri);
+                    let uri_str = std::str::from_utf8(uri).unwrap_or("");
+                    return uri_str.starts_with("http://") || uri_str.starts_with("https://");
+                }
+            }
+            false
+        }
+        // OSC 0/1/2: title set — allowed (low risk)
+        "0" | "1" | "2" => true,
+        // All other OSC codes: allow (standard SGR etc.)
+        _ => true,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Shell allowlist tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_shell_allowed() {
+        assert!(validate_shell("/bin/bash").is_ok());
+        assert!(validate_shell("/bin/sh").is_ok());
+        assert!(validate_shell("/bin/zsh").is_ok());
+    }
+
+    #[test]
+    fn test_validate_shell_blocked() {
+        assert!(validate_shell("/usr/bin/python3").is_err());
+        assert!(validate_shell("/bin/nc").is_err());
+        assert!(validate_shell("bash").is_err()); // relative path not allowed
+    }
+
+    #[test]
+    fn test_default_shell_fallback() {
+        // Even if $SHELL is unset or invalid, default_shell returns a valid path
+        let shell = default_shell();
+        assert!(shell.starts_with('/'), "default_shell must return an absolute path");
+    }
+
+    // ── Environment filter tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_filter_env_safe_blocks_secrets() {
+        let env = vec![
+            ("API_KEY".to_string(), "secret".to_string()),
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("LD_PRELOAD".to_string(), "evil.so".to_string()),
+            ("AWS_SECRET_ACCESS_KEY".to_string(), "abc123".to_string()),
+        ];
+        let filtered = filter_terminal_env(env, "safe");
+        let keys: Vec<&str> = filtered.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(keys.contains(&"PATH"));
+        assert!(!keys.contains(&"API_KEY"));
+        assert!(!keys.contains(&"LD_PRELOAD"));
+        assert!(!keys.contains(&"AWS_SECRET_ACCESS_KEY"));
+    }
+
+    #[test]
+    fn test_filter_env_minimal() {
+        let env = vec![
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("HOME".to_string(), "/home/user".to_string()),
+            ("MY_APP_SECRET".to_string(), "secret".to_string()),
+            ("EDITOR".to_string(), "vim".to_string()),
+        ];
+        let filtered = filter_terminal_env(env, "minimal");
+        let keys: Vec<&str> = filtered.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(keys.contains(&"PATH"));
+        assert!(keys.contains(&"HOME"));
+        assert!(keys.contains(&"EDITOR"));
+        assert!(!keys.contains(&"MY_APP_SECRET"));
+    }
+
+    #[test]
+    fn test_filter_env_passthrough() {
+        let env = vec![
+            ("API_KEY".to_string(), "secret".to_string()),
+            ("LD_PRELOAD".to_string(), "evil.so".to_string()),
+        ];
+        let filtered = filter_terminal_env(env.clone(), "passthrough");
+        assert_eq!(filtered.len(), env.len());
+    }
+
+    // ── PTY output sanitizer tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_sanitize_passes_sgr() {
+        // SGR bold: ESC [ 1 m
+        let input = b"\x1b[1mHello\x1b[0m";
+        let output = sanitize_pty_output(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_sanitize_blocks_osc52() {
+        // OSC 52 clipboard write: ESC ] 52 ; ... BEL
+        let input = b"\x1b]52;c;dGVzdA==\x07visible";
+        let output = sanitize_pty_output(input);
+        let output_str = std::str::from_utf8(&output).unwrap();
+        assert!(!output_str.contains("52"), "OSC 52 should be stripped");
+        assert!(output_str.contains("visible"));
+    }
+
+    #[test]
+    fn test_sanitize_blocks_dcs() {
+        // DCS string: ESC P ... ESC \\ (ST)
+        let input = b"\x1bPsomepayload\x1b\\visible";
+        let output = sanitize_pty_output(input);
+        let output_str = std::str::from_utf8(&output).unwrap();
+        assert!(!output_str.contains("somepayload"), "DCS should be stripped");
+        assert!(output_str.contains("visible"));
+    }
+
+    #[test]
+    fn test_sanitize_allows_osc0_title() {
+        // OSC 0 title: ESC ] 0 ; My Title BEL
+        let input = b"\x1b]0;My Title\x07normal";
+        let output = sanitize_pty_output(input);
+        assert_eq!(output, input);
+    }
 
     #[test]
     fn test_sandbox_policy_builder() {

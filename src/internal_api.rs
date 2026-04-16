@@ -51,6 +51,17 @@ pub enum NacelleEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
     },
+    /// PTY terminal data chunk (base64-encoded raw bytes)
+    TerminalData {
+        session_id: String,
+        /// Base64-encoded raw terminal output bytes
+        data_b64: String,
+    },
+    /// PTY terminal session exited
+    TerminalExited {
+        session_id: String,
+        exit_code: Option<i32>,
+    },
 }
 
 impl NacelleEvent {
@@ -61,6 +72,30 @@ impl NacelleEvent {
             let _ = std::io::stdout().flush();
         }
     }
+}
+
+/// Commands sent from ato-cli to nacelle via stdin (interactive PTY sessions)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TerminalCommand {
+    /// Keyboard/text input to forward to the PTY master
+    TerminalInput {
+        session_id: String,
+        /// Base64-encoded bytes to write to PTY master
+        data_b64: String,
+    },
+    /// Resize the PTY
+    TerminalResize {
+        session_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    /// Send a signal to the PTY child process
+    TerminalSignal {
+        session_id: String,
+        /// Signal name: "SIGINT" | "SIGTERM" | "SIGHUP"
+        signal: String,
+    },
 }
 
 #[cfg(test)]

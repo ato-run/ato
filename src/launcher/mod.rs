@@ -92,6 +92,13 @@ pub struct SourceTarget {
     pub ipc_socket_paths: Vec<PathBuf>,
     /// Additional bind mounts injected by ato-cli for one-shot sandbox jobs.
     pub injected_mounts: Vec<InjectedMount>,
+    /// When true, allocate a PTY and run the workload interactively
+    pub interactive: bool,
+    /// Terminal size and configuration (only used when interactive = true)
+    pub terminal_cols: u16,
+    pub terminal_rows: u16,
+    pub terminal_shell: Option<String>,
+    pub terminal_env_filter: String,
 }
 
 /// Isolation policy derived from capsule.toml [isolation] section

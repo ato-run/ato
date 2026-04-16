@@ -17,6 +17,7 @@
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::os::unix::process::CommandExt;
 
 use tracing::{debug, info, warn};
 
@@ -324,6 +325,18 @@ pub async fn launch_with_bubblewrap(
         ipc_bind_targets.push(bind_target);
     }
 
+    // Bind PTY devices for interactive terminal sessions
+    if target.interactive {
+        // /dev/pts contains the PTY slave devices; /dev/ptmx is the PTY master
+        if std::path::Path::new("/dev/pts").exists() {
+            cmd.args(["--dev-bind", "/dev/pts", "/dev/pts"]);
+        }
+        if std::path::Path::new("/dev/ptmx").exists() {
+            cmd.args(["--dev-bind", "/dev/ptmx", "/dev/ptmx"]);
+        }
+        debug!("Bound /dev/pts and /dev/ptmx into bwrap sandbox for interactive PTY");
+    }
+
     // Hide sensitive paths that would be reachable via any parent bind-mount
     let all_parents: Vec<&str> = extra_bound_parents.iter().map(|s| s.as_str()).collect();
     add_sensitive_path_hiding(&mut cmd, &all_parents);
@@ -452,6 +465,36 @@ pub async fn launch_with_bubblewrap(
 
     debug!("Executing bwrap command: {:?}", cmd);
 
+    // Apply Landlock inside the forked child (before bwrap execs).
+    // This adds a filesystem-access layer on top of bwrap's namespace isolation.
+    // Landlock survives exec, so it stays active for the capsule workload.
+    {
+        use crate::system::sandbox::{apply_sandbox, is_sandbox_supported};
+        if is_sandbox_supported() {
+            let policy = generate_landlock_policy(target);
+            // Safety: pre_exec callback runs after fork() in the child process,
+            // before exec(). apply_sandbox calls restrict_self() which is safe
+            // to call post-fork. We capture the policy by value.
+            unsafe {
+                cmd.pre_exec(move || {
+                    // Set PR_SET_NO_NEW_PRIVS so Landlock doesn't require CAP_SYS_ADMIN.
+                    let ret = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+                    if ret != 0 {
+                        // Non-fatal: log via eprintln (tracing not available post-fork).
+                        eprintln!("[nacelle] PR_SET_NO_NEW_PRIVS failed: errno={}", *libc::__errno_location());
+                    }
+                    if let Err(e) = apply_sandbox(&policy) {
+                        eprintln!("[nacelle] Landlock apply_sandbox failed: {e}");
+                        // Non-fatal: proceed with namespace isolation only.
+                    }
+                    Ok(())
+                });
+            }
+        } else {
+            debug!("Landlock not supported on this kernel; skipping pre_exec hook");
+        }
+    }
+
     // Spawn the process
     let child = cmd.spawn().map_err(|e| RuntimeError::CommandExecution {
         operation: "bwrap spawn".to_string(),
@@ -565,6 +608,11 @@ mod tests {
             isolation: None, // no isolation config → default policy
             ipc_socket_paths: vec![],
             injected_mounts: vec![],
+            interactive: false,
+            terminal_cols: 80,
+            terminal_rows: 24,
+            terminal_shell: None,
+            terminal_env_filter: "safe".to_string(),
         };
 
         let policy = generate_landlock_policy(&target);
@@ -596,6 +644,11 @@ mod tests {
             }),
             ipc_socket_paths: vec![],
             injected_mounts: vec![],
+            interactive: false,
+            terminal_cols: 80,
+            terminal_rows: 24,
+            terminal_shell: None,
+            terminal_env_filter: "safe".to_string(),
         };
 
         let policy = generate_landlock_policy(&target);
@@ -632,6 +685,11 @@ mod tests {
                 }),
                 ipc_socket_paths: vec![],
                 injected_mounts: vec![],
+            interactive: false,
+            terminal_cols: 80,
+            terminal_rows: 24,
+            terminal_shell: None,
+            terminal_env_filter: "safe".to_string(),
             };
 
             let policy = generate_landlock_policy(&target);
@@ -676,6 +734,11 @@ mod tests {
                 PathBuf::from("/tmp/capsule-ipc/db-service.sock"),
             ],
             injected_mounts: vec![],
+            interactive: false,
+            terminal_cols: 80,
+            terminal_rows: 24,
+            terminal_shell: None,
+            terminal_env_filter: "safe".to_string(),
         };
 
         let policy = generate_landlock_policy(&target);
@@ -705,6 +768,11 @@ mod tests {
             isolation: None,
             ipc_socket_paths: vec![],
             injected_mounts: vec![],
+            interactive: false,
+            terminal_cols: 80,
+            terminal_rows: 24,
+            terminal_shell: None,
+            terminal_env_filter: "safe".to_string(),
         };
 
         let policy = generate_landlock_policy(&target);
