@@ -31,11 +31,13 @@ use wry::{
 #[cfg(target_os = "macos")]
 use wry::WebViewExtMacOS;
 
+use crate::automation::AutomationHost;
+use crate::automation::command::{AutomationCommand, PendingAutomationRequest};
 use crate::bridge::{BridgeProxy, GuestBridgeResponse, GuestSessionContext, ShellEvent};
 use crate::orchestrator::{resolve_and_start_guest, spawn_log_tail_session, spawn_terminal_session, stop_guest_session, take_pending_share_terminal, GuestLaunchSession, TerminalProcess};
 use crate::state::{
     ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry, AuthSessionStatus,
-    BrowserCommandKind, GuestRoute, PaneBounds, ShellMode, WebSessionState,
+    BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, ShellMode, WebSessionState,
 };
 use capsule_core::handle::CapsuleDisplayStrategy;
 use tracing::{debug, error, info, warn};
@@ -89,6 +91,8 @@ pub struct WebViewManager {
     pending_auth_handoffs: Arc<Mutex<Vec<AuthHandoffSignal>>>,
     /// Live PTY sessions keyed by session_id.
     terminal_sessions: HashMap<String, TerminalProcess>,
+    /// Automation host — handles AI-agent socket requests.
+    automation: AutomationHost,
 }
 
 struct ManagedWebView {
@@ -160,6 +164,29 @@ struct PendingLaunchResult {
 
 impl WebViewManager {
     pub fn new(window_handle: AnyWindowHandle, async_app: AsyncApp) -> Self {
+        let automation = AutomationHost::new();
+        automation.start();
+
+        // Spawn a foreground polling task that wakes GPUI when automation requests arrive.
+        // The socket thread sets `has_pending = true`; this loop detects it within 50ms.
+        {
+            use std::sync::atomic::Ordering;
+            use std::time::Duration;
+            let has_pending = Arc::clone(&automation.has_pending);
+            let fe = async_app.foreground_executor().clone();
+            let be = async_app.background_executor().clone();
+            let async_app_poll = async_app.clone();
+            fe.spawn(async move {
+                loop {
+                    be.timer(Duration::from_millis(50)).await;
+                    if has_pending.swap(false, Ordering::Relaxed) {
+                        notify_window(async_app_poll.clone(), window_handle);
+                    }
+                }
+            })
+            .detach();
+        }
+
         Self {
             views: HashMap::new(),
             pending_launches: HashMap::new(),
@@ -173,6 +200,7 @@ impl WebViewManager {
             visibility_cache: HashMap::new(),
             pending_auth_handoffs: Arc::new(Mutex::new(Vec::new())),
             terminal_sessions: HashMap::new(),
+            automation,
         }
     }
 
@@ -230,6 +258,8 @@ impl WebViewManager {
 
         if matches!(reuse_action, WebViewReuseAction::Rebuild) {
             if let Some(previous) = self.views.remove(&active.pane_id) {
+                self.automation.fail_requests_for_pane(active.pane_id);
+                self.automation.mark_page_unloaded(active.pane_id);
                 self.stop_launched_session(&previous, state);
                 state.sync_web_session_state(previous.pane_id, WebSessionState::Closed);
             }
@@ -400,6 +430,9 @@ impl WebViewManager {
         }
 
         self.sync_responder_target(state);
+
+        // Dispatch pending automation requests from the AI-agent socket.
+        self.dispatch_automation_requests();
     }
 
     pub fn sync_responder_target(&mut self, state: &mut AppState) {
@@ -428,6 +461,85 @@ impl WebViewManager {
 
     pub fn wants_host_focus(&self, state: &AppState) -> bool {
         matches!(self.desired_responder_target(state), ResponderTarget::Host)
+    }
+
+    /// Process all pending automation requests from the AI-agent socket.
+    ///
+    /// Called at end of every `sync_from_state` cycle.
+    fn dispatch_automation_requests(&mut self) {
+        use std::time::Instant;
+        use AutomationCommand::*;
+
+        let requests = self.automation.drain_requests();
+        if requests.is_empty() {
+            return;
+        }
+
+        let mut requeue: Vec<PendingAutomationRequest> = Vec::new();
+
+        for req in requests {
+            if req.is_expired() {
+                req.send(Err("automation command timed out".into()));
+                continue;
+            }
+
+            // Commands that don't require a live WebView.
+            match &req.command {
+                ListPanes => {
+                    let panes: Vec<serde_json::Value> = self
+                        .views
+                        .keys()
+                        .map(|id| serde_json::json!({ "pane_id": id }))
+                        .collect();
+                    req.send(Ok(serde_json::json!({ "panes": panes })));
+                    continue;
+                }
+                FocusPane { .. } => {
+                    req.send(Ok(serde_json::json!({ "ok": true })));
+                    continue;
+                }
+                _ => {}
+            }
+
+            // Resolve pane_id=0 → active pane.
+            let pane_id = if req.pane_id == 0 {
+                match self.active_pane_id {
+                    Some(id) => id,
+                    None => {
+                        req.send(Err("no active pane".into()));
+                        continue;
+                    }
+                }
+            } else {
+                req.pane_id
+            };
+
+            // Navigation commands don't need a loaded page; all JS commands do.
+            let needs_loaded = !matches!(
+                &req.command,
+                Navigate { .. } | NavigateBack | NavigateForward | Screenshot
+            );
+
+            if needs_loaded && !self.automation.is_page_loaded(pane_id) {
+                if req.wait_deadline.map_or(false, |d| Instant::now() < d)
+                    || matches!(req.command, WaitFor { .. })
+                {
+                    requeue.push(req);
+                } else {
+                    req.send(Err("page not yet loaded".into()));
+                }
+                continue;
+            }
+
+            let Some(view) = self.views.get(&pane_id) else {
+                req.send(Err(format!("pane {pane_id} not found")));
+                continue;
+            };
+
+            dispatch_automation_command(req, &view.webview, pane_id, &self.automation);
+        }
+
+        self.automation.requeue(requeue);
     }
 
     pub fn open_devtools_for_active_pane(&mut self, state: &mut AppState) {
@@ -991,6 +1103,14 @@ impl WebViewManager {
             builder = builder.with_initialization_script_for_main_only(preload_script, true);
         }
 
+        // Inject automation agent when the pane has the Automation capability.
+        if pane.capabilities.contains(&CapabilityGrant::Automation) {
+            builder = builder.with_initialization_script_for_main_only(
+                include_str!("../assets/automation/agent.js").to_string(),
+                true,
+            );
+        }
+
         if build_flags.enable_ipc {
             let route = pane.route.clone();
             let allowlist_for_ipc = allowlist.clone();
@@ -1061,27 +1181,35 @@ impl WebViewManager {
             );
         }
 
-        if !matches!(build_flags.page_load_behavior, PageLoadBehavior::None) {
+        // Always install a page-load handler.
+        // - PageLoadEvent::Started → mark pane as not-loaded (guard for evaluate_script)
+        // - PageLoadEvent::Finished → mark loaded + push bridge shell events
+        {
             let bridge = self.bridge.clone();
+            let automation = self.automation.clone();
             let pane_id = pane.pane_id;
             let page_load_behavior = build_flags.page_load_behavior;
             let async_app = self.async_app.clone();
             let window_handle = self.window_handle;
             builder = builder.with_on_page_load_handler(move |event, url| {
-                if !matches!(event, PageLoadEvent::Finished) {
-                    return;
-                }
-
-                match page_load_behavior {
-                    PageLoadBehavior::UpdateExternalUrl => {
-                        bridge.push_shell_event(ShellEvent::UrlChanged { pane_id, url });
+                match event {
+                    PageLoadEvent::Started => {
+                        automation.mark_page_unloaded(pane_id);
                     }
-                    PageLoadBehavior::MarkCapsuleReady => {
-                        bridge.push_shell_event(ShellEvent::SessionReady { pane_id });
+                    PageLoadEvent::Finished => {
+                        automation.mark_page_loaded(pane_id);
+                        match page_load_behavior {
+                            PageLoadBehavior::UpdateExternalUrl => {
+                                bridge.push_shell_event(ShellEvent::UrlChanged { pane_id, url });
+                            }
+                            PageLoadBehavior::MarkCapsuleReady => {
+                                bridge.push_shell_event(ShellEvent::SessionReady { pane_id });
+                            }
+                            PageLoadBehavior::None => {}
+                        }
+                        notify_window(async_app.clone(), window_handle);
                     }
-                    PageLoadBehavior::None => {}
                 }
-                notify_window(async_app.clone(), window_handle);
             });
         }
 
@@ -1993,6 +2121,220 @@ fn mime_for_path(path: &Path) -> &'static str {
 }
 
 /// Decode a standard base64 string into bytes.
+
+// ── Automation command dispatch ───────────────────────────────────────────────
+
+/// Execute a single automation command against a live WebView.
+/// Called from `WebViewManager::dispatch_automation_requests` on the GPUI main thread.
+fn dispatch_automation_command(
+    req: PendingAutomationRequest,
+    webview: &WebView,
+    pane_id: usize,
+    host: &AutomationHost,
+) {
+    use std::time::{Duration, Instant};
+    use AutomationCommand::*;
+
+    // Helper: call JS via evaluate_script_with_callback and route result to req.
+    macro_rules! js_call {
+        ($js:expr, $req:expr) => {{
+            let tx = $req.clone_tx();
+            let js_str: String = $js;
+            if let Err(e) = webview.evaluate_script_with_callback(&js_str, move |result| {
+                let v = serde_json::from_str::<Value>(&result)
+                    .unwrap_or_else(|_| serde_json::json!({ "raw": result }));
+                if let Ok(mut guard) = tx.lock() {
+                    if let Some(sender) = guard.take() {
+                        let _ = sender.send(Ok(v));
+                    }
+                }
+            }) {
+                $req.send(Err(e.to_string()));
+            }
+        }};
+    }
+
+    match req.command {
+        Snapshot => js_call!("window.__atoAgent.snapshot()".into(), req),
+        ConsoleMessages => js_call!("window.__atoAgent.getConsoleMessages()".into(), req),
+        Click { ref ref_id } => {
+            js_call!(
+                format!("window.__atoAgent.click({})", serde_json::to_string(ref_id).unwrap()),
+                req
+            );
+        }
+        Fill { ref ref_id, ref value } => {
+            js_call!(
+                format!(
+                    "window.__atoAgent.fill({},{})",
+                    serde_json::to_string(ref_id).unwrap(),
+                    serde_json::to_string(value).unwrap()
+                ),
+                req
+            );
+        }
+        Type { ref ref_id, ref text } => {
+            js_call!(
+                format!(
+                    "window.__atoAgent.type({},{})",
+                    serde_json::to_string(ref_id).unwrap(),
+                    serde_json::to_string(text).unwrap()
+                ),
+                req
+            );
+        }
+        SelectOption { ref ref_id, ref value } => {
+            js_call!(
+                format!(
+                    "window.__atoAgent.selectOption({},{})",
+                    serde_json::to_string(ref_id).unwrap(),
+                    serde_json::to_string(value).unwrap()
+                ),
+                req
+            );
+        }
+        Check { ref ref_id, checked } => {
+            js_call!(
+                format!(
+                    "window.__atoAgent.check({},{})",
+                    serde_json::to_string(ref_id).unwrap(),
+                    if checked { "true" } else { "false" }
+                ),
+                req
+            );
+        }
+        PressKey { ref key } => {
+            js_call!(
+                format!("window.__atoAgent.pressKey({})", serde_json::to_string(key).unwrap()),
+                req
+            );
+        }
+        Evaluate { ref expression } => {
+            js_call!(
+                format!(
+                    "window.__atoAgent.evaluate({})",
+                    serde_json::to_string(expression).unwrap()
+                ),
+                req
+            );
+        }
+        VerifyTextVisible { ref text } => {
+            js_call!(
+                format!(
+                    "window.__atoAgent.verifyTextVisible({})",
+                    serde_json::to_string(text).unwrap()
+                ),
+                req
+            );
+        }
+        VerifyElementVisible { ref ref_id } => {
+            js_call!(
+                format!(
+                    "window.__atoAgent.verifyElementVisible({})",
+                    serde_json::to_string(ref_id).unwrap()
+                ),
+                req
+            );
+        }
+        WaitFor { ref selector, .. } => {
+            let js = format!(
+                "window.__atoAgent.waitFor({})",
+                serde_json::to_string(selector).unwrap()
+            );
+            let tx = req.clone_tx();
+            let deadline = req.wait_deadline;
+            let host_clone = host.clone();
+            let selector_clone = selector.clone();
+
+            if let Err(e) = webview.evaluate_script_with_callback(&js, move |result| {
+                let found = serde_json::from_str::<Value>(&result)
+                    .ok()
+                    .and_then(|v| v.get("found").and_then(|f| f.as_bool()))
+                    .unwrap_or(false);
+
+                if found {
+                    if let Ok(mut guard) = tx.lock() {
+                        if let Some(sender) = guard.take() {
+                            let _ = sender.send(Ok(serde_json::json!({ "found": true })));
+                        }
+                    }
+                } else if deadline.map_or(false, |d| Instant::now() < d) {
+                    // Re-queue for retry; the foreground polling task retries within 50ms.
+                    let remaining_ms = deadline
+                        .map(|d| d.saturating_duration_since(Instant::now()).as_millis() as u64)
+                        .unwrap_or(0);
+                    if let Ok(mut guard) = tx.lock() {
+                        if let Some(original_tx) = guard.take() {
+                            let new_req = PendingAutomationRequest::new(
+                                pane_id,
+                                WaitFor { selector: selector_clone.clone(), timeout_ms: remaining_ms },
+                                original_tx,
+                            );
+                            host_clone.requeue(vec![new_req]);
+                            host_clone
+                                .has_pending
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                } else {
+                    if let Ok(mut guard) = tx.lock() {
+                        if let Some(sender) = guard.take() {
+                            let _ = sender.send(Err("wait_for timed out".into()));
+                        }
+                    }
+                }
+            }) {
+                req.send(Err(e.to_string()));
+            }
+        }
+        Screenshot => {
+            let (inner_tx, inner_rx) = std::sync::mpsc::channel();
+            crate::automation::screenshot::take_screenshot(webview, inner_tx);
+            let req_tx = req.clone_tx();
+            std::thread::spawn(move || {
+                match inner_rx.recv_timeout(Duration::from_secs(10)) {
+                    Ok(Ok(v)) => {
+                        if let Ok(mut guard) = req_tx.lock() {
+                            if let Some(sender) = guard.take() {
+                                let _ = sender.send(Ok(v));
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        if let Ok(mut guard) = req_tx.lock() {
+                            if let Some(sender) = guard.take() {
+                                let _ = sender.send(Err(e));
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        if let Ok(mut guard) = req_tx.lock() {
+                            if let Some(sender) = guard.take() {
+                                let _ = sender.send(Err("screenshot timed out".into()));
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        Navigate { ref url } => {
+            match webview.load_url(url) {
+                Ok(()) => req.send(Ok(serde_json::json!({ "ok": true }))),
+                Err(e) => req.send(Err(e.to_string())),
+            };
+        }
+        NavigateBack => {
+            let _ = webview.evaluate_script("history.back();");
+            req.send(Ok(serde_json::json!({ "ok": true })));
+        }
+        NavigateForward => {
+            let _ = webview.evaluate_script("history.forward();");
+            req.send(Ok(serde_json::json!({ "ok": true })));
+        }
+        // Handled in dispatch_automation_requests before reaching here.
+        ListPanes | FocusPane { .. } => unreachable!(),
+    }
+}
 
 #[cfg(test)]
 mod tests {

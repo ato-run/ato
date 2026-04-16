@@ -54,6 +54,8 @@ pub enum CapabilityGrant {
     OpenExternal,
     ClipboardRead,
     Terminal,
+    /// Grants AI-agent automation (JS injection + AutomationHost socket).
+    Automation,
 }
 
 impl CapabilityGrant {
@@ -64,6 +66,7 @@ impl CapabilityGrant {
             Self::OpenExternal => "open-external",
             Self::ClipboardRead => "clipboard-read",
             Self::Terminal => "terminal",
+            Self::Automation => "automation",
         }
     }
 
@@ -74,6 +77,7 @@ impl CapabilityGrant {
             "open-external" => Some(Self::OpenExternal),
             "clipboard-read" => Some(Self::ClipboardRead),
             "terminal" => Some(Self::Terminal),
+            "automation" => Some(Self::Automation),
             _ => None,
         }
     }
@@ -1979,6 +1983,18 @@ impl AppState {
             return "https://www.google.com".to_string();
         }
 
+        // Local filesystem paths — pass through to classify_surface_input which
+        // will recognise them as LocalPath capsules.
+        if trimmed.starts_with('/')
+            || trimmed.starts_with("./")
+            || trimmed.starts_with("../")
+            || trimmed.starts_with("~/")
+            || trimmed == "."
+            || trimmed == ".."
+        {
+            return trimmed.to_string();
+        }
+
         if trimmed.starts_with("capsule://")
             || trimmed.starts_with("ato://")
             || looks_like_registry_sugar(trimmed)
@@ -2217,6 +2233,29 @@ impl AppState {
             });
         });
         self.command_bar_text = route.to_string();
+    }
+
+    /// Switch pane to a `Terminal` surface for a `terminal_stream` capsule session.
+    ///
+    /// Called after `ato app session start` returns `display_strategy = terminal_stream`.
+    /// Replaces whatever `Web(CapsuleHandle)` surface the pane currently has with a
+    /// `Terminal` surface that routes through the `terminal://` custom protocol.
+    pub fn mount_terminal_stream_pane(
+        &mut self,
+        pane_id: PaneId,
+        session_id: String,
+        title: String,
+    ) {
+        self.update_pane(pane_id, |pane| {
+            pane.title = title.clone();
+            pane.surface = PaneSurface::Terminal(TerminalPane {
+                session_id: session_id.clone(),
+                capsule_handle: title.clone(),
+                cols: 80,
+                rows: 24,
+            });
+        });
+        self.command_bar_text = title;
     }
 
     pub fn active_permission_prompt(&self) -> Option<&PermissionPrompt> {
@@ -2653,6 +2692,22 @@ mod tests {
             "https://www.google.com/search?q=hello%20world"
         );
         assert_eq!(AppState::normalize_input(""), "https://www.google.com");
+
+        // Local filesystem paths must pass through without URL-ification.
+        assert_eq!(
+            AppState::normalize_input("/Users/me/projects/my-capsule"),
+            "/Users/me/projects/my-capsule"
+        );
+        assert_eq!(
+            AppState::normalize_input("./samples/test-echo"),
+            "./samples/test-echo"
+        );
+        assert_eq!(
+            AppState::normalize_input("~/projects/capsule"),
+            "~/projects/capsule"
+        );
+        assert_eq!(AppState::normalize_input("."), ".");
+        assert_eq!(AppState::normalize_input(".."), "..");
     }
 
     #[test]
