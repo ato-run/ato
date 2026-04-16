@@ -653,6 +653,72 @@ pub fn is_slug_only_ref(input: &str) -> bool {
     !scoped_input.contains('/')
 }
 
+/// Resolution of a bare slug (e.g. `python`) against locally installed
+/// capsules under `~/.ato/store/<publisher>/<slug>/<version>/`.
+///
+/// A slug-only reference is only considered `Unique` when exactly one
+/// publisher owns an installed capsule with that slug. This lets the REPL
+/// and `ato run` accept bare names that the user has already fetched into
+/// their local CAS, while still rejecting ambiguous or unknown names with
+/// a helpful scoped-id prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalSlugResolution {
+    NotFound,
+    Unique(String),
+    Ambiguous(Vec<String>),
+}
+
+pub fn resolve_local_slug(slug: &str) -> Result<LocalSlugResolution> {
+    let slug = slug.trim();
+    if slug.is_empty() || slug.contains('/') {
+        return Ok(LocalSlugResolution::NotFound);
+    }
+    let store_root = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ato")
+        .join("store");
+    if !store_root.exists() {
+        return Ok(LocalSlugResolution::NotFound);
+    }
+    let mut matches: Vec<String> = Vec::new();
+    let read = match std::fs::read_dir(&store_root) {
+        Ok(rd) => rd,
+        Err(_) => return Ok(LocalSlugResolution::NotFound),
+    };
+    for publisher_entry in read {
+        let Ok(publisher_entry) = publisher_entry else {
+            continue;
+        };
+        let publisher_path = publisher_entry.path();
+        if !publisher_path.is_dir() {
+            continue;
+        }
+        let Some(publisher) = publisher_path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let slug_dir = publisher_path.join(slug);
+        if !slug_dir.is_dir() {
+            continue;
+        }
+        let has_version = std::fs::read_dir(&slug_dir)
+            .map(|rd| {
+                rd.filter_map(|entry| entry.ok())
+                    .any(|entry| entry.path().is_dir())
+            })
+            .unwrap_or(false);
+        if has_version {
+            matches.push(format!("{publisher}/{slug}"));
+        }
+    }
+    matches.sort();
+    matches.dedup();
+    Ok(match matches.len() {
+        0 => LocalSlugResolution::NotFound,
+        1 => LocalSlugResolution::Unique(matches.into_iter().next().unwrap()),
+        _ => LocalSlugResolution::Ambiguous(matches),
+    })
+}
+
 pub fn normalize_github_repository(repository: &str) -> Result<String> {
     crate::publish_preflight::normalize_repository_value(repository)
 }

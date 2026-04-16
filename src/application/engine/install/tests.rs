@@ -1339,6 +1339,28 @@ fn test_parse_capsule_ref_rejects_slug_only() {
 }
 
 #[test]
+fn test_resolve_local_slug_against_fake_store() {
+    // This test exercises the public API path shape but cannot substitute
+    // the hard-coded `~/.ato/store` root without adding a test-only param.
+    // We rely on `not_found` behaviour for arbitrary random slug values to
+    // keep the test hermetic.
+    let random_slug = format!("__definitely_not_installed_{}__", std::process::id());
+    let resolution =
+        resolve_local_slug(&random_slug).expect("resolve_local_slug must not error");
+    assert!(matches!(resolution, LocalSlugResolution::NotFound));
+
+    // Slashes or empty input always yield NotFound even if present.
+    assert!(matches!(
+        resolve_local_slug("").unwrap(),
+        LocalSlugResolution::NotFound
+    ));
+    assert!(matches!(
+        resolve_local_slug("acme/python").unwrap(),
+        LocalSlugResolution::NotFound
+    ));
+}
+
+#[test]
 fn test_parse_capsule_request_extracts_version_suffix() {
     let parsed = parse_capsule_request("koh0920/sample-capsule@1.2.3").unwrap();
     assert_eq!(parsed.scoped_ref.scoped_id, "koh0920/sample-capsule");
