@@ -48,6 +48,8 @@ pub struct NativeSandboxCapabilityReport {
 pub enum SourceRuntimeMode {
     /// Native execution with platform sandbox (fast, dev-friendly)
     Native,
+    /// Interactive PTY session (shell spawned inside sandbox)
+    Interactive,
 }
 
 /// Configuration for SourceRuntime
@@ -251,6 +253,10 @@ impl SourceRuntime {
             return Err(RuntimeError::SandboxSetupFailed(
                 "Native sandbox not supported on this platform; OCI fallback removed".to_string(),
             ));
+        }
+
+        if target.interactive {
+            return Ok(SourceRuntimeMode::Interactive);
         }
 
         Ok(SourceRuntimeMode::Native)
@@ -464,6 +470,189 @@ impl SourceRuntime {
     }
 
     // OCI fallback removed; only native sandbox is supported.
+
+    /// Launch an interactive PTY terminal session inside the sandbox.
+    ///
+    /// Spawns a shell process attached to a PTY inside the platform sandbox.
+    /// Streams output as `NacelleEvent::TerminalData` NDJSON to stdout.
+    /// Reads `TerminalCommand` JSON from stdin and forwards to the PTY master.
+    async fn launch_interactive(
+        &self,
+        _request: &LaunchRequest<'_>,
+        target: &SourceTarget,
+    ) -> Result<LaunchResult, RuntimeError> {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        use std::io::{BufRead, Read, Write};
+        use std::sync::{Arc, Mutex};
+
+        use crate::internal_api::{NacelleEvent, TerminalCommand};
+        use crate::system::sandbox::{
+            default_shell, filter_terminal_env, sanitize_pty_output, validate_shell,
+        };
+
+        let session_id = _request.workload_id.to_string();
+
+        // Validate and resolve shell
+        let shell = match &target.terminal_shell {
+            Some(s) => {
+                validate_shell(s).map_err(|e| RuntimeError::SecurityViolation(e.to_string()))?;
+                s.clone()
+            }
+            None => default_shell(),
+        };
+
+        // Allocate PTY
+        let pty_system = native_pty_system();
+        let pty_size = PtySize {
+            rows: target.terminal_rows,
+            cols: target.terminal_cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let pair = pty_system
+            .openpty(pty_size)
+            .map_err(|e| RuntimeError::SandboxSetupFailed(format!("PTY alloc: {e}")))?;
+
+        // Clone reader + writer BEFORE moving pair.master into Arc
+        let pty_reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| RuntimeError::SandboxSetupFailed(format!("PTY reader clone: {e}")))?;
+        let pty_writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| RuntimeError::SandboxSetupFailed(format!("PTY writer take: {e}")))?;
+
+        // Wrap master in Arc<Mutex<>> for resize (accessed from stdin thread)
+        let master = Arc::new(Mutex::new(pair.master));
+
+        // Build shell command with filtered environment
+        let mut cmd = CommandBuilder::new(&shell);
+        cmd.arg("-i");
+        let raw_env: Vec<(String, String)> = std::env::vars().collect();
+        for (k, v) in filter_terminal_env(raw_env, &target.terminal_env_filter) {
+            cmd.env(k, v);
+        }
+        cmd.env("TERM", "xterm-256color");
+
+        // Spawn shell on PTY slave, then drop slave handle
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|e| RuntimeError::SandboxSetupFailed(format!("shell spawn: {e}")))?;
+        drop(pair.slave);
+
+        // Get child PID now so it can be shared across threads without moving `child`
+        let child_pid: Option<u32> = child.process_id();
+
+        // Wrap child for blocking wait in spawn_blocking
+        let child = Arc::new(Mutex::new(child));
+
+        // ── Thread A: PTY master → stdout NDJSON (TerminalData events) ──────────
+        let session_id_a = session_id.clone();
+        let mut pty_reader = pty_reader;
+        let _reader_thread = std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match pty_reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let sanitized = sanitize_pty_output(&buf[..n]);
+                        NacelleEvent::TerminalData {
+                            session_id: session_id_a.clone(),
+                            data_b64: BASE64.encode(&sanitized),
+                        }
+                        .emit();
+                    }
+                }
+            }
+        });
+
+        // ── Thread B: stdin JSON commands → PTY master write / resize / signal ──
+        let session_id_b = session_id.clone();
+        let master_b = Arc::clone(&master);
+        let mut pty_writer = pty_writer;
+        let _stdin_thread = std::thread::spawn(move || {
+            let stdin = std::io::stdin();
+            let reader = stdin.lock();
+            for line in reader.lines() {
+                let Ok(line) = line else { break };
+                let Ok(cmd) = serde_json::from_str::<TerminalCommand>(&line) else {
+                    continue;
+                };
+                match cmd {
+                    TerminalCommand::TerminalInput {
+                        session_id,
+                        data_b64,
+                    } if session_id == session_id_b => {
+                        if let Ok(bytes) = BASE64.decode(&data_b64) {
+                            let _ = pty_writer.write_all(&bytes);
+                            let _ = pty_writer.flush();
+                        }
+                    }
+                    TerminalCommand::TerminalResize {
+                        session_id,
+                        cols,
+                        rows,
+                    } if session_id == session_id_b => {
+                        if let Ok(m) = master_b.lock() {
+                            let _ = m.resize(PtySize {
+                                rows,
+                                cols,
+                                pixel_width: 0,
+                                pixel_height: 0,
+                            });
+                        }
+                    }
+                    TerminalCommand::TerminalSignal {
+                        session_id,
+                        signal,
+                    } if session_id == session_id_b => {
+                        #[cfg(unix)]
+                        if let Some(pid) = child_pid {
+                            use nix::sys::signal::{kill, Signal};
+                            use nix::unistd::Pid;
+                            let sig = match signal.as_str() {
+                                "SIGINT" => Some(Signal::SIGINT),
+                                "SIGTERM" => Some(Signal::SIGTERM),
+                                "SIGHUP" => Some(Signal::SIGHUP),
+                                _ => None,
+                            };
+                            if let Some(sig) = sig {
+                                let _ = kill(Pid::from_raw(pid as i32), sig);
+                            }
+                        }
+                    }
+                    _ => {} // wrong session_id or unrecognised variant
+                }
+            }
+        });
+
+        // Wait for shell to exit (blocking; run in spawn_blocking to not block Tokio)
+        let child_wait = Arc::clone(&child);
+        let exit_status = tokio::task::spawn_blocking(move || {
+            child_wait.lock().ok().and_then(|mut c| c.wait().ok())
+        })
+        .await
+        .ok()
+        .flatten();
+
+        let exit_code = exit_status.map(|s| s.exit_code() as i32);
+
+        NacelleEvent::TerminalExited {
+            session_id,
+            exit_code,
+        }
+        .emit();
+
+        Ok(LaunchResult {
+            pid: child_pid,
+            bundle_path: None,
+            log_path: None,
+            port: None,
+        })
+    }
 }
 
 fn canonical_supported_languages() -> Vec<String> {
@@ -564,6 +753,7 @@ impl Runtime for SourceRuntime {
 
         match mode {
             SourceRuntimeMode::Native => self.launch_native(&request, target).await,
+            SourceRuntimeMode::Interactive => self.launch_interactive(&request, target).await,
         }
     }
 

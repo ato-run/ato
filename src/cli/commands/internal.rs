@@ -132,14 +132,37 @@ pub struct Envelope {
     pub spec_version: String,
 }
 
+/// Terminal configuration for interactive PTY sessions
+#[derive(Debug, Deserialize, Clone)]
+pub struct TerminalConfig {
+    /// Initial terminal columns
+    #[serde(default = "default_cols")]
+    pub cols: u16,
+    /// Initial terminal rows
+    #[serde(default = "default_rows")]
+    pub rows: u16,
+    /// Shell executable path; validated against allowlist
+    pub shell: Option<String>,
+    /// Environment variable filter mode: "safe" | "minimal" | "passthrough"
+    #[serde(default = "default_env_filter")]
+    pub env_filter: String,
+}
+
+fn default_cols() -> u16 { 80 }
+fn default_rows() -> u16 { 24 }
+fn default_env_filter() -> String { "safe".to_string() }
+
 /// Request envelope for exec command
 #[derive(Debug, Deserialize)]
 pub struct ExecEnvelope {
     pub spec_version: String,
     pub workload: WorkloadSpec,
+    /// When true, nacelle spawns the workload in an interactive PTY session
     #[serde(default)]
-    #[allow(dead_code)]
     pub interactive: bool,
+    /// Terminal configuration (only meaningful when interactive = true)
+    #[serde(default)]
+    pub terminal: Option<TerminalConfig>,
     /// Environment variables to pass to the workload
     #[serde(default)]
     pub env: Option<Vec<(String, String)>>,
@@ -1020,16 +1043,22 @@ fn parse_exec_request(raw: &str) -> Result<ParsedExecRequest> {
 async fn handle_exec_v2(envelope: ExecEnvelopeV2) -> Result<()> {
     validate_spec_version(&envelope.spec_version).map_err(anyhow::Error::msg)?;
     let prepared = prepare_v2_launch(envelope)?;
-    execute_prepared_launch(prepared).await
+    execute_prepared_launch(prepared, false, None).await
 }
 
 async fn handle_exec_v1(envelope: ExecEnvelope) -> Result<()> {
     validate_spec_version(&envelope.spec_version).map_err(anyhow::Error::msg)?;
+    let interactive = envelope.interactive;
+    let terminal = envelope.terminal.clone();
     let prepared = prepare_v1_launch(envelope)?;
-    execute_prepared_launch(prepared).await
+    execute_prepared_launch(prepared, interactive, terminal).await
 }
 
-async fn execute_prepared_launch(prepared: EnvironmentWorkspace) -> Result<()> {
+async fn execute_prepared_launch(
+    prepared: EnvironmentWorkspace,
+    interactive: bool,
+    terminal: Option<TerminalConfig>,
+) -> Result<()> {
     info!("Received exec request for run {}", prepared.run_id);
 
     let manifest_content = fs::read_to_string(&prepared.manifest_path).with_context(|| {
@@ -1052,6 +1081,18 @@ async fn execute_prepared_launch(prepared: EnvironmentWorkspace) -> Result<()> {
     let is_dev_mode =
         !isolation_policy.sandbox_enabled || std::env::var("NACELLE_DEV_MODE").is_ok();
 
+    let (term_cols, term_rows, term_shell, term_env_filter) = terminal
+        .as_ref()
+        .map(|t| {
+            (
+                t.cols,
+                t.rows,
+                t.shell.clone(),
+                t.env_filter.clone(),
+            )
+        })
+        .unwrap_or((80, 24, None, "safe".to_string()));
+
     let source_target = SourceTarget {
         language: resolution.language.unwrap_or_else(|| "generic".to_string()),
         version: manifest
@@ -1068,6 +1109,11 @@ async fn execute_prepared_launch(prepared: EnvironmentWorkspace) -> Result<()> {
         isolation: Some(isolation_policy),
         ipc_socket_paths: prepared.ipc_socket_paths.clone(),
         injected_mounts: prepared.injected_mounts.clone(),
+        interactive,
+        terminal_cols: term_cols,
+        terminal_rows: term_rows,
+        terminal_shell: term_shell,
+        terminal_env_filter: term_env_filter,
     };
 
     let config: SourceRuntimeConfig = prepared.runtime_config(is_dev_mode);
