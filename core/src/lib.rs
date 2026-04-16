@@ -34,6 +34,7 @@ pub mod runner;
 pub mod runtime;
 pub mod schema_registry;
 pub mod security;
+pub mod share;
 pub mod signing;
 pub mod smoke;
 pub mod trust_store;
