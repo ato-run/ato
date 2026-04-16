@@ -2034,8 +2034,9 @@ pub fn spawn_cli_session(
 /// - `\x04` (Ctrl-D) on an empty line: close the session.
 pub fn spawn_ato_run_repl(session_id: String, _cols: u16, _rows: u16) -> Result<TerminalProcess> {
     use crate::egress_policy::{EgressPolicy, HostPattern};
+    use crate::egress_proxy::{DenyEvent, EgressProxy, EgressProxyHandle};
     use std::io::BufReader;
-    use std::sync::{Arc, Mutex as StdMutex};
+    use std::sync::{mpsc::channel as std_channel, Arc, Mutex as StdMutex};
 
     let ato_bin =
         resolve_ato_binary().context("cannot resolve ato binary for ato://cli (ato run REPL)")?;
@@ -2046,11 +2047,27 @@ pub fn spawn_ato_run_repl(session_id: String, _cols: u16, _rows: u16) -> Result<
 
     let sid = session_id.clone();
 
-    // Session-only egress allowlist. Phase 1: in-memory only, no enforcement
-    // yet — the meta-commands are visible in `.egress` output and future
-    // phases will push this into the sidecar proxy / nacelle sandbox.
+    // Session-only egress allowlist. Localhost is always in `default_allow`;
+    // `.allow <pat>` mutates `session_allow` which dies with the REPL.
     let egress_policy: Arc<StdMutex<EgressPolicy>> =
         Arc::new(StdMutex::new(EgressPolicy::localhost_only()));
+
+    // Start the SOCKS5 gate. Every child spawned below will have its
+    // HTTP(S)_PROXY / ALL_PROXY pointed here. Deny events surface via
+    // `deny_rx` and are injected into the REPL output stream.
+    let (deny_tx, deny_rx) = std_channel::<DenyEvent>();
+    let egress_proxy: Option<EgressProxyHandle> =
+        match EgressProxy::spawn(egress_policy.clone(), Some(deny_tx)) {
+            Ok(h) => {
+                info!(session_id = %sid, addr=%h.addr(), "ato-run REPL: egress proxy listening");
+                Some(h)
+            }
+            Err(e) => {
+                warn!(session_id = %sid, error=%e, "ato-run REPL: egress proxy failed to start — egress will not be gated");
+                None
+            }
+        };
+    let socks5_url = egress_proxy.as_ref().map(|h| h.http_url());
 
     // Send helper: base64-encode and push to xterm.js.
     fn send(tx: &Sender<String>, bytes: &[u8]) -> bool {
@@ -2059,6 +2076,10 @@ pub fn spawn_ato_run_repl(session_id: String, _cols: u16, _rows: u16) -> Result<
     }
 
     std::thread::spawn(move || {
+        // Keep the egress proxy alive for the duration of this REPL
+        // session. Dropping the handle on thread exit stops the listener.
+        let _egress_proxy_guard = egress_proxy;
+
         // Track the currently-running `ato run` child so Ctrl-C can interrupt it.
         let running_child: Arc<StdMutex<Option<std::process::Child>>> =
             Arc::new(StdMutex::new(None));
@@ -2280,6 +2301,22 @@ pub fn spawn_ato_run_repl(session_id: String, _cols: u16, _rows: u16) -> Result<
                             .stdout(Stdio::piped())
                             .stderr(Stdio::piped());
 
+                        // Route all child egress through the session's SOCKS5
+                        // gate so the allowlist is actually enforced. Use
+                        // `socks5h://` so the proxy receives the hostname
+                        // (policy decisions operate on names, not IPs).
+                        if let Some(ref url) = socks5_url {
+                            proc_cmd
+                                .env("ALL_PROXY", url)
+                                .env("all_proxy", url)
+                                .env("HTTPS_PROXY", url)
+                                .env("https_proxy", url)
+                                .env("HTTP_PROXY", url)
+                                .env("http_proxy", url)
+                                .env("NO_PROXY", "localhost,127.0.0.1,::1")
+                                .env("no_proxy", "localhost,127.0.0.1,::1");
+                        }
+
                         let spawned = proc_cmd.spawn();
                         let mut child = match spawned {
                             Ok(c) => c,
@@ -2375,6 +2412,16 @@ pub fn spawn_ato_run_repl(session_id: String, _cols: u16, _rows: u16) -> Result<
                                         }
                                     }
                                 }
+                            }
+
+                            // Drain any egress-deny events and inline a hint
+                            // so the user knows why a connection failed.
+                            while let Ok(ev) = deny_rx.try_recv() {
+                                let msg = format!(
+                                    "\r\n\x1b[33m⚠ egress blocked: {}:{}\x1b[0m  \x1b[90m(type `.allow {}` to permit this session)\x1b[0m\r\n",
+                                    ev.host, ev.port, ev.host
+                                );
+                                let _ = send(&output_tx, msg.as_bytes());
                             }
                             std::thread::sleep(std::time::Duration::from_millis(20));
                         };
