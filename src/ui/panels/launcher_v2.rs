@@ -181,19 +181,16 @@ fn render_primary_actions(state: &AppState) -> impl IntoElement {
         }])
         .child(panel_header("LAUNCHER", "Pinned actions"))
         .child(panel_divider())
-        .children(
-            launcher_action_specs(state)
-                .into_iter()
-                .enumerate()
-                .map(|(index, (action, title, detail))| {
-                    let row = action_row(action, title, detail);
-                    if index == 0 {
-                        row
-                    } else {
-                        div().child(panel_divider()).child(row).into_any_element()
-                    }
-                }),
-        )
+        .children(launcher_action_specs(state).into_iter().enumerate().map(
+            |(index, (action, title, detail))| {
+                let row = action_row(action, title, detail);
+                if index == 0 {
+                    row
+                } else {
+                    div().child(panel_divider()).child(row).into_any_element()
+                }
+            },
+        ))
 }
 
 fn render_status_card(state: &AppState) -> impl IntoElement {

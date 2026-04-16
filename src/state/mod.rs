@@ -11,6 +11,7 @@ use tracing::{debug, info};
 use url::{form_urlencoded, Url};
 
 use crate::bridge::ShellEvent;
+use crate::orchestrator::{register_pending_cli_command, CliLaunchSpec};
 
 pub type WorkspaceId = usize;
 pub type TaskSetId = usize;
@@ -85,12 +86,24 @@ impl CapabilityGrant {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GuestRoute {
-    Capsule { session: String, entry_path: String },
+    Capsule {
+        session: String,
+        entry_path: String,
+    },
     ExternalUrl(Url),
-    CapsuleHandle { handle: String, label: String },
-    CapsuleUrl { handle: String, label: String, url: Url },
+    CapsuleHandle {
+        handle: String,
+        label: String,
+    },
+    CapsuleUrl {
+        handle: String,
+        label: String,
+        url: Url,
+    },
     /// Interactive PTY terminal session served via terminal:// custom protocol
-    Terminal { session_id: String },
+    Terminal {
+        session_id: String,
+    },
 }
 
 impl GuestRoute {
@@ -993,7 +1006,11 @@ impl AppState {
                         handle: normalized.clone(),
                         label: format!("share:{share_id}"),
                     },
-                    vec![CapabilityGrant::ReadFile, CapabilityGrant::WorkspaceInfo],
+                    vec![
+                        CapabilityGrant::ReadFile,
+                        CapabilityGrant::WorkspaceInfo,
+                        CapabilityGrant::Automation,
+                    ],
                     "tauri".to_string(),
                     Some("share".to_string()),
                     Some("untrusted".to_string()),
@@ -1001,82 +1018,80 @@ impl AppState {
                     WebSessionState::Resolving,
                 )
             } else {
-            match classify_surface_input(HandleInput {
-                raw: normalized.clone(),
-                surface: CapsuleInputSurface::DesktopOmnibar,
-            }) {
-                Ok(CapsuleSurfaceInput::Capsule { canonical }) => {
-                    let label = canonical.display_string();
-                    (
-                        GuestRoute::CapsuleHandle {
-                            handle: label.clone(),
-                            label,
-                        },
-                        vec![CapabilityGrant::ReadFile, CapabilityGrant::WorkspaceInfo],
-                        route_profile_for_source(canonical.source_label()).to_string(),
-                        Some(canonical.source_label().to_string()),
-                        Some(if canonical.source_label() == "local" {
-                            "local".to_string()
-                        } else {
-                            "untrusted".to_string()
-                        }),
-                        true,
-                        WebSessionState::Resolving,
-                    )
-                }
-                Ok(CapsuleSurfaceInput::HostRoute { route }) => {
-                    self.push_activity(
-                        ActivityTone::Info,
-                        format!(
-                            "Host route {} is reserved for desktop callbacks",
-                            route.namespace
-                        ),
-                    );
-                    return;
-                }
-                Ok(CapsuleSurfaceInput::WebUrl { url }) => {
-                    let Ok(url) = Url::parse(&url) else {
-                        self.push_activity(
-                            ActivityTone::Error,
-                            format!("Unable to navigate to invalid URL: {input}"),
-                        );
+                match classify_surface_input(HandleInput {
+                    raw: normalized.clone(),
+                    surface: CapsuleInputSurface::DesktopOmnibar,
+                }) {
+                    Ok(CapsuleSurfaceInput::Capsule { canonical }) => {
+                        let label = canonical.display_string();
+                        (
+                            GuestRoute::CapsuleHandle {
+                                handle: label.clone(),
+                                label,
+                            },
+                            vec![CapabilityGrant::ReadFile, CapabilityGrant::WorkspaceInfo],
+                            route_profile_for_source(canonical.source_label()).to_string(),
+                            Some(canonical.source_label().to_string()),
+                            Some(if canonical.source_label() == "local" {
+                                "local".to_string()
+                            } else {
+                                "untrusted".to_string()
+                            }),
+                            true,
+                            WebSessionState::Resolving,
+                        )
+                    }
+                    Ok(CapsuleSurfaceInput::HostRoute { route: _ }) => {
+                        // Route ato:// URLs entered via the omnibar / MCP
+                        // browser_navigate through the same deep-link dispatcher
+                        // used for OS-level URL handlers. This enables, e.g.,
+                        // `ato://cli` to open the interactive CLI panel.
+                        self.handle_host_route(&normalized);
                         return;
-                    };
-                    (
-                        GuestRoute::ExternalUrl(url),
-                        vec![CapabilityGrant::OpenExternal],
-                        "electron".to_string(),
-                        Some("web".to_string()),
-                        None,
-                        false,
-                        WebSessionState::Launching,
-                    )
-                }
-                Ok(CapsuleSurfaceInput::SearchQuery { query }) => {
-                    let fallback = Self::search_fallback(&query);
-                    let Ok(url) = Url::parse(&fallback) else {
-                        self.push_activity(
-                            ActivityTone::Error,
-                            format!("Unable to navigate to invalid URL: {input}"),
-                        );
+                    }
+                    Ok(CapsuleSurfaceInput::WebUrl { url }) => {
+                        let Ok(url) = Url::parse(&url) else {
+                            self.push_activity(
+                                ActivityTone::Error,
+                                format!("Unable to navigate to invalid URL: {input}"),
+                            );
+                            return;
+                        };
+                        (
+                            GuestRoute::ExternalUrl(url),
+                            vec![CapabilityGrant::OpenExternal],
+                            "electron".to_string(),
+                            Some("web".to_string()),
+                            None,
+                            false,
+                            WebSessionState::Launching,
+                        )
+                    }
+                    Ok(CapsuleSurfaceInput::SearchQuery { query }) => {
+                        let fallback = Self::search_fallback(&query);
+                        let Ok(url) = Url::parse(&fallback) else {
+                            self.push_activity(
+                                ActivityTone::Error,
+                                format!("Unable to navigate to invalid URL: {input}"),
+                            );
+                            return;
+                        };
+                        (
+                            GuestRoute::ExternalUrl(url),
+                            vec![CapabilityGrant::OpenExternal],
+                            "electron".to_string(),
+                            Some("web".to_string()),
+                            None,
+                            false,
+                            WebSessionState::Launching,
+                        )
+                    }
+                    Err(error) => {
+                        self.push_activity(ActivityTone::Error, error.to_string());
                         return;
-                    };
-                    (
-                        GuestRoute::ExternalUrl(url),
-                        vec![CapabilityGrant::OpenExternal],
-                        "electron".to_string(),
-                        Some("web".to_string()),
-                        None,
-                        false,
-                        WebSessionState::Launching,
-                    )
+                    }
                 }
-                Err(error) => {
-                    self.push_activity(ActivityTone::Error, error.to_string());
-                    return;
-                }
-            }
-        }; // end if is_share_url else match
+            }; // end if is_share_url else match
         let label = next_route.to_string();
         debug!(route = %label, "navigate_to_url resolved route");
         let partition_id = sanitize(&label);
@@ -1160,7 +1175,10 @@ impl AppState {
     }
 
     pub fn begin_ato_login(&mut self, target: PendingPostLoginTarget) {
-        let Some(pane_id) = self.active_task().and_then(|task| task.focused_pane()).map(|pane| pane.id)
+        let Some(pane_id) = self
+            .active_task()
+            .and_then(|task| task.focused_pane())
+            .map(|pane| pane.id)
         else {
             self.push_activity(
                 ActivityTone::Error,
@@ -1227,6 +1245,21 @@ impl AppState {
             return;
         }
 
+        // ato://cli[?cmd=<shell|ato|...>]
+        // Opens a bare interactive terminal panel. By default every input line
+        // is routed through `ato run` so dependencies are auto-resolved by the
+        // CLI. `?cmd=bash` spawns a raw shell under nacelle; `?cmd=ato` runs
+        // the `ato` binary directly.
+        if raw_route.starts_with("ato://cli") {
+            let cmd = Url::parse(raw_route).ok().and_then(|url| {
+                url.query_pairs()
+                    .find(|(k, _)| k == "cmd")
+                    .map(|(_, v)| v.into_owned())
+            });
+            self.open_cli_panel(cmd);
+            return;
+        }
+
         let Ok(route) = parse_host_route(raw_route) else {
             self.push_activity(
                 ActivityTone::Warning,
@@ -1235,10 +1268,15 @@ impl AppState {
             return;
         };
 
-        if route.namespace != "auth" || route.path_segments.first().map(String::as_str) != Some("callback") {
+        if route.namespace != "auth"
+            || route.path_segments.first().map(String::as_str) != Some("callback")
+        {
             self.push_activity(
                 ActivityTone::Info,
-                format!("Host route {} is reserved for desktop callbacks", route.namespace),
+                format!(
+                    "Host route {} is reserved for desktop callbacks",
+                    route.namespace
+                ),
             );
             return;
         }
@@ -1369,8 +1407,13 @@ impl AppState {
     /// Remove the GPUI DevConsole companion pane if it is present, without opening a new one.
     pub fn dismiss_dev_console(&mut self) {
         if let Some(task) = self.active_task_mut() {
-            if task.panes.iter().any(|p| matches!(p.surface, PaneSurface::DevConsole)) {
-                task.panes.retain(|p| !matches!(p.surface, PaneSurface::DevConsole));
+            if task
+                .panes
+                .iter()
+                .any(|p| matches!(p.surface, PaneSurface::DevConsole))
+            {
+                task.panes
+                    .retain(|p| !matches!(p.surface, PaneSurface::DevConsole));
                 task.pane_tree = PaneTree::Leaf(task.focused_pane);
             }
         }
@@ -1734,7 +1777,7 @@ impl AppState {
                 },
                 partition_id: terminal.session_id.clone(),
                 profile: "terminal".to_string(),
-                capabilities: vec![CapabilityGrant::Terminal],
+                capabilities: vec![CapabilityGrant::Terminal, CapabilityGrant::Automation],
                 session: WebSessionState::Launching,
                 source_label: None,
                 trust_state: None,
@@ -2148,44 +2191,42 @@ impl AppState {
         invoke_url: Option<String>,
         served_by: Option<String>,
     ) {
-        self.update_pane(pane_id, |pane| {
-            match &mut pane.surface {
-                PaneSurface::Web(web) => {
-                    web.canonical_handle = canonical_handle.clone();
-                    web.source_label = source_label.clone();
-                    web.trust_state = trust_state.clone();
-                    web.restricted = restricted;
-                    web.snapshot_label = snapshot_label.clone();
-                    web.session_id = session_id.clone();
-                    web.adapter = adapter.clone();
-                    web.manifest_path = manifest_path.clone();
-                    web.runtime_label = runtime_label.clone();
-                    web.display_strategy = display_strategy.clone();
-                    web.log_path = log_path.clone();
-                    web.local_url = local_url.clone();
-                    web.healthcheck_url = healthcheck_url.clone();
-                    web.invoke_url = invoke_url.clone();
-                    web.served_by = served_by.clone();
-                }
-                PaneSurface::CapsuleStatus(capsule) => {
-                    capsule.canonical_handle = canonical_handle.clone();
-                    capsule.source_label = source_label.clone();
-                    capsule.trust_state = trust_state.clone();
-                    capsule.restricted = restricted;
-                    capsule.snapshot_label = snapshot_label.clone();
-                    capsule.session_id = session_id.clone();
-                    capsule.adapter = adapter.clone();
-                    capsule.manifest_path = manifest_path.clone();
-                    capsule.runtime_label = runtime_label.clone();
-                    capsule.display_strategy = display_strategy.clone();
-                    capsule.log_path = log_path.clone();
-                    capsule.local_url = local_url.clone();
-                    capsule.healthcheck_url = healthcheck_url.clone();
-                    capsule.invoke_url = invoke_url.clone();
-                    capsule.served_by = served_by.clone();
-                }
-                _ => {}
+        self.update_pane(pane_id, |pane| match &mut pane.surface {
+            PaneSurface::Web(web) => {
+                web.canonical_handle = canonical_handle.clone();
+                web.source_label = source_label.clone();
+                web.trust_state = trust_state.clone();
+                web.restricted = restricted;
+                web.snapshot_label = snapshot_label.clone();
+                web.session_id = session_id.clone();
+                web.adapter = adapter.clone();
+                web.manifest_path = manifest_path.clone();
+                web.runtime_label = runtime_label.clone();
+                web.display_strategy = display_strategy.clone();
+                web.log_path = log_path.clone();
+                web.local_url = local_url.clone();
+                web.healthcheck_url = healthcheck_url.clone();
+                web.invoke_url = invoke_url.clone();
+                web.served_by = served_by.clone();
             }
+            PaneSurface::CapsuleStatus(capsule) => {
+                capsule.canonical_handle = canonical_handle.clone();
+                capsule.source_label = source_label.clone();
+                capsule.trust_state = trust_state.clone();
+                capsule.restricted = restricted;
+                capsule.snapshot_label = snapshot_label.clone();
+                capsule.session_id = session_id.clone();
+                capsule.adapter = adapter.clone();
+                capsule.manifest_path = manifest_path.clone();
+                capsule.runtime_label = runtime_label.clone();
+                capsule.display_strategy = display_strategy.clone();
+                capsule.log_path = log_path.clone();
+                capsule.local_url = local_url.clone();
+                capsule.healthcheck_url = healthcheck_url.clone();
+                capsule.invoke_url = invoke_url.clone();
+                capsule.served_by = served_by.clone();
+            }
+            _ => {}
         });
     }
 
@@ -2233,6 +2274,42 @@ impl AppState {
             });
         });
         self.command_bar_text = route.to_string();
+    }
+
+    /// Open a bare CLI panel in a new tab.
+    ///
+    /// `cmd` maps to a `CliLaunchSpec`:
+    /// - `None` or `"ato-run"` → `CliLaunchSpec::AtoRunRepl` (the default:
+    ///   every input line is executed as `ato run -- <line>`).
+    /// - `"ato"` → `CliLaunchSpec::RawAto` (runs the `ato` binary directly).
+    /// - any other value → `CliLaunchSpec::RawShell(value)` (interactive shell
+    ///   under nacelle, e.g. `bash` / `zsh` / `/bin/sh`).
+    pub fn open_cli_panel(&mut self, cmd: Option<String>) {
+        let spec = match cmd.as_deref().map(str::trim) {
+            None | Some("") | Some("ato-run") => CliLaunchSpec::AtoRunRepl,
+            Some("ato") => CliLaunchSpec::RawAto,
+            Some(other) => CliLaunchSpec::RawShell(other.to_string()),
+        };
+        let title = match &spec {
+            CliLaunchSpec::AtoRunRepl => "ato CLI".to_string(),
+            CliLaunchSpec::RawShell(shell) => format!("CLI ({shell})"),
+            CliLaunchSpec::RawAto => "ato".to_string(),
+        };
+
+        // `create_new_tab` uses `self.next_pane_id` for the new pane, then
+        // increments it. Capture it before the call so we can target the new
+        // pane without searching for it afterwards.
+        let new_pane_id = self.next_pane_id;
+        self.create_new_tab();
+
+        let session_id = format!("cli-{}-{}", new_pane_id, uuid_v4_simple());
+        register_pending_cli_command(session_id.clone(), spec.clone());
+
+        self.push_activity(
+            ActivityTone::Info,
+            format!("Opening {title} panel from ato://cli"),
+        );
+        self.mount_terminal_stream_pane(new_pane_id, session_id, title);
     }
 
     /// Switch pane to a `Terminal` surface for a `terminal_stream` capsule session.
@@ -2365,8 +2442,9 @@ impl AppState {
             .find(|session| session.originating_pane_id == pane_id)
             .is_some_and(|session| matches!(session.auth_mode, AuthMode::FirstPartyNative));
         self.update_pane(pane_id, |pane| {
-            if let PaneSurface::AuthHandoff { original_surface, .. } =
-                std::mem::replace(&mut pane.surface, PaneSurface::Launcher)
+            if let PaneSurface::AuthHandoff {
+                original_surface, ..
+            } = std::mem::replace(&mut pane.surface, PaneSurface::Launcher)
             {
                 pane.surface = *original_surface;
             }
@@ -2393,8 +2471,9 @@ impl AppState {
             .find(|session| session.originating_pane_id == pane_id)
             .is_some_and(|session| matches!(session.auth_mode, AuthMode::FirstPartyNative));
         self.update_pane(pane_id, |pane| {
-            if let PaneSurface::AuthHandoff { original_surface, .. } =
-                std::mem::replace(&mut pane.surface, PaneSurface::Launcher)
+            if let PaneSurface::AuthHandoff {
+                original_surface, ..
+            } = std::mem::replace(&mut pane.surface, PaneSurface::Launcher)
             {
                 pane.surface = *original_surface;
             }
@@ -2432,7 +2511,8 @@ impl AppState {
                 self.navigate_to_url(&cloud_dock_url(target));
             }
             None => {
-                self.command_bar_text = cloud_dock_url(self.desktop_auth.publisher_handle.as_deref());
+                self.command_bar_text =
+                    cloud_dock_url(self.desktop_auth.publisher_handle.as_deref());
             }
         }
         self.push_activity(ActivityTone::Info, "ato.run sign-in completed");
@@ -2565,9 +2645,7 @@ fn sidebar_icon_for_task(task: &TaskSet) -> SidebarTaskIconSpec {
         | PaneSurface::Inspector
         | PaneSurface::Launcher
         | PaneSurface::AuthHandoff { .. }
-        | PaneSurface::Terminal(_) => {
-            SidebarTaskIconSpec::Monogram(short_label(&task.title))
-        }
+        | PaneSurface::Terminal(_) => SidebarTaskIconSpec::Monogram(short_label(&task.title)),
     }
 }
 
@@ -2982,7 +3060,10 @@ mod tests {
             .and_then(|task| task.focused_pane())
             .expect("pane");
         assert!(matches!(pane.surface, PaneSurface::AuthHandoff { .. }));
-        assert_eq!(state.desktop_auth.status, DesktopAuthStatus::AwaitingBrowser);
+        assert_eq!(
+            state.desktop_auth.status,
+            DesktopAuthStatus::AwaitingBrowser
+        );
         assert_eq!(
             state.pending_post_login_target,
             Some(PendingPostLoginTarget::CloudDock)
@@ -3118,9 +3199,7 @@ mod tests {
     fn handle_host_route_open_deep_link_with_share_url_routes_as_resolving() {
         let mut state = AppState::demo();
 
-        state.handle_host_route(
-            "ato://open?handle=https%3A%2F%2Fato.run%2Fs%2Fabc123",
-        );
+        state.handle_host_route("ato://open?handle=https%3A%2F%2Fato.run%2Fs%2Fabc123");
 
         let pane = state.active_web_pane().expect("pane");
         assert_eq!(pane.session, WebSessionState::Resolving);
@@ -3137,10 +3216,104 @@ mod tests {
         // No new tab created; activity log should note the missing param
         let workspace = state.active_workspace().expect("workspace");
         assert_eq!(workspace.tasks.len(), initial_task_count);
+        assert!(state.activity.iter().any(|e| e.message.contains("handle")));
+    }
+
+    #[test]
+    fn handle_host_route_ato_cli_opens_new_terminal_tab_with_ato_run_repl() {
+        let mut state = AppState::demo();
+        let initial_task_count = state.active_workspace().expect("workspace").tasks.len();
+
+        state.handle_host_route("ato://cli");
+
+        let workspace = state.active_workspace().expect("workspace");
+        assert_eq!(
+            workspace.tasks.len(),
+            initial_task_count + 1,
+            "ato://cli should open a new tab"
+        );
+
+        let task = workspace.tasks.last().expect("newly opened task");
+        let pane = task
+            .panes
+            .iter()
+            .find(|p| p.id == task.focused_pane)
+            .expect("focused pane");
+
+        // The focused pane should carry a Terminal surface.
+        let session_id = match &pane.surface {
+            PaneSurface::Terminal(term) => term.session_id.clone(),
+            other => panic!("expected Terminal surface, got {other:?}"),
+        };
+        assert!(
+            session_id.starts_with("cli-"),
+            "expected cli- prefixed session id, got {session_id}"
+        );
+
+        // The pending CLI spec must be registered for the webview render path.
+        let spec = crate::orchestrator::take_pending_cli_command(&session_id)
+            .expect("pending CLI spec must be registered before pane is mounted");
+        assert!(matches!(
+            spec,
+            crate::orchestrator::CliLaunchSpec::AtoRunRepl
+        ));
+
         assert!(state
             .activity
             .iter()
-            .any(|e| e.message.contains("handle")));
+            .any(|e| e.message.contains("ato://cli")));
+    }
+
+    #[test]
+    fn handle_host_route_ato_cli_with_cmd_bash_uses_raw_shell() {
+        let mut state = AppState::demo();
+
+        state.handle_host_route("ato://cli?cmd=bash");
+
+        let workspace = state.active_workspace().expect("workspace");
+        let task = workspace.tasks.last().expect("task");
+        let pane = task
+            .panes
+            .iter()
+            .find(|p| p.id == task.focused_pane)
+            .expect("focused pane");
+
+        let session_id = match &pane.surface {
+            PaneSurface::Terminal(term) => term.session_id.clone(),
+            other => panic!("expected Terminal surface, got {other:?}"),
+        };
+
+        let spec =
+            crate::orchestrator::take_pending_cli_command(&session_id).expect("pending CLI spec");
+        match spec {
+            crate::orchestrator::CliLaunchSpec::RawShell(shell) => {
+                assert_eq!(shell, "bash")
+            }
+            other => panic!("expected RawShell(bash), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_host_route_ato_cli_with_cmd_ato_uses_raw_ato() {
+        let mut state = AppState::demo();
+        state.handle_host_route("ato://cli?cmd=ato");
+
+        let workspace = state.active_workspace().expect("workspace");
+        let task = workspace.tasks.last().expect("task");
+        let pane = task
+            .panes
+            .iter()
+            .find(|p| p.id == task.focused_pane)
+            .expect("focused pane");
+
+        let session_id = match &pane.surface {
+            PaneSurface::Terminal(term) => term.session_id.clone(),
+            other => panic!("expected Terminal surface, got {other:?}"),
+        };
+
+        let spec =
+            crate::orchestrator::take_pending_cli_command(&session_id).expect("pending CLI spec");
+        assert!(matches!(spec, crate::orchestrator::CliLaunchSpec::RawAto));
     }
 
     #[test]

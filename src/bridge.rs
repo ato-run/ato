@@ -72,15 +72,25 @@ pub enum GuestBridgeResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case")]
 pub enum ShellEvent {
-    SessionReady { pane_id: usize },
+    SessionReady {
+        pane_id: usize,
+    },
     PermissionDenied {
         pane_id: usize,
         capability: String,
         command: Option<String>,
     },
-    SessionClosed { pane_id: usize },
-    UrlChanged { pane_id: usize, url: String },
-    TitleChanged { pane_id: usize, title: String },
+    SessionClosed {
+        pane_id: usize,
+    },
+    UrlChanged {
+        pane_id: usize,
+        url: String,
+    },
+    TitleChanged {
+        pane_id: usize,
+        title: String,
+    },
     GuestConsoleLog {
         pane_id: usize,
         level: String,
@@ -223,7 +233,10 @@ impl BridgeProxy {
                 }
             }
             // Terminal IPC messages require the "terminal" capability grant.
-            GuestBridgeRequest::TerminalInput { session_id, data_b64 } => {
+            GuestBridgeRequest::TerminalInput {
+                session_id,
+                data_b64,
+            } => {
                 if !capability_allowed(allowlist, "terminal") {
                     self.log(
                         ActivityTone::Warning,
@@ -234,14 +247,21 @@ impl BridgeProxy {
                         message: "terminal capability is not granted".to_string(),
                     };
                 }
-                self.push_shell_event(ShellEvent::TerminalInput { session_id, data_b64 });
+                self.push_shell_event(ShellEvent::TerminalInput {
+                    session_id,
+                    data_b64,
+                });
                 GuestBridgeResponse::Ok {
                     request_id: None,
                     message: "terminal input forwarded".to_string(),
                     payload: Value::Null,
                 }
             }
-            GuestBridgeRequest::TerminalResize { session_id, cols, rows } => {
+            GuestBridgeRequest::TerminalResize {
+                session_id,
+                cols,
+                rows,
+            } => {
                 if !capability_allowed(allowlist, "terminal") {
                     self.log(
                         ActivityTone::Warning,
@@ -252,7 +272,11 @@ impl BridgeProxy {
                         message: "terminal capability is not granted".to_string(),
                     };
                 }
-                self.push_shell_event(ShellEvent::TerminalResize { session_id, cols, rows });
+                self.push_shell_event(ShellEvent::TerminalResize {
+                    session_id,
+                    cols,
+                    rows,
+                });
                 GuestBridgeResponse::Ok {
                     request_id: None,
                     message: "terminal resize forwarded".to_string(),

@@ -1,5 +1,5 @@
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -33,7 +33,12 @@ pub struct JsonRpcError {
 
 impl JsonRpcResponse {
     pub fn ok(id: Value, result: Value) -> Self {
-        Self { jsonrpc: "2.0", id, result: Some(result), error: None }
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result: Some(result),
+            error: None,
+        }
     }
 
     pub fn err(id: Value, code: i32, message: impl Into<String>) -> Self {
@@ -41,7 +46,10 @@ impl JsonRpcResponse {
             jsonrpc: "2.0",
             id,
             result: None,
-            error: Some(JsonRpcError { code, message: message.into() }),
+            error: Some(JsonRpcError {
+                code,
+                message: message.into(),
+            }),
         }
     }
 }
@@ -86,6 +94,9 @@ pub enum AutomationCommand {
     ListPanes,
     /// Focuses a pane by ID (makes it the active pane).
     FocusPane { pane_id: usize },
+    /// Opens a URL via the app-level omnibar (navigate_to_url).
+    /// Works even when no pane is currently active; creates a new pane.
+    OpenUrl { url: String },
 }
 
 // ── Pending request queue entry ──────────────────────────────────────────────
