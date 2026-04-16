@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
+use base64::Engine as _;
 use capsule_core::handle::{
     normalize_capsule_handle, CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor,
 };
@@ -166,7 +167,19 @@ struct StoredSessionRecord {
 /// Used by both the orchestrator and the state layer to intercept share URLs before
 /// `classify_surface_input` routes them as plain external web pages.
 pub fn is_share_url(s: &str) -> bool {
-    (s.starts_with("https://") || s.starts_with("http://")) && s.contains("/s/")
+    // Only match known ato.run domains and localhost dev server, followed by /s/<token>
+    let known_host = s.starts_with("https://ato.run/s/")
+        || s.starts_with("https://staging.ato.run/s/")
+        || s.starts_with("http://localhost:");
+    if !known_host {
+        return false;
+    }
+    // For localhost, still require /s/ path segment
+    if s.starts_with("http://localhost:") {
+        // e.g. http://localhost:8787/s/token
+        return s.contains("/s/");
+    }
+    true
 }
 
 pub fn resolve_and_start_capsule(handle: &str) -> Result<CapsuleLaunchSession> {
@@ -778,7 +791,6 @@ fn start_web_service_from_workspace(
         );
         let install_status = Command::new(pm)
             .arg("install")
-            .args(if pm == "pnpm" { &["--no-frozen-lockfile"][..] } else { &[][..] })
             .current_dir(&install_root)
             .status()
             .with_context(|| format!("failed to run `{pm} install` in {}", install_root.display()))?;
@@ -1232,6 +1244,10 @@ mod tests {
         assert!(!super::is_share_url("https://ato.run/dock"));
         assert!(!super::is_share_url("acme/chat"));
         assert!(!super::is_share_url(""));
+        // These should NOT match even though they contain /s/
+        assert!(!super::is_share_url("https://example.com/s/something"));
+        assert!(!super::is_share_url("https://evil.ato.run/s/inject"));
+        assert!(!super::is_share_url("https://ato.run.evil.com/s/inject"));
     }
 
     // ────────────────────────────────────────────────────────────────────────
@@ -1524,10 +1540,9 @@ mod tests {
 
 // ── Terminal PTY session management ──────────────────────────────────────────
 
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
-/// A live PTY terminal session owned by `WebViewManager`.
+/// A live terminal session routed through nacelle, owned by `WebViewManager`.
 pub struct TerminalProcess {
     pub session_id: String,
     /// Send base64-encoded bytes to the PTY stdin.
@@ -1538,111 +1553,130 @@ pub struct TerminalProcess {
     pub output_rx: Receiver<String>,
 }
 
-/// Spawn a PTY session for `session_id` running `shell` at `cols`×`rows`.
-/// Background threads bridge PTY I/O to the returned channels.
+
+/// Spawn a terminal session routed through nacelle for a given `session_id`.
+///
+/// Routes: ato-desktop → nacelle (interactive:true, type:"shell") → PTY → /bin/zsh
+/// This ensures nacelle's security stack applies: shell allowlist, env filter,
+/// output sanitizer, Seatbelt/bwrap/Landlock.
+///
+/// The ExecEnvelope is written to a temp file so nacelle's stdin remains free
+/// for TerminalCommand JSON messages (nacelle --input reads the whole file,
+/// then stdin is used for the command stream).
 pub fn spawn_terminal_session(
     session_id: String,
     shell: &str,
     cols: u16,
     rows: u16,
 ) -> Result<TerminalProcess> {
-    let pty_system = native_pty_system();
-    let pty_pair = pty_system
-        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-        .context("failed to open PTY pair")?;
+    // Locate nacelle binary
+    let nacelle_bin = std::env::var("NACELLE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("nacelle"));
 
-    let mut cmd = CommandBuilder::new(shell);
-    cmd.env("TERM", "xterm-256color");
-    cmd.env_remove("TERM_PROGRAM"); // avoid inheriting desktop env
+    // Write ExecEnvelope to a temp file so stdin stays free for TerminalCommands
+    let tmp_dir = PathBuf::from(".tmp");
+    std::fs::create_dir_all(&tmp_dir).ok();
+    let envelope_path = tmp_dir.join(format!("terminal-{session_id}.json"));
+    let envelope_json = serde_json::json!({
+        "spec_version": "1.0",
+        "workload": { "type": "shell" },
+        "interactive": true,
+        "terminal": {
+            "cols": cols,
+            "rows": rows,
+            "shell": shell,
+            "env_filter": "safe"
+        }
+    });
+    std::fs::write(&envelope_path, envelope_json.to_string())
+        .with_context(|| format!("failed to write nacelle envelope to {}", envelope_path.display()))?;
 
-    let _child = pty_pair
-        .slave
-        .spawn_command(cmd)
-        .with_context(|| format!("failed to spawn shell '{shell}'"))?;
-    // slave is consumed by the child; drop it.
-    drop(pty_pair.slave);
+    // Spawn nacelle subprocess with stdin/stdout piped
+    let mut child = std::process::Command::new(&nacelle_bin)
+        .args(["internal", "--input", &envelope_path.to_string_lossy(), "exec"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .with_context(|| format!("failed to spawn nacelle at {}", nacelle_bin.display()))?;
+
+    let mut nacelle_stdin = child.stdin.take().context("nacelle stdin unavailable")?;
+    let nacelle_stdout = child.stdout.take().context("nacelle stdout unavailable")?;
 
     // Channels
     let (input_tx, input_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = channel();
     let (resize_tx, resize_rx): (Sender<(u16, u16)>, Receiver<(u16, u16)>) = channel();
     let (output_tx, output_rx): (Sender<String>, Receiver<String>) = channel();
 
-    // Wrap master in Arc<Mutex> for sharing between threads.
-    let master = std::sync::Arc::new(std::sync::Mutex::new(pty_pair.master));
+    let sid_a = session_id.clone();
+    let envelope_path_cleanup = envelope_path.clone();
 
-    // Thread A: PTY → output_tx (read PTY master output, base64-encode, send)
-    {
-        let master_clone = std::sync::Arc::clone(&master);
-        let output_tx_clone = output_tx.clone();
-        let sid = session_id.clone();
-        std::thread::spawn(move || {
-            let mut reader = {
-                let m = master_clone.lock().unwrap();
-                match m.try_clone_reader() {
-                    Ok(r) => r,
-                    Err(e) => {
-                        warn!(session_id = %sid, error = %e, "PTY reader clone failed");
-                        return;
-                    }
-                }
+    // Thread A: nacelle stdout NDJSON → output_tx (extract terminal_data.data_b64)
+    std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader};
+        let reader = BufReader::new(nacelle_stdout);
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
             };
-            let mut buf = [0u8; 4096];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let encoded = base64_encode(&buf[..n]);
-                        if output_tx_clone.send(encoded).is_err() {
+            match value.get("event").and_then(|e| e.as_str()) {
+                Some("terminal_data") => {
+                    if let Some(b64) = value.get("data_b64").and_then(|d| d.as_str()) {
+                        if output_tx.send(b64.to_string()).is_err() {
                             break;
                         }
                     }
-                    Err(_) => break,
                 }
-            }
-            info!(session_id = %sid, "PTY reader thread exited");
-        });
-    }
-
-    // Thread B: input_rx → PTY stdin
-    {
-        let master_clone = std::sync::Arc::clone(&master);
-        let sid = session_id.clone();
-        std::thread::spawn(move || {
-            let mut writer = {
-                let m = master_clone.lock().unwrap();
-                match m.take_writer() {
-                    Ok(w) => w,
-                    Err(e) => {
-                        warn!(session_id = %sid, error = %e, "PTY writer take failed");
-                        return;
-                    }
-                }
-            };
-            for data in input_rx {
-                use std::io::Write;
-                if writer.write_all(&data).is_err() {
+                Some("terminal_exited") => {
+                    let code = value.get("exit_code").and_then(|c| c.as_i64());
+                    info!(session_id = %sid_a, exit_code = ?code, "nacelle terminal session exited");
                     break;
                 }
+                _ => {}
             }
-            info!(session_id = %sid, "PTY writer thread exited");
-        });
-    }
+        }
+        // Clean up envelope temp file
+        std::fs::remove_file(&envelope_path_cleanup).ok();
+    });
 
-    // Thread C: resize_rx → PTY resize
-    {
-        let master_clone = std::sync::Arc::clone(&master);
-        let sid = session_id.clone();
-        std::thread::spawn(move || {
-            for (c, r) in resize_rx {
-                let m = master_clone.lock().unwrap();
-                if let Err(e) = m.resize(PtySize { rows: r, cols: c, pixel_width: 0, pixel_height: 0 }) {
-                    warn!(session_id = %sid, error = %e, "PTY resize failed");
+    let sid_b = session_id.clone();
+
+    // Thread B: input_rx + resize_rx → nacelle stdin (TerminalCommand JSON lines)
+    std::thread::spawn(move || {
+        use std::io::Write;
+        loop {
+            // Service input bytes
+            while let Ok(data) = input_rx.try_recv() {
+                let cmd = serde_json::json!({
+                    "type": "terminal_input",
+                    "session_id": sid_b,
+                    "data_b64": base64::engine::general_purpose::STANDARD.encode(&data)
+                });
+                if writeln!(nacelle_stdin, "{}", cmd).is_err() {
+                    return;
                 }
+                let _ = nacelle_stdin.flush();
             }
-        });
-    }
+            // Service resize requests
+            while let Ok((c, r)) = resize_rx.try_recv() {
+                let cmd = serde_json::json!({
+                    "type": "terminal_resize",
+                    "session_id": sid_b,
+                    "cols": c,
+                    "rows": r
+                });
+                if writeln!(nacelle_stdin, "{}", cmd).is_err() {
+                    return;
+                }
+                let _ = nacelle_stdin.flush();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    });
 
-    info!(session_id = %session_id, shell, cols, rows, "Terminal PTY session spawned");
+    info!(session_id = %session_id, shell, cols, rows, "Terminal session spawned via nacelle");
 
     Ok(TerminalProcess {
         session_id,
@@ -1650,44 +1684,4 @@ pub fn spawn_terminal_session(
         resize_tx,
         output_rx,
     })
-}
-
-/// Minimal base64 encoder (RFC 4648, no padding newlines).
-fn base64_encode(data: &[u8]) -> String {
-    use std::fmt::Write;
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
-    let mut i = 0;
-    while i + 2 < data.len() {
-        let b0 = data[i] as u32;
-        let b1 = data[i + 1] as u32;
-        let b2 = data[i + 2] as u32;
-        let _ = write!(out, "{}{}{}{}", 
-            TABLE[((b0 >> 2) & 0x3f) as usize] as char,
-            TABLE[(((b0 << 4) | (b1 >> 4)) & 0x3f) as usize] as char,
-            TABLE[(((b1 << 2) | (b2 >> 6)) & 0x3f) as usize] as char,
-            TABLE[(b2 & 0x3f) as usize] as char,
-        );
-        i += 3;
-    }
-    match data.len() - i {
-        1 => {
-            let b0 = data[i] as u32;
-            let _ = write!(out, "{}{}==",
-                TABLE[((b0 >> 2) & 0x3f) as usize] as char,
-                TABLE[((b0 << 4) & 0x3f) as usize] as char,
-            );
-        }
-        2 => {
-            let b0 = data[i] as u32;
-            let b1 = data[i + 1] as u32;
-            let _ = write!(out, "{}{}{}=",
-                TABLE[((b0 >> 2) & 0x3f) as usize] as char,
-                TABLE[(((b0 << 4) | (b1 >> 4)) & 0x3f) as usize] as char,
-                TABLE[((b1 << 2) & 0x3f) as usize] as char,
-            );
-        }
-        _ => {}
-    }
-    out
 }

@@ -222,8 +222,18 @@ impl BridgeProxy {
                     },
                 }
             }
-            // Terminal IPC messages are forwarded to the orchestrator via shell events.
+            // Terminal IPC messages require the "terminal" capability grant.
             GuestBridgeRequest::TerminalInput { session_id, data_b64 } => {
+                if !capability_allowed(allowlist, "terminal") {
+                    self.log(
+                        ActivityTone::Warning,
+                        format!("Denied TerminalInput: terminal capability not granted (session {session_id})"),
+                    );
+                    return GuestBridgeResponse::Denied {
+                        request_id: None,
+                        message: "terminal capability is not granted".to_string(),
+                    };
+                }
                 self.push_shell_event(ShellEvent::TerminalInput { session_id, data_b64 });
                 GuestBridgeResponse::Ok {
                     request_id: None,
@@ -232,6 +242,16 @@ impl BridgeProxy {
                 }
             }
             GuestBridgeRequest::TerminalResize { session_id, cols, rows } => {
+                if !capability_allowed(allowlist, "terminal") {
+                    self.log(
+                        ActivityTone::Warning,
+                        format!("Denied TerminalResize: terminal capability not granted (session {session_id})"),
+                    );
+                    return GuestBridgeResponse::Denied {
+                        request_id: None,
+                        message: "terminal capability is not granted".to_string(),
+                    };
+                }
                 self.push_shell_event(ShellEvent::TerminalResize { session_id, cols, rows });
                 GuestBridgeResponse::Ok {
                     request_id: None,
