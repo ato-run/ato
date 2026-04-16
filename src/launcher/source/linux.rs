@@ -480,8 +480,7 @@ pub async fn launch_with_bubblewrap(
                     // Set PR_SET_NO_NEW_PRIVS so Landlock doesn't require CAP_SYS_ADMIN.
                     let ret = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
                     if ret != 0 {
-                        // Non-fatal: log via eprintln (tracing not available post-fork).
-                        eprintln!("[nacelle] PR_SET_NO_NEW_PRIVS failed: errno={}", *libc::__errno_location());
+                        eprintln!("[nacelle] PR_SET_NO_NEW_PRIVS failed: {}", std::io::Error::last_os_error());
                     }
                     if let Err(e) = apply_sandbox(&policy) {
                         eprintln!("[nacelle] Landlock apply_sandbox failed: {e}");
@@ -608,11 +607,7 @@ mod tests {
             isolation: None, // no isolation config → default policy
             ipc_socket_paths: vec![],
             injected_mounts: vec![],
-            interactive: false,
-            terminal_cols: 80,
-            terminal_rows: 24,
-            terminal_shell: None,
-            terminal_env_filter: "safe".to_string(),
+            ..Default::default()
         };
 
         let policy = generate_landlock_policy(&target);
@@ -644,11 +639,7 @@ mod tests {
             }),
             ipc_socket_paths: vec![],
             injected_mounts: vec![],
-            interactive: false,
-            terminal_cols: 80,
-            terminal_rows: 24,
-            terminal_shell: None,
-            terminal_env_filter: "safe".to_string(),
+            ..Default::default()
         };
 
         let policy = generate_landlock_policy(&target);
@@ -685,11 +676,7 @@ mod tests {
                 }),
                 ipc_socket_paths: vec![],
                 injected_mounts: vec![],
-            interactive: false,
-            terminal_cols: 80,
-            terminal_rows: 24,
-            terminal_shell: None,
-            terminal_env_filter: "safe".to_string(),
+            ..Default::default()
             };
 
             let policy = generate_landlock_policy(&target);
@@ -734,11 +721,7 @@ mod tests {
                 PathBuf::from("/tmp/capsule-ipc/db-service.sock"),
             ],
             injected_mounts: vec![],
-            interactive: false,
-            terminal_cols: 80,
-            terminal_rows: 24,
-            terminal_shell: None,
-            terminal_env_filter: "safe".to_string(),
+            ..Default::default()
         };
 
         let policy = generate_landlock_policy(&target);
@@ -768,11 +751,7 @@ mod tests {
             isolation: None,
             ipc_socket_paths: vec![],
             injected_mounts: vec![],
-            interactive: false,
-            terminal_cols: 80,
-            terminal_rows: 24,
-            terminal_shell: None,
-            terminal_env_filter: "safe".to_string(),
+            ..Default::default()
         };
 
         let policy = generate_landlock_policy(&target);
