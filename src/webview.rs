@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use anyhow::{Context, Result};
+use base64::Engine as _;
 use gpui::{AnyWindowHandle, AppContext, AsyncApp, Window};
 use http::header::CONTENT_TYPE;
 #[cfg(target_os = "macos")]
@@ -564,7 +565,7 @@ impl WebViewManager {
                 ShellEvent::TerminalInput { session_id, data_b64 } => {
                     if let Some(proc) = self.terminal_sessions.get(session_id) {
                         // Decode base64 and forward to PTY stdin.
-                        match base64_decode(data_b64) {
+                        match base64::engine::general_purpose::STANDARD.decode(data_b64) {
                             Ok(bytes) => {
                                 if proc.input_tx.send(bytes).is_err() {
                                     warn!(session_id = %session_id, "PTY input channel closed");
@@ -1899,57 +1900,6 @@ fn mime_for_path(path: &Path) -> &'static str {
 }
 
 /// Decode a standard base64 string into bytes.
-fn base64_decode(input: &str) -> Result<Vec<u8>> {
-    const TABLE: [u8; 256] = {
-        let mut t = [0xFF_u8; 256];
-        let mut i = 0u8;
-        while i < 26 { t[(b'A' + i) as usize] = i; i += 1; }
-        let mut i = 0u8;
-        while i < 26 { t[(b'a' + i) as usize] = 26 + i; i += 1; }
-        let mut i = 0u8;
-        while i < 10 { t[(b'0' + i) as usize] = 52 + i; i += 1; }
-        t[b'+' as usize] = 62;
-        t[b'/' as usize] = 63;
-        t[b'=' as usize] = 0; // padding — treated as 0 bits
-        t
-    };
-
-    let input = input.trim_end_matches('=');
-    let mut out = Vec::with_capacity(input.len() * 3 / 4 + 1);
-    let bytes = input.as_bytes();
-    let mut i = 0;
-    while i + 3 < bytes.len() {
-        let v0 = TABLE[bytes[i] as usize];
-        let v1 = TABLE[bytes[i + 1] as usize];
-        let v2 = TABLE[bytes[i + 2] as usize];
-        let v3 = TABLE[bytes[i + 3] as usize];
-        if v0 == 0xFF || v1 == 0xFF || v2 == 0xFF || v3 == 0xFF {
-            anyhow::bail!("invalid base64 character");
-        }
-        out.push((v0 << 2) | (v1 >> 4));
-        out.push((v1 << 4) | (v2 >> 2));
-        out.push((v2 << 6) | v3);
-        i += 4;
-    }
-    match bytes.len() - i {
-        2 => {
-            let v0 = TABLE[bytes[i] as usize];
-            let v1 = TABLE[bytes[i + 1] as usize];
-            if v0 == 0xFF || v1 == 0xFF { anyhow::bail!("invalid base64"); }
-            out.push((v0 << 2) | (v1 >> 4));
-        }
-        3 => {
-            let v0 = TABLE[bytes[i] as usize];
-            let v1 = TABLE[bytes[i + 1] as usize];
-            let v2 = TABLE[bytes[i + 2] as usize];
-            if v0 == 0xFF || v1 == 0xFF || v2 == 0xFF { anyhow::bail!("invalid base64"); }
-            out.push((v0 << 2) | (v1 >> 4));
-            out.push((v1 << 4) | (v2 >> 2));
-        }
-        _ => {}
-    }
-    Ok(out)
-}
 
 #[cfg(test)]
 mod tests {
@@ -2090,7 +2040,6 @@ mod tests {
         ));
     }
 
-    #[test]
     #[test]
     fn command_bar_keeps_ready_capsule_webviews_visible() {
         let bounds = PaneBounds {
