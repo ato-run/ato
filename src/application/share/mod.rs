@@ -476,17 +476,10 @@ pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
         anyhow::bail!("`ato run <share-url>` does not support --background in this MVP.");
     }
 
+    // CLI-specific: interactive entry selection + env prompt (stays in CLI layer)
     let loaded = load_share_input(&args.input)?;
     let entries = effective_entries(&loaded.spec);
     let entry = select_run_entry(&args.input, &loaded, &entries, args.entry.as_deref())?;
-    let temp_root = ephemeral_run_root(&loaded, &entry)?;
-    // Ephemeral roots are always fully re-materialized; clean up any stale remnant
-    // from a previous interrupted run before proceeding.
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root)
-            .with_context(|| format!("Failed to clean stale run root {}", temp_root.display()))?;
-    }
-    let state = materialize_loaded_share(&loaded, &temp_root, ShareToolRuntime::System, false)?;
     let env_overlay = resolve_entry_env_overlay(
         &args.input,
         &entry,
@@ -494,45 +487,32 @@ pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
         args.prompt_env,
     )?;
 
-    let run_command = if args.args.is_empty() {
-        entry.run.clone()
-    } else {
-        format!(
-            "{} {}",
-            entry.run,
-            shell_words::join(args.args.iter().map(String::as_str))
-        )
-    };
-    let run_cwd = temp_root.join(&entry.cwd);
     let next_command = loaded
         .resolved_revision_url
         .clone()
         .unwrap_or_else(|| args.input.clone());
-
     futures::executor::block_on(args.reporter.notify(format!(
         "Try now: `{}`\nSet up locally later: ato decap {} --into ./{}",
-        run_command, next_command, loaded.spec.root
+        entry.run, next_command, loaded.spec.root
     )))?;
-    if !state.verification.issues.is_empty() {
-        futures::executor::block_on(args.reporter.warn(format!(
-            "Workspace verification reported {} issue(s) before run.",
-            state.verification.issues.len()
-        )))?;
-    }
 
-    let status = run_shell_streaming(&run_command, &run_cwd, &env_overlay)?;
-    let _ = fs::remove_dir_all(&temp_root);
-    if status.success() {
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "share entry `{}` exited with status {}",
-            entry.id,
-            status
-                .code()
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "signal".to_string())
-        );
+    // Delegate to capsule-core ShareExecutor (nacelle-sandboxed execution)
+    let result = capsule_core::share::execute_share(capsule_core::share::ShareRunRequest {
+        input: args.input.clone(),
+        entry: Some(entry.id.clone()),
+        extra_args: args.args,
+        env_overlay,
+        mode: capsule_core::share::ShareExecutionMode::Inherited,
+        nacelle_path: None,
+        ato_path: None,
+    })?;
+
+    match result {
+        capsule_core::share::ShareExecutionResult::Completed { exit_code: 0 } => Ok(()),
+        capsule_core::share::ShareExecutionResult::Completed { exit_code } => {
+            anyhow::bail!("share entry `{}` exited with code {}", entry.id, exit_code);
+        }
+        _ => unreachable!("Inherited mode always returns Completed"),
     }
 }
 
