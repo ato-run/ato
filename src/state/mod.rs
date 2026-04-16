@@ -7,6 +7,7 @@ use capsule_core::handle::{
     InputSurface as CapsuleInputSurface, SurfaceInput as CapsuleSurfaceInput,
 };
 use serde::{Deserialize, Serialize};
+use tracing::{debug, error, info, warn};
 use url::{form_urlencoded, Url};
 
 use crate::bridge::ShellEvent;
@@ -52,6 +53,7 @@ pub enum CapabilityGrant {
     WorkspaceInfo,
     OpenExternal,
     ClipboardRead,
+    Terminal,
 }
 
 impl CapabilityGrant {
@@ -61,6 +63,7 @@ impl CapabilityGrant {
             Self::WorkspaceInfo => "workspace-info",
             Self::OpenExternal => "open-external",
             Self::ClipboardRead => "clipboard-read",
+            Self::Terminal => "terminal",
         }
     }
 
@@ -70,6 +73,7 @@ impl CapabilityGrant {
             "workspace-info" => Some(Self::WorkspaceInfo),
             "open-external" => Some(Self::OpenExternal),
             "clipboard-read" => Some(Self::ClipboardRead),
+            "terminal" => Some(Self::Terminal),
             _ => None,
         }
     }
@@ -81,6 +85,8 @@ pub enum GuestRoute {
     ExternalUrl(Url),
     CapsuleHandle { handle: String, label: String },
     CapsuleUrl { handle: String, label: String, url: Url },
+    /// Interactive PTY terminal session served via terminal:// custom protocol
+    Terminal { session_id: String },
 }
 
 impl GuestRoute {
@@ -90,6 +96,7 @@ impl GuestRoute {
             Self::ExternalUrl(url) => url.as_str().to_string(),
             Self::CapsuleHandle { label, .. } => label.clone(),
             Self::CapsuleUrl { label, .. } => label.clone(),
+            Self::Terminal { session_id } => format!("terminal://{session_id}/"),
         }
     }
 }
@@ -108,6 +115,10 @@ pub enum WebSessionState {
     Launching,
     Mounted,
     Closed,
+    /// Launch was attempted but failed permanently (e.g. broken workspace, spawn error).
+    /// Unlike `Closed`, this state prevents automatic re-queuing on every render frame.
+    /// It is cleared back to `Launching` when the user explicitly re-navigates.
+    LaunchFailed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -321,6 +332,20 @@ pub enum PaneSurface {
         origin: String,
         original_surface: Box<PaneSurface>,
     },
+    /// Interactive PTY terminal backed by nacelle
+    Terminal(TerminalPane),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalPane {
+    /// Unique session ID assigned by nacelle
+    pub session_id: String,
+    /// Capsule handle (e.g. "myapp") — used for display title
+    pub capsule_handle: String,
+    /// Terminal width in columns
+    pub cols: u16,
+    /// Terminal height in rows
+    pub rows: u16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -934,9 +959,44 @@ impl AppState {
         }
     }
 
+    /// Open each dropped path in a new tab by routing it through `navigate_to_url`.
+    /// Paths that are local capsule directories go through `ato app session start`;
+    /// paths without a capsule.toml will surface an error in the activity log.
+    pub fn launch_dropped_paths(&mut self, paths: Vec<PathBuf>) {
+        for path in paths {
+            let path_str = path.display().to_string();
+            self.create_new_tab();
+            self.navigate_to_url(&path_str);
+        }
+    }
+
     pub fn navigate_to_url(&mut self, input: &str) {
         let normalized = Self::normalize_input(input);
+        info!(input, normalized = %normalized, "navigate_to_url");
         let (next_route, capabilities, profile, source_label, trust_state, restricted, session) =
+            if crate::orchestrator::is_share_url(&normalized) {
+                // Share URLs must be routed as CapsuleHandle so the orchestrator can
+                // materialise them via `ato decap` before starting the session.
+                // classify_surface_input would classify them as WebUrl (external browser).
+                let share_id = normalized
+                    .rsplit('/')
+                    .find(|seg| !seg.is_empty())
+                    .unwrap_or("share")
+                    .to_string();
+                info!(share_url = %normalized, share_id = %share_id, "detected share URL — routing via decap");
+                (
+                    GuestRoute::CapsuleHandle {
+                        handle: normalized.clone(),
+                        label: format!("share:{share_id}"),
+                    },
+                    vec![CapabilityGrant::ReadFile, CapabilityGrant::WorkspaceInfo],
+                    "tauri".to_string(),
+                    Some("share".to_string()),
+                    Some("untrusted".to_string()),
+                    true,
+                    WebSessionState::Resolving,
+                )
+            } else {
             match classify_surface_input(HandleInput {
                 raw: normalized.clone(),
                 surface: CapsuleInputSurface::DesktopOmnibar,
@@ -1011,8 +1071,10 @@ impl AppState {
                     self.push_activity(ActivityTone::Error, error.to_string());
                     return;
                 }
-            };
+            }
+        }; // end if is_share_url else match
         let label = next_route.to_string();
+        debug!(route = %label, "navigate_to_url resolved route");
         let partition_id = sanitize(&label);
         let mut navigated = None;
 
@@ -1135,11 +1197,36 @@ impl AppState {
         );
     }
 
-    pub fn handle_host_route(&mut self, route: &str) {
-        let Ok(route) = parse_host_route(route) else {
+    pub fn handle_host_route(&mut self, raw_route: &str) {
+        // ato://open?handle=<percent-encoded-capsule-handle>
+        // Lets external callers (browser, share menu, CLI) open a capsule in the desktop.
+        if raw_route.starts_with("ato://open") {
+            if let Ok(url) = Url::parse(raw_route) {
+                if let Some(handle) = url
+                    .query_pairs()
+                    .find(|(k, _)| k == "handle")
+                    .map(|(_, v)| v.into_owned())
+                {
+                    self.push_activity(
+                        ActivityTone::Info,
+                        format!("Opening capsule from deep link: {handle}"),
+                    );
+                    self.create_new_tab();
+                    self.navigate_to_url(&handle);
+                    return;
+                }
+            }
             self.push_activity(
                 ActivityTone::Warning,
-                format!("Ignored invalid host route {route}"),
+                "ato://open deep link is missing the 'handle' query parameter",
+            );
+            return;
+        }
+
+        let Ok(route) = parse_host_route(raw_route) else {
+            self.push_activity(
+                ActivityTone::Warning,
+                format!("Ignored invalid host route {raw_route}"),
             );
             return;
         };
@@ -1461,6 +1548,10 @@ impl AppState {
                         entry.duration_ms = Some(duration_ms);
                     }
                 }
+                // TerminalInput and TerminalResize are consumed upstream by the WebViewManager
+                // (which has access to nacelle stdin writers) before apply_shell_events is called.
+                // They should not appear here; silently ignore any that leak through.
+                ShellEvent::TerminalInput { .. } | ShellEvent::TerminalResize { .. } => {}
             }
         }
     }
@@ -1489,6 +1580,7 @@ impl AppState {
                         GuestRoute::CapsuleUrl { handle, .. } => Some(route_source_label(handle)),
                         GuestRoute::Capsule { .. } => Some("embedded".to_string()),
                         GuestRoute::ExternalUrl(_) => Some("web".to_string()),
+                        GuestRoute::Terminal { .. } => Some("terminal".to_string()),
                     };
                     web.trust_state = match &web.route {
                         GuestRoute::CapsuleHandle { handle, .. } if handle.contains("samples") => {
@@ -1628,6 +1720,35 @@ impl AppState {
             | PaneSurface::Inspector
             | PaneSurface::Launcher
             | PaneSurface::AuthHandoff { .. } => None,
+            PaneSurface::Terminal(terminal) => Some(ActiveWebPane {
+                workspace_id: workspace.id,
+                task_id: task.id,
+                pane_id: pane.id,
+                title: pane.title.clone(),
+                route: GuestRoute::Terminal {
+                    session_id: terminal.session_id.clone(),
+                },
+                partition_id: terminal.session_id.clone(),
+                profile: "terminal".to_string(),
+                capabilities: vec![CapabilityGrant::Terminal],
+                session: WebSessionState::Launching,
+                source_label: None,
+                trust_state: None,
+                restricted: false,
+                snapshot_label: None,
+                canonical_handle: None,
+                session_id: Some(terminal.session_id.clone()),
+                adapter: None,
+                manifest_path: None,
+                runtime_label: None,
+                display_strategy: None,
+                log_path: None,
+                local_url: None,
+                healthcheck_url: None,
+                invoke_url: None,
+                served_by: None,
+                bounds: pane.bounds,
+            }),
         }
     }
 
@@ -1986,6 +2107,9 @@ impl AppState {
                 PaneSurface::Inspector => "Capsule inspector".to_string(),
                 PaneSurface::Launcher => "Launchpad".to_string(),
                 PaneSurface::AuthHandoff { origin, .. } => format!("Signing in to {origin}…"),
+                PaneSurface::Terminal(terminal) => {
+                    format!("terminal://{}/", terminal.session_id)
+                }
             })
     }
 
@@ -2391,7 +2515,8 @@ fn sidebar_icon_for_task(task: &TaskSet) -> SidebarTaskIconSpec {
                 .unwrap_or_else(|| SidebarTaskIconSpec::Monogram(short_label(&task.title))),
             GuestRoute::Capsule { .. }
             | GuestRoute::CapsuleHandle { .. }
-            | GuestRoute::CapsuleUrl { .. } => {
+            | GuestRoute::CapsuleUrl { .. }
+            | GuestRoute::Terminal { .. } => {
                 SidebarTaskIconSpec::Monogram(short_label(&task.title))
             }
         },
@@ -2400,7 +2525,8 @@ fn sidebar_icon_for_task(task: &TaskSet) -> SidebarTaskIconSpec {
         | PaneSurface::DevConsole
         | PaneSurface::Inspector
         | PaneSurface::Launcher
-        | PaneSurface::AuthHandoff { .. } => {
+        | PaneSurface::AuthHandoff { .. }
+        | PaneSurface::Terminal(_) => {
             SidebarTaskIconSpec::Monogram(short_label(&task.title))
         }
     }
@@ -2430,6 +2556,7 @@ fn task_route_label(task: &TaskSet) -> String {
         PaneSurface::Inspector => "Capsule inspector".to_string(),
         PaneSurface::Launcher => "Launchpad".to_string(),
         PaneSurface::AuthHandoff { origin, .. } => format!("Signing in to {origin}…"),
+        PaneSurface::Terminal(terminal) => format!("terminal://{}/", terminal.session_id),
     }
 }
 
@@ -2865,6 +2992,128 @@ mod tests {
     }
 
     #[test]
+    fn navigate_to_share_url_uses_resolving_state_with_share_label() {
+        let mut state = AppState::demo();
+        state.navigate_to_url("https://ato.run/s/abc123xyz");
+        let pane = state.active_web_pane().expect("pane");
+
+        // Share URLs must route as CapsuleHandle so orchestrator can decap them.
+        // They must NOT be classified as external WebUrl by classify_surface_input.
+        // GuestRoute::CapsuleHandle.to_string() returns the label, not the full URL.
+        assert_eq!(pane.route.to_string(), "share:abc123xyz");
+        assert_eq!(pane.session, WebSessionState::Resolving);
+        assert_eq!(pane.source_label.as_deref(), Some("share"));
+        assert_eq!(pane.trust_state.as_deref(), Some("untrusted"));
+        assert!(pane.restricted);
+        assert!(pane.title.contains("share:"));
+    }
+
+    #[test]
+    fn navigate_to_share_url_extracts_share_id_as_label() {
+        let mut state = AppState::demo();
+        state.navigate_to_url("https://ato.run/s/myspecialrun");
+        let pane = state.active_web_pane().expect("pane");
+
+        // The label is "share:<last-segment>"; it always contains the run ID.
+        assert!(pane.route.to_string().contains("myspecialrun"));
+        assert_eq!(pane.session, WebSessionState::Resolving);
+    }
+
+    #[test]
+    fn navigate_clears_launch_failed_state_allowing_retry() {
+        // Verify that explicitly navigating to a URL resets LaunchFailed → Launching,
+        // which is what allows the user to retry a previously failed capsule.
+        let mut state = AppState::demo();
+        state.navigate_to_url("https://ato.run/s/abc123xyz");
+        let pane_id = state.active_web_pane().expect("pane").pane_id;
+
+        // Simulate: launch failed.
+        state.sync_web_session_state(pane_id, WebSessionState::LaunchFailed);
+        assert_eq!(
+            state.active_web_pane().expect("pane").session,
+            WebSessionState::LaunchFailed
+        );
+
+        // User re-enters same URL → navigate_to_url always sets Launching.
+        state.navigate_to_url("https://ato.run/s/abc123xyz");
+        assert_eq!(
+            state.active_web_pane().expect("pane").session,
+            WebSessionState::Resolving,
+            "re-navigating must reset LaunchFailed so the launch can be retried"
+        );
+    }
+
+    #[test]
+    fn handle_host_route_open_deep_link_creates_new_tab_and_navigates() {
+        let mut state = AppState::demo();
+        let initial_task_count = state.active_workspace().expect("workspace").tasks.len();
+
+        // Note: capsule://ato.run/acme/chat percent-encoded for the query param
+        state.handle_host_route("ato://open?handle=capsule%3A%2F%2Fato.run%2Facme%2Fchat");
+
+        let workspace = state.active_workspace().expect("workspace");
+        assert_eq!(workspace.tasks.len(), initial_task_count + 1);
+        let pane = state.active_web_pane().expect("pane");
+        // GuestRoute::CapsuleHandle.to_string() returns the label (= display_string of canonical)
+        assert!(pane.route.to_string().contains("acme") && pane.route.to_string().contains("chat"));
+        assert_eq!(pane.session, WebSessionState::Resolving);
+    }
+
+    #[test]
+    fn handle_host_route_open_deep_link_with_share_url_routes_as_resolving() {
+        let mut state = AppState::demo();
+
+        state.handle_host_route(
+            "ato://open?handle=https%3A%2F%2Fato.run%2Fs%2Fabc123",
+        );
+
+        let pane = state.active_web_pane().expect("pane");
+        assert_eq!(pane.session, WebSessionState::Resolving);
+        assert_eq!(pane.source_label.as_deref(), Some("share"));
+    }
+
+    #[test]
+    fn handle_host_route_open_without_handle_param_does_not_navigate() {
+        let mut state = AppState::demo();
+        let initial_task_count = state.active_workspace().expect("workspace").tasks.len();
+
+        state.handle_host_route("ato://open");
+
+        // No new tab created; activity log should note the missing param
+        let workspace = state.active_workspace().expect("workspace");
+        assert_eq!(workspace.tasks.len(), initial_task_count);
+        assert!(state
+            .activity
+            .iter()
+            .any(|e| e.message.contains("handle")));
+    }
+
+    #[test]
+    fn launch_dropped_paths_creates_one_tab_per_path() {
+        let mut state = AppState::demo();
+        let initial_task_count = state.active_workspace().expect("workspace").tasks.len();
+
+        state.launch_dropped_paths(vec![
+            std::path::PathBuf::from("/home/user/project-a"),
+            std::path::PathBuf::from("/home/user/project-b"),
+        ]);
+
+        let workspace = state.active_workspace().expect("workspace");
+        assert_eq!(workspace.tasks.len(), initial_task_count + 2);
+    }
+
+    #[test]
+    fn launch_dropped_paths_with_empty_list_is_noop() {
+        let mut state = AppState::demo();
+        let initial_task_count = state.active_workspace().expect("workspace").tasks.len();
+
+        state.launch_dropped_paths(vec![]);
+
+        let workspace = state.active_workspace().expect("workspace");
+        assert_eq!(workspace.tasks.len(), initial_task_count);
+    }
+
+    #[test]
     fn drain_browser_commands_only_returns_matching_pane() {
         let mut state = AppState::demo();
         state.browser_commands.push_back(BrowserCommand {
@@ -2885,5 +3134,78 @@ mod tests {
                 kind: BrowserCommandKind::Reload
             }]
         );
+    }
+
+    #[test]
+    fn ato_open_url_query_param_is_percent_decoded_correctly() {
+        // Regression: url crate must correctly decode ato://open?handle=... query params.
+        // Specifically, capsule%3A%2F%2Fato.run (single 't') must not become atto.run.
+        let raw = "ato://open?handle=capsule%3A%2F%2Fato.run%2Facme%2Fchat";
+        let url = url::Url::parse(raw).expect("ato:// URL should parse");
+        let handle = url
+            .query_pairs()
+            .find(|(k, _)| k == "handle")
+            .map(|(_, v)| v.into_owned());
+        assert_eq!(handle.as_deref(), Some("capsule://ato.run/acme/chat"));
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // E2E: real share URL state-machine test
+    //
+    // This test exercises the state routing for the real share URL without
+    // actually invoking the `ato` binary or the network.  It verifies that
+    // pasting `https://ato.run/s/01KP5WDF81SQQTVZRF88RNY8MR` into the omnibar
+    // routes the pane into a CapsuleHandle(Resolving) state so the orchestrator
+    // thread will pick it up and call `ato decap` next.
+    // ────────────────────────────────────────────────────────────────────────
+    #[test]
+    fn e2e_share_url_state_routes_to_resolving_capsule_handle() {
+        const SHARE_URL: &str = "https://ato.run/s/01KP5WDF81SQQTVZRF88RNY8MR";
+
+        let mut state = AppState::demo();
+        // Simulate typing the share URL into the omnibar and pressing Enter.
+        state.navigate_to_url(SHARE_URL);
+
+        let pane = state
+            .active_web_pane()
+            .expect("a web pane must be active after navigate_to_url");
+
+        // The pane must be in Resolving state so the webview manager will
+        // trigger a background launch via `resolve_and_start_guest`.
+        assert_eq!(
+            pane.session,
+            WebSessionState::Resolving,
+            "share URL must enter Resolving state, not {:#?}",
+            pane.session
+        );
+
+        // The route must be a CapsuleHandle (not ExternalUrl / Capsule).
+        assert!(
+            matches!(pane.route, GuestRoute::CapsuleHandle { .. }),
+            "share URL must route as CapsuleHandle, got {:#?}",
+            pane.route
+        );
+
+        // The handle stored on the route must be the original share URL so
+        // resolve_and_start_from_share receives it intact.
+        if let GuestRoute::CapsuleHandle { handle, label } = &pane.route {
+            assert_eq!(
+                handle, SHARE_URL,
+                "CapsuleHandle.handle must equal the share URL"
+            );
+            assert!(
+                label.starts_with("share:"),
+                "CapsuleHandle.label must start with 'share:', got '{label}'"
+            );
+            assert!(
+                label.contains("01KP5WDF81SQQTVZRF88RNY8MR"),
+                "label must contain the share ID, got '{label}'"
+            );
+        }
+
+        // Trust / source metadata must mark the capsule as untrusted / restricted.
+        assert_eq!(pane.source_label.as_deref(), Some("share"));
+        assert_eq!(pane.trust_state.as_deref(), Some("untrusted"));
+        assert!(pane.restricted, "share-URL capsules must be restricted");
     }
 }
