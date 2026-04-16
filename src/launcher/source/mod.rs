@@ -528,11 +528,26 @@ impl SourceRuntime {
         // Wrap master in Arc<Mutex<>> for resize (accessed from stdin thread)
         let master = Arc::new(Mutex::new(pair.master));
 
-        // Build shell command with filtered environment
-        let mut cmd = CommandBuilder::new(&shell);
-        cmd.arg("-i");
+        // Build the PTY command: use explicit cmd args if provided (share-run mode),
+        // otherwise fall back to an interactive shell.
         let raw_env: Vec<(String, String)> = std::env::vars().collect();
-        for (k, v) in filter_terminal_env(raw_env, &target.terminal_env_filter) {
+        let filtered_env: Vec<(String, String)> =
+            filter_terminal_env(raw_env, &target.terminal_env_filter);
+
+        let mut cmd = if let Some(ref cmd_args) = target.cmd {
+            let mut builder = CommandBuilder::new(&cmd_args[0]);
+            for arg in &cmd_args[1..] {
+                builder.arg(arg);
+            }
+            // Set working directory for non-interactive command execution
+            builder.cwd(&target.source_dir);
+            builder
+        } else {
+            let mut builder = CommandBuilder::new(&shell);
+            builder.arg("-i");
+            builder
+        };
+        for (k, v) in filtered_env {
             cmd.env(k, v);
         }
         cmd.env("TERM", "xterm-256color");
@@ -754,19 +769,25 @@ impl Runtime for SourceRuntime {
             request.workload_id, target.language, target.entrypoint
         );
 
-        // Security validation for Generic Source Runtime
-        if let Some(ref cmd) = target.cmd {
-            info!("Using explicit command (Generic Source Runtime): {:?}", cmd);
+        // Security validation for Generic Source Runtime.
+        // Interactive PTY sessions skip this — they use the shell allowlist
+        // (validate_shell) instead of validate_binary, because shell paths are
+        // absolute by design (e.g. /bin/zsh) while validate_binary blocks
+        // absolute paths for capsule command portability.
+        if !target.interactive {
+            if let Some(ref cmd) = target.cmd {
+                info!("Using explicit command (Generic Source Runtime): {:?}", cmd);
 
-            // Validate binary is in allowlist
-            if let Some(binary) = cmd.first() {
-                validate_binary(binary, target.dev_mode)
+                // Validate binary is in allowlist
+                if let Some(binary) = cmd.first() {
+                    validate_binary(binary, target.dev_mode)
+                        .map_err(|e| RuntimeError::SecurityViolation(e.to_string()))?;
+                }
+
+                // Validate command arguments (File-First + Dangerous Flags)
+                validate_cmd(cmd, &target.source_dir, target.dev_mode)
                     .map_err(|e| RuntimeError::SecurityViolation(e.to_string()))?;
             }
-
-            // Validate command arguments (File-First + Dangerous Flags)
-            validate_cmd(cmd, &target.source_dir, target.dev_mode)
-                .map_err(|e| RuntimeError::SecurityViolation(e.to_string()))?;
         }
 
         // Determine execution mode
