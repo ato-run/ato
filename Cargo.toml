@@ -43,6 +43,7 @@ hex = "0.4"
 blake3 = "1.5"
 ed25519-dalek = { version = "2.0", features = ["rand_core"] }
 base64 = "0.22"
+portable-pty = "0.8"
 chrono = { version = "0.4", default-features = true }
 bs58 = "0.5"
 unsigned-varint = "0.8"
