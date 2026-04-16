@@ -40,7 +40,10 @@ fn main() {
             }
         };
 
-        let id = request.get("id").cloned().unwrap_or(serde_json::Value::Null);
+        let id = request
+            .get("id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("");
 
         // Notifications (no id) — handle silently without responding.
@@ -80,7 +83,10 @@ fn parse_socket_arg(args: &[String]) -> Option<PathBuf> {
 
 fn discover_socket() -> PathBuf {
     let home = dirs_home();
-    let current_file = home.join(".ato").join("run").join("ato-desktop-current.json");
+    let current_file = home
+        .join(".ato")
+        .join("run")
+        .join("ato-desktop-current.json");
     if let Ok(data) = std::fs::read_to_string(&current_file) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
             if let Some(path) = v.get("socket").and_then(|s| s.as_str()) {
@@ -127,8 +133,7 @@ fn handle_initialize(id: serde_json::Value) -> serde_json::Value {
 }
 
 fn handle_tools_list(id: serde_json::Value) -> serde_json::Value {
-    let tools: serde_json::Value =
-        serde_json::from_str(TOOLS).expect("TOOLS is valid JSON");
+    let tools: serde_json::Value = serde_json::from_str(TOOLS).expect("TOOLS is valid JSON");
     serde_json::json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -197,40 +202,57 @@ fn map_tool_to_command(
         "browser_snapshot" => ("snapshot", serde_json::json!({})),
         "browser_take_screenshot" => ("screenshot", serde_json::json!({})),
         "browser_click" => ("click", serde_json::json!({ "ref": s("ref")? })),
-        "browser_fill" => {
-            ("fill", serde_json::json!({ "ref": s("ref")?, "value": s("value")? }))
-        }
-        "browser_type" => {
-            ("type", serde_json::json!({ "ref": s("ref")?, "text": s("text")? }))
-        }
-        "browser_select_option" => {
-            ("select_option", serde_json::json!({ "ref": s("ref")?, "value": s("value")? }))
-        }
+        "browser_fill" => (
+            "fill",
+            serde_json::json!({ "ref": s("ref")?, "value": s("value")? }),
+        ),
+        "browser_type" => (
+            "type",
+            serde_json::json!({ "ref": s("ref")?, "text": s("text")? }),
+        ),
+        "browser_select_option" => (
+            "select_option",
+            serde_json::json!({ "ref": s("ref")?, "value": s("value")? }),
+        ),
         "browser_check" => {
-            let checked = args.get("checked").and_then(|v| v.as_bool()).unwrap_or(true);
-            ("check", serde_json::json!({ "ref": s("ref")?, "checked": checked }))
+            let checked = args
+                .get("checked")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            (
+                "check",
+                serde_json::json!({ "ref": s("ref")?, "checked": checked }),
+            )
         }
-        "browser_uncheck" => {
-            ("check", serde_json::json!({ "ref": s("ref")?, "checked": false }))
-        }
+        "browser_uncheck" => (
+            "check",
+            serde_json::json!({ "ref": s("ref")?, "checked": false }),
+        ),
         "browser_press_key" => ("press_key", serde_json::json!({ "key": s("key")? })),
-        "browser_navigate" => ("navigate", serde_json::json!({ "url": s("url")? })),
+        // browser_navigate → open_url (app-level navigate_to_url, works even without an active pane).
+        "browser_navigate" => ("open_url", serde_json::json!({ "url": s("url")? })),
         "browser_navigate_back" => ("navigate_back", serde_json::json!({})),
         "browser_navigate_forward" => ("navigate_forward", serde_json::json!({})),
         "browser_wait_for" => {
             let timeout = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(5000);
-            ("wait_for", serde_json::json!({ "selector": s("selector")?, "timeout": timeout }))
+            (
+                "wait_for",
+                serde_json::json!({ "selector": s("selector")?, "timeout": timeout }),
+            )
         }
-        "browser_evaluate" => {
-            ("evaluate", serde_json::json!({ "expression": s("expression")? }))
-        }
+        "browser_evaluate" => (
+            "evaluate",
+            serde_json::json!({ "expression": s("expression")? }),
+        ),
         "browser_console_messages" => ("console_messages", serde_json::json!({})),
-        "browser_verify_text_visible" => {
-            ("verify_text_visible", serde_json::json!({ "text": s("text")? }))
-        }
-        "browser_verify_element_visible" => {
-            ("verify_element_visible", serde_json::json!({ "ref": s("ref")? }))
-        }
+        "browser_verify_text_visible" => (
+            "verify_text_visible",
+            serde_json::json!({ "text": s("text")? }),
+        ),
+        "browser_verify_element_visible" => (
+            "verify_element_visible",
+            serde_json::json!({ "ref": s("ref")? }),
+        ),
         "browser_tabs" => ("list_panes", serde_json::json!({})),
         "browser_tab_focus" => {
             let target = args
@@ -274,7 +296,9 @@ fn send_automation_command(
     });
     let mut line = serde_json::to_string(&rpc).unwrap();
     line.push('\n');
-    stream.write_all(line.as_bytes()).map_err(|e| format!("send failed: {e}"))?;
+    stream
+        .write_all(line.as_bytes())
+        .map_err(|e| format!("send failed: {e}"))?;
 
     let mut response_line = String::new();
     BufReader::new(stream)
@@ -292,7 +316,10 @@ fn send_automation_command(
         return Err(msg.to_string());
     }
 
-    Ok(response.get("result").cloned().unwrap_or(serde_json::Value::Null))
+    Ok(response
+        .get("result")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null))
 }
 
 #[cfg(not(unix))]

@@ -1,9 +1,7 @@
 mod window_controls;
 
 use gpui::prelude::*;
-use gpui::{
-    div, hsla, point, px, BoxShadow, Entity, FontWeight, IntoElement, MouseButton, Window,
-};
+use gpui::{div, hsla, point, px, BoxShadow, Entity, FontWeight, IntoElement, MouseButton, Window};
 use gpui_component::input::{Input, InputState};
 
 use crate::app::{FocusCommandBar, NavigateToUrl, SelectTask, ShowSettings};
@@ -83,7 +81,11 @@ fn render_omnibar(
                 .text_color(omnibar_text)
                 .bg(if command_bar { active_bg } else { rest_bg })
                 .border_1()
-                .border_color(if command_bar { active_border } else { rest_border })
+                .border_color(if command_bar {
+                    active_border
+                } else {
+                    rest_border
+                })
                 .when(command_bar, move |this| {
                     this.shadow(vec![BoxShadow {
                         color: shadow_color,
@@ -149,7 +151,10 @@ fn render_omnibar(
         })
 }
 
-fn render_omnibar_suggestions(suggestions: &[OmnibarSuggestion], theme: &Theme) -> impl IntoElement {
+fn render_omnibar_suggestions(
+    suggestions: &[OmnibarSuggestion],
+    theme: &Theme,
+) -> impl IntoElement {
     let dropdown_bg = theme.omnibar_dropdown_bg;
     let dropdown_border = theme.omnibar_dropdown_border;
 
@@ -258,30 +263,31 @@ fn render_overview_toggle(state: &AppState, theme: &Theme) -> impl IntoElement {
 }
 
 fn render_active_route_status(state: &AppState, theme: &Theme) -> impl IntoElement {
-    let Some(active) = state
-        .active_capsule_pane()
-        .or_else(|| state.active_web_pane().map(|pane| crate::state::ActiveCapsulePane {
-            pane_id: pane.pane_id,
-            title: pane.title,
-            route: pane.route,
-            session: pane.session,
-            source_label: pane.source_label,
-            trust_state: pane.trust_state,
-            restricted: pane.restricted,
-            snapshot_label: pane.snapshot_label,
-            canonical_handle: pane.canonical_handle,
-            session_id: pane.session_id,
-            adapter: pane.adapter,
-            manifest_path: pane.manifest_path,
-            runtime_label: pane.runtime_label,
-            display_strategy: pane.display_strategy,
-            log_path: pane.log_path,
-            local_url: pane.local_url,
-            healthcheck_url: pane.healthcheck_url,
-            invoke_url: pane.invoke_url,
-            served_by: pane.served_by,
-        }))
-    else {
+    let Some(active) = state.active_capsule_pane().or_else(|| {
+        state
+            .active_web_pane()
+            .map(|pane| crate::state::ActiveCapsulePane {
+                pane_id: pane.pane_id,
+                title: pane.title,
+                route: pane.route,
+                session: pane.session,
+                source_label: pane.source_label,
+                trust_state: pane.trust_state,
+                restricted: pane.restricted,
+                snapshot_label: pane.snapshot_label,
+                canonical_handle: pane.canonical_handle,
+                session_id: pane.session_id,
+                adapter: pane.adapter,
+                manifest_path: pane.manifest_path,
+                runtime_label: pane.runtime_label,
+                display_strategy: pane.display_strategy,
+                log_path: pane.log_path,
+                local_url: pane.local_url,
+                healthcheck_url: pane.healthcheck_url,
+                invoke_url: pane.invoke_url,
+                served_by: pane.served_by,
+            })
+    }) else {
         return div().w(px(0.0));
     };
 
@@ -319,13 +325,11 @@ fn render_active_route_status(state: &AppState, theme: &Theme) -> impl IntoEleme
         return div().w(px(0.0));
     }
 
-    div()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .children(tags.into_iter().take(4).map(|(label, emphasized)| {
-            render_status_chip(&label, emphasized, theme)
-        }))
+    div().flex().items_center().gap(px(6.0)).children(
+        tags.into_iter()
+            .take(4)
+            .map(|(label, emphasized)| render_status_chip(&label, emphasized, theme)),
+    )
 }
 
 fn render_status_chip(label: &str, emphasized: bool, theme: &Theme) -> impl IntoElement {
@@ -360,7 +364,11 @@ fn render_status_chip(label: &str, emphasized: bool, theme: &Theme) -> impl Into
 /// Two stacked mini-window rectangles with traffic-light dots,
 /// matching the mock's overview toggle icon.
 fn render_overview_icon(active: bool, theme: &Theme) -> impl IntoElement {
-    let icon_color = if active { theme.accent } else { theme.text_tertiary };
+    let icon_color = if active {
+        theme.accent
+    } else {
+        theme.text_tertiary
+    };
 
     div()
         .w(px(20.0))
