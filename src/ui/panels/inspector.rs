@@ -335,5 +335,6 @@ fn session_state_label(inspector: &CapsuleInspectorView) -> &'static str {
         WebSessionState::Launching => "launching",
         WebSessionState::Mounted => "mounted",
         WebSessionState::Closed => "closed",
+        WebSessionState::LaunchFailed => "failed",
     }
 }
