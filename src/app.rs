@@ -6,8 +6,8 @@ use gpui::{
 use gpui::{Menu, MenuItem, OsAction, SystemMenuType};
 #[cfg(target_os = "macos")]
 use gpui_component::input;
-use std::collections::VecDeque;
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -160,75 +160,74 @@ pub fn run() {
         }
     });
     application.run(move |cx: &mut App| {
-            gpui_component::init(cx);
-            open_url_bridge.install_async_app(cx.to_async());
+        gpui_component::init(cx);
+        open_url_bridge.install_async_app(cx.to_async());
 
-            // Scope the shell shortcuts so guest webviews do not inherit host commands.
-            cx.bind_keys([
-                KeyBinding::new("cmd-k", FocusCommandBar, Some("DeskyShell")),
-                KeyBinding::new("cmd-b", ToggleOverview, Some("DeskyShell")),
-                KeyBinding::new("cmd-,", ShowSettings, Some("DeskyShell")),
-                KeyBinding::new("ctrl-tab", NextWorkspace, Some("DeskyShell")),
-                KeyBinding::new("ctrl-shift-tab", PreviousWorkspace, Some("DeskyShell")),
-                KeyBinding::new("cmd-]", NextTask, Some("DeskyShell")),
-                KeyBinding::new("cmd-[", PreviousTask, Some("DeskyShell")),
-                KeyBinding::new("cmd-\\", SplitPane, Some("DeskyShell")),
-                KeyBinding::new("cmd-alt-right", ExpandSplit, Some("DeskyShell")),
-                KeyBinding::new("cmd-alt-left", ShrinkSplit, Some("DeskyShell")),
-                KeyBinding::new("tab", CycleHandle, Some("DeskyShell")),
-                KeyBinding::new("cmd-t", NewTab, Some("DeskyShell")),
-                KeyBinding::new("escape", DismissTransient, Some("DeskyShell")),
-                KeyBinding::new("cmd-z", NativeUndo, Some("Pane")),
-                KeyBinding::new("cmd-shift-z", NativeRedo, Some("Pane")),
-                KeyBinding::new("cmd-x", NativeCut, Some("Pane")),
-                KeyBinding::new("cmd-c", NativeCopy, Some("Pane")),
-                KeyBinding::new("cmd-v", NativePaste, Some("Pane")),
-                KeyBinding::new("cmd-a", NativeSelectAll, Some("Pane")),
-                KeyBinding::new("cmd-alt-i", ToggleDevConsole, None),
-                KeyBinding::new("cmd-q", Quit, None),
-            ]);
+        // Scope the shell shortcuts so guest webviews do not inherit host commands.
+        cx.bind_keys([
+            KeyBinding::new("cmd-k", FocusCommandBar, Some("DeskyShell")),
+            KeyBinding::new("cmd-b", ToggleOverview, Some("DeskyShell")),
+            KeyBinding::new("cmd-,", ShowSettings, Some("DeskyShell")),
+            KeyBinding::new("ctrl-tab", NextWorkspace, Some("DeskyShell")),
+            KeyBinding::new("ctrl-shift-tab", PreviousWorkspace, Some("DeskyShell")),
+            KeyBinding::new("cmd-]", NextTask, Some("DeskyShell")),
+            KeyBinding::new("cmd-[", PreviousTask, Some("DeskyShell")),
+            KeyBinding::new("cmd-\\", SplitPane, Some("DeskyShell")),
+            KeyBinding::new("cmd-alt-right", ExpandSplit, Some("DeskyShell")),
+            KeyBinding::new("cmd-alt-left", ShrinkSplit, Some("DeskyShell")),
+            KeyBinding::new("tab", CycleHandle, Some("DeskyShell")),
+            KeyBinding::new("cmd-t", NewTab, Some("DeskyShell")),
+            KeyBinding::new("escape", DismissTransient, Some("DeskyShell")),
+            KeyBinding::new("cmd-z", NativeUndo, Some("Pane")),
+            KeyBinding::new("cmd-shift-z", NativeRedo, Some("Pane")),
+            KeyBinding::new("cmd-x", NativeCut, Some("Pane")),
+            KeyBinding::new("cmd-c", NativeCopy, Some("Pane")),
+            KeyBinding::new("cmd-v", NativePaste, Some("Pane")),
+            KeyBinding::new("cmd-a", NativeSelectAll, Some("Pane")),
+            KeyBinding::new("cmd-alt-i", ToggleDevConsole, None),
+            KeyBinding::new("cmd-q", Quit, None),
+        ]);
 
-            #[cfg(target_os = "macos")]
-            install_app_menus(cx);
+        #[cfg(target_os = "macos")]
+        install_app_menus(cx);
 
-            cx.on_action(|_: &NativeUndo, _: &mut App| {});
-            cx.on_action(|_: &NativeRedo, _: &mut App| {});
-            cx.on_action(|_: &NativeCut, _: &mut App| {});
-            cx.on_action(|_: &NativeCopy, _: &mut App| {});
-            cx.on_action(|_: &NativePaste, _: &mut App| {});
-            cx.on_action(|_: &NativeSelectAll, _: &mut App| {});
-            cx.on_action(|_: &Quit, cx| cx.quit());
-            cx.on_window_closed(|cx, _window_id| {
-                if cx.windows().is_empty() {
-                    cx.quit();
+        cx.on_action(|_: &NativeUndo, _: &mut App| {});
+        cx.on_action(|_: &NativeRedo, _: &mut App| {});
+        cx.on_action(|_: &NativeCut, _: &mut App| {});
+        cx.on_action(|_: &NativeCopy, _: &mut App| {});
+        cx.on_action(|_: &NativePaste, _: &mut App| {});
+        cx.on_action(|_: &NativeSelectAll, _: &mut App| {});
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_window_closed(|cx, _window_id| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+
+        let bounds = Bounds::centered(None, size(px(1440.0), px(920.0)), cx);
+
+        // Let GPUI draw the shell chrome so the window feels like an in-app surface.
+        cx.open_window(
+            WindowOptions {
+                titlebar: Some(TitleBar::title_bar_options()),
+                focus: true,
+                show: true,
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_decorations: Some(WindowDecorations::Client),
+                ..Default::default()
+            },
+            {
+                let open_url_bridge = open_url_bridge.clone();
+                move |window, cx| {
+                    let shell = cx.new(|cx| DesktopShell::new(window, cx, open_url_bridge.clone()));
+                    cx.new(|cx| gpui_component::Root::new(shell, window, cx))
                 }
-            })
-            .detach();
+            },
+        )
+        .expect("failed to open ato-desktop window");
 
-            let bounds = Bounds::centered(None, size(px(1440.0), px(920.0)), cx);
-
-            // Let GPUI draw the shell chrome so the window feels like an in-app surface.
-            cx.open_window(
-                WindowOptions {
-                    titlebar: Some(TitleBar::title_bar_options()),
-                    focus: true,
-                    show: true,
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_decorations: Some(WindowDecorations::Client),
-                    ..Default::default()
-                },
-                {
-                    let open_url_bridge = open_url_bridge.clone();
-                    move |window, cx| {
-                        let shell =
-                            cx.new(|cx| DesktopShell::new(window, cx, open_url_bridge.clone()));
-                        cx.new(|cx| gpui_component::Root::new(shell, window, cx))
-                    }
-                },
-            )
-            .expect("failed to open ato-desktop window");
-
-            cx.activate(true);
+        cx.activate(true);
     });
 }
 

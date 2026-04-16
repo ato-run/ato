@@ -57,8 +57,16 @@ pub(super) fn render_capsule_runtime_panel(capsule: &CapsuleStatusPane, theme: &
                             capsule.display_strategy.as_deref(),
                             theme,
                         ))
-                        .child(render_row("State", session_state_label(&capsule.session), theme))
-                        .child(render_optional_row("URL", capsule.local_url.as_deref(), theme))
+                        .child(render_row(
+                            "State",
+                            session_state_label(&capsule.session),
+                            theme,
+                        ))
+                        .child(render_optional_row(
+                            "URL",
+                            capsule.local_url.as_deref(),
+                            theme,
+                        ))
                         .child(render_optional_row(
                             "Health",
                             capsule.healthcheck_url.as_deref(),
@@ -69,7 +77,11 @@ pub(super) fn render_capsule_runtime_panel(capsule: &CapsuleStatusPane, theme: &
                             capsule.invoke_url.as_deref(),
                             theme,
                         ))
-                        .child(render_optional_row("Log", capsule.log_path.as_deref(), theme)),
+                        .child(render_optional_row(
+                            "Log",
+                            capsule.log_path.as_deref(),
+                            theme,
+                        )),
                 )
                 .child(
                     div()

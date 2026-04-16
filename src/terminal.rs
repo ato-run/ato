@@ -60,8 +60,8 @@ impl TerminalSession {
     pub fn consume_rate_token(&mut self) -> bool {
         let now = Instant::now();
         let elapsed = now.duration_since(self.rate_last_refill).as_secs_f64();
-        self.rate_tokens =
-            (self.rate_tokens + elapsed * RATE_LIMIT_REFILL_PER_SEC).min(RATE_LIMIT_CAPACITY as f64);
+        self.rate_tokens = (self.rate_tokens + elapsed * RATE_LIMIT_REFILL_PER_SEC)
+            .min(RATE_LIMIT_CAPACITY as f64);
         self.rate_last_refill = now;
 
         if self.rate_tokens >= 1.0 {
@@ -113,9 +113,7 @@ impl TerminalSessionManager {
                 "Terminal session limit ({}) reached; rejecting new session",
                 MAX_SESSIONS
             );
-            return Err(format!(
-                "Terminal session limit ({MAX_SESSIONS}) reached"
-            ));
+            return Err(format!("Terminal session limit ({MAX_SESSIONS}) reached"));
         }
 
         info!(
@@ -125,9 +123,10 @@ impl TerminalSessionManager {
             rows,
             "Terminal session created"
         );
-        inner
-            .sessions
-            .insert(session_id.clone(), TerminalSession::new(session_id, capsule_handle, cols, rows));
+        inner.sessions.insert(
+            session_id.clone(),
+            TerminalSession::new(session_id, capsule_handle, cols, rows),
+        );
         Ok(())
     }
 
@@ -233,7 +232,8 @@ mod tests {
     #[test]
     fn test_create_and_remove_session() {
         let mgr = TerminalSessionManager::new();
-        mgr.create_session("s1".into(), "myapp".into(), 80, 24).unwrap();
+        mgr.create_session("s1".into(), "myapp".into(), 80, 24)
+            .unwrap();
         assert!(mgr.is_active("s1"));
         mgr.remove_session("s1");
         assert!(!mgr.is_active("s1"));
@@ -243,7 +243,8 @@ mod tests {
     fn test_session_limit() {
         let mgr = TerminalSessionManager::new();
         for i in 0..MAX_SESSIONS {
-            mgr.create_session(format!("s{i}"), "app".into(), 80, 24).unwrap();
+            mgr.create_session(format!("s{i}"), "app".into(), 80, 24)
+                .unwrap();
         }
         let result = mgr.create_session("overflow".into(), "app".into(), 80, 24);
         assert!(result.is_err());
@@ -252,7 +253,8 @@ mod tests {
     #[test]
     fn test_rate_limit_allows_burst() {
         let mgr = TerminalSessionManager::new();
-        mgr.create_session("s1".into(), "app".into(), 80, 24).unwrap();
+        mgr.create_session("s1".into(), "app".into(), 80, 24)
+            .unwrap();
         // First 1000 tokens should succeed
         for _ in 0..100 {
             assert!(mgr.consume_input_token("s1"));
@@ -268,7 +270,8 @@ mod tests {
     #[test]
     fn test_update_size() {
         let mgr = TerminalSessionManager::new();
-        mgr.create_session("s1".into(), "app".into(), 80, 24).unwrap();
+        mgr.create_session("s1".into(), "app".into(), 80, 24)
+            .unwrap();
         mgr.update_size("s1", 132, 50);
         // No panic; session still active
         assert!(mgr.is_active("s1"));

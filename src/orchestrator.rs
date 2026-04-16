@@ -30,6 +30,43 @@ pub fn take_pending_share_terminal(session_id: &str) -> Option<TerminalProcess> 
         .and_then(|mut map| map.remove(session_id))
 }
 
+/// Launch specification for a bare CLI panel opened via `ato://cli`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CliLaunchSpec {
+    /// Default: a line-oriented REPL that routes every command through `ato run`.
+    AtoRunRepl,
+    /// Raw interactive shell under nacelle (e.g. bash, zsh, /bin/sh).
+    RawShell(String),
+    /// Plain invocation of the `ato` binary (its own help / subcommand entrypoint).
+    RawAto,
+}
+
+/// Pending CLI launch specs keyed by session_id, populated by
+/// `AppState::handle_host_route` when an `ato://cli` deep link is opened.
+/// Drained by `webview.rs` when the Terminal pane is first rendered.
+static PENDING_CLI_COMMANDS: std::sync::OnceLock<Mutex<HashMap<String, CliLaunchSpec>>> =
+    std::sync::OnceLock::new();
+
+fn pending_cli_commands() -> &'static Mutex<HashMap<String, CliLaunchSpec>> {
+    PENDING_CLI_COMMANDS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register a pending CLI launch spec for a session_id.
+pub fn register_pending_cli_command(session_id: String, spec: CliLaunchSpec) {
+    if let Ok(mut map) = pending_cli_commands().lock() {
+        map.insert(session_id, spec);
+    }
+}
+
+/// Take a pending CLI launch spec by session_id.
+/// Returns `None` if the session was not opened via `ato://cli`.
+pub fn take_pending_cli_command(session_id: &str) -> Option<CliLaunchSpec> {
+    pending_cli_commands()
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(session_id))
+}
+
 const ATO_BIN_ENV: &str = "ATO_DESKTOP_ATO_BIN";
 
 #[derive(Clone, Debug)]
@@ -264,7 +301,10 @@ pub fn cleanup_stale_capsule_sessions() -> Result<Vec<String>> {
         if log_path.exists() {
             let _ = fs::remove_file(&log_path);
         }
-        notes.push(format!("Removed stale capsule session {}", record.session_id));
+        notes.push(format!(
+            "Removed stale capsule session {}",
+            record.session_id
+        ));
     }
 
     Ok(notes)
@@ -410,8 +450,8 @@ fn build_launch_session(
     let web = started.web.clone();
     let terminal = started.terminal.clone();
     let service = started.service.clone();
-    let guest_metadata_missing = matches!(display_strategy, CapsuleDisplayStrategy::GuestWebview)
-        && guest.is_none();
+    let guest_metadata_missing =
+        matches!(display_strategy, CapsuleDisplayStrategy::GuestWebview) && guest.is_none();
 
     if recover_from_materialized_manifest && !guest_metadata_missing {
         notes.push(
@@ -448,9 +488,7 @@ fn build_launch_session(
     };
 
     if guest_metadata_missing {
-        bail!(
-            "ato app session start returned guest_webview for {handle} without guest payload"
-        );
+        bail!("ato app session start returned guest_webview for {handle} without guest payload");
     }
 
     Ok(CapsuleLaunchSession {
@@ -668,10 +706,7 @@ fn collect_dev_script_dirs(
                 if path.is_dir() {
                     let name = entry.file_name();
                     let name_str = name.to_string_lossy();
-                    if !DEV_SCAN_SKIP
-                        .iter()
-                        .any(|skip| name_str.as_ref() == *skip)
-                    {
+                    if !DEV_SCAN_SKIP.iter().any(|skip| name_str.as_ref() == *skip) {
                         collect_dev_script_dirs(&path, depth + 1, max_depth, out);
                     }
                 }
@@ -690,8 +725,6 @@ fn frontend_score(path: &Path) -> usize {
         .count()
 }
 
-
-
 /// Detect the package manager to use for a given source directory.
 ///
 /// Searches the directory and up to 3 ancestor levels for lock files and workspace
@@ -701,8 +734,7 @@ fn frontend_score(path: &Path) -> usize {
 /// itself if no such ancestor is found.
 fn detect_package_manager(source_dir: &Path) -> (&'static str, PathBuf) {
     // Check source_dir itself first, then ancestors (skip(1)) up to 3 levels.
-    let candidates = std::iter::once(source_dir)
-        .chain(source_dir.ancestors().skip(1).take(3));
+    let candidates = std::iter::once(source_dir).chain(source_dir.ancestors().skip(1).take(3));
 
     let mut pnpm_root: Option<PathBuf> = None;
     let mut yarn_root: Option<PathBuf> = None;
@@ -824,9 +856,15 @@ fn start_web_service_from_workspace(
             .arg("install")
             .current_dir(&install_root)
             .status()
-            .with_context(|| format!("failed to run `{pm} install` in {}", install_root.display()))?;
+            .with_context(|| {
+                format!("failed to run `{pm} install` in {}", install_root.display())
+            })?;
         if !install_status.success() {
-            bail!("`{pm} install` failed in {} (exit {:?})", install_root.display(), install_status.code());
+            bail!(
+                "`{pm} install` failed in {} (exit {:?})",
+                install_root.display(),
+                install_status.code()
+            );
         }
         info!(share_url, pm, "install completed");
     }
@@ -837,12 +875,7 @@ fn start_web_service_from_workspace(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| {
-            format!(
-                "failed to spawn `{pm} run dev` in {}",
-                source_dir.display()
-            )
-        })?;
+        .with_context(|| format!("failed to spawn `{pm} run dev` in {}", source_dir.display()))?;
 
     let pid = child.id();
     let stdout = child.stdout.take().expect("stdout is piped");
@@ -862,11 +895,7 @@ fn start_web_service_from_workspace(
     let local_url = match url_result {
         Ok(url) => url,
         Err(detect_err) => {
-            let stderr_output = stderr_handle
-                .join()
-                .unwrap_or_default()
-                .trim()
-                .to_string();
+            let stderr_output = stderr_handle.join().unwrap_or_default().trim().to_string();
             if !stderr_output.is_empty() {
                 error!(
                     share_url,
@@ -875,9 +904,7 @@ fn start_web_service_from_workspace(
                     stderr = %stderr_output,
                     "dev server process failed"
                 );
-                bail!(
-                    "`{pm} run dev` failed: {detect_err}\nstderr:\n{stderr_output}"
-                );
+                bail!("`{pm} run dev` failed: {detect_err}\nstderr:\n{stderr_output}");
             }
             return Err(detect_err);
         }
@@ -960,7 +987,10 @@ fn detect_dev_server_url(
         for host in ["localhost", "[::1]", "127.0.0.1"] {
             let url = format!("http://{host}:{port}/");
             if verify_html_url(&url) {
-                warn!(url, "dev server URL not found in stdout, using first HTML-serving port");
+                warn!(
+                    url,
+                    "dev server URL not found in stdout, using first HTML-serving port"
+                );
                 return Ok(url);
             }
         }
@@ -973,7 +1003,10 @@ fn detect_dev_server_url(
 /// A 2 s timeout is used so startup detection is not delayed by a slow or absent server.
 /// If the server returns no `Content-Type` header (unusual but possible) we assume HTML.
 fn verify_html_url(url: &str) -> bool {
-    match ureq::head(url).timeout(std::time::Duration::from_secs(2)).call() {
+    match ureq::head(url)
+        .timeout(std::time::Duration::from_secs(2))
+        .call()
+    {
         Ok(resp) => resp
             .header("content-type")
             .map(|ct| ct.contains("text/html"))
@@ -1059,14 +1092,20 @@ fn decap_share(share_url: &str, into: &Path) -> Result<()> {
 
 /// Resolve and start a capsule from a share URL by materializing it locally first.
 fn resolve_and_start_from_share(share_url: &str) -> Result<CapsuleLaunchSession> {
-    info!(share_url, "starting share URL execution via nacelle sandbox");
+    info!(
+        share_url,
+        "starting share URL execution via nacelle sandbox"
+    );
 
     let result = capsule_core::share::execute_share(capsule_core::share::ShareRunRequest {
         input: share_url.to_string(),
         entry: None,
         extra_args: vec![],
         env_overlay: std::collections::BTreeMap::new(),
-        mode: capsule_core::share::ShareExecutionMode::Piped { cols: 120, rows: 40 },
+        mode: capsule_core::share::ShareExecutionMode::Piped {
+            cols: 120,
+            rows: 40,
+        },
         nacelle_path: std::env::var("NACELLE_PATH").ok().map(PathBuf::from),
         ato_path: std::env::var("ATO_DESKTOP_ATO_BIN")
             .ok()
@@ -1294,7 +1333,9 @@ mod tests {
     #[test]
     fn is_share_url_rejects_non_share_urls() {
         // publisher/slug registry handles must NOT be treated as share URLs
-        assert!(!super::is_share_url("https://ato.run/koh0920/ato-onboarding"));
+        assert!(!super::is_share_url(
+            "https://ato.run/koh0920/ato-onboarding"
+        ));
         assert!(!super::is_share_url("capsule://ato.run/acme/chat"));
         assert!(!super::is_share_url("https://ato.run/dock"));
         assert!(!super::is_share_url("acme/chat"));
@@ -1591,6 +1632,58 @@ mod tests {
             eprintln!("[e2e] stopped     = {stopped}");
         }
     }
+
+    #[test]
+    fn shell_split_parses_plain_args() {
+        let argv = super::shell_split("ls -la /tmp").expect("parse");
+        assert_eq!(argv, vec!["ls", "-la", "/tmp"]);
+    }
+
+    #[test]
+    fn shell_split_handles_double_quotes_and_escapes() {
+        let argv = super::shell_split(r#"echo "hello world" foo\ bar"#).expect("parse");
+        assert_eq!(argv, vec!["echo", "hello world", "foo bar"]);
+    }
+
+    #[test]
+    fn shell_split_handles_single_quotes_literally() {
+        let argv = super::shell_split(r#"echo 'a "b" c'"#).expect("parse");
+        assert_eq!(argv, vec!["echo", r#"a "b" c"#]);
+    }
+
+    #[test]
+    fn shell_split_rejects_unterminated_quote() {
+        assert!(super::shell_split(r#"echo "unterminated"#).is_err());
+    }
+
+    #[test]
+    fn shell_split_returns_empty_for_blank_input() {
+        let argv = super::shell_split("   ").expect("parse");
+        assert!(argv.is_empty());
+    }
+
+    #[test]
+    fn pending_cli_command_registry_roundtrip() {
+        let session_id = format!("test-cli-{}", std::process::id());
+        super::register_pending_cli_command(session_id.clone(), super::CliLaunchSpec::AtoRunRepl);
+        let spec = super::take_pending_cli_command(&session_id).expect("spec");
+        assert!(matches!(spec, super::CliLaunchSpec::AtoRunRepl));
+        // taking again must return None (consumed).
+        assert!(super::take_pending_cli_command(&session_id).is_none());
+    }
+
+    #[test]
+    fn pending_cli_command_registry_preserves_shell_variant() {
+        let session_id = format!("test-cli-shell-{}", std::process::id());
+        super::register_pending_cli_command(
+            session_id.clone(),
+            super::CliLaunchSpec::RawShell("zsh".to_string()),
+        );
+        match super::take_pending_cli_command(&session_id).expect("spec") {
+            super::CliLaunchSpec::RawShell(s) => assert_eq!(s, "zsh"),
+            other => panic!("expected RawShell, got {other:?}"),
+        }
+    }
 }
 
 // ── Terminal PTY session management ──────────────────────────────────────────
@@ -1607,7 +1700,6 @@ pub struct TerminalProcess {
     /// Receive base64-encoded output chunks from the PTY.
     pub output_rx: Receiver<String>,
 }
-
 
 /// Spawn a terminal session routed through nacelle for a given `session_id`.
 ///
@@ -1644,12 +1736,21 @@ pub fn spawn_terminal_session(
             "env_filter": "safe"
         }
     });
-    std::fs::write(&envelope_path, envelope_json.to_string())
-        .with_context(|| format!("failed to write nacelle envelope to {}", envelope_path.display()))?;
+    std::fs::write(&envelope_path, envelope_json.to_string()).with_context(|| {
+        format!(
+            "failed to write nacelle envelope to {}",
+            envelope_path.display()
+        )
+    })?;
 
     // Spawn nacelle subprocess with stdin/stdout piped
     let mut child = std::process::Command::new(&nacelle_bin)
-        .args(["internal", "--input", &envelope_path.to_string_lossy(), "exec"])
+        .args([
+            "internal",
+            "--input",
+            &envelope_path.to_string_lossy(),
+            "exec",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -1748,14 +1849,42 @@ pub fn spawn_terminal_session(
 /// reading until the receiver is dropped (pane closed). Bare `\n` bytes are
 /// normalised to `\r\n` so xterm.js renders line breaks correctly.
 pub fn spawn_log_tail_session(session_id: String, log_path: PathBuf) -> Result<TerminalProcess> {
-    let (input_tx, _): (Sender<Vec<u8>>, _) = channel();
+    let (input_tx, input_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = channel();
     let (resize_tx, _): (Sender<(u16, u16)>, _) = channel();
     let (output_tx, output_rx): (Sender<String>, Receiver<String>) = channel();
 
+    // Input-warning thread: log-tail is read-only, but xterm.js still forwards
+    // keystrokes. Keep the receiver alive (so `input_tx.send()` does not fail)
+    // and emit a one-shot banner the first time the user types, directing them
+    // to `ato://cli` if they want an interactive shell.
+    let banner_tx = output_tx.clone();
+    let banner_sid = session_id.clone();
+    std::thread::spawn(move || {
+        use base64::engine::general_purpose::STANDARD;
+        let mut warned = false;
+        while let Ok(bytes) = input_rx.recv() {
+            if bytes.is_empty() {
+                continue;
+            }
+            if !warned {
+                warned = true;
+                let msg = "\r\n\x1b[33m[CLI mode is read-only: this pane tails capsule logs. \
+                           Open an interactive shell with \x1b[1mato://cli\x1b[0m\x1b[33m.]\x1b[0m\r\n";
+                if banner_tx.send(STANDARD.encode(msg.as_bytes())).is_err() {
+                    break;
+                }
+                warn!(
+                    session_id = %banner_sid,
+                    "log-tail received input; emitted read-only banner"
+                );
+            }
+        }
+    });
+
     let sid = session_id.clone();
     std::thread::spawn(move || {
-        use std::io::Read;
         use base64::engine::general_purpose::STANDARD;
+        use std::io::Read;
 
         // Wait for the log file to appear (capsule process may still be starting).
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1807,6 +1936,368 @@ pub fn spawn_log_tail_session(session_id: String, log_path: PathBuf) -> Result<T
         resize_tx,
         output_rx,
     })
+}
+
+/// Spawn an interactive terminal session driven by a `CliLaunchSpec`.
+///
+/// Dispatches to:
+/// - `AtoRunRepl` → `spawn_ato_run_repl` (line-buffered REPL that routes every
+///   command through `ato run`).
+/// - `RawShell(shell)` → `spawn_terminal_session` (nacelle-backed PTY shell).
+/// - `RawAto` → a nacelle-backed PTY running the `ato` binary directly.
+pub fn spawn_cli_session(
+    session_id: String,
+    cols: u16,
+    rows: u16,
+    spec: CliLaunchSpec,
+) -> Result<TerminalProcess> {
+    match spec {
+        CliLaunchSpec::AtoRunRepl => spawn_ato_run_repl(session_id, cols, rows),
+        CliLaunchSpec::RawShell(shell) => spawn_terminal_session(session_id, &shell, cols, rows),
+        CliLaunchSpec::RawAto => {
+            // Run `ato` under nacelle by using it as the shell. nacelle will
+            // exec it in an interactive PTY; if the user's `ato` has no REPL
+            // the process exits and xterm.js shows a session-ended notice.
+            let ato_bin =
+                resolve_ato_binary().context("cannot resolve ato binary for ato://cli?cmd=ato")?;
+            spawn_terminal_session(session_id, &ato_bin.to_string_lossy(), cols, rows)
+        }
+    }
+}
+
+/// Spawn a line-oriented REPL that routes each input line through `ato run`.
+///
+/// The REPL lives entirely in Rust (no PTY required): xterm.js keystrokes are
+/// decoded from `input_tx`, echoed back through `output_tx` with minimal line
+/// editing, and on Enter the current buffer is forwarded to `ato run -- <line>`.
+/// Child stdout/stderr stream back as base64-encoded chunks.
+///
+/// Supported editing:
+/// - printable bytes: appended to buffer and echoed.
+/// - `\r` or `\n`: submit the current line.
+/// - `\x7f` / `\x08` (DEL / Backspace): erase one char with `\b \b`.
+/// - `\x03` (Ctrl-C): cancel the current line (or kill the running child).
+/// - `\x04` (Ctrl-D) on an empty line: close the session.
+pub fn spawn_ato_run_repl(session_id: String, _cols: u16, _rows: u16) -> Result<TerminalProcess> {
+    use std::io::BufReader;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    let ato_bin =
+        resolve_ato_binary().context("cannot resolve ato binary for ato://cli (ato run REPL)")?;
+
+    let (input_tx, input_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = channel();
+    let (resize_tx, _resize_rx): (Sender<(u16, u16)>, Receiver<(u16, u16)>) = channel();
+    let (output_tx, output_rx): (Sender<String>, Receiver<String>) = channel();
+
+    let sid = session_id.clone();
+
+    // Send helper: base64-encode and push to xterm.js.
+    fn send(tx: &Sender<String>, bytes: &[u8]) -> bool {
+        tx.send(base64::engine::general_purpose::STANDARD.encode(bytes))
+            .is_ok()
+    }
+
+    std::thread::spawn(move || {
+        // Track the currently-running `ato run` child so Ctrl-C can interrupt it.
+        let running_child: Arc<StdMutex<Option<std::process::Child>>> =
+            Arc::new(StdMutex::new(None));
+
+        // Initial banner + prompt.
+        let banner = "\x1b[36m┌─ ato CLI ──────────────────────────────────────────┐\x1b[0m\r\n\
+             \x1b[36m│\x1b[0m Every command runs as \x1b[1mato run -- <command>\x1b[0m\r\n\
+             \x1b[36m│\x1b[0m Ctrl-C cancels; Ctrl-D exits.\r\n\
+             \x1b[36m└────────────────────────────────────────────────────┘\x1b[0m\r\n";
+        if !send(&output_tx, banner.as_bytes()) {
+            return;
+        }
+        if !send(&output_tx, b"\x1b[32mato>\x1b[0m ") {
+            return;
+        }
+
+        let mut line: Vec<u8> = Vec::new();
+
+        while let Ok(bytes) = input_rx.recv() {
+            for &b in &bytes {
+                match b {
+                    // Enter → submit
+                    b'\r' | b'\n' => {
+                        if !send(&output_tx, b"\r\n") {
+                            return;
+                        }
+                        let cmd = String::from_utf8_lossy(&line).trim().to_string();
+                        line.clear();
+
+                        if cmd.is_empty() {
+                            if !send(&output_tx, b"\x1b[32mato>\x1b[0m ") {
+                                return;
+                            }
+                            continue;
+                        }
+
+                        // Handle a couple of REPL-local shortcuts before invoking ato.
+                        if cmd == "exit" || cmd == "quit" {
+                            let _ = send(&output_tx, b"\x1b[90mbye.\x1b[0m\r\n");
+                            info!(session_id = %sid, "ato-run REPL: exit requested");
+                            return;
+                        }
+
+                        // Spawn `ato run -- <cmd>` with pipes. We split on whitespace
+                        // respecting simple shell-like quoting via shell-words.
+                        let argv = match shell_split(&cmd) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                let msg = format!("\x1b[31mparse error: {e}\x1b[0m\r\n");
+                                let _ = send(&output_tx, msg.as_bytes());
+                                let _ = send(&output_tx, b"\x1b[32mato>\x1b[0m ");
+                                continue;
+                            }
+                        };
+
+                        let mut proc_cmd = std::process::Command::new(&ato_bin);
+                        proc_cmd
+                            .arg("run")
+                            .arg("--")
+                            .args(&argv)
+                            .env("FORCE_COLOR", "1")
+                            .env("CLICOLOR_FORCE", "1")
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::piped());
+
+                        let spawned = proc_cmd.spawn();
+                        let mut child = match spawned {
+                            Ok(c) => c,
+                            Err(e) => {
+                                let msg =
+                                    format!("\x1b[31mfailed to spawn ato run: {e}\x1b[0m\r\n");
+                                let _ = send(&output_tx, msg.as_bytes());
+                                let _ = send(&output_tx, b"\x1b[32mato>\x1b[0m ");
+                                continue;
+                            }
+                        };
+
+                        let child_stdout = child.stdout.take();
+                        let child_stderr = child.stderr.take();
+                        if let Ok(mut slot) = running_child.lock() {
+                            *slot = Some(child);
+                        }
+
+                        // Pump stdout + stderr to xterm.js on worker threads.
+                        let out_tx = output_tx.clone();
+                        let stdout_thread = child_stdout.map(|s| {
+                            std::thread::spawn(move || {
+                                let mut reader = BufReader::new(s);
+                                let mut buf = [0u8; 1024];
+                                let mut prev_cr = false;
+                                use std::io::Read;
+                                loop {
+                                    match reader.read(&mut buf) {
+                                        Ok(0) | Err(_) => break,
+                                        Ok(n) => {
+                                            let norm =
+                                                normalize_log_newlines(&buf[..n], &mut prev_cr);
+                                            if !send(&out_tx, &norm) {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            })
+                        });
+
+                        let err_tx = output_tx.clone();
+                        let stderr_thread = child_stderr.map(|s| {
+                            std::thread::spawn(move || {
+                                let mut reader = BufReader::new(s);
+                                let mut buf = [0u8; 1024];
+                                let mut prev_cr = false;
+                                use std::io::Read;
+                                loop {
+                                    match reader.read(&mut buf) {
+                                        Ok(0) | Err(_) => break,
+                                        Ok(n) => {
+                                            let norm =
+                                                normalize_log_newlines(&buf[..n], &mut prev_cr);
+                                            if !send(&err_tx, &norm) {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            })
+                        });
+
+                        // Wait for the child to exit. We drain Ctrl-C signals
+                        // from input_rx via a short poll loop (non-blocking).
+                        let exit_status = loop {
+                            // Non-blocking wait with a poll.
+                            let wait_result = {
+                                let mut slot = match running_child.lock() {
+                                    Ok(s) => s,
+                                    Err(_) => break None,
+                                };
+                                match slot.as_mut() {
+                                    Some(c) => c.try_wait().ok().flatten(),
+                                    None => break None,
+                                }
+                            };
+                            if let Some(status) = wait_result {
+                                break Some(status);
+                            }
+
+                            // Drain any pending input for Ctrl-C.
+                            while let Ok(more) = input_rx.try_recv() {
+                                for &ib in &more {
+                                    if ib == 0x03 {
+                                        if let Ok(mut slot) = running_child.lock() {
+                                            if let Some(c) = slot.as_mut() {
+                                                let _ = c.kill();
+                                                let _ =
+                                                    send(&output_tx, b"\r\n\x1b[33m^C\x1b[0m\r\n");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        };
+
+                        // Wait on pump threads.
+                        if let Some(t) = stdout_thread {
+                            let _ = t.join();
+                        }
+                        if let Some(t) = stderr_thread {
+                            let _ = t.join();
+                        }
+
+                        // Clear running child slot.
+                        if let Ok(mut slot) = running_child.lock() {
+                            *slot = None;
+                        }
+
+                        if let Some(status) = exit_status {
+                            if !status.success() {
+                                let code = status.code().unwrap_or(-1);
+                                let msg = format!(
+                                    "\x1b[31m[ato run exited with status {code}]\x1b[0m\r\n"
+                                );
+                                let _ = send(&output_tx, msg.as_bytes());
+                            }
+                        }
+
+                        if !send(&output_tx, b"\x1b[32mato>\x1b[0m ") {
+                            return;
+                        }
+                    }
+                    // Ctrl-C outside of a running child → clear the current line.
+                    0x03 => {
+                        line.clear();
+                        if !send(&output_tx, b"^C\r\n\x1b[32mato>\x1b[0m ") {
+                            return;
+                        }
+                    }
+                    // Ctrl-D on empty line → exit.
+                    0x04 => {
+                        if line.is_empty() {
+                            let _ = send(&output_tx, b"\r\n\x1b[90mbye.\x1b[0m\r\n");
+                            info!(session_id = %sid, "ato-run REPL: EOF");
+                            return;
+                        }
+                    }
+                    // Backspace / DEL
+                    0x7f | 0x08 => {
+                        if !line.is_empty() {
+                            line.pop();
+                            if !send(&output_tx, b"\x08 \x08") {
+                                return;
+                            }
+                        }
+                    }
+                    // Tab — no completion yet, just print a space.
+                    b'\t' => {
+                        line.push(b' ');
+                        if !send(&output_tx, b" ") {
+                            return;
+                        }
+                    }
+                    // ESC sequence — swallow a few common ones (arrow keys) to
+                    // avoid polluting the buffer. We peek only the single byte
+                    // here; subsequent bytes in the same chunk will be handled
+                    // on the next iterations but are harmless printable-ish
+                    // values the buffer ignores.
+                    0x1b => {
+                        // Ignore; a more complete impl would parse CSI sequences.
+                    }
+                    // Printable / UTF-8 byte
+                    _ => {
+                        line.push(b);
+                        if !send(&output_tx, &[b]) {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Input channel closed → exit.
+        let _ = send(&output_tx, b"\r\n\x1b[90m[session closed]\x1b[0m\r\n");
+    });
+
+    info!(session_id = %session_id, "ato-run REPL session spawned");
+
+    Ok(TerminalProcess {
+        session_id,
+        input_tx,
+        resize_tx,
+        output_rx,
+    })
+}
+
+/// Split a command line into argv, respecting simple single/double quotes.
+///
+/// This is intentionally small — full POSIX expansion (globs, variables) is
+/// the responsibility of `ato run` itself. Unmatched quotes return an error.
+fn shell_split(input: &str) -> std::result::Result<Vec<String>, String> {
+    let mut args: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escape = false;
+
+    for ch in input.chars() {
+        if escape {
+            current.push(ch);
+            escape = false;
+            continue;
+        }
+        match ch {
+            '\\' if !in_single => {
+                escape = true;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if in_single || in_double {
+        return Err("unterminated quote".to_string());
+    }
+    if escape {
+        return Err("trailing backslash".to_string());
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    Ok(args)
 }
 
 /// Normalise bare `\n` → `\r\n` for xterm.js, preserving existing `\r\n` sequences.

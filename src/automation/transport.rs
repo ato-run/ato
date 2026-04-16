@@ -88,7 +88,10 @@ pub fn start_socket_listener(pending: PendingQueue, notify: NotifyFn) -> std::io
 }
 
 #[cfg(not(unix))]
-pub fn start_socket_listener(_pending: PendingQueue, _notify: NotifyFn) -> std::io::Result<PathBuf> {
+pub fn start_socket_listener(
+    _pending: PendingQueue,
+    _notify: NotifyFn,
+) -> std::io::Result<PathBuf> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "automation socket transport is not yet supported on this platform",
@@ -125,7 +128,10 @@ fn handle_connection(
                 match rx.recv_timeout(Duration::from_secs(35)) {
                     Ok(Ok(value)) => {
                         let id = extract_id(&line);
-                        (id.clone(), serde_json::to_string(&JsonRpcResponse::ok(id, value)).unwrap())
+                        (
+                            id.clone(),
+                            serde_json::to_string(&JsonRpcResponse::ok(id, value)).unwrap(),
+                        )
                     }
                     Ok(Err(msg)) => {
                         let id = extract_id(&line);
@@ -179,7 +185,10 @@ fn dispatch_request(
                 jsonrpc: "2.0",
                 id: Value::Null,
                 result: None,
-                error: Some(JsonRpcError { code: -32700, message: format!("parse error: {e}") }),
+                error: Some(JsonRpcError {
+                    code: -32700,
+                    message: format!("parse error: {e}"),
+                }),
             })
             .unwrap();
             return Err(err_json);
@@ -187,7 +196,11 @@ fn dispatch_request(
     };
 
     let id = rpc.id.clone().unwrap_or(Value::Null);
-    let pane_id = rpc.params.get("pane_id").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let pane_id = rpc
+        .params
+        .get("pane_id")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
 
     let command = match parse_command(&rpc.method, &rpc.params) {
         Ok(cmd) => cmd,
@@ -221,14 +234,24 @@ fn parse_command(method: &str, params: &Value) -> Result<AutomationCommand, Stri
         "snapshot" => Ok(AutomationCommand::Snapshot),
         "screenshot" => Ok(AutomationCommand::Screenshot),
         "click" => Ok(AutomationCommand::Click { ref_id: s("ref")? }),
-        "fill" => Ok(AutomationCommand::Fill { ref_id: s("ref")?, value: s("value")? }),
-        "type" => Ok(AutomationCommand::Type { ref_id: s("ref")?, text: s("text")? }),
-        "select_option" => {
-            Ok(AutomationCommand::SelectOption { ref_id: s("ref")?, value: s("value")? })
-        }
+        "fill" => Ok(AutomationCommand::Fill {
+            ref_id: s("ref")?,
+            value: s("value")?,
+        }),
+        "type" => Ok(AutomationCommand::Type {
+            ref_id: s("ref")?,
+            text: s("text")?,
+        }),
+        "select_option" => Ok(AutomationCommand::SelectOption {
+            ref_id: s("ref")?,
+            value: s("value")?,
+        }),
         "check" => Ok(AutomationCommand::Check {
             ref_id: s("ref")?,
-            checked: params.get("checked").and_then(|v| v.as_bool()).unwrap_or(true),
+            checked: params
+                .get("checked")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
         }),
         "press_key" => Ok(AutomationCommand::PressKey { key: s("key")? }),
         "navigate" => Ok(AutomationCommand::Navigate { url: s("url")? }),
@@ -241,13 +264,16 @@ fn parse_command(method: &str, params: &Value) -> Result<AutomationCommand, Stri
                 .and_then(|v| v.as_u64())
                 .unwrap_or(5000),
         }),
-        "evaluate" => Ok(AutomationCommand::Evaluate { expression: s("expression")? }),
+        "evaluate" => Ok(AutomationCommand::Evaluate {
+            expression: s("expression")?,
+        }),
         "console_messages" => Ok(AutomationCommand::ConsoleMessages),
         "verify_text_visible" => Ok(AutomationCommand::VerifyTextVisible { text: s("text")? }),
         "verify_element_visible" => {
             Ok(AutomationCommand::VerifyElementVisible { ref_id: s("ref")? })
         }
         "list_panes" => Ok(AutomationCommand::ListPanes),
+        "open_url" => Ok(AutomationCommand::OpenUrl { url: s("url")? }),
         "focus_pane" => Ok(AutomationCommand::FocusPane {
             pane_id: params
                 .get("pane_id")
