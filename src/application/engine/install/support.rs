@@ -902,16 +902,49 @@ pub(crate) async fn resolve_run_target_or_install(
         Ok(value) => value,
         Err(error) => {
             if install::is_slug_only_ref(&raw) {
-                let effective_registry = registry.unwrap_or(DEFAULT_RUN_REGISTRY_URL);
-                anyhow::bail!(
-                    "{}",
-                    crate::scoped_id_prompt::run_scoped_id_prompt(&raw, Some(effective_registry))
-                        .await?
+                // A bare slug like `python` is allowed when exactly one
+                // publisher owns a locally installed capsule with that slug
+                // (i.e. `~/.ato/store/<publisher>/<slug>/<version>/` exists).
+                // This matches the "same mental model as ato run" UX: users
+                // who have already fetched a capsule into their CAS can
+                // invoke it by its slug without repeating the publisher.
+                match install::resolve_local_slug(&raw) {
+                    Ok(install::LocalSlugResolution::Unique(scoped_id)) => {
+                        debug!(slug = %raw, scoped_id = %scoped_id, "resolved bare slug from local store");
+                        install::parse_capsule_ref(&scoped_id).with_context(|| {
+                            format!(
+                                "Locally resolved scoped id '{scoped_id}' is not a valid capsule reference"
+                            )
+                        })?
+                    }
+                    Ok(install::LocalSlugResolution::Ambiguous(candidates)) => {
+                        let list = candidates
+                            .iter()
+                            .map(|scoped_id| format!("  - {scoped_id}"))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        anyhow::bail!(
+                            "scoped_id_required: '{}' is installed under multiple publishers.\n\nLocal matches:\n{}\n\nRe-run with the publisher/slug form.",
+                            raw, list
+                        );
+                    }
+                    _ => {
+                        let effective_registry = registry.unwrap_or(DEFAULT_RUN_REGISTRY_URL);
+                        anyhow::bail!(
+                            "{}",
+                            crate::scoped_id_prompt::run_scoped_id_prompt(
+                                &raw,
+                                Some(effective_registry)
+                            )
+                            .await?
+                        );
+                    }
+                }
+            } else {
+                return Err(error).context(
+                    "Invalid run target. Use a local path or existing .capsule file, or publisher/slug for store capsules.",
                 );
             }
-            return Err(error).context(
-                "Invalid run target. Use a local path or existing .capsule file, or publisher/slug for store capsules.",
-            );
         }
     };
 
