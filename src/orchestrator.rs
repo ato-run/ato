@@ -2033,6 +2033,7 @@ pub fn spawn_cli_session(
 /// - `\x03` (Ctrl-C): cancel the current line (or kill the running child).
 /// - `\x04` (Ctrl-D) on an empty line: close the session.
 pub fn spawn_ato_run_repl(session_id: String, _cols: u16, _rows: u16) -> Result<TerminalProcess> {
+    use crate::egress_policy::{EgressPolicy, HostPattern};
     use std::io::BufReader;
     use std::sync::{Arc, Mutex as StdMutex};
 
@@ -2044,6 +2045,12 @@ pub fn spawn_ato_run_repl(session_id: String, _cols: u16, _rows: u16) -> Result<
     let (output_tx, output_rx): (Sender<String>, Receiver<String>) = channel();
 
     let sid = session_id.clone();
+
+    // Session-only egress allowlist. Phase 1: in-memory only, no enforcement
+    // yet — the meta-commands are visible in `.egress` output and future
+    // phases will push this into the sidecar proxy / nacelle sandbox.
+    let egress_policy: Arc<StdMutex<EgressPolicy>> =
+        Arc::new(StdMutex::new(EgressPolicy::localhost_only()));
 
     // Send helper: base64-encode and push to xterm.js.
     fn send(tx: &Sender<String>, bytes: &[u8]) -> bool {
@@ -2060,6 +2067,7 @@ pub fn spawn_ato_run_repl(session_id: String, _cols: u16, _rows: u16) -> Result<
         let banner = "\x1b[36m┌─ ato CLI ──────────────────────────────────────────┐\x1b[0m\r\n\
              \x1b[36m│\x1b[0m Capsules: \x1b[1m<slug>\x1b[0m or \x1b[1m<publisher>/<slug>\x1b[0m (via \x1b[1mato run\x1b[0m)\r\n\
              \x1b[36m│\x1b[0m Toolchains: \x1b[1mpython\x1b[0m \x1b[1mnode\x1b[0m \x1b[1mdeno\x1b[0m \x1b[1muv\x1b[0m (from ~/.ato/toolchains)\r\n\
+             \x1b[36m│\x1b[0m Egress: \x1b[1mlocalhost only\x1b[0m — type \x1b[1m.egress\x1b[0m or \x1b[1m.allow <host>\x1b[0m\r\n\
              \x1b[36m│\x1b[0m Ctrl-C cancels; Ctrl-D exits.\r\n\
              \x1b[36m└────────────────────────────────────────────────────┘\x1b[0m\r\n";
         if !send(&output_tx, banner.as_bytes()) {
@@ -2094,6 +2102,139 @@ pub fn spawn_ato_run_repl(session_id: String, _cols: u16, _rows: u16) -> Result<
                             let _ = send(&output_tx, b"\x1b[90mbye.\x1b[0m\r\n");
                             info!(session_id = %sid, "ato-run REPL: exit requested");
                             return;
+                        }
+
+                        // Egress meta-commands: processed entirely in-process,
+                        // no child spawn. Session-only grants (discarded when
+                        // this REPL closes). Phase 1: visibility only — the
+                        // policy is not yet wired to a proxy or sandbox.
+                        if let Some(rest) = cmd.strip_prefix('.') {
+                            let mut parts = rest.splitn(2, char::is_whitespace);
+                            let sub = parts.next().unwrap_or("");
+                            let arg = parts.next().unwrap_or("").trim();
+                            match sub {
+                                "egress" => {
+                                    let snap = match egress_policy.lock() {
+                                        Ok(g) => g.snapshot(),
+                                        Err(_) => {
+                                            let _ = send(
+                                                &output_tx,
+                                                b"\x1b[31megress policy lock poisoned\x1b[0m\r\n",
+                                            );
+                                            let _ = send(&output_tx, b"\x1b[32mato>\x1b[0m ");
+                                            continue;
+                                        }
+                                    };
+                                    let text = snap.render_human().replace('\n', "\r\n");
+                                    let _ = send(&output_tx, text.as_bytes());
+                                    let _ = send(&output_tx, b"\x1b[32mato>\x1b[0m ");
+                                    continue;
+                                }
+                                "allow" => {
+                                    if arg.is_empty() {
+                                        let _ = send(
+                                            &output_tx,
+                                            b"\x1b[33musage: .allow <host | *.host | ip>\x1b[0m\r\n",
+                                        );
+                                    } else {
+                                        match HostPattern::parse(arg) {
+                                            Ok(p) => {
+                                                let rendered = p.render();
+                                                let added = egress_policy
+                                                    .lock()
+                                                    .map(|mut g| g.allow(p))
+                                                    .unwrap_or(false);
+                                                let msg = if added {
+                                                    format!(
+                                                        "\x1b[32m+ allowed this session: {rendered}\x1b[0m\r\n"
+                                                    )
+                                                } else {
+                                                    format!(
+                                                        "\x1b[90m(already allowed: {rendered})\x1b[0m\r\n"
+                                                    )
+                                                };
+                                                let _ = send(&output_tx, msg.as_bytes());
+                                            }
+                                            Err(e) => {
+                                                let msg = format!(
+                                                    "\x1b[31minvalid pattern: {e}\x1b[0m\r\n"
+                                                );
+                                                let _ = send(&output_tx, msg.as_bytes());
+                                            }
+                                        }
+                                    }
+                                    let _ = send(&output_tx, b"\x1b[32mato>\x1b[0m ");
+                                    continue;
+                                }
+                                "deny" => {
+                                    if arg.is_empty() {
+                                        let _ = send(
+                                            &output_tx,
+                                            b"\x1b[33musage: .deny <host | *.host | ip>\x1b[0m\r\n",
+                                        );
+                                    } else {
+                                        match HostPattern::parse(arg) {
+                                            Ok(p) => {
+                                                let rendered = p.render();
+                                                let removed = egress_policy
+                                                    .lock()
+                                                    .map(|mut g| g.revoke(&p))
+                                                    .unwrap_or(false);
+                                                let msg = if removed {
+                                                    format!(
+                                                        "\x1b[33m- revoked: {rendered}\x1b[0m\r\n"
+                                                    )
+                                                } else {
+                                                    format!(
+                                                        "\x1b[90m(not in session allows or is built-in: {rendered})\x1b[0m\r\n"
+                                                    )
+                                                };
+                                                let _ = send(&output_tx, msg.as_bytes());
+                                            }
+                                            Err(e) => {
+                                                let msg = format!(
+                                                    "\x1b[31minvalid pattern: {e}\x1b[0m\r\n"
+                                                );
+                                                let _ = send(&output_tx, msg.as_bytes());
+                                            }
+                                        }
+                                    }
+                                    let _ = send(&output_tx, b"\x1b[32mato>\x1b[0m ");
+                                    continue;
+                                }
+                                "reset-egress" => {
+                                    if let Ok(mut g) = egress_policy.lock() {
+                                        g.reset_session();
+                                    }
+                                    let _ = send(
+                                        &output_tx,
+                                        b"\x1b[33msession egress allows cleared\x1b[0m\r\n",
+                                    );
+                                    let _ = send(&output_tx, b"\x1b[32mato>\x1b[0m ");
+                                    continue;
+                                }
+                                "help" => {
+                                    let help = "\
+\x1b[1mREPL meta-commands\x1b[0m\r\n\
+  \x1b[36m.egress\x1b[0m              show current allowlist\r\n\
+  \x1b[36m.allow\x1b[0m <pattern>     add a session-only allow (e.g. example.com, *.github.com, 1.2.3.4)\r\n\
+  \x1b[36m.deny\x1b[0m <pattern>      remove a session allow\r\n\
+  \x1b[36m.reset-egress\x1b[0m        clear all session allows (defaults remain)\r\n\
+  \x1b[36m.help\x1b[0m                this message\r\n\
+  \x1b[36mexit\x1b[0m / \x1b[36mquit\x1b[0m         close the REPL\r\n";
+                                    let _ = send(&output_tx, help.as_bytes());
+                                    let _ = send(&output_tx, b"\x1b[32mato>\x1b[0m ");
+                                    continue;
+                                }
+                                _ => {
+                                    let msg = format!(
+                                        "\x1b[31munknown meta-command: .{sub}\x1b[0m (try \x1b[36m.help\x1b[0m)\r\n"
+                                    );
+                                    let _ = send(&output_tx, msg.as_bytes());
+                                    let _ = send(&output_tx, b"\x1b[32mato>\x1b[0m ");
+                                    continue;
+                                }
+                            }
                         }
 
                         // Spawn `ato run -- <cmd>` with pipes. We split on whitespace
