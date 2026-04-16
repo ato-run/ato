@@ -31,11 +31,13 @@ use wry::{
 use wry::WebViewExtMacOS;
 
 use crate::bridge::{BridgeProxy, GuestBridgeResponse, GuestSessionContext, ShellEvent};
-use crate::orchestrator::{resolve_and_start_guest, stop_guest_session, GuestLaunchSession};
+use crate::orchestrator::{resolve_and_start_guest, spawn_terminal_session, stop_guest_session, GuestLaunchSession, TerminalProcess};
 use crate::state::{
     ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry, AuthSessionStatus,
     BrowserCommandKind, GuestRoute, PaneBounds, ShellMode, WebSessionState,
 };
+use capsule_core::handle::CapsuleDisplayStrategy;
+use tracing::{debug, error, info, warn};
 
 const DEVTOOLS_DEBUG_ENV: &str = "ATO_DESKTOP_DEVTOOLS_DEBUG";
 
@@ -84,6 +86,8 @@ pub struct WebViewManager {
     bridge: BridgeProxy,
     visibility_cache: HashMap<usize, bool>,
     pending_auth_handoffs: Arc<Mutex<Vec<AuthHandoffSignal>>>,
+    /// Live PTY sessions keyed by session_id.
+    terminal_sessions: HashMap<String, TerminalProcess>,
 }
 
 struct ManagedWebView {
@@ -167,6 +171,7 @@ impl WebViewManager {
             bridge: BridgeProxy::new(),
             visibility_cache: HashMap::new(),
             pending_auth_handoffs: Arc::new(Mutex::new(Vec::new())),
+            terminal_sessions: HashMap::new(),
         }
     }
 
@@ -319,6 +324,51 @@ impl WebViewManager {
             ),
             state,
         );
+
+        // Spawn a PTY terminal session if this is a Terminal pane and no session exists yet.
+        if let GuestRoute::Terminal { session_id } = &active.route {
+            let session_id = session_id.clone();
+            if !self.terminal_sessions.contains_key(&session_id) {
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                match spawn_terminal_session(session_id.clone(), &shell, 80, 24) {
+                    Ok(proc) => {
+                        info!(session_id = %session_id, "Spawned terminal PTY session");
+                        self.terminal_sessions.insert(session_id.clone(), proc);
+                        state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
+                    }
+                    Err(e) => {
+                        error!(session_id = %session_id, error = %e, "Failed to spawn terminal PTY");
+                        state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
+                    }
+                }
+            }
+
+            // Drain PTY output and push to xterm.js via evaluate_script.
+            if let (Some(proc), Some(view)) = (
+                self.terminal_sessions.get(&session_id),
+                self.views.get_mut(&active.pane_id),
+            ) {
+                loop {
+                    use std::sync::mpsc::TryRecvError;
+                    match proc.output_rx.try_recv() {
+                        Ok(b64) => {
+                            let json = serde_json::to_string(&b64).unwrap_or_default();
+                            let script = format!("window.__ato_write_terminal({json});");
+                            if let Err(e) = view.webview.evaluate_script(&script) {
+                                warn!(error = %e, "evaluate_script for terminal output failed");
+                            }
+                        }
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            // Session exited; notify xterm.js and clean up.
+                            let script = "window.__ato_terminal_exit(0);";
+                            let _ = view.webview.evaluate_script(script);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
 
         if let Some(existing) = self.views.get_mut(&active.pane_id) {
             for command in state.drain_browser_commands(active.pane_id) {
@@ -502,13 +552,42 @@ impl WebViewManager {
 
     fn apply_shell_events(&mut self, events: &[ShellEvent]) {
         for event in events {
-            if let ShellEvent::UrlChanged { pane_id, url } = event {
-                if let Some(view) = self.views.get_mut(pane_id) {
-                    if let Ok(parsed) = url.parse() {
-                        view.route = GuestRoute::ExternalUrl(parsed);
-                        view.route_key = url.clone();
+            match event {
+                ShellEvent::UrlChanged { pane_id, url } => {
+                    if let Some(view) = self.views.get_mut(pane_id) {
+                        if let Ok(parsed) = url.parse() {
+                            view.route = GuestRoute::ExternalUrl(parsed);
+                            view.route_key = url.clone();
+                        }
                     }
                 }
+                ShellEvent::TerminalInput { session_id, data_b64 } => {
+                    if let Some(proc) = self.terminal_sessions.get(session_id) {
+                        // Decode base64 and forward to PTY stdin.
+                        match base64_decode(data_b64) {
+                            Ok(bytes) => {
+                                if proc.input_tx.send(bytes).is_err() {
+                                    warn!(session_id = %session_id, "PTY input channel closed");
+                                }
+                            }
+                            Err(e) => {
+                                warn!(session_id = %session_id, error = %e, "base64 decode failed for terminal input");
+                            }
+                        }
+                    } else {
+                        debug!(session_id = %session_id, "terminal input: no PTY session found");
+                    }
+                }
+                ShellEvent::TerminalResize { session_id, cols, rows } => {
+                    if let Some(proc) = self.terminal_sessions.get(session_id) {
+                        if proc.resize_tx.send((*cols, *rows)).is_err() {
+                            warn!(session_id = %session_id, "PTY resize channel closed");
+                        }
+                    } else {
+                        debug!(session_id = %session_id, cols, rows, "terminal resize: no PTY session found");
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -546,6 +625,7 @@ impl WebViewManager {
         for (pane_id, completed) in completed {
             let Some(active) = state.active_web_pane() else {
                 if let Ok(session) = completed.session {
+                    warn!(pane_id, session_id = %session.session_id, "no active pane; stopping orphaned session");
                     self.stop_guest_session_record(&session, state);
                 }
                 continue;
@@ -553,30 +633,46 @@ impl WebViewManager {
 
             if active.pane_id != pane_id || active.route.to_string() != completed.route_key {
                 if let Ok(session) = completed.session {
+                    warn!(pane_id, "pane/route mismatch; stopping stale session");
                     self.stop_guest_session_record(&session, state);
                 }
                 continue;
             }
 
             match completed.session {
-                Ok(session) => match self.build_webview(window, &active, Some(session), state.auth_policy_registry.clone()) {
-                    Ok(webview) => {
-                        self.bridge.log(
-                            ActivityTone::Info,
-                            format!("Built child webview for {}", active.route),
-                        );
-                        self.views.insert(active.pane_id, webview);
+                Ok(session) => {
+                    let is_web_url = session.display_strategy == CapsuleDisplayStrategy::WebUrl;
+                    match self.build_webview(window, &active, Some(session), state.auth_policy_registry.clone()) {
+                        Ok(webview) => {
+                            info!(pane_id, route = %active.route, "child webview built");
+                            self.bridge.log(
+                                ActivityTone::Info,
+                                format!("Built child webview for {}", active.route),
+                            );
+                            // WebUrl sessions stay in Launching until PageLoadEvent::Finished
+                            // fires SessionReady → Mounted.  This keeps the GPUI loading
+                            // screen visible while the web app (e.g. Next.js) compiles and
+                            // renders its first frame, preventing a blank white flash.
+                            if is_web_url {
+                                state.sync_web_session_state(active.pane_id, WebSessionState::Launching);
+                            }
+                            self.views.insert(active.pane_id, webview);
+                        }
+                        Err(error) => {
+                            error!(pane_id, %error, "failed to build child webview");
+                            state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
+                            state.push_activity(
+                                ActivityTone::Error,
+                                format!("Failed to build child webview: {error}"),
+                            );
+                        }
                     }
-                    Err(error) => {
-                        state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
-                        state.push_activity(
-                            ActivityTone::Error,
-                            format!("Failed to build child webview: {error}"),
-                        );
-                    }
-                },
+                }
                 Err(error) => {
-                    state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
+                    error!(pane_id, %error, "guest session failed");
+                    // Use LaunchFailed (not Closed) to prevent ensure_pending_local_launch
+                    // from re-queuing a new attempt on every render frame.
+                    state.sync_web_session_state(active.pane_id, WebSessionState::LaunchFailed);
                     state.push_activity(
                         ActivityTone::Error,
                         format!("Failed to start guest session: {error}"),
@@ -598,6 +694,17 @@ impl WebViewManager {
             return;
         }
 
+        // If a previous attempt for this exact route already failed permanently, do not
+        // re-queue — this is the gate that breaks the infinite retry loop.
+        // navigate_to_url() always sets Launching, so the user can explicitly retry by
+        // re-entering the URL in the omnibar.
+        if let Some(active) = state.active_web_pane() {
+            if active.session == WebSessionState::LaunchFailed {
+                return;
+            }
+        }
+
+        info!(pane_id, handle, "queuing guest session launch");
         let (sender, receiver) = channel();
         let route_key = route_key.to_string();
         let handle = handle.to_string();
@@ -621,9 +728,15 @@ impl WebViewManager {
 
         let launch_task = background_executor.spawn(async move {
             let result = PendingLaunchResult {
-                route_key,
-                session: resolve_and_start_guest(&handle).map_err(|error| error.to_string()),
+                route_key: route_key.clone(),
+                session: resolve_and_start_guest(&handle).map_err(|e| {
+                    error!(handle = %handle, error = %e, "guest session launch failed");
+                    e.to_string()
+                }),
             };
+            if result.session.is_ok() {
+                info!(handle = %handle, route_key = %result.route_key, "guest session launched");
+            }
 
             if let Err(error) = sender.send(result) {
                 if let Ok(session) = error.0.session {
@@ -647,10 +760,18 @@ impl WebViewManager {
         local_session: Option<GuestLaunchSession>,
         auth_policy: AuthPolicyRegistry,
     ) -> Result<ManagedWebView> {
-        let scheme = self.protocol_router.scheme_for(&pane.partition_id);
+        let scheme = if matches!(pane.route, GuestRoute::Terminal { .. }) {
+            "terminal".to_string()
+        } else {
+            self.protocol_router.scheme_for(&pane.partition_id)
+        };
         let mut launched_session = None;
         let mut session_context = None;
-        let build_flags = build_flags_for_route(&pane.route);
+        // build_flags may be overridden below for WebUrl sessions (see CapsuleHandle branch).
+        let mut build_flags = build_flags_for_route(&pane.route);
+        // Signals that we should inject a minimal window.onload ready script + IPC handler
+        // for raw web app (WebUrl) sessions rather than relying on PageLoadEvent::Finished.
+        let mut inject_window_ready_signal = false;
 
         let (url, bridge_endpoint, allowlist, route_content, guest_payload) = match &pane.route {
             GuestRoute::Capsule {
@@ -702,27 +823,63 @@ impl WebViewManager {
                         session.session_id, session.normalized_handle
                     ),
                 );
-
-                let session_id = session.session_id.clone();
-                let frontend_path = session
-                    .frontend_url_path()
-                    .unwrap_or_else(|| "/index.html".to_string());
-                session_context = Some(GuestSessionContext {
-                    pane_id: pane.pane_id,
-                    session_id: session.session_id.clone(),
-                    adapter: session.adapter.clone().unwrap_or_default(),
-                    invoke_url: session.invoke_url.clone().unwrap_or_default(),
-                    app_root: session.app_root.clone(),
-                });
                 launched_session = Some(session.clone());
-                (
-                    format!("{scheme}://{session_id}{frontend_path}"),
-                    Some(format!("{scheme}://{session_id}/__ato/bridge")),
-                    session.capabilities.clone(),
-                    RouteContent::GuestAssets(session.clone()),
-                    Some(session.session_payload()),
-                )
+
+                // Web dev-server sessions navigate directly to the local URL without the
+                // capsule:// custom protocol — the app is served by an external process.
+                // Override build_flags to External-style: no bridge injection, no custom
+                // protocol, and page-load updates the URL (not waits for a ready signal).
+                // Without this override, the webview stays hidden because CapsuleHandle
+                // route_requires_ready_signal=true and the bridge preload script is injected
+                // into the raw web app, preventing it from ever becoming "Mounted".
+                // We keep inject_bridge=false (no preload pollution). Instead of relying on
+                // PageLoadEvent::Finished (which fires on initial HTML commit, before JS executes),
+                // we inject a minimal window.onload script + dedicated IPC handler so SessionReady
+                // only fires after all scripts have run and the page has actually rendered.
+                if session.display_strategy == CapsuleDisplayStrategy::WebUrl {
+                    build_flags = BuildFlags {
+                        inject_bridge: false,
+                        enable_ipc: false,
+                        enable_custom_protocol: false,
+                        page_load_behavior: PageLoadBehavior::None,
+                        observe_title_changes: true,
+                    };
+                    inject_window_ready_signal = true;
+                    let url = session.local_url.clone().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "WebUrl session has no local_url: {}",
+                            session.session_id
+                        )
+                    })?;
+                    (url, None, Vec::new(), RouteContent::External, None)
+                } else {
+                    let session_id = session.session_id.clone();
+                    let frontend_path = session
+                        .frontend_url_path()
+                        .unwrap_or_else(|| "/index.html".to_string());
+                    session_context = Some(GuestSessionContext {
+                        pane_id: pane.pane_id,
+                        session_id: session.session_id.clone(),
+                        adapter: session.adapter.clone().unwrap_or_default(),
+                        invoke_url: session.invoke_url.clone().unwrap_or_default(),
+                        app_root: session.app_root.clone(),
+                    });
+                    (
+                        format!("{scheme}://{session_id}{frontend_path}"),
+                        Some(format!("{scheme}://{session_id}/__ato/bridge")),
+                        session.capabilities.clone(),
+                        RouteContent::GuestAssets(session.clone()),
+                        Some(session.session_payload()),
+                    )
+                }
             }
+            GuestRoute::Terminal { session_id } => (
+                format!("terminal://{session_id}/"),
+                None,
+                vec!["terminal".to_string()],
+                RouteContent::TerminalAssets,
+                None,
+            ),
         };
 
         let webview_bounds = content_bounds(pane.bounds);
@@ -757,6 +914,32 @@ impl WebViewManager {
                         format!("Guest request denied for route {}", route),
                     );
                 }
+            });
+        }
+
+        // For WebUrl sessions (share URL web dev servers): inject a minimal preload script that
+        // fires window.ipc.postMessage on window.onload rather than relying on
+        // PageLoadEvent::Finished. window.onload fires after ALL scripts have loaded and
+        // executed, meaning React/Vue/Next.js has rendered its initial UI before we show the
+        // webview — eliminating the blank white flash.
+        if inject_window_ready_signal {
+            let ready_script = "(function(){\
+                function s(){try{window.ipc.postMessage('{\"__ato_ready__\":true}');}catch(e){}}\
+                if(document.readyState==='complete'){s();}\
+                else{window.addEventListener('load',s,{once:true});}\
+            })();";
+            builder =
+                builder.with_initialization_script_for_main_only(ready_script.to_string(), true);
+            let bridge = self.bridge.clone();
+            let pane_id = pane.pane_id;
+            let async_app = self.async_app.clone();
+            let window_handle = self.window_handle;
+            builder = builder.with_ipc_handler(move |request| {
+                if request.body().contains("__ato_ready__") {
+                    bridge.push_shell_event(ShellEvent::SessionReady { pane_id });
+                    notify_window(async_app.clone(), window_handle);
+                }
+                // All other IPC messages from the raw web app are silently ignored.
             });
         }
 
@@ -1050,6 +1233,13 @@ fn build_flags_for_route(route: &GuestRoute) -> BuildFlags {
             page_load_behavior: PageLoadBehavior::MarkCapsuleReady,
             observe_title_changes: false,
         },
+        GuestRoute::Terminal { .. } => BuildFlags {
+            inject_bridge: false,
+            enable_ipc: true,
+            enable_custom_protocol: true,
+            page_load_behavior: PageLoadBehavior::None,
+            observe_title_changes: false,
+        },
     }
 }
 
@@ -1200,6 +1390,7 @@ fn active_web_session(state: &AppState, pane_id: usize) -> Option<WebSessionStat
             | crate::state::PaneSurface::Inspector
             | crate::state::PaneSurface::DevConsole
             | crate::state::PaneSurface::Launcher
+            | crate::state::PaneSurface::Terminal(_)
             | crate::state::PaneSurface::AuthHandoff { .. } => None,
         }
     })
@@ -1219,6 +1410,7 @@ enum RouteContent {
     EmbeddedWelcome,
     GuestAssets(GuestLaunchSession),
     External,
+    TerminalAssets,
 }
 
 impl ProtocolRouter {
@@ -1287,6 +1479,7 @@ impl ProtocolRouter {
                 format!("custom protocol not available for external route {scheme}: {path}"),
                 "text/plain; charset=utf-8",
             ),
+            RouteContent::TerminalAssets => serve_terminal_asset(path),
         }
     }
 
@@ -1370,6 +1563,46 @@ fn build_embedded_response(
         )
         .body(Cow::Borrowed(body.as_bytes()))
         .context("failed to build embedded protocol response")
+}
+
+fn serve_terminal_asset(path: &str) -> Result<Response<Cow<'static, [u8]>>> {
+    // Terminal assets are embedded at compile time to avoid filesystem access.
+    // CSP restricts script sources to self + inline so xterm.js can initialise.
+    const CSP: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:;";
+    let (body, content_type): (&'static [u8], &'static str) = match path {
+        "/" | "/index.html" => (
+            include_bytes!("../assets/terminal/index.html"),
+            "text/html; charset=utf-8",
+        ),
+        "/xterm.js" => (
+            include_bytes!("../assets/terminal/xterm.js"),
+            "application/javascript; charset=utf-8",
+        ),
+        "/xterm.css" => (
+            include_bytes!("../assets/terminal/xterm.css"),
+            "text/css; charset=utf-8",
+        ),
+        "/addon-canvas.js" => (
+            include_bytes!("../assets/terminal/addon-canvas.js"),
+            "application/javascript; charset=utf-8",
+        ),
+        _ => {
+            return build_plain_response(
+                404,
+                format!("terminal asset not found: {path}"),
+                "text/plain; charset=utf-8",
+            );
+        }
+    };
+    Response::builder()
+        .status(200)
+        .header(CONTENT_TYPE, content_type)
+        .header(
+            http::header::HeaderName::from_static("content-security-policy"),
+            CSP,
+        )
+        .body(Cow::Borrowed(body))
+        .context("failed to build terminal asset response")
 }
 
 fn build_plain_response(
@@ -1665,6 +1898,59 @@ fn mime_for_path(path: &Path) -> &'static str {
     }
 }
 
+/// Decode a standard base64 string into bytes.
+fn base64_decode(input: &str) -> Result<Vec<u8>> {
+    const TABLE: [u8; 256] = {
+        let mut t = [0xFF_u8; 256];
+        let mut i = 0u8;
+        while i < 26 { t[(b'A' + i) as usize] = i; i += 1; }
+        let mut i = 0u8;
+        while i < 26 { t[(b'a' + i) as usize] = 26 + i; i += 1; }
+        let mut i = 0u8;
+        while i < 10 { t[(b'0' + i) as usize] = 52 + i; i += 1; }
+        t[b'+' as usize] = 62;
+        t[b'/' as usize] = 63;
+        t[b'=' as usize] = 0; // padding — treated as 0 bits
+        t
+    };
+
+    let input = input.trim_end_matches('=');
+    let mut out = Vec::with_capacity(input.len() * 3 / 4 + 1);
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        let v0 = TABLE[bytes[i] as usize];
+        let v1 = TABLE[bytes[i + 1] as usize];
+        let v2 = TABLE[bytes[i + 2] as usize];
+        let v3 = TABLE[bytes[i + 3] as usize];
+        if v0 == 0xFF || v1 == 0xFF || v2 == 0xFF || v3 == 0xFF {
+            anyhow::bail!("invalid base64 character");
+        }
+        out.push((v0 << 2) | (v1 >> 4));
+        out.push((v1 << 4) | (v2 >> 2));
+        out.push((v2 << 6) | v3);
+        i += 4;
+    }
+    match bytes.len() - i {
+        2 => {
+            let v0 = TABLE[bytes[i] as usize];
+            let v1 = TABLE[bytes[i + 1] as usize];
+            if v0 == 0xFF || v1 == 0xFF { anyhow::bail!("invalid base64"); }
+            out.push((v0 << 2) | (v1 >> 4));
+        }
+        3 => {
+            let v0 = TABLE[bytes[i] as usize];
+            let v1 = TABLE[bytes[i + 1] as usize];
+            let v2 = TABLE[bytes[i + 2] as usize];
+            if v0 == 0xFF || v1 == 0xFF || v2 == 0xFF { anyhow::bail!("invalid base64"); }
+            out.push((v0 << 2) | (v1 >> 4));
+            out.push((v1 << 4) | (v2 >> 2));
+        }
+        _ => {}
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1681,6 +1967,21 @@ mod tests {
             profile: "electron".to_string(),
             capabilities: vec![CapabilityGrant::OpenExternal],
             session: WebSessionState::Launching,
+            source_label: None,
+            trust_state: None,
+            restricted: false,
+            snapshot_label: None,
+            canonical_handle: None,
+            session_id: None,
+            adapter: None,
+            manifest_path: None,
+            runtime_label: None,
+            display_strategy: None,
+            log_path: None,
+            local_url: None,
+            healthcheck_url: None,
+            invoke_url: None,
+            served_by: None,
             bounds: PaneBounds::empty(),
         }
     }
@@ -1747,6 +2048,31 @@ mod tests {
     }
 
     #[test]
+    fn capsule_handle_web_url_build_flags_no_bridge_injection() {
+        // WebUrl sessions must NOT inject the bridge — the preload script would be injected
+        // into a raw web app that doesn't know about it, which would break the app.
+        // They use a minimal window.onload IPC script (inject_window_ready_signal) so that
+        // SessionReady only fires after all JS has executed and the app has rendered, rather
+        // than on the premature PageLoadEvent::Finished (= didFinishNavigation = initial HTML commit).
+        let external_flags = build_flags_for_route(&GuestRoute::ExternalUrl(
+            url::Url::parse("http://localhost:3000").expect("url"),
+        ));
+        assert!(!external_flags.inject_bridge, "ExternalUrl must not inject bridge");
+        assert!(!external_flags.enable_ipc, "ExternalUrl must not enable IPC");
+        // ExternalUrl routes do NOT require ready signal → show on Launching
+        let route = GuestRoute::ExternalUrl(url::Url::parse("http://localhost:3000").expect("url"));
+        let bounds = PaneBounds { x: 0.0, y: 0.0, width: 640.0, height: 480.0 };
+        assert!(
+            should_show_webview(&route, &WebSessionState::Launching, ShellMode::Focus, bounds),
+            "ExternalUrl-style webview must be visible immediately on Launching state"
+        );
+        assert!(
+            should_show_webview(&route, &WebSessionState::Mounted, ShellMode::Focus, bounds),
+            "ExternalUrl-style webview must be visible when Mounted"
+        );
+    }
+
+    #[test]
     fn command_bar_keeps_external_webviews_visible() {
         let bounds = PaneBounds {
             x: 0.0,
@@ -1764,6 +2090,7 @@ mod tests {
         ));
     }
 
+    #[test]
     #[test]
     fn command_bar_keeps_ready_capsule_webviews_visible() {
         let bounds = PaneBounds {

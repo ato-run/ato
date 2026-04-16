@@ -146,5 +146,6 @@ fn session_state_label(session: &WebSessionState) -> &'static str {
         WebSessionState::Launching => "Launching",
         WebSessionState::Mounted => "Mounted",
         WebSessionState::Closed => "Closed",
+        WebSessionState::LaunchFailed => "Failed",
     }
 }
