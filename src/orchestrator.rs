@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
@@ -9,6 +11,24 @@ use capsule_core::handle::{
 };
 use serde::Deserialize;
 use tracing::{debug, error, info, warn};
+
+/// Pending terminal processes spawned by share URL executor.
+/// `webview.rs` drains these when creating Terminal panes.
+static PENDING_SHARE_TERMINALS: std::sync::OnceLock<Mutex<HashMap<String, TerminalProcess>>> =
+    std::sync::OnceLock::new();
+
+fn pending_share_terminals() -> &'static Mutex<HashMap<String, TerminalProcess>> {
+    PENDING_SHARE_TERMINALS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Take a pending share terminal process by session_id.
+/// Called by `webview.rs` when spawning a Terminal pane.
+pub fn take_pending_share_terminal(session_id: &str) -> Option<TerminalProcess> {
+    pending_share_terminals()
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(session_id))
+}
 
 const ATO_BIN_ENV: &str = "ATO_DESKTOP_ATO_BIN";
 
@@ -761,6 +781,17 @@ fn start_web_service_from_workspace(
         .filter(|d| d.is_dir())
         .collect();
 
+    // If the spec had no sources at all, the share was created with an older ato-cli
+    // that couldn't capture non-git directories. Give an actionable error instead of
+    // the generic "no dev script" message.
+    if state.sources.is_empty() {
+        bail!(
+            "share {} has no sources — it was captured without any source content.\n\
+             Re-share the project with the current ato-cli: ato encap <dir> --share",
+            share_url
+        );
+    }
+
     // Recursively find directories with a "dev" npm script inside those roots.
     let source_dir = find_dev_script_dir(&source_roots).ok_or_else(|| {
         anyhow::anyhow!(
@@ -1028,50 +1059,74 @@ fn decap_share(share_url: &str, into: &Path) -> Result<()> {
 
 /// Resolve and start a capsule from a share URL by materializing it locally first.
 fn resolve_and_start_from_share(share_url: &str) -> Result<CapsuleLaunchSession> {
-    let tmp = share_tmp_dir(share_url)?;
-    info!(share_url, tmp_dir = %tmp.display(), "starting share URL resolution");
+    info!(share_url, "starting share URL execution via nacelle sandbox");
 
-    // `.ato/share/state.json` is written by `ato decap` only on successful completion.
-    // Its presence is the reliable indicator that the workspace is fully materialized
-    // and safe to reuse, regardless of whether a capsule.toml exists at the root.
-    let share_state_marker = tmp.join(".ato").join("share").join("state.json");
-    if share_state_marker.exists() {
-        info!(share_url, "reusing cached decap workspace, skipping ato decap");
-    } else {
-        // Clear any stale / incomplete materialization so `ato decap` sees an empty dir.
-        if tmp.exists() {
-            warn!(share_url, dir = %tmp.display(), "clearing stale share dir before re-decap");
-            fs::remove_dir_all(&tmp)
-                .with_context(|| format!("failed to clear stale share dir {}", tmp.display()))?;
+    let result = capsule_core::share::execute_share(capsule_core::share::ShareRunRequest {
+        input: share_url.to_string(),
+        entry: None,
+        extra_args: vec![],
+        env_overlay: std::collections::BTreeMap::new(),
+        mode: capsule_core::share::ShareExecutionMode::Piped { cols: 120, rows: 40 },
+        nacelle_path: std::env::var("NACELLE_PATH").ok().map(PathBuf::from),
+        ato_path: std::env::var("ATO_DESKTOP_ATO_BIN")
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| resolve_ato_binary().ok()),
+    })?;
+
+    match result {
+        capsule_core::share::ShareExecutionResult::Spawned(piped) => {
+            let session_id = piped.session_id.clone();
+            info!(share_url, %session_id, "share terminal session spawned via nacelle");
+
+            // Convert SharePipedSession to TerminalProcess and stash for webview.rs
+            let terminal_process = TerminalProcess {
+                session_id: session_id.clone(),
+                input_tx: piped.input_tx,
+                resize_tx: piped.resize_tx,
+                output_rx: piped.output_rx,
+            };
+            if let Ok(mut map) = pending_share_terminals().lock() {
+                map.insert(session_id.clone(), terminal_process);
+            }
+
+            // Build a synthetic CapsuleLaunchSession with TerminalStream strategy
+            let workspace = share_tmp_dir(share_url).unwrap_or_else(|_| PathBuf::from("/tmp"));
+            Ok(CapsuleLaunchSession {
+                handle: share_url.to_string(),
+                normalized_handle: share_url.to_string(),
+                canonical_handle: None,
+                source: Some("share".to_string()),
+                trust_state: "untrusted".to_string(),
+                restricted: false,
+                snapshot_label: None,
+                session_id,
+                runtime: CapsuleRuntimeDescriptor {
+                    target_label: "share".to_string(),
+                    runtime: Some("shell".to_string()),
+                    driver: Some("nacelle".to_string()),
+                    language: None,
+                    port: None,
+                },
+                display_strategy: CapsuleDisplayStrategy::TerminalStream,
+                manifest_path: workspace.join(".ato/share/state.json"),
+                app_root: workspace,
+                target_label: "share".to_string(),
+                adapter: None,
+                frontend_entry: None,
+                invoke_url: None,
+                healthcheck_url: None,
+                capabilities: vec!["terminal".to_string()],
+                local_url: None,
+                served_by: Some("nacelle".to_string()),
+                log_path: None,
+                notes: vec!["Share URL executed via nacelle sandbox.".to_string()],
+            })
         }
-        decap_share(share_url, &tmp)?;
+        capsule_core::share::ShareExecutionResult::Completed { exit_code } => {
+            bail!("share execution completed unexpectedly (code {exit_code}) in piped mode")
+        }
     }
-
-    // Find capsule root — may be a subdirectory in monorepos.
-    if let Some(capsule_root) = find_capsule_root(&tmp) {
-        let path_str = capsule_root.display().to_string();
-        info!(share_url, capsule_root = %capsule_root.display(), "found capsule.toml, starting via ato-cli");
-        let resolved = resolve_capsule(&path_str)?;
-        let started = start_capsule(&path_str)?;
-        let session = build_launch_session(share_url, resolved, started)?;
-        info!(
-            share_url,
-            session_id = %session.session_id,
-            "share URL capsule session started"
-        );
-        return Ok(session);
-    }
-
-    // No capsule.toml found — web-only project; start the dev server directly.
-    info!(share_url, workspace = %tmp.display(), "no capsule.toml found, starting web dev server");
-    let session = start_web_service_from_workspace(share_url, &tmp)?;
-    info!(
-        share_url,
-        session_id = %session.session_id,
-        local_url = ?session.local_url,
-        "share URL web session started"
-    );
-    Ok(session)
 }
 
 fn process_is_alive(pid: i32) -> bool {
@@ -1684,4 +1739,85 @@ pub fn spawn_terminal_session(
         resize_tx,
         output_rx,
     })
+}
+
+/// Spawn a log-tail session for `terminal_stream` capsule sessions.
+///
+/// The capsule process writes its stdout/stderr to `log_path`. This function
+/// opens that file, streams its bytes to xterm.js via `output_rx`, and keeps
+/// reading until the receiver is dropped (pane closed). Bare `\n` bytes are
+/// normalised to `\r\n` so xterm.js renders line breaks correctly.
+pub fn spawn_log_tail_session(session_id: String, log_path: PathBuf) -> Result<TerminalProcess> {
+    let (input_tx, _): (Sender<Vec<u8>>, _) = channel();
+    let (resize_tx, _): (Sender<(u16, u16)>, _) = channel();
+    let (output_tx, output_rx): (Sender<String>, Receiver<String>) = channel();
+
+    let sid = session_id.clone();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        use base64::engine::general_purpose::STANDARD;
+
+        // Wait for the log file to appear (capsule process may still be starting).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if log_path.exists() {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = output_tx.send(STANDARD.encode(b"\x1b[31m[Log file not found]\x1b[0m\r\n"));
+                info!(session_id = %sid, "log-tail: log file never appeared");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        let mut file = match std::fs::File::open(&log_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let msg = format!("\x1b[31m[Cannot open log: {}]\x1b[0m\r\n", e);
+                let _ = output_tx.send(STANDARD.encode(msg.as_bytes()));
+                return;
+            }
+        };
+
+        let mut buf = [0u8; 4096];
+        let mut prev_cr = false;
+        info!(session_id = %sid, path = %log_path.display(), "log-tail: started");
+
+        loop {
+            match file.read(&mut buf) {
+                Ok(0) => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Ok(n) => {
+                    let normalised = normalize_log_newlines(&buf[..n], &mut prev_cr);
+                    if output_tx.send(STANDARD.encode(&normalised)).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        info!(session_id = %sid, "log-tail: ended");
+    });
+
+    Ok(TerminalProcess {
+        session_id,
+        input_tx,
+        resize_tx,
+        output_rx,
+    })
+}
+
+/// Normalise bare `\n` → `\r\n` for xterm.js, preserving existing `\r\n` sequences.
+fn normalize_log_newlines(data: &[u8], prev_cr: &mut bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len() + 16);
+    for &b in data {
+        if b == b'\n' && !*prev_cr {
+            out.push(b'\r');
+        }
+        out.push(b);
+        *prev_cr = b == b'\r';
+    }
+    out
 }
