@@ -21,6 +21,12 @@ const HARD_DENIED_ENV_KEYS: &[&str] = &[
     "DYLD_IMAGE_SUFFIX",
     // Python startup code injection
     "PYTHONSTARTUP",
+    // Python module path redirect — can shadow stdlib or inject packages
+    "PYTHONPATH",
+    // Shell startup file executed by non-interactive bash (used in sh -lc build cmds)
+    "BASH_ENV",
+    // Node.js module resolution redirect — can hijack require() calls
+    "NODE_PATH",
     // npm config overrides — can redirect script execution or change the registry
     "npm_config_globalconfig",
     "npm_config_userconfig",
@@ -31,13 +37,19 @@ const HARD_DENIED_ENV_KEYS: &[&str] = &[
 
 /// `NODE_OPTIONS` flags that enable module-load-time code injection.  A
 /// `NODE_OPTIONS` value containing any of these sub-strings is rejected.
+///
+/// All entries MUST be lowercase — `check_user_env_safety` lowercases the value
+/// before comparing.
 const NODE_OPTIONS_INJECTION_FLAGS: &[&str] = &[
     "--require",
-    "-r ",
-    "-r\t",
+    "-r ",  // space-separated: NODE_OPTIONS="-r ./hook.js"
+    "-r\t", // tab-separated
+    "-r=",  // equals-separated: NODE_OPTIONS="-r=./malicious.js"
     "--loader",
     "--experimental-loader",
-    "--import",
+    "--import ",  // whitespace-separated: NODE_OPTIONS="--import ./inject.js"
+    "--import\t", // tab-separated
+    "--import=",  // equals-separated: NODE_OPTIONS="--import=./inject.js"
     "--experimental-vm-modules",
     "--experimental-specifier-resolution",
 ];
@@ -63,12 +75,33 @@ pub fn check_user_env_safety(key: &str, value: &str) -> Result<()> {
     if key == "NODE_OPTIONS" {
         let lower = value.to_ascii_lowercase();
         for flag in NODE_OPTIONS_INJECTION_FLAGS {
+            // All flags in the list must be lowercase — assert during development.
+            debug_assert!(
+                flag.chars()
+                    .all(|c| c.is_ascii_lowercase() || !c.is_ascii_alphabetic()),
+                "NODE_OPTIONS_INJECTION_FLAGS entry '{}' contains uppercase letters",
+                flag
+            );
             if lower.contains(flag) {
                 anyhow::bail!(
                     "NODE_OPTIONS value contains a potentially dangerous flag ('{}').\n\
                      Module-loading flags in NODE_OPTIONS are blocked for security.\n\
                      Allowed examples: --max-old-space-size=4096, --expose-gc.",
                     flag.trim()
+                );
+            }
+        }
+        // Also catch bare --require or --import at end-of-string (no trailing separator).
+        for bare in &["--require", "-r", "--import"] {
+            if lower == *bare
+                || lower.ends_with(&format!(" {}", bare))
+                || lower.ends_with(&format!("\t{}", bare))
+            {
+                anyhow::bail!(
+                    "NODE_OPTIONS value contains a potentially dangerous flag ('{}').\n\
+                     Module-loading flags in NODE_OPTIONS are blocked for security.\n\
+                     Allowed examples: --max-old-space-size=4096, --expose-gc.",
+                    bare
                 );
             }
         }
@@ -108,7 +141,19 @@ mod tests {
             "--require /evil.js",
             "--loader ts-node/esm --require hook",
             "--experimental-loader malicious",
+            // P1: --import variations
             "--import /path/to/inject.js",
+            "--import=./inject.mjs",
+            "--import\t./inject.mjs",
+            // P0: -r= bypass
+            "-r=./malicious.js",
+            "-r /evil.js",
+            "-r\t/evil.js",
+            // bare flags at end-of-string
+            "--require",
+            "-r",
+            "--import",
+            "--max-old-space-size=4096 --require",
         ];
         for value in &dangerous {
             let result = check_user_env_safety("NODE_OPTIONS", value);
@@ -132,6 +177,14 @@ mod tests {
             check_user_env_safety("NODE_OPTIONS", value).unwrap_or_else(|e| {
                 panic!("expected NODE_OPTIONS='{}' to be allowed: {}", value, e)
             });
+        }
+    }
+
+    #[test]
+    fn new_denied_keys_are_rejected() {
+        for key in &["BASH_ENV", "NODE_PATH", "PYTHONPATH"] {
+            let result = check_user_env_safety(key, "anything");
+            assert!(result.is_err(), "expected '{}' to be denied", key);
         }
     }
 
