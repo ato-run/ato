@@ -34,11 +34,35 @@ pub fn take_pending_share_terminal(session_id: &str) -> Option<TerminalProcess> 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CliLaunchSpec {
     /// Default: a line-oriented REPL that routes every command through `ato run`.
-    AtoRunRepl,
+    ///
+    /// `prelude` is an optional command line that the REPL will execute
+    /// immediately after printing its banner, as if the user had typed it
+    /// at the `ato>` prompt (the command is echoed then submitted). Used by
+    /// share URL integration to kick off `ato run <share-url>` automatically.
+    ///
+    /// `initial_allow_hosts` seeds the session egress allowlist so the
+    /// prelude's capsule can reach its own origin (e.g. share capsules get
+    /// `ato.run` allowed). Patterns are parsed via `HostPattern::parse`;
+    /// invalid entries are silently dropped.
+    AtoRunRepl {
+        prelude: Option<String>,
+        initial_allow_hosts: Vec<String>,
+    },
     /// Raw interactive shell under nacelle (e.g. bash, zsh, /bin/sh).
     RawShell(String),
     /// Plain invocation of the `ato` binary (its own help / subcommand entrypoint).
     RawAto,
+}
+
+impl CliLaunchSpec {
+    /// Construct a plain ato-run REPL with no prelude and the default
+    /// (localhost-only) egress policy.
+    pub fn ato_run_repl() -> Self {
+        CliLaunchSpec::AtoRunRepl {
+            prelude: None,
+            initial_allow_hosts: Vec::new(),
+        }
+    }
 }
 
 /// Pending CLI launch specs keyed by session_id, populated by
@@ -1719,11 +1743,43 @@ mod tests {
     #[test]
     fn pending_cli_command_registry_roundtrip() {
         let session_id = format!("test-cli-{}", std::process::id());
-        super::register_pending_cli_command(session_id.clone(), super::CliLaunchSpec::AtoRunRepl);
+        super::register_pending_cli_command(session_id.clone(), super::CliLaunchSpec::ato_run_repl());
         let spec = super::take_pending_cli_command(&session_id).expect("spec");
-        assert!(matches!(spec, super::CliLaunchSpec::AtoRunRepl));
+        assert!(matches!(spec, super::CliLaunchSpec::AtoRunRepl { .. }));
         // taking again must return None (consumed).
         assert!(super::take_pending_cli_command(&session_id).is_none());
+    }
+
+    #[test]
+    fn ato_run_repl_spec_carries_prelude_and_allow_hosts() {
+        let spec = super::CliLaunchSpec::AtoRunRepl {
+            prelude: Some("https://ato.run/s/demo".to_string()),
+            initial_allow_hosts: vec!["ato.run".to_string()],
+        };
+        match spec {
+            super::CliLaunchSpec::AtoRunRepl {
+                prelude,
+                initial_allow_hosts,
+            } => {
+                assert_eq!(prelude.as_deref(), Some("https://ato.run/s/demo"));
+                assert_eq!(initial_allow_hosts, vec!["ato.run".to_string()]);
+            }
+            _ => panic!("expected AtoRunRepl"),
+        }
+    }
+
+    #[test]
+    fn ato_run_repl_default_ctor_is_empty() {
+        match super::CliLaunchSpec::ato_run_repl() {
+            super::CliLaunchSpec::AtoRunRepl {
+                prelude,
+                initial_allow_hosts,
+            } => {
+                assert!(prelude.is_none());
+                assert!(initial_allow_hosts.is_empty());
+            }
+            _ => panic!("expected AtoRunRepl"),
+        }
     }
 
     #[test]
@@ -2006,7 +2062,10 @@ pub fn spawn_cli_session(
     spec: CliLaunchSpec,
 ) -> Result<TerminalProcess> {
     match spec {
-        CliLaunchSpec::AtoRunRepl => spawn_ato_run_repl(session_id, cols, rows),
+        CliLaunchSpec::AtoRunRepl {
+            prelude,
+            initial_allow_hosts,
+        } => spawn_ato_run_repl(session_id, cols, rows, prelude, initial_allow_hosts),
         CliLaunchSpec::RawShell(shell) => spawn_terminal_session(session_id, &shell, cols, rows),
         CliLaunchSpec::RawAto => {
             // Run `ato` under nacelle by using it as the shell. nacelle will
@@ -2032,7 +2091,13 @@ pub fn spawn_cli_session(
 /// - `\x7f` / `\x08` (DEL / Backspace): erase one char with `\b \b`.
 /// - `\x03` (Ctrl-C): cancel the current line (or kill the running child).
 /// - `\x04` (Ctrl-D) on an empty line: close the session.
-pub fn spawn_ato_run_repl(session_id: String, _cols: u16, _rows: u16) -> Result<TerminalProcess> {
+pub fn spawn_ato_run_repl(
+    session_id: String,
+    _cols: u16,
+    _rows: u16,
+    prelude: Option<String>,
+    initial_allow_hosts: Vec<String>,
+) -> Result<TerminalProcess> {
     use crate::egress_policy::{EgressPolicy, HostPattern};
     use crate::egress_proxy::{DenyEvent, EgressProxy, EgressProxyHandle};
     use std::io::BufReader;
@@ -2051,6 +2116,53 @@ pub fn spawn_ato_run_repl(session_id: String, _cols: u16, _rows: u16) -> Result<
     // `.allow <pat>` mutates `session_allow` which dies with the REPL.
     let egress_policy: Arc<StdMutex<EgressPolicy>> =
         Arc::new(StdMutex::new(EgressPolicy::localhost_only()));
+
+    // Seed the session allowlist with any caller-provided hosts (e.g. the
+    // share URL's own origin for share-initiated REPLs). Invalid patterns
+    // are skipped with a warn log so they surface in diagnostics.
+    if !initial_allow_hosts.is_empty() {
+        if let Ok(mut g) = egress_policy.lock() {
+            for host in &initial_allow_hosts {
+                match HostPattern::parse(host) {
+                    Ok(p) => {
+                        let added = g.allow(p);
+                        debug!(
+                            session_id = %sid,
+                            host = %host,
+                            added,
+                            "ato-run REPL: seeded initial allow host"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            session_id = %sid,
+                            host = %host,
+                            error = %e,
+                            "ato-run REPL: invalid initial_allow_hosts pattern, skipped"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Pre-queue the prelude into the input channel BEFORE spawning the REPL
+    // thread. The thread prints the banner + prompt first, then processes the
+    // prelude bytes as if the user had typed them — giving the `echo_and_run`
+    // UX for free (local echo + Enter submit).
+    if let Some(ref pre) = prelude {
+        let mut bytes = pre.as_bytes().to_vec();
+        bytes.push(b'\r');
+        if let Err(e) = input_tx.send(bytes) {
+            warn!(
+                session_id = %sid,
+                error = %e,
+                "ato-run REPL: failed to queue prelude (channel closed)"
+            );
+        } else {
+            info!(session_id = %sid, prelude = %pre, "ato-run REPL: prelude queued");
+        }
+    }
 
     // Start the SOCKS5 gate. Every child spawned below will have its
     // HTTP(S)_PROXY / ALL_PROXY pointed here. Deny events surface via
