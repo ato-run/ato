@@ -18,6 +18,7 @@ use nacelle::launcher::source::{
     NativeSandboxCapabilityReport, SourceRuntime, SourceRuntimeConfig,
 };
 use nacelle::launcher::{InjectedMount, IsolationPolicy, LaunchRequest, Runtime, SourceTarget};
+use nacelle::system::sandbox::{default_shell, validate_shell};
 
 /// Minimal manifest structure for parsing capsule.toml
 #[derive(Debug, Deserialize)]
@@ -1048,10 +1049,82 @@ async fn handle_exec_v2(envelope: ExecEnvelopeV2) -> Result<()> {
 
 async fn handle_exec_v1(envelope: ExecEnvelope) -> Result<()> {
     validate_spec_version(&envelope.spec_version).map_err(anyhow::Error::msg)?;
+    // Route shell workloads (no manifest) directly without prepare_v1_launch
+    if envelope.workload.kind == "shell" && envelope.workload.manifest.is_none() {
+        return handle_exec_v1_shell(envelope).await;
+    }
     let interactive = envelope.interactive;
     let terminal = envelope.terminal.clone();
     let prepared = prepare_v1_launch(envelope)?;
     execute_prepared_launch(prepared, interactive, terminal).await
+}
+
+/// Launch an interactive shell session without a capsule manifest.
+///
+/// Used when ato-desktop requests a terminal session via:
+/// `{ "workload": { "type": "shell" }, "interactive": true, "terminal": { ... } }`
+///
+/// Bypasses capsule manifest requirements but still routes through nacelle's
+/// sandbox (shell allowlist, env filter, output sanitizer, Seatbelt/bwrap/Landlock).
+async fn handle_exec_v1_shell(envelope: ExecEnvelope) -> Result<()> {
+    anyhow::ensure!(
+        envelope.interactive,
+        "type:shell workload requires interactive:true"
+    );
+
+    let terminal = envelope.terminal.unwrap_or(TerminalConfig {
+        cols: 80,
+        rows: 24,
+        shell: None,
+        env_filter: "safe".to_string(),
+    });
+
+    // Resolve and validate shell
+    let shell = match &terminal.shell {
+        Some(s) => {
+            validate_shell(s).with_context(|| format!("shell {s} is not in the allowlist"))?;
+            s.clone()
+        }
+        None => default_shell(),
+    };
+
+    let source_dir = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/"));
+
+    let source_target = SourceTarget {
+        language: "shell".to_string(),
+        entrypoint: shell.clone(),
+        cmd: Some(vec![shell, "-i".to_string()]),
+        source_dir,
+        dev_mode: true,
+        isolation: None,
+        interactive: true,
+        terminal_cols: terminal.cols,
+        terminal_rows: terminal.rows,
+        terminal_shell: terminal.shell,
+        terminal_env_filter: terminal.env_filter,
+        ..SourceTarget::default()
+    };
+
+    info!("Launching interactive shell session");
+    let config = SourceRuntimeConfig::default();
+    let runtime = SourceRuntime::new(config);
+    let run_id = format!("shell-{}", std::process::id());
+    let request = LaunchRequest {
+        workload_id: &run_id,
+        bundle_root: source_target.source_dir.clone(),
+        env: None,
+        args: None,
+        source_target: Some(source_target),
+        socket_manager: None,
+    };
+
+    runtime
+        .launch(request)
+        .await
+        .map_err(|e| anyhow::anyhow!("shell launch failed: {e}"))?;
+    Ok(())
 }
 
 async fn execute_prepared_launch(
