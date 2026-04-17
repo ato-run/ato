@@ -1192,21 +1192,17 @@ fn build_egress(manifest: &toml::Value) -> Result<(Option<EgressConfig>, Vec<Str
             let rule_type = rule.get("type").and_then(|v| v.as_str());
             let value = rule.get("value").and_then(|v| v.as_str());
             match (rule_type, value) {
-                (Some("ip"), Some(val)) => {
-                    if seen_ips.insert(val.to_string()) {
-                        rules.push(EgressRuleEntry {
-                            rule_type: "ip".to_string(),
-                            value: val.to_string(),
-                        });
-                    }
+                (Some("ip"), Some(val)) if seen_ips.insert(val.to_string()) => {
+                    rules.push(EgressRuleEntry {
+                        rule_type: "ip".to_string(),
+                        value: val.to_string(),
+                    });
                 }
-                (Some("cidr"), Some(val)) => {
-                    if seen_cidrs.insert(val.to_string()) {
-                        rules.push(EgressRuleEntry {
-                            rule_type: "cidr".to_string(),
-                            value: val.to_string(),
-                        });
-                    }
+                (Some("cidr"), Some(val)) if seen_cidrs.insert(val.to_string()) => {
+                    rules.push(EgressRuleEntry {
+                        rule_type: "cidr".to_string(),
+                        value: val.to_string(),
+                    });
                 }
                 _ => {}
             }
