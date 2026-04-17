@@ -2147,7 +2147,7 @@ pub async fn suggest_scoped_capsules(
             })
         })
         .collect();
-    suggestions.sort_by(|a, b| b.downloads.cmp(&a.downloads));
+    suggestions.sort_by_key(|s: &_| std::cmp::Reverse(s.downloads));
     suggestions.truncate(3);
     Ok(suggestions)
 }
