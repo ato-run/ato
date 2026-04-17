@@ -1345,8 +1345,7 @@ fn test_resolve_local_slug_against_fake_store() {
     // We rely on `not_found` behaviour for arbitrary random slug values to
     // keep the test hermetic.
     let random_slug = format!("__definitely_not_installed_{}__", std::process::id());
-    let resolution =
-        resolve_local_slug(&random_slug).expect("resolve_local_slug must not error");
+    let resolution = resolve_local_slug(&random_slug).expect("resolve_local_slug must not error");
     assert!(matches!(resolution, LocalSlugResolution::NotFound));
 
     // Slashes or empty input always yield NotFound even if present.
