@@ -3495,6 +3495,102 @@ fn is_equal_ranked(candidates: &[RankedCandidate]) -> bool {
     candidates.len() > 1 && candidates[0].score == candidates[1].score
 }
 
+/// Parse `pyproject.toml` content and return `("uv", "run <script>")` when
+/// a `[project.scripts]` table is present, using the first script name found.
+#[allow(dead_code)]
+pub(crate) fn detect_uv_entrypoint(pyproject_content: &str) -> Option<(String, String)> {
+    let value: toml::Value = toml::from_str(pyproject_content).ok()?;
+    let scripts = value.get("project")?.get("scripts")?.as_table()?;
+    let script_name = scripts.keys().next()?;
+    Some(("uv".to_string(), format!("run {}", script_name)))
+}
+
+/// Environment and network hints inferred from AI agent SDK dependencies.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AiAgentHint {
+    /// Environment variable keys required by the detected SDKs, e.g.
+    /// `["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]`.
+    pub required_env: Vec<String>,
+    /// Egress hosts that should be allowed for the detected SDKs, e.g.
+    /// `["api.anthropic.com"]`.
+    pub egress_hosts: Vec<String>,
+}
+
+/// Scan `requirements.txt`, `pyproject.toml`, and `package.json` for known
+/// LLM SDK dependencies and return an [`AiAgentHint`] when any are found.
+#[allow(dead_code)]
+pub(crate) fn detect_ai_agent_hint(project_root: &Path) -> Option<AiAgentHint> {
+    let mut hint = AiAgentHint::default();
+    let mut found = false;
+
+    if let Ok(content) = fs::read_to_string(project_root.join("requirements.txt")) {
+        let lower = content.to_lowercase();
+        if lower.contains("anthropic") && !hint.egress_hosts.contains(&"api.anthropic.com".to_string()) {
+            hint.required_env.push("ANTHROPIC_API_KEY".to_string());
+            hint.egress_hosts.push("api.anthropic.com".to_string());
+            found = true;
+        }
+        if lower.contains("openai") && !hint.egress_hosts.contains(&"api.openai.com".to_string()) {
+            hint.required_env.push("OPENAI_API_KEY".to_string());
+            hint.egress_hosts.push("api.openai.com".to_string());
+            found = true;
+        }
+        if (lower.contains("google-generativeai") || lower.contains("google.generativeai"))
+            && !hint.egress_hosts.contains(&"generativelanguage.googleapis.com".to_string())
+        {
+            hint.required_env.push("GOOGLE_API_KEY".to_string());
+            hint.egress_hosts.push("generativelanguage.googleapis.com".to_string());
+            found = true;
+        }
+        if (lower.contains("mistralai") || lower.contains("mistral"))
+            && !hint.egress_hosts.contains(&"api.mistral.ai".to_string())
+        {
+            hint.required_env.push("MISTRAL_API_KEY".to_string());
+            hint.egress_hosts.push("api.mistral.ai".to_string());
+            found = true;
+        }
+        if lower.contains("groq") && !hint.egress_hosts.contains(&"api.groq.com".to_string()) {
+            hint.required_env.push("GROQ_API_KEY".to_string());
+            hint.egress_hosts.push("api.groq.com".to_string());
+            found = true;
+        }
+    }
+
+    if let Ok(content) = fs::read_to_string(project_root.join("pyproject.toml")) {
+        let lower = content.to_lowercase();
+        if lower.contains("anthropic") && !hint.egress_hosts.contains(&"api.anthropic.com".to_string()) {
+            hint.required_env.push("ANTHROPIC_API_KEY".to_string());
+            hint.egress_hosts.push("api.anthropic.com".to_string());
+            found = true;
+        }
+        if lower.contains("openai") && !hint.egress_hosts.contains(&"api.openai.com".to_string()) {
+            hint.required_env.push("OPENAI_API_KEY".to_string());
+            hint.egress_hosts.push("api.openai.com".to_string());
+            found = true;
+        }
+    }
+
+    if let Ok(content) = fs::read_to_string(project_root.join("package.json")) {
+        if content.contains("@anthropic-ai/sdk")
+            && !hint.egress_hosts.contains(&"api.anthropic.com".to_string())
+        {
+            hint.required_env.push("ANTHROPIC_API_KEY".to_string());
+            hint.egress_hosts.push("api.anthropic.com".to_string());
+            found = true;
+        }
+        if (content.contains("\"openai\"") || content.contains("openai/"))
+            && !hint.egress_hosts.contains(&"api.openai.com".to_string())
+        {
+            hint.required_env.push("OPENAI_API_KEY".to_string());
+            hint.egress_hosts.push("api.openai.com".to_string());
+            found = true;
+        }
+    }
+
+    if found { Some(hint) } else { None }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
