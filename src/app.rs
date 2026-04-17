@@ -185,6 +185,9 @@ pub fn run() {
             KeyBinding::new("cmd-v", NativePaste, Some("Pane")),
             KeyBinding::new("cmd-a", NativeSelectAll, Some("Pane")),
             KeyBinding::new("cmd-alt-i", ToggleDevConsole, None),
+            KeyBinding::new("cmd-r", BrowserReload, Some("DeskyShell")),
+            KeyBinding::new("cmd-left", BrowserBack, Some("DeskyShell")),
+            KeyBinding::new("cmd-right", BrowserForward, Some("DeskyShell")),
             KeyBinding::new("cmd-q", Quit, None),
         ]);
 
