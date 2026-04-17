@@ -844,10 +844,15 @@ pub async fn download_github_repository_at_ref(
     };
     let response = client
         .get(&archive_url)
-        .header(reqwest::header::USER_AGENT, "ato-cli")
-        .send()
-        .await
-        .with_context(|| format!("Failed to fetch GitHub repository archive: {normalized}"))?;
+        .header(reqwest::header::USER_AGENT, "ato-cli");
+    let response = if let Some(token) = github_api_bearer_token() {
+        response.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+    } else {
+        response
+    }
+    .send()
+    .await
+    .with_context(|| format!("Failed to fetch GitHub repository archive: {normalized}"))?;
     let session_token = crate::auth::current_session_token();
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         if let Some(token) = session_token.as_deref() {
