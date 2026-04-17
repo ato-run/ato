@@ -189,7 +189,6 @@ fn render_omnibar(
                                 .appearance(false)
                                 .bordered(false)
                                 .focus_bordered(false)
-                                .disabled(!command_bar)
                                 .bg(hsla(0.0, 0.0, 0.0, 0.0))
                                 .text_size(px(12.5))
                                 .font_weight(FontWeight(400.0))
