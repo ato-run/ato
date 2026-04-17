@@ -3575,76 +3575,150 @@ pub(crate) struct AiAgentHint {
 
 /// Scan `requirements.txt`, `pyproject.toml`, and `package.json` for known
 /// LLM SDK dependencies and return an [`AiAgentHint`] when any are found.
+///
+/// Matches are performed against exact package names (not substrings) to
+/// avoid false positives like `openai-whisper` or commented-out lines.
 #[allow(dead_code)]
 pub(crate) fn detect_ai_agent_hint(project_root: &Path) -> Option<AiAgentHint> {
+    // (package-name → (ENV_VAR, host)) — matched exactly (case-insensitive)
+    // against package identifiers extracted from manifest files.
+    const PY_SDKS: &[(&str, &str, &str)] = &[
+        ("anthropic", "ANTHROPIC_API_KEY", "api.anthropic.com"),
+        ("openai", "OPENAI_API_KEY", "api.openai.com"),
+        (
+            "google-generativeai",
+            "GOOGLE_API_KEY",
+            "generativelanguage.googleapis.com",
+        ),
+        ("mistralai", "MISTRAL_API_KEY", "api.mistral.ai"),
+        ("groq", "GROQ_API_KEY", "api.groq.com"),
+    ];
+    const NODE_SDKS: &[(&str, &str, &str)] = &[
+        ("@anthropic-ai/sdk", "ANTHROPIC_API_KEY", "api.anthropic.com"),
+        ("openai", "OPENAI_API_KEY", "api.openai.com"),
+    ];
+
     let mut hint = AiAgentHint::default();
+    let push = |env: &str, host: &str, hint: &mut AiAgentHint| -> bool {
+        if hint.egress_hosts.iter().any(|h| h == host) {
+            return false;
+        }
+        hint.required_env.push(env.to_string());
+        hint.egress_hosts.push(host.to_string());
+        true
+    };
     let mut found = false;
 
+    // requirements.txt — line-based parse, skip comments/flags.
     if let Ok(content) = fs::read_to_string(project_root.join("requirements.txt")) {
-        let lower = content.to_lowercase();
-        if lower.contains("anthropic") && !hint.egress_hosts.contains(&"api.anthropic.com".to_string()) {
-            hint.required_env.push("ANTHROPIC_API_KEY".to_string());
-            hint.egress_hosts.push("api.anthropic.com".to_string());
-            found = true;
-        }
-        if lower.contains("openai") && !hint.egress_hosts.contains(&"api.openai.com".to_string()) {
-            hint.required_env.push("OPENAI_API_KEY".to_string());
-            hint.egress_hosts.push("api.openai.com".to_string());
-            found = true;
-        }
-        if (lower.contains("google-generativeai") || lower.contains("google.generativeai"))
-            && !hint.egress_hosts.contains(&"generativelanguage.googleapis.com".to_string())
-        {
-            hint.required_env.push("GOOGLE_API_KEY".to_string());
-            hint.egress_hosts.push("generativelanguage.googleapis.com".to_string());
-            found = true;
-        }
-        if (lower.contains("mistralai") || lower.contains("mistral"))
-            && !hint.egress_hosts.contains(&"api.mistral.ai".to_string())
-        {
-            hint.required_env.push("MISTRAL_API_KEY".to_string());
-            hint.egress_hosts.push("api.mistral.ai".to_string());
-            found = true;
-        }
-        if lower.contains("groq") && !hint.egress_hosts.contains(&"api.groq.com".to_string()) {
-            hint.required_env.push("GROQ_API_KEY".to_string());
-            hint.egress_hosts.push("api.groq.com".to_string());
-            found = true;
+        for line in content.lines() {
+            let Some(pkg) = parse_requirements_line(line) else {
+                continue;
+            };
+            let pkg_lower = pkg.to_ascii_lowercase();
+            for (needle, env, host) in PY_SDKS {
+                if pkg_lower == *needle {
+                    found |= push(env, host, &mut hint);
+                }
+            }
         }
     }
 
+    // pyproject.toml — parse via toml to get [project].dependencies and
+    // [tool.poetry.dependencies].
     if let Ok(content) = fs::read_to_string(project_root.join("pyproject.toml")) {
-        let lower = content.to_lowercase();
-        if lower.contains("anthropic") && !hint.egress_hosts.contains(&"api.anthropic.com".to_string()) {
-            hint.required_env.push("ANTHROPIC_API_KEY".to_string());
-            hint.egress_hosts.push("api.anthropic.com".to_string());
-            found = true;
-        }
-        if lower.contains("openai") && !hint.egress_hosts.contains(&"api.openai.com".to_string()) {
-            hint.required_env.push("OPENAI_API_KEY".to_string());
-            hint.egress_hosts.push("api.openai.com".to_string());
-            found = true;
+        for pkg in extract_pyproject_dependencies(&content) {
+            let pkg_lower = pkg.to_ascii_lowercase();
+            for (needle, env, host) in PY_SDKS {
+                if pkg_lower == *needle {
+                    found |= push(env, host, &mut hint);
+                }
+            }
         }
     }
 
+    // package.json — parse JSON and inspect dependencies / devDependencies.
     if let Ok(content) = fs::read_to_string(project_root.join("package.json")) {
-        if content.contains("@anthropic-ai/sdk")
-            && !hint.egress_hosts.contains(&"api.anthropic.com".to_string())
-        {
-            hint.required_env.push("ANTHROPIC_API_KEY".to_string());
-            hint.egress_hosts.push("api.anthropic.com".to_string());
-            found = true;
-        }
-        if (content.contains("\"openai\"") || content.contains("openai/"))
-            && !hint.egress_hosts.contains(&"api.openai.com".to_string())
-        {
-            hint.required_env.push("OPENAI_API_KEY".to_string());
-            hint.egress_hosts.push("api.openai.com".to_string());
-            found = true;
+        if let Ok(value) = serde_json::from_str::<Value>(&content) {
+            for section in ["dependencies", "devDependencies", "peerDependencies"] {
+                let Some(map) = value.get(section).and_then(|v| v.as_object()) else {
+                    continue;
+                };
+                for name in map.keys() {
+                    for (needle, env, host) in NODE_SDKS {
+                        if name == *needle {
+                            found |= push(env, host, &mut hint);
+                        }
+                    }
+                }
+            }
         }
     }
 
-    if found { Some(hint) } else { None }
+    if found {
+        Some(hint)
+    } else {
+        None
+    }
+}
+
+/// Extract a package name from a single `requirements.txt` line.
+/// Returns `None` for blank lines, comments, or option flags.
+#[allow(dead_code)]
+fn parse_requirements_line(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('-') {
+        return None;
+    }
+    // Package name ends at the first version specifier, extras bracket, or
+    // env-marker separator.
+    let end = trimmed
+        .find(|c: char| {
+            matches!(c, '=' | '<' | '>' | '~' | '!' | ';' | '[' | ' ' | '\t')
+        })
+        .unwrap_or(trimmed.len());
+    let pkg = trimmed[..end].trim();
+    if pkg.is_empty() {
+        None
+    } else {
+        Some(pkg)
+    }
+}
+
+/// Extract dependency package names from `pyproject.toml`.
+/// Handles both PEP-621 `[project].dependencies` (list of PEP 508 strings)
+/// and `[tool.poetry.dependencies]` (table keyed by package name).
+#[allow(dead_code)]
+fn extract_pyproject_dependencies(content: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(value) = toml::from_str::<toml::Value>(content) else {
+        return out;
+    };
+
+    if let Some(deps) = value
+        .get("project")
+        .and_then(|p| p.get("dependencies"))
+        .and_then(|d| d.as_array())
+    {
+        for entry in deps {
+            if let Some(s) = entry.as_str() {
+                if let Some(pkg) = parse_requirements_line(s) {
+                    out.push(pkg.to_string());
+                }
+            }
+        }
+    }
+    if let Some(deps) = value
+        .get("tool")
+        .and_then(|t| t.get("poetry"))
+        .and_then(|p| p.get("dependencies"))
+        .and_then(|d| d.as_table())
+    {
+        for name in deps.keys() {
+            out.push(name.clone());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
