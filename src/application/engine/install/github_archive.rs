@@ -1,10 +1,15 @@
 use super::*;
 
 pub(crate) fn github_checkout_root() -> Result<PathBuf> {
-    let root = std::env::current_dir()
-        .with_context(|| "Failed to resolve current directory for temporary checkout")?
+    // Use the global ato home directory rather than a CWD-relative .ato/tmp path.
+    // Paths under .ato/tmp are blocked by the workspace-internal-state guard in the
+    // capsule packer (core/src/packers/capsule.rs::ensure_payload_source_root), which
+    // prevents packing from within the ato internal scratch space.  Using
+    // ~/.ato/gh-install/ instead places checkouts alongside the global ato state but
+    // outside the blocked WORKSPACE_INTERNAL_SUBDIRS list.
+    let root = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory for GitHub checkout"))?
         .join(".ato")
-        .join("tmp")
         .join("gh-install");
     std::fs::create_dir_all(&root).with_context(|| {
         format!(
@@ -25,6 +30,17 @@ pub(crate) fn github_api_base_url() -> String {
         .map(|value| value.trim().trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "https://api.github.com".to_string())
+}
+
+pub(crate) fn github_api_bearer_token() -> Option<String> {
+    ["ATO_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]
+        .into_iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
 }
 
 pub(crate) fn unpack_github_tarball(bytes: &[u8], destination: &Path) -> Result<PathBuf> {
