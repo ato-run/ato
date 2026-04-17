@@ -30,6 +30,8 @@ pub(super) fn render_settings_panel(body: &str, state: &AppState, theme: &Theme)
                 .child(render_terminal_card(state, theme))
                 // Developer section
                 .child(render_developer_card(state, theme))
+                // Secrets section
+                .child(render_secrets_card(state, theme))
                 // Egress Policy section
                 .child(render_egress_card(state, theme))
                 // Diagnostics section
@@ -90,6 +92,70 @@ fn render_terminal_card(state: &AppState, theme: &Theme) -> Div {
             &format!("{max_sessions}"),
             theme,
         ))
+}
+
+fn render_secrets_card(state: &AppState, theme: &Theme) -> Div {
+    let secrets = &state.secret_store.secrets;
+
+    let card = settings_card("Secrets", theme);
+
+    if secrets.is_empty() {
+        card.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(theme.text_disabled)
+                .child("No secrets configured. Secrets can be injected into capsules as environment variables."),
+        )
+    } else {
+        card.child(
+            div()
+                .rounded(px(10.0))
+                .bg(theme.settings_body_bg)
+                .border_1()
+                .border_color(theme.settings_body_border)
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .children(secrets.iter().enumerate().map(|(i, secret)| {
+                    let masked = "•".repeat(secret.value.len().min(16));
+                    let grants_count = state
+                        .secret_store
+                        .grants
+                        .values()
+                        .filter(|keys| keys.contains(&secret.key))
+                        .count();
+
+                    div()
+                        .id(("secret", i))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.0))
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .font_weight(FontWeight(500.0))
+                                        .text_color(theme.text_primary)
+                                        .child(secret.key.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .text_color(theme.text_disabled)
+                                        .child(format!(
+                                            "{masked}  ({grants_count} capsule{})",
+                                            if grants_count == 1 { "" } else { "s" }
+                                        )),
+                                ),
+                        )
+                })),
+        )
+    }
 }
 
 fn render_developer_card(state: &AppState, theme: &Theme) -> Div {

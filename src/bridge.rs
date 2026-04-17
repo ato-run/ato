@@ -49,6 +49,10 @@ pub enum GuestBridgeRequest {
         cols: u16,
         rows: u16,
     },
+    /// Request secrets granted to this capsule session.
+    GetSecrets {
+        request_id: u64,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -118,6 +122,11 @@ pub enum ShellEvent {
         session_id: String,
         cols: u16,
         rows: u16,
+    },
+    /// Guest requests secrets granted to its capsule session
+    GetSecrets {
+        request_id: u64,
+        pane_id: Option<usize>,
     },
 }
 
@@ -280,6 +289,29 @@ impl BridgeProxy {
                 GuestBridgeResponse::Ok {
                     request_id: None,
                     message: "terminal resize forwarded".to_string(),
+                    payload: Value::Null,
+                }
+            }
+            GuestBridgeRequest::GetSecrets { request_id } => {
+                if !capability_allowed(allowlist, "secrets") {
+                    self.log(
+                        ActivityTone::Warning,
+                        "Denied GetSecrets: secrets capability not granted",
+                    );
+                    return GuestBridgeResponse::Denied {
+                        request_id: Some(request_id),
+                        message: "secrets capability is not granted".to_string(),
+                    };
+                }
+                // Secrets are resolved from the SecretStore by the WebViewManager
+                // via a ShellEvent, since the bridge does not have access to AppState.
+                self.push_shell_event(ShellEvent::GetSecrets {
+                    request_id,
+                    pane_id: session.map(|s| s.pane_id),
+                });
+                GuestBridgeResponse::Ok {
+                    request_id: Some(request_id),
+                    message: "secrets request queued".to_string(),
                     payload: Value::Null,
                 }
             }
