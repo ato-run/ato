@@ -374,7 +374,7 @@ run_command = "pnpm dev"
 }
 
 #[test]
-fn normalize_github_install_preview_toml_rejects_subdir_lockfile_missing_from_pack_include() {
+fn normalize_github_install_preview_toml_auto_adds_subdir_lockfile_to_pack_include() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let app_dir = tmp.path().join("apps").join("web");
     std::fs::create_dir_all(&app_dir).expect("create app dir");
@@ -398,12 +398,149 @@ entrypoint = "src/main.ts"
 run_command = "pnpm dev"
 "#;
 
-    let err = normalize_github_install_preview_toml(tmp.path(), manifest).expect_err("must fail");
+    let normalized =
+        normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
 
-    assert!(err
-        .to_string()
-        .contains("pack.include does not cover required lockfile"));
-    assert!(err.to_string().contains("apps/web/pnpm-lock.yaml"));
+    assert!(normalized.contains(r#""apps/web/pnpm-lock.yaml""#));
+}
+
+#[test]
+fn normalize_github_install_preview_toml_resolves_multiple_lockfiles_by_priority_pnpm_over_yarn() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let app_dir = tmp.path().join("apps").join("web");
+    std::fs::create_dir_all(&app_dir).expect("create app dir");
+    std::fs::write(app_dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
+        .expect("write pnpm lock");
+    std::fs::write(app_dir.join("yarn.lock"), "__metadata:\n  version: 4")
+        .expect("write yarn lock");
+    let manifest = r#"
+schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[pack]
+include = ["package.json", "src/**"]
+
+[targets.app]
+runtime = "source"
+driver = "node"
+working_dir = "apps/web"
+entrypoint = "src/main.ts"
+run_command = "pnpm dev"
+"#;
+
+    let normalized =
+        normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+    // pnpm wins by priority (pnpm > yarn > bun > npm)
+    assert!(
+        normalized.contains(r#""apps/web/pnpm-lock.yaml""#),
+        "pnpm-lock.yaml must be auto-included by priority"
+    );
+    assert!(
+        !normalized.contains("yarn.lock"),
+        "yarn.lock must not be included when pnpm-lock.yaml takes priority"
+    );
+}
+
+#[test]
+fn normalize_github_install_preview_toml_resolves_multiple_lockfiles_via_package_manager_field() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let app_dir = tmp.path().join("apps").join("web");
+    std::fs::create_dir_all(&app_dir).expect("create app dir");
+    std::fs::write(app_dir.join("package-lock.json"), "{\"lockfileVersion\":3}")
+        .expect("write npm lock");
+    std::fs::write(app_dir.join("bun.lock"), "# bun lockfile v0\n").expect("write bun lock");
+    // package.json explicitly declares bun as the package manager
+    std::fs::write(
+        app_dir.join("package.json"),
+        r#"{"name":"demo","packageManager":"bun@1.1.0"}"#,
+    )
+    .expect("write package.json");
+
+    let manifest = r#"
+schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[pack]
+include = ["apps/web/package.json", "apps/web/src/**"]
+
+[targets.app]
+runtime = "source"
+driver = "node"
+working_dir = "apps/web"
+entrypoint = "src/index.ts"
+run_command = "bun dev"
+"#;
+
+    let normalized =
+        normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+    assert!(
+        normalized.contains(r#""apps/web/bun.lock""#),
+        "bun.lock must be auto-included"
+    );
+    assert!(
+        !normalized.contains("package-lock.json"),
+        "package-lock.json must not be included when bun is declared"
+    );
+}
+
+#[test]
+fn normalize_github_install_preview_toml_resolves_multiple_lockfiles_by_priority_when_no_package_manager_field() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(tmp.path().join("package-lock.json"), "{\"lockfileVersion\":3}")
+        .expect("write npm lock");
+    std::fs::write(tmp.path().join("bun.lock"), "# bun lockfile v0\n").expect("write bun lock");
+    // package.json without packageManager field — bun.lock wins by priority (bun > npm)
+    std::fs::write(tmp.path().join("package.json"), r#"{"name":"demo"}"#)
+        .expect("write package.json");
+
+    let manifest = r#"
+schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[pack]
+include = ["package.json", "src/**"]
+
+[targets.app]
+runtime = "source"
+driver = "node"
+entrypoint = "src/index.ts"
+run_command = "node src/index.js"
+"#;
+
+    let normalized =
+        normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+    // bun.lock wins by priority; package-lock.json must NOT be added
+    assert!(
+        normalized.contains(r#""bun.lock""#),
+        "bun.lock must be auto-included by priority"
+    );
+    assert!(
+        !normalized.contains("package-lock.json"),
+        "package-lock.json must not be included when bun.lock takes priority"
+    );
+}
+
+#[test]
+fn github_checkout_root_is_outside_workspace_internal_subtree() {
+    use capsule_core::common::paths::path_contains_workspace_internal_subtree;
+    let root = super::github_checkout_root().expect("checkout root");
+    assert!(
+        !path_contains_workspace_internal_subtree(&root),
+        "github_checkout_root() must not be inside a workspace internal subtree; got: {}",
+        root.display()
+    );
 }
 
 #[test]
@@ -1635,6 +1772,76 @@ async fn download_github_repository_at_ref_maps_private_repo_404_to_auth_message
     let rendered = format!("{:#}", err);
     assert!(rendered.contains("GitHub App"));
     assert!(rendered.contains("private repositories"));
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn download_github_repository_at_ref_uses_github_token_for_public_archive_fetch() {
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    use axum::Router;
+
+    async fn github_tarball(headers: HeaderMap) -> impl IntoResponse {
+        assert_eq!(
+            headers
+                .get(reqwest::header::AUTHORIZATION.as_str())
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer gh-token-public")
+        );
+
+        let mut archive_bytes = Vec::new();
+        {
+            let encoder =
+                flate2::write::GzEncoder::new(&mut archive_bytes, flate2::Compression::default());
+            let mut builder = tar::Builder::new(encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(17);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(
+                    &mut header,
+                    "public-repo-main/index.js",
+                    std::io::Cursor::new(b"console.log('ok')"),
+                )
+                .expect("append tarball file");
+            builder
+                .into_inner()
+                .expect("finish tar")
+                .finish()
+                .expect("finish gzip");
+        }
+
+        (
+            StatusCode::OK,
+            [(reqwest::header::CONTENT_TYPE.as_str(), "application/gzip")],
+            archive_bytes,
+        )
+    }
+
+    let _env_lock = acquire_test_env_lock().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock github server");
+    let addr = listener.local_addr().expect("local addr");
+    let app = Router::new().route(
+        "/repos/octocat/public-repo/tarball/main",
+        get(github_tarball),
+    );
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let base_url = format!("http://{}", addr);
+    let _github_guard = EnvVarGuard::set("ATO_GITHUB_API_BASE_URL", Some(base_url.as_str()));
+    let _gh_token_guard = EnvVarGuard::set("GH_TOKEN", Some("gh-token-public"));
+
+    let checkout = download_github_repository_at_ref("octocat/public-repo", Some("main"))
+        .await
+        .expect("public repo archive should download");
+    assert!(checkout.checkout_dir.join("index.js").exists());
 
     server.abort();
 }

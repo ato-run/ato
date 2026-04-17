@@ -205,6 +205,7 @@ pub(super) fn normalize_github_install_preview_toml(
         }
     }
 
+    changed |= changed_pack_include_from_checkout(&mut parsed, checkout_dir)?;
     inspect_normalized_github_install_preview_manifest(&parsed, checkout_dir)?;
 
     if !changed {
@@ -602,13 +603,36 @@ fn inspect_normalized_github_install_preview_manifest(
         );
 
         if let Some((_, missing_path, _)) = lockfile_check_paths.iter().find(|(_, path, exists)| {
-            *exists
-                && path
-                    .strip_prefix(checkout_dir)
-                    .ok()
-                    .map(normalize_relative_path)
-                    .map(|relative| !pack_include_covers_path(&pack_include, &relative))
-                    .unwrap_or(false)
+            if !exists {
+                return false;
+            }
+            // When multiple node lockfiles exist, only the canonical one (resolved via
+            // packageManager) must be covered.  If the canonical lockfile is in
+            // pack.include, non-canonical lockfiles are allowed to be absent.
+            let existing_lockfiles = lockfile_check_paths
+                .iter()
+                .filter(|(_, _, e)| *e)
+                .collect::<Vec<_>>();
+            if target.driver.eq_ignore_ascii_case("node") && existing_lockfiles.len() > 1 {
+                let is_canonical = resolve_canonical_node_lockfile_by_package_manager(
+                    &lockfile_check_paths
+                        .iter()
+                        .filter(|(_, _, e)| *e)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    &execution_working_directory,
+                )
+                .map(|(name, _, _)| *name == path.file_name().and_then(|n| n.to_str()).unwrap_or(""))
+                .unwrap_or(true);
+                if !is_canonical {
+                    return false;
+                }
+            }
+            path.strip_prefix(checkout_dir)
+                .ok()
+                .map(normalize_relative_path)
+                .map(|relative| !pack_include_covers_path(&pack_include, &relative))
+                .unwrap_or(false)
         }) {
             let relative = normalize_relative_path(
                 missing_path
@@ -736,6 +760,78 @@ fn github_install_lockfile_checks(
     }
 }
 
+/// When multiple Node lockfiles exist in the same working directory, try to resolve
+/// the ambiguity using the `packageManager` field in `package.json` (Corepack convention).
+/// If that field is absent, fall back to the same file-existence priority order used by
+/// `infer_node_package_manager_command_prefix()`: pnpm > yarn > bun > npm.
+///
+/// Returns `Some(lockfile)` when a single canonical lockfile can be determined, or
+/// `None` when the heuristic is inconclusive (caller should bail).
+fn resolve_canonical_node_lockfile_by_package_manager<'a>(
+    existing_lockfiles: &'a [(&'static str, PathBuf, bool)],
+    working_dir: &Path,
+) -> Option<&'a (&'static str, PathBuf, bool)> {
+    // First try the explicit `packageManager` field (Corepack convention).
+    if let Some(pkg_json) = read_package_json(working_dir) {
+        if let Some(declared_pm) = pkg_json
+            .get("packageManager")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let pm_lower = declared_pm.to_ascii_lowercase();
+            let canonical_name: &str = if pm_lower.starts_with("pnpm@") {
+                "pnpm-lock.yaml"
+            } else if pm_lower.starts_with("yarn@") {
+                "yarn.lock"
+            } else if pm_lower.starts_with("bun@") {
+                "bun.lock"
+            } else if pm_lower.starts_with("npm@") {
+                "package-lock.json"
+            } else {
+                ""
+            };
+
+            if !canonical_name.is_empty() {
+                if let Some(found) = existing_lockfiles
+                    .iter()
+                    .find(|(name, _, _)| *name == canonical_name)
+                {
+                    return Some(found);
+                }
+                // bun fallback: bun.lock declared but only bun.lockb present
+                if canonical_name == "bun.lock" {
+                    if let Some(found) = existing_lockfiles
+                        .iter()
+                        .find(|(name, _, _)| *name == "bun.lockb")
+                    {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+    }
+
+    // No explicit packageManager field. Use the same priority order as
+    // infer_node_package_manager_command_prefix(): pnpm > yarn > bun > npm.
+    for preferred in &[
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lock",
+        "bun.lockb",
+        "package-lock.json",
+    ] {
+        if let Some(found) = existing_lockfiles
+            .iter()
+            .find(|(name, _, _)| name == preferred)
+        {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
 fn normalize_relative_path(path: &Path) -> String {
     path.components()
         .filter_map(|component| match component {
@@ -801,27 +897,118 @@ fn pack_include_pattern_matches(pattern: &str, relative_path: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn changed_pack_include_from_checkout(parsed: &mut toml::Value, checkout_dir: &Path) -> Result<()> {
+fn changed_pack_include_from_checkout(
+    parsed: &mut toml::Value,
+    checkout_dir: &Path,
+) -> Result<bool> {
+    let targets = github_install_preview_targets_for_inspection(parsed);
     let Some(pack) = parsed.get_mut("pack").and_then(toml::Value::as_table_mut) else {
-        return Ok(());
+        return Ok(false);
     };
     let Some(include) = pack.get_mut("include").and_then(toml::Value::as_array_mut) else {
-        return Ok(());
+        return Ok(false);
     };
+    let mut changed = false;
+    let mut normalized_include = include
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
 
     if let Some(import_map) = referenced_deno_import_map(checkout_dir)? {
-        let already_present = include.iter().any(|entry| {
-            entry
-                .as_str()
-                .map(|value| value.trim() == import_map)
-                .unwrap_or(false)
-        });
-        if !already_present {
-            include.push(toml::Value::String(import_map));
+        changed |= ensure_pack_include_entry(include, &mut normalized_include, &import_map);
+    }
+
+    for target in targets {
+        let execution_working_directory = target
+            .working_dir
+            .as_deref()
+            .map(|relative| checkout_dir.join(relative))
+            .unwrap_or_else(|| checkout_dir.to_path_buf());
+        let existing_lockfiles =
+            github_install_lockfile_checks(&target.driver, &execution_working_directory)
+                .into_iter()
+                .filter(|(_, _, exists)| *exists)
+                .collect::<Vec<_>>();
+
+        if target.driver.eq_ignore_ascii_case("node") && existing_lockfiles.len() > 1 {
+            // More than one lockfile exists. Try to resolve ambiguity using the
+            // `packageManager` field declared in package.json (Corepack convention).
+            // If that resolves to a single canonical lockfile, use only that one.
+            // Otherwise fail with a clear message so the user knows what to fix.
+            match resolve_canonical_node_lockfile_by_package_manager(
+                &existing_lockfiles,
+                &execution_working_directory,
+            ) {
+                Some(canonical) => {
+                    let relative = canonical
+                        .1
+                        .strip_prefix(checkout_dir)
+                        .map(normalize_relative_path)
+                        .map_err(|_| {
+                            anyhow::anyhow!(
+                                "GitHub install preview manifest is inconsistent: target '{}' requires lockfile '{}' outside checkout '{}'",
+                                target.label,
+                                canonical.1.display(),
+                                checkout_dir.display(),
+                            )
+                        })?;
+                    ensure_pack_include_entry(include, &mut normalized_include, &relative);
+                }
+                None => {
+                    let lockfiles = existing_lockfiles
+                        .iter()
+                        .map(|(_, path, _)| {
+                            path.strip_prefix(checkout_dir)
+                                .map(normalize_relative_path)
+                                .unwrap_or_else(|_| normalize_relative_path(path))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    bail!(
+                        "GitHub install preview manifest is ambiguous: target '{}' runs from '{}' and multiple node lockfiles were detected: {}",
+                        target.label,
+                        execution_working_directory.display(),
+                        lockfiles,
+                    );
+                }
+            }
+            continue;
+        }
+
+        for (_, path, _) in existing_lockfiles {
+            let relative = path
+                .strip_prefix(checkout_dir)
+                .map(normalize_relative_path)
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "GitHub install preview manifest is inconsistent: target '{}' requires lockfile '{}' outside checkout '{}'",
+                        target.label,
+                        path.display(),
+                        checkout_dir.display(),
+                    )
+                })?;
+            changed |= ensure_pack_include_entry(include, &mut normalized_include, &relative);
         }
     }
 
-    Ok(())
+    Ok(changed)
+}
+
+fn ensure_pack_include_entry(
+    include: &mut Vec<toml::Value>,
+    normalized_include: &mut Vec<String>,
+    entry: &str,
+) -> bool {
+    if pack_include_covers_path(normalized_include, entry) {
+        return false;
+    }
+
+    include.push(toml::Value::String(entry.to_string()));
+    normalized_include.push(entry.to_string());
+    true
 }
 
 fn referenced_deno_import_map(checkout_dir: &Path) -> Result<Option<String>> {
