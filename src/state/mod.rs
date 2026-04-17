@@ -1364,6 +1364,21 @@ impl AppState {
     }
 
     pub fn handle_host_route(&mut self, raw_route: &str) {
+        // capsule://<host>/<publisher>/<slug>
+        // Deep link from browser: opens the capsule directly in the desktop.
+        // Examples:
+        //   capsule://ato.run/acme/chat
+        //   capsule://localhost:8787/myapp
+        if raw_route.starts_with("capsule://") {
+            self.push_activity(
+                ActivityTone::Info,
+                format!("Opening capsule from deep link: {raw_route}"),
+            );
+            self.create_new_tab();
+            self.navigate_to_url(raw_route);
+            return;
+        }
+
         // ato://open?handle=<percent-encoded-capsule-handle>
         // Lets external callers (browser, share menu, CLI) open a capsule in the desktop.
         if raw_route.starts_with("ato://open") {
@@ -3491,6 +3506,20 @@ mod tests {
             initial_tasks + 2,
             "each share navigation creates a fresh tab"
         );
+    }
+
+    #[test]
+    fn handle_host_route_capsule_deep_link_creates_new_tab() {
+        let mut state = AppState::demo();
+        let initial_task_count = state.active_workspace().expect("workspace").tasks.len();
+
+        state.handle_host_route("capsule://ato.run/acme/chat");
+
+        let workspace = state.active_workspace().expect("workspace");
+        assert_eq!(workspace.tasks.len(), initial_task_count + 1);
+        let pane = state.active_web_pane().expect("pane");
+        assert!(pane.route.to_string().contains("acme") && pane.route.to_string().contains("chat"));
+        assert_eq!(pane.session, WebSessionState::Resolving);
     }
 
     #[test]

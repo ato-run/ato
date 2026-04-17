@@ -223,6 +223,16 @@ fn render_info_plist(version: &str) -> String {
           <string>ato</string>
         </array>
       </dict>
+      <dict>
+        <key>CFBundleTypeRole</key>
+        <string>Viewer</string>
+        <key>CFBundleURLName</key>
+        <string>run.ato.desktop.capsule</string>
+        <key>CFBundleURLSchemes</key>
+        <array>
+          <string>capsule</string>
+        </array>
+      </dict>
     </array>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
