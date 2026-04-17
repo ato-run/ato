@@ -4,6 +4,51 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.68] - 2026-04-17
+
+### What Changed
+
+
+#### Bug Fixes
+
+- Move default_git_mode_str import into cfg(test) scope
+
+- Fix remaining clippy errors (sort_by_key, manual_pattern_char_comparison)
+
+- Use exact package name match for AI agent SDK detection
+
+- Handle both nacelle event formats and open_url routing
+
+- Address review findings C-1, C-2, M-1, M-4, m-1
+
+- Add archive source kind for non-git directories
+
+
+#### Features
+
+- Add Vite port detection and dev script inference
+
+- Add AI agent pattern detection and uv entrypoint inference
+
+- Prefix 'Try now' hint with [hint] tag in grey
+
+- Dim 'Try now' hint so execution output stands out
+
+- Resolve bare slugs from local ~/.ato/store for ato run
+
+- Route ato run <share-url> through nacelle via ShareExecutor
+
+
+#### Other Changes
+
+- Cargo fmt
+
+
+#### Refactoring
+
+- Extract share types to capsule-core
+
+
 ## [0.4.67] - 2026-04-16
 
 ### What Changed
