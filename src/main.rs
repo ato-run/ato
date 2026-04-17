@@ -7,6 +7,7 @@ mod orchestrator;
 mod state;
 mod terminal;
 mod ui;
+mod userland;
 mod webview;
 
 fn main() {
