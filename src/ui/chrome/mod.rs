@@ -4,8 +4,8 @@ use gpui::prelude::*;
 use gpui::{div, hsla, point, px, BoxShadow, Entity, FontWeight, IntoElement, MouseButton, Window};
 use gpui_component::input::{Input, InputState};
 
-use crate::app::{FocusCommandBar, NavigateToUrl, SelectTask, ShowSettings};
-use crate::state::{AppState, OmnibarSuggestion, OmnibarSuggestionAction, ShellMode};
+use crate::app::{BrowserBack, BrowserForward, BrowserReload, FocusCommandBar, NavigateToUrl, SelectTask, ShowSettings};
+use crate::state::{AppState, GuestRoute, OmnibarSuggestion, OmnibarSuggestionAction, ShellMode};
 
 use self::window_controls::{default_window_control_buttons, render_window_controls};
 use super::theme::Theme;
@@ -30,6 +30,7 @@ pub(super) fn render_command_chrome(
         .border_b_1()
         .border_color(theme.panel_border)
         .child(render_window_controls(default_window_control_buttons()))
+        .child(render_nav_buttons(state, theme))
         .child(div().flex_1().flex().justify_center().child(render_omnibar(
             omnibar,
             omnibar_value,
@@ -39,6 +40,83 @@ pub(super) fn render_command_chrome(
         )))
         .child(render_active_route_status(state, theme))
         .child(render_overview_toggle(state, theme))
+}
+
+fn render_nav_buttons(state: &AppState, theme: &Theme) -> impl IntoElement {
+    let has_web_pane = state
+        .active_web_pane()
+        .map(|p| matches!(p.route, GuestRoute::ExternalUrl(_)))
+        .unwrap_or(false);
+    let enabled_color = theme.text_secondary;
+    let disabled_color = theme.text_tertiary;
+    let color = if has_web_pane {
+        enabled_color
+    } else {
+        disabled_color
+    };
+
+    div()
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .child(render_nav_button(
+            "nav-back",
+            "◀",
+            color,
+            has_web_pane,
+            theme,
+            |_, window, cx| {
+                window.dispatch_action(Box::new(BrowserBack), cx);
+            },
+        ))
+        .child(render_nav_button(
+            "nav-forward",
+            "▶",
+            color,
+            has_web_pane,
+            theme,
+            |_, window, cx| {
+                window.dispatch_action(Box::new(BrowserForward), cx);
+            },
+        ))
+        .child(render_nav_button(
+            "nav-reload",
+            "↻",
+            color,
+            has_web_pane,
+            theme,
+            |_, window, cx| {
+                window.dispatch_action(Box::new(BrowserReload), cx);
+            },
+        ))
+}
+
+fn render_nav_button(
+    id: &'static str,
+    label: &'static str,
+    color: gpui::Hsla,
+    enabled: bool,
+    theme: &Theme,
+    on_click: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    let hover_bg = theme.surface_hover;
+
+    div()
+        .id(id)
+        .w(px(26.0))
+        .h(px(26.0))
+        .rounded(px(6.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(12.0))
+        .text_color(color)
+        .when(enabled, move |this| {
+            this.cursor_pointer()
+                .hover(move |style| style.bg(hover_bg))
+                .on_mouse_down(MouseButton::Left, on_click)
+        })
+        .child(label)
 }
 
 fn render_omnibar(
