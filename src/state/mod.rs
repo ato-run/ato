@@ -1570,26 +1570,34 @@ impl AppState {
     }
 
     pub fn browser_reload(&mut self) {
-        // For ExternalUrl panes, use the standard WebView reload.
-        if let Some(active) = self.active_web_pane() {
-            if matches!(&active.route, GuestRoute::ExternalUrl(_)) {
-                self.enqueue_browser_command(BrowserCommandKind::Reload);
-                return;
-            }
-        }
-
-        // For capsule and other pane types, restart the session by
-        // re-navigating to the same route URL.
-        let reload_url = if let Some(active) = self.active_web_pane() {
-            Some(active.route.to_string())
-        } else if let Some(active) = self.active_capsule_pane() {
-            Some(active.route.to_string())
-        } else {
-            None
+        let Some(active) = self.active_web_pane() else {
+            return;
         };
 
-        if let Some(url) = reload_url {
-            self.navigate_to_url(&url);
+        match &active.route {
+            // ExternalUrl and Terminal: use WebView's native reload.
+            // Terminal sessions have URLs like terminal://session_id/ which
+            // navigate_to_url can't parse (would fall through to Google search).
+            GuestRoute::ExternalUrl(_) | GuestRoute::Terminal { .. } => {
+                let pane_id = active.pane_id;
+                self.browser_commands.push_back(BrowserCommand {
+                    pane_id,
+                    kind: BrowserCommandKind::Reload,
+                });
+            }
+            // Capsule and Capsule handle: restart the session by re-navigating.
+            GuestRoute::CapsuleHandle { handle, .. } => {
+                let handle = handle.clone();
+                self.navigate_to_url(&handle);
+            }
+            GuestRoute::CapsuleUrl { label, .. } => {
+                let label = label.clone();
+                self.navigate_to_url(&label);
+            }
+            GuestRoute::Capsule { session, entry_path } => {
+                let url = format!("capsule://{session}{entry_path}");
+                self.navigate_to_url(&url);
+            }
         }
     }
 
