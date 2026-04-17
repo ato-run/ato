@@ -1570,7 +1570,27 @@ impl AppState {
     }
 
     pub fn browser_reload(&mut self) {
-        self.enqueue_browser_command(BrowserCommandKind::Reload);
+        // For ExternalUrl panes, use the standard WebView reload.
+        if let Some(active) = self.active_web_pane() {
+            if matches!(&active.route, GuestRoute::ExternalUrl(_)) {
+                self.enqueue_browser_command(BrowserCommandKind::Reload);
+                return;
+            }
+        }
+
+        // For capsule and other pane types, restart the session by
+        // re-navigating to the same route URL.
+        let reload_url = if let Some(active) = self.active_web_pane() {
+            Some(active.route.to_string())
+        } else if let Some(active) = self.active_capsule_pane() {
+            Some(active.route.to_string())
+        } else {
+            None
+        };
+
+        if let Some(url) = reload_url {
+            self.navigate_to_url(&url);
+        }
     }
 
     pub fn drain_browser_commands(&mut self, pane_id: PaneId) -> Vec<BrowserCommandKind> {
