@@ -224,6 +224,21 @@ impl EgressSnapshot {
     }
 }
 
+/// Known LLM API hosts indexed by SDK keyword.
+///
+/// Used by `detect_ai_agent_hint` to map detected SDK names to the egress
+/// hosts that should be added to `egress_allow` when the SDK is found.
+pub const KNOWN_LLM_API_HOSTS: &[(&str, &str)] = &[
+    ("anthropic",   "api.anthropic.com"),
+    ("openai",      "api.openai.com"),
+    ("google",      "generativelanguage.googleapis.com"),
+    ("mistral",     "api.mistral.ai"),
+    ("groq",        "api.groq.com"),
+    ("cohere",      "api.cohere.ai"),
+    ("together",    "api.together.xyz"),
+    ("replicate",   "api.replicate.com"),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
