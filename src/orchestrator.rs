@@ -1690,6 +1690,61 @@ mod tests {
         assert!(super::find_ato_toolchain_binary("foo/bar").is_none());
     }
 
+    /// Regression: sibling binaries inside a family toolchain dir
+    /// (`npm`, `npx`, `pip`, `pip3`, `uvx`) must resolve via the family
+    /// fallback. Before the fix, `find_ato_toolchain_binary("npm")` looked
+    /// for `~/.ato/toolchains/npm-*/` and returned None, so `npm install`
+    /// was incorrectly routed through `ato run --` and hit `scoped_id_required`.
+    #[test]
+    fn find_ato_toolchain_binary_finds_npm_inside_node_family() {
+        let home = match dirs::home_dir() {
+            Some(h) => h,
+            None => return,
+        };
+        let has_node = std::fs::read_dir(home.join(".ato/toolchains"))
+            .map(|it| {
+                it.filter_map(|e| e.ok())
+                    .any(|e| e.file_name().to_string_lossy().starts_with("node-"))
+            })
+            .unwrap_or(false);
+        if !has_node {
+            return; // environment doesn't have a node toolchain; skip.
+        }
+        let npm = super::find_ato_toolchain_binary("npm");
+        assert!(
+            npm.is_some(),
+            "node toolchain installed but `npm` did not resolve — family fallback is broken"
+        );
+        let p = npm.unwrap();
+        assert_eq!(p.file_name().and_then(|s| s.to_str()), Some("npm"));
+        assert!(p.exists(), "resolved npm path does not exist: {p:?}");
+    }
+
+    /// Companion regression for Python family siblings.
+    #[test]
+    fn find_ato_toolchain_binary_finds_pip_inside_python_family() {
+        let home = match dirs::home_dir() {
+            Some(h) => h,
+            None => return,
+        };
+        let has_python = std::fs::read_dir(home.join(".ato/toolchains"))
+            .map(|it| {
+                it.filter_map(|e| e.ok())
+                    .any(|e| e.file_name().to_string_lossy().starts_with("python-"))
+            })
+            .unwrap_or(false);
+        if !has_python {
+            return;
+        }
+        let pip = super::find_ato_toolchain_binary("pip");
+        assert!(
+            pip.is_some(),
+            "python toolchain installed but `pip` did not resolve — family fallback is broken"
+        );
+        let p = pip.unwrap();
+        assert_eq!(p.file_name().and_then(|s| s.to_str()), Some("pip"));
+    }
+
     #[test]
     fn find_executable_named_in_bin_subdir() {
         let base = std::env::temp_dir()
@@ -2245,7 +2300,7 @@ pub fn spawn_ato_run_repl(
         // Initial banner + prompt.
         let banner = "\x1b[36m┌─ ato CLI ──────────────────────────────────────────┐\x1b[0m\r\n\
              \x1b[36m│\x1b[0m Capsules: \x1b[1m<slug>\x1b[0m or \x1b[1m<publisher>/<slug>\x1b[0m (via \x1b[1mato run\x1b[0m)\r\n\
-             \x1b[36m│\x1b[0m Toolchains: \x1b[1mpython\x1b[0m \x1b[1mnode\x1b[0m \x1b[1mdeno\x1b[0m \x1b[1muv\x1b[0m (from ~/.ato/toolchains)\r\n\
+             \x1b[36m│\x1b[0m Toolchains: \x1b[1mpython\x1b[0m \x1b[1mpip\x1b[0m \x1b[1mnode\x1b[0m \x1b[1mnpm\x1b[0m \x1b[1mnpx\x1b[0m \x1b[1mdeno\x1b[0m \x1b[1muv\x1b[0m (from ~/.ato/toolchains)\r\n\
              \x1b[36m│\x1b[0m Userland: \x1b[1mnpm i -g\x1b[0m / \x1b[1mpip install\x1b[0m land in ~/.ato/userland/ and stay on PATH\r\n\
              \x1b[36m│\x1b[0m Egress: \x1b[1mlocalhost only\x1b[0m — type \x1b[1m.egress\x1b[0m or \x1b[1m.allow <host>\x1b[0m\r\n\
              \x1b[36m│\x1b[0m Ctrl-C cancels; Ctrl-D exits.\r\n\
@@ -2777,7 +2832,15 @@ pub fn spawn_ato_run_repl(
 ///
 /// This is intentionally small — full POSIX expansion (globs, variables) is
 /// the responsibility of `ato run` itself. Unmatched quotes return an error.
-/// Resolve a bare command name against `~/.ato/toolchains/<name>-<version>/`.
+/// Resolve a bare command name against `~/.ato/toolchains/`.
+///
+/// Lookup strategy:
+///   1. Direct prefix match: dirs named `<name>-<ver>/` (e.g. `python-3.12/`).
+///      This is how primary binaries resolve: `python`, `node`, `deno`, `uv`.
+///   2. Family fallback: if `name` belongs to a known family (`npm`→Node,
+///      `pip`→Python, ...), also search the family's toolchain root
+///      (`node-<ver>/`, `python-<ver>/`, ...). This is how sibling binaries
+///      resolve: `npm`, `npx`, `pnpm`, `pip`, `pip3`, `uvx`, `corepack`, ...
 ///
 /// Returns the path to an executable file named `name` inside the newest
 /// matching toolchain directory, or `None` if no toolchain is installed.
@@ -2793,33 +2856,52 @@ fn find_ato_toolchain_binary(name: &str) -> Option<PathBuf> {
     }
     let home = dirs::home_dir()?;
     let toolchains = home.join(".ato").join("toolchains");
-    let prefix = format!("{name}-");
 
-    // Collect candidate toolchain roots (`<name>-<version>/`), sorted desc so
-    // the newest-looking version wins. We rely on lexicographic sort here —
-    // good enough for semver-ish names. Skip archive files (.tar.gz, .zip).
-    let mut roots: Vec<PathBuf> = fs::read_dir(&toolchains)
+    // Build the list of directory-name prefixes we will search in priority
+    // order. The direct match wins over the family fallback so
+    // `node → node-*/.../bin/node` stays stable even if a future `node-*`
+    // layout happens to also contain a nested `node` directory.
+    let mut prefixes: Vec<String> = vec![format!("{name}-")];
+    if let Some(family) = crate::userland::Family::classify(name) {
+        let family_prefix = match family {
+            crate::userland::Family::Node => "node-",
+            crate::userland::Family::Python => "python-",
+            crate::userland::Family::Deno => "deno-",
+        };
+        let fp = family_prefix.to_string();
+        if !prefixes.contains(&fp) {
+            prefixes.push(fp);
+        }
+    }
+
+    let entries: Vec<PathBuf> = fs::read_dir(&toolchains)
         .ok()?
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let path = e.path();
-            if !path.is_dir() {
-                return None;
-            }
-            let n = path.file_name()?.to_str()?.to_string();
-            if n.starts_with(&prefix) {
-                Some(path)
-            } else {
-                None
-            }
+            if path.is_dir() { Some(path) } else { None }
         })
         .collect();
-    roots.sort();
-    roots.reverse();
 
-    for root in roots {
-        if let Some(bin) = find_executable_named(&root, name, 4) {
-            return Some(bin);
+    for prefix in &prefixes {
+        // Collect matching roots, newest-first by lexicographic order (good
+        // enough for semver-ish names).
+        let mut roots: Vec<PathBuf> = entries
+            .iter()
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|n| n.starts_with(prefix))
+            })
+            .cloned()
+            .collect();
+        roots.sort();
+        roots.reverse();
+
+        for root in roots {
+            if let Some(bin) = find_executable_named(&root, name, 4) {
+                return Some(bin);
+            }
         }
     }
     None
