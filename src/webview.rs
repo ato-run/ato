@@ -34,6 +34,7 @@ use wry::{
 use crate::automation::command::{AutomationCommand, PendingAutomationRequest};
 use crate::automation::AutomationHost;
 use crate::bridge::{BridgeProxy, GuestBridgeResponse, GuestSessionContext, ShellEvent};
+use crate::config::SecretEntry;
 use crate::orchestrator::{
     resolve_and_start_guest, spawn_cli_session, spawn_log_tail_session, spawn_terminal_session,
     stop_guest_session, take_pending_cli_command, take_pending_share_terminal, GuestLaunchSession,
@@ -273,7 +274,7 @@ impl WebViewManager {
         // Pull bridge activity into app state first so rebuilds always see the latest guest messages.
         state.extend_activity(self.bridge.drain_activity());
         let shell_events = self.bridge.drain_shell_events();
-        self.apply_shell_events(&shell_events);
+        self.apply_shell_events(&shell_events, state);
         state.apply_shell_events(shell_events);
         self.drain_pending_launches(window, state);
 
@@ -432,7 +433,7 @@ impl WebViewManager {
                     state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
                 } else if let Some(spec) = take_pending_cli_command(&session_id) {
                     // Priority 2: pending CLI launch spec from an `ato://cli` deep link.
-                    match spawn_cli_session(session_id.clone(), 80, 24, spec.clone()) {
+                    match spawn_cli_session(session_id.clone(), 80, 24, spec.clone(), Vec::new()) {
                         Ok(proc) => {
                             info!(session_id = %session_id, ?spec, "Spawned CLI session from ato://cli");
                             self.terminal_sessions.insert(session_id.clone(), proc);
@@ -759,7 +760,7 @@ impl WebViewManager {
         state.active_web_pane().map(|pane| pane.pane_id)
     }
 
-    fn apply_shell_events(&mut self, events: &[ShellEvent]) {
+    fn apply_shell_events(&mut self, events: &[ShellEvent], state: &AppState) {
         for event in events {
             match event {
                 ShellEvent::UrlChanged { pane_id, url } => {
@@ -801,6 +802,32 @@ impl WebViewManager {
                         }
                     } else {
                         debug!(session_id = %session_id, cols, rows, "terminal resize: no PTY session found");
+                    }
+                }
+                ShellEvent::GetSecrets { request_id, pane_id } => {
+                    if let Some(pid) = pane_id {
+                        let handle = self
+                            .views
+                            .get(pid)
+                            .and_then(|v| v.launched_session.as_ref())
+                            .map(|s| s.handle.clone())
+                            .unwrap_or_default();
+                        let secrets = state.secret_store.secrets_for_capsule(&handle);
+                        let payload: std::collections::HashMap<&str, &str> = secrets
+                            .iter()
+                            .map(|s| (s.key.as_str(), s.value.as_str()))
+                            .collect();
+                        let payload_json = serde_json::to_string(&payload)
+                            .unwrap_or_else(|_| "{}".to_string());
+                        let script = format!(
+                            "window.__ATO_HOST__ && window.__ATO_HOST__.resolveSecrets({}, {});",
+                            request_id, payload_json
+                        );
+                        if let Some(view) = self.views.get_mut(pid) {
+                            if let Err(e) = view.webview.evaluate_script(&script) {
+                                warn!(pane_id = pid, error = %e, "failed to deliver GetSecrets response");
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -1050,6 +1077,14 @@ impl WebViewManager {
         let async_app = self.async_app.clone();
         let window_handle = self.window_handle;
 
+        // Collect secrets granted for this capsule handle before moving into the async block.
+        let secrets: Vec<SecretEntry> = state
+            .secret_store
+            .secrets_for_capsule(&handle)
+            .into_iter()
+            .cloned()
+            .collect();
+
         self.pending_launches.insert(
             key,
             PendingLaunch {
@@ -1066,7 +1101,7 @@ impl WebViewManager {
         let launch_task = background_executor.spawn(async move {
             let result = PendingLaunchResult {
                 route_key: route_key.clone(),
-                session: resolve_and_start_guest(&handle).map_err(|e| {
+                session: resolve_and_start_guest(&handle, &secrets).map_err(|e| {
                     error!(handle = %handle, error = %e, "guest session launch failed");
                     e.to_string()
                 }),

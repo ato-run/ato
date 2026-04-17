@@ -12,6 +12,8 @@ use capsule_core::handle::{
 use serde::Deserialize;
 use tracing::{debug, error, info, warn};
 
+use crate::config::SecretEntry;
+
 /// Pending terminal processes spawned by share URL executor.
 /// `webview.rs` drains these when creating Terminal panes.
 static PENDING_SHARE_TERMINALS: std::sync::OnceLock<Mutex<HashMap<String, TerminalProcess>>> =
@@ -141,8 +143,8 @@ impl CapsuleLaunchSession {
 
 pub type GuestLaunchSession = CapsuleLaunchSession;
 
-pub fn resolve_and_start_guest(handle: &str) -> Result<GuestLaunchSession> {
-    resolve_and_start_capsule(handle)
+pub fn resolve_and_start_guest(handle: &str, secrets: &[SecretEntry]) -> Result<GuestLaunchSession> {
+    resolve_and_start_capsule(handle, secrets)
 }
 
 pub fn stop_guest_session(session_id: &str) -> Result<bool> {
@@ -263,13 +265,13 @@ pub fn is_share_url(s: &str) -> bool {
     true
 }
 
-pub fn resolve_and_start_capsule(handle: &str) -> Result<CapsuleLaunchSession> {
+pub fn resolve_and_start_capsule(handle: &str, secrets: &[SecretEntry]) -> Result<CapsuleLaunchSession> {
     info!(handle, "resolving capsule");
     if is_share_url(handle) {
         return resolve_and_start_from_share(handle);
     }
     let resolved = resolve_capsule(handle)?;
-    let started = start_capsule(handle)?;
+    let started = start_capsule(handle, secrets)?;
     let session = build_launch_session(handle, resolved, started)?;
     info!(
         session_id = %session.session_id,
@@ -339,10 +341,36 @@ fn resolve_capsule(handle: &str) -> Result<ResolvePayload> {
     Ok(envelope.resolution)
 }
 
-fn start_capsule(handle: &str) -> Result<SessionStartInfo> {
-    let envelope: SessionStartEnvelope =
-        run_ato_json(&["app", "session", "start", handle, "--json"])?;
-    Ok(envelope.session)
+fn start_capsule(handle: &str, secrets: &[SecretEntry]) -> Result<SessionStartInfo> {
+    let ato_bin = resolve_ato_binary()?;
+    debug!(bin = %ato_bin.display(), handle, "spawning ato helper for session start");
+    let mut cmd = Command::new(&ato_bin);
+    cmd.args(["app", "session", "start", handle, "--json"]);
+
+    // Inject granted secrets as ATO_SECRET_<KEY> environment variables so the
+    // capsule process can read them without the host leaking its full env.
+    for secret in secrets {
+        cmd.env(
+            format!("ATO_SECRET_{}", secret.key.to_ascii_uppercase()),
+            &secret.value,
+        );
+    }
+
+    let output = cmd.output().with_context(|| {
+        format!(
+            "failed to run ato helper '{}' for session start",
+            ato_bin.display()
+        )
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        error!(handle, stderr = %stderr, "ato session start failed");
+        bail!("ato session start failed: {stderr}");
+    }
+
+    serde_json::from_slice(&output.stdout)
+        .context("failed to parse session start response")
 }
 
 fn run_ato_json<T>(args: &[&str]) -> Result<T>
@@ -1608,7 +1636,7 @@ mod tests {
         }
 
         // Materialise the share URL and start a session.
-        let session = super::resolve_and_start_capsule(SHARE_URL)
+        let session = super::resolve_and_start_capsule(SHARE_URL, &[])
             .expect("resolve_and_start_capsule should succeed for the share URL");
 
         eprintln!("[e2e] session_id  = {}", session.session_id);
@@ -2182,12 +2210,13 @@ pub fn spawn_cli_session(
     cols: u16,
     rows: u16,
     spec: CliLaunchSpec,
+    secrets: Vec<SecretEntry>,
 ) -> Result<TerminalProcess> {
     match spec {
         CliLaunchSpec::AtoRunRepl {
             prelude,
             initial_allow_hosts,
-        } => spawn_ato_run_repl(session_id, cols, rows, prelude, initial_allow_hosts),
+        } => spawn_ato_run_repl(session_id, cols, rows, prelude, initial_allow_hosts, secrets),
         CliLaunchSpec::RawShell(shell) => spawn_terminal_session(session_id, &shell, cols, rows),
         CliLaunchSpec::RawAto => {
             // Run `ato` under nacelle by using it as the shell. nacelle will
@@ -2219,6 +2248,7 @@ pub fn spawn_ato_run_repl(
     rows: u16,
     prelude: Option<String>,
     initial_allow_hosts: Vec<String>,
+    secrets: Vec<SecretEntry>,
 ) -> Result<TerminalProcess> {
     use crate::egress_policy::{EgressPolicy, HostPattern};
     use crate::egress_proxy::{DenyEvent, EgressProxy, EgressProxyHandle};
@@ -2621,6 +2651,14 @@ pub fn spawn_ato_run_repl(
                         // Advertise a real TTY so TUI apps enable interactive
                         // UIs. xterm-256color is what xterm.js implements.
                         cmd_builder.env("TERM", "xterm-256color");
+                        // Inject secrets with ATO_SECRET_ prefix so capsule processes
+                        // can access them without leaking to untrusted env inherit.
+                        for secret in &secrets {
+                            cmd_builder.env(
+                                format!("ATO_SECRET_{}", secret.key.to_ascii_uppercase()),
+                                &secret.value,
+                            );
+                        }
                         // Inherit HOME/USER/LANG from the parent so shells
                         // behave naturally (CommandBuilder does NOT inherit
                         // env by default — explicit inheritance below).
