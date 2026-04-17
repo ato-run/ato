@@ -57,6 +57,8 @@ pub enum CapabilityGrant {
     Terminal,
     /// Grants AI-agent automation (JS injection + AutomationHost socket).
     Automation,
+    /// Grants access to secrets from the secret store.
+    Secrets,
 }
 
 impl CapabilityGrant {
@@ -68,6 +70,7 @@ impl CapabilityGrant {
             Self::ClipboardRead => "clipboard-read",
             Self::Terminal => "terminal",
             Self::Automation => "automation",
+            Self::Secrets => "secrets",
         }
     }
 
@@ -79,6 +82,7 @@ impl CapabilityGrant {
             "clipboard-read" => Some(Self::ClipboardRead),
             "terminal" => Some(Self::Terminal),
             "automation" => Some(Self::Automation),
+            "secrets" => Some(Self::Secrets),
             _ => None,
         }
     }
@@ -663,6 +667,7 @@ pub struct AppState {
     pub console_logs: Vec<ConsoleLogEntry>,
     pub network_logs: Vec<NetworkLogEntry>,
     pub config: crate::config::DesktopConfig,
+    pub secret_store: crate::config::SecretStore,
     next_task_id: TaskSetId,
     next_pane_id: PaneId,
     next_new_tab_index: usize,
@@ -828,6 +833,7 @@ impl AppState {
             console_logs: Vec::new(),
             network_logs: Vec::new(),
             config: crate::config::load_config(),
+            secret_store: crate::config::load_secrets(),
             next_task_id: 4,
             next_pane_id: 4,
             next_new_tab_index: 2,
@@ -860,6 +866,30 @@ impl AppState {
     pub fn update_config(&mut self, f: impl FnOnce(&mut crate::config::DesktopConfig)) {
         f(&mut self.config);
         crate::config::save_config(&self.config);
+    }
+
+    /// Add or update a secret and persist to disk.
+    pub fn add_secret(&mut self, key: String, value: String) {
+        self.secret_store.add_secret(key, value);
+        crate::config::save_secrets(&self.secret_store);
+    }
+
+    /// Remove a secret and persist to disk.
+    pub fn remove_secret(&mut self, key: &str) {
+        self.secret_store.remove_secret(key);
+        crate::config::save_secrets(&self.secret_store);
+    }
+
+    /// Grant a secret to a capsule and persist.
+    pub fn grant_secret_to_capsule(&mut self, capsule_handle: &str, key: &str) {
+        self.secret_store.grant_secret(capsule_handle, key);
+        crate::config::save_secrets(&self.secret_store);
+    }
+
+    /// Revoke a secret from a capsule and persist.
+    pub fn revoke_secret_from_capsule(&mut self, capsule_handle: &str, key: &str) {
+        self.secret_store.revoke_secret(capsule_handle, key);
+        crate::config::save_secrets(&self.secret_store);
     }
 
     pub fn focus_command_bar(&mut self) {
@@ -1684,6 +1714,9 @@ impl AppState {
                 // (which has access to nacelle stdin writers) before apply_shell_events is called.
                 // They should not appear here; silently ignore any that leak through.
                 ShellEvent::TerminalInput { .. } | ShellEvent::TerminalResize { .. } => {}
+                // GetSecrets is also handled upstream by WebViewManager which has
+                // access to the AppState secret store. Ignore any that leak here.
+                ShellEvent::GetSecrets { .. } => {}
             }
         }
     }
