@@ -2013,31 +2013,52 @@ pub fn spawn_terminal_session(
     // Thread B: input_rx + resize_rx → nacelle stdin (TerminalCommand JSON lines)
     std::thread::spawn(move || {
         use std::io::Write;
+        use std::sync::mpsc::TryRecvError;
         loop {
             // Service input bytes
-            while let Ok(data) = input_rx.try_recv() {
-                let cmd = serde_json::json!({
-                    "type": "terminal_input",
-                    "session_id": sid_b,
-                    "data_b64": base64::engine::general_purpose::STANDARD.encode(&data)
-                });
-                if writeln!(nacelle_stdin, "{}", cmd).is_err() {
-                    return;
+            loop {
+                match input_rx.try_recv() {
+                    Ok(data) => {
+                        let cmd = serde_json::json!({
+                            "type": "terminal_input",
+                            "session_id": sid_b,
+                            "data_b64": base64::engine::general_purpose::STANDARD.encode(&data)
+                        });
+                        if writeln!(nacelle_stdin, "{}", cmd).is_err() {
+                            warn!(session_id = %sid_b, "nacelle stdin write failed, stopping input thread");
+                            return;
+                        }
+                        if nacelle_stdin.flush().is_err() {
+                            warn!(session_id = %sid_b, "nacelle stdin flush failed, stopping input thread");
+                            return;
+                        }
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => return,
                 }
-                let _ = nacelle_stdin.flush();
             }
             // Service resize requests
-            while let Ok((c, r)) = resize_rx.try_recv() {
-                let cmd = serde_json::json!({
-                    "type": "terminal_resize",
-                    "session_id": sid_b,
-                    "cols": c,
-                    "rows": r
-                });
-                if writeln!(nacelle_stdin, "{}", cmd).is_err() {
-                    return;
+            loop {
+                match resize_rx.try_recv() {
+                    Ok((c, r)) => {
+                        let cmd = serde_json::json!({
+                            "type": "terminal_resize",
+                            "session_id": sid_b,
+                            "cols": c,
+                            "rows": r
+                        });
+                        if writeln!(nacelle_stdin, "{}", cmd).is_err() {
+                            warn!(session_id = %sid_b, "nacelle stdin write failed (resize), stopping input thread");
+                            return;
+                        }
+                        if nacelle_stdin.flush().is_err() {
+                            warn!(session_id = %sid_b, "nacelle stdin flush failed (resize), stopping input thread");
+                            return;
+                        }
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => return,
                 }
-                let _ = nacelle_stdin.flush();
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
@@ -2677,6 +2698,25 @@ pub fn spawn_ato_run_repl(
                                 continue;
                             }
                         };
+
+                        // Take the writer ONCE before entering the loop.
+                        // portable-pty's take_writer() can only be called once
+                        // (subsequent calls fail with "cannot take writer more
+                        // than once"), so we must hold the writer for the
+                        // lifetime of the child process.
+                        let mut master_writer = match pty_pair.master.take_writer() {
+                            Ok(w) => w,
+                            Err(e) => {
+                                let msg = format!(
+                                    "\x1b[31mpty take_writer failed: {e}\x1b[0m\r\n"
+                                );
+                                let _ = send(&output_tx, msg.as_bytes());
+                                let _ = pty_child.kill();
+                                let _ = send(&output_tx, b"\x1b[32mato>\x1b[0m ");
+                                continue;
+                            }
+                        };
+
                         let master_for_ops: Arc<StdMutex<Box<dyn portable_pty::MasterPty + Send>>> =
                             Arc::new(StdMutex::new(pty_pair.master));
 
@@ -2723,13 +2763,9 @@ pub fn spawn_ato_run_repl(
                                 if bytes.is_empty() {
                                     continue;
                                 }
-                                if let Ok(master) = master_for_ops.lock() {
-                                    if let Ok(mut w) = master.take_writer() {
-                                        use std::io::Write;
-                                        let _ = w.write_all(&bytes);
-                                        let _ = w.flush();
-                                    }
-                                }
+                                use std::io::Write;
+                                let _ = master_writer.write_all(&bytes);
+                                let _ = master_writer.flush();
                             }
 
                             // Resize: always update the stored dims and also
@@ -2761,8 +2797,9 @@ pub fn spawn_ato_run_repl(
                             std::thread::sleep(std::time::Duration::from_millis(20));
                         };
 
-                        // Dropping the master closes the PTY, which makes the
-                        // output-reader EOF and the thread exit cleanly.
+                        // Drop the writer first, then the master to close
+                        // the PTY cleanly. The output-reader will then EOF.
+                        drop(master_writer);
                         drop(master_for_ops);
                         let _ = output_thread.join();
 
