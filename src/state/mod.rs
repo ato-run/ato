@@ -1008,10 +1008,24 @@ impl AppState {
             let host = url::Url::parse(&normalized)
                 .ok()
                 .and_then(|u| u.host_str().map(str::to_owned));
+            // Seed both the share host (e.g. `ato.run`) and its wildcard
+            // subdomain pattern (`*.ato.run`). The second entry is crucial:
+            // `ato run` fetches share metadata from the API host
+            // (`api.ato.run` / `staging.api.ato.run`), which is a distinct
+            // host from the share URL's own host. Without the wildcard the
+            // egress proxy blocks that fetch and `ato run` exits with
+            // "Failed to fetch share URL".
             let mut initial_allow_hosts = Vec::new();
             if let Some(h) = host {
                 if !h.is_empty() {
-                    initial_allow_hosts.push(h);
+                    initial_allow_hosts.push(h.clone());
+                    // Don't add wildcard for localhost / bare IP — HostPattern::parse
+                    // would reject "*.localhost" and the exact form already suffices.
+                    let is_ip = h.parse::<std::net::IpAddr>().is_ok();
+                    let is_localhost = h.eq_ignore_ascii_case("localhost");
+                    if !is_ip && !is_localhost {
+                        initial_allow_hosts.push(format!("*.{h}"));
+                    }
                 }
             }
             info!(
