@@ -462,11 +462,26 @@ fn build_envelope(
     cols: u16,
     rows: u16,
 ) -> serde_json::Value {
+    // Use a bare command name (`sh`) rather than the absolute `/bin/sh`.
+    // Rationale: nacelle's source launcher runs non-interactive workloads
+    // through `validate_binary`, which rejects absolute paths for
+    // portability. Its own error message recommends bare command names.
+    // `sh` is guaranteed to be on PATH on every POSIX system, and the
+    // Windows branch already used the bare name `cmd`.
+    let shell: &str = if cfg!(windows) { "cmd" } else { "sh" };
+    let shell_args: &[&str] = if cfg!(windows) { &["/C"] } else { &["-lc"] };
+    let mut cmd: Vec<String> = Vec::with_capacity(shell_args.len() + 2);
+    cmd.push(shell.to_string());
+    for a in shell_args {
+        cmd.push((*a).to_string());
+    }
+    cmd.push(run_command.to_string());
+
     let mut envelope = serde_json::json!({
         "spec_version": "1.0",
         "workload": {
             "type": "shell",
-            "cmd": ["/bin/sh", "-lc", run_command]
+            "cmd": cmd,
         },
         "interactive": interactive,
         "cwd": cwd.display().to_string(),
@@ -513,6 +528,11 @@ mod tests {
             24,
         );
         assert_eq!(envelope["workload"]["type"], "shell");
+        // Must use bare command name so nacelle's validate_binary allows it.
+        #[cfg(not(windows))]
+        assert_eq!(envelope["workload"]["cmd"][0], "sh");
+        #[cfg(windows)]
+        assert_eq!(envelope["workload"]["cmd"][0], "cmd");
         assert_eq!(envelope["workload"]["cmd"][2], "python main.py");
         assert_eq!(envelope["interactive"], false);
         assert!(envelope.get("terminal").is_none());
