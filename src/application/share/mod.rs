@@ -28,8 +28,8 @@ use crate::fs_copy;
 use crate::reporters::CliReporter;
 
 use share_types::{
-    default_git_mode_str, default_runtime_source_str, SHARE_DIR, SHARE_LOCK_FILE,
-    SHARE_SCHEMA_VERSION, SHARE_SPEC_FILE, SHARE_STATE_FILE,
+    default_runtime_source_str, SHARE_DIR, SHARE_LOCK_FILE, SHARE_SCHEMA_VERSION, SHARE_SPEC_FILE,
+    SHARE_STATE_FILE,
 };
 const SHARE_GUIDE_FILE: &str = "guide.md";
 const DEFAULT_API_TIMEOUT_SECS: u64 = 20;
@@ -3124,6 +3124,7 @@ fn sha256_label(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use share_types::default_git_mode_str;
 
     #[test]
     fn parse_share_revision_segment_supports_mutable_and_immutable() {
