@@ -71,6 +71,65 @@ fn format_bounds(bounds: PaneBounds) -> String {
     )
 }
 
+/// Query the local capsule registry for matching capsules.
+/// Runs synchronously (designed to be called from a background thread).
+fn search_local_registry(query: &str) -> Vec<crate::state::CapsuleSearchResult> {
+    let encoded: String = query
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{:02X}", b),
+        })
+        .collect();
+    let url = format!("http://127.0.0.1:8787/api/capsules?q={encoded}");
+
+    let response = match ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .get(&url)
+        .call()
+    {
+        Ok(r) => r,
+        Err(_) => return Vec::new(), // Registry not running
+    };
+
+    let body_str = match response.into_string() {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let body: serde_json::Value = match serde_json::from_str(&body_str) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let Some(items) = body.as_array().or_else(|| body.get("capsules").and_then(|v| v.as_array())) else {
+        return Vec::new();
+    };
+
+    items
+        .iter()
+        .take(5)
+        .filter_map(|item| {
+            let handle = item.get("handle").or_else(|| item.get("name"))?.as_str()?;
+            Some(crate::state::CapsuleSearchResult {
+                handle: handle.to_string(),
+                display_name: item
+                    .get("display_name")
+                    .or_else(|| item.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(handle)
+                    .to_string(),
+                description: item
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            })
+        })
+        .collect()
+}
+
 pub struct DesktopShell {
     state: AppState,
     omnibar: Entity<InputState>,
@@ -79,6 +138,7 @@ pub struct DesktopShell {
     webviews: WebViewManager,
     terminal_sessions: TerminalSessionManager,
     open_url_bridge: Arc<OpenUrlBridge>,
+    capsule_search_rx: Option<std::sync::mpsc::Receiver<Vec<crate::state::CapsuleSearchResult>>>,
 }
 
 impl DesktopShell {
@@ -167,6 +227,51 @@ impl DesktopShell {
             webviews,
             terminal_sessions: TerminalSessionManager::new(),
             open_url_bridge,
+            capsule_search_rx: None,
+        }
+    }
+
+    /// Trigger an async capsule search if the omnibar text changed and is non-empty.
+    fn maybe_trigger_capsule_search(&mut self, query: &str) {
+        let trimmed = query.trim();
+        if trimmed == self.state.capsule_search_query {
+            return;
+        }
+        self.state.capsule_search_query = trimmed.to_string();
+
+        if trimmed.is_empty() || trimmed.len() < 2 {
+            self.state.capsule_search_results.clear();
+            self.capsule_search_rx = None;
+            return;
+        }
+
+        // Skip if it looks like a URL
+        if trimmed.starts_with("http://")
+            || trimmed.starts_with("https://")
+            || trimmed.contains("://")
+        {
+            self.state.capsule_search_results.clear();
+            self.capsule_search_rx = None;
+            return;
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.capsule_search_rx = Some(rx);
+
+        let query_str = trimmed.to_string();
+        std::thread::spawn(move || {
+            let results = search_local_registry(&query_str);
+            let _ = tx.send(results);
+        });
+    }
+
+    /// Poll for capsule search results from the background thread.
+    fn poll_capsule_search(&mut self) {
+        if let Some(ref rx) = self.capsule_search_rx {
+            if let Ok(results) = rx.try_recv() {
+                self.state.capsule_search_results = results;
+                self.capsule_search_rx = None;
+            }
         }
     }
 
@@ -692,7 +797,9 @@ impl Render for DesktopShell {
             self.sync_focus_target(window, cx);
         }
         self.sync_favicons(window, cx);
+        self.poll_capsule_search();
         let omnibar_value = self.omnibar.read(cx).value().to_string();
+        self.maybe_trigger_capsule_search(&omnibar_value);
         let omnibar_suggestions = self.state.omnibar_suggestions(&omnibar_value);
         let active_pane_count = self.state.active_panes().len();
         let overview = matches!(self.state.shell_mode, ShellMode::Overview);

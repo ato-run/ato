@@ -296,6 +296,14 @@ fn render_omnibar_suggestion(
                 OmnibarSuggestionAction::ShowSettings => {
                     window.dispatch_action(Box::new(ShowSettings), cx);
                 }
+                OmnibarSuggestionAction::LaunchCapsule { handle } => {
+                    window.dispatch_action(
+                        Box::new(NavigateToUrl {
+                            url: handle.clone(),
+                        }),
+                        cx,
+                    );
+                }
             }
         })
         .child(
