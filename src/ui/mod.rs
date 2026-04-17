@@ -30,8 +30,8 @@ use crate::app::{
     FocusCommandBar, NativeCopy, NativeCut, NativePaste, NativeRedo, NativeSelectAll, NativeUndo,
     NavigateToUrl, NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, OpenCloudDock,
     OpenLocalRegistry, OpenUrlBridge, PreviousTask, PreviousWorkspace, ResumeAfterAuth, SelectTask,
-    ShowSettings, ShrinkSplit, SignInToAtoRun, SplitPane, ToggleDevConsole, ToggleOverview,
-    ToggleTheme,
+    ShowSettings, ShrinkSplit, SignInToAtoRun, SplitPane, ToggleAutoDevtools, ToggleDevConsole,
+    ToggleOverview, ToggleTheme,
 };
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
@@ -172,6 +172,17 @@ impl DesktopShell {
 
     fn on_toggle_theme(&mut self, _: &ToggleTheme, _window: &mut Window, cx: &mut Context<Self>) {
         self.state.toggle_theme();
+        cx.notify();
+    }
+
+    fn on_toggle_auto_devtools(
+        &mut self,
+        _: &ToggleAutoDevtools,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.state.config.auto_open_devtools;
+        self.state.update_config(|c| c.auto_open_devtools = !current);
         cx.notify();
     }
 
@@ -724,6 +735,7 @@ impl Render for DesktopShell {
             .bg(theme.canvas_bg)
             .text_color(theme.canvas_text)
             .on_action(cx.listener(Self::on_toggle_theme))
+            .on_action(cx.listener(Self::on_toggle_auto_devtools))
             .on_action(cx.listener(Self::on_focus_command_bar))
             .on_action(cx.listener(Self::on_toggle_overview))
             .on_action(cx.listener(Self::on_show_settings))
