@@ -555,7 +555,9 @@ fn prepare_session_execution(
         &prepared,
         launch_ctx,
         &TargetLaunchOptions {
-            enforcement: "audit".to_string(),
+            // source/python requires "strict" enforcement (guard.rs policy).
+            // execute_host runs Python directly on the host — nacelle is not required.
+            enforcement: "strict".to_string(),
             sandbox_mode: true,
             dangerously_skip_permissions: false,
             assume_yes: true,
