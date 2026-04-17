@@ -54,6 +54,7 @@ actions!(
         AllowPermissionForSession,
         DenyPermissionPrompt,
         ToggleDevConsole,
+        ToggleAutoDevtools,
         Quit
     ]
 );
