@@ -40,7 +40,7 @@ pub(super) async fn handle_list_local_processes() -> impl IntoResponse {
             )
         }
     };
-    processes.sort_by(|left, right| right.start_time.cmp(&left.start_time));
+    processes.sort_by_key(|p| std::cmp::Reverse(p.start_time));
 
     let rows = processes
         .into_iter()

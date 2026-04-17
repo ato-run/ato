@@ -3677,7 +3677,7 @@ fn parse_requirements_line(line: &str) -> Option<&str> {
     // Package name ends at the first version specifier, extras bracket, or
     // env-marker separator.
     let end = trimmed
-        .find(|c: char| matches!(c, '=' | '<' | '>' | '~' | '!' | ';' | '[' | ' ' | '\t'))
+        .find(['=', '<', '>', '~', '!', ';', '[', ' ', '\t'])
         .unwrap_or(trimmed.len());
     let pkg = trimmed[..end].trim();
     if pkg.is_empty() {
