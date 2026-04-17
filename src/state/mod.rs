@@ -367,6 +367,8 @@ pub struct TerminalPane {
     pub cols: u16,
     /// Terminal height in rows
     pub rows: u16,
+    /// Original launch spec, retained for session restart (reload).
+    pub cli_launch_spec: Option<crate::orchestrator::CliLaunchSpec>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1570,15 +1572,46 @@ impl AppState {
     }
 
     pub fn browser_reload(&mut self) {
+        // Check for Terminal pane first — needs special handling to restart
+        // the PTY session rather than just reloading the WebView.
+        let active_pane_id = self
+            .active_task()
+            .and_then(|task| task.focused_pane())
+            .map(|pane| pane.id);
+        if let Some(pane_id) = active_pane_id {
+            if let Some(terminal_spec) = self.terminal_reload_spec(pane_id) {
+                let (spec, title) = terminal_spec;
+                let new_session_id = format!("cli-{}-{}", pane_id, uuid_v4_simple());
+                register_pending_cli_command(new_session_id.clone(), spec.clone());
+                self.push_activity(
+                    ActivityTone::Info,
+                    format!("Reloading CLI session: {title}"),
+                );
+                self.mount_terminal_stream_pane_with_spec(
+                    pane_id,
+                    new_session_id,
+                    title,
+                    Some(spec),
+                );
+                return;
+            }
+        }
+
         let Some(active) = self.active_web_pane() else {
             return;
         };
 
         match &active.route {
-            // ExternalUrl and Terminal: use WebView's native reload.
-            // Terminal sessions have URLs like terminal://session_id/ which
-            // navigate_to_url can't parse (would fall through to Google search).
-            GuestRoute::ExternalUrl(_) | GuestRoute::Terminal { .. } => {
+            // ExternalUrl: use WebView's native reload.
+            GuestRoute::ExternalUrl(_) => {
+                let pane_id = active.pane_id;
+                self.browser_commands.push_back(BrowserCommand {
+                    pane_id,
+                    kind: BrowserCommandKind::Reload,
+                });
+            }
+            // Terminal handled above; this branch is for Terminal in a Web wrapper
+            GuestRoute::Terminal { .. } => {
                 let pane_id = active.pane_id;
                 self.browser_commands.push_back(BrowserCommand {
                     pane_id,
@@ -1599,6 +1632,30 @@ impl AppState {
                 self.navigate_to_url(&url);
             }
         }
+    }
+
+    /// Extract the CliLaunchSpec and title from the active Terminal pane (if any)
+    /// for session restart.
+    fn terminal_reload_spec(
+        &self,
+        pane_id: PaneId,
+    ) -> Option<(crate::orchestrator::CliLaunchSpec, String)> {
+        for workspace in &self.workspaces {
+            for task in &workspace.tasks {
+                for pane in &task.panes {
+                    if pane.id == pane_id {
+                        if let PaneSurface::Terminal(terminal) = &pane.surface {
+                            let spec = terminal
+                                .cli_launch_spec
+                                .clone()
+                                .unwrap_or_else(crate::orchestrator::CliLaunchSpec::ato_run_repl);
+                            return Some((spec, terminal.capsule_handle.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     pub fn drain_browser_commands(&mut self, pane_id: PaneId) -> Vec<BrowserCommandKind> {
@@ -2501,7 +2558,7 @@ impl AppState {
             ActivityTone::Info,
             format!("Opening {title} panel from ato://cli"),
         );
-        self.mount_terminal_stream_pane(new_pane_id, session_id, title);
+        self.mount_terminal_stream_pane_with_spec(new_pane_id, session_id, title, Some(spec));
     }
 
     /// Switch pane to a `Terminal` surface for a `terminal_stream` capsule session.
@@ -2515,6 +2572,18 @@ impl AppState {
         session_id: String,
         title: String,
     ) {
+        self.mount_terminal_stream_pane_with_spec(pane_id, session_id, title, None);
+    }
+
+    /// Like `mount_terminal_stream_pane` but also stores the `CliLaunchSpec`
+    /// so the session can be restarted on reload.
+    pub fn mount_terminal_stream_pane_with_spec(
+        &mut self,
+        pane_id: PaneId,
+        session_id: String,
+        title: String,
+        spec: Option<crate::orchestrator::CliLaunchSpec>,
+    ) {
         self.update_pane(pane_id, |pane| {
             pane.title = title.clone();
             pane.surface = PaneSurface::Terminal(TerminalPane {
@@ -2522,6 +2591,7 @@ impl AppState {
                 capsule_handle: title.clone(),
                 cols: 80,
                 rows: 24,
+                cli_launch_spec: spec.clone(),
             });
         });
         self.command_bar_text = title;
