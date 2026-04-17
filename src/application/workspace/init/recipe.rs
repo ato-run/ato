@@ -277,7 +277,16 @@ fn node_release_entrypoint(dir: &Path, node: &DetectedNode) -> Vec<String> {
         return vec!["node".to_string(), "dist/server.js".to_string()];
     }
 
-    if let Some(main) = node.main.as_ref() {
+    // Only use `node.main` as a direct entrypoint when it is a file that
+    // bare Node.js can execute AND actually exists in the source tree.
+    // `main = "index.html"`, `main = "package.json"`, or pointing at a built
+    // artifact that isn't in the source checkout are all filtered out here.
+    if let Some(main) = node
+        .main
+        .as_ref()
+        .filter(|m| is_directly_runnable_node_main(m))
+        .filter(|m| dir.join(m).exists())
+    {
         if node.is_bun {
             return vec!["bun".to_string(), main.clone()];
         }
@@ -339,6 +348,17 @@ fn node_release_entrypoint(dir: &Path, node: &DetectedNode) -> Vec<String> {
     } else {
         vec!["npm".to_string(), "start".to_string()]
     }
+}
+
+/// Returns true for paths that bare Node.js can execute directly.
+/// Extensionless paths (e.g. `dist/server`, `./bin/www`) are allowed;
+/// TypeScript, JSX, HTML, JSON etc. are not.
+fn is_directly_runnable_node_main(path: &str) -> bool {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    ext.is_empty() || matches!(ext, "js" | "mjs" | "cjs")
 }
 
 fn detect_python_entrypoint(dir: &Path) -> Vec<String> {
@@ -464,4 +484,31 @@ fn render_toml_string_array(values: &[String]) -> String {
         .map(|v| format!("\"{}\"", toml_escape_string(v)))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_directly_runnable_node_main_accepts_js_extensions() {
+        assert!(is_directly_runnable_node_main("index.js"));
+        assert!(is_directly_runnable_node_main("dist/server.mjs"));
+        assert!(is_directly_runnable_node_main("lib/app.cjs"));
+    }
+
+    #[test]
+    fn is_directly_runnable_node_main_accepts_extensionless_paths() {
+        assert!(is_directly_runnable_node_main("dist/server"));
+        assert!(is_directly_runnable_node_main("bin/www"));
+    }
+
+    #[test]
+    fn is_directly_runnable_node_main_rejects_non_js_extensions() {
+        assert!(!is_directly_runnable_node_main("index.html"));
+        assert!(!is_directly_runnable_node_main("package.json"));
+        assert!(!is_directly_runnable_node_main("src/main.tsx"));
+        assert!(!is_directly_runnable_node_main("src/server.ts"));
+        assert!(!is_directly_runnable_node_main("app.jsx"));
+    }
 }
