@@ -36,16 +36,37 @@ const DEFAULT_API_TIMEOUT_SECS: u64 = 20;
 
 /// Emit an informational hint (not an execution result, not a warning) to stderr.
 ///
-/// Dimmed via ANSI when stderr is a TTY so actual program stdout from the
-/// share workload (e.g. `hello, world!`) stands out visually. Falls back to
-/// plain text when stderr is piped/redirected to keep logs grep-friendly.
+/// Each line is prefixed with a `[hint]` tag so it is visually distinct from
+/// actual program stdout (e.g. `hello, world!`). When stderr is a TTY — or
+/// when the caller set `FORCE_COLOR=1` / `CLICOLOR_FORCE=1` (used by
+/// ato-desktop's REPL which pipes stderr) — the prefix and body are rendered
+/// in grey (`\x1b[90m`) so the actual execution output stands out. Falls back
+/// to plain `[hint] ...` when colors are off (respects `NO_COLOR`), keeping
+/// logs and grep pipelines readable.
 fn emit_dim_hint(message: &str) {
+    let color = hint_color_enabled();
     let mut stderr = io::stderr();
-    if stderr.is_terminal() {
-        let _ = writeln!(stderr, "\x1b[2m{}\x1b[0m", message);
-    } else {
-        let _ = writeln!(stderr, "{}", message);
+    for line in message.lines() {
+        let _ = if color {
+            writeln!(stderr, "\x1b[90m[hint]\x1b[0m \x1b[90m{}\x1b[0m", line)
+        } else {
+            writeln!(stderr, "[hint] {}", line)
+        };
     }
+}
+
+fn hint_color_enabled() -> bool {
+    // Explicit opt-out always wins.
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    // Honour caller-forced color (ato-desktop REPL pipes stderr but sets these).
+    if std::env::var_os("FORCE_COLOR").is_some()
+        || std::env::var_os("CLICOLOR_FORCE").is_some()
+    {
+        return true;
+    }
+    io::stderr().is_terminal()
 }
 /// Pinned Python version used by ato-managed runtimes for decap install steps.
 const SHARE_PROVIDER_PYTHON_VERSION: &str = "3.11.10";
