@@ -220,6 +220,42 @@ fn draft_requires_manual_review_for_explicit_lockfile_blocker_warning() {
 }
 
 #[test]
+fn draft_allows_soft_package_script_manual_review_warning() {
+    let draft = GitHubInstallDraftResponse {
+        repo: GitHubInstallDraftRepo {
+            owner: "example".to_string(),
+            repo: "repo".to_string(),
+            full_name: "example/repo".to_string(),
+            default_branch: "main".to_string(),
+        },
+        capsule_toml: GitHubInstallDraftCapsuleToml { exists: false },
+        repo_ref: "example/repo".to_string(),
+        proposed_run_command: None,
+        proposed_install_command: "ato run github.com/example/repo".to_string(),
+        resolved_ref: GitHubInstallDraftResolvedRef {
+            ref_name: "main".to_string(),
+            sha: "abc123".to_string(),
+        },
+        manifest_source: "inferred".to_string(),
+        preview_toml: Some(
+            "schema_version = \"0.3\"\nname = \"demo\"\nruntime = \"source/node\"\nrun = \"node package.json\"\n"
+                .to_string(),
+        ),
+        capsule_hint: Some(GitHubInstallDraftHint {
+            confidence: "medium".to_string(),
+            warnings: vec![
+                "The selected package.json script could not be normalized to a direct Node entrypoint and may require manual review.".to_string(),
+            ],
+            launchability: Some("manual_review".to_string()),
+        }),
+        inference_mode: Some("rules".to_string()),
+        retryable: false,
+    };
+
+    assert!(!draft_requires_manual_review(&draft));
+}
+
+#[test]
 fn draft_allows_optional_port_env_advisory_warning() {
     let draft = GitHubInstallDraftResponse {
         repo: GitHubInstallDraftRepo {

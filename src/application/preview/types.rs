@@ -298,14 +298,11 @@ fn derived_plan_from_github_draft(
 }
 
 fn draft_requires_manual_review(draft: &GitHubInstallDraftResponse) -> bool {
-    if draft
+    let launchability_requires_manual_review = draft
         .capsule_hint
         .as_ref()
         .and_then(|hint| hint.launchability.as_deref())
-        == Some("manual_review")
-    {
-        return true;
-    }
+        == Some("manual_review");
     if draft.retryable {
         return false;
     }
@@ -316,20 +313,31 @@ fn draft_requires_manual_review(draft: &GitHubInstallDraftResponse) -> bool {
         .map(required_env_from_preview_toml)
         .map(|values| !values.is_empty())
         .unwrap_or(false);
-    let has_manual_review_warning = draft
+    let (has_manual_review_warning, has_soft_preview_warning) = draft
         .capsule_hint
         .as_ref()
         .map(|hint| {
-            hint.warnings
-                .iter()
-                .any(|warning| warning_requires_manual_review(warning))
+            (
+                hint.warnings
+                    .iter()
+                    .any(|warning| warning_requires_manual_review(warning)),
+                hint.warnings
+                    .iter()
+                    .any(|warning| warning_is_soft_preview_advisory(warning)),
+            )
         })
-        .unwrap_or(false);
+        .unwrap_or((false, false));
 
-    has_required_env || has_manual_review_warning
+    has_required_env
+        || has_manual_review_warning
+        || (launchability_requires_manual_review && !has_soft_preview_warning)
 }
 
 fn warning_requires_manual_review(warning: &str) -> bool {
+    if warning_is_soft_preview_advisory(warning) {
+        return false;
+    }
+
     let lowered = warning.to_ascii_lowercase();
 
     lowered.contains("frozen-lockfile")
@@ -353,6 +361,12 @@ fn warning_requires_manual_review(warning: &str) -> bool {
         || warning.contains("環境変数を設定")
         || warning.contains("外部DB")
         || warning.contains("認証")
+}
+
+fn warning_is_soft_preview_advisory(warning: &str) -> bool {
+    warning
+        .to_ascii_lowercase()
+        .contains("could not be normalized to a direct node entrypoint")
 }
 
 fn required_env_from_preview_toml(manifest_text: &str) -> Vec<String> {
