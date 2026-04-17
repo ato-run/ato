@@ -1,6 +1,7 @@
 mod app;
 mod automation;
 mod bridge;
+mod config;
 mod egress_policy;
 mod egress_proxy;
 mod orchestrator;

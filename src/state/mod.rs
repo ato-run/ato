@@ -662,6 +662,7 @@ pub struct AppState {
     pub auth_policy_registry: AuthPolicyRegistry,
     pub console_logs: Vec<ConsoleLogEntry>,
     pub network_logs: Vec<NetworkLogEntry>,
+    pub config: crate::config::DesktopConfig,
     next_task_id: TaskSetId,
     next_pane_id: PaneId,
     next_new_tab_index: usize,
@@ -798,7 +799,7 @@ impl AppState {
             preview: "ato.run landing page".to_string(),
         };
 
-        Self {
+        let mut state = Self {
             shell_mode: ShellMode::Focus,
             active_workspace: 1,
             workspaces: vec![Workspace {
@@ -815,7 +816,7 @@ impl AppState {
             capsule_logs: HashMap::new(),
             browser_commands: VecDeque::new(),
             pending_permission_prompt: None,
-            theme_mode: ThemeMode::Light,
+            theme_mode: ThemeMode::Light, // synced below from config
             desktop_auth: DesktopAuthState {
                 status: DesktopAuthStatus::SignedOut,
                 publisher_handle: None,
@@ -826,10 +827,13 @@ impl AppState {
             auth_policy_registry: AuthPolicyRegistry::default_third_party(),
             console_logs: Vec::new(),
             network_logs: Vec::new(),
+            config: crate::config::load_config(),
             next_task_id: 4,
             next_pane_id: 4,
             next_new_tab_index: 2,
-        }
+        };
+        state.sync_theme_from_config();
+        state
     }
 
     pub fn toggle_theme(&mut self) {
@@ -837,6 +841,25 @@ impl AppState {
             ThemeMode::Light => ThemeMode::Dark,
             ThemeMode::Dark => ThemeMode::Light,
         };
+        self.config.theme = match self.theme_mode {
+            ThemeMode::Light => crate::config::ThemeConfig::Light,
+            ThemeMode::Dark => crate::config::ThemeConfig::Dark,
+        };
+        crate::config::save_config(&self.config);
+    }
+
+    /// Sync theme_mode from the persisted config.
+    fn sync_theme_from_config(&mut self) {
+        self.theme_mode = match self.config.theme {
+            crate::config::ThemeConfig::Light => ThemeMode::Light,
+            crate::config::ThemeConfig::Dark => ThemeMode::Dark,
+        };
+    }
+
+    /// Update a config value and persist to disk.
+    pub fn update_config(&mut self, f: impl FnOnce(&mut crate::config::DesktopConfig)) {
+        f(&mut self.config);
+        crate::config::save_config(&self.config);
     }
 
     pub fn focus_command_bar(&mut self) {
