@@ -2246,6 +2246,7 @@ pub fn spawn_ato_run_repl(
         let banner = "\x1b[36m┌─ ato CLI ──────────────────────────────────────────┐\x1b[0m\r\n\
              \x1b[36m│\x1b[0m Capsules: \x1b[1m<slug>\x1b[0m or \x1b[1m<publisher>/<slug>\x1b[0m (via \x1b[1mato run\x1b[0m)\r\n\
              \x1b[36m│\x1b[0m Toolchains: \x1b[1mpython\x1b[0m \x1b[1mnode\x1b[0m \x1b[1mdeno\x1b[0m \x1b[1muv\x1b[0m (from ~/.ato/toolchains)\r\n\
+             \x1b[36m│\x1b[0m Userland: \x1b[1mnpm i -g\x1b[0m / \x1b[1mpip install\x1b[0m land in ~/.ato/userland/ and stay on PATH\r\n\
              \x1b[36m│\x1b[0m Egress: \x1b[1mlocalhost only\x1b[0m — type \x1b[1m.egress\x1b[0m or \x1b[1m.allow <host>\x1b[0m\r\n\
              \x1b[36m│\x1b[0m Ctrl-C cancels; Ctrl-D exits.\r\n\
              \x1b[36m└────────────────────────────────────────────────────┘\x1b[0m\r\n";
@@ -2430,14 +2431,30 @@ pub fn spawn_ato_run_repl(
 
                         let mut proc_cmd;
                         let command_label: String;
-                        if let Some(tc) = find_ato_toolchain_binary(&argv[0]) {
-                            // Toolchain found under ~/.ato/toolchains: invoke
-                            // the binary directly with the remaining args.
-                            // Note: the same mental model as `ato run` is
-                            // preserved in intent (Ato-managed binary, Ato
-                            // layered storage), but for toolchains we skip
-                            // the capsule-manifest wrapping that `ato run`
-                            // requires.
+                        // Userland-aware resolution order:
+                        //   1. ~/.ato/toolchains/<name>-<ver>/...  (existing)
+                        //   2. ~/.ato/userland/<family>/bin/<name> (NEW)
+                        //   3. fallback to `ato run --` (existing, scoped_id)
+                        //
+                        // We also inject the install-destination env envelope
+                        // (NPM_CONFIG_PREFIX, PIP_PREFIX, ...) whenever the
+                        // target belongs to a known toolchain family, so that
+                        // `npm install -g` always lands under userland/ and
+                        // subsequent bare-name runs pick it up.
+                        let tc_hit = find_ato_toolchain_binary(&argv[0]);
+                        let userland_hit = if tc_hit.is_none() {
+                            crate::userland::find_userland_binary(&argv[0])
+                        } else {
+                            None
+                        };
+                        let family_for_env: Option<crate::userland::Family> =
+                            if let Some(ref p) = userland_hit {
+                                crate::userland::family_for_userland_binary(p)
+                            } else {
+                                crate::userland::Family::classify(&argv[0])
+                            };
+
+                        if let Some(tc) = tc_hit {
                             command_label = format!("{} (toolchain)", argv[0]);
                             debug!(
                                 session_id = %sid,
@@ -2447,10 +2464,69 @@ pub fn spawn_ato_run_repl(
                             );
                             proc_cmd = std::process::Command::new(&tc);
                             proc_cmd.args(&argv[1..]);
+                        } else if let Some(ul) = userland_hit {
+                            command_label = format!("{} (userland)", argv[0]);
+                            debug!(
+                                session_id = %sid,
+                                name = %argv[0],
+                                path = %ul.display(),
+                                "ato-run REPL: resolved userland binary"
+                            );
+                            proc_cmd = std::process::Command::new(&ul);
+                            proc_cmd.args(&argv[1..]);
                         } else {
                             command_label = "ato run".to_string();
                             proc_cmd = std::process::Command::new(&ato_bin);
                             proc_cmd.arg("run").arg("--").args(&argv);
+                        }
+
+                        // Userland env envelope: redirect install targets into
+                        // ~/.ato/userland/<family>/ so `npm i -g` cannot reach
+                        // /usr/local. Safe to apply to non-install commands
+                        // too — `npm ls -g` etc. then see the userland prefix.
+                        if let Some(family) = family_for_env {
+                            for (k, v) in crate::userland::install_env(family) {
+                                proc_cmd.env(k, v);
+                            }
+                            // Ensure the userland bin dir is on PATH so tools
+                            // that shell out to installed siblings (e.g. npm
+                            // spawning its own postinstall scripts) find
+                            // their neighbours.
+                            if let Some(root) = crate::userland::family_root(family) {
+                                let bin = root.join("bin");
+                                let existing = std::env::var("PATH").unwrap_or_default();
+                                let new_path = if existing.is_empty() {
+                                    bin.to_string_lossy().to_string()
+                                } else {
+                                    format!("{}:{}", bin.display(), existing)
+                                };
+                                proc_cmd.env("PATH", new_path);
+                            }
+                        }
+
+                        // Install-verb auto-allow: `npm install`, `pip install`,
+                        // etc. add the registry hosts to the session allowlist
+                        // so the SOCKS5 gate lets the fetch through. Non-install
+                        // commands do NOT auto-allow — query commands stay gated.
+                        let auto_allow = crate::userland::install_verb_allowlist(&argv);
+                        if !auto_allow.is_empty() {
+                            if let Ok(mut g) = egress_policy.lock() {
+                                let mut added_any = Vec::new();
+                                for host in &auto_allow {
+                                    if let Ok(p) = HostPattern::parse(host) {
+                                        if g.allow(p) {
+                                            added_any.push(host.clone());
+                                        }
+                                    }
+                                }
+                                if !added_any.is_empty() {
+                                    let msg = format!(
+                                        "\x1b[90m[hint] auto-allow for install: {}\x1b[0m\r\n",
+                                        added_any.join(", ")
+                                    );
+                                    let _ = send(&output_tx, msg.as_bytes());
+                                }
+                            }
                         }
                         proc_cmd
                             .env("FORCE_COLOR", "1")
