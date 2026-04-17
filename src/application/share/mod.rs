@@ -33,6 +33,20 @@ use share_types::{
 };
 const SHARE_GUIDE_FILE: &str = "guide.md";
 const DEFAULT_API_TIMEOUT_SECS: u64 = 20;
+
+/// Emit an informational hint (not an execution result, not a warning) to stderr.
+///
+/// Dimmed via ANSI when stderr is a TTY so actual program stdout from the
+/// share workload (e.g. `hello, world!`) stands out visually. Falls back to
+/// plain text when stderr is piped/redirected to keep logs grep-friendly.
+fn emit_dim_hint(message: &str) {
+    let mut stderr = io::stderr();
+    if stderr.is_terminal() {
+        let _ = writeln!(stderr, "\x1b[2m{}\x1b[0m", message);
+    } else {
+        let _ = writeln!(stderr, "{}", message);
+    }
+}
 /// Pinned Python version used by ato-managed runtimes for decap install steps.
 const SHARE_PROVIDER_PYTHON_VERSION: &str = "3.11.10";
 /// Pinned Node version signalled to fnm/nvm/mise for decap install steps.
@@ -486,10 +500,13 @@ pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
         .resolved_revision_url
         .clone()
         .unwrap_or_else(|| args.input.clone());
-    futures::executor::block_on(args.reporter.notify(format!(
+    // Informational prelude (not execution result, not a warning): dim on a TTY
+    // so the actual program output stands out. See `emit_dim_hint` for the
+    // dim ANSI sequence + non-TTY fallback.
+    emit_dim_hint(&format!(
         "Try now: `{}`\nSet up locally later: ato decap {} --into ./{}",
         entry.run, next_command, loaded.spec.root
-    )))?;
+    ));
 
     // Delegate to capsule-core ShareExecutor (nacelle-sandboxed execution)
     let result = capsule_core::share::execute_share(capsule_core::share::ShareRunRequest {
