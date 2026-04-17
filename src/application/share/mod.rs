@@ -61,9 +61,7 @@ fn hint_color_enabled() -> bool {
         return false;
     }
     // Honour caller-forced color (ato-desktop REPL pipes stderr but sets these).
-    if std::env::var_os("FORCE_COLOR").is_some()
-        || std::env::var_os("CLICOLOR_FORCE").is_some()
-    {
+    if std::env::var_os("FORCE_COLOR").is_some() || std::env::var_os("CLICOLOR_FORCE").is_some() {
         return true;
     }
     io::stderr().is_terminal()

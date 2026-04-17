@@ -389,7 +389,7 @@ fn spawn_nacelle_piped(
                     info!(session_id = %sid, exit_code = ?code, "share terminal session exited");
                     break;
                 }
-                // Legacy flat format: {"event":"terminal_data","data_b64":"..."} 
+                // Legacy flat format: {"event":"terminal_data","data_b64":"..."}
                 _ => match value.get("event").and_then(|e| e.as_str()) {
                     Some("terminal_data") => {
                         if let Some(b64) = value.get("data_b64").and_then(|d| d.as_str()) {

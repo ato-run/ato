@@ -3594,7 +3594,11 @@ pub(crate) fn detect_ai_agent_hint(project_root: &Path) -> Option<AiAgentHint> {
         ("groq", "GROQ_API_KEY", "api.groq.com"),
     ];
     const NODE_SDKS: &[(&str, &str, &str)] = &[
-        ("@anthropic-ai/sdk", "ANTHROPIC_API_KEY", "api.anthropic.com"),
+        (
+            "@anthropic-ai/sdk",
+            "ANTHROPIC_API_KEY",
+            "api.anthropic.com",
+        ),
         ("openai", "OPENAI_API_KEY", "api.openai.com"),
     ];
 
@@ -3673,9 +3677,7 @@ fn parse_requirements_line(line: &str) -> Option<&str> {
     // Package name ends at the first version specifier, extras bracket, or
     // env-marker separator.
     let end = trimmed
-        .find(|c: char| {
-            matches!(c, '=' | '<' | '>' | '~' | '!' | ';' | '[' | ' ' | '\t')
-        })
+        .find(|c: char| matches!(c, '=' | '<' | '>' | '~' | '!' | ';' | '[' | ' ' | '\t'))
         .unwrap_or(trimmed.len());
     let pkg = trimmed[..end].trim();
     if pkg.is_empty() {
