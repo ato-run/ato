@@ -1146,6 +1146,46 @@ async fn handle_exec_v1_shell(envelope: ExecEnvelope) -> Result<()> {
         .launch(request)
         .await
         .map_err(|e| anyhow::anyhow!("shell launch failed: {e}"))?;
+
+    // Non-interactive shell workloads (e.g. `ato run <share-url>` → `sh -lc "python main.py"`)
+    // run via launch_direct on macOS / launch_with_bubblewrap on linux, both of which spawn the
+    // child with piped stdout/stderr. Without explicit forwarding + wait, nacelle returns
+    // exit 0 before the child produces any output and the piped FDs are dropped when nacelle
+    // exits. Wait for the child and stream its output through nacelle's own stdio so callers
+    // that spawn nacelle with Stdio::inherit() (e.g. ato-cli share executor) see the output.
+    if has_cmd && !envelope.interactive {
+        if let Some(mut child) = runtime.take_async_child(&run_id).await {
+            use tokio::io::{copy, stderr as tokio_stderr, stdout as tokio_stdout};
+            let child_stdout = child.stdout.take();
+            let child_stderr = child.stderr.take();
+            let stdout_task = child_stdout.map(|mut s| {
+                tokio::spawn(async move {
+                    let mut out = tokio_stdout();
+                    let _ = copy(&mut s, &mut out).await;
+                })
+            });
+            let stderr_task = child_stderr.map(|mut s| {
+                tokio::spawn(async move {
+                    let mut err = tokio_stderr();
+                    let _ = copy(&mut s, &mut err).await;
+                })
+            });
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| anyhow::anyhow!("shell wait failed: {e}"))?;
+            if let Some(t) = stdout_task {
+                let _ = t.await;
+            }
+            if let Some(t) = stderr_task {
+                let _ = t.await;
+            }
+            if !status.success() {
+                let code = status.code().unwrap_or(1);
+                anyhow::bail!("shell workload exited with status {code}");
+            }
+        }
+    }
     Ok(())
 }
 
