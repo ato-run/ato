@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
+type ResizeTx = Sender<(u16, u16)>;
+type ResizeRx = Receiver<(u16, u16)>;
+
 use anyhow::{bail, Context, Result};
 use tracing::{error, info, warn};
 
@@ -349,7 +352,7 @@ fn spawn_nacelle_piped(
     let nacelle_stdout = child.stdout.take().context("nacelle stdout unavailable")?;
 
     let (input_tx, input_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = channel();
-    let (resize_tx, resize_rx): (Sender<(u16, u16)>, Receiver<(u16, u16)>) = channel();
+    let (resize_tx, resize_rx): (ResizeTx, ResizeRx) = channel();
     let (output_tx, output_rx): (Sender<String>, Receiver<String>) = channel();
 
     let session_id = format!("share-{}", child.id());
