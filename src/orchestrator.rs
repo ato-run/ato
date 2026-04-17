@@ -2194,22 +2194,29 @@ pub fn spawn_cli_session(
 /// - `\x04` (Ctrl-D) on an empty line: close the session.
 pub fn spawn_ato_run_repl(
     session_id: String,
-    _cols: u16,
-    _rows: u16,
+    cols: u16,
+    rows: u16,
     prelude: Option<String>,
     initial_allow_hosts: Vec<String>,
 ) -> Result<TerminalProcess> {
     use crate::egress_policy::{EgressPolicy, HostPattern};
     use crate::egress_proxy::{DenyEvent, EgressProxy, EgressProxyHandle};
-    use std::io::BufReader;
     use std::sync::{mpsc::channel as std_channel, Arc, Mutex as StdMutex};
 
     let ato_bin =
         resolve_ato_binary().context("cannot resolve ato binary for ato://cli (ato run REPL)")?;
 
     let (input_tx, input_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = channel();
-    let (resize_tx, _resize_rx): (Sender<(u16, u16)>, Receiver<(u16, u16)>) = channel();
+    let (resize_tx, resize_rx): (Sender<(u16, u16)>, Receiver<(u16, u16)>) = channel();
     let (output_tx, output_rx): (Sender<String>, Receiver<String>) = channel();
+
+    // Current terminal geometry. We track this in a shared cell so both the
+    // main input loop (which owns `resize_rx`) and the per-command PTY spawn
+    // (which needs an initial PtySize) see the latest dims.
+    let initial_cols = if cols == 0 { 120 } else { cols };
+    let initial_rows = if rows == 0 { 40 } else { rows };
+    let pty_dims: Arc<StdMutex<(u16, u16)>> =
+        Arc::new(StdMutex::new((initial_cols, initial_rows)));
 
     let sid = session_id.clone();
 
@@ -2292,10 +2299,6 @@ pub fn spawn_ato_run_repl(
         // Keep the egress proxy alive for the duration of this REPL
         // session. Dropping the handle on thread exit stops the listener.
         let _egress_proxy_guard = egress_proxy;
-
-        // Track the currently-running `ato run` child so Ctrl-C can interrupt it.
-        let running_child: Arc<StdMutex<Option<std::process::Child>>> =
-            Arc::new(StdMutex::new(None));
 
         // Initial banner + prompt.
         let banner = "\x1b[36m┌─ ato CLI ──────────────────────────────────────────┐\x1b[0m\r\n\
@@ -2484,18 +2487,21 @@ pub fn spawn_ato_run_repl(
                             }
                         };
 
-                        let mut proc_cmd;
-                        let command_label: String;
-                        // Userland-aware resolution order:
+                        // ── Per-command subprocess spawn ───────────────
+                        //
+                        // We allocate a PTY for every child so that TUI apps
+                        // (claude, vim, htop, python -i, etc.) see a real
+                        // terminal. Line-oriented tools (`ls`, `npm install`)
+                        // run perfectly through a PTY too — the TTY driver
+                        // just line-buffers for them. Using portable-pty keeps
+                        // this cross-platform (openpty on unix, conpty on
+                        // Windows via the crate's shim).
+                        use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+
+                        // Userland-aware resolution:
                         //   1. ~/.ato/toolchains/<name>-<ver>/...  (existing)
                         //   2. ~/.ato/userland/<family>/bin/<name> (NEW)
-                        //   3. fallback to `ato run --` (existing, scoped_id)
-                        //
-                        // We also inject the install-destination env envelope
-                        // (NPM_CONFIG_PREFIX, PIP_PREFIX, ...) whenever the
-                        // target belongs to a known toolchain family, so that
-                        // `npm install -g` always lands under userland/ and
-                        // subsequent bare-name runs pick it up.
+                        //   3. fallback to `ato run --` (scoped_id required)
                         let tc_hit = find_ato_toolchain_binary(&argv[0]);
                         let userland_hit = if tc_hit.is_none() {
                             crate::userland::find_userland_binary(&argv[0])
@@ -2509,6 +2515,8 @@ pub fn spawn_ato_run_repl(
                                 crate::userland::Family::classify(&argv[0])
                             };
 
+                        let command_label: String;
+                        let mut cmd_builder: CommandBuilder;
                         if let Some(tc) = tc_hit {
                             command_label = format!("{} (toolchain)", argv[0]);
                             debug!(
@@ -2517,8 +2525,10 @@ pub fn spawn_ato_run_repl(
                                 path = %tc.display(),
                                 "ato-run REPL: resolved toolchain binary"
                             );
-                            proc_cmd = std::process::Command::new(&tc);
-                            proc_cmd.args(&argv[1..]);
+                            cmd_builder = CommandBuilder::new(&tc);
+                            for a in &argv[1..] {
+                                cmd_builder.arg(a);
+                            }
                         } else if let Some(ul) = userland_hit {
                             command_label = format!("{} (userland)", argv[0]);
                             debug!(
@@ -2527,26 +2537,28 @@ pub fn spawn_ato_run_repl(
                                 path = %ul.display(),
                                 "ato-run REPL: resolved userland binary"
                             );
-                            proc_cmd = std::process::Command::new(&ul);
-                            proc_cmd.args(&argv[1..]);
+                            cmd_builder = CommandBuilder::new(&ul);
+                            for a in &argv[1..] {
+                                cmd_builder.arg(a);
+                            }
                         } else {
                             command_label = "ato run".to_string();
-                            proc_cmd = std::process::Command::new(&ato_bin);
-                            proc_cmd.arg("run").arg("--").args(&argv);
+                            cmd_builder = CommandBuilder::new(&ato_bin);
+                            cmd_builder.arg("run");
+                            cmd_builder.arg("--");
+                            for a in &argv {
+                                cmd_builder.arg(a);
+                            }
                         }
 
                         // Userland env envelope: redirect install targets into
                         // ~/.ato/userland/<family>/ so `npm i -g` cannot reach
-                        // /usr/local. Safe to apply to non-install commands
-                        // too — `npm ls -g` etc. then see the userland prefix.
+                        // /usr/local. Applies to both install and query
+                        // commands for consistency.
                         if let Some(family) = family_for_env {
                             for (k, v) in crate::userland::install_env(family) {
-                                proc_cmd.env(k, v);
+                                cmd_builder.env(k, v);
                             }
-                            // Ensure the userland bin dir is on PATH so tools
-                            // that shell out to installed siblings (e.g. npm
-                            // spawning its own postinstall scripts) find
-                            // their neighbours.
                             if let Some(root) = crate::userland::family_root(family) {
                                 let bin = root.join("bin");
                                 let existing = std::env::var("PATH").unwrap_or_default();
@@ -2555,14 +2567,13 @@ pub fn spawn_ato_run_repl(
                                 } else {
                                     format!("{}:{}", bin.display(), existing)
                                 };
-                                proc_cmd.env("PATH", new_path);
+                                cmd_builder.env("PATH", new_path);
                             }
                         }
 
-                        // Install-verb auto-allow: `npm install`, `pip install`,
-                        // etc. add the registry hosts to the session allowlist
-                        // so the SOCKS5 gate lets the fetch through. Non-install
-                        // commands do NOT auto-allow — query commands stay gated.
+                        // Install-verb auto-allow: add registry hosts to
+                        // session_allow on install verbs only. Query
+                        // commands stay gated (see userland::install_verb_allowlist).
                         let auto_allow = crate::userland::install_verb_allowlist(&argv);
                         if !auto_allow.is_empty() {
                             if let Ok(mut g) = egress_policy.lock() {
@@ -2583,31 +2594,60 @@ pub fn spawn_ato_run_repl(
                                 }
                             }
                         }
-                        proc_cmd
-                            .env("FORCE_COLOR", "1")
-                            .env("CLICOLOR_FORCE", "1")
-                            .stdin(Stdio::null())
-                            .stdout(Stdio::piped())
-                            .stderr(Stdio::piped());
 
-                        // Route all child egress through the session's SOCKS5
-                        // gate so the allowlist is actually enforced. Use
-                        // `socks5h://` so the proxy receives the hostname
-                        // (policy decisions operate on names, not IPs).
-                        if let Some(ref url) = socks5_url {
-                            proc_cmd
-                                .env("ALL_PROXY", url)
-                                .env("all_proxy", url)
-                                .env("HTTPS_PROXY", url)
-                                .env("https_proxy", url)
-                                .env("HTTP_PROXY", url)
-                                .env("http_proxy", url)
-                                .env("NO_PROXY", "localhost,127.0.0.1,::1")
-                                .env("no_proxy", "localhost,127.0.0.1,::1");
+                        cmd_builder.env("FORCE_COLOR", "1");
+                        cmd_builder.env("CLICOLOR_FORCE", "1");
+                        // Advertise a real TTY so TUI apps enable interactive
+                        // UIs. xterm-256color is what xterm.js implements.
+                        cmd_builder.env("TERM", "xterm-256color");
+                        // Inherit HOME/USER/LANG from the parent so shells
+                        // behave naturally (CommandBuilder does NOT inherit
+                        // env by default — explicit inheritance below).
+                        for key in &["HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "SHELL", "TMPDIR"] {
+                            if let Ok(v) = std::env::var(key) {
+                                cmd_builder.env(key, v);
+                            }
                         }
 
-                        let spawned = proc_cmd.spawn();
-                        let mut child = match spawned {
+                        // Route child egress through the session's SOCKS5
+                        // gate so the allowlist is enforced.
+                        if let Some(ref url) = socks5_url {
+                            cmd_builder.env("ALL_PROXY", url);
+                            cmd_builder.env("all_proxy", url);
+                            cmd_builder.env("HTTPS_PROXY", url);
+                            cmd_builder.env("https_proxy", url);
+                            cmd_builder.env("HTTP_PROXY", url);
+                            cmd_builder.env("http_proxy", url);
+                            cmd_builder.env("NO_PROXY", "localhost,127.0.0.1,::1");
+                            cmd_builder.env("no_proxy", "localhost,127.0.0.1,::1");
+                        }
+
+                        // Open the PTY with the current xterm geometry. If
+                        // resize events arrive mid-run we forward them to the
+                        // master with `resize()`.
+                        let (init_cols, init_rows) = pty_dims
+                            .lock()
+                            .map(|g| *g)
+                            .unwrap_or((initial_cols, initial_rows));
+                        let pty_system = NativePtySystem::default();
+                        let pty_pair = match pty_system.openpty(PtySize {
+                            rows: init_rows,
+                            cols: init_cols,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        }) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                let msg = format!(
+                                    "\x1b[31mfailed to open PTY: {e}\x1b[0m\r\n"
+                                );
+                                let _ = send(&output_tx, msg.as_bytes());
+                                let _ = send(&output_tx, b"\x1b[32mato>\x1b[0m ");
+                                continue;
+                            }
+                        };
+
+                        let mut pty_child = match pty_pair.slave.spawn_command(cmd_builder) {
                             Ok(c) => c,
                             Err(e) => {
                                 let msg = format!(
@@ -2618,93 +2658,98 @@ pub fn spawn_ato_run_repl(
                                 continue;
                             }
                         };
+                        // Close the slave on our side; the child owns it now.
+                        drop(pty_pair.slave);
 
-                        let child_stdout = child.stdout.take();
-                        let child_stderr = child.stderr.take();
-                        if let Ok(mut slot) = running_child.lock() {
-                            *slot = Some(child);
-                        }
+                        // The master is used for: (a) reading child output,
+                        // (b) writing user input, (c) resizing. Stash in an
+                        // Arc so the output-reader thread can run in parallel
+                        // with the main wait loop (which writes + resizes).
+                        let mut master_reader = match pty_pair.master.try_clone_reader() {
+                            Ok(r) => r,
+                            Err(e) => {
+                                let msg = format!(
+                                    "\x1b[31mpty clone_reader failed: {e}\x1b[0m\r\n"
+                                );
+                                let _ = send(&output_tx, msg.as_bytes());
+                                let _ = pty_child.kill();
+                                let _ = send(&output_tx, b"\x1b[32mato>\x1b[0m ");
+                                continue;
+                            }
+                        };
+                        let master_for_ops: Arc<StdMutex<Box<dyn portable_pty::MasterPty + Send>>> =
+                            Arc::new(StdMutex::new(pty_pair.master));
 
-                        // Pump stdout + stderr to xterm.js on worker threads.
+                        // Output pump: PTY master → xterm, verbatim. A PTY
+                        // already hands us terminal-ready bytes (CRLF where
+                        // needed, escape sequences, etc.) so we skip the
+                        // `normalize_log_newlines` step that the piped path
+                        // required.
                         let out_tx = output_tx.clone();
-                        let stdout_thread = child_stdout.map(|s| {
-                            std::thread::spawn(move || {
-                                let mut reader = BufReader::new(s);
-                                let mut buf = [0u8; 1024];
-                                let mut prev_cr = false;
-                                use std::io::Read;
-                                loop {
-                                    match reader.read(&mut buf) {
-                                        Ok(0) | Err(_) => break,
-                                        Ok(n) => {
-                                            let norm =
-                                                normalize_log_newlines(&buf[..n], &mut prev_cr);
-                                            if !send(&out_tx, &norm) {
-                                                break;
-                                            }
+                        let output_thread = std::thread::spawn(move || {
+                            use std::io::Read;
+                            let mut buf = [0u8; 4096];
+                            loop {
+                                match master_reader.read(&mut buf) {
+                                    Ok(0) | Err(_) => break,
+                                    Ok(n) => {
+                                        if !send(&out_tx, &buf[..n]) {
+                                            break;
                                         }
                                     }
                                 }
-                            })
+                            }
                         });
 
-                        let err_tx = output_tx.clone();
-                        let stderr_thread = child_stderr.map(|s| {
-                            std::thread::spawn(move || {
-                                let mut reader = BufReader::new(s);
-                                let mut buf = [0u8; 1024];
-                                let mut prev_cr = false;
-                                use std::io::Read;
-                                loop {
-                                    match reader.read(&mut buf) {
-                                        Ok(0) | Err(_) => break,
-                                        Ok(n) => {
-                                            let norm =
-                                                normalize_log_newlines(&buf[..n], &mut prev_cr);
-                                            if !send(&err_tx, &norm) {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            })
-                        });
-
-                        // Wait for the child to exit. We drain Ctrl-C signals
-                        // from input_rx via a short poll loop (non-blocking).
+                        // Wait for the child to exit. While it runs we:
+                        //   - forward ALL xterm input bytes straight to the
+                        //     PTY master (no echo, no line editing — the
+                        //     child / TTY layer handles echo).
+                        //   - forward resize events via MasterPty::resize.
+                        //   - surface egress-deny events as inline hints.
                         let exit_status = loop {
-                            // Non-blocking wait with a poll.
-                            let wait_result = {
-                                let mut slot = match running_child.lock() {
-                                    Ok(s) => s,
-                                    Err(_) => break None,
-                                };
-                                match slot.as_mut() {
-                                    Some(c) => c.try_wait().ok().flatten(),
-                                    None => break None,
-                                }
-                            };
-                            if let Some(status) = wait_result {
-                                break Some(status);
+                            match pty_child.try_wait() {
+                                Ok(Some(status)) => break Some(status),
+                                Ok(None) => {}
+                                Err(_) => break None,
                             }
 
-                            // Drain any pending input for Ctrl-C.
-                            while let Ok(more) = input_rx.try_recv() {
-                                for &ib in &more {
-                                    if ib == 0x03 {
-                                        if let Ok(mut slot) = running_child.lock() {
-                                            if let Some(c) = slot.as_mut() {
-                                                let _ = c.kill();
-                                                let _ =
-                                                    send(&output_tx, b"\r\n\x1b[33m^C\x1b[0m\r\n");
-                                            }
-                                        }
+                            // Pass-through: every input byte goes straight to
+                            // the PTY. Ctrl-C (0x03) is delivered via the TTY
+                            // line discipline which will deliver SIGINT to
+                            // the foreground process group naturally — no
+                            // special kill() path needed.
+                            while let Ok(bytes) = input_rx.try_recv() {
+                                if bytes.is_empty() {
+                                    continue;
+                                }
+                                if let Ok(master) = master_for_ops.lock() {
+                                    if let Ok(mut w) = master.take_writer() {
+                                        use std::io::Write;
+                                        let _ = w.write_all(&bytes);
+                                        let _ = w.flush();
                                     }
                                 }
                             }
 
-                            // Drain any egress-deny events and inline a hint
-                            // so the user knows why a connection failed.
+                            // Resize: always update the stored dims and also
+                            // resize the live master so ncurses/readline
+                            // repaint correctly.
+                            while let Ok((rc, rr)) = resize_rx.try_recv() {
+                                if let Ok(mut g) = pty_dims.lock() {
+                                    *g = (rc, rr);
+                                }
+                                if let Ok(master) = master_for_ops.lock() {
+                                    let _ = master.resize(PtySize {
+                                        cols: rc,
+                                        rows: rr,
+                                        pixel_width: 0,
+                                        pixel_height: 0,
+                                    });
+                                }
+                            }
+
+                            // Egress-deny hints (best-effort, non-fatal).
                             while let Ok(ev) = deny_rx.try_recv() {
                                 let msg = format!(
                                     "\r\n\x1b[33m⚠ egress blocked: {}:{}\x1b[0m  \x1b[90m(type `.allow {}` to permit this session)\x1b[0m\r\n",
@@ -2712,25 +2757,18 @@ pub fn spawn_ato_run_repl(
                                 );
                                 let _ = send(&output_tx, msg.as_bytes());
                             }
+
                             std::thread::sleep(std::time::Duration::from_millis(20));
                         };
 
-                        // Wait on pump threads.
-                        if let Some(t) = stdout_thread {
-                            let _ = t.join();
-                        }
-                        if let Some(t) = stderr_thread {
-                            let _ = t.join();
-                        }
-
-                        // Clear running child slot.
-                        if let Ok(mut slot) = running_child.lock() {
-                            *slot = None;
-                        }
+                        // Dropping the master closes the PTY, which makes the
+                        // output-reader EOF and the thread exit cleanly.
+                        drop(master_for_ops);
+                        let _ = output_thread.join();
 
                         if let Some(status) = exit_status {
                             if !status.success() {
-                                let code = status.code().unwrap_or(-1);
+                                let code = status.exit_code();
                                 let msg = format!(
                                     "\x1b[31m[{command_label} exited with status {code}]\x1b[0m\r\n"
                                 );
