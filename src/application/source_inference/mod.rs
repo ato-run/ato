@@ -1034,7 +1034,7 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         .insert("metadata".to_string(), metadata);
     lock.contract.entries.insert(
         "network".to_string(),
-        inferred_network_contract(&detected, input.single_script_language),
+        inferred_network_contract(&detected, input.single_script_language, &input.project_root),
     );
     lock.contract.entries.insert(
         "env_contract".to_string(),
@@ -3139,9 +3139,56 @@ fn infer_first_existing_trimmed(project_root: &Path, names: &[&str]) -> Option<S
     })
 }
 
+/// Reads `vite.config.{ts,js,mjs,cjs}` and extracts `server.port`.
+/// Falls back to Vite's default port (5173) if not found.
+fn detect_vite_port(project_root: &Path) -> u16 {
+    let config_names = [
+        "vite.config.ts",
+        "vite.config.js",
+        "vite.config.mjs",
+        "vite.config.cjs",
+    ];
+    for name in &config_names {
+        let path = project_root.join(name);
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Some(port) = extract_vite_server_port(&content) {
+            return port;
+        }
+    }
+    5173
+}
+
+fn extract_vite_server_port(content: &str) -> Option<u16> {
+    let re = Regex::new(r"port\s*:\s*(\d{4,5})").ok()?;
+    let cap = re.captures(content)?;
+    cap.get(1)?.as_str().parse().ok()
+}
+
+/// Extracts metadata from the `scripts.dev` field of a `package.json` string.
+fn extract_dev_script_info(package_json: &str) -> Option<DevScriptInfo> {
+    let json: Value = serde_json::from_str(package_json).ok()?;
+    let dev = json.get("scripts")?.get("dev")?.as_str()?;
+    Some(DevScriptInfo {
+        command: dev.to_string(),
+        is_vite: dev.contains("vite"),
+        is_next: dev.contains("next"),
+    })
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct DevScriptInfo {
+    command: String,
+    is_vite: bool,
+    is_next: bool,
+}
+
 fn inferred_network_contract(
     detected: &DetectedProject,
     single_script_language: Option<SingleScriptLanguage>,
+    project_root: &Path,
 ) -> Value {
     if single_script_language.is_some() {
         return json!({
@@ -3157,7 +3204,16 @@ fn inferred_network_contract(
                 if node.has_hono {
                     3000
                 } else if node.scripts.has_dev {
-                    5173
+                    let dev_info = fs::read_to_string(project_root.join("package.json"))
+                        .ok()
+                        .as_deref()
+                        .and_then(extract_dev_script_info);
+                    let is_vite = dev_info.map(|d| d.is_vite).unwrap_or(false);
+                    if is_vite {
+                        detect_vite_port(project_root)
+                    } else {
+                        3000
+                    }
                 } else {
                     3000
                 }
@@ -3493,6 +3549,178 @@ fn unique_attempt_token() -> String {
 
 fn is_equal_ranked(candidates: &[RankedCandidate]) -> bool {
     candidates.len() > 1 && candidates[0].score == candidates[1].score
+}
+
+/// Parse `pyproject.toml` content and return `("uv", "run <script>")` when
+/// a `[project.scripts]` table is present, using the first script name found.
+#[allow(dead_code)]
+pub(crate) fn detect_uv_entrypoint(pyproject_content: &str) -> Option<(String, String)> {
+    let value: toml::Value = toml::from_str(pyproject_content).ok()?;
+    let scripts = value.get("project")?.get("scripts")?.as_table()?;
+    let script_name = scripts.keys().next()?;
+    Some(("uv".to_string(), format!("run {}", script_name)))
+}
+
+/// Environment and network hints inferred from AI agent SDK dependencies.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AiAgentHint {
+    /// Environment variable keys required by the detected SDKs, e.g.
+    /// `["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]`.
+    pub required_env: Vec<String>,
+    /// Egress hosts that should be allowed for the detected SDKs, e.g.
+    /// `["api.anthropic.com"]`.
+    pub egress_hosts: Vec<String>,
+}
+
+/// Scan `requirements.txt`, `pyproject.toml`, and `package.json` for known
+/// LLM SDK dependencies and return an [`AiAgentHint`] when any are found.
+///
+/// Matches are performed against exact package names (not substrings) to
+/// avoid false positives like `openai-whisper` or commented-out lines.
+#[allow(dead_code)]
+pub(crate) fn detect_ai_agent_hint(project_root: &Path) -> Option<AiAgentHint> {
+    // (package-name → (ENV_VAR, host)) — matched exactly (case-insensitive)
+    // against package identifiers extracted from manifest files.
+    const PY_SDKS: &[(&str, &str, &str)] = &[
+        ("anthropic", "ANTHROPIC_API_KEY", "api.anthropic.com"),
+        ("openai", "OPENAI_API_KEY", "api.openai.com"),
+        (
+            "google-generativeai",
+            "GOOGLE_API_KEY",
+            "generativelanguage.googleapis.com",
+        ),
+        ("mistralai", "MISTRAL_API_KEY", "api.mistral.ai"),
+        ("groq", "GROQ_API_KEY", "api.groq.com"),
+    ];
+    const NODE_SDKS: &[(&str, &str, &str)] = &[
+        (
+            "@anthropic-ai/sdk",
+            "ANTHROPIC_API_KEY",
+            "api.anthropic.com",
+        ),
+        ("openai", "OPENAI_API_KEY", "api.openai.com"),
+    ];
+
+    let mut hint = AiAgentHint::default();
+    let push = |env: &str, host: &str, hint: &mut AiAgentHint| -> bool {
+        if hint.egress_hosts.iter().any(|h| h == host) {
+            return false;
+        }
+        hint.required_env.push(env.to_string());
+        hint.egress_hosts.push(host.to_string());
+        true
+    };
+    let mut found = false;
+
+    // requirements.txt — line-based parse, skip comments/flags.
+    if let Ok(content) = fs::read_to_string(project_root.join("requirements.txt")) {
+        for line in content.lines() {
+            let Some(pkg) = parse_requirements_line(line) else {
+                continue;
+            };
+            let pkg_lower = pkg.to_ascii_lowercase();
+            for (needle, env, host) in PY_SDKS {
+                if pkg_lower == *needle {
+                    found |= push(env, host, &mut hint);
+                }
+            }
+        }
+    }
+
+    // pyproject.toml — parse via toml to get [project].dependencies and
+    // [tool.poetry.dependencies].
+    if let Ok(content) = fs::read_to_string(project_root.join("pyproject.toml")) {
+        for pkg in extract_pyproject_dependencies(&content) {
+            let pkg_lower = pkg.to_ascii_lowercase();
+            for (needle, env, host) in PY_SDKS {
+                if pkg_lower == *needle {
+                    found |= push(env, host, &mut hint);
+                }
+            }
+        }
+    }
+
+    // package.json — parse JSON and inspect dependencies / devDependencies.
+    if let Ok(content) = fs::read_to_string(project_root.join("package.json")) {
+        if let Ok(value) = serde_json::from_str::<Value>(&content) {
+            for section in ["dependencies", "devDependencies", "peerDependencies"] {
+                let Some(map) = value.get(section).and_then(|v| v.as_object()) else {
+                    continue;
+                };
+                for name in map.keys() {
+                    for (needle, env, host) in NODE_SDKS {
+                        if name == *needle {
+                            found |= push(env, host, &mut hint);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if found {
+        Some(hint)
+    } else {
+        None
+    }
+}
+
+/// Extract a package name from a single `requirements.txt` line.
+/// Returns `None` for blank lines, comments, or option flags.
+#[allow(dead_code)]
+fn parse_requirements_line(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('-') {
+        return None;
+    }
+    // Package name ends at the first version specifier, extras bracket, or
+    // env-marker separator.
+    let end = trimmed
+        .find(['=', '<', '>', '~', '!', ';', '[', ' ', '\t'])
+        .unwrap_or(trimmed.len());
+    let pkg = trimmed[..end].trim();
+    if pkg.is_empty() {
+        None
+    } else {
+        Some(pkg)
+    }
+}
+
+/// Extract dependency package names from `pyproject.toml`.
+/// Handles both PEP-621 `[project].dependencies` (list of PEP 508 strings)
+/// and `[tool.poetry.dependencies]` (table keyed by package name).
+#[allow(dead_code)]
+fn extract_pyproject_dependencies(content: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(value) = toml::from_str::<toml::Value>(content) else {
+        return out;
+    };
+
+    if let Some(deps) = value
+        .get("project")
+        .and_then(|p| p.get("dependencies"))
+        .and_then(|d| d.as_array())
+    {
+        for entry in deps {
+            if let Some(s) = entry.as_str() {
+                if let Some(pkg) = parse_requirements_line(s) {
+                    out.push(pkg.to_string());
+                }
+            }
+        }
+    }
+    if let Some(deps) = value
+        .get("tool")
+        .and_then(|t| t.get("poetry"))
+        .and_then(|p| p.get("dependencies"))
+        .and_then(|d| d.as_table())
+    {
+        for name in deps.keys() {
+            out.push(name.clone());
+        }
+    }
+    out
 }
 
 #[cfg(test)]

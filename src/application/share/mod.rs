@@ -6,8 +6,19 @@ use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
+use capsule_core::share::{
+    self as share_types, EntryEnvSpec, EnvRequirementSpec, EnvState, GeneratedFrom,
+    InstallStepSpec, InstallStepState, LoadedShareInput, ResolvedSourceLock, ResolvedToolLock,
+    ServiceSpec, ShareEntrySpec, ShareLock, ShareNotes, ShareSourceSpec, ShareSourceState,
+    ShareSpec, ToolRequirementSpec, VerificationState, WorkspaceShareState,
+};
 use capsule_core::CapsuleReporter;
 use chrono::Utc;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -16,25 +27,53 @@ use crate::cli::{GitMode, ShareToolRuntime};
 use crate::fs_copy;
 use crate::reporters::CliReporter;
 
-const SHARE_DIR: &str = ".ato/share";
-const SHARE_SPEC_FILE: &str = "share.spec.json";
-const SHARE_LOCK_FILE: &str = "share.lock.json";
+use share_types::{
+    default_runtime_source_str, SHARE_DIR, SHARE_LOCK_FILE, SHARE_SCHEMA_VERSION, SHARE_SPEC_FILE,
+    SHARE_STATE_FILE,
+};
 const SHARE_GUIDE_FILE: &str = "guide.md";
-const SHARE_STATE_FILE: &str = "state.json";
-const SHARE_SCHEMA_VERSION: &str = "2";
 const DEFAULT_API_TIMEOUT_SECS: u64 = 20;
+
+/// Emit an informational hint (not an execution result, not a warning) to stderr.
+///
+/// Each line is prefixed with a `[hint]` tag so it is visually distinct from
+/// actual program stdout (e.g. `hello, world!`). When stderr is a TTY — or
+/// when the caller set `FORCE_COLOR=1` / `CLICOLOR_FORCE=1` (used by
+/// ato-desktop's REPL which pipes stderr) — the prefix and body are rendered
+/// in grey (`\x1b[90m`) so the actual execution output stands out. Falls back
+/// to plain `[hint] ...` when colors are off (respects `NO_COLOR`), keeping
+/// logs and grep pipelines readable.
+fn emit_dim_hint(message: &str) {
+    let color = hint_color_enabled();
+    let mut stderr = io::stderr();
+    for line in message.lines() {
+        let _ = if color {
+            writeln!(stderr, "\x1b[90m[hint]\x1b[0m \x1b[90m{}\x1b[0m", line)
+        } else {
+            writeln!(stderr, "[hint] {}", line)
+        };
+    }
+}
+
+fn hint_color_enabled() -> bool {
+    // Explicit opt-out always wins.
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    // Honour caller-forced color (ato-desktop REPL pipes stderr but sets these).
+    if std::env::var_os("FORCE_COLOR").is_some() || std::env::var_os("CLICOLOR_FORCE").is_some() {
+        return true;
+    }
+    io::stderr().is_terminal()
+}
 /// Pinned Python version used by ato-managed runtimes for decap install steps.
 const SHARE_PROVIDER_PYTHON_VERSION: &str = "3.11.10";
 /// Pinned Node version signalled to fnm/nvm/mise for decap install steps.
 const SHARE_PROVIDER_NODE_VERSION: &str = "20.11.0";
-
-fn default_git_mode_str() -> String {
-    "same-commit".to_string()
-}
-
-fn default_runtime_source_str() -> String {
-    "system".to_string()
-}
+/// Maximum compressed archive size for kind="archive" sources (10 MB).
+const ARCHIVE_MAX_COMPRESSED_BYTES: u64 = 10 * 1024 * 1024;
+/// Maximum number of files in a kind="archive" source.
+const ARCHIVE_MAX_FILE_COUNT: usize = 5_000;
 
 /// Configuration loaded from the `[share]` section of `capsule.toml`.
 /// CLI flags take precedence over values here.
@@ -103,240 +142,6 @@ pub(crate) struct RunShareArgs {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ShareSpec {
-    pub(crate) schema_version: String,
-    pub(crate) name: String,
-    pub(crate) root: String,
-    #[serde(default)]
-    pub(crate) sources: Vec<ShareSourceSpec>,
-    #[serde(default)]
-    pub(crate) tool_requirements: Vec<ToolRequirementSpec>,
-    #[serde(default)]
-    pub(crate) env_requirements: Vec<EnvRequirementSpec>,
-    #[serde(default)]
-    pub(crate) install_steps: Vec<InstallStepSpec>,
-    #[serde(default)]
-    pub(crate) entries: Vec<ShareEntrySpec>,
-    #[serde(default)]
-    pub(crate) services: Vec<ServiceSpec>,
-    #[serde(default)]
-    pub(crate) notes: ShareNotes,
-    pub(crate) generated_from: GeneratedFrom,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ShareSourceSpec {
-    pub(crate) id: String,
-    pub(crate) kind: String,
-    pub(crate) url: String,
-    pub(crate) path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) branch: Option<String>,
-    #[serde(default)]
-    pub(crate) evidence: Vec<String>,
-    /// "same-commit" | "latest-at-encap"  (v2; defaults to "same-commit" for v1 lock reads)
-    #[serde(default = "default_git_mode_str")]
-    pub(crate) git_mode: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ToolRequirementSpec {
-    pub(crate) id: String,
-    pub(crate) tool: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) version: Option<String>,
-    #[serde(default)]
-    pub(crate) required_by: Vec<String>,
-    #[serde(default)]
-    pub(crate) evidence: Vec<String>,
-    /// "auto" | "ato" | "system"  (v2; defaults to "system" for v1 lock reads)
-    #[serde(default = "default_runtime_source_str")]
-    pub(crate) runtime_source: String,
-    /// "uv" | "npm" | "bun" | "pnpm"  (populated when runtime_source != "system")
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) provider_toolchain: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct EnvRequirementSpec {
-    pub(crate) id: String,
-    pub(crate) path: String,
-    pub(crate) required: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) template_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) note: Option<String>,
-    #[serde(default)]
-    pub(crate) evidence: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct InstallStepSpec {
-    pub(crate) id: String,
-    pub(crate) cwd: String,
-    pub(crate) run: String,
-    #[serde(default)]
-    pub(crate) depends_on: Vec<String>,
-    #[serde(default)]
-    pub(crate) evidence: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ShareEntrySpec {
-    pub(crate) id: String,
-    pub(crate) label: String,
-    pub(crate) cwd: String,
-    pub(crate) run: String,
-    pub(crate) kind: String,
-    pub(crate) primary: bool,
-    #[serde(default)]
-    pub(crate) depends_on: Vec<String>,
-    #[serde(default)]
-    pub(crate) env: EntryEnvSpec,
-    #[serde(default)]
-    pub(crate) evidence: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub(crate) struct EntryEnvSpec {
-    #[serde(default)]
-    pub(crate) required: Vec<String>,
-    #[serde(default)]
-    pub(crate) optional: Vec<String>,
-    #[serde(default)]
-    pub(crate) files: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ServiceSpec {
-    pub(crate) id: String,
-    pub(crate) cwd: String,
-    pub(crate) run: String,
-    #[serde(default)]
-    pub(crate) depends_on: Vec<String>,
-    pub(crate) kind: String,
-    pub(crate) optional: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) port: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) healthcheck: Option<String>,
-    #[serde(default)]
-    pub(crate) evidence: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub(crate) struct ShareNotes {
-    #[serde(default)]
-    pub(crate) team_notes: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct GeneratedFrom {
-    pub(crate) root_path: String,
-    pub(crate) captured_at: String,
-    pub(crate) host_os: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ShareLock {
-    pub(crate) schema_version: String,
-    pub(crate) spec_digest: String,
-    pub(crate) generated_guide_digest: String,
-    pub(crate) revision: u32,
-    pub(crate) created_at: String,
-    pub(crate) resolved_sources: Vec<ResolvedSourceLock>,
-    pub(crate) resolved_tools: Vec<ResolvedToolLock>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ResolvedSourceLock {
-    pub(crate) id: String,
-    pub(crate) rev: String,
-    /// "same-commit" | "latest-at-encap"  (v2)
-    #[serde(default = "default_git_mode_str")]
-    pub(crate) git_mode: String,
-    /// Remote branch used when git_mode is "latest-at-encap"
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) remote_branch: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ResolvedToolLock {
-    pub(crate) tool: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) resolved_version: Option<String>,
-    /// Kept for backward-compat with v1; not used by v2 decap logic
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) binary_path: Option<String>,
-    /// "auto" | "ato" | "system"  (v2)
-    #[serde(default = "default_runtime_source_str")]
-    pub(crate) runtime_source: String,
-    /// Provider toolchain used at encap time, e.g. "uv", "npm"
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) provider_toolchain: Option<String>,
-    /// Version of the ato-managed runtime recorded at encap time
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) provider_version: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct WorkspaceShareState {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) share_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) resolved_revision_url: Option<String>,
-    pub(crate) workspace_root: String,
-    #[serde(default)]
-    pub(crate) sources: Vec<ShareSourceState>,
-    #[serde(default)]
-    pub(crate) install_steps: Vec<InstallStepState>,
-    #[serde(default)]
-    pub(crate) env: Vec<EnvState>,
-    pub(crate) verification: VerificationState,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) last_verified_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ShareSourceState {
-    pub(crate) id: String,
-    pub(crate) status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) current_rev: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) last_error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct InstallStepState {
-    pub(crate) id: String,
-    pub(crate) status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) started_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) finished_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) stdout_digest: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) stderr_digest: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) last_error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct EnvState {
-    pub(crate) id: String,
-    pub(crate) status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct VerificationState {
-    pub(crate) result: String,
-    #[serde(default)]
-    pub(crate) issues: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ShareApiCreateRequest {
     title: String,
     visibility: String,
@@ -368,6 +173,17 @@ struct CandidateRepo {
     branch: Option<String>,
     rev: String,
     evidence: Vec<String>,
+}
+
+/// A directory without a git remote that is bundled inline as a gzip tar archive.
+#[derive(Debug)]
+struct CandidateArchiveSource {
+    abs_path: PathBuf,
+    rel_path: String,
+    /// Base64-encoded gzip tar content.
+    content_base64: String,
+    /// sha256:<hex> of the raw (pre-base64) gzip bytes.
+    content_digest: String,
 }
 
 #[derive(Debug, Clone)]
@@ -688,17 +504,10 @@ pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
         anyhow::bail!("`ato run <share-url>` does not support --background in this MVP.");
     }
 
+    // CLI-specific: interactive entry selection + env prompt (stays in CLI layer)
     let loaded = load_share_input(&args.input)?;
     let entries = effective_entries(&loaded.spec);
     let entry = select_run_entry(&args.input, &loaded, &entries, args.entry.as_deref())?;
-    let temp_root = ephemeral_run_root(&loaded, &entry)?;
-    // Ephemeral roots are always fully re-materialized; clean up any stale remnant
-    // from a previous interrupted run before proceeding.
-    if temp_root.exists() {
-        fs::remove_dir_all(&temp_root)
-            .with_context(|| format!("Failed to clean stale run root {}", temp_root.display()))?;
-    }
-    let state = materialize_loaded_share(&loaded, &temp_root, ShareToolRuntime::System, false)?;
     let env_overlay = resolve_entry_env_overlay(
         &args.input,
         &entry,
@@ -706,45 +515,35 @@ pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
         args.prompt_env,
     )?;
 
-    let run_command = if args.args.is_empty() {
-        entry.run.clone()
-    } else {
-        format!(
-            "{} {}",
-            entry.run,
-            shell_words::join(args.args.iter().map(String::as_str))
-        )
-    };
-    let run_cwd = temp_root.join(&entry.cwd);
     let next_command = loaded
         .resolved_revision_url
         .clone()
         .unwrap_or_else(|| args.input.clone());
-
-    futures::executor::block_on(args.reporter.notify(format!(
+    // Informational prelude (not execution result, not a warning): dim on a TTY
+    // so the actual program output stands out. See `emit_dim_hint` for the
+    // dim ANSI sequence + non-TTY fallback.
+    emit_dim_hint(&format!(
         "Try now: `{}`\nSet up locally later: ato decap {} --into ./{}",
-        run_command, next_command, loaded.spec.root
-    )))?;
-    if !state.verification.issues.is_empty() {
-        futures::executor::block_on(args.reporter.warn(format!(
-            "Workspace verification reported {} issue(s) before run.",
-            state.verification.issues.len()
-        )))?;
-    }
+        entry.run, next_command, loaded.spec.root
+    ));
 
-    let status = run_shell_streaming(&run_command, &run_cwd, &env_overlay)?;
-    let _ = fs::remove_dir_all(&temp_root);
-    if status.success() {
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "share entry `{}` exited with status {}",
-            entry.id,
-            status
-                .code()
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "signal".to_string())
-        );
+    // Delegate to capsule-core ShareExecutor (nacelle-sandboxed execution)
+    let result = capsule_core::share::execute_share(capsule_core::share::ShareRunRequest {
+        input: args.input.clone(),
+        entry: Some(entry.id.clone()),
+        extra_args: args.args,
+        env_overlay,
+        mode: capsule_core::share::ShareExecutionMode::Inherited,
+        nacelle_path: None,
+        ato_path: None,
+    })?;
+
+    match result {
+        capsule_core::share::ShareExecutionResult::Completed { exit_code: 0 } => Ok(()),
+        capsule_core::share::ShareExecutionResult::Completed { exit_code } => {
+            anyhow::bail!("share entry `{}` exited with code {}", entry.id, exit_code);
+        }
+        _ => unreachable!("Inherited mode always returns Completed"),
     }
 }
 
@@ -887,6 +686,23 @@ fn materialize_loaded_share(
     state.last_verified_at = Some(Utc::now().to_rfc3339());
     write_share_state(into, &state)?;
 
+    // Persist spec and lock alongside state.json so downstream consumers
+    // (e.g. capsule-core ShareExecutor) can read them from the workspace
+    // without needing a separate API fetch.
+    let share_dir = into.join(SHARE_DIR);
+    fs::write(
+        share_dir.join(SHARE_SPEC_FILE),
+        serde_json::to_string_pretty(&loaded.spec)
+            .context("failed to serialize spec for workspace")?,
+    )
+    .context("failed to write share.spec.json to workspace")?;
+    fs::write(
+        share_dir.join(SHARE_LOCK_FILE),
+        serde_json::to_string_pretty(&loaded.lock)
+            .context("failed to serialize lock for workspace")?,
+    )
+    .context("failed to write share.lock.json to workspace")?;
+
     if strict && !state.verification.issues.is_empty() {
         let issues = state.verification.issues.join("\n  - ");
         anyhow::bail!(
@@ -1016,6 +832,21 @@ fn capture_workspace(
         .map(|repo| resolve_source_lock(repo, git_mode))
         .collect::<Result<Vec<_>>>()?;
 
+    // Discover directories not covered by any git repo and pack them inline.
+    let archive_sources = discover_archive_sources(root, &repos, &ignore, reporter)?;
+    let archive_locks: Vec<ResolvedSourceLock> = archive_sources
+        .iter()
+        .map(|arc| ResolvedSourceLock {
+            id: repo_id_from_path(&arc.rel_path),
+            rev: arc.content_digest.clone(),
+            git_mode: "archive".to_string(),
+            remote_branch: None,
+        })
+        .collect();
+
+    let mut all_locks = repo_locks;
+    all_locks.extend(archive_locks);
+
     let mut tool_requirements = BTreeMap::<String, ToolRequirementSpec>::new();
     let mut env_requirements = Vec::new();
     let mut install_steps = Vec::new();
@@ -1042,10 +873,51 @@ fn capture_workspace(
         }
     }
 
+    // Also scan archive source directories so tools/steps/services are detected.
+    for arc in &archive_sources {
+        let scan_dirs = discover_repo_scan_dirs(&arc.abs_path)?;
+        for scan_dir in scan_dirs {
+            let within = relative_display(&arc.abs_path, &scan_dir);
+            let relative_dir = if within == "." {
+                arc.rel_path.clone()
+            } else {
+                format!("{}/{}", arc.rel_path, within)
+            };
+            detect_tools(&scan_dir, &relative_dir, &mut tool_requirements)?;
+            detect_env_requirements(&scan_dir, &relative_dir, &mut env_requirements)?;
+            detect_install_steps(&scan_dir, &relative_dir, &mut install_steps)?;
+            detect_services(&scan_dir, &relative_dir, &mut services)?;
+        }
+    }
+
     install_steps.sort_by(|left, right| left.id.cmp(&right.id));
     services.sort_by(|left, right| left.id.cmp(&right.id));
     env_requirements.sort_by(|left, right| left.path.cmp(&right.path));
     let entries = derive_entries(&services, &env_requirements);
+
+    let git_sources = repos.iter().map(|repo| ShareSourceSpec {
+        id: repo_id_from_path(&repo.rel_path),
+        kind: "git".to_string(),
+        url: repo.url.clone(),
+        path: repo.rel_path.clone(),
+        branch: repo.branch.clone(),
+        evidence: repo.evidence.clone(),
+        git_mode: git_mode.as_str().to_string(),
+        archive_content: None,
+    });
+    let inline_sources = archive_sources.iter().map(|arc| ShareSourceSpec {
+        id: repo_id_from_path(&arc.rel_path),
+        kind: "archive".to_string(),
+        // Embed content as a data URI — this survives the API round-trip because
+        // the `url` field is a known spec field that the server stores verbatim.
+        url: format!("data:application/x-tar+gzip;base64,{}", arc.content_base64),
+        path: arc.rel_path.clone(),
+        branch: None,
+        evidence: vec![format!("archive: {}", arc.content_digest)],
+        git_mode: "archive".to_string(),
+        // Also populate archive_content for local-only workflows (before upload).
+        archive_content: Some(arc.content_base64.clone()),
+    });
 
     let spec = ShareSpec {
         schema_version: SHARE_SCHEMA_VERSION.to_string(),
@@ -1059,18 +931,7 @@ fn capture_workspace(
             .and_then(|value| value.to_str())
             .unwrap_or("workspace")
             .to_string(),
-        sources: repos
-            .iter()
-            .map(|repo| ShareSourceSpec {
-                id: repo_id_from_path(&repo.rel_path),
-                kind: "git".to_string(),
-                url: repo.url.clone(),
-                path: repo.rel_path.clone(),
-                branch: repo.branch.clone(),
-                evidence: repo.evidence.clone(),
-                git_mode: git_mode.as_str().to_string(),
-            })
-            .collect(),
+        sources: git_sources.chain(inline_sources).collect(),
         tool_requirements: {
             let runtime_source = tool_runtime.as_str().to_string();
             tool_requirements
@@ -1099,7 +960,7 @@ fn capture_workspace(
 
     Ok(CapturedWorkspace {
         spec,
-        repo_locks,
+        repo_locks: all_locks,
         resolved_tools,
     })
 }
@@ -1204,6 +1065,269 @@ struct CapturedWorkspace {
     spec: ShareSpec,
     repo_locks: Vec<ResolvedSourceLock>,
     resolved_tools: Vec<ResolvedToolLock>,
+}
+
+/// Returns directories at or directly under `root` that are not covered by any
+/// discovered git repo and contain at least one non-trivial file. These directories
+/// are bundled as inline gzip tar archives embedded in the share spec.
+fn discover_archive_sources(
+    root: &Path,
+    repos: &[CandidateRepo],
+    ignore: &IgnoreMatcher,
+    reporter: &Arc<CliReporter>,
+) -> Result<Vec<CandidateArchiveSource>> {
+    // Compute the set of absolute paths already owned by git repos.
+    let repo_paths: BTreeSet<PathBuf> = repos.iter().map(|r| r.abs_path.clone()).collect();
+
+    let mut result = Vec::new();
+
+    // When there are no repos, the root itself is the archive candidate (e.g., a single
+    // non-git project directory).  When repos exist, only check direct children that are
+    // not already a repo or inside one — the root is just a workspace container.
+    let candidates: Vec<PathBuf> = if repos.is_empty() {
+        vec![root.to_path_buf()]
+    } else {
+        fs::read_dir(root)
+            .with_context(|| format!("Failed to read {}", root.display()))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect()
+    };
+
+    for candidate in candidates {
+        if ignore.matches(root, &candidate) {
+            continue;
+        }
+        if repo_paths.contains(&candidate) {
+            continue;
+        }
+        // Skip dirs already owned by a git repo (candidate is inside a repo's tree).
+        let inside_repo = repos
+            .iter()
+            .any(|r| candidate.starts_with(&r.abs_path) && candidate != r.abs_path);
+        if inside_repo {
+            continue;
+        }
+        // Skip well-known non-source dirs.
+        let dir_name = candidate.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if matches!(
+            dir_name,
+            ".git" | ".ato" | ".tmp" | "target" | "node_modules" | ".venv" | "__pycache__"
+        ) {
+            continue;
+        }
+
+        let rel_path = relative_display(root, &candidate);
+        let rel_path = if rel_path == "." {
+            root.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("workspace")
+                .to_string()
+        } else {
+            rel_path
+        };
+
+        match pack_archive_source(root, &candidate) {
+            Ok(Some((content_base64, content_digest))) => {
+                futures::executor::block_on(reporter.notify(format!(
+                    "📦 Bundling archive source: {} ({})",
+                    rel_path, content_digest
+                )))?;
+                result.push(CandidateArchiveSource {
+                    abs_path: candidate,
+                    rel_path,
+                    content_base64,
+                    content_digest,
+                });
+            }
+            Ok(None) => {
+                // Directory had no non-trivial files — skip silently.
+            }
+            Err(err) => {
+                futures::executor::block_on(
+                    reporter.warn(format!("⚠️  Could not bundle {}: {}", rel_path, err)),
+                )?;
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Returns true if `filename` looks like a secret/env file that must not be bundled.
+fn is_env_file_path(filename: &str) -> bool {
+    let lower = filename.to_ascii_lowercase();
+    lower == ".env" || lower.starts_with(".env.") || lower == ".envrc"
+}
+
+/// Paths to exclude when packing archive sources (relative to the archive root).
+fn is_archive_excluded_path(rel: &str) -> bool {
+    let parts: Vec<&str> = rel.split('/').collect();
+    let first = parts.first().copied().unwrap_or("");
+    // Skip build artifacts, virtual environments, and generated lock dirs.
+    if matches!(
+        first,
+        ".git" | ".ato" | ".tmp" | "target" | "node_modules" | ".venv" | "__pycache__"
+    ) {
+        return true;
+    }
+    // Skip environment / secret files at any path level.
+    let filename = parts.last().copied().unwrap_or("");
+    is_env_file_path(filename)
+}
+
+/// Pack a directory into a gzip tar and return (base64_content, sha256_digest).
+/// Returns `None` if the directory contains no packable files.
+fn pack_archive_source(root: &Path, dir: &Path) -> Result<Option<(String, String)>> {
+    let mut file_count: usize = 0;
+    let gz_buf: Vec<u8> = Vec::new();
+    let enc = GzEncoder::new(gz_buf, Compression::best());
+    let mut builder = tar::Builder::new(enc);
+    builder.follow_symlinks(false);
+
+    let mut entries: Vec<(PathBuf, String)> = Vec::new();
+    collect_archive_entries(dir, dir, &mut entries, root)?;
+
+    if entries.is_empty() {
+        return Ok(None);
+    }
+
+    for (abs_path, rel_str) in &entries {
+        if is_archive_excluded_path(rel_str) {
+            continue;
+        }
+        let metadata =
+            fs::metadata(abs_path).with_context(|| format!("stat {}", abs_path.display()))?;
+        if !metadata.is_file() {
+            continue;
+        }
+        file_count += 1;
+        if file_count > ARCHIVE_MAX_FILE_COUNT {
+            anyhow::bail!(
+                "Archive source exceeds {} file limit. \
+                 Add a .atoignore to exclude large directories.",
+                ARCHIVE_MAX_FILE_COUNT
+            );
+        }
+        builder
+            .append_path_with_name(abs_path, rel_str)
+            .with_context(|| format!("Failed to add {} to archive", abs_path.display()))?;
+    }
+
+    if file_count == 0 {
+        return Ok(None);
+    }
+
+    let enc = builder.into_inner().context("Failed to finish tar")?;
+    let gz_bytes = enc.finish().context("Failed to finish gzip")?;
+
+    if gz_bytes.len() as u64 > ARCHIVE_MAX_COMPRESSED_BYTES {
+        anyhow::bail!(
+            "Archive source compressed size ({} bytes) exceeds {} byte limit. \
+             Add a .atoignore to reduce the workspace size.",
+            gz_bytes.len(),
+            ARCHIVE_MAX_COMPRESSED_BYTES
+        );
+    }
+
+    let digest = sha256_label(&gz_bytes);
+    let content_base64 = BASE64.encode(&gz_bytes);
+    Ok(Some((content_base64, digest)))
+}
+
+/// Recursively collect (abs_path, archive-relative path) for all entries under `dir`.
+fn collect_archive_entries(
+    archive_root: &Path,
+    dir: &Path,
+    out: &mut Vec<(PathBuf, String)>,
+    _workspace_root: &Path,
+) -> Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| format!("Failed to read {}", dir.display()))? {
+        let entry = entry.with_context(|| format!("Failed to read entry in {}", dir.display()))?;
+        let path = entry.path();
+        let rel = relative_display(archive_root, &path);
+        if is_archive_excluded_path(&rel) {
+            continue;
+        }
+        if path.is_dir() {
+            collect_archive_entries(archive_root, &path, out, _workspace_root)?;
+        } else if path.is_file() {
+            out.push((path, rel));
+        }
+    }
+    Ok(())
+}
+
+/// Safely extract a base64-encoded gzip tar archive into `target`.
+/// Rejects absolute paths, `..` components, symlinks, hardlinks, and device files.
+fn extract_archive_source(content_base64: &str, target: &Path) -> Result<()> {
+    let gz_bytes = BASE64
+        .decode(content_base64)
+        .context("Failed to base64-decode archive content")?;
+
+    fs::create_dir_all(target).with_context(|| format!("Failed to create {}", target.display()))?;
+
+    let gz = GzDecoder::new(gz_bytes.as_slice());
+    let mut archive = tar::Archive::new(gz);
+    archive.set_preserve_permissions(false);
+    archive.set_unpack_xattrs(false);
+    archive.set_overwrite(true);
+
+    for entry_result in archive
+        .entries()
+        .context("Failed to read archive entries")?
+    {
+        let mut entry = entry_result.context("Failed to read archive entry")?;
+        let header = entry.header();
+
+        // Reject non-regular-file entries (symlinks, hardlinks, devices, directories).
+        let entry_type = header.entry_type();
+        if !entry_type.is_file() {
+            if entry_type.is_dir() {
+                // Directories are fine — let them through.
+            } else {
+                // Reject symlinks, hardlinks, block/char devices, etc.
+                anyhow::bail!(
+                    "Archive contains a non-regular entry type {:?}; rejected for security",
+                    entry_type
+                );
+            }
+        }
+
+        let entry_path = entry
+            .path()
+            .context("Archive entry has non-UTF-8 path")?
+            .into_owned();
+
+        // Reject absolute paths and `..` traversal.
+        if entry_path.is_absolute() {
+            anyhow::bail!(
+                "Archive contains absolute path {}: rejected for security",
+                entry_path.display()
+            );
+        }
+        for component in entry_path.components() {
+            use std::path::Component;
+            if matches!(component, Component::ParentDir) {
+                anyhow::bail!(
+                    "Archive contains path traversal in {}: rejected for security",
+                    entry_path.display()
+                );
+            }
+        }
+
+        let dest = target.join(&entry_path);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        entry
+            .unpack(&dest)
+            .with_context(|| format!("Failed to extract {}", entry_path.display()))?;
+    }
+
+    Ok(())
 }
 
 fn discover_repositories(root: &Path, ignore: &IgnoreMatcher) -> Result<Vec<CandidateRepo>> {
@@ -2177,14 +2301,6 @@ fn upload_share(spec: &ShareSpec, lock: &ShareLock, guide: &str) -> Result<Share
     serde_json::from_value(body["share"].clone()).context("Invalid share upload response payload")
 }
 
-struct LoadedShareInput {
-    share_url: Option<String>,
-    resolved_revision_url: Option<String>,
-    spec: ShareSpec,
-    lock: ShareLock,
-    spec_digest_verified: bool,
-}
-
 pub(crate) fn looks_like_share_run_input(input: &str) -> bool {
     (input.starts_with("http://") || input.starts_with("https://")) && input.contains("/s/")
 }
@@ -2657,6 +2773,28 @@ fn materialize_source(
     locked: &ResolvedSourceLock,
     target: &Path,
 ) -> Result<String> {
+    // Archive sources embed their content directly — extract inline, no git needed.
+    if source.kind == "archive" {
+        // Prefer explicit archive_content field; fall back to data URI in url field.
+        let content: String = if let Some(c) = source.archive_content.as_deref() {
+            c.to_string()
+        } else if let Some(b64) = source
+            .url
+            .strip_prefix("data:application/x-tar+gzip;base64,")
+        {
+            b64.to_string()
+        } else {
+            anyhow::bail!(
+                "archive source '{}' has no extractable content (no archive_content field \
+                 and url is not a data URI)",
+                source.id
+            )
+        };
+        extract_archive_source(&content, target)
+            .with_context(|| format!("Failed to extract archive source {}", source.id))?;
+        return Ok(locked.rev.clone());
+    }
+
     if !target.exists() {
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)
@@ -2986,6 +3124,7 @@ fn sha256_label(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use share_types::default_git_mode_str;
 
     #[test]
     fn parse_share_revision_segment_supports_mutable_and_immutable() {
@@ -3118,6 +3257,63 @@ mod tests {
                 entry.id, entry.cwd, source_path
             );
         }
+    }
+
+    #[test]
+    fn archive_source_round_trip_no_git_repo() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+
+        // Set up a non-git directory with a capsule.toml and a source file.
+        fs::write(
+            root.join("capsule.toml"),
+            "[capsule]\nname = \"python-script\"\nruntime = \"source\"\n",
+        )
+        .expect("capsule.toml");
+        fs::create_dir_all(root.join("source")).expect("mkdir source");
+        fs::write(
+            root.join("source/main.py"),
+            "print('hello from python script')\n",
+        )
+        .expect("main.py");
+        // A .env file that must NOT appear in the archive.
+        fs::write(root.join(".env"), "SECRET=hunter2\n").expect(".env");
+
+        let reporter = Arc::new(crate::reporters::CliReporter::new(false));
+        let capture = capture_workspace(
+            root,
+            GitMode::SameCommit,
+            false,
+            ShareToolRuntime::System,
+            &reporter,
+        )
+        .expect("capture");
+
+        // Exactly one archive source, no git sources.
+        assert_eq!(capture.spec.sources.len(), 1);
+        let src = &capture.spec.sources[0];
+        assert_eq!(src.kind, "archive");
+        assert!(src.archive_content.is_some(), "archive_content must be set");
+
+        // Extract into a new temp dir and verify files round-trip correctly.
+        let out = tempfile::tempdir().expect("tempdir out");
+        extract_archive_source(src.archive_content.as_ref().unwrap(), out.path()).expect("extract");
+
+        // capsule.toml and source/main.py should be present.
+        assert!(
+            out.path().join("capsule.toml").exists(),
+            "capsule.toml missing after extract"
+        );
+        assert!(
+            out.path().join("source/main.py").exists(),
+            "source/main.py missing after extract"
+        );
+
+        // .env must NOT have been included.
+        assert!(
+            !out.path().join(".env").exists(),
+            ".env must be excluded from archive"
+        );
     }
 
     #[test]
@@ -3928,6 +4124,7 @@ mod tests {
                 branch: None,
                 evidence: Vec::new(),
                 git_mode: default_git_mode_str(),
+                archive_content: None,
             }],
             tool_requirements: vec![ToolRequirementSpec {
                 id: "node".to_string(),
@@ -3991,6 +4188,7 @@ mod tests {
                     branch: None,
                     evidence: Vec::new(),
                     git_mode: default_git_mode_str(),
+                    archive_content: None,
                 },
                 ShareSourceSpec {
                     id: "skip-repo".to_string(),
@@ -4000,6 +4198,7 @@ mod tests {
                     branch: None,
                     evidence: Vec::new(),
                     git_mode: default_git_mode_str(),
+                    archive_content: None,
                 },
             ],
             tool_requirements: vec![
