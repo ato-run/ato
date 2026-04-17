@@ -1209,7 +1209,7 @@ mod tests {
     use super::{
         allows_registry_guest_recovery, build_launch_session, collect_dev_script_dirs,
         detect_package_manager, extract_localhost_url, find_capsule_root, find_dev_script_dir,
-        url_port, which_in_path, ResolvePayload, SessionStartInfo,
+        pop_last_codepoint_width, url_port, which_in_path, ResolvePayload, SessionStartInfo,
     };
 
     fn resolved_payload(
@@ -1793,6 +1793,52 @@ mod tests {
             super::CliLaunchSpec::RawShell(s) => assert_eq!(s, "zsh"),
             other => panic!("expected RawShell, got {other:?}"),
         }
+    }
+
+    // ── REPL backspace: pop one codepoint, not one byte ─────────────────────
+    //
+    // Regression: typing `あ` (3 bytes, 2 cells) then pressing BS three times
+    // used to pop bytes individually and emit three `\x08 \x08` sequences,
+    // walking the cursor past `あ` and into the `ato>` prompt. After the fix,
+    // one BS erases one codepoint's worth of display cells.
+    #[test]
+    fn bs_ascii_pops_one_byte_one_cell() {
+        let mut line = b"abc".to_vec();
+        assert_eq!(pop_last_codepoint_width(&mut line), Some(1));
+        assert_eq!(line, b"ab");
+        assert_eq!(pop_last_codepoint_width(&mut line), Some(1));
+        assert_eq!(pop_last_codepoint_width(&mut line), Some(1));
+        assert_eq!(pop_last_codepoint_width(&mut line), None);
+        assert!(line.is_empty());
+    }
+
+    #[test]
+    fn bs_cjk_pops_three_bytes_two_cells() {
+        // 'あ' = 0xE3 0x81 0x82 in UTF-8, 2 columns wide.
+        let mut line = "あ".as_bytes().to_vec();
+        assert_eq!(line.len(), 3);
+        assert_eq!(pop_last_codepoint_width(&mut line), Some(2));
+        assert!(
+            line.is_empty(),
+            "all 3 UTF-8 bytes of 'あ' must be popped in one BS"
+        );
+        // Further BS on empty buffer is a no-op (prompt-safe).
+        assert_eq!(pop_last_codepoint_width(&mut line), None);
+    }
+
+    #[test]
+    fn bs_mixed_ascii_cjk_prompt_safe() {
+        // "aあb" — 1 + 3 + 1 = 5 bytes; columns 1 + 2 + 1.
+        let mut line = "aあb".as_bytes().to_vec();
+        assert_eq!(line.len(), 5);
+        assert_eq!(pop_last_codepoint_width(&mut line), Some(1)); // 'b'
+        assert_eq!(line, "aあ".as_bytes());
+        assert_eq!(pop_last_codepoint_width(&mut line), Some(2)); // 'あ'
+        assert_eq!(line, b"a");
+        assert_eq!(pop_last_codepoint_width(&mut line), Some(1)); // 'a'
+        assert!(line.is_empty());
+        // 4th BS: None → REPL must NOT emit `\x08 \x08`, preserving `ato>`.
+        assert_eq!(pop_last_codepoint_width(&mut line), None);
     }
 }
 
@@ -2581,10 +2627,32 @@ pub fn spawn_ato_run_repl(
                         }
                     }
                     // Backspace / DEL
+                    //
+                    // Erase exactly one user-visible character, not one byte.
+                    // Before this fix, typing a multi-byte UTF-8 char (e.g.
+                    // Japanese `あ` = 3 bytes, 2 cells) and then pressing
+                    // Backspace popped one byte off `line` and emitted one
+                    // `\x08 \x08` per press. Pressing BS three times popped
+                    // all three bytes but walked the cursor back 3 cells —
+                    // past where `あ` ever occupied — and started erasing
+                    // the `ato>` prompt itself.
+                    //
+                    // Fix: pop one complete codepoint (1–4 bytes) per BS, and
+                    // emit one `\x08 \x08` per DISPLAY COLUMN the codepoint
+                    // occupied. CJK/emoji wide chars take 2 columns; ASCII/
+                    // Latin take 1. Width is resolved via unicode-width.
                     0x7f | 0x08 => {
-                        if !line.is_empty() {
-                            line.pop();
-                            if !send(&output_tx, b"\x08 \x08") {
+                        if let Some(width) = pop_last_codepoint_width(&mut line) {
+                            // Safety cap: even if width comes back as 0 (e.g.
+                            // stray combining char), never erase nothing —
+                            // we've already popped bytes, and the original
+                            // render emitted at least visual motion for them.
+                            let cells = width.max(1);
+                            let mut erase = Vec::with_capacity(cells * 3);
+                            for _ in 0..cells {
+                                erase.extend_from_slice(b"\x08 \x08");
+                            }
+                            if !send(&output_tx, &erase) {
                                 return;
                             }
                         }
@@ -2783,3 +2851,37 @@ fn normalize_log_newlines(data: &[u8], prev_cr: &mut bool) -> Vec<u8> {
     }
     out
 }
+
+/// Pop the last UTF-8 codepoint from `line` and return its display width in
+/// terminal columns (1 for ASCII/Latin, 2 for CJK/emoji wide chars, `None` if
+/// the buffer is empty or malformed).
+///
+/// Walks back over UTF-8 continuation bytes (0x80..=0xBF) until it finds a
+/// leading byte, then pops that whole codepoint as a unit. Uses
+/// `unicode_width` to compute column count. Invalid tail bytes are dropped
+/// defensively (never leaves a dangling continuation).
+fn pop_last_codepoint_width(line: &mut Vec<u8>) -> Option<usize> {
+    if line.is_empty() {
+        return None;
+    }
+    // Find the start index of the last codepoint.
+    let mut start = line.len();
+    while start > 0 {
+        start -= 1;
+        let b = line[start];
+        // Leading byte: ASCII (0..=0x7F) or multi-byte leader (0xC0..=0xFF).
+        // Continuation bytes are 0x80..=0xBF; keep walking past them.
+        if b < 0x80 || b >= 0xC0 {
+            break;
+        }
+    }
+    let bytes = line.split_off(start);
+    // Decode and measure width. If bytes are not valid UTF-8, assume 1 column.
+    let width = std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(|s| s.chars().next())
+        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(1))
+        .unwrap_or(1);
+    Some(width)
+}
+
