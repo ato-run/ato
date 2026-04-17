@@ -99,6 +99,117 @@ pub fn save_config(config: &DesktopConfig) {
     }
 }
 
+// ── Secret Store ──────────────────────────────────────────────────────────────
+
+/// A single secret key-value pair.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SecretEntry {
+    pub key: String,
+    /// Stored as plaintext in the JSON file (MVP).
+    /// Phase 2: macOS Keychain integration.
+    pub value: String,
+}
+
+/// Secret storage with per-capsule grant management.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SecretStore {
+    /// Global secret entries.
+    #[serde(default)]
+    pub secrets: Vec<SecretEntry>,
+    /// Per-capsule grants: capsule handle → list of secret keys allowed.
+    #[serde(default)]
+    pub grants: std::collections::HashMap<String, Vec<String>>,
+}
+
+impl SecretStore {
+    pub fn add_secret(&mut self, key: String, value: String) {
+        if let Some(existing) = self.secrets.iter_mut().find(|s| s.key == key) {
+            existing.value = value;
+        } else {
+            self.secrets.push(SecretEntry { key, value });
+        }
+    }
+
+    pub fn remove_secret(&mut self, key: &str) {
+        self.secrets.retain(|s| s.key != key);
+        for keys in self.grants.values_mut() {
+            keys.retain(|k| k != key);
+        }
+    }
+
+    pub fn secrets_for_capsule(&self, handle: &str) -> Vec<&SecretEntry> {
+        let Some(allowed_keys) = self.grants.get(handle) else {
+            return Vec::new();
+        };
+        self.secrets
+            .iter()
+            .filter(|s| allowed_keys.contains(&s.key))
+            .collect()
+    }
+
+    pub fn grant_secret(&mut self, capsule_handle: &str, key: &str) {
+        let keys = self
+            .grants
+            .entry(capsule_handle.to_string())
+            .or_default();
+        if !keys.contains(&key.to_string()) {
+            keys.push(key.to_string());
+        }
+    }
+
+    pub fn revoke_secret(&mut self, capsule_handle: &str, key: &str) {
+        if let Some(keys) = self.grants.get_mut(capsule_handle) {
+            keys.retain(|k| k != key);
+        }
+    }
+}
+
+fn secrets_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".ato").join("secrets.json"))
+}
+
+pub fn load_secrets() -> SecretStore {
+    let Some(path) = secrets_path() else {
+        return SecretStore::default();
+    };
+
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match serde_json::from_str(&content) {
+            Ok(store) => {
+                info!(path = %path.display(), "Loaded secret store");
+                store
+            }
+            Err(e) => {
+                warn!(path = %path.display(), error = %e, "Failed to parse secret store, using empty");
+                SecretStore::default()
+            }
+        },
+        Err(_) => SecretStore::default(),
+    }
+}
+
+pub fn save_secrets(store: &SecretStore) {
+    let Some(path) = secrets_path() else {
+        warn!("Cannot determine home directory, secrets not saved");
+        return;
+    };
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    match serde_json::to_string_pretty(store) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                warn!(path = %path.display(), error = %e, "Failed to write secret store");
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to serialize secret store");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
