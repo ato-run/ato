@@ -346,15 +346,80 @@ fn action_row(action: LauncherAction, title: &'static str, detail: &'static str)
         .into_any_element()
 }
 
+struct DemoCapsule {
+    handle: &'static str,
+    label: &'static str,
+    emoji: &'static str,
+}
+
+fn demo_capsules() -> Vec<DemoCapsule> {
+    vec![
+        DemoCapsule {
+            handle: "koh0920/shadcn-admin",
+            label: "Dashboard",
+            emoji: "📊",
+        },
+        DemoCapsule {
+            handle: "koh0920/iphone-3d",
+            label: "3D iPhone",
+            emoji: "📱",
+        },
+        DemoCapsule {
+            handle: "koh0920/react-dnd-kanban",
+            label: "Kanban",
+            emoji: "🗂️",
+        },
+    ]
+}
+
 fn render_pinned_chips() -> impl IntoElement {
-    div()
-        .w(px(560.0))
-        .flex()
-        .gap(px(8.0))
+    let mut row = div().w(px(560.0)).flex().flex_wrap().gap(px(8.0));
+    row = row
         .child(pinned_chip("ato.run", 217.0, 0.80, 0.50))
         .child(pinned_chip("Cloud Dock", 161.0, 0.55, 0.42))
         .child(pinned_chip("Local Registry", 43.0, 0.90, 0.44))
-        .child(pinned_chip("GitHub Auth", 0.0, 0.0, 0.30))
+        .child(pinned_chip("GitHub Auth", 0.0, 0.0, 0.30));
+    for capsule in demo_capsules() {
+        row = row.child(demo_capsule_chip(capsule));
+    }
+    row
+}
+
+fn demo_capsule_chip(capsule: DemoCapsule) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(11.0))
+        .py(px(7.0))
+        .rounded(px(10.0))
+        .bg(hsla(217.0 / 360.0, 0.60, 0.97, 1.0))
+        .border_1()
+        .border_color(hsla(217.0 / 360.0, 0.40, 0.80, 0.50))
+        .shadow(vec![BoxShadow {
+            color: hsla(217.0 / 360.0, 0.50, 0.0, 0.05),
+            offset: point(px(0.0), px(1.0)),
+            blur_radius: px(4.0),
+            spread_radius: px(0.0),
+        }])
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            window.dispatch_action(Box::new(FocusCommandBar), cx);
+            let _ = capsule.handle;
+        })
+        .child(
+            div()
+                .text_size(px(12.0))
+                .child(capsule.emoji),
+        )
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(FontWeight(500.0))
+                .text_color(hsla(217.0 / 360.0, 0.60, 0.35, 1.0))
+                .child(capsule.label),
+        )
+        .into_any_element()
 }
 
 fn pinned_chip(label: &'static str, hue_deg: f32, sat: f32, lit: f32) -> impl IntoElement {
