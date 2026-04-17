@@ -5,7 +5,7 @@ use gpui::{
 };
 
 use super::super::theme::Theme;
-use crate::app::{FocusCommandBar, OpenCloudDock, OpenLocalRegistry, SignInToAtoRun};
+use crate::app::{FocusCommandBar, NavigateToUrl, OpenCloudDock, OpenLocalRegistry, SignInToAtoRun};
 use crate::state::{AppState, DesktopAuthStatus, LauncherAction, ThemeMode};
 
 pub(in crate::ui) fn render_launcher_panel_v2(state: &AppState, theme: &Theme) -> impl IntoElement {
@@ -404,8 +404,12 @@ fn demo_capsule_chip(capsule: DemoCapsule) -> AnyElement {
         }])
         .cursor_pointer()
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            window.dispatch_action(Box::new(FocusCommandBar), cx);
-            let _ = capsule.handle;
+            window.dispatch_action(
+                Box::new(NavigateToUrl {
+                    url: capsule.handle.to_string(),
+                }),
+                cx,
+            );
         })
         .child(
             div()
