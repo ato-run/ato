@@ -442,9 +442,19 @@ pub struct Workspace {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SystemPageIcon {
+    Console,
+    Terminal,
+    Launcher,
+    Inspector,
+    CapsuleStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarTaskIconSpec {
     Monogram(String),
     ExternalUrl { origin: String },
+    SystemIcon(SystemPageIcon),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2703,20 +2713,25 @@ fn sidebar_icon_for_task(task: &TaskSet) -> SidebarTaskIconSpec {
             GuestRoute::ExternalUrl(url) => external_origin(url)
                 .map(|origin| SidebarTaskIconSpec::ExternalUrl { origin })
                 .unwrap_or_else(|| SidebarTaskIconSpec::Monogram(short_label(&task.title))),
+            GuestRoute::Terminal { .. } => {
+                SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Terminal)
+            }
             GuestRoute::Capsule { .. }
             | GuestRoute::CapsuleHandle { .. }
-            | GuestRoute::CapsuleUrl { .. }
-            | GuestRoute::Terminal { .. } => {
+            | GuestRoute::CapsuleUrl { .. } => {
                 SidebarTaskIconSpec::Monogram(short_label(&task.title))
             }
         },
-        PaneSurface::Native { .. }
-        | PaneSurface::CapsuleStatus(_)
-        | PaneSurface::DevConsole
-        | PaneSurface::Inspector
-        | PaneSurface::Launcher
-        | PaneSurface::AuthHandoff { .. }
-        | PaneSurface::Terminal(_) => SidebarTaskIconSpec::Monogram(short_label(&task.title)),
+        PaneSurface::DevConsole => SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Console),
+        PaneSurface::Terminal(_) => SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Terminal),
+        PaneSurface::Launcher => SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Launcher),
+        PaneSurface::Inspector => SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Inspector),
+        PaneSurface::CapsuleStatus(_) => {
+            SidebarTaskIconSpec::SystemIcon(SystemPageIcon::CapsuleStatus)
+        }
+        PaneSurface::Native { .. } | PaneSurface::AuthHandoff { .. } => {
+            SidebarTaskIconSpec::Monogram(short_label(&task.title))
+        }
     }
 }
 
@@ -3067,14 +3082,17 @@ mod tests {
         let tasks = state.sidebar_task_items();
 
         assert_eq!(tasks.len(), 3);
+        // Task 1: Launcher → SystemIcon
         assert_eq!(
             tasks[0].icon,
-            SidebarTaskIconSpec::Monogram("NE".to_string())
+            SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Launcher)
         );
+        // Task 2: CapsuleHandle web pane → Monogram
         assert_eq!(
             tasks[1].icon,
             SidebarTaskIconSpec::Monogram("GU".to_string())
         );
+        // Task 3: ExternalUrl
         assert_eq!(
             tasks[2].icon,
             SidebarTaskIconSpec::ExternalUrl {

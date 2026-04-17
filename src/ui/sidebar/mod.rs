@@ -10,7 +10,7 @@ use gpui_component::{Icon, IconName};
 
 use super::theme::Theme;
 use crate::app::{NewTab, SelectTask, ShowSettings};
-use crate::state::{AppState, SidebarTaskIconSpec, SidebarTaskItem};
+use crate::state::{AppState, SidebarTaskIconSpec, SidebarTaskItem, SystemPageIcon};
 
 const NAV_ITEM_SIZE: f32 = 36.0;
 const APP_ICON_SIZE: f32 = 22.0;
@@ -128,6 +128,9 @@ fn render_app_icon(
                 render_globe_icon(active, theme)
             }
         },
+        SidebarTaskIconSpec::SystemIcon(page_type) => {
+            render_system_icon(page_type, active, theme)
+        }
     }
 }
 
@@ -219,6 +222,37 @@ fn render_globe_icon(active: bool, theme: &Theme) -> Div {
         .text_size(px(12.0))
         .font_weight(FontWeight::BOLD)
         .child("◎")
+}
+
+fn render_system_icon(page_type: SystemPageIcon, active: bool, theme: &Theme) -> Div {
+    let (label, hue) = match page_type {
+        SystemPageIcon::Console => (">_", 270.0),    // purple
+        SystemPageIcon::Terminal => ("$", 160.0),     // green
+        SystemPageIcon::Launcher => ("◆", 217.0),    // blue
+        SystemPageIcon::Inspector => ("i", 45.0),     // yellow
+        SystemPageIcon::CapsuleStatus => ("⊙", 0.0), // red
+    };
+
+    let saturation = if active { 0.55 } else { 0.40 };
+    let lightness = if active { 0.50 } else { 0.38 };
+    let bg = gpui::hsla(hue / 360.0, saturation, lightness, if active { 0.25 } else { 0.15 });
+    let text_color = gpui::hsla(hue / 360.0, saturation + 0.1, lightness + 0.2, 1.0);
+    let border_color = theme.border_default;
+
+    div()
+        .w(px(APP_ICON_SIZE))
+        .h(px(APP_ICON_SIZE))
+        .rounded(px(5.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(bg)
+        .border_1()
+        .border_color(border_color)
+        .text_color(text_color)
+        .text_size(px(10.0))
+        .font_weight(FontWeight::BOLD)
+        .child(label)
 }
 
 fn render_nav_separator(theme: &Theme) -> Div {

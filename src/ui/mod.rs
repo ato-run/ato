@@ -600,7 +600,7 @@ impl DesktopShell {
             .into_iter()
             .filter_map(|task| match task.icon {
                 SidebarTaskIconSpec::ExternalUrl { origin } => Some(origin),
-                SidebarTaskIconSpec::Monogram(_) => None,
+                SidebarTaskIconSpec::Monogram(_) | SidebarTaskIconSpec::SystemIcon(_) => None,
             })
             .collect::<Vec<_>>();
 
