@@ -3,7 +3,7 @@ use gpui::{div, hsla, px, Div, FontWeight, MouseButton};
 use gpui_component::scroll::ScrollableElement;
 
 use super::super::theme::Theme;
-use crate::app::ToggleTheme;
+use crate::app::{ToggleAutoDevtools, ToggleTheme};
 use crate::state::{AppState, ThemeMode};
 
 pub(super) fn render_settings_panel(body: &str, state: &AppState, theme: &Theme) -> Div {
@@ -25,89 +25,223 @@ pub(super) fn render_settings_panel(body: &str, state: &AppState, theme: &Theme)
                 .flex_col()
                 .gap_4()
                 // Appearance section
-                .child(
-                    div()
-                        .rounded(px(12.0))
-                        .bg(theme.settings_card_bg)
-                        .border_1()
-                        .border_color(theme.settings_card_border)
-                        .p_4()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight(600.0))
-                                .text_color(theme.text_primary)
-                                .child("Appearance"),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .rounded(px(8.0))
-                                .bg(theme.settings_body_bg)
-                                .border_1()
-                                .border_color(theme.settings_card_border)
-                                .overflow_hidden()
-                                .child(theme_chip(
-                                    "Light",
-                                    state.theme_mode == ThemeMode::Light,
-                                    theme,
-                                ))
-                                .child(theme_chip(
-                                    "Dark",
-                                    state.theme_mode == ThemeMode::Dark,
-                                    theme,
-                                )),
-                        ),
-                )
+                .child(render_appearance_card(state, theme))
+                // Terminal section
+                .child(render_terminal_card(state, theme))
+                // Developer section
+                .child(render_developer_card(state, theme))
+                // Egress Policy section
+                .child(render_egress_card(state, theme))
                 // Diagnostics section
+                .child(render_diagnostics_card(&body_text, theme)),
+        )
+}
+
+fn render_appearance_card(state: &AppState, theme: &Theme) -> Div {
+    div()
+        .rounded(px(12.0))
+        .bg(theme.settings_card_bg)
+        .border_1()
+        .border_color(theme.settings_card_border)
+        .p_4()
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(FontWeight(600.0))
+                .text_color(theme.text_primary)
+                .child("Appearance"),
+        )
+        .child(
+            div()
+                .flex()
+                .rounded(px(8.0))
+                .bg(theme.settings_body_bg)
+                .border_1()
+                .border_color(theme.settings_card_border)
+                .overflow_hidden()
+                .child(theme_chip(
+                    "Light",
+                    state.theme_mode == ThemeMode::Light,
+                    theme,
+                ))
+                .child(theme_chip(
+                    "Dark",
+                    state.theme_mode == ThemeMode::Dark,
+                    theme,
+                )),
+        )
+}
+
+fn render_terminal_card(state: &AppState, theme: &Theme) -> Div {
+    let font_size = state.config.terminal_font_size;
+    let max_sessions = state.config.terminal_max_sessions;
+
+    settings_card("Terminal", theme)
+        .child(settings_row(
+            "Font size",
+            &format!("{font_size}px"),
+            theme,
+        ))
+        .child(settings_row(
+            "Max sessions",
+            &format!("{max_sessions}"),
+            theme,
+        ))
+}
+
+fn render_developer_card(state: &AppState, theme: &Theme) -> Div {
+    let auto_devtools = state.config.auto_open_devtools;
+
+    settings_card("Developer", theme).child(settings_toggle_row(
+        "Auto-open DevTools",
+        auto_devtools,
+        theme,
+    ))
+}
+
+fn render_egress_card(state: &AppState, theme: &Theme) -> Div {
+    let hosts = &state.config.default_egress_allow;
+
+    let card = settings_card("Default Egress Policy", theme);
+
+    if hosts.is_empty() {
+        card.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(theme.text_disabled)
+                .child("localhost only (no default allow hosts)"),
+        )
+    } else {
+        card.child(
+            div()
+                .rounded(px(10.0))
+                .bg(theme.settings_body_bg)
+                .border_1()
+                .border_color(theme.settings_body_border)
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .children(hosts.iter().map(|host| {
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_secondary)
+                        .child(host.clone())
+                })),
+        )
+    }
+}
+
+fn render_diagnostics_card(body_text: &str, theme: &Theme) -> Div {
+    settings_card("Agent diagnostics", theme)
+        .child(
+            div()
+                .text_size(px(11.0))
+                .line_height(px(18.0))
+                .text_color(theme.text_disabled)
+                .child("Companion native pane for host-side state and diagnostics."),
+        )
+        .child(
+            div()
+                .rounded(px(10.0))
+                .bg(theme.settings_body_bg)
+                .border_1()
+                .border_color(theme.settings_body_border)
+                .p_4()
+                .text_sm()
+                .line_height(px(22.0))
+                .text_color(theme.text_disabled)
+                .child(body_text.to_string()),
+        )
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn settings_card(title: &str, theme: &Theme) -> Div {
+    div()
+        .rounded(px(12.0))
+        .bg(theme.settings_card_bg)
+        .border_1()
+        .border_color(theme.settings_card_border)
+        .p_4()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(FontWeight(600.0))
+                .text_color(theme.text_primary)
+                .child(title.to_string()),
+        )
+}
+
+fn settings_row(label: &str, value: &str, theme: &Theme) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(theme.text_secondary)
+                .child(label.to_string()),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(theme.text_disabled)
+                .child(value.to_string()),
+        )
+}
+
+fn settings_toggle_row(label: &str, active: bool, theme: &Theme) -> Div {
+    let accent = theme.accent;
+    let accent_subtle = theme.accent_subtle;
+    let text_secondary = theme.text_secondary;
+    let border_default = theme.border_default;
+
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(text_secondary)
+                .child(label.to_string()),
+        )
+        .child(
+            div()
+                .id("toggle-auto-devtools")
+                .w(px(36.0))
+                .h(px(20.0))
+                .rounded(px(10.0))
+                .cursor_pointer()
+                .border_1()
+                .border_color(if active { accent } else { border_default })
+                .bg(if active {
+                    accent_subtle
+                } else {
+                    hsla(0.0, 0.0, 0.0, 0.0)
+                })
+                .flex()
+                .items_center()
+                .px(px(2.0))
                 .child(
                     div()
-                        .rounded(px(12.0))
-                        .bg(theme.settings_card_bg)
-                        .border_1()
-                        .border_color(theme.settings_card_border)
-                        .p_4()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .font_weight(FontWeight(600.0))
-                                        .text_color(theme.text_primary)
-                                        .child("Agent diagnostics"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .line_height(px(18.0))
-                                        .text_color(theme.text_disabled)
-                                        .child(
-                                            "Companion native pane for host-side state and diagnostics.",
-                                        ),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .rounded(px(10.0))
-                                .bg(theme.settings_body_bg)
-                                .border_1()
-                                .border_color(theme.settings_body_border)
-                                .p_4()
-                                .text_sm()
-                                .line_height(px(22.0))
-                                .text_color(theme.text_disabled)
-                                .child(body_text),
-                        ),
-                ),
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .rounded_full()
+                        .bg(if active { accent } else { text_secondary })
+                        .when(active, |this| this.ml_auto()),
+                )
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    window.dispatch_action(Box::new(ToggleAutoDevtools), cx);
+                }),
         )
 }
 
