@@ -474,6 +474,15 @@ pub enum OmnibarSuggestionAction {
     Navigate { url: String },
     SelectTask { task_id: TaskSetId },
     ShowSettings,
+    LaunchCapsule { handle: String },
+}
+
+/// A search result from the local capsule registry.
+#[derive(Clone, Debug)]
+pub struct CapsuleSearchResult {
+    pub handle: String,
+    pub display_name: String,
+    pub description: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -668,6 +677,8 @@ pub struct AppState {
     pub network_logs: Vec<NetworkLogEntry>,
     pub config: crate::config::DesktopConfig,
     pub secret_store: crate::config::SecretStore,
+    pub capsule_search_results: Vec<CapsuleSearchResult>,
+    pub capsule_search_query: String,
     next_task_id: TaskSetId,
     next_pane_id: PaneId,
     next_new_tab_index: usize,
@@ -834,6 +845,8 @@ impl AppState {
             network_logs: Vec::new(),
             config: crate::config::load_config(),
             secret_store: crate::config::load_secrets(),
+            capsule_search_results: Vec::new(),
+            capsule_search_query: String::new(),
             next_task_id: 4,
             next_pane_id: 4,
             next_new_tab_index: 2,
@@ -936,7 +949,21 @@ impl AppState {
             }
         }
 
-        suggestions.truncate(6);
+        // Append capsule search results from registry
+        for result in &self.capsule_search_results {
+            suggestions.push(OmnibarSuggestion {
+                title: result.display_name.clone(),
+                detail: result
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| result.handle.clone()),
+                action: OmnibarSuggestionAction::LaunchCapsule {
+                    handle: result.handle.clone(),
+                },
+            });
+        }
+
+        suggestions.truncate(8);
         suggestions
     }
 
