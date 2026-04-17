@@ -43,13 +43,21 @@ pub(super) fn render_command_chrome(
 }
 
 fn render_nav_buttons(state: &AppState, theme: &Theme) -> impl IntoElement {
-    let has_web_pane = state
+    let is_external_url = state
         .active_web_pane()
         .map(|p| matches!(p.route, GuestRoute::ExternalUrl(_)))
         .unwrap_or(false);
+    // Reload works on any web pane (capsule reload restarts the session)
+    let has_any_web_pane = state.active_web_pane().is_some()
+        || state.active_capsule_pane().is_some();
     let enabled_color = theme.text_secondary;
     let disabled_color = theme.text_tertiary;
-    let color = if has_web_pane {
+    let nav_color = if is_external_url {
+        enabled_color
+    } else {
+        disabled_color
+    };
+    let reload_color = if has_any_web_pane {
         enabled_color
     } else {
         disabled_color
@@ -62,8 +70,8 @@ fn render_nav_buttons(state: &AppState, theme: &Theme) -> impl IntoElement {
         .child(render_nav_button(
             "nav-back",
             "◀",
-            color,
-            has_web_pane,
+            nav_color,
+            is_external_url,
             theme,
             |_, window, cx| {
                 window.dispatch_action(Box::new(BrowserBack), cx);
@@ -72,8 +80,8 @@ fn render_nav_buttons(state: &AppState, theme: &Theme) -> impl IntoElement {
         .child(render_nav_button(
             "nav-forward",
             "▶",
-            color,
-            has_web_pane,
+            nav_color,
+            is_external_url,
             theme,
             |_, window, cx| {
                 window.dispatch_action(Box::new(BrowserForward), cx);
@@ -82,8 +90,8 @@ fn render_nav_buttons(state: &AppState, theme: &Theme) -> impl IntoElement {
         .child(render_nav_button(
             "nav-reload",
             "↻",
-            color,
-            has_web_pane,
+            reload_color,
+            has_any_web_pane,
             theme,
             |_, window, cx| {
                 window.dispatch_action(Box::new(BrowserReload), cx);
