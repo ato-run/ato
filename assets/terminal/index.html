@@ -133,6 +133,11 @@
         ']\x1b[0m');
       term.options.disableStdin = true;
     };
+
+    // ─── Error notification ──────────────────────────────────────────────
+    window.__ato_terminal_error = function(message) {
+      term.writeln('\r\n\x1b[31m[Error: ' + message + ']\x1b[0m');
+    };
   </script>
 </body>
 </html>
