@@ -1034,7 +1034,7 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         .insert("metadata".to_string(), metadata);
     lock.contract.entries.insert(
         "network".to_string(),
-        inferred_network_contract(&detected, input.single_script_language),
+        inferred_network_contract(&detected, input.single_script_language, &input.project_root),
     );
     lock.contract.entries.insert(
         "env_contract".to_string(),
@@ -3139,9 +3139,56 @@ fn infer_first_existing_trimmed(project_root: &Path, names: &[&str]) -> Option<S
     })
 }
 
+/// Reads `vite.config.{ts,js,mjs,cjs}` and extracts `server.port`.
+/// Falls back to Vite's default port (5173) if not found.
+fn detect_vite_port(project_root: &Path) -> u16 {
+    let config_names = [
+        "vite.config.ts",
+        "vite.config.js",
+        "vite.config.mjs",
+        "vite.config.cjs",
+    ];
+    for name in &config_names {
+        let path = project_root.join(name);
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Some(port) = extract_vite_server_port(&content) {
+            return port;
+        }
+    }
+    5173
+}
+
+fn extract_vite_server_port(content: &str) -> Option<u16> {
+    let re = Regex::new(r"port\s*:\s*(\d{4,5})").ok()?;
+    let cap = re.captures(content)?;
+    cap.get(1)?.as_str().parse().ok()
+}
+
+/// Extracts metadata from the `scripts.dev` field of a `package.json` string.
+fn extract_dev_script_info(package_json: &str) -> Option<DevScriptInfo> {
+    let json: Value = serde_json::from_str(package_json).ok()?;
+    let dev = json.get("scripts")?.get("dev")?.as_str()?;
+    Some(DevScriptInfo {
+        command: dev.to_string(),
+        is_vite: dev.contains("vite"),
+        is_next: dev.contains("next"),
+    })
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct DevScriptInfo {
+    command: String,
+    is_vite: bool,
+    is_next: bool,
+}
+
 fn inferred_network_contract(
     detected: &DetectedProject,
     single_script_language: Option<SingleScriptLanguage>,
+    project_root: &Path,
 ) -> Value {
     if single_script_language.is_some() {
         return json!({
@@ -3157,7 +3204,16 @@ fn inferred_network_contract(
                 if node.has_hono {
                     3000
                 } else if node.scripts.has_dev {
-                    5173
+                    let dev_info = fs::read_to_string(project_root.join("package.json"))
+                        .ok()
+                        .as_deref()
+                        .and_then(extract_dev_script_info);
+                    let is_vite = dev_info.map(|d| d.is_vite).unwrap_or(false);
+                    if is_vite {
+                        detect_vite_port(project_root)
+                    } else {
+                        3000
+                    }
                 } else {
                     3000
                 }
