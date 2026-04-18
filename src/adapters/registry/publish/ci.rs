@@ -602,19 +602,14 @@ mod tests {
         fs::create_dir_all(root).expect("fixture dir");
         fs::write(
             root.join("capsule.toml"),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "desktop-demo"
 version = "0.1.0"
 type = "app"
-default_target = "desktop"
 
-[targets.desktop]
-runtime = "source"
-driver = "native"
-entrypoint = "sh"
-cmd = ["build-app.sh"]
+runtime = "source/native"
 working_dir = "."
-
+run = "sh build-app.sh"
 [artifact]
 framework = "gpui-wry"
 stage = "unsigned"
@@ -744,24 +739,22 @@ args = ["--deep", "--force", "--sign", "-", "dist/Desktop Demo.app"]
         std::fs::write(
             tmp.path().join("capsule.toml"),
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "tool"
 version = "1.0.0"
 type = "app"
+
 default_target = "default"
 
 [targets.default]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.12"
-run_command = "python3 default.py"
+run = "python3 default.py"
 
 [targets.export]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.12"
-run_command = "python3 tool.py"
-
+run = "python3 tool.py"
 [exports.cli.tool]
 kind = "python-tool"
 target = "export"

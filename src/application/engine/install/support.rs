@@ -2579,24 +2579,22 @@ mod tests {
     async fn resolve_run_target_or_install_resolves_cli_export_from_installed_capsule() {
         let resolved = resolve_export_target(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "tool"
 version = "1.0.0"
 type = "app"
+
 default_target = "default"
 
 [targets.default]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11"
-entrypoint = "default.py"
+run = "default.py"
 
 [targets.export]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11"
-run_command = "python3 tool.py --from-target"
-
+run = "python3 tool.py --from-target"
 [exports.cli.tool]
 kind = "python-tool"
 target = "export"
@@ -2619,18 +2617,14 @@ args = ["--from-export"]
     async fn resolve_run_target_or_install_errors_when_export_missing() {
         let err = resolve_export_target(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "tool"
 version = "1.0.0"
 type = "app"
-default_target = "default"
 
-[targets.default]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11"
-entrypoint = "default.py"
-"#,
+run = "default.py""#,
         )
         .await
         .expect_err("missing export must fail");
@@ -2651,18 +2645,14 @@ entrypoint = "default.py"
     async fn resolve_run_target_or_install_errors_when_export_slug_mismatches() {
         let err = resolve_export_target(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "tool"
 version = "1.0.0"
 type = "app"
-default_target = "export"
 
-[targets.export]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11"
-entrypoint = "tool.py"
-
+run = "tool.py"
 [exports.cli.other-tool]
 kind = "python-tool"
 target = "export"
@@ -2684,18 +2674,14 @@ target = "export"
     async fn resolve_run_target_or_install_errors_when_export_backend_is_not_python_tool() {
         let err = resolve_export_target(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "tool"
 version = "1.0.0"
 type = "app"
-default_target = "export"
 
-[targets.export]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11"
-entrypoint = "tool.py"
-
+run = "tool.py"
 [exports.cli.tool]
 kind = "node-tool"
 target = "export"
@@ -2717,18 +2703,14 @@ target = "export"
     async fn resolve_run_target_or_install_errors_when_export_target_missing() {
         let err = resolve_export_target(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "tool"
 version = "1.0.0"
 type = "app"
-default_target = "default"
 
-[targets.default]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11"
-entrypoint = "default.py"
-
+run = "default.py"
 [exports.cli.tool]
 kind = "python-tool"
 target = "missing"
@@ -2750,18 +2732,14 @@ target = "missing"
     async fn resolve_run_target_or_install_errors_when_export_target_is_not_source_python() {
         let err = resolve_export_target(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "tool"
 version = "1.0.0"
 type = "app"
-default_target = "export"
 
-[targets.export]
-runtime = "source"
-driver = "node"
+runtime = "source/node"
 runtime_version = "20"
-entrypoint = "tool.js"
-
+run = "tool.js"
 [exports.cli.tool]
 kind = "python-tool"
 target = "export"

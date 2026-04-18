@@ -1615,18 +1615,14 @@ mod tests {
         std::fs::write(
             &original_manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
-runtime = "source"
-driver = "node"
+runtime = "source/node"
 runtime_version = "20.11.0"
-run_command = "node server.js"
-"#,
+run = "node server.js""#,
         )
         .expect("write original manifest");
         let shadow_root = tmp
@@ -1639,19 +1635,15 @@ run_command = "node server.js"
         std::fs::write(
             &shadow_manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
-runtime = "source"
-driver = "node"
+runtime = "source/node"
 runtime_version = "20.11.0"
 working_dir = "workspace"
-run_command = "node server.js"
-"#,
+run = "node server.js""#,
         )
         .expect("write shadow manifest");
 
@@ -1804,19 +1796,15 @@ run_command = "node server.js"
         std::fs::write(
             workspace_root.join("capsule.toml"),
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-provider"
 version = "0.1.0"
 type = "job"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11.10"
-entrypoint = "main.py"
 source_layout = "anchored_entrypoint"
-"#,
+run = "main.py""#,
         )
         .expect("write provider manifest");
         std::fs::write(workspace_root.join("main.py"), "print('ok')\n")
@@ -2042,17 +2030,13 @@ source_layout = "anchored_entrypoint"
         let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
             toml::from_str(
                 r#"
-                schema_version = "0.2"
+                schema_version = "0.3"
                 name = "app"
                 version = "0.1.0"
                 type = "app"
-                default_target = "app"
 
-                [targets.app]
-                runtime = "source"
-                driver = "node"
-                run_command = "node server.js"
-                "#,
+                runtime = "source/node"
+                run = "node server.js""#,
             )
             .expect("manifest"),
             tmp.path().join("capsule.toml"),
@@ -2074,16 +2058,13 @@ source_layout = "anchored_entrypoint"
 
         let manifest = CapsuleManifest::from_toml(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
-
 [state.data]
 kind = "filesystem"
 durability = "persistent"
@@ -2127,16 +2108,13 @@ target = "/var/lib/app"
 
         let manifest = CapsuleManifest::from_toml(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
-
 [state.data]
 kind = "filesystem"
 durability = "persistent"
@@ -2185,16 +2163,13 @@ target = "/var/lib/app"
 
         let manifest_a = CapsuleManifest::from_toml(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
-
 [state.data]
 kind = "filesystem"
 durability = "persistent"
@@ -2213,16 +2188,13 @@ target = "/var/lib/app"
         .unwrap();
         let manifest_b = CapsuleManifest::from_toml(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
-
 [state.data]
 kind = "filesystem"
 durability = "persistent"

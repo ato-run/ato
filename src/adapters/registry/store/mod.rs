@@ -2011,16 +2011,13 @@ fn new_operation_id(op_type: &str) -> String {
 fn build_manifest_from_payload(payload_bytes: &[u8]) -> Result<(CapsuleManifest, Vec<u8>)> {
     let base_manifest = CapsuleManifest::from_toml(
         r#"
-schema_version = "1"
+schema_version = "0.3"
 name = "registry-artifact"
 version = "0.0.0"
 type = "app"
-default_target = "default"
 
-[targets.default]
 runtime = "source"
-entrypoint = "main"
-"#,
+run = "main""#,
     )?;
     manifest_payload::build_distribution_manifest(&base_manifest, payload_bytes).map_err(Into::into)
 }

@@ -49,18 +49,14 @@ fn write_static_publish_project(dir: &Path, name: &str, version: &str) {
     fs::write(
         dir.join("capsule.toml"),
         format!(
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "{name}"
 version = "{version}"
 type = "app"
-default_target = "site"
 
-[targets.site]
-runtime = "web"
-driver = "static"
-entrypoint = "dist"
+runtime = "web/static"
 port = 4173
-"#
+run = "dist""#
         ),
     )
     .expect("write manifest");
@@ -1435,17 +1431,13 @@ fn write_native_build_fixture(root: &std::path::Path, executable: bool) {
     fs::create_dir_all(root.join("MyApp.app/Contents/MacOS")).unwrap();
     fs::write(
         root.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "my-app"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "native"
-entrypoint = "MyApp.app"
-"#,
+runtime = "source/native"
+run = "MyApp.app""#,
     )
     .unwrap();
     let binary = root.join("MyApp.app/Contents/MacOS/MyApp");
@@ -1466,19 +1458,15 @@ fn write_native_command_build_fixture(root: &std::path::Path) {
     fs::create_dir_all(root).unwrap();
     fs::write(
         root.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "my-app"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "native"
-entrypoint = "sh"
+runtime = "source/native"
 cmd = ["build-app.sh"]
 working_dir = "."
-
+run = "sh"
 [artifact]
 framework = "tauri"
 stage = "unsigned"
@@ -1512,20 +1500,16 @@ fn write_inline_native_command_build_fixture(root: &std::path::Path) {
     fs::create_dir_all(root).unwrap();
     fs::write(
         root.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "time-management-desktop"
 version = "0.1.0"
 description = "Tauri desktop app for time management"
 type = "app"
-default_target = "desktop"
 
-[targets.desktop]
-runtime = "source"
-driver = "native"
-entrypoint = "sh"
+runtime = "source/native"
 cmd = ["build-app.sh"]
 working_dir = "."
-
+run = "sh"
 [artifact]
 framework = "tauri"
 stage = "unsigned"
@@ -1646,17 +1630,13 @@ fn test_build_strict_v3_non_app_native_target_keeps_strict_v3_error() {
     fs::create_dir_all(tmp.path().join("source")).unwrap();
     fs::write(
         tmp.path().join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "strict-v3-ci-check"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "native"
-entrypoint = "source/main.py"
-"#,
+runtime = "source/native"
+run = "source/main.py""#,
     )
     .unwrap();
     fs::write(
@@ -2030,16 +2010,12 @@ fn test_run_rejects_pnpm_toolchain_for_non_provider_targets() {
     let temp = tempdir().unwrap();
     fs::write(
         temp.path().join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
-default_target = "app"
 
-[targets.app]
-runtime = "node"
-driver = "node"
-entrypoint = "index.mjs"
-"#,
+runtime = "node/node"
+run = "index.mjs""#,
     )
     .unwrap();
     fs::write(temp.path().join("index.mjs"), "console.log('ok')\n").unwrap();

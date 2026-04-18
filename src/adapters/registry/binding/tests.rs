@@ -41,16 +41,13 @@ fn normalize_local_service_locator_requires_loopback_host() {
 fn ingress_binding_contract_carries_allow_from_metadata() {
     let manifest = CapsuleManifest::from_toml(
         r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
-
 [services.api]
 target = "app"
 network = { publish = true, allow_from = ["web", "worker"] }
@@ -67,16 +64,13 @@ network = { publish = true, allow_from = ["web", "worker"] }
 fn local_service_binding_contract_allows_non_published_services() {
     let manifest = CapsuleManifest::from_toml(
         r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
-
 [services.api]
 target = "app"
 network = { allow_from = ["web"] }
@@ -94,17 +88,14 @@ network = { allow_from = ["web"] }
 fn derive_service_upstream_locator_uses_target_port() {
     let manifest = CapsuleManifest::from_toml(
         r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
 port = 4310
-
 [services.main]
 target = "app"
 network = { publish = true }
@@ -120,10 +111,11 @@ network = { publish = true }
 fn derive_service_endpoint_locator_honors_target_and_port_overrides() {
     let manifest = CapsuleManifest::from_toml(
         r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
+
 default_target = "app"
 
 [targets.app]
@@ -135,7 +127,6 @@ port = 4310
 runtime = "oci"
 image = "ghcr.io/example/app:alt"
 port = 5320
-
 [services.api]
 network = { allow_from = ["web"] }
 "#,
@@ -158,17 +149,14 @@ fn load_manifest_reads_capsule_artifact() {
     let file = fs::File::create(&capsule_path).expect("create capsule");
     let mut builder = tar::Builder::new(file);
     let manifest = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
 port = 4310
-
 [services.main]
 network = { publish = true }
 "#;
@@ -189,17 +177,14 @@ network = { publish = true }
 fn auto_bindable_service_names_select_publish_and_allow_from() {
     let manifest = CapsuleManifest::from_toml(
         r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
 port = 4310
-
 [services.main]
 network = { publish = true }
 

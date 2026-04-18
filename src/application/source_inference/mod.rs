@@ -4587,19 +4587,15 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         fs::write(
             dir.path().join("capsule.toml"),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-entrypoint = "npm"
+runtime = "source/node"
 cmd = ["start"]
-driver = "node"
-    runtime_version = "20"
-"#,
+runtime_version = "20"
+run = "npm""#,
         )
         .expect("write manifest");
 
@@ -4630,19 +4626,15 @@ driver = "node"
         let dir = tempdir().expect("tempdir");
         fs::write(
             dir.path().join("capsule.toml"),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "node"
-entrypoint = "npm"
+runtime = "source/node"
 cmd = ["start"]
 runtime_version = "20"
-"#,
+run = "npm""#,
         )
         .expect("write manifest");
 
@@ -4678,18 +4670,14 @@ runtime_version = "20"
         let dir = tempdir().expect("tempdir");
         fs::write(
             dir.path().join("capsule.toml"),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "2.1.3"
-entrypoint = "main.ts"
-"#,
+run = "main.ts""#,
         )
         .expect("write manifest");
 
@@ -4725,20 +4713,16 @@ entrypoint = "main.ts"
         let dir = tempdir().expect("tempdir");
         fs::write(
             dir.path().join("capsule.toml"),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
+runtime = "web/static"
+port = 8080
+run = "public/index.html"
 [network]
 egress_allow = ["api.github.com"]
-
-[targets.web]
-runtime = "web"
-driver = "static"
-entrypoint = "public/index.html"
-port = 8080
 "#,
         )
         .expect("write manifest");
@@ -4791,18 +4775,14 @@ port = 8080
         let dir = tempdir().expect("tempdir");
         fs::write(
             dir.path().join("capsule.toml"),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "1.46.3"
-entrypoint = "main.ts"
-
+run = "main.ts"
 [ipc.imports.greeter]
 from = "missing-service"
 "#,
@@ -4852,19 +4832,15 @@ from = "missing-service"
         );
         fs::write(
             dir.path().join("capsule.toml"),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "desktop"
 
-[targets.desktop]
-runtime = "source"
-driver = "native"
-entrypoint = "pnpm"
+runtime = "source/native"
 cmd = ["build"]
 working_dir = "."
-
+run = "pnpm"
 [artifact]
 framework = "tauri"
 stage = "unsigned"
@@ -5560,18 +5536,14 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
         );
         fs::write(
             dir.path().join("capsule.toml"),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "desktop"
 
-[targets.desktop]
-runtime = "source"
-driver = "native"
-entrypoint = "pnpm"
+runtime = "source/native"
 cmd = ["build"]
-
+run = "pnpm"
 [artifact]
 framework = "tauri"
 stage = "unsigned"
@@ -5788,24 +5760,22 @@ print('ok')
         let dir = tempdir().expect("tempdir");
         fs::write(
             dir.path().join("capsule.toml"),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
+
 default_target = "main"
 
 [targets.main]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "2.1.3"
-entrypoint = "main.ts"
+run = "main.ts"
 
 [targets.worker]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "2.1.3"
-entrypoint = "worker.ts"
-
+run = "worker.ts"
 [services.main]
 target = "main"
 
