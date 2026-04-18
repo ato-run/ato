@@ -400,9 +400,10 @@ fn run_lifecycle_shell_command(
         // attempting to download the pinned pnpm version in offline/CI environments.
         .env("npm_config_manage_package_manager_versions", "false")
         .env("npm_config_approve_builds", "on")
-        // Skip husky git-hooks setup: the capsule workspace has no .git dir so
-        // husky's prepare/postinstall script would fail with exit code 128.
-        .env("HUSKY", "0");
+        // Skip git-hooks managers (husky, lefthook, etc.): the capsule workspace
+        // has no .git dir so their prepare/postinstall scripts would fail with exit 128.
+        .env("HUSKY", "0")
+        .env("LEFTHOOK", "0");
 
     for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
         cmd.env(key, value);
