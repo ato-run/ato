@@ -118,6 +118,7 @@ pub(super) fn normalize_github_install_preview_toml(
 
         if runtime.as_deref() == Some("source/node") {
             normalize_v03_source_node_typescript_run(&mut parsed, checkout_dir)?;
+            normalize_v03_ui_framework_run_to_dev_server(&mut parsed, checkout_dir)?;
         }
 
         changed_pack_include_from_checkout(&mut parsed, checkout_dir)?;
@@ -436,11 +437,67 @@ fn normalize_v03_source_node_typescript_run(
     Ok(())
 }
 
+/// When the server infers `run = "node src/main.tsx"` (or .jsx/.astro/.svelte/.vue),
+/// Node.js cannot execute those files natively, causing ERR_UNKNOWN_FILE_EXTENSION.
+/// If the project has a `dev` script in package.json, redirect to `<pkg_manager> run dev`.
+/// This runs after `normalize_v03_source_node_typescript_run` so CLI tools with a bin+build
+/// path are already rewritten; only dev-server apps remain.
+fn normalize_v03_ui_framework_run_to_dev_server(
+    parsed: &mut toml::Value,
+    checkout_dir: &Path,
+) -> Result<()> {
+    let Some(run) = parsed
+        .get("run")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+
+    let run_parts = run.split_whitespace().collect::<Vec<_>>();
+    if run_parts.len() < 2 || run_parts[0] != "node" {
+        return Ok(());
+    }
+
+    let entry = run_parts[1];
+    let ext = entry.rsplit('.').next().unwrap_or("");
+    // Extensions that Node.js cannot execute natively without a bundler/transpiler
+    let needs_dev_server = matches!(ext, "ts" | "mts" | "cts" | "tsx" | "jsx" | "astro" | "svelte" | "vue");
+    if !needs_dev_server {
+        return Ok(());
+    }
+
+    let Some(package_json) = read_package_json(checkout_dir) else {
+        return Ok(());
+    };
+
+    let dev_script_body = package_json
+        .get("scripts")
+        .and_then(|v| v.get("dev"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+
+    let Some(dev_script_body) = dev_script_body else {
+        return Ok(());
+    };
+
+    let package_manager = infer_node_package_manager_command_prefix(checkout_dir, &package_json);
+    let dev_command = normalize_package_script_command(package_manager, "dev", &dev_script_body);
+
+    let Some(table) = parsed.as_table_mut() else {
+        return Ok(());
+    };
+    table.insert("run".to_string(), toml::Value::String(dev_command));
+    Ok(())
+}
+
 fn ensure_pack_include_entry_in_table(table: &mut toml::value::Table, entry: String) {
     if entry.trim().is_empty() {
         return;
     }
-
     let pack = table
         .entry("pack".to_string())
         .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
