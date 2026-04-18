@@ -721,9 +721,9 @@ repository = "koh0920/sample"
         Some("sample")
     );
     assert_eq!(repository.as_deref(), Some("koh0920/sample"));
-    assert!(manifest_toml
-        .as_deref()
-        .is_some_and(|raw| raw.contains("default_target = \"cli\"")));
+    assert!(manifest_toml.as_deref().is_some_and(|raw| {
+        raw.contains("name = \"sample\"") && raw.contains("schema_version")
+    }));
     assert!(capsule_lock.is_none());
     assert_eq!(readme_markdown.as_deref(), Some("dummy"));
     assert_eq!(readme_source.as_deref(), Some("artifact"));

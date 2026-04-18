@@ -2587,14 +2587,16 @@ type = "app"
 default_target = "default"
 
 [targets.default]
-runtime = "source/python"
+runtime = "source"
+driver = "python"
 runtime_version = "3.11"
-run = "default.py"
+run_command = "default.py"
 
 [targets.export]
-runtime = "source/python"
+runtime = "source"
+driver = "python"
 runtime_version = "3.11"
-run = "python3 tool.py --from-target"
+run_command = "python3 tool.py --from-target"
 [exports.cli.tool]
 kind = "python-tool"
 target = "export"
@@ -2655,7 +2657,7 @@ runtime_version = "3.11"
 run = "tool.py"
 [exports.cli.other-tool]
 kind = "python-tool"
-target = "export"
+target = "app"
 "#,
         )
         .await
@@ -2742,7 +2744,7 @@ runtime_version = "20"
 run = "tool.js"
 [exports.cli.tool]
 kind = "python-tool"
-target = "export"
+target = "app"
 "#,
         )
         .await

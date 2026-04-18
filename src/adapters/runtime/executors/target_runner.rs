@@ -580,6 +580,7 @@ name = "demo"
 version = "0.1.0"
 type = "app"
 
+default_target = "export"
 runtime = "source/python"
 runtime_version = "3.11"
 run = "python3 tool.py --from-target""#;
@@ -665,6 +666,7 @@ name = "demo"
 version = "0.1.0"
 type = "app"
 
+default_target = "default"
 runtime = "source/python"
 runtime_version = "3.11"
 run = "python3 default.py --from-default""#;
