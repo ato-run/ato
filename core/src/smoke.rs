@@ -17,7 +17,7 @@ use crate::error::CapsuleError;
 use crate::isolation::HostIsolationContext;
 
 const DEFAULT_STARTUP_TIMEOUT_MS: u64 = 2000;
-const PORT_RETRY_TIMEOUT: Duration = Duration::from_secs(60);
+const PORT_RETRY_TIMEOUT: Duration = Duration::from_secs(120);
 const PORT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const STDERR_TAIL_MAX_BYTES: usize = 8192;
 const STDERR_CAPTURE_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
