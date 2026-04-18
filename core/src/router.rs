@@ -514,12 +514,9 @@ fn synthesize_manifest_from_lock(
         if let Some(image) = runtime.image.as_ref() {
             target.insert("image".to_string(), toml::Value::String(image.clone()));
         }
-        if !runtime.entrypoint.trim().is_empty() {
-            target.insert(
-                "entrypoint".to_string(),
-                toml::Value::String(runtime.entrypoint.clone()),
-            );
-        }
+        // schema_version "0.3" rejects legacy `entrypoint`/`cmd` fields.
+        // Execution entrypoint is read from the lock runtime model directly, not
+        // from this synthesized manifest, so these fields can be omitted here.
         if let Some(run_command) = runtime.run_command.as_ref() {
             if !run_command.trim().is_empty() {
                 target.insert(
@@ -527,19 +524,6 @@ fn synthesize_manifest_from_lock(
                     toml::Value::String(run_command.clone()),
                 );
             }
-        }
-        if !runtime.cmd.is_empty() {
-            target.insert(
-                "cmd".to_string(),
-                toml::Value::Array(
-                    runtime
-                        .cmd
-                        .iter()
-                        .cloned()
-                        .map(toml::Value::String)
-                        .collect(),
-                ),
-            );
         }
         if !runtime.env.is_empty() {
             let env = runtime
@@ -1696,16 +1680,16 @@ mod tests {
     fn orchestration_mode_detects_target_services() {
         let dir = write_manifest(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
+
 default_target = "web"
 
 [targets.web]
-runtime = "web"
-driver = "node"
-entrypoint = "server.js"
+runtime = "web/node"
+run = "server.js"
 port = 3000
 required_env = ["API_KEY"]
 
@@ -1713,7 +1697,6 @@ required_env = ["API_KEY"]
 runtime = "oci"
 image = "mysql:8"
 port = 3306
-
 [services.main]
 target = "web"
 depends_on = ["db"]
@@ -1822,23 +1805,22 @@ run = "echo 'Hello World' && /app/server --port $PORT"
     fn orchestration_mode_defaults_main_target() {
         let dir = write_manifest(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
+
 default_target = "web"
 
 [targets.web]
-runtime = "web"
-driver = "node"
-entrypoint = "server.js"
+runtime = "web/node"
+run = "server.js"
 port = 3000
 
 [targets.db]
 runtime = "oci"
 image = "mysql:8"
 port = 3306
-
 [services.main]
 depends_on = ["db"]
 
@@ -1867,16 +1849,16 @@ target = "db"
     fn resolve_services_builds_connections() {
         let dir = write_manifest(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
+
 default_target = "web"
 
 [targets.web]
-runtime = "web"
-driver = "node"
-entrypoint = "server.js"
+runtime = "web/node"
+run = "server.js"
 port = 3000
 required_env = ["API_KEY"]
 
@@ -1884,7 +1866,6 @@ required_env = ["API_KEY"]
 runtime = "oci"
 image = "mysql:8"
 port = 3306
-
 [services.main]
 target = "web"
 depends_on = ["db"]
@@ -1924,16 +1905,13 @@ network = { aliases = ["mysql"] }
     fn resolve_services_includes_ephemeral_state_mounts_for_oci_targets() {
         let dir = write_manifest(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
-
 [state.data]
 kind = "filesystem"
 durability = "ephemeral"
@@ -1971,16 +1949,13 @@ target = "/var/lib/app"
     fn resolve_services_requires_explicit_bind_for_persistent_state() {
         let dir = write_manifest(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
-
 [state.data]
 kind = "filesystem"
 durability = "persistent"
@@ -2016,16 +1991,13 @@ target = "/var/lib/app"
     fn resolve_services_uses_explicit_bind_for_persistent_state() {
         let dir = write_manifest(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
-
 [state.data]
 kind = "filesystem"
 durability = "persistent"
