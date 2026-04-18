@@ -63,17 +63,13 @@ fn run_lockfile_measurement() -> (
     let temp = TempDir::new().expect("tempdir");
     let manifest_path = temp.path().join("capsule.toml");
     let manifest_text = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "alloc-gate-demo"
 version = "0.1.0"
 type = "app"
-default_target = "default"
 
-[targets.default]
-runtime = "source"
-driver = "native"
-entrypoint = "source/main.sh"
-"#;
+runtime = "source/native"
+run = "source/main.sh""#;
     fs::write(&manifest_path, manifest_text).expect("write manifest");
     fs::create_dir_all(temp.path().join("source")).expect("create source dir");
     fs::write(temp.path().join("source/main.sh"), "echo alloc-gate").expect("write entrypoint");

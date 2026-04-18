@@ -575,18 +575,14 @@ from = "./missing-service"
         let temp_dir = tempdir().expect("tempdir");
         let manifest_path = temp_dir.path().join("capsule.toml");
         let manifest_text = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "export"
 
-[targets.export]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11"
-run_command = "python3 tool.py --from-target"
-"#;
+run = "python3 tool.py --from-target""#;
         std::fs::write(&manifest_path, manifest_text).expect("write manifest");
         std::fs::write(temp_dir.path().join("uv.lock"), "# uv lock\n").expect("write uv.lock");
 
@@ -664,18 +660,14 @@ run_command = "python3 tool.py --from-target"
         let temp_dir = tempdir().expect("tempdir");
         let manifest_path = temp_dir.path().join("capsule.toml");
         let manifest_text = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "default"
 
-[targets.default]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11"
-run_command = "python3 default.py --from-default"
-"#;
+run = "python3 default.py --from-default""#;
         std::fs::write(&manifest_path, manifest_text).expect("write manifest");
         std::fs::write(temp_dir.path().join("uv.lock"), "# uv lock\n").expect("write uv.lock");
 
@@ -739,17 +731,13 @@ run_command = "python3 default.py --from-default"
         let manifest_path = temp_dir.path().join("capsule.toml");
         std::fs::write(
             &manifest_path,
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "default"
 
-[targets.default]
-runtime = "source"
-driver = "node"
-entrypoint = "index.js"
-"#,
+runtime = "source/node"
+run = "index.js""#,
         )
         .expect("write manifest");
         let legacy_lock_path = temp_dir.path().join("capsule.lock.json");

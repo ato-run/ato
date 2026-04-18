@@ -1493,10 +1493,11 @@ mod tests {
     async fn orchestrator_cleans_up_oci_services_and_network() {
         let plan = manifest_data(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
+
 default_target = "app"
 
 [targets.app]
@@ -1508,7 +1509,6 @@ port = 8080
 runtime = "oci"
 image = "mysql:8"
 port = 3306
-
 [state.data]
 kind = "filesystem"
 durability = "ephemeral"

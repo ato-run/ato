@@ -634,16 +634,13 @@ mod tests {
         fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "oci-app"
 version = "1.0.0"
 type = "app"
-default_target = "main"
 
-[targets.main]
 runtime = "oci"
-entrypoint = "ghcr.io/example/app:latest"
-"#,
+run = "ghcr.io/example/app:latest""#,
         )
         .expect("write manifest");
 

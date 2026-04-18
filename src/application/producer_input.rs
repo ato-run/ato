@@ -555,19 +555,15 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("capsule.toml"),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "desktop-demo"
 version = "0.1.0"
 type = "app"
-default_target = "desktop"
 
-[targets.desktop]
-runtime = "source"
-driver = "native"
-entrypoint = "sh"
+runtime = "source/native"
 cmd = ["build-app.sh"]
 working_dir = "."
-
+run = "sh"
 [artifact]
 framework = "gpui-wry"
 stage = "unsigned"
@@ -620,17 +616,13 @@ args = ["--deep", "--force", "--sign", "-", "dist/Desktop Demo.app"]
     fn producer_bridge_validation_fails_closed_on_target_mismatch() {
         let dir = tempdir().expect("tempdir");
         let manifest_path = dir.path().join("generated.capsule.toml");
-        let manifest_raw = r#"schema_version = "0.2"
+        let manifest_raw = r#"schema_version = "0.3"
     name = "demo"
     version = "0.1.0"
     type = "app"
-    default_target = "other"
 
-    [targets.other]
-    runtime = "source"
-    driver = "deno"
-    entrypoint = "main.ts"
-    "#
+runtime = "source/deno"
+run = "main.ts""#
         .to_string();
         std::fs::write(&manifest_path, &manifest_raw).expect("write manifest");
 
@@ -803,23 +795,19 @@ args = ["--deep", "--force", "--sign", "-", "dist/Desktop Demo.app"]
     #[test]
     fn compatibility_accessors_only_read_explicit_compatibility_input() {
         let manifest_raw = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "1.2.3"
 type = "app"
-default_target = "cli"
 
+runtime = "source/deno"
+run = "main.ts"
 [metadata]
 repository = "https://github.com/example/demo-app"
 
 [store]
 registry = "https://registry.example.test"
 playground = true
-
-[targets.cli]
-runtime = "source"
-driver = "deno"
-entrypoint = "main.ts"
 "#;
         let dir = tempdir().expect("tempdir");
         let manifest_path = dir.path().join("generated.capsule.toml");

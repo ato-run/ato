@@ -95,6 +95,28 @@ pub(super) fn normalize_github_install_preview_toml(
             }
         }
 
+        // Normalize v0.3 combined runtime drivers (e.g. source/pip -> source/python)
+        {
+            let normalized_runtime = parsed
+                .get("runtime")
+                .and_then(toml::Value::as_str)
+                .and_then(|rt| {
+                    let (base, drv) = rt.trim().split_once('/')?;
+                    let normalized = normalize_github_install_driver(&drv.to_ascii_lowercase());
+                    if normalized != drv.to_ascii_lowercase() {
+                        Some(format!("{base}/{normalized}"))
+                    } else {
+                        None
+                    }
+                });
+            if let Some(new_rt) = normalized_runtime {
+                parsed
+                    .as_table_mut()
+                    .expect("normalized GitHub install draft must stay a table")
+                    .insert("runtime".to_string(), toml::Value::String(new_rt));
+            }
+        }
+
         let runtime = parsed
             .get("runtime")
             .and_then(toml::Value::as_str)
@@ -137,11 +159,18 @@ pub(super) fn normalize_github_install_preview_toml(
             .context("Failed to serialize normalized GitHub install draft");
     }
 
-    let schema_is_v03 = parsed
-        .get("schema_version")
-        .and_then(toml::Value::as_str)
-        .map(|v| v.trim() == "0.3")
-        .unwrap_or(false);
+    let schema_is_v02 = incoming_schema == "0.2";
+    let schema_is_v03 = incoming_schema == "0.3";
+
+    // Upgrade schema_version 0.2 → 0.3 for multi-target manifests too.
+    if schema_is_v02 {
+        if let Some(table) = parsed.as_table_mut() {
+            table.insert(
+                "schema_version".to_string(),
+                toml::Value::String("0.3".to_string()),
+            );
+        }
+    }
 
     let Some(targets) = parsed
         .get_mut("targets")
@@ -150,14 +179,15 @@ pub(super) fn normalize_github_install_preview_toml(
         return Ok(manifest_text.to_string());
     };
 
-    let mut changed = false;
+    let mut changed = schema_is_v02;
     for (_, target_value) in targets.iter_mut() {
         let Some(target) = target_value.as_table_mut() else {
             continue;
         };
 
-        // schema_version=0.3 targets must not use legacy 'entrypoint' or 'cmd'; migrate to 'run'.
-        if schema_is_v03 {
+        // schema_version=0.3 targets (or upgraded from 0.2) must not use legacy 'entrypoint' or
+        // 'cmd'; migrate to 'run'.
+        if schema_is_v03 || schema_is_v02 {
             for legacy_field in ["entrypoint", "cmd"] {
                 if let Some(value) = target.remove(legacy_field) {
                     if !target.contains_key("run") {
