@@ -229,6 +229,159 @@ include = ["src/**", "fixtures/db.json", "package.json", "pnpm-lock.yaml"]
 }
 
 #[test]
+fn normalize_github_install_preview_toml_rewrites_tsx_run_to_dev_script_for_vite_app() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{"scripts": {"dev": "vite"}}"#,
+    )
+    .expect("write package.json");
+    std::fs::write(tmp.path().join("package-lock.json"), "{}").expect("write lock");
+    let manifest = r#"
+schema_version = "0.3"
+name = "my-vite-app"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node src/main.tsx"
+
+[pack]
+include = ["src/**", "package.json", "package-lock.json"]
+"#;
+
+    let normalized =
+        normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+    assert!(
+        normalized.contains("run = \"npm run dev\""),
+        "expected 'npm run dev' but got: {normalized}"
+    );
+}
+
+#[test]
+fn normalize_github_install_preview_toml_rewrites_jsx_run_to_dev_script() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{"scripts": {"dev": "vite"}}"#,
+    )
+    .expect("write package.json");
+    std::fs::write(tmp.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")
+        .expect("write pnpm lock");
+    let manifest = r#"
+schema_version = "0.3"
+name = "my-react-app"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node src/main.jsx"
+
+[pack]
+include = ["src/**", "package.json", "pnpm-lock.yaml"]
+"#;
+
+    let normalized =
+        normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+    assert!(
+        normalized.contains("run = \"pnpm run dev\""),
+        "expected 'pnpm run dev' but got: {normalized}"
+    );
+}
+
+#[test]
+fn normalize_github_install_preview_toml_rewrites_ts_without_bin_to_dev_script() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // No "bin" field — this is a dev-server app, not a CLI tool
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{"scripts": {"dev": "react-scripts start", "build": "react-scripts build"}}"#,
+    )
+    .expect("write package.json");
+    std::fs::write(tmp.path().join("package-lock.json"), "{}").expect("write lock");
+    let manifest = r#"
+schema_version = "0.3"
+name = "react-player-demo"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node src/index.ts"
+
+[pack]
+include = ["src/**", "package.json", "package-lock.json"]
+"#;
+
+    let normalized =
+        normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+    assert!(
+        normalized.contains("run = \"npm run dev\""),
+        "expected 'npm run dev' but got: {normalized}"
+    );
+}
+
+#[test]
+fn normalize_github_install_preview_toml_does_not_rewrite_tsx_if_no_dev_script() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{"scripts": {"start": "node dist/server.js"}}"#,
+    )
+    .expect("write package.json");
+    std::fs::write(tmp.path().join("package-lock.json"), "{}").expect("write lock");
+    let manifest = r#"
+schema_version = "0.3"
+name = "my-app"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node src/main.tsx"
+
+[pack]
+include = ["src/**", "package.json", "package-lock.json"]
+"#;
+
+    let normalized =
+        normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+    // Should not be rewritten because there is no dev script
+    assert!(
+        normalized.contains("run = \"node src/main.tsx\""),
+        "expected run to be unchanged but got: {normalized}"
+    );
+}
+
+#[test]
+fn normalize_github_install_preview_toml_rewrites_astro_run_to_dev_script() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{"scripts": {"dev": "astro dev"}}"#,
+    )
+    .expect("write package.json");
+    std::fs::write(tmp.path().join("package-lock.json"), "{}").expect("write lock");
+    let manifest = r#"
+schema_version = "0.3"
+name = "my-astro-site"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node src/pages/index.astro"
+
+[pack]
+include = ["src/**", "package.json", "package-lock.json"]
+"#;
+
+    let normalized =
+        normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+    assert!(
+        normalized.contains("run = \"npm run dev\""),
+        "expected 'npm run dev' but got: {normalized}"
+    );
+}
+
+#[test]
 fn normalize_github_install_preview_toml_collapses_legacy_env_required() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let manifest = r#"
