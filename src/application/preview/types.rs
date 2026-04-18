@@ -374,6 +374,9 @@ fn warning_is_soft_preview_advisory(warning: &str) -> bool {
     let lowered = warning.to_ascii_lowercase();
     lowered.contains("could not be normalized to a direct node entrypoint")
         || lowered.contains("a development server command was inferred from package.json")
+        // ato run uses plain install (not --frozen-lockfile), so lockfile platform-
+        // compatibility warnings from the store draft are not actionable for preview runs.
+        || lowered.contains("frozen-lockfile")
 }
 
 fn required_env_from_preview_toml(manifest_text: &str) -> Vec<String> {

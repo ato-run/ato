@@ -659,12 +659,18 @@ fn prepare_smoke_working_directory(
     command.stdin(Stdio::null());
     command.stdout(Stdio::null());
     command.stderr(Stdio::piped());
+    // apply_isolated_command_env calls env_clear() internally; set package-manager
+    // compat vars AFTER it so they are not wiped.
+    apply_isolated_command_env(&mut command, root, service, isolated_env);
     // Prevent corepack from enforcing the `packageManager` version pin, which may
     // refer to a version not yet cached on the host machine.
     command.env("COREPACK_ENABLE_STRICT", "0");
+    // Disable pnpm 10's auto-manage-package-manager-versions: without this, pnpm
+    // attempts to download and switch to the version pinned in packageManager, which
+    // fails in offline/isolated smoke environments.
+    command.env("npm_config_manage_package_manager_versions", "false");
     // Auto-approve pnpm build scripts without interactive prompt.
     command.env("npm_config_approve_builds", "on");
-    apply_isolated_command_env(&mut command, root, service, isolated_env);
 
     let output = command.output().map_err(|err| {
         SmokeFailureReport::new(
