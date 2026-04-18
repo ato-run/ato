@@ -1051,12 +1051,31 @@ fn read_entrypoint(manifest: &toml::Value) -> Result<String> {
 
 fn resolve_shell_command(command: &str, manifest: &toml::Value) -> CommandResolution {
     let env = merged_manifest_env(manifest);
+    let signals = execution_signals(manifest);
+
+    // `npm:binary` is a package-binary shorthand (e.g. "npm:vite --host 0.0.0.0").
+    // Pass it through as-is so spawn_main_service can resolve it via node_modules/.bin/.
+    // Wrapping it in `sh -c` would cause "/bin/sh: npm:vite: command not found".
+    if let Some(rest) = command.strip_prefix("npm:") {
+        let mut parts = rest.splitn(2, ' ');
+        let bin = parts.next().unwrap_or(rest);
+        let args: Vec<String> = parts
+            .next()
+            .map(|tail| tail.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default();
+        return (
+            format!("npm:{bin}"),
+            args,
+            if env.is_empty() { None } else { Some(env) },
+            signals,
+        );
+    }
 
     (
         "sh".to_string(),
         vec!["-c".to_string(), command.to_string()],
         if env.is_empty() { None } else { Some(env) },
-        execution_signals(manifest),
+        signals,
     )
 }
 
