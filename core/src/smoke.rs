@@ -545,7 +545,18 @@ fn spawn_main_service(
     isolated_env: &HostIsolationContext,
 ) -> std::io::Result<Child> {
     let cwd_path = resolve_path(root, &service.cwd);
-    let executable = resolve_path_with_cwd(root, &cwd_path, &service.executable);
+    // Resolve `npm:X` → `node_modules/.bin/X` so ato's package-bin references
+    // work inside the smoke's isolated environment.
+    let executable = if let Some(package_bin) = service.executable.trim().strip_prefix("npm:") {
+        let bin = cwd_path.join("node_modules").join(".bin").join(package_bin);
+        if bin.exists() {
+            bin
+        } else {
+            resolve_path_with_cwd(root, &cwd_path, &service.executable)
+        }
+    } else {
+        resolve_path_with_cwd(root, &cwd_path, &service.executable)
+    };
     let mut cmd = Command::new(&executable);
     let args = service
         .args
@@ -673,6 +684,16 @@ fn prepare_smoke_working_directory(
     command.env("npm_config_manage_package_manager_versions", "false");
     // Auto-approve pnpm build scripts without interactive prompt.
     command.env("npm_config_approve_builds", "on");
+    // Use the bundled pnpm content-addressable store (fetched during build) so the
+    // smoke install resolves from cache rather than downloading from the network.
+    if program == "pnpm" {
+        if let Some(bundled_store) = resolve_bundled_pnpm_store_dir(root) {
+            command.env("pnpm_config_store_dir", &bundled_store);
+            command.arg("--store-dir");
+            command.arg(&bundled_store);
+            command.arg("--prefer-offline");
+        }
+    }
 
     let output = command.output().map_err(|err| {
         SmokeFailureReport::new(
@@ -834,6 +855,24 @@ fn resolve_bundled_uv_cache_dir(root: &Path, service: &MainService) -> Option<St
         }
     }
 
+    None
+}
+
+/// Look for the pnpm content-addressable store bundled as an artifact in the
+/// capsule (populated by `pnpm fetch` during the build phase). Using it avoids
+/// a full network download during smoke test dependency preparation.
+fn resolve_bundled_pnpm_store_dir(root: &Path) -> Option<PathBuf> {
+    for base in [workspace_artifacts_dir(root), root.join("artifacts")] {
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let candidate = entry.path().join("pnpm-store");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+        }
+    }
     None
 }
 
