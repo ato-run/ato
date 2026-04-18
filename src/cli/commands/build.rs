@@ -312,7 +312,7 @@ pub fn execute_pack_command_with_injected_manifest(
     for diagnostic in ipc_diagnostics {
         futures::executor::block_on(reporter.warn(diagnostic.to_string()))?;
     }
-    run_v03_build_lifecycle_steps(&decision.plan, &reporter)?;
+    run_v03_build_lifecycle_steps(&decision.plan, &reporter, injected_manifest.is_none())?;
     record_timing(
         &mut timing_entries,
         "build.validation",
@@ -800,6 +800,7 @@ fn cleanup_failed_artifact(
 fn run_v03_build_lifecycle_steps(
     plan: &capsule_core::router::ManifestData,
     reporter: &std::sync::Arc<reporters::CliReporter>,
+    strict_lockfile: bool,
 ) -> Result<()> {
     let schema_version = plan
         .manifest
@@ -817,7 +818,7 @@ fn run_v03_build_lifecycle_steps(
         let working_dir = target_plan.execution_working_directory();
 
         if provisioned_roots.insert(working_dir.clone()) {
-            if let Some(command) = plan_v03_build_provision_command(&target_plan)? {
+            if let Some(command) = plan_v03_build_provision_command(&target_plan, strict_lockfile)? {
                 futures::executor::block_on(
                     reporter.notify(format!("⚙️  Provision [{}]: {}", target_label, command)),
                 )?;
@@ -869,6 +870,7 @@ fn run_v03_build_lifecycle_steps(
 
 fn plan_v03_build_provision_command(
     plan: &capsule_core::router::ManifestData,
+    strict_lockfile: bool,
 ) -> Result<Option<String>> {
     let runtime = plan.execution_runtime().unwrap_or_default();
     let driver = plan.execution_driver().unwrap_or_default();
@@ -921,16 +923,28 @@ fn plan_v03_build_provision_command(
         );
         let mut matches = Vec::new();
         if package_lock.exists() {
-            matches.push("npm ci");
+            matches.push(if strict_lockfile { "npm ci" } else { "npm install" });
         }
         if yarn_lock.exists() {
-            matches.push("yarn install --frozen-lockfile");
+            matches.push(if strict_lockfile {
+                "yarn install --frozen-lockfile"
+            } else {
+                "yarn install"
+            });
         }
         if pnpm_lock.exists() {
-            matches.push("pnpm install --frozen-lockfile");
+            matches.push(if strict_lockfile {
+                "pnpm install --frozen-lockfile"
+            } else {
+                "pnpm install"
+            });
         }
         if bun_lock.exists() || bun_lockb.exists() {
-            matches.push("bun install --frozen-lockfile");
+            matches.push(if strict_lockfile {
+                "bun install --frozen-lockfile"
+            } else {
+                "bun install"
+            });
         }
         return match matches.as_slice() {
             [] => Err(AtoExecutionError::lock_incomplete(
@@ -1430,7 +1444,7 @@ mod tests {
             ],
         );
 
-        let command = plan_v03_build_provision_command(&plan).expect("plan provision");
+        let command = plan_v03_build_provision_command(&plan, true).expect("plan provision");
         assert_eq!(command.as_deref(), Some("pnpm install --frozen-lockfile"));
     }
 
@@ -1450,7 +1464,7 @@ mod tests {
             ],
         );
 
-        let command = plan_v03_build_provision_command(&plan).expect("plan provision");
+        let command = plan_v03_build_provision_command(&plan, true).expect("plan provision");
         assert_eq!(command.as_deref(), Some("yarn install --frozen-lockfile"));
     }
 
@@ -1493,7 +1507,7 @@ mod tests {
         let reporter = std::sync::Arc::new(crate::reporters::CliReporter::new(true));
 
         std::env::set_var("ATO_BUILD_CACHE_TEST_ENV", "test");
-        run_v03_build_lifecycle_steps(&plan, &reporter).expect("first build");
+        run_v03_build_lifecycle_steps(&plan, &reporter, true).expect("first build");
         assert_eq!(
             std::fs::read_to_string(tmp.path().join(".tmp/build-count.txt")).expect("read count"),
             "x"
@@ -1504,7 +1518,7 @@ mod tests {
         );
 
         std::fs::remove_dir_all(tmp.path().join("dist")).expect("remove dist");
-        run_v03_build_lifecycle_steps(&plan, &reporter).expect("cache restore");
+        run_v03_build_lifecycle_steps(&plan, &reporter, true).expect("cache restore");
 
         assert_eq!(
             std::fs::read_to_string(tmp.path().join(".tmp/build-count.txt"))
