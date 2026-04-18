@@ -3,7 +3,7 @@ use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::router::{
     CompatManifestBridge, CompatProjectInput, ExecutionDescriptor, RuntimeDecision, RuntimeKind,
 };
-use capsule_core::types::ValidationMode;
+use capsule_core::types::{CapsuleManifest, ValidationMode};
 use capsule_core::CapsuleReporter;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -73,7 +73,16 @@ fn build_decision_from_manifest_text(
     manifest_text: &str,
     validation_mode: ValidationMode,
 ) -> Result<(RuntimeDecision, CompatManifestBridge)> {
-    let bridge = CompatManifestBridge::from_normalized_toml(manifest_text.to_string())?;
+    let bridge = {
+        // Parse and validate normally. Then get the intermediate normalized TOML (with
+        // [targets.<label>] populated) separately, bypassing the re-validation that would reject
+        // v0.2-style `entrypoint` fields produced by normalize_v03_target_table.
+        let parsed = CapsuleManifest::from_toml(manifest_text)
+            .map_err(|err| anyhow::anyhow!("Failed to parse manifest: {err}"))?;
+        let compat_toml = CapsuleManifest::normalize_to_compat_toml(manifest_text)
+            .map_err(|err| anyhow::anyhow!("Failed to normalize manifest: {err}"))?;
+        CompatManifestBridge::from_compat_normalized(parsed, compat_toml)
+    };
     bridge
         .manifest_model()
         .validate_for_mode(validation_mode)
@@ -1568,7 +1577,7 @@ run = "main.js""#;
             build_decision_from_manifest_text(tmp.path(), manifest, ValidationMode::Strict)
                 .expect("build decision from manifest text");
 
-        assert_eq!(decision.plan.selected_target_label(), "cli");
+        assert_eq!(decision.plan.selected_target_label(), "app");
         assert_eq!(bridge.package_name(), "build-helper-demo");
         assert!(!tmp.path().join("capsule.toml").exists());
     }
@@ -1611,16 +1620,6 @@ run = "main.js""#;
     #[test]
     fn injected_source_standalone_build_does_not_materialize_capsule_toml() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            tmp.path().join("package.json"),
-            r#"{"name":"bundle-demo","version":"0.1.0"}"#,
-        )
-        .expect("package.json");
-        std::fs::write(
-            tmp.path().join("package-lock.json"),
-            r#"{"name":"bundle-demo","version":"0.1.0","lockfileVersion":3,"packages":{}}"#,
-        )
-        .expect("package-lock.json");
         std::fs::write(tmp.path().join("main.js"), "console.log('bundle');\n").expect("main.js");
 
         let nacelle = tmp.path().join("nacelle");
@@ -1640,11 +1639,10 @@ name = "bundle-demo"
 version = "0.1.0"
 type = "app"
 
-runtime = "source/node"
-runtime_version = "20.11.0"
+runtime = "source"
 run = "main.js""#;
 
-        let error = execute_pack_command_with_injected_manifest(
+        let result = execute_pack_command_with_injected_manifest(
             tmp.path().to_path_buf(),
             false,
             None,
@@ -1661,9 +1659,10 @@ run = "main.js""#;
             Some(manifest),
             true,
         )
-        .expect_err("standalone source build may fail but must not materialize manifest");
+        .expect("standalone source build with injected manifest must not materialize manifest");
 
-        assert!(!error.to_string().is_empty());
+        assert!(result.ok);
+        assert_eq!(result.build_strategy, "source");
         assert!(!tmp.path().join("capsule.toml").exists());
     }
 
