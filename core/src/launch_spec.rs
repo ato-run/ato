@@ -184,8 +184,20 @@ fn resolve_launch_working_dir(plan: &ManifestData, command: &str) -> PathBuf {
     }
 
     let source_dir = plan.manifest_dir.join("source");
-    if source_dir.is_dir() && command_path_exists(&source_dir, command) {
-        return source_dir;
+    if source_dir.is_dir() {
+        // For package manager commands (npm, pnpm, yarn, bun), the command itself
+        // is a system binary — not a file inside source/. Check instead whether
+        // source/ looks like a Node.js project (has package.json).
+        let is_pkg_manager = matches!(
+            command.trim(),
+            "npm" | "pnpm" | "yarn" | "bun"
+        );
+        if is_pkg_manager && source_dir.join("package.json").exists() {
+            return source_dir;
+        }
+        if command_path_exists(&source_dir, command) {
+            return source_dir;
+        }
     }
 
     plan.manifest_dir.clone()
