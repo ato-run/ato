@@ -219,7 +219,7 @@ runtime = "source/deno"
 runtime_version = "2.1.3"
 run = "main.ts"
 [services.main]
-target = "web"
+target = "app"
 "#,
         );
 
@@ -337,9 +337,9 @@ version = "0.1.0"
 type = "app"
 
 runtime = "source/native"
-cmd = ["build"]
+build = "pnpm build"
 working_dir = "."
-run = "pnpm"
+run = "pnpm start"
 [artifact]
 framework = "tauri"
 stage = "unsigned"
@@ -392,14 +392,16 @@ type = "app"
 default_target = "main"
 
 [targets.main]
-runtime = "source/deno"
+runtime = "source"
+driver = "deno"
 runtime_version = "2.1.3"
-run = "main.ts"
+run_command = "main.ts"
 
 [targets.worker]
-runtime = "source/deno"
+runtime = "source"
+driver = "deno"
 runtime_version = "2.1.3"
-run = "worker.ts"
+run_command = "worker.ts"
 [services.main]
 target = "main"
 
@@ -596,14 +598,16 @@ type = "app"
 default_target = "main"
 
 [targets.main]
-runtime = "source/deno"
+runtime = "source"
+driver = "deno"
 runtime_version = "2.1.3"
-run = "main.ts"
+run_command = "main.ts"
 
 [targets.worker]
-runtime = "source/deno"
+runtime = "source"
+driver = "deno"
 runtime_version = "2.1.3"
-run = "worker.ts"
+run_command = "worker.ts"
 [services.main]
 target = "main"
 
@@ -621,14 +625,16 @@ type = "app"
 default_target = "main"
 
 [targets.main]
-runtime = "source/deno"
+runtime = "source"
+driver = "deno"
 runtime_version = "2.1.3"
-run = "main.ts"
+run_command = "main.ts"
 
 [targets.worker]
-runtime = "source/deno"
+runtime = "source"
+driver = "deno"
 runtime_version = "2.1.3"
-run = "worker.ts"
+run_command = "worker.ts"
 [services.worker]
 target = "worker"
 
