@@ -72,11 +72,13 @@ pub(super) fn normalize_github_install_preview_toml(
         return Ok(manifest_text.to_string());
     };
 
-    if parsed
+    let incoming_schema = parsed
         .get("schema_version")
         .and_then(toml::Value::as_str)
-        .map(|value| value.trim() == "0.3")
-        .unwrap_or(false)
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
+
+    if matches!(incoming_schema.as_str(), "0.3" | "0.2")
         && parsed.get("targets").is_none()
     {
         {
@@ -84,6 +86,13 @@ pub(super) fn normalize_github_install_preview_toml(
                 .as_table_mut()
                 .expect("normalized GitHub install draft must stay a table");
             collapse_legacy_required_env_field(table);
+            // Upgrade schema_version 0.2 → 0.3 so the manifest validator accepts it.
+            if incoming_schema == "0.2" {
+                table.insert(
+                    "schema_version".to_string(),
+                    toml::Value::String("0.3".to_string()),
+                );
+            }
         }
 
         let runtime = parsed
