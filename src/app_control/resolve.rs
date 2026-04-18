@@ -928,14 +928,14 @@ run = "backend/mock-tauri""#,
                 .target
                 .as_ref()
                 .map(|target| target.target_label.as_str()),
-            Some("desktop")
+            Some("app")
         );
         assert_eq!(
             resolution
-                .launch
+                .target
                 .as_ref()
-                .map(|launch| launch.command.as_str()),
-            Some("backend/mock-tauri")
+                .and_then(|target| target.driver.as_deref()),
+            Some("tauri")
         );
     }
 }

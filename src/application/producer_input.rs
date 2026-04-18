@@ -220,12 +220,36 @@ impl ProducerAuthoritativeInput {
                 selected_runtime.driver
             );
         }
-        if manifest_target.entrypoint.trim() != selected_runtime.entrypoint {
+        let effective_entrypoint = {
+            let ep = manifest_target.entrypoint.trim();
+            if ep.is_empty() {
+                manifest_target
+                    .run_command
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+            } else {
+                ep
+            }
+        };
+        let lock_effective_entrypoint = {
+            let ep = selected_runtime.entrypoint.trim();
+            if ep.is_empty() {
+                selected_runtime
+                    .run_command
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+            } else {
+                ep
+            }
+        };
+        if effective_entrypoint != lock_effective_entrypoint {
             anyhow::bail!(
                 "generated manifest bridge diverged from authoritative lock entrypoint: target '{}' entrypoint '{}' != '{}'",
                 bridge.manifest_model().default_target,
-                manifest_target.entrypoint.trim(),
-                selected_runtime.entrypoint
+                effective_entrypoint,
+                lock_effective_entrypoint
             );
         }
         if manifest_target.run_command.as_deref() != selected_runtime.run_command.as_deref() {
@@ -561,9 +585,9 @@ version = "0.1.0"
 type = "app"
 
 runtime = "source/native"
-cmd = ["build-app.sh"]
+build = "sh build-app.sh"
 working_dir = "."
-run = "sh"
+run = "sh run-app.sh"
 [artifact]
 framework = "gpui-wry"
 stage = "unsigned"
