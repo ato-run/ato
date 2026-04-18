@@ -32,18 +32,14 @@ fn validate_succeeds_for_valid_ipc_schema() {
     write_file(
         &temp.path().join("capsule.toml"),
         r#"
-schema_version = "1"
+schema_version = "0.3"
 name = "validate-ok"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "1.46.3"
-entrypoint = "main.ts"
-
+run = "main.ts"
 [ipc.exports]
 name = "validate-ok"
 
@@ -82,18 +78,14 @@ fn validate_fails_for_invalid_ipc_schema_reference() {
     write_file(
         &temp.path().join("capsule.toml"),
         r#"
-schema_version = "1"
+schema_version = "0.3"
 name = "validate-bad-schema"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "1.46.3"
-entrypoint = "main.ts"
-
+run = "main.ts"
 [ipc.exports]
 name = "validate-bad-schema"
 

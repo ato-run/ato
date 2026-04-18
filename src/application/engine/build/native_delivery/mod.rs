@@ -1429,10 +1429,19 @@ pub(crate) fn native_delivery_draft_contract_from_manifest(
         "closure_status".to_string(),
         Value::String("incomplete".to_string()),
     );
-    build.insert(
-        "program".to_string(),
-        Value::String(target.entrypoint.trim().to_string()),
-    );
+    let program = if !target.entrypoint.trim().is_empty() {
+        target.entrypoint.trim().to_string()
+    } else if let Some(run_cmd) = target.run_command.as_deref() {
+        run_cmd
+            .trim()
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    } else {
+        String::new()
+    };
+    build.insert("program".to_string(), Value::String(program));
     if !target.cmd.is_empty() {
         build.insert(
             "args".to_string(),
@@ -1577,7 +1586,13 @@ fn detect_native_manifest_contract(
         return Ok(None);
     }
 
-    let input = target.entrypoint.trim();
+    let input = if !target.entrypoint.trim().is_empty() {
+        target.entrypoint.trim()
+    } else if let Some(run_cmd) = target.run_command.as_deref() {
+        run_cmd.trim()
+    } else {
+        return Ok(None);
+    };
     if input.is_empty() {
         return Ok(None);
     }
@@ -1603,12 +1618,27 @@ fn detect_native_build_command(
         return Ok(None);
     }
 
-    let program = target.entrypoint.trim();
-    if program.is_empty() || target.cmd.is_empty() {
+    // In v0.2: entrypoint = "sh", cmd = ["build-app.sh"]
+    // In v0.3: run = "sh build-app.sh" (no separate cmd)
+    let (program, args) = if !target.entrypoint.trim().is_empty() && !target.cmd.is_empty() {
+        (target.entrypoint.trim().to_string(), target.cmd.clone())
+    } else if let Some(run_cmd) = target.run_command.as_deref() {
+        let parts: Vec<&str> = run_cmd.trim().split_whitespace().collect();
+        if parts.len() < 2 {
+            return Ok(None);
+        }
+        (
+            parts[0].to_string(),
+            parts[1..].iter().map(|s| s.to_string()).collect(),
+        )
+    } else {
+        return Ok(None);
+    };
+    if program.is_empty() {
         return Ok(None);
     }
 
-    let program_path = Path::new(program);
+    let program_path = Path::new(&program);
     if program_path.extension().and_then(|ext| ext.to_str()) == Some("app") {
         return Ok(None);
     }
@@ -1617,8 +1647,8 @@ fn detect_native_build_command(
         resolve_native_build_working_dir(manifest_dir, target.working_dir.as_deref())?;
 
     Ok(Some(NativeBuildCommand {
-        program: program.to_string(),
-        args: target.cmd.clone(),
+        program,
+        args,
         working_dir,
     }))
 }

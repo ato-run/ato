@@ -84,22 +84,18 @@ requires-python = ">=3.12"
     )
     .expect("write pyproject");
     let manifest = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
-runtime = "source"
-driver = "pip"
-entrypoint = "main.py"
-"#;
+runtime = "source/pip"
+run = "main.py""#;
 
     let normalized =
         normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
 
-    assert!(normalized.contains(r#"driver = "python""#));
+    assert!(normalized.contains(r#"runtime = "source/python""#));
     assert!(normalized.contains(r#"runtime_version = "3.12.0""#));
 }
 
@@ -107,22 +103,18 @@ entrypoint = "main.py"
 fn normalize_github_install_preview_toml_maps_native_tooling_drivers() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let manifest = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
-runtime = "source"
-driver = "cargo"
-entrypoint = "src/main.rs"
-"#;
+runtime = "source/cargo"
+run = "src/main.rs""#;
 
     let normalized =
         normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
 
-    assert!(normalized.contains(r#"driver = "native""#));
+    assert!(normalized.contains(r#"runtime = "source/native""#));
     assert!(!normalized.contains("runtime_version"));
 }
 
@@ -473,20 +465,15 @@ fn normalize_github_install_preview_toml_accepts_root_pnpm_lockfile_include() {
     std::fs::write(tmp.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
         .expect("write pnpm lock");
     let manifest = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
+runtime = "source/node"
+run = "pnpm dev"
 [pack]
 include = ["package.json", "pnpm-lock.yaml", "src/**"]
-
-[targets.app]
-runtime = "source"
-driver = "node"
-entrypoint = "src/main.ts"
-run_command = "pnpm dev"
 "#;
 
     let normalized =
@@ -503,21 +490,16 @@ fn normalize_github_install_preview_toml_accepts_subdir_pnpm_lockfile_include() 
     std::fs::write(app_dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
         .expect("write pnpm lock");
     let manifest = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
+runtime = "source/node"
+working_dir = "apps/web"
+run = "pnpm dev"
 [pack]
 include = ["apps/web/**"]
-
-[targets.app]
-runtime = "source"
-driver = "node"
-working_dir = "apps/web"
-entrypoint = "src/main.ts"
-run_command = "pnpm dev"
 "#;
 
     let normalized =
@@ -534,21 +516,16 @@ fn normalize_github_install_preview_toml_auto_adds_subdir_lockfile_to_pack_inclu
     std::fs::write(app_dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
         .expect("write pnpm lock");
     let manifest = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
+runtime = "source/node"
+working_dir = "apps/web"
+run = "pnpm dev"
 [pack]
 include = ["package.json", "src/**"]
-
-[targets.app]
-runtime = "source"
-driver = "node"
-working_dir = "apps/web"
-entrypoint = "src/main.ts"
-run_command = "pnpm dev"
 "#;
 
     let normalized =
@@ -567,21 +544,16 @@ fn normalize_github_install_preview_toml_resolves_multiple_lockfiles_by_priority
     std::fs::write(app_dir.join("yarn.lock"), "__metadata:\n  version: 4")
         .expect("write yarn lock");
     let manifest = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
+runtime = "source/node"
+working_dir = "apps/web"
+run = "pnpm dev"
 [pack]
 include = ["package.json", "src/**"]
-
-[targets.app]
-runtime = "source"
-driver = "node"
-working_dir = "apps/web"
-entrypoint = "src/main.ts"
-run_command = "pnpm dev"
 "#;
 
     let normalized =
@@ -614,21 +586,16 @@ fn normalize_github_install_preview_toml_resolves_multiple_lockfiles_via_package
     .expect("write package.json");
 
     let manifest = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
+runtime = "source/node"
+working_dir = "apps/web"
+run = "bun dev"
 [pack]
 include = ["apps/web/package.json", "apps/web/src/**"]
-
-[targets.app]
-runtime = "source"
-driver = "node"
-working_dir = "apps/web"
-entrypoint = "src/index.ts"
-run_command = "bun dev"
 "#;
 
     let normalized =
@@ -655,20 +622,15 @@ fn normalize_github_install_preview_toml_resolves_multiple_lockfiles_by_priority
         .expect("write package.json");
 
     let manifest = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
+runtime = "source/node"
+run = "node src/index.js"
 [pack]
 include = ["package.json", "src/**"]
-
-[targets.app]
-runtime = "source"
-driver = "node"
-entrypoint = "src/index.ts"
-run_command = "node src/index.js"
 "#;
 
     let normalized =
@@ -1116,16 +1078,13 @@ fn build_mock_fixture(scoped_id: &str, version: &str, chunks: Vec<Vec<u8>>) -> M
     let merkle_root = compute_merkle_root_for_test(&chunk_hashes);
     let mut manifest = CapsuleManifest::from_toml(
         r#"
-schema_version = "1"
+schema_version = "0.3"
 name = "sample"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
 runtime = "source"
-entrypoint = "main.py"
-"#,
+run = "main.py""#,
     )
     .expect("manifest");
     manifest.distribution = Some(capsule_core::types::DistributionInfo {
@@ -2045,16 +2004,13 @@ fn test_compute_manifest_hash_without_signatures_is_stable() {
     let chunk_hash = format!("blake3:{}", blake3::hash(b"payload").to_hex());
     let mut manifest = CapsuleManifest::from_toml(
         r#"
-schema_version = "1"
+schema_version = "0.3"
 name = "sample"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
 runtime = "source"
-entrypoint = "main.py"
-"#,
+run = "main.py""#,
     )
     .expect("manifest");
     manifest.distribution = Some(capsule_core::types::DistributionInfo {
@@ -2097,16 +2053,13 @@ fn test_verify_payload_chunks_and_merkle_root() {
     let chunk_hash = format!("blake3:{}", blake3::hash(&payload).to_hex());
     let mut manifest = CapsuleManifest::from_toml(
         r#"
-schema_version = "1"
+schema_version = "0.3"
 name = "sample"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
 runtime = "source"
-entrypoint = "main.py"
-"#,
+run = "main.py""#,
     )
     .expect("manifest");
     manifest.distribution = Some(capsule_core::types::DistributionInfo {
@@ -2207,16 +2160,13 @@ fn test_reconstruct_payload_reports_missing_chunks() {
 
     let mut manifest = CapsuleManifest::from_toml(
         r#"
-schema_version = "1"
+schema_version = "0.3"
 name = "sample"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
 runtime = "source"
-entrypoint = "main.py"
-"#,
+run = "main.py""#,
     )
     .expect("manifest");
     manifest.distribution = Some(capsule_core::types::DistributionInfo {

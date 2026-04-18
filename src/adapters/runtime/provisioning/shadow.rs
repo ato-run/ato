@@ -195,6 +195,45 @@ pub fn materialize_shadow_manifest(
     let relative_working_dir =
         diff_paths(shadow_working_dir, &shadow_workspace.root_dir).unwrap_or_default();
 
+    // For v0.3 flat manifests (no [targets] table), synthesize one from top-level fields
+    let is_v03_flat = manifest.get("targets").is_none()
+        && (manifest.get("run").is_some() || manifest.get("runtime").is_some());
+    if is_v03_flat {
+        let manifest_table = manifest
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("manifest must be a TOML table"))?;
+        let mut target_table = toml::value::Table::new();
+        for key in [
+            "runtime", "run", "port", "runtime_version", "working_dir", "runtime_tools",
+        ] {
+            if let Some(val) = manifest_table.remove(key) {
+                if key == "runtime" {
+                    if let Some(rt_str) = val.as_str() {
+                        if let Some((rt, drv)) = rt_str.split_once('/') {
+                            target_table
+                                .insert("runtime".to_string(), Value::String(rt.to_string()));
+                            target_table
+                                .insert("driver".to_string(), Value::String(drv.to_string()));
+                            continue;
+                        }
+                    }
+                }
+                if key == "run" {
+                    target_table.insert("run_command".to_string(), val);
+                } else {
+                    target_table.insert(key.to_string(), val);
+                }
+            }
+        }
+        let mut targets_table = toml::value::Table::new();
+        targets_table.insert(target_label.to_string(), Value::Table(target_table));
+        manifest_table.insert("targets".to_string(), Value::Table(targets_table));
+        manifest_table.insert(
+            "default_target".to_string(),
+            Value::String(target_label.to_string()),
+        );
+    }
+
     let Some(targets) = manifest.get_mut("targets").and_then(Value::as_table_mut) else {
         anyhow::bail!("targets table is missing from manifest");
     };
@@ -577,17 +616,13 @@ mod tests {
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
-runtime = "source"
-driver = "node"
-run_command = "node server.js"
-"#,
+runtime = "source/node"
+run = "node server.js""#,
         )
         .expect("manifest");
 
