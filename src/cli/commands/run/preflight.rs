@@ -339,11 +339,14 @@ fn provision_command_from_cargo_importer(
 }
 
 fn node_install_command_from_evidence(evidence: &ImportedEvidence) -> Result<String> {
+    // Source/GitHub runs use non-strict install: lockfiles may come from a different
+    // platform or OS than the current machine, so --frozen-lockfile / npm ci would fail
+    // on checksum mismatches. Plain install is correct for developer-preview mode.
     let command = match evidence.importer_id {
-        ImporterId::Npm => "npm ci",
-        ImporterId::Yarn => "yarn install --frozen-lockfile",
-        ImporterId::Pnpm => "pnpm install --frozen-lockfile",
-        ImporterId::Bun => "bun install --frozen-lockfile",
+        ImporterId::Npm => "npm install",
+        ImporterId::Yarn => "yarn install",
+        ImporterId::Pnpm => "pnpm install",
+        ImporterId::Bun => "bun install",
         other => {
             return Err(anyhow::anyhow!(
                 "unsupported node importer '{}' for provision command",
