@@ -312,7 +312,10 @@ pub fn execute_pack_command_with_injected_manifest(
     for diagnostic in ipc_diagnostics {
         futures::executor::block_on(reporter.warn(diagnostic.to_string()))?;
     }
-    run_v03_build_lifecycle_steps(&decision.plan, &reporter, injected_manifest.is_none())?;
+    // Source/GitHub builds never enforce --frozen-lockfile: lockfiles may come from a different
+    // platform and would fail checksum validation. Only user-injected manifests (explicit
+    // capsule.toml) could benefit from strict enforcement, and even then it's not required.
+    run_v03_build_lifecycle_steps(&decision.plan, &reporter, false)?;
     record_timing(
         &mut timing_entries,
         "build.validation",
@@ -1350,7 +1353,11 @@ fn run_build_lifecycle_shell_command(
         // Disable pnpm 10's auto-manage-package-manager-versions to prevent it from
         // attempting to download the pinned pnpm version in offline/CI environments.
         .env("npm_config_manage_package_manager_versions", "false")
-        .env("npm_config_approve_builds", "on");
+        .env("npm_config_approve_builds", "on")
+        // Skip git-hooks managers: the capsule workspace has no .git dir so their
+        // prepare/postinstall scripts would fail with exit 128.
+        .env("HUSKY", "0")
+        .env("LEFTHOOK", "0");
 
     for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
         cmd.env(key, value);
