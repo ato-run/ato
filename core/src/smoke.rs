@@ -558,6 +558,8 @@ fn spawn_main_service(
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::piped());
     apply_isolated_command_env(&mut cmd, root, service, isolated_env);
+    cmd.env("COREPACK_ENABLE_STRICT", "0");
+    cmd.env("npm_config_manage_package_manager_versions", "false");
 
     #[cfg(unix)]
     unsafe {
@@ -734,6 +736,8 @@ fn run_check_commands(
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::piped());
         apply_isolated_command_env(&mut cmd, root, service, isolated_env);
+        cmd.env("COREPACK_ENABLE_STRICT", "0");
+        cmd.env("npm_config_manage_package_manager_versions", "false");
 
         let output = cmd.output().map_err(|e| {
             SmokeFailureReport::new(
