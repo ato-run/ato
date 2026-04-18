@@ -609,7 +609,8 @@ type = "app"
 
 runtime = "source/native"
 working_dir = "."
-run = "sh build-app.sh"
+build = "sh build-app.sh"
+run = "echo noop"
 [artifact]
 framework = "gpui-wry"
 stage = "unsigned"
@@ -747,14 +748,16 @@ type = "app"
 default_target = "default"
 
 [targets.default]
-runtime = "source/python"
+runtime = "source"
+driver = "python"
 runtime_version = "3.12"
-run = "python3 default.py"
+run_command = "python3 default.py"
 
 [targets.export]
-runtime = "source/python"
+runtime = "source"
+driver = "python"
 runtime_version = "3.12"
-run = "python3 tool.py"
+run_command = "python3 tool.py"
 [exports.cli.tool]
 kind = "python-tool"
 target = "export"
