@@ -477,7 +477,7 @@ fn synthesize_manifest_from_lock(
     }
     manifest.insert(
         "schema_version".to_string(),
-        toml::Value::String("0.2".to_string()),
+        toml::Value::String("0.3".to_string()),
     );
     manifest.insert(
         "type".to_string(),
