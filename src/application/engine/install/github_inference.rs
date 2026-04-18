@@ -501,8 +501,11 @@ fn normalize_v03_ui_framework_run_to_dev_server(
 
     let entry = run_parts[1];
     let ext = entry.rsplit('.').next().unwrap_or("");
-    // Extensions that Node.js cannot execute natively without a bundler/transpiler
-    let needs_dev_server = matches!(ext, "ts" | "mts" | "cts" | "tsx" | "jsx" | "astro" | "svelte" | "vue");
+    // Extensions that Node.js cannot execute natively without a bundler/transpiler.
+    // Also treat `node package.json` as invalid — package.json is not an executable entrypoint.
+    let is_package_json = entry == "package.json" || entry.ends_with("/package.json");
+    let needs_dev_server = is_package_json
+        || matches!(ext, "ts" | "mts" | "cts" | "tsx" | "jsx" | "astro" | "svelte" | "vue");
     if !needs_dev_server {
         return Ok(());
     }
@@ -511,9 +514,14 @@ fn normalize_v03_ui_framework_run_to_dev_server(
         return Ok(());
     };
 
+    // Prefer `dev` script; fall back to `start` script for apps without a dev server script.
     let dev_script_body = package_json
         .get("scripts")
-        .and_then(|v| v.get("dev"))
+        .and_then(|scripts| {
+            scripts
+                .get("dev")
+                .or_else(|| scripts.get("start"))
+        })
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|v| !v.is_empty())
@@ -523,8 +531,19 @@ fn normalize_v03_ui_framework_run_to_dev_server(
         return Ok(());
     };
 
+    let script_name = if package_json
+        .get("scripts")
+        .and_then(|s| s.get("dev"))
+        .is_some()
+    {
+        "dev"
+    } else {
+        "start"
+    };
+
     let package_manager = infer_node_package_manager_command_prefix(checkout_dir, &package_json);
-    let dev_command = normalize_package_script_command(package_manager, "dev", &dev_script_body);
+    let dev_command =
+        normalize_package_script_command(package_manager, script_name, &dev_script_body);
 
     let Some(table) = parsed.as_table_mut() else {
         return Ok(());
