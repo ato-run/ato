@@ -2445,6 +2445,13 @@ fn copy_env_example_in_dir(dir: &Path, json: bool, prompt_for_secrets: bool) {
                         .trim_matches('"')
                         .trim_matches('\'');
                     if secret_keys.contains(&key) && is_placeholder_value(value) {
+                        // If the key is already available in the process environment
+                        // (e.g. via --env-file), use that value directly without prompting.
+                        if let Ok(env_val) = std::env::var(&key) {
+                            prompted.insert(key.clone(), env_val.clone());
+                            lines_out.push(format!("{}={}", key, env_val));
+                            continue;
+                        }
                         let prompt = format!("🔑  Enter value for {} (hidden): ", key);
                         match rpassword::prompt_password(&prompt) {
                             Ok(entered) => {
