@@ -380,7 +380,8 @@ fn run_lifecycle_shell_command(
     cmd.current_dir(plan.execution_working_directory())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit());
+        .stderr(std::process::Stdio::inherit())
+        .env("COREPACK_ENABLE_STRICT", "0");
 
     for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
         cmd.env(key, value);
