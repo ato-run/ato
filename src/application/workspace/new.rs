@@ -421,20 +421,17 @@ fn create_shell_project(
 ) -> Result<()> {
     let manifest = format!(
         r#"# Capsule Manifest - Multi-Target Native v0.2
-schema_version = "0.2"
+schema_version = "0.3"
 name = "{name}"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
+runtime = "source"
+run = "main.sh"
 [metadata]
 description = "A new capsule application"
 
 [requirements]
-
-[targets.cli]
-runtime = "source"
-entrypoint = "main.sh"
 
 [storage]
 

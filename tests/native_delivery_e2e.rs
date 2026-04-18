@@ -674,16 +674,13 @@ fn append_generated_tar_entry(
 fn build_native_capsule(tmp: &TempDir, pack_dir: &Path) -> Result<PathBuf> {
     let payload_tar = build_payload_tar_bytes(pack_dir)?;
     let manifest: CapsuleManifest = toml::from_str(
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "sample-native-capsule"
 version = "0.1.1"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
 runtime = "static"
-path = "sample-native-capsule.app"
-"#,
+path = "sample-native-capsule.app""#,
     )
     .context("parse native capsule manifest")?;
     let (_distribution_manifest, manifest_toml_bytes) =

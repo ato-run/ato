@@ -172,17 +172,13 @@ fn sample_native_build_plan(root: &Path, mode: u32) -> Result<NativeBuildPlan> {
     fs::create_dir_all(binary_path.parent().context("binary parent missing")?)?;
     fs::write(
         manifest_dir.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "my-app"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "native"
-entrypoint = "MyApp.app"
-"#,
+runtime = "source/native"
+run = "MyApp.app""#,
     )?;
     fs::write(&binary_path, b"unsigned-app")?;
     #[cfg(unix)]
@@ -205,17 +201,13 @@ fn sample_file_native_build_plan(root: &Path) -> Result<NativeBuildPlan> {
     )?;
     fs::write(
         manifest_dir.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "my-app"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "native"
-entrypoint = "dist/MyApp.exe"
-"#,
+runtime = "source/native"
+run = "dist/MyApp.exe""#,
     )?;
     fs::write(&source_file_path, sample_windows_executable_bytes())?;
 
@@ -300,19 +292,14 @@ fn detect_build_strategy_rejects_command_mode_source_delivery_sidecar() -> Resul
     fs::create_dir_all(&manifest_dir)?;
     fs::write(
         manifest_dir.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "my-app"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "native"
-entrypoint = "sh"
-cmd = ["build-app.sh"]
+runtime = "source/native"
 working_dir = "."
-"#,
+run = "sh build-app.sh""#,
     )?;
     fs::write(
         manifest_dir.join(DELIVERY_CONFIG_FILE),
@@ -338,17 +325,13 @@ fn detect_build_strategy_accepts_windows_exe_manifest_contract() -> Result<()> {
     )?;
     fs::write(
         manifest_dir.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "my-app"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "native"
-entrypoint = "dist/MyApp.exe"
-"#,
+runtime = "source/native"
+run = "dist/MyApp.exe""#,
     )?;
     fs::write(&source_file_path, sample_windows_executable_bytes())?;
 
@@ -374,19 +357,14 @@ fn detect_build_strategy_ignores_command_mode_without_inline_delivery_config() -
     fs::create_dir_all(&manifest_dir)?;
     fs::write(
         manifest_dir.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "my-app"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "native"
-entrypoint = "sh"
-cmd = ["build-app.sh"]
+runtime = "source/native"
 working_dir = "."
-"#,
+run = "sh build-app.sh""#,
     )?;
 
     assert!(detect_build_strategy(&manifest_dir)?.is_none());
@@ -400,19 +378,14 @@ fn detect_build_strategy_accepts_inline_delivery_config() -> Result<()> {
     fs::create_dir_all(&manifest_dir)?;
     fs::write(
         manifest_dir.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "time-management-desktop"
 version = "0.1.0"
 type = "app"
-default_target = "desktop"
 
-[targets.desktop]
-runtime = "source"
-driver = "native"
-entrypoint = "sh"
-cmd = ["build-app.sh"]
+runtime = "source/native"
 working_dir = "."
-
+run = "sh build-app.sh"
 [artifact]
 framework = "tauri"
 stage = "unsigned"
@@ -446,17 +419,13 @@ fn detect_build_strategy_generates_canonical_delivery_config_from_capsule_manife
     fs::create_dir_all(binary_path.parent().context("binary parent missing")?)?;
     fs::write(
         manifest_dir.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "my-app"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "native"
-entrypoint = "MyApp.app"
-"#,
+runtime = "source/native"
+run = "MyApp.app""#,
     )?;
     fs::write(&binary_path, b"unsigned-app")?;
     #[cfg(unix)]
@@ -499,17 +468,13 @@ fn detect_build_strategy_rejects_source_delivery_sidecar_for_canonical_app_targe
     fs::create_dir_all(binary_path.parent().expect("binary parent")).expect("create app");
     fs::write(
         manifest_dir.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "my-app"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "native"
-entrypoint = "MyApp.app"
-"#,
+runtime = "source/native"
+run = "MyApp.app""#,
     )
     .expect("write manifest");
     fs::write(
@@ -549,18 +514,13 @@ fn detect_build_strategy_rejects_partial_inline_delivery_config() {
     fs::create_dir_all(&manifest_dir).expect("create manifest dir");
     fs::write(
         manifest_dir.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "time-management-desktop"
 version = "0.1.0"
 type = "app"
-default_target = "desktop"
 
-[targets.desktop]
-runtime = "source"
-driver = "native"
-entrypoint = "sh"
-cmd = ["build-app.sh"]
-
+runtime = "source/native"
+run = "sh build-app.sh"
 [artifact]
 framework = "tauri"
 stage = "unsigned"
@@ -1452,17 +1412,13 @@ fn native_delivery_draft_contract_skips_generic_native_targets_without_delivery_
     let manifest_path = tmp.path().join("capsule.toml");
     fs::write(
         &manifest_path,
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "strict-v3-ci-check"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "native"
-entrypoint = "source/main.py"
-"#,
+runtime = "source/native"
+run = "source/main.py""#,
     )?;
 
     let delivery = native_delivery_draft_contract_from_manifest(&manifest_path)?;
@@ -1477,19 +1433,14 @@ fn native_delivery_draft_contract_keeps_explicit_desktop_metadata() -> Result<()
     let manifest_path = tmp.path().join("capsule.toml");
     fs::write(
         &manifest_path,
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "desktop-demo"
 version = "0.1.0"
 type = "app"
-default_target = "desktop"
 
-[targets.desktop]
-runtime = "source"
-driver = "native"
-entrypoint = "cargo"
-cmd = ["build", "--release"]
+runtime = "source/native"
 working_dir = "."
-
+run = "cargo build --release"
 [artifact]
 framework = "tauri"
 stage = "unsigned"

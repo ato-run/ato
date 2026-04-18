@@ -908,17 +908,14 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         fs::write(
             temp.path().join("capsule.toml"),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "desky-mock-tauri"
 version = "0.1.0"
 type = "app"
-default_target = "desktop"
 
-[targets.desktop]
 runtime = "source"
 driver = "tauri"
-entrypoint = "backend/mock-tauri"
-"#,
+run = "backend/mock-tauri""#,
         )
         .expect("write manifest");
 

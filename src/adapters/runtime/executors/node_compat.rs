@@ -858,17 +858,15 @@ mod tests {
     };
     use std::collections::HashMap;
 
-    fn plan_from_manifest(tmp: &tempfile::TempDir, manifest: &str) -> ManifestData {
+    fn plan_from_manifest(tmp: &tempfile::TempDir, manifest_fragment: &str) -> ManifestData {
         let manifest_path = tmp.path().join("capsule.toml");
         let manifest = format!(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
-
-{manifest}
+{manifest_fragment}
 "#
         );
         std::fs::write(&manifest_path, &manifest).expect("write manifest");
@@ -897,10 +895,8 @@ default_target = "app"
         let plan = plan_from_manifest(
             &tmp,
             r#"
-[targets.app]
-runtime = "source"
-driver = "node"
-entrypoint = "main.js"
+runtime = "source/node"
+run = "node main.js"
 "#,
         );
         let spec = derive_launch_spec(&plan).expect("derive launch spec");
@@ -952,10 +948,8 @@ entrypoint = "main.js"
         let plan = plan_from_manifest(
             &tmp,
             r#"
-[targets.app]
-runtime = "source"
-driver = "node"
-entrypoint = "main.js"
+runtime = "source/node"
+run = "node main.js"
 "#,
         );
         let spec = derive_launch_spec(&plan).expect("derive launch spec");
@@ -979,10 +973,8 @@ entrypoint = "main.js"
         let plan = plan_from_manifest(
             &tmp,
             r#"
-[targets.app]
-runtime = "source"
-driver = "node"
-run_command = "node lib.js fixtures/db.json --port 3000"
+runtime = "source/node"
+run = "node lib.js fixtures/db.json --port 3000"
 "#,
         );
         let spec = derive_launch_spec(&plan).expect("derive launch spec");

@@ -210,18 +210,14 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         write_manifest(
             dir.path(),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "2.1.3"
-entrypoint = "main.ts"
-
+run = "main.ts"
 [services.main]
 target = "web"
 "#,
@@ -249,17 +245,13 @@ target = "web"
         let dir = tempdir().expect("tempdir");
         write_manifest(
             dir.path(),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "desktop"
 
-[targets.desktop]
-runtime = "source"
-driver = "native"
-entrypoint = "dist/MyApp.app"
-"#,
+runtime = "source/native"
+run = "dist/MyApp.app""#,
         );
         write_minimal_macos_app_bundle(dir.path(), "dist/MyApp.app");
 
@@ -339,19 +331,15 @@ entrypoint = "dist/MyApp.app"
         let dir = tempdir().expect("tempdir");
         write_manifest(
             dir.path(),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "desktop"
 
-[targets.desktop]
-runtime = "source"
-driver = "native"
-entrypoint = "pnpm"
+runtime = "source/native"
 cmd = ["build"]
 working_dir = "."
-
+run = "pnpm"
 [artifact]
 framework = "tauri"
 stage = "unsigned"
@@ -396,24 +384,22 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
         let dir = tempdir().expect("tempdir");
         write_manifest(
             dir.path(),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
+
 default_target = "main"
 
 [targets.main]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "2.1.3"
-entrypoint = "main.ts"
+run = "main.ts"
 
 [targets.worker]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "2.1.3"
-entrypoint = "worker.ts"
-
+run = "worker.ts"
 [services.main]
 target = "main"
 
@@ -444,18 +430,14 @@ target = "worker"
         let dir = tempdir().expect("tempdir");
         write_manifest(
             dir.path(),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "2.1.3"
-entrypoint = "main.ts"
-"#,
+run = "main.ts""#,
         );
         fs::write(
             dir.path().join("capsule.lock.json"),
@@ -511,18 +493,14 @@ entrypoint = "main.ts"
         let dir = tempdir().expect("tempdir");
         write_manifest(
             dir.path(),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "2.1.3"
-entrypoint = "main.ts"
-"#,
+run = "main.ts""#,
         );
         fs::write(
             dir.path().join("capsule.lock.json"),
@@ -553,18 +531,14 @@ entrypoint = "main.ts"
         let dir = tempdir().expect("tempdir");
         write_manifest(
             dir.path(),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "2.1.3"
-entrypoint = "main.ts"
-"#,
+run = "main.ts""#,
         );
 
         let left = compile_from_dir(dir.path());
@@ -589,18 +563,14 @@ entrypoint = "main.ts"
         let dir = tempdir().expect("tempdir");
         write_manifest(
             dir.path(),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "2.1.3"
-entrypoint = "main.ts"
-"#,
+run = "main.ts""#,
         );
 
         let left = compile_from_dir(dir.path());
@@ -618,24 +588,22 @@ entrypoint = "main.ts"
         let right = tempdir().expect("tempdir");
         write_manifest(
             left.path(),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
+
 default_target = "main"
 
 [targets.main]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "2.1.3"
-entrypoint = "main.ts"
+run = "main.ts"
 
 [targets.worker]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "2.1.3"
-entrypoint = "worker.ts"
-
+run = "worker.ts"
 [services.main]
 target = "main"
 
@@ -645,24 +613,22 @@ target = "worker"
         );
         write_manifest(
             right.path(),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
+
 default_target = "main"
 
 [targets.main]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "2.1.3"
-entrypoint = "main.ts"
+run = "main.ts"
 
 [targets.worker]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "2.1.3"
-entrypoint = "worker.ts"
-
+run = "worker.ts"
 [services.worker]
 target = "worker"
 
@@ -689,18 +655,14 @@ target = "main"
         let base = tempdir().expect("tempdir");
         write_manifest(
             base.path(),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "2.1.3"
-entrypoint = "main.ts"
-"#,
+run = "main.ts""#,
         );
         let baseline = compile_from_dir(base.path());
 

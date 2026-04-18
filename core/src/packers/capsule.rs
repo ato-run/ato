@@ -1086,17 +1086,13 @@ capsule_path = "./apps/admin"
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "generated-app"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "native"
-entrypoint = "source/main.sh"
-"#,
+runtime = "source/native"
+run = "source/main.sh""#,
         )
         .expect("write manifest");
 
@@ -1162,17 +1158,13 @@ entrypoint = "source/main.sh"
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "repro-source-pack"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "native"
-entrypoint = "source/main.sh"
-"#,
+runtime = "source/native"
+run = "source/main.sh""#,
         )
         .expect("write manifest");
 
@@ -1246,17 +1238,13 @@ manifest_hash = "sha256:dummy"
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "manifest-pack"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "native"
-entrypoint = "source/main.sh"
-"#,
+runtime = "source/native"
+run = "source/main.sh""#,
         )
         .expect("write manifest");
 
@@ -1381,19 +1369,15 @@ manifest_hash = "sha256:dummy"
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "python-demo"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11.10"
-entrypoint = "main.py"
 dependencies = "requirements.txt"
-"#,
+run = "main.py""#,
         )
         .unwrap();
         std::fs::write(tmp.path().join("main.py"), "print('ok')\n").unwrap();

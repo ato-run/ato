@@ -7,11 +7,10 @@ use std::io::Write;
 fn manifest(version: &str) -> String {
     format!(
         r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "sample"
 version = "{}"
 type = "app"
-default_target = "cli"
 "#,
         version
     )

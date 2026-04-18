@@ -731,17 +731,13 @@ mod tests {
             .map(|value| format!("\n[metadata]\nrepository = \"{}\"\n", value))
             .unwrap_or_default();
         let manifest = format!(
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "{name}"
 version = "{version}"
 type = "app"
-default_target = "cli"
 {repo_line}
-[targets.cli]
-runtime = "source"
-driver = "deno"
-entrypoint = "main.ts"
-"#
+runtime = "source/deno"
+run = "main.ts""#
         );
         let mut bytes = Vec::<u8>::new();
         {
@@ -768,17 +764,13 @@ entrypoint = "main.ts"
     }
 
     fn build_native_test_artifact_bytes() -> Vec<u8> {
-        let manifest = r#"schema_version = "0.2"
+        let manifest = r#"schema_version = "0.3"
 name = "demo-native"
 version = "0.1.0"
 type = "app"
-default_target = "desktop"
 
-[targets.desktop]
-runtime = "source"
-driver = "native"
-entrypoint = "Demo.app"
-"#;
+runtime = "source/native"
+run = "Demo.app""#;
         let delivery = r#"schema_version = "0.1"
 
 [artifact]
@@ -993,17 +985,13 @@ args = ["--deep", "--force", "--sign", "-", "Demo.app"]
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "2.1.3"
-entrypoint = "main.ts"
-"#,
+run = "main.ts""#,
         )
         .expect("write manifest");
 

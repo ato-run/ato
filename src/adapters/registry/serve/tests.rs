@@ -586,11 +586,10 @@ fn truncate_for_error_limits_message_length() {
 
 #[test]
 fn extract_manifest_from_capsule_returns_text() {
-    let manifest = r#"schema_version = "0.2"
+    let manifest = r#"schema_version = "0.3"
 name = "sample"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 "#;
     let bytes = build_capsule_bytes(manifest);
     let extracted = extract_manifest_from_capsule(&bytes).expect("extract");
@@ -599,11 +598,10 @@ default_target = "cli"
 
 #[test]
 fn extract_readme_from_capsule_prefers_priority_order() {
-    let manifest = r#"schema_version = "0.2"
+    let manifest = r#"schema_version = "0.3"
 name = "sample"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 "#;
     let bytes = build_capsule_bytes_with_files(
         manifest,
@@ -619,11 +617,10 @@ default_target = "cli"
 
 #[test]
 fn extract_readme_from_capsule_truncates_large_files() {
-    let manifest = r#"schema_version = "0.2"
+    let manifest = r#"schema_version = "0.3"
 name = "sample"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 "#;
     let large = vec![b'a'; README_MAX_BYTES + 4096];
     let bytes = build_capsule_bytes_with_files(manifest, &[("README.md", &large)]);
@@ -633,11 +630,10 @@ default_target = "cli"
 
 #[test]
 fn extract_readme_from_capsule_reads_payload_tar_zst_contents() {
-    let manifest = r#"schema_version = "0.2"
+    let manifest = r#"schema_version = "0.3"
 name = "sample"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 "#;
     let bytes = build_capsule_bytes_with_payload_files(
         manifest,
@@ -673,11 +669,10 @@ repository = "meta/repo"
 #[test]
 fn load_capsule_detail_manifest_reads_latest_release_artifact() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let manifest = r#"schema_version = "0.2"
+    let manifest = r#"schema_version = "0.3"
 name = "sample"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 
 [metadata]
 repository = "koh0920/sample"
@@ -1003,16 +998,13 @@ async fn persistent_state_local_api_registers_and_lists_records() {
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
-
 [state.data]
 kind = "filesystem"
 durability = "persistent"
