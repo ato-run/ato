@@ -68,7 +68,16 @@ pub fn draft_requires_manual_review(draft: &GitHubInstallDraftResponse) -> bool 
         .preview_toml
         .as_deref()
         .map(required_env_from_preview_toml)
-        .map(|values| !values.is_empty())
+        .map(|values| {
+            // Skip env vars already satisfied by the process environment.
+            // ScopedEnv.apply_map() sets --env-file values into std::env before this
+            // check runs, so vars the user already provided do not count as missing.
+            values
+                .into_iter()
+                .filter(|k| std::env::var(k).is_err())
+                .collect::<Vec<_>>()
+        })
+        .map(|unsatisfied| !unsatisfied.is_empty())
         .unwrap_or(false);
     let (has_manual_review_warning, has_soft_preview_warning) = draft
         .capsule_hint
@@ -134,9 +143,9 @@ fn warning_requires_manual_review(warning: &str) -> bool {
 }
 
 fn warning_is_soft_preview_advisory(warning: &str) -> bool {
-    warning
-        .to_ascii_lowercase()
-        .contains("could not be normalized to a direct node entrypoint")
+    let lowered = warning.to_ascii_lowercase();
+    lowered.contains("could not be normalized to a direct node entrypoint")
+        || lowered.contains("a development server command was inferred from package.json")
 }
 
 fn build_github_preview_session(
