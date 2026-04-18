@@ -1,10 +1,6 @@
-schema_version = "0.2"
+schema_version = "0.3"
 name = "native-shell-capsule"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
-
-[targets.cli]
-runtime = "source"
-driver = "native"
-entrypoint = "run.sh"
+runtime = "source/native"
+run = "run.sh"

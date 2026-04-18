@@ -1,14 +1,10 @@
-schema_version = "0.2"
+schema_version = "0.3"
 name = "redirect-escape-capsule"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
+runtime = "source/deno"
+runtime_version = "1.46.3"
+run = "main.ts"
 
 [network]
 egress_allow = ["127.0.0.1"]
-
-[targets.cli]
-runtime = "source"
-driver = "deno"
-runtime_version = "1.46.3"
-entrypoint = "main.ts"

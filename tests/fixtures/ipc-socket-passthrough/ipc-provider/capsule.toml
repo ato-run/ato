@@ -1,13 +1,9 @@
-schema_version = "0.2"
+schema_version = "0.3"
 name = "ipc-provider"
 version = "0.1.0"
 type = "app"
-default_target = "svc"
-
-[targets.svc]
-runtime = "source"
-driver = "native"
-entrypoint = "echo provider"
+runtime = "source/native"
+run = "echo provider"
 
 [ipc.exports]
 name = "echo-service"
