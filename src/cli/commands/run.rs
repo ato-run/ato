@@ -56,7 +56,7 @@ use background::*;
 use preflight::*;
 pub(crate) use preflight::{preflight_native_sandbox, run_v03_lifecycle_steps};
 
-const BACKGROUND_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+const BACKGROUND_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const BACKGROUND_READY_WAIT_TIMEOUT_ENV: &str = "ATO_BACKGROUND_READY_WAIT_TIMEOUT_SECS";
 
 type RunPipelineState = run_phase::RunPipelineState;
