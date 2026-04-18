@@ -920,14 +920,10 @@ fn plan_node_actions(
         .node_lockfiles
         .first()
         .and_then(|lock| match lock.as_str() {
-            "package-lock.json" if which::which("npm").is_ok() => Some("npm ci"),
-            "yarn.lock" if which::which("yarn").is_ok() => Some("yarn install --frozen-lockfile"),
-            "pnpm-lock.yaml" if which::which("pnpm").is_ok() => {
-                Some("pnpm install --frozen-lockfile")
-            }
-            "bun.lock" | "bun.lockb" if which::which("bun").is_ok() => {
-                Some("bun install --frozen-lockfile")
-            }
+            "package-lock.json" if which::which("npm").is_ok() => Some("npm install"),
+            "yarn.lock" if which::which("yarn").is_ok() => Some("yarn install"),
+            "pnpm-lock.yaml" if which::which("pnpm").is_ok() => Some("pnpm install"),
+            "bun.lock" | "bun.lockb" if which::which("bun").is_ok() => Some("bun install"),
             _ => None,
         })
         .map(str::to_string);
