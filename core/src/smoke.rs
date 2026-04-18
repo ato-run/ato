@@ -684,6 +684,8 @@ fn prepare_smoke_working_directory(
     command.env("npm_config_manage_package_manager_versions", "false");
     // Auto-approve pnpm build scripts without interactive prompt.
     command.env("npm_config_approve_builds", "on");
+    // Skip husky git-hooks setup: the smoke workspace has no .git dir.
+    command.env("HUSKY", "0");
     // Use the bundled pnpm content-addressable store (fetched during build) so the
     // smoke install resolves from cache rather than downloading from the network.
     if program == "pnpm" {
