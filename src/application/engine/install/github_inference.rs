@@ -1017,6 +1017,21 @@ fn changed_pack_include_from_checkout(
         changed |= ensure_pack_include_entry(include, &mut normalized_include, &import_map);
     }
 
+    // Vite apps need index.html and vite.config.* at the root to serve correctly.
+    // The store-generated include list typically omits these. Add them when present.
+    let vite_root_files = [
+        "index.html",
+        "vite.config.ts",
+        "vite.config.js",
+        "vite.config.mts",
+        "vite.config.mjs",
+    ];
+    for file in &vite_root_files {
+        if checkout_dir.join(file).exists() {
+            changed |= ensure_pack_include_entry(include, &mut normalized_include, file);
+        }
+    }
+
     for target in targets {
         let execution_working_directory = target
             .working_dir
