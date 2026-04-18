@@ -495,8 +495,13 @@ pub(crate) fn detect_build_strategy_from_descriptor(
             None => return Ok(None),
         },
     };
-    if let Some(canonical) = &canonical_config {
-        ensure_delivery_config_matches_context(&config, canonical, &source_label)?;
+    // Only enforce canonical defaults when no explicit inline config was provided.
+    // If the user supplies [artifact] + [finalize] in their manifest, those settings
+    // take precedence over auto-inferred defaults.
+    if !has_explicit_delivery_config {
+        if let Some(canonical) = &canonical_config {
+            ensure_delivery_config_matches_context(&config, canonical, &source_label)?;
+        }
     }
 
     let input_relative = PathBuf::from(config.artifact.input.trim());
