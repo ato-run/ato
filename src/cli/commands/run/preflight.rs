@@ -204,14 +204,14 @@ pub(crate) async fn run_v03_lifecycle_steps(
     let mut provisioned_roots = std::collections::HashSet::new();
     for target_label in plan.selected_target_package_order()? {
         let target_plan = plan.with_selected_target(target_label.clone());
-        let working_dir = target_plan.execution_working_directory();
+        let working_dir = resolve_provision_working_dir(&target_plan);
 
         if provisioned_roots.insert(working_dir.clone()) {
             if let Some(command) = plan_v03_provision_command(&target_plan)? {
                 reporter
                     .notify(format!("⚙️  Provision [{}]: {}", target_label, command))
                     .await?;
-                run_lifecycle_shell_command(&target_plan, launch_ctx, &command, "provision")?;
+                run_lifecycle_shell_command(&target_plan, launch_ctx, &command, "provision", &working_dir)?;
             }
         }
 
@@ -223,11 +223,24 @@ pub(crate) async fn run_v03_lifecycle_steps(
             reporter
                 .notify(format!("🏗️  Build [{}]: {}", target_label, command))
                 .await?;
-            run_lifecycle_shell_command(&target_plan, launch_ctx, &command, "build")?;
+            run_lifecycle_shell_command(&target_plan, launch_ctx, &command, "build", &working_dir)?;
         }
     }
 
     Ok(())
+}
+
+/// Returns the working directory for provision/build lifecycle commands.
+/// For GitHub-installed capsules, project files live under source/ while
+/// execution_working_directory() returns the outer manifest dir (no working_dir
+/// in capsule.toml). Detect this layout so npm/pnpm/cargo run where package.json
+/// and lockfiles actually are.
+fn resolve_provision_working_dir(plan: &capsule_core::router::ManifestData) -> std::path::PathBuf {
+    let source_dir = plan.manifest_dir.join("source");
+    if source_dir.join("package.json").exists() {
+        return source_dir;
+    }
+    plan.execution_working_directory()
 }
 
 pub(super) fn plan_v03_provision_command(
@@ -238,7 +251,7 @@ pub(super) fn plan_v03_provision_command(
     let runtime = runtime.trim().to_ascii_lowercase();
     let driver = driver.trim().to_ascii_lowercase();
     let manifest_dir = plan.manifest_dir.clone();
-    let execution_working_directory = plan.execution_working_directory();
+    let execution_working_directory = resolve_provision_working_dir(plan);
 
     if runtime == "web" && driver == "static" {
         debug!(
@@ -362,6 +375,7 @@ fn run_lifecycle_shell_command(
     launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
     command: &str,
     phase: &str,
+    working_dir: &Path,
 ) -> Result<()> {
     #[cfg(windows)]
     let mut cmd = {
@@ -377,7 +391,7 @@ fn run_lifecycle_shell_command(
         cmd
     };
 
-    cmd.current_dir(plan.execution_working_directory())
+    cmd.current_dir(working_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
