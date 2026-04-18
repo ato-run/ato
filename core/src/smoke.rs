@@ -637,11 +637,13 @@ fn prepare_smoke_working_directory(
     }
 
     let install = if cwd_path.join("pnpm-lock.yaml").exists() {
-        Some(("pnpm", vec!["install", "--frozen-lockfile"]))
+        Some(("pnpm", vec!["install"]))
     } else if cwd_path.join("package-lock.json").exists() {
-        Some(("npm", vec!["ci"]))
+        Some(("npm", vec!["install"]))
+    } else if cwd_path.join("yarn.lock").exists() {
+        Some(("yarn", vec!["install"]))
     } else if cwd_path.join("bun.lock").exists() || cwd_path.join("bun.lockb").exists() {
-        Some(("bun", vec!["install", "--frozen-lockfile"]))
+        Some(("bun", vec!["install"]))
     } else {
         None
     };
