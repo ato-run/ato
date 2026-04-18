@@ -1,10 +1,6 @@
-schema_version = "0.2"
+schema_version = "0.3"
 name = "glibc-mismatch-capsule"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
-
-[targets.cli]
-runtime = "source"
-driver = "native"
-entrypoint = "app.bin"
+runtime = "source/native"
+run = "app.bin"
