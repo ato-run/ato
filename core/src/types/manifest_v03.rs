@@ -378,6 +378,9 @@ fn normalize_v03_target_table(package_name: &str, table: &Table) -> Result<Table
         if let Some(driver) = driver {
             normalized_driver = Some(driver.clone());
             target_table.insert("driver".to_string(), toml::Value::String(driver));
+        } else if let Some(driver) = normalized_driver.as_ref() {
+            // runtime selector didn't contain a driver, but one was specified explicitly
+            target_table.insert("driver".to_string(), toml::Value::String(driver.clone()));
         }
     } else if let Some(driver) = normalized_driver.as_ref() {
         target_table.insert("driver".to_string(), toml::Value::String(driver.clone()));
