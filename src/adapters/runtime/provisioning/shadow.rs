@@ -312,6 +312,14 @@ fn diff_paths(path: PathBuf, base: &Path) -> Option<PathBuf> {
 }
 
 fn relative_working_dir_from_manifest_root(plan: &ManifestData) -> PathBuf {
+    // When the project lives under source/ (GitHub-installed capsules), the
+    // execution_working_directory() returns the manifest root (outer dir) because
+    // no working_dir is set in capsule.toml.  Detect this layout explicitly so the
+    // shadow workspace mirrors the same structure.
+    let source_dir = plan.manifest_dir.join("source");
+    if source_dir.join("package.json").exists() {
+        return PathBuf::from("source");
+    }
     diff_paths(plan.execution_working_directory(), &plan.manifest_dir).unwrap_or_default()
 }
 
