@@ -54,7 +54,7 @@ pub fn load_manifest_with_validation_mode(
 
     // Ensure schema_version is set for downstream consumers.
     if model.schema_version.trim().is_empty() {
-        model.schema_version = "0.2".to_string();
+        model.schema_version = "0.3".to_string();
     }
 
     let normalized_text = model.to_toml().map_err(|e| {

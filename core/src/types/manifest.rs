@@ -562,7 +562,7 @@ pub struct PolymorphismConfig {
 }
 
 fn default_schema_version() -> String {
-    "0.2".to_string()
+    "0.3".to_string()
 }
 
 fn is_supported_schema_version(value: &str) -> bool {
