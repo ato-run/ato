@@ -382,6 +382,9 @@ fn run_lifecycle_shell_command(
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .env("COREPACK_ENABLE_STRICT", "0")
+        // Disable pnpm 10's auto-manage-package-manager-versions to prevent it from
+        // attempting to download the pinned pnpm version in offline/CI environments.
+        .env("npm_config_manage_package_manager_versions", "false")
         .env("npm_config_approve_builds", "on");
 
     for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
