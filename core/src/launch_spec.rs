@@ -101,14 +101,16 @@ fn derive_run_command_launch_spec(
                     anyhow!("source/node run_command must include a script entrypoint")
                 })?;
                 (command, tokens.into_iter().skip(2).collect::<Vec<_>>())
-            } else if first.starts_with("npm:") {
+            } else if first.starts_with("npm:") || matches!(first, "npm" | "pnpm" | "yarn" | "bun") {
+                // Accept package manager invocations: `npm run dev`, `pnpm run dev`,
+                // `yarn dev`, `bun run dev`, etc.
                 (
                     tokens[0].clone(),
                     tokens.into_iter().skip(1).collect::<Vec<_>>(),
                 )
             } else {
                 return Err(anyhow!(
-                    "source/node run_command must start with 'node' or 'npm:<package>', got '{}'",
+                    "source/node run_command must start with 'node', 'npm:<package>', or a package manager (npm/pnpm/yarn/bun), got '{}'",
                     first
                 ));
             }
