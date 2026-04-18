@@ -1036,16 +1036,48 @@ fn changed_pack_include_from_checkout(
         changed |= ensure_pack_include_entry(include, &mut normalized_include, &import_map);
     }
 
-    // Vite apps need index.html and vite.config.* at the root to serve correctly.
-    // The store-generated include list typically omits these. Add them when present.
-    let vite_root_files = [
+    // Common root-level config files required for dev servers to start correctly.
+    // The store-generated include list often omits these. Add them when present.
+    let common_root_configs = [
+        // Vite
         "index.html",
         "vite.config.ts",
         "vite.config.js",
         "vite.config.mts",
         "vite.config.mjs",
+        // TypeScript
+        "tsconfig.json",
+        "tsconfig.app.json",
+        "tsconfig.node.json",
+        "tsconfig.base.json",
+        // Tailwind CSS
+        "tailwind.config.ts",
+        "tailwind.config.js",
+        "tailwind.config.cjs",
+        "tailwind.config.mjs",
+        // PostCSS
+        "postcss.config.js",
+        "postcss.config.cjs",
+        "postcss.config.mjs",
+        "postcss.config.ts",
+        // shadcn/ui
+        "components.json",
+        // Next.js
+        "next.config.js",
+        "next.config.mjs",
+        "next.config.ts",
+        // Babel (needed by some CRA and rollup based projects)
+        "babel.config.js",
+        "babel.config.json",
+        ".babelrc",
+        ".babelrc.js",
+        // UnoCSS / Windi CSS
+        "uno.config.ts",
+        "uno.config.js",
+        "windi.config.ts",
+        "windi.config.js",
     ];
-    for file in &vite_root_files {
+    for file in &common_root_configs {
         if checkout_dir.join(file).exists() {
             changed |= ensure_pack_include_entry(include, &mut normalized_include, file);
         }
