@@ -147,6 +147,13 @@ pub(super) fn normalize_github_install_preview_toml(
             }
         }
 
+        // Ensure runtime_version meets the minimum required by detected packages.
+        // The store draft may have been generated with an older default (e.g. 20.12.0)
+        // that is too low for the packages now present in the repo (e.g. vite 8).
+        if runtime.as_deref() == Some("source/node") || runtime.as_deref() == Some("web/node") {
+            bump_node_runtime_version_if_needed(&mut parsed, checkout_dir);
+        }
+
         if runtime.as_deref() == Some("source/node") {
             normalize_v03_source_node_typescript_run(&mut parsed, checkout_dir)?;
             normalize_v03_ui_framework_run_to_dev_server(&mut parsed, checkout_dir)?;
@@ -1223,6 +1230,81 @@ fn infer_github_install_runtime_version(checkout_dir: &Path, driver: &str) -> Op
     }
 }
 
+/// If the capsule.toml already declares a `runtime_version` that is below the
+/// minimum required by packages detected in `checkout_dir`, bump it in place.
+///
+/// Currently handles: Vite ≥ 8.0.0 requires Node.js ≥ 20.19.0.
+fn bump_node_runtime_version_if_needed(parsed: &mut toml::Value, checkout_dir: &Path) {
+    let current = parsed
+        .get("runtime_version")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let Some(current) = current else {
+        return;
+    };
+
+    let min_required = minimum_node_version_for_checkout(checkout_dir);
+    if min_required == (0, 0) {
+        return;
+    }
+
+    // Parse current version as (major, minor).
+    let parts: Vec<u64> = current
+        .split('.')
+        .filter_map(|p| p.parse().ok())
+        .collect();
+    let (cur_major, cur_minor) = (
+        parts.first().copied().unwrap_or(0),
+        parts.get(1).copied().unwrap_or(0),
+    );
+
+    if (cur_major, cur_minor) < min_required {
+        // Always bump to the current LTS (22.14) rather than the bare minimum
+        // to avoid re-triggering this check on the next run.
+        let bumped = DEFAULT_GITHUB_DRAFT_NODE_RUNTIME_VERSION.to_string();
+        if let Some(table) = parsed.as_table_mut() {
+            table.insert("runtime_version".to_string(), toml::Value::String(bumped));
+        }
+    }
+}
+
+/// Returns the (major, minor) Node.js version floor required by packages
+/// detected in `package.json` inside `checkout_dir`. Returns (0, 0) when no
+/// constraint is inferred.
+fn minimum_node_version_for_checkout(checkout_dir: &Path) -> (u64, u64) {
+    let Ok(raw) = std::fs::read_to_string(checkout_dir.join("package.json")) else {
+        return (0, 0);
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return (0, 0);
+    };
+
+    // Collect all dep version strings that might pin a framework with known
+    // Node.js requirements.
+    let dep_sections = ["dependencies", "devDependencies", "peerDependencies"];
+    for section in &dep_sections {
+        let Some(deps) = json.get(section).and_then(|v| v.as_object()) else {
+            continue;
+        };
+
+        // Vite ≥ 8.0.0 requires Node.js ≥ 20.19.0.
+        if let Some(vite_range) = deps.get("vite").and_then(serde_json::Value::as_str) {
+            if let Some(major) = first_numeric_version_component(vite_range)
+                .as_deref()
+                .and_then(|s| s.parse::<u64>().ok())
+            {
+                if major >= 8 {
+                    return (20, 19);
+                }
+            }
+        }
+    }
+
+    (0, 0)
+}
+
 fn infer_node_runtime_version_for_github_install(checkout_dir: &Path) -> String {
     let package_json_path = checkout_dir.join("package.json");
     let raw = std::fs::read_to_string(&package_json_path).ok();
@@ -1248,9 +1330,9 @@ fn infer_node_runtime_version_for_github_install(checkout_dir: &Path) -> String 
     };
 
     if major >= 22 {
-        format!("{major}.0.0")
+        format!("{major}.14.0")
     } else if major >= 20 {
-        format!("{major}.12.0")
+        format!("{major}.19.0")
     } else if major >= 18 {
         format!("{major}.20.0")
     } else {
