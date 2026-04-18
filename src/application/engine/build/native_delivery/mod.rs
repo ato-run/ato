@@ -1434,23 +1434,39 @@ pub(crate) fn native_delivery_draft_contract_from_manifest(
         "closure_status".to_string(),
         Value::String("incomplete".to_string()),
     );
-    let program = if !target.entrypoint.trim().is_empty() {
-        target.entrypoint.trim().to_string()
-    } else if let Some(run_cmd) = target.run_command.as_deref() {
-        run_cmd
-            .trim()
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_string()
+    // v0.3: build = "sh build-app.sh" → build_command on target
+    // v0.2: entrypoint = "sh", cmd = ["build-app.sh"]
+    // v0.3 fallback: run = "sh build-app.sh" → run_command
+    let build_source = target
+        .build_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            if !target.entrypoint.trim().is_empty() {
+                None // v0.2 entrypoint+cmd path handled below
+            } else {
+                target.run_command.as_deref().map(str::trim).filter(|v| !v.is_empty())
+            }
+        });
+    let (program, build_args) = if !target.entrypoint.trim().is_empty() && !target.cmd.is_empty() {
+        (target.entrypoint.trim().to_string(), target.cmd.clone())
+    } else if let Some(cmd) = build_source {
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        (
+            parts.first().unwrap_or(&"").to_string(),
+            parts.get(1..).unwrap_or(&[]).iter().map(|s| s.to_string()).collect(),
+        )
+    } else if !target.entrypoint.trim().is_empty() {
+        (target.entrypoint.trim().to_string(), Vec::new())
     } else {
-        String::new()
+        (String::new(), Vec::new())
     };
     build.insert("program".to_string(), Value::String(program));
-    if !target.cmd.is_empty() {
+    if !build_args.is_empty() {
         build.insert(
             "args".to_string(),
-            Value::Array(target.cmd.iter().cloned().map(Value::String).collect()),
+            Value::Array(build_args.into_iter().map(Value::String).collect()),
         );
     }
     if let Some(working_dir) = target.working_dir.as_ref() {
@@ -1624,11 +1640,24 @@ fn detect_native_build_command(
     }
 
     // In v0.2: entrypoint = "sh", cmd = ["build-app.sh"]
-    // In v0.3: run = "sh build-app.sh" (no separate cmd)
+    // In v0.3 flat: build = "sh build-app.sh" → normalized to build_command on target
+    // In v0.3 fallback: run = "sh build-app.sh" → normalized to run_command
+    let build_source = target
+        .build_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            target
+                .run_command
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+        });
     let (program, args) = if !target.entrypoint.trim().is_empty() && !target.cmd.is_empty() {
         (target.entrypoint.trim().to_string(), target.cmd.clone())
-    } else if let Some(run_cmd) = target.run_command.as_deref() {
-        let parts: Vec<&str> = run_cmd.trim().split_whitespace().collect();
+    } else if let Some(build_cmd) = build_source {
+        let parts: Vec<&str> = build_cmd.split_whitespace().collect();
         if parts.len() < 2 {
             return Ok(None);
         }
