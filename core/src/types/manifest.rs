@@ -566,7 +566,7 @@ fn default_schema_version() -> String {
 }
 
 fn is_supported_schema_version(value: &str) -> bool {
-    matches!(value.trim(), "0.2" | "0.3" | "1")
+    matches!(value.trim(), "0.3")
 }
 
 fn is_v03_schema(raw: &toml::Value) -> bool {

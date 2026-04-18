@@ -1090,7 +1090,7 @@ impl CapsuleManifest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ValidationError {
-    #[error("Invalid schema_version '{0}', expected '1' or legacy '0.2'/'0.3'")]
+    #[error("Invalid schema_version '{0}', expected '0.3'")]
     InvalidSchemaVersion(String),
     #[error("Invalid name '{0}', must be kebab-case")]
     InvalidName(String),
