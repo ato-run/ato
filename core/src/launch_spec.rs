@@ -188,11 +188,10 @@ fn resolve_launch_working_dir(plan: &ManifestData, command: &str) -> PathBuf {
         // For package manager commands (npm, pnpm, yarn, bun), the command itself
         // is a system binary — not a file inside source/. Check instead whether
         // source/ looks like a Node.js project (has package.json).
-        let is_pkg_manager = matches!(
-            command.trim(),
-            "npm" | "pnpm" | "yarn" | "bun"
-        );
-        if is_pkg_manager && source_dir.join("package.json").exists() {
+        // For any command, prefer source/ when source/package.json exists —
+        // system binaries like npm/pnpm/node/vite all need to run where
+        // package.json (and node_modules) live.
+        if source_dir.join("package.json").exists() {
             return source_dir;
         }
         if command_path_exists(&source_dir, command) {
