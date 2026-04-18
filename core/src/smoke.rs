@@ -917,8 +917,12 @@ fn kill_child(child: &mut Child) -> Result<(), CapsuleError> {
 }
 
 fn can_connect_localhost(port: u16) -> bool {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok()
+    // Check both IPv4 (127.0.0.1) and IPv6 (::1) since dev servers like Vite 5+
+    // may bind exclusively to the IPv6 loopback address.
+    let ipv4 = SocketAddr::from(([127, 0, 0, 1], port));
+    let ipv6 = SocketAddr::from(([0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], port));
+    TcpStream::connect_timeout(&ipv4, Duration::from_millis(100)).is_ok()
+        || TcpStream::connect_timeout(&ipv6, Duration::from_millis(100)).is_ok()
 }
 
 fn ensure_required_port_is_free_before_start(
