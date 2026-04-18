@@ -1562,7 +1562,17 @@ fn synthesize_runtime_model_from_v03(
         .and_then(|v| v.as_str())
         .unwrap_or("source");
 
-    let (runtime, driver) = split_v03_runtime(runtime_selector);
+    let (runtime, selector_driver) = split_v03_runtime(runtime_selector);
+    // If the runtime selector didn't contain a driver (e.g. `runtime = "source"`),
+    // fall back to an explicit top-level `driver` field (e.g. `driver = "tauri"`).
+    let driver = selector_driver.or_else(|| {
+        source
+            .get("driver")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    });
     let language = infer_language_from_driver(driver.as_deref());
 
     let run_command = source.get("run").and_then(|v| v.as_str()).map(str::to_string);
