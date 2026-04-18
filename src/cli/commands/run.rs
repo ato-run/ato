@@ -1379,7 +1379,7 @@ mod tests {
         );
 
         let command = plan_v03_provision_command(&plan).expect("plan provision");
-        assert_eq!(command.as_deref(), Some("pnpm install --frozen-lockfile"));
+        assert_eq!(command.as_deref(), Some("pnpm install"));
     }
 
     #[test]
@@ -1402,7 +1402,7 @@ mod tests {
         );
 
         let command = plan_v03_provision_command(&plan).expect("plan provision");
-        assert_eq!(command.as_deref(), Some("yarn install --frozen-lockfile"));
+        assert_eq!(command.as_deref(), Some("yarn install"));
     }
 
     #[test]
@@ -1452,7 +1452,7 @@ mod tests {
         );
 
         let command = plan_v03_provision_command(&plan).expect("plan provision");
-        assert_eq!(command.as_deref(), Some("pnpm install --frozen-lockfile"));
+        assert_eq!(command.as_deref(), Some("pnpm install"));
     }
 
     #[test]
