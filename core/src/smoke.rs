@@ -659,6 +659,11 @@ fn prepare_smoke_working_directory(
     command.stdin(Stdio::null());
     command.stdout(Stdio::null());
     command.stderr(Stdio::piped());
+    // Prevent corepack from enforcing the `packageManager` version pin, which may
+    // refer to a version not yet cached on the host machine.
+    command.env("COREPACK_ENABLE_STRICT", "0");
+    // Auto-approve pnpm build scripts without interactive prompt.
+    command.env("npm_config_approve_builds", "on");
     apply_isolated_command_env(&mut command, root, service, isolated_env);
 
     let output = command.output().map_err(|err| {
