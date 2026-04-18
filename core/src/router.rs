@@ -51,11 +51,50 @@ impl CompatManifestBridge {
         toml::from_str(&self.raw_toml).map_err(|err| anyhow!("parse compat manifest bridge: {err}"))
     }
 
+    /// Build a bridge where the manifest model and the compat raw TOML come from separate sources.
+    /// Use this when the normalized compat TOML (with `[targets]`) cannot be re-parsed via the
+    /// normal `CapsuleManifest::from_toml` path (e.g. it contains v0.2-style `entrypoint` fields
+    /// that the v0.3 validator would reject).
+    pub fn from_compat_normalized(manifest: CapsuleManifest, compat_toml: String) -> Self {
+        Self {
+            sha256: sha256_hex(compat_toml.as_bytes()),
+            raw_toml: compat_toml,
+            manifest,
+        }
+    }
+
     pub fn from_manifest_value(manifest: &toml::Value) -> Result<Self> {
+        // Detect flat v0.3 manifests that need normalization before direct serde
+        // deserialization (e.g. `build = "cmd"` string, `runtime = "source/native"`
+        // composite selectors, etc.). A flat v0.3 manifest has schema_version=0.3
+        // and no [targets] table yet.
+        let is_flat_v03 = crate::types::is_v03_like_schema(manifest)
+            && !manifest
+                .get("targets")
+                .and_then(|v| v.as_table())
+                .is_some();
+
+        if is_flat_v03 {
+            let raw_toml = toml::to_string(manifest)
+                .map_err(|err| anyhow!("serialize manifest bridge: {err}"))?;
+            let compat_toml = CapsuleManifest::normalize_to_compat_toml(&raw_toml)
+                .map_err(|err| anyhow!(err.to_string()))?;
+            let parsed = toml::from_str::<CapsuleManifest>(&compat_toml)
+                .map_err(|err| anyhow!("parse compat manifest bridge: {err}"))?;
+            return Ok(Self {
+                raw_toml: compat_toml.clone(),
+                manifest: parsed,
+                sha256: sha256_hex(compat_toml.as_bytes()),
+            });
+        }
+
         let raw_toml =
             toml::to_string(manifest).map_err(|err| anyhow!("serialize manifest bridge: {err}"))?;
-        let parsed =
-            CapsuleManifest::from_toml(&raw_toml).map_err(|err| anyhow!(err.to_string()))?;
+        // Use serde deserialization directly — the value is already a structured manifest
+        // (possibly with v0.2-style `entrypoint` in targets). Calling CapsuleManifest::from_toml
+        // would re-run normalization and reject those legacy fields.
+        let parsed = toml::from_str::<CapsuleManifest>(&raw_toml)
+            .map_err(|err| anyhow!("parse compat manifest bridge: {err}"))?;
         Ok(Self {
             raw_toml: raw_toml.clone(),
             manifest: parsed,
