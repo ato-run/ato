@@ -698,7 +698,7 @@ fn parse_lock_native_build_command(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .context("desktop-native delivery.build.build_command.working_dir is missing")?;
+        .unwrap_or(".");
     let working_dir_path = PathBuf::from(working_dir_raw);
     let working_dir = if working_dir_path.is_absolute() {
         working_dir_path
