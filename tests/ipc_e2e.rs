@@ -227,15 +227,13 @@ fn ipc_start_with_no_ipc_section_uses_fallback_name() {
     std::fs::write(
         temp.path().join("capsule.toml"),
         r#"
-schema_version = "1"
+schema_version = "0.3"
 name = "no-ipc"
 version = "0.1.0"
 type = "app"
 
-[execution]
 runtime = "source"
-entrypoint = "echo hello"
-"#,
+run = "echo hello""#,
     )
     .unwrap();
 
@@ -256,18 +254,14 @@ fn run_fails_closed_when_required_ipc_import_is_missing() {
     write_file(
         &temp.path().join("capsule.toml"),
         r#"
-schema_version = "1"
+schema_version = "0.3"
 name = "ipc-fail-closed"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "1.46.3"
-entrypoint = "main.ts"
-
+run = "main.ts"
 [ipc.imports.greeter]
 from = "./missing-service"
 "#,
@@ -299,18 +293,14 @@ fn build_fails_when_ipc_schema_reference_is_invalid() {
     write_file(
         &temp.path().join("capsule.toml"),
         r#"
-schema_version = "1"
+schema_version = "0.3"
 name = "ipc-schema-invalid"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "1.46.3"
-entrypoint = "main.ts"
-
+run = "main.ts"
 [ipc.exports]
 name = "schema-service"
 

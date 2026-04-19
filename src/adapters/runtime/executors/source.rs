@@ -933,12 +933,19 @@ fn spawn_internal_exec(
     Ok((child, event_rx, exec_meta))
 }
 
-fn spawn_host_lifecycle_events(pid: u32, readiness_port: Option<u16>) -> Receiver<LifecycleEvent> {
+pub(crate) fn spawn_host_lifecycle_events(
+    pid: u32,
+    readiness_port: Option<u16>,
+) -> Receiver<LifecycleEvent> {
     let (event_tx, event_rx) = mpsc::channel();
     let ready_tx = event_tx.clone();
     thread::spawn(move || {
         if let Some(port) = readiness_port {
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let timeout_secs = std::env::var("ATO_BACKGROUND_READY_WAIT_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(60);
+            let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
             while std::time::Instant::now() < deadline {
                 if std::net::TcpStream::connect_timeout(
                     &std::net::SocketAddr::from(([127, 0, 0, 1], port)),

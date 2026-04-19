@@ -456,19 +456,15 @@ if __name__ == "__main__":
 #[cfg(unix)]
 fn fixture_capsule_manifest(ollama_base_url: &str) -> String {
     format!(
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "ollama-translator"
 version = "0.1.0"
 type = "job"
-default_target = "translate"
 
-[targets.translate]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11.10"
-entrypoint = "ollama_translator.py"
 source_layout = "anchored_entrypoint"
-
+run = "ollama_translator.py"
 [services.ollama]
 from = "dependency:ollama"
 mode = "reuse-if-present"
@@ -487,19 +483,15 @@ ollama_model = "qwen2:7b"
 #[cfg(unix)]
 fn fixture_generic_required_external_manifest(service_base_url: &str) -> String {
     format!(
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "generic-service-client"
 version = "0.1.0"
 type = "job"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11.10"
-entrypoint = "main.py"
 source_layout = "anchored_entrypoint"
-
+run = "main.py"
 [services.catalog]
 from = "dependency:catalog"
 mode = "required-external"

@@ -1665,6 +1665,16 @@ pub(crate) async fn install_github_repository(
         // first try.
         *draft = draft.normalize_preview_toml_for_checkout(&checkout.checkout_dir)?;
         apply_github_auto_fix_to_draft(draft, &checkout.checkout_dir, auto_fix_mode, false, json)?;
+        // Unconditionally correct port when the run script hard-codes --port <n>
+        if let Some(toml) = draft.preview_toml.as_deref() {
+            let corrected = super::github_inference::correct_port_from_run_script(
+                toml,
+                &checkout.checkout_dir,
+            )?;
+            if corrected != toml {
+                draft.preview_toml = Some(corrected);
+            }
+        }
         preview_session.update_from_install_draft(draft);
     }
     if install_draft.is_some() {
@@ -2445,6 +2455,13 @@ fn copy_env_example_in_dir(dir: &Path, json: bool, prompt_for_secrets: bool) {
                         .trim_matches('"')
                         .trim_matches('\'');
                     if secret_keys.contains(&key) && is_placeholder_value(value) {
+                        // If the key is already available in the process environment
+                        // (e.g. via --env-file), use that value directly without prompting.
+                        if let Ok(env_val) = std::env::var(&key) {
+                            prompted.insert(key.clone(), env_val.clone());
+                            lines_out.push(format!("{}={}", key, env_val));
+                            continue;
+                        }
                         let prompt = format!("🔑  Enter value for {} (hidden): ", key);
                         match rpassword::prompt_password(&prompt) {
                             Ok(entered) => {
@@ -2579,24 +2596,24 @@ mod tests {
     async fn resolve_run_target_or_install_resolves_cli_export_from_installed_capsule() {
         let resolved = resolve_export_target(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "tool"
 version = "1.0.0"
 type = "app"
+
 default_target = "default"
 
 [targets.default]
 runtime = "source"
 driver = "python"
 runtime_version = "3.11"
-entrypoint = "default.py"
+run_command = "default.py"
 
 [targets.export]
 runtime = "source"
 driver = "python"
 runtime_version = "3.11"
 run_command = "python3 tool.py --from-target"
-
 [exports.cli.tool]
 kind = "python-tool"
 target = "export"
@@ -2619,18 +2636,14 @@ args = ["--from-export"]
     async fn resolve_run_target_or_install_errors_when_export_missing() {
         let err = resolve_export_target(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "tool"
 version = "1.0.0"
 type = "app"
-default_target = "default"
 
-[targets.default]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11"
-entrypoint = "default.py"
-"#,
+run = "default.py""#,
         )
         .await
         .expect_err("missing export must fail");
@@ -2651,21 +2664,17 @@ entrypoint = "default.py"
     async fn resolve_run_target_or_install_errors_when_export_slug_mismatches() {
         let err = resolve_export_target(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "tool"
 version = "1.0.0"
 type = "app"
-default_target = "export"
 
-[targets.export]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11"
-entrypoint = "tool.py"
-
+run = "tool.py"
 [exports.cli.other-tool]
 kind = "python-tool"
-target = "export"
+target = "app"
 "#,
         )
         .await
@@ -2684,18 +2693,14 @@ target = "export"
     async fn resolve_run_target_or_install_errors_when_export_backend_is_not_python_tool() {
         let err = resolve_export_target(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "tool"
 version = "1.0.0"
 type = "app"
-default_target = "export"
 
-[targets.export]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11"
-entrypoint = "tool.py"
-
+run = "tool.py"
 [exports.cli.tool]
 kind = "node-tool"
 target = "export"
@@ -2717,18 +2722,14 @@ target = "export"
     async fn resolve_run_target_or_install_errors_when_export_target_missing() {
         let err = resolve_export_target(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "tool"
 version = "1.0.0"
 type = "app"
-default_target = "default"
 
-[targets.default]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11"
-entrypoint = "default.py"
-
+run = "default.py"
 [exports.cli.tool]
 kind = "python-tool"
 target = "missing"
@@ -2750,21 +2751,17 @@ target = "missing"
     async fn resolve_run_target_or_install_errors_when_export_target_is_not_source_python() {
         let err = resolve_export_target(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "tool"
 version = "1.0.0"
 type = "app"
-default_target = "export"
 
-[targets.export]
-runtime = "source"
-driver = "node"
+runtime = "source/node"
 runtime_version = "20"
-entrypoint = "tool.js"
-
+run = "tool.js"
 [exports.cli.tool]
 kind = "python-tool"
-target = "export"
+target = "app"
 "#,
         )
         .await

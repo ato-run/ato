@@ -307,17 +307,13 @@ mod tests {
         let tmp = tempdir().expect("tmp dir");
         std::fs::write(
             tmp.path().join("capsule.toml"),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "default"
 
-[targets.default]
-runtime = "source"
-driver = "deno"
-entrypoint = "main.ts"
-
+runtime = "source/deno"
+run = "main.ts"
 [build.lifecycle]
 prepare = "pnpm -C apps/dashboard build"
 "#,

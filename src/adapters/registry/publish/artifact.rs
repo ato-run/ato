@@ -1147,17 +1147,13 @@ mod tests {
 
     fn test_capsule_bytes(name: &str, version: &str) -> Vec<u8> {
         let manifest = format!(
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "{name}"
 version = "{version}"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "deno"
-entrypoint = "main.ts"
-"#
+runtime = "source/deno"
+run = "main.ts""#
         );
         let mut buf = Vec::<u8>::new();
         {
@@ -1263,17 +1259,13 @@ entrypoint = "main.ts"
         lock_json: Option<Vec<u8>>,
         local_derivation_json: Option<&str>,
     ) -> Vec<u8> {
-        let manifest = r#"schema_version = "0.2"
+        let manifest = r#"schema_version = "0.3"
 name = "demo-native"
 version = "0.1.0"
 type = "app"
-default_target = "desktop"
 
-[targets.desktop]
-runtime = "source"
-driver = "native"
-entrypoint = "Demo.app"
-"#;
+runtime = "source/native"
+run = "Demo.app""#;
         let delivery = r#"schema_version = "0.1"
 
 [artifact]

@@ -234,6 +234,105 @@ pub fn spawn(
         .context("Failed to spawn node compat runtime for orchestration")
 }
 
+/// Spawn a NodeCompat process for background (daemon) execution.
+/// Returns a `CapsuleProcess` with port-based readiness detection.
+pub fn spawn_background(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
+    launch_ctx: &RuntimeLaunchContext,
+    dangerously_skip_permissions: bool,
+) -> Result<super::source::CapsuleProcess> {
+    verify_execution_plan_hashes(execution_plan)?;
+
+    let launch_spec = derive_launch_spec(plan)?;
+    let readiness_port = runtime_overrides::override_port(launch_spec.port);
+
+    let mut cmd = if is_package_manager_entrypoint(&launch_spec.command) {
+        let PreparedCommand {
+            cmd,
+            #[cfg(unix)]
+            _secret_fd_guard,
+        } = build_package_manager_command(
+            plan,
+            authoritative_lock,
+            execution_plan,
+            &launch_spec.working_dir,
+            &launch_spec.command,
+            &launch_spec.args,
+            launch_ctx,
+        )?;
+        cmd
+    } else {
+        let Some(_) = launch_spec.required_lockfile.as_ref() else {
+            return Err(AtoExecutionError::lock_incomplete(
+                "source/node Tier1 execution requires a Node lockfile",
+                Some("package-lock.json|yarn.lock|pnpm-lock.yaml|bun.lock|bun.lockb"),
+            )
+            .into());
+        };
+
+        if let Some(PreparedCommand {
+            cmd,
+            #[cfg(unix)]
+            _secret_fd_guard,
+        }) = maybe_build_direct_node_command(
+            plan,
+            authoritative_lock,
+            execution_plan,
+            &launch_spec.working_dir,
+            &launch_spec.command,
+            &launch_spec.args,
+            launch_ctx,
+        )? {
+            cmd
+        } else {
+            let deno_bin =
+                runtime_manager::ensure_deno_binary_with_authority(plan, authoritative_lock)?;
+            let use_compat_flag = deno_supports_compat_flag(&deno_bin)?;
+            run_provisioning(
+                &deno_bin,
+                &launch_spec.working_dir,
+                &launch_spec.command,
+                launch_ctx,
+            )?;
+            let PreparedCommand {
+                cmd,
+                #[cfg(unix)]
+                _secret_fd_guard,
+            } = build_runtime_command(
+                &deno_bin,
+                plan,
+                authoritative_lock,
+                execution_plan,
+                &launch_spec.working_dir,
+                &launch_spec.command,
+                &launch_spec.args,
+                launch_ctx,
+                use_compat_flag,
+                dangerously_skip_permissions,
+            )?;
+            cmd
+        }
+    };
+
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let child = cmd
+        .spawn()
+        .context("Failed to spawn node compat process in background")?;
+    let event_rx = super::source::spawn_host_lifecycle_events(child.id(), readiness_port);
+
+    Ok(super::source::CapsuleProcess {
+        child,
+        cleanup_paths: Vec::new(),
+        event_rx: Some(event_rx),
+        workload_pid: None,
+        log_path: None,
+    })
+}
+
 fn run_provisioning(
     deno_bin: &Path,
     runtime_dir: &Path,
@@ -858,17 +957,15 @@ mod tests {
     };
     use std::collections::HashMap;
 
-    fn plan_from_manifest(tmp: &tempfile::TempDir, manifest: &str) -> ManifestData {
+    fn plan_from_manifest(tmp: &tempfile::TempDir, manifest_fragment: &str) -> ManifestData {
         let manifest_path = tmp.path().join("capsule.toml");
         let manifest = format!(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
-
-{manifest}
+{manifest_fragment}
 "#
         );
         std::fs::write(&manifest_path, &manifest).expect("write manifest");
@@ -897,10 +994,8 @@ default_target = "app"
         let plan = plan_from_manifest(
             &tmp,
             r#"
-[targets.app]
-runtime = "source"
-driver = "node"
-entrypoint = "main.js"
+runtime = "source/node"
+run = "node main.js"
 "#,
         );
         let spec = derive_launch_spec(&plan).expect("derive launch spec");
@@ -952,10 +1047,8 @@ entrypoint = "main.js"
         let plan = plan_from_manifest(
             &tmp,
             r#"
-[targets.app]
-runtime = "source"
-driver = "node"
-entrypoint = "main.js"
+runtime = "source/node"
+run = "node main.js"
 "#,
         );
         let spec = derive_launch_spec(&plan).expect("derive launch spec");
@@ -979,10 +1072,8 @@ entrypoint = "main.js"
         let plan = plan_from_manifest(
             &tmp,
             r#"
-[targets.app]
-runtime = "source"
-driver = "node"
-run_command = "node lib.js fixtures/db.json --port 3000"
+runtime = "source/node"
+run = "node lib.js fixtures/db.json --port 3000"
 "#,
         );
         let spec = derive_launch_spec(&plan).expect("derive launch spec");

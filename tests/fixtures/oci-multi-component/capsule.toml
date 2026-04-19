@@ -1,21 +1,22 @@
-schema_version = "0.2"
+schema_version = "0.3"
 name = "oci-multi-component"
 version = "0.1.0"
 type = "app"
-default_target = "worker"
 
-[targets.worker]
-runtime = "source"
-driver = "native"
-entrypoint = "./run.sh"
+[packages.worker]
+type = "app"
+runtime = "source/native"
+run = "./run.sh"
 port = 18081
 
-[targets.redis]
+[packages.redis]
+type = "app"
 runtime = "oci"
 image = "redis:alpine"
 port = 6379
 
-[targets.bridge]
+[packages.bridge]
+type = "app"
 runtime = "oci"
 image = "redis:alpine"
 cmd = ["sh", "-c", "redis-cli -h cache-db -p 6379 ping >/dev/null && echo bridge-ok && tail -f /dev/null"]

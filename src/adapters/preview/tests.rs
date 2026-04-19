@@ -220,6 +220,42 @@ fn draft_requires_manual_review_for_explicit_lockfile_blocker_warning() {
 }
 
 #[test]
+fn draft_allows_soft_package_script_manual_review_warning() {
+    let draft = GitHubInstallDraftResponse {
+        repo: GitHubInstallDraftRepo {
+            owner: "example".to_string(),
+            repo: "repo".to_string(),
+            full_name: "example/repo".to_string(),
+            default_branch: "main".to_string(),
+        },
+        capsule_toml: GitHubInstallDraftCapsuleToml { exists: false },
+        repo_ref: "example/repo".to_string(),
+        proposed_run_command: None,
+        proposed_install_command: "ato run github.com/example/repo".to_string(),
+        resolved_ref: GitHubInstallDraftResolvedRef {
+            ref_name: "main".to_string(),
+            sha: "abc123".to_string(),
+        },
+        manifest_source: "inferred".to_string(),
+        preview_toml: Some(
+            "schema_version = \"0.3\"\nname = \"demo\"\nruntime = \"source/node\"\nrun = \"node package.json\"\n"
+                .to_string(),
+        ),
+        capsule_hint: Some(GitHubInstallDraftHint {
+            confidence: "medium".to_string(),
+            warnings: vec![
+                "The selected package.json script could not be normalized to a direct Node entrypoint and may require manual review.".to_string(),
+            ],
+            launchability: Some("manual_review".to_string()),
+        }),
+        inference_mode: Some("rules".to_string()),
+        retryable: false,
+    };
+
+    assert!(!draft_requires_manual_review(&draft));
+}
+
+#[test]
 fn draft_allows_optional_port_env_advisory_warning() {
     let draft = GitHubInstallDraftResponse {
         repo: GitHubInstallDraftRepo {
@@ -322,4 +358,163 @@ fn preview_session_tracks_retry_failure_and_manual_fix() {
     );
     assert!(session.last_failure_reason.is_none());
     assert!(session.last_smoke_error_class.is_none());
+}
+
+fn make_draft_with_required_env(required_env_keys: &[&str]) -> GitHubInstallDraftResponse {
+    let required_env_toml = format!(
+        "schema_version = \"0.3\"\nrequired_env = [{}]\n",
+        required_env_keys
+            .iter()
+            .map(|k| format!("\"{}\"", k))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    GitHubInstallDraftResponse {
+        repo: GitHubInstallDraftRepo {
+            owner: "example".to_string(),
+            repo: "repo".to_string(),
+            full_name: "example/repo".to_string(),
+            default_branch: "main".to_string(),
+        },
+        capsule_toml: GitHubInstallDraftCapsuleToml { exists: false },
+        repo_ref: "example/repo".to_string(),
+        proposed_run_command: None,
+        proposed_install_command: "ato run github.com/example/repo".to_string(),
+        resolved_ref: GitHubInstallDraftResolvedRef {
+            ref_name: "main".to_string(),
+            sha: "abc123".to_string(),
+        },
+        manifest_source: "inferred".to_string(),
+        preview_toml: Some(required_env_toml),
+        capsule_hint: Some(GitHubInstallDraftHint {
+            confidence: "high".to_string(),
+            warnings: Vec::new(),
+            launchability: Some("runnable".to_string()),
+        }),
+        inference_mode: Some("rules".to_string()),
+        retryable: false,
+    }
+}
+
+struct EnvVarStrGuard {
+    key: &'static str,
+    original: Option<String>,
+}
+
+impl EnvVarStrGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let original = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarStrGuard {
+    fn drop(&mut self) {
+        if let Some(ref v) = self.original {
+            std::env::set_var(self.key, v);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
+
+#[test]
+fn required_env_already_in_process_env_does_not_block() {
+    let _lock = env_lock();
+    // NODE_ENV provided by --env-file (simulated by setting it in process env)
+    let _guard = EnvVarStrGuard::set("NODE_ENV", "development");
+    let draft = make_draft_with_required_env(&["NODE_ENV"]);
+    assert!(!draft_requires_manual_review(&draft));
+}
+
+#[test]
+fn required_env_partially_satisfied_still_blocks_for_missing_key() {
+    let _lock = env_lock();
+    let _guard = EnvVarStrGuard::set("NODE_ENV", "development");
+    // DATABASE_URL is NOT set — draft should still block
+    std::env::remove_var("DATABASE_URL");
+    let draft = make_draft_with_required_env(&["NODE_ENV", "DATABASE_URL"]);
+    assert!(draft_requires_manual_review(&draft));
+}
+
+#[test]
+fn required_env_all_satisfied_unblocks_draft() {
+    let _lock = env_lock();
+    let _node_guard = EnvVarStrGuard::set("NODE_ENV", "development");
+    let _babel_guard = EnvVarStrGuard::set("BABEL_ENV", "development");
+    let draft = make_draft_with_required_env(&["NODE_ENV", "BABEL_ENV"]);
+    assert!(!draft_requires_manual_review(&draft));
+}
+
+#[test]
+fn dev_server_inferred_warning_is_soft_advisory() {
+    let draft = GitHubInstallDraftResponse {
+        repo: GitHubInstallDraftRepo {
+            owner: "example".to_string(),
+            repo: "repo".to_string(),
+            full_name: "example/repo".to_string(),
+            default_branch: "main".to_string(),
+        },
+        capsule_toml: GitHubInstallDraftCapsuleToml { exists: false },
+        repo_ref: "example/repo".to_string(),
+        proposed_run_command: None,
+        proposed_install_command: "ato run github.com/example/repo".to_string(),
+        resolved_ref: GitHubInstallDraftResolvedRef {
+            ref_name: "main".to_string(),
+            sha: "abc123".to_string(),
+        },
+        manifest_source: "inferred".to_string(),
+        preview_toml: Some(
+            "schema_version = \"0.3\"\nname = \"demo\"\nruntime = \"source/node\"\nrun = \"pnpm dev\"\n"
+                .to_string(),
+        ),
+        capsule_hint: Some(GitHubInstallDraftHint {
+            confidence: "medium".to_string(),
+            warnings: vec![
+                "A development server command was inferred from package.json. Review it before using the draft locally.".to_string(),
+            ],
+            launchability: Some("manual_review".to_string()),
+        }),
+        inference_mode: Some("rules".to_string()),
+        retryable: false,
+    };
+
+    assert!(!draft_requires_manual_review(&draft));
+}
+
+#[test]
+fn secret_warning_still_hard_blocks_even_with_soft_advisory() {
+    // A draft with BOTH a soft advisory AND a hard-blocking secret warning
+    // should still require manual review.
+    let draft = GitHubInstallDraftResponse {
+        repo: GitHubInstallDraftRepo {
+            owner: "example".to_string(),
+            repo: "repo".to_string(),
+            full_name: "example/repo".to_string(),
+            default_branch: "main".to_string(),
+        },
+        capsule_toml: GitHubInstallDraftCapsuleToml { exists: false },
+        repo_ref: "example/repo".to_string(),
+        proposed_run_command: None,
+        proposed_install_command: "ato run github.com/example/repo".to_string(),
+        resolved_ref: GitHubInstallDraftResolvedRef {
+            ref_name: "main".to_string(),
+            sha: "abc123".to_string(),
+        },
+        manifest_source: "inferred".to_string(),
+        preview_toml: Some("schema_version = \"0.3\"\nname = \"demo\"\n".to_string()),
+        capsule_hint: Some(GitHubInstallDraftHint {
+            confidence: "medium".to_string(),
+            warnings: vec![
+                "A development server command was inferred from package.json. Review it before using the draft locally.".to_string(),
+                "This app requires a database credential to function.".to_string(),
+            ],
+            launchability: Some("manual_review".to_string()),
+        }),
+        inference_mode: Some("rules".to_string()),
+        retryable: false,
+    };
+
+    assert!(draft_requires_manual_review(&draft));
 }

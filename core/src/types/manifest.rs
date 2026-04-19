@@ -562,11 +562,11 @@ pub struct PolymorphismConfig {
 }
 
 fn default_schema_version() -> String {
-    "0.2".to_string()
+    "0.3".to_string()
 }
 
 fn is_supported_schema_version(value: &str) -> bool {
-    matches!(value.trim(), "0.2" | "0.3" | "1")
+    matches!(value.trim(), "0.3")
 }
 
 fn is_v03_schema(raw: &toml::Value) -> bool {
@@ -603,7 +603,7 @@ fn is_chml_manifest(raw: &toml::Value) -> bool {
         || table.contains_key("capsule_path")
 }
 
-fn is_v03_like_schema(raw: &toml::Value) -> bool {
+pub fn is_v03_like_schema(raw: &toml::Value) -> bool {
     is_v03_schema(raw) || is_chml_manifest(raw)
 }
 
@@ -1375,7 +1375,19 @@ impl CapsuleManifest {
         toml::to_string_pretty(self).map_err(|e| CapsuleError::SerializeError(e.to_string()))
     }
 
-    /// Resolve the effective v0.2 target from `default_target`.
+    /// Returns the intermediate normalized TOML text (with `[targets]` populated) for use in the
+    /// compat bridge, without re-running v0.3 validation on the result. This avoids the
+    /// round-trip issue where `normalize_v03_target_table` emits `entrypoint` (v0.2-style) which
+    /// `reject_v03_legacy_fields` would reject on re-parse.
+    pub fn normalize_to_compat_toml(content: &str) -> Result<String, CapsuleError> {
+        let raw: toml::Value = toml::from_str(content)
+            .map_err(|e| CapsuleError::ParseError(format!("TOML parse error: {}", e)))?;
+        let mut visiting = HashSet::new();
+        let normalized = normalize_v03_manifest_value_with_path(raw, None, &mut visiting)?;
+        toml::to_string(&normalized)
+            .map_err(|e| CapsuleError::SerializeError(format!("TOML serialize error: {}", e)))
+    }
+
     pub fn resolve_default_target(&self) -> Result<&NamedTarget, CapsuleError> {
         let targets = self.targets.as_ref().ok_or_else(|| {
             CapsuleError::ValidationError(

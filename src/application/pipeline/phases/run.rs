@@ -2116,6 +2116,37 @@ where
             }
         }
         ExecutorKind::NodeCompat => {
+            if request.background {
+                let process = crate::executors::node_compat::spawn_background(
+                    &decision.plan,
+                    prepared.authoritative_lock.as_ref(),
+                    &execution_plan,
+                    &launch_ctx,
+                    request.dangerously_skip_permissions,
+                )?;
+                let runtime =
+                    hooks.process_runtime_label(&decision.plan, false, compatibility_host_mode);
+                let ready_without_events = process.event_rx.is_none();
+                hooks
+                    .complete_background_source_process(
+                        process,
+                        &decision.plan,
+                        runtime,
+                        run_scoped_id.clone(),
+                        is_one_shot,
+                        ready_without_events,
+                        false,
+                        compatibility_host_mode,
+                        &request.reporter,
+                    )
+                    .await?;
+                sidecar_cleanup.stop_now();
+                progress.ok(
+                    HourglassPhase::Execute,
+                    "background node compat execution started",
+                );
+                return Ok(());
+            }
             let exit = crate::executors::node_compat::execute(
                 &decision.plan,
                 prepared.authoritative_lock.as_ref(),

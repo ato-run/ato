@@ -131,9 +131,17 @@ fn normalize_v03_legacy_env_required(
     Ok(normalized)
 }
 
+fn is_non_empty_legacy_value(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::String(s) => !s.trim().is_empty(),
+        toml::Value::Array(a) => !a.is_empty(),
+        _ => true,
+    }
+}
+
 fn reject_v03_legacy_fields(table: &Table, context: &str) -> Result<(), CapsuleError> {
     for field in ["entrypoint", "cmd"] {
-        if table.contains_key(field) {
+        if table.get(field).is_some_and(is_non_empty_legacy_value) {
             return Err(CapsuleError::ParseError(format!(
                 "schema_version=0.3 {context} must not use legacy field '{}'; use 'run' instead",
                 field
@@ -147,7 +155,10 @@ fn reject_v03_legacy_fields(table: &Table, context: &str) -> Result<(), CapsuleE
                 continue;
             };
             for field in ["entrypoint", "cmd"] {
-                if target_table.contains_key(field) {
+                if target_table
+                    .get(field)
+                    .is_some_and(is_non_empty_legacy_value)
+                {
                     return Err(CapsuleError::ParseError(format!(
                         "schema_version=0.3 target '{}' must not use legacy field '{}'; use 'run' instead",
                         target_name, field
@@ -364,6 +375,9 @@ fn normalize_v03_target_table(package_name: &str, table: &Table) -> Result<Table
         if let Some(driver) = driver {
             normalized_driver = Some(driver.clone());
             target_table.insert("driver".to_string(), toml::Value::String(driver));
+        } else if let Some(driver) = normalized_driver.as_ref() {
+            // runtime selector didn't contain a driver, but one was specified explicitly
+            target_table.insert("driver".to_string(), toml::Value::String(driver.clone()));
         }
     } else if let Some(driver) = normalized_driver.as_ref() {
         target_table.insert("driver".to_string(), toml::Value::String(driver.clone()));
@@ -1737,6 +1751,8 @@ pub(super) fn normalize_v03_manifest_value_with_path(
 
         table.remove("runtime");
         table.remove("run");
+        table.remove("driver");
+        table.remove("language");
         table.remove("port");
         table.remove("required_env");
         table.remove("runtime_version");

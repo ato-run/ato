@@ -42,17 +42,13 @@ fn run(args: Args) -> Result<()> {
     let generate_started = Instant::now();
     fs::write(
         &manifest_path,
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "tar-pack-bench"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "native"
-entrypoint = "source/group-000/file-000000.txt"
-"#,
+runtime = "source/native"
+run = "source/group-000/file-000000.txt""#,
     )
     .context("write capsule.toml")?;
     fs::write(

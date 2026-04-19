@@ -909,16 +909,13 @@ mod tests {
         std::fs::write(source_dir.join("hello.sh"), "#!/bin/sh\necho ok\n").unwrap();
 
         let manifest = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "bundle-test"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
 runtime = "source"
-entrypoint = "hello.sh"
-"#;
+run = "hello.sh""#;
         let manifest_path = root.join("capsule.toml");
         std::fs::write(&manifest_path, manifest).unwrap();
 
@@ -958,19 +955,15 @@ entrypoint = "hello.sh"
         let source_dir = root.join("source");
         std::fs::create_dir_all(&source_dir).unwrap();
         let manifest = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "bundle-test"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11.10"
-entrypoint = "main.py"
 dependencies = "requirements.txt"
-"#;
+run = "main.py""#;
         let manifest_path = root.join("capsule.toml");
         std::fs::write(&manifest_path, manifest).unwrap();
         std::fs::write(source_dir.join("main.py"), "print('ok')\n").unwrap();

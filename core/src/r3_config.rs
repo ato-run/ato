@@ -1051,12 +1051,31 @@ fn read_entrypoint(manifest: &toml::Value) -> Result<String> {
 
 fn resolve_shell_command(command: &str, manifest: &toml::Value) -> CommandResolution {
     let env = merged_manifest_env(manifest);
+    let signals = execution_signals(manifest);
+
+    // `npm:binary` is a package-binary shorthand (e.g. "npm:vite --host 0.0.0.0").
+    // Pass it through as-is so spawn_main_service can resolve it via node_modules/.bin/.
+    // Wrapping it in `sh -c` would cause "/bin/sh: npm:vite: command not found".
+    if let Some(rest) = command.strip_prefix("npm:") {
+        let mut parts = rest.splitn(2, ' ');
+        let bin = parts.next().unwrap_or(rest);
+        let args: Vec<String> = parts
+            .next()
+            .map(|tail| tail.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default();
+        return (
+            format!("npm:{bin}"),
+            args,
+            if env.is_empty() { None } else { Some(env) },
+            signals,
+        );
+    }
 
     (
         "sh".to_string(),
         vec!["-c".to_string(), command.to_string()],
         if env.is_empty() { None } else { Some(env) },
-        execution_signals(manifest),
+        signals,
     )
 }
 
@@ -1685,20 +1704,15 @@ mod tests {
         let manifest_path = tmp.path().join("capsule.toml");
 
         let manifest = r#"
-    schema_version = "0.2"
+    schema_version = "0.3"
     name = "demo"
     version = "0.1.0"
     type = "app"
-    default_target = "cli"
 
-    [targets.cli]
     runtime = "source"
-    language = "python"
-    entrypoint = "main.py"
-
-[targets.cli.env]
-MODEL = "demo"
-
+    MODEL = "demo"
+    run = "main.py"
+    [env]
 [network]
 egress_allow = ["1.1.1.1"]
 "#;
@@ -1720,21 +1734,16 @@ egress_allow = ["1.1.1.1"]
         let manifest_path = tmp.path().join("capsule.toml");
 
         let manifest = r#"
-    schema_version = "0.2"
+    schema_version = "0.3"
     name = "python-demo"
     version = "0.1.0"
     type = "app"
-    default_target = "cli"
 
-    [targets.cli]
     runtime = "source"
-    language = "python"
     runtime_version = "3.11.10"
-    entrypoint = "main.py"
-
-    [targets.cli.env]
     PORT = "8080"
-    "#;
+    run = "main.py"
+    [env]"#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
 
@@ -1768,18 +1777,14 @@ egress_allow = ["1.1.1.1"]
         let manifest_path = tmp.path().join("capsule.toml");
 
         let manifest = r#"
-    schema_version = "0.2"
+    schema_version = "0.3"
     name = "static-demo"
     version = "0.1.0"
     type = "app"
-    default_target = "site"
 
-    [targets.site]
-    runtime = "web"
-    driver = "static"
-    entrypoint = "dist"
+    runtime = "web/static"
     port = 4173
-    "#;
+    run = "dist""#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
 
@@ -1794,21 +1799,16 @@ egress_allow = ["1.1.1.1"]
         let manifest_path = tmp.path().join("capsule.toml");
 
         let manifest = r#"
-    schema_version = "0.2"
+    schema_version = "0.3"
     name = "python-demo"
     version = "0.1.0"
     type = "app"
-    default_target = "cli"
 
-    [targets.cli]
     runtime = "source"
-    language = "python"
     runtime_version = "3.11.10"
-    entrypoint = "main.py"
-
-    [targets.cli.env]
     PORT = "8080"
-    "#;
+    run = "main.py"
+    [env]"#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
 
@@ -1846,18 +1846,14 @@ egress_allow = ["1.1.1.1"]
         let manifest_path = tmp.path().join("capsule.toml");
 
         let manifest = r#"
-    schema_version = "0.2"
+    schema_version = "0.3"
     name = "python-single-script"
     version = "0.1.0"
     type = "job"
-    default_target = "cli"
 
-    [targets.cli]
     runtime = "source"
-    language = "python"
-    entrypoint = "main.py"
     source_layout = "anchored_entrypoint"
-    "#;
+    run = "main.py""#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
 
@@ -1879,18 +1875,14 @@ egress_allow = ["1.1.1.1"]
         let manifest_path = tmp.path().join("capsule.toml");
 
         let manifest = r#"
-    schema_version = "0.2"
+    schema_version = "0.3"
     name = "node-demo"
     version = "0.1.0"
     type = "app"
-    default_target = "cli"
 
-    [targets.cli]
     runtime = "source"
-    language = "node"
     version = "20"
-    entrypoint = "index.js"
-    "#;
+    run = "index.js""#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
 
@@ -1909,18 +1901,14 @@ egress_allow = ["1.1.1.1"]
         let manifest_path = tmp.path().join("capsule.toml");
 
         let manifest = r#"
-    schema_version = "0.2"
+    schema_version = "0.3"
     name = "node-demo"
     version = "0.1.0"
     type = "app"
-    default_target = "cli"
 
-    [targets.cli]
     runtime = "source"
-    language = "node"
     version = "20"
-    entrypoint = "index.js"
-    "#;
+    run = "index.js""#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
 
@@ -1939,12 +1927,28 @@ egress_allow = ["1.1.1.1"]
         let manifest_path = tmp.path().join("capsule.toml");
 
         let manifest = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "svc-demo"
 version = "0.1.0"
 type = "app"
+
 default_target = "dashboard"
 
+[targets.dashboard]
+runtime = "web/node"
+runtime_version = "20.11.0"
+port = 4173
+working_dir = "."
+env = { PORT = "4173" }
+run = "apps/dashboard/server.js"
+
+[targets.control_plane]
+runtime = "source/python"
+runtime_version = "3.11.10"
+working_dir = "apps/control-plane"
+port = 8081
+env = { PYTHONPATH = "src" }
+run = "python -m uvicorn control_plane.modal_webhook:app --port 8081"
 [services.main]
 target = "dashboard"
 depends_on = ["control_plane"]
@@ -1953,24 +1957,6 @@ readiness_probe = { http_get = "/", port = "4173" }
 [services.control_plane]
 target = "control_plane"
 readiness_probe = { http_get = "/healthz", port = "8081" }
-
-[targets.dashboard]
-runtime = "web"
-driver = "node"
-runtime_version = "20.11.0"
-entrypoint = "apps/dashboard/server.js"
-port = 4173
-working_dir = "."
-env = { PORT = "4173" }
-
-[targets.control_plane]
-runtime = "source"
-driver = "python"
-runtime_version = "3.11.10"
-entrypoint = "python -m uvicorn control_plane.modal_webhook:app --port 8081"
-working_dir = "apps/control-plane"
-port = 8081
-env = { PYTHONPATH = "src" }
 "#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
@@ -2048,18 +2034,14 @@ port = 3000
         let manifest_path = tmp.path().join("capsule.toml");
 
         let manifest = r#"
-    schema_version = "0.2"
+    schema_version = "0.3"
     name = "deno-demo"
     version = "0.1.0"
     type = "app"
-    default_target = "cli"
 
-    [targets.cli]
     runtime = "source"
-    language = "deno"
     version = "1.40"
-    entrypoint = "server.ts"
-    "#;
+    run = "server.ts""#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
 
@@ -2080,18 +2062,14 @@ port = 3000
         let manifest_path = tmp.path().join("capsule.toml");
 
         let manifest = r#"
-    schema_version = "0.2"
+    schema_version = "0.3"
     name = "deno-demo"
     version = "0.1.0"
     type = "app"
-    default_target = "cli"
 
-    [targets.cli]
     runtime = "source"
-    language = "deno"
     version = "1.40"
-    entrypoint = "server.ts"
-    "#;
+    run = "server.ts""#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
 
@@ -2109,18 +2087,14 @@ port = 3000
         let manifest_path = tmp.path().join("capsule.toml");
 
         let manifest = r#"
-    schema_version = "0.2"
+    schema_version = "0.3"
     name = "bun-demo"
     version = "0.1.0"
     type = "app"
-    default_target = "cli"
 
-    [targets.cli]
     runtime = "source"
-    language = "bun"
     version = "1.1"
-    entrypoint = "main.ts"
-    "#;
+    run = "main.ts""#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
 
@@ -2138,18 +2112,14 @@ port = 3000
         let manifest_path = tmp.path().join("capsule.toml");
 
         let manifest = r#"
-    schema_version = "0.2"
+    schema_version = "0.3"
     name = "bun-demo"
     version = "0.1.0"
     type = "app"
-    default_target = "cli"
 
-    [targets.cli]
     runtime = "source"
-    language = "bun"
     version = "1.1"
-    entrypoint = "main.ts"
-    "#;
+    run = "main.ts""#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
 
@@ -2167,17 +2137,13 @@ port = 3000
         let manifest_path = tmp.path().join("capsule.toml");
 
         let manifest = r#"
-    schema_version = "0.2"
+    schema_version = "0.3"
     name = "custom-demo"
     version = "0.1.0"
     type = "app"
-    default_target = "cli"
 
-    [targets.cli]
     runtime = "source"
-    language = "binary"
-    entrypoint = "./my-app"
-    "#;
+    run = "./my-app""#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
 
@@ -2194,17 +2160,14 @@ port = 3000
         let manifest_path = tmp.path().join("capsule.toml");
 
         let manifest = r#"
-    schema_version = "0.2"
+    schema_version = "0.3"
     name = "fresh-demo"
     version = "0.1.0"
     type = "app"
-    default_target = "app"
 
-    [targets.app]
     runtime = "source"
-    entrypoint = "main.ts"
     cmd = ["deno", "run", "-A", "--no-lock", "--unstable-kv", "main.ts"]
-    "#;
+    run = "main.ts""#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
 
@@ -2395,17 +2358,13 @@ port = 3000
     fn generate_config_from_compat_input_does_not_require_manifest_path() {
         let workspace = tempdir().expect("tempdir");
         let manifest_raw = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "compat-demo"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "node"
-entrypoint = "index.js"
-"#;
+runtime = "source/node"
+run = "index.js""#;
         let manifest_value: toml::Value = toml::from_str(manifest_raw).expect("manifest value");
         let bridge = crate::router::CompatManifestBridge::from_manifest_value(&manifest_value)
             .expect("bridge");

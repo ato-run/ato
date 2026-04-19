@@ -142,6 +142,34 @@ pub(super) async fn generate_node_lockfile(
         }
         ProbeResult::Missing(_) => {}
         ProbeResult::Ambiguous(ambiguity) => {
+            // Multiple lockfiles present — use the same priority as preflight.rs:
+            // pnpm > npm > yarn > bun, so the build phase stays consistent with provision.
+            let priority_order = [
+                ImporterId::Pnpm,
+                ImporterId::Npm,
+                ImporterId::Yarn,
+                ImporterId::Bun,
+            ];
+            if let Some(id) = priority_order
+                .iter()
+                .find(|id| ambiguity.importer_ids.contains(id))
+            {
+                let pos = ambiguity
+                    .importer_ids
+                    .iter()
+                    .position(|imp| imp == id)
+                    .unwrap();
+                if *id == ImporterId::Npm {
+                    reporter
+                        .notify(
+                            "ℹ️  package-lock.json detected (multi-lockfile); skipping pnpm-lock.yaml generation"
+                                .to_string(),
+                        )
+                        .await?;
+                    return Ok(None);
+                }
+                return Ok(Some(ambiguity.paths[pos].clone()));
+            }
             return Err(CapsuleError::Pack(ambiguity.message));
         }
         ProbeResult::NotApplicable => return Ok(None),

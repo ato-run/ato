@@ -155,7 +155,14 @@ fn import_native_delivery_contract(
     if imported_artifact_closure.is_some() {
         let manifest = input.manifest;
         let target = manifest.model.resolve_default_target()?;
-        let entrypoint = target.entrypoint.trim();
+        let entrypoint = {
+            let ep = target.entrypoint.trim();
+            if ep.is_empty() {
+                target.run_command.as_deref().map(str::trim).unwrap_or("")
+            } else {
+                ep
+            }
+        };
         if entrypoint.is_empty() {
             return Ok(None);
         }
@@ -372,7 +379,14 @@ fn import_native_artifact_closure(input: &CompatibilityCompilerInput<'_>) -> Res
         return Ok(None);
     }
 
-    let entrypoint = target.entrypoint.trim();
+    let entrypoint = {
+        let ep = target.entrypoint.trim();
+        if ep.is_empty() {
+            target.run_command.as_deref().map(str::trim).unwrap_or("")
+        } else {
+            ep
+        }
+    };
     if entrypoint.is_empty() {
         return Ok(None);
     }
