@@ -3946,7 +3946,8 @@ mod tests {
     fn node_extensionless_dev_script_is_kept_as_direct_entrypoint() {
         let dir = tempdir().expect("tempdir");
         // create the extensionless file so it can be referenced
-        fs::write(dir.path().join("package.json"),
+        fs::write(
+            dir.path().join("package.json"),
             r#"{"name":"demo","scripts":{"dev":"node dist/server"}}"#,
         )
         .expect("write package json");
@@ -4738,8 +4739,14 @@ egress_allow = ["api.github.com"]
         // The raw_manifest preserves the original flat v0.3 form; default_target
         // is injected during normalization so it will not appear here.
         assert!(
-            generated.get("runtime").and_then(toml::Value::as_str).is_some()
-                || generated.get("default_target").and_then(toml::Value::as_str).is_some(),
+            generated
+                .get("runtime")
+                .and_then(toml::Value::as_str)
+                .is_some()
+                || generated
+                    .get("default_target")
+                    .and_then(toml::Value::as_str)
+                    .is_some(),
             "manifest should have runtime (flat v0.3) or default_target (normalized)"
         );
         assert_eq!(

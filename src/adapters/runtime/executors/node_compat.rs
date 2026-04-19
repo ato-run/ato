@@ -322,8 +322,7 @@ pub fn spawn_background(
     let child = cmd
         .spawn()
         .context("Failed to spawn node compat process in background")?;
-    let event_rx =
-        super::source::spawn_host_lifecycle_events(child.id(), readiness_port);
+    let event_rx = super::source::spawn_host_lifecycle_events(child.id(), readiness_port);
 
     Ok(super::source::CapsuleProcess {
         child,

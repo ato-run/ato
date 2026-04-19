@@ -211,7 +211,13 @@ pub(crate) async fn run_v03_lifecycle_steps(
                 reporter
                     .notify(format!("⚙️  Provision [{}]: {}", target_label, command))
                     .await?;
-                run_lifecycle_shell_command(&target_plan, launch_ctx, &command, "provision", &working_dir)?;
+                run_lifecycle_shell_command(
+                    &target_plan,
+                    launch_ctx,
+                    &command,
+                    "provision",
+                    &working_dir,
+                )?;
             }
         }
 

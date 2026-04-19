@@ -158,11 +158,7 @@ fn import_native_delivery_contract(
         let entrypoint = {
             let ep = target.entrypoint.trim();
             if ep.is_empty() {
-                target
-                    .run_command
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or("")
+                target.run_command.as_deref().map(str::trim).unwrap_or("")
             } else {
                 ep
             }
@@ -386,11 +382,7 @@ fn import_native_artifact_closure(input: &CompatibilityCompilerInput<'_>) -> Res
     let entrypoint = {
         let ep = target.entrypoint.trim();
         if ep.is_empty() {
-            target
-                .run_command
-                .as_deref()
-                .map(str::trim)
-                .unwrap_or("")
+            target.run_command.as_deref().map(str::trim).unwrap_or("")
         } else {
             ep
         }

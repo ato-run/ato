@@ -69,10 +69,7 @@ impl CompatManifestBridge {
         // composite selectors, etc.). A flat v0.3 manifest has schema_version=0.3
         // and no [targets] table yet.
         let is_flat_v03 = crate::types::is_v03_like_schema(manifest)
-            && !manifest
-                .get("targets")
-                .and_then(|v| v.as_table())
-                .is_some();
+            && manifest.get("targets").and_then(|v| v.as_table()).is_none();
 
         if is_flat_v03 {
             let raw_toml = toml::to_string(manifest)
@@ -408,10 +405,7 @@ pub fn execution_descriptor_from_manifest_parts(
     // Detect v0.3-native manifests: schema_version == "0.3", or flat v0.3
     // fields present without a [targets] table (e.g. previewToml from the
     // ato.run API).
-    let has_targets = manifest
-        .get("targets")
-        .and_then(|v| v.as_table())
-        .is_some();
+    let has_targets = manifest.get("targets").and_then(|v| v.as_table()).is_some();
     let is_v03_native = !has_targets
         && (manifest
             .get("schema_version")
@@ -1575,12 +1569,18 @@ fn synthesize_runtime_model_from_v03(
     });
     let language = infer_language_from_driver(driver.as_deref());
 
-    let run_command = source.get("run").and_then(|v| v.as_str()).map(str::to_string);
+    let run_command = source
+        .get("run")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let image = source
         .get("image")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let port = source.get("port").and_then(|v| v.as_integer()).map(|v| v as u16);
+    let port = source
+        .get("port")
+        .and_then(|v| v.as_integer())
+        .map(|v| v as u16);
 
     // For web/static, the `run` field is an entrypoint (directory), not a command.
     let is_web_static = runtime == "web" && driver.as_deref() == Some("static");
@@ -1611,31 +1611,29 @@ fn synthesize_runtime_model_from_v03(
         .unwrap_or_default();
 
     let readiness_probe = source.get("readiness_probe").and_then(|v| {
-        if let Some(s) = v.as_str() {
-            Some(ReadinessProbe {
+        v.as_str()
+            .map(|s| ReadinessProbe {
                 http_get: Some(s.to_string()),
                 tcp_connect: None,
                 port: "PORT".to_string(),
             })
-        } else if let Some(table) = v.as_table() {
-            Some(ReadinessProbe {
-                http_get: table
-                    .get("http_get")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-                tcp_connect: table
-                    .get("tcp_connect")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-                port: table
-                    .get("port")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("PORT")
-                    .to_string(),
+            .or_else(|| {
+                v.as_table().map(|table| ReadinessProbe {
+                    http_get: table
+                        .get("http_get")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    tcp_connect: table
+                        .get("tcp_connect")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    port: table
+                        .get("port")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("PORT")
+                        .to_string(),
+                })
             })
-        } else {
-            None
-        }
     });
 
     let resolved_runtime = ResolvedTargetRuntime {
@@ -2101,10 +2099,7 @@ run = "index.html"
 "#,
         )
         .unwrap();
-        assert_eq!(
-            super::resolve_v03_target(&manifest, None).unwrap(),
-            "app"
-        );
+        assert_eq!(super::resolve_v03_target(&manifest, None).unwrap(), "app");
     }
 
     #[test]
@@ -2160,8 +2155,7 @@ port = 4173
         )
         .unwrap();
 
-        let model =
-            super::synthesize_runtime_model_from_v03(&manifest, "app").unwrap();
+        let model = super::synthesize_runtime_model_from_v03(&manifest, "app").unwrap();
 
         assert_eq!(model.selected.runtime.runtime, "web");
         assert_eq!(model.selected.runtime.driver.as_deref(), Some("static"));
@@ -2185,8 +2179,7 @@ port = 3000
         )
         .unwrap();
 
-        let model =
-            super::synthesize_runtime_model_from_v03(&manifest, "app").unwrap();
+        let model = super::synthesize_runtime_model_from_v03(&manifest, "app").unwrap();
 
         assert_eq!(model.selected.runtime.runtime, "source");
         assert_eq!(model.selected.runtime.driver.as_deref(), Some("node"));
@@ -2213,8 +2206,7 @@ port = 8000
         )
         .unwrap();
 
-        let model =
-            super::synthesize_runtime_model_from_v03(&manifest, "api").unwrap();
+        let model = super::synthesize_runtime_model_from_v03(&manifest, "api").unwrap();
 
         assert_eq!(model.selected.runtime.runtime, "source");
         assert_eq!(model.selected.runtime.driver.as_deref(), Some("python"));
@@ -2236,10 +2228,7 @@ port = 8000
             super::split_v03_runtime("source/node"),
             ("source".to_string(), Some("node".to_string()))
         );
-        assert_eq!(
-            super::split_v03_runtime("oci"),
-            ("oci".to_string(), None)
-        );
+        assert_eq!(super::split_v03_runtime("oci"), ("oci".to_string(), None));
         assert_eq!(
             super::split_v03_runtime("source/go"),
             ("source".to_string(), Some("native".to_string()))
