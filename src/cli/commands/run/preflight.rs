@@ -313,7 +313,7 @@ fn provision_command_from_node_importer(
         ProbeResult::Missing(_) => {
             // No lockfile present; npm install will create package-lock.json on the fly.
             // Acceptable for source/preview runs (best-effort, not reproducibility-critical).
-            Ok(Some("npm install".to_string()))
+            Ok(Some("npm install --legacy-peer-deps".to_string()))
         }
         ProbeResult::Ambiguous(ambiguity) => {
             // Multiple lockfiles present; prefer pnpm > npm > yarn > bun.
@@ -328,12 +328,12 @@ fn provision_command_from_node_importer(
                 .find(|id| ambiguity.importer_ids.contains(id))
                 .and_then(|id| match id {
                     ImporterId::Pnpm => Some("pnpm install"),
-                    ImporterId::Npm => Some("npm install"),
+                    ImporterId::Npm => Some("npm install --legacy-peer-deps"),
                     ImporterId::Yarn => Some("yarn install"),
                     ImporterId::Bun => Some("bun install"),
                     _ => None,
                 })
-                .unwrap_or("npm install");
+                .unwrap_or("npm install --legacy-peer-deps");
             Ok(Some(cmd.to_string()))
         }
         ProbeResult::NotApplicable => Ok(None),
@@ -371,8 +371,10 @@ fn node_install_command_from_evidence(evidence: &ImportedEvidence) -> Result<Str
     // Source/GitHub runs use non-strict install: lockfiles may come from a different
     // platform or OS than the current machine, so --frozen-lockfile / npm ci would fail
     // on checksum mismatches. Plain install is correct for developer-preview mode.
+    // --legacy-peer-deps allows older projects that rely on npm v6 conflict-resolution
+    // to install without hard errors on peer dependency mismatches.
     let command = match evidence.importer_id {
-        ImporterId::Npm => "npm install",
+        ImporterId::Npm => "npm install --legacy-peer-deps",
         ImporterId::Yarn => "yarn install",
         ImporterId::Pnpm => "pnpm install",
         ImporterId::Bun => "bun install",
