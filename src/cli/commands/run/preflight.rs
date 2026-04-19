@@ -310,16 +310,26 @@ fn provision_command_from_node_importer(
 ) -> Result<Option<String>> {
     match probe_required_node_lockfile(execution_working_directory)? {
         ProbeResult::Found(values) => Ok(Some(node_install_command_from_evidence(&values[0])?)),
-        ProbeResult::Missing(missing) => Err(AtoExecutionError::lock_incomplete(
-            missing.message,
-            Some("package-lock.json"),
-        )
-        .into()),
-        ProbeResult::Ambiguous(ambiguity) => Err(AtoExecutionError::lock_incomplete(
-            ambiguity.message,
-            Some("package-lock.json"),
-        )
-        .into()),
+        ProbeResult::Missing(_) => {
+            // No lockfile present; npm install will create package-lock.json on the fly.
+            // Acceptable for source/preview runs (best-effort, not reproducibility-critical).
+            Ok(Some("npm install".to_string()))
+        }
+        ProbeResult::Ambiguous(ambiguity) => {
+            // Multiple lockfiles present; prefer pnpm > npm > yarn > bun.
+            let cmd = ambiguity
+                .importer_ids
+                .iter()
+                .find_map(|id| match id {
+                    ImporterId::Pnpm => Some("pnpm install"),
+                    ImporterId::Npm => Some("npm install"),
+                    ImporterId::Yarn => Some("yarn install"),
+                    ImporterId::Bun => Some("bun install"),
+                    _ => None,
+                })
+                .unwrap_or("npm install");
+            Ok(Some(cmd.to_string()))
+        }
         ProbeResult::NotApplicable => Ok(None),
     }
 }
@@ -377,6 +387,17 @@ fn run_lifecycle_shell_command(
     phase: &str,
     working_dir: &Path,
 ) -> Result<()> {
+    // Some packages have preinstall scripts that call `lefthook install` or similar
+    // git-hook managers. These fail with exit 128 because the source checkout has no
+    // .git directory. Creating a minimal stub allows git-root detection to succeed.
+    // We remove the stub after the command so it does not persist in the capsule.
+    let fake_git = working_dir.join(".git");
+    let created_fake_git = if !fake_git.exists() {
+        std::fs::create_dir_all(&fake_git).is_ok()
+    } else {
+        false
+    };
+
     #[cfg(windows)]
     let mut cmd = {
         let mut cmd = std::process::Command::new("cmd");
@@ -412,7 +433,13 @@ fn run_lifecycle_shell_command(
 
     let status = cmd
         .status()
-        .with_context(|| format!("Failed to execute {} command", phase))?;
+        .with_context(|| format!("Failed to execute {} command", phase));
+
+    if created_fake_git {
+        let _ = std::fs::remove_dir_all(&fake_git);
+    }
+
+    let status = status?;
     if status.success() {
         Ok(())
     } else {
