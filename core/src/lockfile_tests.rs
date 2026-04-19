@@ -76,11 +76,10 @@ fn verify_lockfile_manifest_hash() {
     let temp = TempDir::new().unwrap();
     let manifest_path = temp.path().join("capsule.toml");
     let lockfile_path = temp.path().join(CAPSULE_LOCK_FILE_NAME);
-    let manifest_text = r#"schema_version = "0.2"
+    let manifest_text = r#"schema_version = "0.3"
 name = "demo"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 "#;
     fs::write(&manifest_path, manifest_text).unwrap();
 
@@ -775,16 +774,12 @@ fn ensure_lockfile_reuses_when_inputs_unchanged() {
     let temp = TempDir::new().unwrap();
     let manifest_path = temp.path().join("capsule.toml");
     let manifest_text = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "default"
-[targets.default]
-runtime = "source"
-driver = "native"
-entrypoint = "source/main.sh"
-"#;
+runtime = "source/native"
+run = "source/main.sh""#;
     fs::write(&manifest_path, manifest_text).unwrap();
     fs::create_dir_all(temp.path().join("source")).unwrap();
     fs::write(temp.path().join("source/main.sh"), "echo demo").unwrap();
@@ -827,16 +822,12 @@ fn ensure_lockfile_for_compat_input_does_not_materialize_bridge_manifest() {
     fs::write(temp.path().join("main.sh"), "echo demo\n").unwrap();
 
     let manifest_text = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "default"
-[targets.default]
-runtime = "source"
-driver = "native"
-entrypoint = "main.sh"
-"#;
+runtime = "source/native"
+run = "main.sh""#;
     let manifest_raw: toml::Value = toml::from_str(manifest_text).unwrap();
     let bridge = crate::router::CompatManifestBridge::from_manifest_value(&manifest_raw).unwrap();
     let compat_input =
@@ -870,17 +861,13 @@ fn ensure_lockfile_accepts_existing_deno_lock() {
     let temp = TempDir::new().unwrap();
     let manifest_path = temp.path().join("capsule.toml");
     let manifest_text = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "default"
-[targets.default]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "1.46.3"
-entrypoint = "main.ts"
-"#;
+run = "main.ts""#;
     fs::write(&manifest_path, manifest_text).unwrap();
     fs::write(temp.path().join("main.ts"), "console.log('demo')").unwrap();
     fs::write(
@@ -915,20 +902,15 @@ fn ensure_lockfile_accepts_existing_uv_lock() {
     let temp = TempDir::new().unwrap();
     let manifest_path = temp.path().join("capsule.toml");
     let manifest_text = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11.10"
-entrypoint = "main.py"
-run_command = "uv run python3 main.py"
 dependencies = "requirements.txt"
-"#;
+run = "uv run python3 main.py""#;
     fs::write(&manifest_path, manifest_text).unwrap();
     fs::write(temp.path().join("main.py"), "print('demo')\n").unwrap();
     fs::write(temp.path().join("requirements.txt"), "fastapi==0.115.0\n").unwrap();
@@ -1016,16 +998,12 @@ fn generate_lockfile_does_not_include_ambient_tools_for_native_target() {
     let temp = TempDir::new().unwrap();
     let manifest_path = temp.path().join("capsule.toml");
     let manifest_text = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "default"
-[targets.default]
-runtime = "source"
-driver = "native"
-entrypoint = "main.sh"
-"#;
+runtime = "source/native"
+run = "main.sh""#;
     fs::write(&manifest_path, manifest_text).unwrap();
     fs::write(temp.path().join("main.sh"), "echo demo").unwrap();
 

@@ -72,18 +72,47 @@ pub(super) fn normalize_github_install_preview_toml(
         return Ok(manifest_text.to_string());
     };
 
-    if parsed
+    let incoming_schema = parsed
         .get("schema_version")
         .and_then(toml::Value::as_str)
-        .map(|value| value.trim() == "0.3")
-        .unwrap_or(false)
-        && parsed.get("targets").is_none()
-    {
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
+
+    if matches!(incoming_schema.as_str(), "0.3" | "0.2") && parsed.get("targets").is_none() {
         {
             let table = parsed
                 .as_table_mut()
                 .expect("normalized GitHub install draft must stay a table");
             collapse_legacy_required_env_field(table);
+            // Upgrade schema_version 0.2 → 0.3 so the manifest validator accepts it.
+            if incoming_schema == "0.2" {
+                table.insert(
+                    "schema_version".to_string(),
+                    toml::Value::String("0.3".to_string()),
+                );
+            }
+        }
+
+        // Normalize v0.3 combined runtime drivers (e.g. source/pip -> source/python)
+        {
+            let normalized_runtime = parsed
+                .get("runtime")
+                .and_then(toml::Value::as_str)
+                .and_then(|rt| {
+                    let (base, drv) = rt.trim().split_once('/')?;
+                    let normalized = normalize_github_install_driver(&drv.to_ascii_lowercase());
+                    if normalized != drv.to_ascii_lowercase() {
+                        Some(format!("{base}/{normalized}"))
+                    } else {
+                        None
+                    }
+                });
+            if let Some(new_rt) = normalized_runtime {
+                parsed
+                    .as_table_mut()
+                    .expect("normalized GitHub install draft must stay a table")
+                    .insert("runtime".to_string(), toml::Value::String(new_rt));
+            }
         }
 
         let runtime = parsed
@@ -116,8 +145,16 @@ pub(super) fn normalize_github_install_preview_toml(
             }
         }
 
+        // Ensure runtime_version meets the minimum required by detected packages.
+        // The store draft may have been generated with an older default (e.g. 20.12.0)
+        // that is too low for the packages now present in the repo (e.g. vite 8).
+        if runtime.as_deref() == Some("source/node") || runtime.as_deref() == Some("web/node") {
+            bump_node_runtime_version_if_needed(&mut parsed, checkout_dir);
+        }
+
         if runtime.as_deref() == Some("source/node") {
             normalize_v03_source_node_typescript_run(&mut parsed, checkout_dir)?;
+            normalize_v03_ui_framework_run_to_dev_server(&mut parsed, checkout_dir)?;
         }
 
         changed_pack_include_from_checkout(&mut parsed, checkout_dir)?;
@@ -127,11 +164,18 @@ pub(super) fn normalize_github_install_preview_toml(
             .context("Failed to serialize normalized GitHub install draft");
     }
 
-    let schema_is_v03 = parsed
-        .get("schema_version")
-        .and_then(toml::Value::as_str)
-        .map(|v| v.trim() == "0.3")
-        .unwrap_or(false);
+    let schema_is_v02 = incoming_schema == "0.2";
+    let schema_is_v03 = incoming_schema == "0.3";
+
+    // Upgrade schema_version 0.2 → 0.3 for multi-target manifests too.
+    if schema_is_v02 {
+        if let Some(table) = parsed.as_table_mut() {
+            table.insert(
+                "schema_version".to_string(),
+                toml::Value::String("0.3".to_string()),
+            );
+        }
+    }
 
     let Some(targets) = parsed
         .get_mut("targets")
@@ -140,14 +184,15 @@ pub(super) fn normalize_github_install_preview_toml(
         return Ok(manifest_text.to_string());
     };
 
-    let mut changed = false;
+    let mut changed = schema_is_v02;
     for (_, target_value) in targets.iter_mut() {
         let Some(target) = target_value.as_table_mut() else {
             continue;
         };
 
-        // schema_version=0.3 targets must not use legacy 'entrypoint' or 'cmd'; migrate to 'run'.
-        if schema_is_v03 {
+        // schema_version=0.3 targets (or upgraded from 0.2) must not use legacy 'entrypoint' or
+        // 'cmd'; migrate to 'run'.
+        if schema_is_v03 || schema_is_v02 {
             for legacy_field in ["entrypoint", "cmd"] {
                 if let Some(value) = target.remove(legacy_field) {
                     if !target.contains_key("run") {
@@ -205,6 +250,7 @@ pub(super) fn normalize_github_install_preview_toml(
         }
     }
 
+    changed |= changed_pack_include_from_checkout(&mut parsed, checkout_dir)?;
     inspect_normalized_github_install_preview_manifest(&parsed, checkout_dir)?;
 
     if !changed {
@@ -345,6 +391,107 @@ fn parse_auto_fix_port_bound(name: &str, value: &str) -> Result<u16> {
         .with_context(|| format!("Failed to parse {} as a TCP port", name))
 }
 
+/// Corrects the `port` field in a preview TOML when the actual run script
+/// specifies a custom port via `--port <num>`.  Handles repos where the store
+/// falls back to the Vite default (5173) but `scripts.start` (or another
+/// selected script) contains `--port 3000`.
+pub(super) fn correct_port_from_run_script(
+    preview_toml: &str,
+    checkout_dir: &Path,
+) -> Result<String> {
+    let Ok(mut parsed) = toml::from_str::<toml::Value>(preview_toml) else {
+        return Ok(preview_toml.to_string());
+    };
+    let Some(table) = parsed.as_table_mut() else {
+        return Ok(preview_toml.to_string());
+    };
+
+    let run_cmd = table
+        .get("run")
+        .and_then(toml::Value::as_str)
+        .map(str::to_string);
+    let Some(run_cmd) = run_cmd else {
+        return Ok(preview_toml.to_string());
+    };
+
+    // Resolve the package.json script name from the run command.
+    // Handles both `npm run <script>`, `pnpm run <script>`, and `npm:<script>` shorthands.
+    let script_name = extract_script_name_from_run_cmd(&run_cmd);
+    let Some(script_name) = script_name else {
+        return Ok(preview_toml.to_string());
+    };
+
+    let Some(package_json) = read_package_json(checkout_dir) else {
+        return Ok(preview_toml.to_string());
+    };
+    let script_cmd = package_json
+        .get("scripts")
+        .and_then(|s| s.get(&script_name))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let Some(script_cmd) = script_cmd else {
+        return Ok(preview_toml.to_string());
+    };
+
+    let Some(detected_port) = extract_port_from_script_cmd(&script_cmd) else {
+        return Ok(preview_toml.to_string());
+    };
+
+    let current_port = table
+        .get("port")
+        .and_then(toml::Value::as_integer)
+        .unwrap_or(0) as u16;
+    if current_port == detected_port {
+        return Ok(preview_toml.to_string());
+    }
+
+    table.insert(
+        "port".to_string(),
+        toml::Value::Integer(i64::from(detected_port)),
+    );
+    toml::to_string(&parsed).context("Failed to serialize port-corrected GitHub install draft")
+}
+
+fn extract_script_name_from_run_cmd(run_cmd: &str) -> Option<String> {
+    let cmd = run_cmd.trim();
+    // `npm:<script>` / `pnpm:<script>` shorthand
+    if let Some(rest) = cmd
+        .strip_prefix("npm:")
+        .or_else(|| cmd.strip_prefix("pnpm:"))
+        .or_else(|| cmd.strip_prefix("yarn:"))
+        .or_else(|| cmd.strip_prefix("bun:"))
+    {
+        let script = rest.split_whitespace().next()?;
+        return Some(script.to_string());
+    }
+    // `npm run <script>` / `pnpm run <script>` / `yarn run <script>` / `bun run <script>`
+    for prefix in &["npm run ", "pnpm run ", "yarn run ", "bun run "] {
+        if let Some(rest) = cmd.strip_prefix(prefix) {
+            let script = rest.split_whitespace().next()?;
+            return Some(script.to_string());
+        }
+    }
+    None
+}
+
+fn extract_port_from_script_cmd(script_cmd: &str) -> Option<u16> {
+    let parts: Vec<&str> = script_cmd.split_whitespace().collect();
+    for (i, part) in parts.iter().enumerate() {
+        if *part == "--port" {
+            if let Some(next) = parts.get(i + 1) {
+                if let Ok(port) = next.parse::<u16>() {
+                    return Some(port);
+                }
+            }
+        } else if let Some(val) = part.strip_prefix("--port=") {
+            if let Ok(port) = val.parse::<u16>() {
+                return Some(port);
+            }
+        }
+    }
+    None
+}
+
 fn normalize_v03_source_node_typescript_run(
     parsed: &mut toml::Value,
     checkout_dir: &Path,
@@ -435,11 +582,85 @@ fn normalize_v03_source_node_typescript_run(
     Ok(())
 }
 
+/// When the server infers `run = "node src/main.tsx"` (or .jsx/.astro/.svelte/.vue),
+/// Node.js cannot execute those files natively, causing ERR_UNKNOWN_FILE_EXTENSION.
+/// If the project has a `dev` script in package.json, redirect to `<pkg_manager> run dev`.
+/// This runs after `normalize_v03_source_node_typescript_run` so CLI tools with a bin+build
+/// path are already rewritten; only dev-server apps remain.
+fn normalize_v03_ui_framework_run_to_dev_server(
+    parsed: &mut toml::Value,
+    checkout_dir: &Path,
+) -> Result<()> {
+    let Some(run) = parsed
+        .get("run")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+
+    let run_parts = run.split_whitespace().collect::<Vec<_>>();
+    if run_parts.len() < 2 || run_parts[0] != "node" {
+        return Ok(());
+    }
+
+    let entry = run_parts[1];
+    let ext = entry.rsplit('.').next().unwrap_or("");
+    // Extensions that Node.js cannot execute natively without a bundler/transpiler.
+    // Also treat `node package.json` as invalid — package.json is not an executable entrypoint.
+    let is_package_json = entry == "package.json" || entry.ends_with("/package.json");
+    let needs_dev_server = is_package_json
+        || matches!(
+            ext,
+            "ts" | "mts" | "cts" | "tsx" | "jsx" | "astro" | "svelte" | "vue"
+        );
+    if !needs_dev_server {
+        return Ok(());
+    }
+
+    let Some(package_json) = read_package_json(checkout_dir) else {
+        return Ok(());
+    };
+
+    // Prefer `dev` script; fall back to `start` script for apps without a dev server script.
+    let dev_script_body = package_json
+        .get("scripts")
+        .and_then(|scripts| scripts.get("dev").or_else(|| scripts.get("start")))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+
+    let Some(dev_script_body) = dev_script_body else {
+        return Ok(());
+    };
+
+    let script_name = if package_json
+        .get("scripts")
+        .and_then(|s| s.get("dev"))
+        .is_some()
+    {
+        "dev"
+    } else {
+        "start"
+    };
+
+    let package_manager = infer_node_package_manager_command_prefix(checkout_dir, &package_json);
+    let dev_command =
+        normalize_package_script_command(package_manager, script_name, &dev_script_body);
+
+    let Some(table) = parsed.as_table_mut() else {
+        return Ok(());
+    };
+    table.insert("run".to_string(), toml::Value::String(dev_command));
+    Ok(())
+}
+
 fn ensure_pack_include_entry_in_table(table: &mut toml::value::Table, entry: String) {
     if entry.trim().is_empty() {
         return;
     }
-
     let pack = table
         .entry("pack".to_string())
         .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
@@ -602,13 +823,38 @@ fn inspect_normalized_github_install_preview_manifest(
         );
 
         if let Some((_, missing_path, _)) = lockfile_check_paths.iter().find(|(_, path, exists)| {
-            *exists
-                && path
-                    .strip_prefix(checkout_dir)
-                    .ok()
-                    .map(normalize_relative_path)
-                    .map(|relative| !pack_include_covers_path(&pack_include, &relative))
-                    .unwrap_or(false)
+            if !exists {
+                return false;
+            }
+            // When multiple node lockfiles exist, only the canonical one (resolved via
+            // packageManager) must be covered.  If the canonical lockfile is in
+            // pack.include, non-canonical lockfiles are allowed to be absent.
+            let existing_lockfiles = lockfile_check_paths
+                .iter()
+                .filter(|(_, _, e)| *e)
+                .collect::<Vec<_>>();
+            if target.driver.eq_ignore_ascii_case("node") && existing_lockfiles.len() > 1 {
+                let is_canonical = resolve_canonical_node_lockfile_by_package_manager(
+                    &lockfile_check_paths
+                        .iter()
+                        .filter(|(_, _, e)| *e)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    &execution_working_directory,
+                )
+                .map(|(name, _, _)| {
+                    *name == path.file_name().and_then(|n| n.to_str()).unwrap_or("")
+                })
+                .unwrap_or(true);
+                if !is_canonical {
+                    return false;
+                }
+            }
+            path.strip_prefix(checkout_dir)
+                .ok()
+                .map(normalize_relative_path)
+                .map(|relative| !pack_include_covers_path(&pack_include, &relative))
+                .unwrap_or(false)
         }) {
             let relative = normalize_relative_path(
                 missing_path
@@ -736,6 +982,78 @@ fn github_install_lockfile_checks(
     }
 }
 
+/// When multiple Node lockfiles exist in the same working directory, try to resolve
+/// the ambiguity using the `packageManager` field in `package.json` (Corepack convention).
+/// If that field is absent, fall back to the same file-existence priority order used by
+/// `infer_node_package_manager_command_prefix()`: pnpm > yarn > bun > npm.
+///
+/// Returns `Some(lockfile)` when a single canonical lockfile can be determined, or
+/// `None` when the heuristic is inconclusive (caller should bail).
+fn resolve_canonical_node_lockfile_by_package_manager<'a>(
+    existing_lockfiles: &'a [(&'static str, PathBuf, bool)],
+    working_dir: &Path,
+) -> Option<&'a (&'static str, PathBuf, bool)> {
+    // First try the explicit `packageManager` field (Corepack convention).
+    if let Some(pkg_json) = read_package_json(working_dir) {
+        if let Some(declared_pm) = pkg_json
+            .get("packageManager")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let pm_lower = declared_pm.to_ascii_lowercase();
+            let canonical_name: &str = if pm_lower.starts_with("pnpm@") {
+                "pnpm-lock.yaml"
+            } else if pm_lower.starts_with("yarn@") {
+                "yarn.lock"
+            } else if pm_lower.starts_with("bun@") {
+                "bun.lock"
+            } else if pm_lower.starts_with("npm@") {
+                "package-lock.json"
+            } else {
+                ""
+            };
+
+            if !canonical_name.is_empty() {
+                if let Some(found) = existing_lockfiles
+                    .iter()
+                    .find(|(name, _, _)| *name == canonical_name)
+                {
+                    return Some(found);
+                }
+                // bun fallback: bun.lock declared but only bun.lockb present
+                if canonical_name == "bun.lock" {
+                    if let Some(found) = existing_lockfiles
+                        .iter()
+                        .find(|(name, _, _)| *name == "bun.lockb")
+                    {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+    }
+
+    // No explicit packageManager field. Use the same priority order as
+    // infer_node_package_manager_command_prefix(): pnpm > yarn > bun > npm.
+    for preferred in &[
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lock",
+        "bun.lockb",
+        "package-lock.json",
+    ] {
+        if let Some(found) = existing_lockfiles
+            .iter()
+            .find(|(name, _, _)| name == preferred)
+        {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
 fn normalize_relative_path(path: &Path) -> String {
     path.components()
         .filter_map(|component| match component {
@@ -801,27 +1119,165 @@ fn pack_include_pattern_matches(pattern: &str, relative_path: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn changed_pack_include_from_checkout(parsed: &mut toml::Value, checkout_dir: &Path) -> Result<()> {
+fn changed_pack_include_from_checkout(
+    parsed: &mut toml::Value,
+    checkout_dir: &Path,
+) -> Result<bool> {
+    let targets = github_install_preview_targets_for_inspection(parsed);
     let Some(pack) = parsed.get_mut("pack").and_then(toml::Value::as_table_mut) else {
-        return Ok(());
+        return Ok(false);
     };
     let Some(include) = pack.get_mut("include").and_then(toml::Value::as_array_mut) else {
-        return Ok(());
+        return Ok(false);
     };
+    let mut changed = false;
+    let mut normalized_include = include
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
 
     if let Some(import_map) = referenced_deno_import_map(checkout_dir)? {
-        let already_present = include.iter().any(|entry| {
-            entry
-                .as_str()
-                .map(|value| value.trim() == import_map)
-                .unwrap_or(false)
-        });
-        if !already_present {
-            include.push(toml::Value::String(import_map));
+        changed |= ensure_pack_include_entry(include, &mut normalized_include, &import_map);
+    }
+
+    // Common root-level config files required for dev servers to start correctly.
+    // The store-generated include list often omits these. Add them when present.
+    let common_root_configs = [
+        // Vite
+        "index.html",
+        "vite.config.ts",
+        "vite.config.js",
+        "vite.config.mts",
+        "vite.config.mjs",
+        // TypeScript
+        "tsconfig.json",
+        "tsconfig.app.json",
+        "tsconfig.node.json",
+        "tsconfig.base.json",
+        // Tailwind CSS
+        "tailwind.config.ts",
+        "tailwind.config.js",
+        "tailwind.config.cjs",
+        "tailwind.config.mjs",
+        // PostCSS
+        "postcss.config.js",
+        "postcss.config.cjs",
+        "postcss.config.mjs",
+        "postcss.config.ts",
+        // shadcn/ui
+        "components.json",
+        // Next.js
+        "next.config.js",
+        "next.config.mjs",
+        "next.config.ts",
+        // Babel (needed by some CRA and rollup based projects)
+        "babel.config.js",
+        "babel.config.json",
+        ".babelrc",
+        ".babelrc.js",
+        // UnoCSS / Windi CSS
+        "uno.config.ts",
+        "uno.config.js",
+        "windi.config.ts",
+        "windi.config.js",
+    ];
+    for file in &common_root_configs {
+        if checkout_dir.join(file).exists() {
+            changed |= ensure_pack_include_entry(include, &mut normalized_include, file);
         }
     }
 
-    Ok(())
+    for target in targets {
+        let execution_working_directory = target
+            .working_dir
+            .as_deref()
+            .map(|relative| checkout_dir.join(relative))
+            .unwrap_or_else(|| checkout_dir.to_path_buf());
+        let existing_lockfiles =
+            github_install_lockfile_checks(&target.driver, &execution_working_directory)
+                .into_iter()
+                .filter(|(_, _, exists)| *exists)
+                .collect::<Vec<_>>();
+
+        if target.driver.eq_ignore_ascii_case("node") && existing_lockfiles.len() > 1 {
+            // More than one lockfile exists. Try to resolve ambiguity using the
+            // `packageManager` field declared in package.json (Corepack convention).
+            // If that resolves to a single canonical lockfile, use only that one.
+            // Otherwise fail with a clear message so the user knows what to fix.
+            match resolve_canonical_node_lockfile_by_package_manager(
+                &existing_lockfiles,
+                &execution_working_directory,
+            ) {
+                Some(canonical) => {
+                    let relative = canonical
+                        .1
+                        .strip_prefix(checkout_dir)
+                        .map(normalize_relative_path)
+                        .map_err(|_| {
+                            anyhow::anyhow!(
+                                "GitHub install preview manifest is inconsistent: target '{}' requires lockfile '{}' outside checkout '{}'",
+                                target.label,
+                                canonical.1.display(),
+                                checkout_dir.display(),
+                            )
+                        })?;
+                    ensure_pack_include_entry(include, &mut normalized_include, &relative);
+                }
+                None => {
+                    let lockfiles = existing_lockfiles
+                        .iter()
+                        .map(|(_, path, _)| {
+                            path.strip_prefix(checkout_dir)
+                                .map(normalize_relative_path)
+                                .unwrap_or_else(|_| normalize_relative_path(path))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    bail!(
+                        "GitHub install preview manifest is ambiguous: target '{}' runs from '{}' and multiple node lockfiles were detected: {}",
+                        target.label,
+                        execution_working_directory.display(),
+                        lockfiles,
+                    );
+                }
+            }
+            continue;
+        }
+
+        for (_, path, _) in existing_lockfiles {
+            let relative = path
+                .strip_prefix(checkout_dir)
+                .map(normalize_relative_path)
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "GitHub install preview manifest is inconsistent: target '{}' requires lockfile '{}' outside checkout '{}'",
+                        target.label,
+                        path.display(),
+                        checkout_dir.display(),
+                    )
+                })?;
+            changed |= ensure_pack_include_entry(include, &mut normalized_include, &relative);
+        }
+    }
+
+    Ok(changed)
+}
+
+fn ensure_pack_include_entry(
+    include: &mut Vec<toml::Value>,
+    normalized_include: &mut Vec<String>,
+    entry: &str,
+) -> bool {
+    if pack_include_covers_path(normalized_include, entry) {
+        return false;
+    }
+
+    include.push(toml::Value::String(entry.to_string()));
+    normalized_include.push(entry.to_string());
+    true
 }
 
 fn referenced_deno_import_map(checkout_dir: &Path) -> Result<Option<String>> {
@@ -874,6 +1330,78 @@ fn infer_github_install_runtime_version(checkout_dir: &Path, driver: &str) -> Op
     }
 }
 
+/// If the capsule.toml already declares a `runtime_version` that is below the
+/// minimum required by packages detected in `checkout_dir`, bump it in place.
+///
+/// Currently handles: Vite ≥ 8.0.0 requires Node.js ≥ 20.19.0.
+fn bump_node_runtime_version_if_needed(parsed: &mut toml::Value, checkout_dir: &Path) {
+    let current = parsed
+        .get("runtime_version")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let Some(current) = current else {
+        return;
+    };
+
+    let min_required = minimum_node_version_for_checkout(checkout_dir);
+    if min_required == (0, 0) {
+        return;
+    }
+
+    // Parse current version as (major, minor).
+    let parts: Vec<u64> = current.split('.').filter_map(|p| p.parse().ok()).collect();
+    let (cur_major, cur_minor) = (
+        parts.first().copied().unwrap_or(0),
+        parts.get(1).copied().unwrap_or(0),
+    );
+
+    if (cur_major, cur_minor) < min_required {
+        // Always bump to the current LTS (22.14) rather than the bare minimum
+        // to avoid re-triggering this check on the next run.
+        let bumped = DEFAULT_GITHUB_DRAFT_NODE_RUNTIME_VERSION.to_string();
+        if let Some(table) = parsed.as_table_mut() {
+            table.insert("runtime_version".to_string(), toml::Value::String(bumped));
+        }
+    }
+}
+
+/// Returns the (major, minor) Node.js version floor required by packages
+/// detected in `package.json` inside `checkout_dir`. Returns (0, 0) when no
+/// constraint is inferred.
+fn minimum_node_version_for_checkout(checkout_dir: &Path) -> (u64, u64) {
+    let Ok(raw) = std::fs::read_to_string(checkout_dir.join("package.json")) else {
+        return (0, 0);
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return (0, 0);
+    };
+
+    // Collect all dep version strings that might pin a framework with known
+    // Node.js requirements.
+    let dep_sections = ["dependencies", "devDependencies", "peerDependencies"];
+    for section in &dep_sections {
+        let Some(deps) = json.get(section).and_then(|v| v.as_object()) else {
+            continue;
+        };
+
+        // Vite ≥ 8.0.0 requires Node.js ≥ 20.19.0.
+        if let Some(vite_range) = deps.get("vite").and_then(serde_json::Value::as_str) {
+            if let Some(major) = first_numeric_version_component(vite_range)
+                .as_deref()
+                .and_then(|s| s.parse::<u64>().ok())
+            {
+                if major >= 8 {
+                    return (20, 19);
+                }
+            }
+        }
+    }
+
+    (0, 0)
+}
+
 fn infer_node_runtime_version_for_github_install(checkout_dir: &Path) -> String {
     let package_json_path = checkout_dir.join("package.json");
     let raw = std::fs::read_to_string(&package_json_path).ok();
@@ -899,9 +1427,9 @@ fn infer_node_runtime_version_for_github_install(checkout_dir: &Path) -> String 
     };
 
     if major >= 22 {
-        format!("{major}.0.0")
+        format!("{major}.14.0")
     } else if major >= 20 {
-        format!("{major}.12.0")
+        format!("{major}.19.0")
     } else if major >= 18 {
         format!("{major}.20.0")
     } else {

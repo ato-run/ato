@@ -571,18 +571,14 @@ fn e2e_publish_artifact_without_cwd_manifest() -> Result<()> {
 
     std::fs::write(
         build_dir.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "test-artifact-cwdless"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "1.46.3"
-entrypoint = "main.ts"
-
+run = "main.ts"
 [build.lifecycle]
 prepare = "echo prepare"
 "#,
@@ -727,18 +723,14 @@ fn e2e_publish_dry_run_artifact_reports_install_and_dry_run() -> Result<()> {
 
     std::fs::write(
         build_dir.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "test-dry-run-artifact"
 version = "1.0.0"
 type = "app"
-default_target = "static"
 
-[targets.static]
-runtime = "web"
-driver = "static"
-entrypoint = "dist"
+runtime = "web/static"
 port = 4173
-"#,
+run = "dist""#,
     )?;
     std::fs::create_dir_all(build_dir.join("dist"))?;
     std::fs::write(
@@ -809,18 +801,14 @@ fn e2e_local_registry_build_publish_install_search_download() -> Result<()> {
 
     std::fs::write(
         project_dir.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "test-local"
 version = "1.0.0"
 type = "app"
-default_target = "static"
 
-[targets.static]
-runtime = "web"
-driver = "static"
-entrypoint = "dist"
+runtime = "web/static"
 port = 4173
-
+run = "dist"
 [build.lifecycle]
 prepare = "echo prepare"
 "#,
@@ -1164,18 +1152,14 @@ fn e2e_local_registry_private_publish_prefers_canonical_lock_metadata() -> Resul
 
     std::fs::write(
         project_dir.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "ignored-manifest"
 version = "9.9.9"
 type = "app"
-default_target = "static"
 
-[targets.static]
-runtime = "web"
-driver = "static"
-entrypoint = "dist"
+runtime = "web/static"
 port = 4173
-"#,
+run = "dist""#,
     )?;
     std::fs::write(
         project_dir.join("dist").join("index.html"),
@@ -1270,20 +1254,16 @@ fn e2e_local_registry_publish_phases_preserve_readme() -> Result<()> {
 
     std::fs::write(
         project_dir.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "test-readme-phases"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 
+runtime = "source/deno"
+runtime_version = "1.46.3"
+run = "main.ts"
 [build.lifecycle]
 prepare = "echo prepare"
-
-[targets.cli]
-runtime = "source"
-driver = "deno"
-runtime_version = "1.46.3"
-entrypoint = "main.ts"
 "#,
     )?;
     std::fs::write(
@@ -1369,23 +1349,19 @@ fn e2e_local_registry_monorepo_publish_uses_parent_readme() -> Result<()> {
     )?;
     std::fs::write(
         project_dir.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "file2api-monorepo"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 
+runtime = "source/deno"
+runtime_version = "1.46.3"
+run = "main.ts"
 [metadata]
 repository = "Koh0920/file2api-monorepo"
 
 [build.lifecycle]
 prepare = "echo prepare"
-
-[targets.cli]
-runtime = "source"
-driver = "deno"
-runtime_version = "1.46.3"
-entrypoint = "main.ts"
 "#,
     )?;
     std::fs::write(
@@ -1460,13 +1436,16 @@ fn e2e_local_registry_package_json_prepare_publish_exposes_readme() -> Result<()
 
     std::fs::write(
         project_dir.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "file2api-monorepo"
 version = "0.1.19"
 description = ""
 type = "app"
-default_target = "default"
 
+runtime = "web/deno"
+runtime_version = "1.46.3"
+port = 4173
+run = "ato-entry.ts"
 [pack]
 include = [
   "ato-entry.ts",
@@ -1475,13 +1454,6 @@ include = [
   "deno.lock",
   "package.json"
 ]
-
-[targets.default]
-runtime = "web"
-driver = "deno"
-runtime_version = "1.46.3"
-entrypoint = "ato-entry.ts"
-port = 4173
 
 [metadata]
 repository = "Koh0920/file2api"
@@ -1573,20 +1545,16 @@ fn e2e_local_registry_run_seeds_execution_consent() -> Result<()> {
 
     std::fs::write(
         project_dir.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "test-run-consent"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 
+runtime = "source/node"
+runtime_version = "20.12.0"
+run = "main.js"
 [network]
 egress_allow = ["api.github.com"]
-
-[targets.cli]
-runtime = "source"
-driver = "node"
-runtime_version = "20.12.0"
-entrypoint = "main.js"
 "#,
     )?;
     std::fs::write(
@@ -1723,18 +1691,14 @@ fn e2e_local_registry_web_static_build_publish_install() -> Result<()> {
     std::fs::write(
         project_dir.join("capsule.toml"),
         format!(
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "test-web-static"
 version = "1.0.0"
 type = "app"
-default_target = "static"
 
-[targets.static]
-runtime = "web"
-driver = "static"
-entrypoint = "dist"
+runtime = "web/static"
 port = {static_port}
-"#
+run = "dist""#
         ),
     )?;
     std::fs::write(
@@ -1806,18 +1770,14 @@ fn e2e_local_registry_node_python_run_fail_closed() -> Result<()> {
 
     std::fs::write(
         node_no_lock.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "test-node-no-lock"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "node"
+runtime = "source/node"
 runtime_version = "20.12.0"
-entrypoint = "main.js"
-"#,
+run = "main.js""#,
     )?;
     std::fs::write(
         node_no_lock.join("main.js"),
@@ -1826,18 +1786,14 @@ entrypoint = "main.js"
 
     std::fs::write(
         node_with_lock.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "test-node-with-lock"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "node"
+runtime = "source/node"
 runtime_version = "20.12.0"
-entrypoint = "main.js"
-"#,
+run = "main.js""#,
     )?;
     std::fs::write(
         node_with_lock.join("main.js"),
@@ -1847,18 +1803,14 @@ entrypoint = "main.js"
 
     std::fs::write(
         node_policy_violation.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "test-node-policy-violation"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "node"
+runtime = "source/node"
 runtime_version = "20.12.0"
-entrypoint = "main.js"
-"#,
+run = "main.js""#,
     )?;
     std::fs::write(
         node_policy_violation.join("main.js"),
@@ -1868,35 +1820,27 @@ entrypoint = "main.js"
 
     std::fs::write(
         python_no_lock.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "test-python-no-lock"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11.9"
-entrypoint = "main.py"
-"#,
+run = "main.py""#,
     )?;
     std::fs::write(python_no_lock.join("main.py"), r#"print("python no lock")"#)?;
 
     std::fs::write(
         python_with_lock.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "test-python-with-lock"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11.9"
-entrypoint = "main.py"
-"#,
+run = "main.py""#,
     )?;
     std::fs::write(
         python_with_lock.join("main.py"),
@@ -2195,24 +2139,22 @@ fn e2e_local_registry_run_exported_python_cli_preserves_arg_order() -> Result<()
 
     std::fs::write(
         project_dir.join("capsule.toml"),
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "tool"
 version = "1.0.0"
 type = "app"
+
 default_target = "default"
 
 [targets.default]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11.10"
-run_command = "python3 default.py --from-default"
+run = "python3 default.py --from-default"
 
 [targets.export]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11.10"
-run_command = "python3 tool.py --from-target"
-
+run = "python3 tool.py --from-target"
 [exports.cli.tool]
 kind = "python-tool"
 target = "export"
@@ -2326,18 +2268,14 @@ fn e2e_local_registry_release_ops_reflect_current_and_yanked_state() -> Result<(
         std::fs::write(
             dir.join("capsule.toml"),
             format!(
-                r#"schema_version = "0.2"
+                r#"schema_version = "0.3"
 name = "release-ops"
 version = "{version}"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "1.46.3"
-entrypoint = "main.ts"
-"#
+run = "main.ts""#
             ),
         )?;
         std::fs::write(dir.join("main.ts"), body)?;

@@ -204,14 +204,20 @@ pub(crate) async fn run_v03_lifecycle_steps(
     let mut provisioned_roots = std::collections::HashSet::new();
     for target_label in plan.selected_target_package_order()? {
         let target_plan = plan.with_selected_target(target_label.clone());
-        let working_dir = target_plan.execution_working_directory();
+        let working_dir = resolve_provision_working_dir(&target_plan);
 
         if provisioned_roots.insert(working_dir.clone()) {
             if let Some(command) = plan_v03_provision_command(&target_plan)? {
                 reporter
                     .notify(format!("⚙️  Provision [{}]: {}", target_label, command))
                     .await?;
-                run_lifecycle_shell_command(&target_plan, launch_ctx, &command, "provision")?;
+                run_lifecycle_shell_command(
+                    &target_plan,
+                    launch_ctx,
+                    &command,
+                    "provision",
+                    &working_dir,
+                )?;
             }
         }
 
@@ -223,11 +229,24 @@ pub(crate) async fn run_v03_lifecycle_steps(
             reporter
                 .notify(format!("🏗️  Build [{}]: {}", target_label, command))
                 .await?;
-            run_lifecycle_shell_command(&target_plan, launch_ctx, &command, "build")?;
+            run_lifecycle_shell_command(&target_plan, launch_ctx, &command, "build", &working_dir)?;
         }
     }
 
     Ok(())
+}
+
+/// Returns the working directory for provision/build lifecycle commands.
+/// For GitHub-installed capsules, project files live under source/ while
+/// execution_working_directory() returns the outer manifest dir (no working_dir
+/// in capsule.toml). Detect this layout so npm/pnpm/cargo run where package.json
+/// and lockfiles actually are.
+fn resolve_provision_working_dir(plan: &capsule_core::router::ManifestData) -> std::path::PathBuf {
+    let source_dir = plan.manifest_dir.join("source");
+    if source_dir.join("package.json").exists() {
+        return source_dir;
+    }
+    plan.execution_working_directory()
 }
 
 pub(super) fn plan_v03_provision_command(
@@ -238,7 +257,7 @@ pub(super) fn plan_v03_provision_command(
     let runtime = runtime.trim().to_ascii_lowercase();
     let driver = driver.trim().to_ascii_lowercase();
     let manifest_dir = plan.manifest_dir.clone();
-    let execution_working_directory = plan.execution_working_directory();
+    let execution_working_directory = resolve_provision_working_dir(plan);
 
     if runtime == "web" && driver == "static" {
         debug!(
@@ -297,16 +316,32 @@ fn provision_command_from_node_importer(
 ) -> Result<Option<String>> {
     match probe_required_node_lockfile(execution_working_directory)? {
         ProbeResult::Found(values) => Ok(Some(node_install_command_from_evidence(&values[0])?)),
-        ProbeResult::Missing(missing) => Err(AtoExecutionError::lock_incomplete(
-            missing.message,
-            Some("package-lock.json"),
-        )
-        .into()),
-        ProbeResult::Ambiguous(ambiguity) => Err(AtoExecutionError::lock_incomplete(
-            ambiguity.message,
-            Some("package-lock.json"),
-        )
-        .into()),
+        ProbeResult::Missing(_) => {
+            // No lockfile present; npm install will create package-lock.json on the fly.
+            // Acceptable for source/preview runs (best-effort, not reproducibility-critical).
+            Ok(Some("npm install --legacy-peer-deps".to_string()))
+        }
+        ProbeResult::Ambiguous(ambiguity) => {
+            // Multiple lockfiles present; prefer pnpm > npm > yarn > bun.
+            let priority_order = [
+                ImporterId::Pnpm,
+                ImporterId::Npm,
+                ImporterId::Yarn,
+                ImporterId::Bun,
+            ];
+            let cmd = priority_order
+                .iter()
+                .find(|id| ambiguity.importer_ids.contains(id))
+                .and_then(|id| match id {
+                    ImporterId::Pnpm => Some("pnpm install"),
+                    ImporterId::Npm => Some("npm install --legacy-peer-deps"),
+                    ImporterId::Yarn => Some("yarn install"),
+                    ImporterId::Bun => Some("bun install"),
+                    _ => None,
+                })
+                .unwrap_or("npm install --legacy-peer-deps");
+            Ok(Some(cmd.to_string()))
+        }
         ProbeResult::NotApplicable => Ok(None),
     }
 }
@@ -339,11 +374,16 @@ fn provision_command_from_cargo_importer(
 }
 
 fn node_install_command_from_evidence(evidence: &ImportedEvidence) -> Result<String> {
+    // Source/GitHub runs use non-strict install: lockfiles may come from a different
+    // platform or OS than the current machine, so --frozen-lockfile / npm ci would fail
+    // on checksum mismatches. Plain install is correct for developer-preview mode.
+    // --legacy-peer-deps allows older projects that rely on npm v6 conflict-resolution
+    // to install without hard errors on peer dependency mismatches.
     let command = match evidence.importer_id {
-        ImporterId::Npm => "npm ci",
-        ImporterId::Yarn => "yarn install --frozen-lockfile",
-        ImporterId::Pnpm => "pnpm install --frozen-lockfile",
-        ImporterId::Bun => "bun install --frozen-lockfile",
+        ImporterId::Npm => "npm install --legacy-peer-deps",
+        ImporterId::Yarn => "yarn install",
+        ImporterId::Pnpm => "pnpm install",
+        ImporterId::Bun => "bun install",
         other => {
             return Err(anyhow::anyhow!(
                 "unsupported node importer '{}' for provision command",
@@ -359,7 +399,19 @@ fn run_lifecycle_shell_command(
     launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
     command: &str,
     phase: &str,
+    working_dir: &Path,
 ) -> Result<()> {
+    // Some packages have preinstall scripts that call `lefthook install` or similar
+    // git-hook managers. These fail with exit 128 because the source checkout has no
+    // .git directory. Creating a minimal stub allows git-root detection to succeed.
+    // We remove the stub after the command so it does not persist in the capsule.
+    let fake_git = working_dir.join(".git");
+    let created_fake_git = if !fake_git.exists() {
+        std::fs::create_dir_all(&fake_git).is_ok()
+    } else {
+        false
+    };
+
     #[cfg(windows)]
     let mut cmd = {
         let mut cmd = std::process::Command::new("cmd");
@@ -374,10 +426,19 @@ fn run_lifecycle_shell_command(
         cmd
     };
 
-    cmd.current_dir(plan.execution_working_directory())
+    cmd.current_dir(working_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit());
+        .stderr(std::process::Stdio::inherit())
+        .env("COREPACK_ENABLE_STRICT", "0")
+        // Disable pnpm 10's auto-manage-package-manager-versions to prevent it from
+        // attempting to download the pinned pnpm version in offline/CI environments.
+        .env("npm_config_manage_package_manager_versions", "false")
+        .env("npm_config_approve_builds", "on")
+        // Skip git-hooks managers (husky, lefthook, etc.): the capsule workspace
+        // has no .git dir so their prepare/postinstall scripts would fail with exit 128.
+        .env("HUSKY", "0")
+        .env("LEFTHOOK", "0");
 
     for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
         cmd.env(key, value);
@@ -386,7 +447,13 @@ fn run_lifecycle_shell_command(
 
     let status = cmd
         .status()
-        .with_context(|| format!("Failed to execute {} command", phase))?;
+        .with_context(|| format!("Failed to execute {} command", phase));
+
+    if created_fake_git {
+        let _ = std::fs::remove_dir_all(&fake_git);
+    }
+
+    let status = status?;
     if status.success() {
         Ok(())
     } else {

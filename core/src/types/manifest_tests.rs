@@ -6,12 +6,18 @@ use super::{
 };
 
 const VALID_TOML: &str = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "mlx-qwen3-8b"
 version = "1.0.0"
 type = "inference"
-default_target = "cli"
 
+runtime = "source"
+port = 8081
+health_check = "/health"
+startup_timeout = 120
+GUMBALL_MODEL = "qwen3-8b"
+run = "server.py"
+[env]
 [metadata]
 display_name = "Qwen3 8B (MLX)"
 description = "Local inference on Apple Silicon"
@@ -29,18 +35,6 @@ platform = ["darwin-arm64"]
 vram_min = "6GB"
 vram_recommended = "8GB"
 disk = "5GB"
-
-[targets]
-port = 8081
-health_check = "/health"
-startup_timeout = 120
-
-[targets.cli]
-runtime = "source"
-entrypoint = "server.py"
-
-[targets.cli.env]
-GUMBALL_MODEL = "qwen3-8b"
 
 [routing]
 weight = "light"
@@ -78,17 +72,13 @@ fn test_validate_valid_manifest() {
 fn test_parse_job_manifest_type() {
     let manifest = CapsuleManifest::from_toml(
         r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "job-demo"
 version = "0.1.0"
 type = "job"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "python"
-entrypoint = "main.py"
-"#,
+runtime = "source/python"
+run = "main.py""#,
     )
     .unwrap();
 
@@ -99,21 +89,15 @@ entrypoint = "main.py"
 fn test_validate_job_manifest_rejects_ports() {
     let manifest = CapsuleManifest::from_toml(
         r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "job-demo"
 version = "0.1.0"
 type = "job"
-default_target = "cli"
 
-[targets]
+runtime = "source/python"
 port = 8080
-
-[targets.cli]
-runtime = "source"
-driver = "python"
-entrypoint = "main.py"
 port = 9000
-"#,
+run = "main.py""#,
     )
     .unwrap();
 
@@ -140,18 +124,14 @@ port = 9000
 fn test_validate_job_manifest_rejects_web_runtime() {
     let manifest = CapsuleManifest::from_toml(
         r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "job-web-demo"
 version = "0.1.0"
 type = "job"
-default_target = "cli"
 
-[targets.cli]
-runtime = "web"
-driver = "static"
-entrypoint = "index.html"
+runtime = "web/static"
 port = 8080
-"#,
+run = "index.html""#,
     )
     .unwrap();
 
@@ -707,18 +687,14 @@ port = 3000
 #[test]
 fn test_validate_cli_export_python_tool_target_is_ok() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "python-tool-demo"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "python"
-entrypoint = "main.py"
+runtime = "source/python"
 runtime_version = "3.11"
-
+run = "main.py"
 [exports.cli.demo-tool]
 kind = "python-tool"
 target = "cli"
@@ -732,18 +708,14 @@ args = ["--mode", "oneshot"]
 #[test]
 fn test_validate_cli_export_rejects_missing_target() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "python-tool-demo"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "python"
-entrypoint = "main.py"
+runtime = "source/python"
 runtime_version = "3.11"
-
+run = "main.py"
 [exports.cli.demo-tool]
 kind = "python-tool"
 target = "missing"
@@ -761,18 +733,14 @@ target = "missing"
 #[test]
 fn test_validate_cli_export_rejects_non_python_target() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "node-tool-demo"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "node"
-entrypoint = "main.js"
+runtime = "source/node"
 runtime_version = "20"
-
+run = "main.js"
 [exports.cli.demo-tool]
 kind = "python-tool"
 target = "cli"
@@ -1178,16 +1146,13 @@ fn test_validate_preview_allows_missing_runtime_version() {
 #[test]
 fn test_validate_web_requires_driver_and_port() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-app"
 version = "0.1.0"
 type = "app"
-default_target = "static"
 
-[targets.static]
 runtime = "web"
-entrypoint = "dist"
-"#;
+run = "dist""#;
     let manifest = CapsuleManifest::from_toml(toml).unwrap();
     let errors = manifest.validate().unwrap_err();
     assert!(errors.iter().any(|e| matches!(
@@ -1203,16 +1168,13 @@ entrypoint = "dist"
 #[test]
 fn test_validate_preview_web_still_requires_driver_but_not_port() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-app"
 version = "0.1.0"
 type = "app"
-default_target = "static"
 
-[targets.static]
 runtime = "web"
-entrypoint = "dist"
-"#;
+run = "dist""#;
     let manifest = CapsuleManifest::from_toml(toml).unwrap();
     let errors = manifest
         .validate_for_mode(ValidationMode::Preview)
@@ -1230,19 +1192,15 @@ entrypoint = "dist"
 #[test]
 fn test_validate_web_rejects_public_and_browser_static() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-app"
 version = "0.1.0"
 type = "app"
-default_target = "static"
 
-[targets.static]
-runtime = "web"
-driver = "browser_static"
-entrypoint = "dist"
+runtime = "web/browser_static"
 public = ["dist/**"]
 port = 8080
-"#;
+run = "dist""#;
     let manifest = CapsuleManifest::from_toml(toml).unwrap();
     let errors = manifest.validate().unwrap_err();
     assert!(errors.iter().any(|e| matches!(
@@ -1254,18 +1212,14 @@ port = 8080
 #[test]
 fn test_validate_web_static_accepts_port_and_driver() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-app"
 version = "0.1.0"
 type = "app"
-default_target = "static"
 
-[targets.static]
-runtime = "web"
-driver = "static"
-entrypoint = "dist"
+runtime = "web/static"
 port = 8080
-"#;
+run = "dist""#;
     let manifest = CapsuleManifest::from_toml(toml).unwrap();
     assert!(manifest.validate().is_ok());
 }
@@ -1294,18 +1248,14 @@ port = 18080
 #[test]
 fn test_validate_web_dynamic_rejects_shell_style_entrypoint() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-app"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "web"
-driver = "node"
-entrypoint = "npm run start"
+runtime = "web/node"
 port = 3000
-"#;
+run = "npm run start""#;
     let manifest = CapsuleManifest::from_toml(toml).unwrap();
     let errors = manifest.validate().unwrap_err();
     assert!(errors.iter().any(|e| matches!(
@@ -1317,17 +1267,13 @@ port = 3000
 #[test]
 fn test_validate_web_deno_services_allows_empty_target_entrypoint() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-services-app"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "web"
-driver = "deno"
+runtime = "web/deno"
 port = 4173
-
 [services.main]
 entrypoint = "node apps/dashboard/server.js"
 "#;
@@ -1338,17 +1284,13 @@ entrypoint = "node apps/dashboard/server.js"
 #[test]
 fn test_validate_web_deno_services_requires_main_service() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-services-app"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "web"
-driver = "deno"
+runtime = "web/deno"
 port = 4173
-
 [services.api]
 entrypoint = "python apps/api/main.py"
 "#;
@@ -1364,17 +1306,13 @@ entrypoint = "python apps/api/main.py"
 #[test]
 fn test_validate_web_deno_services_rejects_unknown_dependency() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-services-app"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "web"
-driver = "deno"
+runtime = "web/deno"
 port = 4173
-
 [services.main]
 entrypoint = "node apps/dashboard/server.js"
 depends_on = ["api"]
@@ -1391,17 +1329,13 @@ depends_on = ["api"]
 #[test]
 fn test_validate_web_deno_services_rejects_circular_dependencies() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-services-app"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "web"
-driver = "deno"
+runtime = "web/deno"
 port = 4173
-
 [services.main]
 entrypoint = "node apps/dashboard/server.js"
 depends_on = ["api"]
@@ -1422,17 +1356,13 @@ depends_on = ["main"]
 #[test]
 fn test_validate_web_deno_services_rejects_invalid_readiness_probe() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-services-app"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "web"
-driver = "deno"
+runtime = "web/deno"
 port = 4173
-
 [services.main]
 entrypoint = "node apps/dashboard/server.js"
 
@@ -1452,17 +1382,13 @@ readiness_probe = { port = "API_PORT" }
 #[test]
 fn test_validate_web_deno_services_rejects_expose() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-services-app"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "web"
-driver = "deno"
+runtime = "web/deno"
 port = 4173
-
 [services.main]
 entrypoint = "node apps/dashboard/server.js"
 expose = ["API_PORT"]
@@ -1479,16 +1405,13 @@ expose = ["API_PORT"]
 #[test]
 fn test_validate_ephemeral_state_binding_for_oci_service() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "stateful-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
-
 [state.data]
 kind = "filesystem"
 durability = "ephemeral"
@@ -1508,18 +1431,14 @@ target = "/var/lib/app"
 #[test]
 fn test_validate_rejects_state_binding_for_non_oci_service() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "stateful-app"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "web"
-driver = "node"
-entrypoint = "server.js"
+runtime = "web/node"
 port = 3000
-
+run = "server.js"
 [state.data]
 kind = "filesystem"
 durability = "ephemeral"
@@ -1544,16 +1463,13 @@ target = "/var/lib/app"
 #[test]
 fn test_validate_accepts_persistent_state_with_explicit_attach() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "stateful-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
-
 [state.data]
 kind = "filesystem"
 durability = "persistent"
@@ -1575,17 +1491,14 @@ target = "/var/lib/app"
 #[test]
 fn test_validate_rejects_empty_state_owner_scope() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "stateful-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 state_owner_scope = "   "
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
-
 [state.data]
 kind = "filesystem"
 durability = "persistent"
@@ -1612,17 +1525,14 @@ target = "/var/lib/app"
 #[test]
 fn test_persistent_state_owner_scope_prefers_explicit_field() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "stateful-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 state_owner_scope = "tenant/acme/prod"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
-
 [state.data]
 kind = "filesystem"
 durability = "persistent"
@@ -1647,17 +1557,14 @@ target = "/var/lib/app"
 #[test]
 fn test_validate_rejects_empty_service_binding_scope() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "stateful-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 service_binding_scope = "   "
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
-
 [services.main]
 target = "app"
 network = { publish = true }
@@ -1674,17 +1581,14 @@ network = { publish = true }
 #[test]
 fn test_host_service_binding_scope_prefers_explicit_field() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "stateful-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 service_binding_scope = "tenant/acme/services"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
-
 [services.main]
 target = "app"
 network = { publish = true }
@@ -1764,20 +1668,13 @@ fn test_vram_parsing() {
 #[test]
 fn test_rejects_legacy_execution_section_toml() {
     let legacy_manifest = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "legacy-app"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[execution]
 runtime = "source"
-entrypoint = "main.py"
-
-[targets.cli]
-runtime = "source"
-entrypoint = "main.py"
-"#;
+run = "main.py""#;
 
     let error = CapsuleManifest::from_toml(legacy_manifest).unwrap_err();
     assert!(error
@@ -1814,23 +1711,22 @@ fn test_rejects_legacy_execution_section_json() {
 #[test]
 fn test_validate_orchestration_services_target_mode() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "multi-runtime-app"
 version = "0.1.0"
 type = "app"
+
 default_target = "web"
 
 [targets.web]
-runtime = "web"
-driver = "node"
-entrypoint = "server.js"
+runtime = "web/node"
 port = 3000
+run = "server.js"
 
 [targets.db]
 runtime = "oci"
 image = "mysql:8"
 port = 3306
-
 [services.main]
 target = "web"
 depends_on = ["db"]
@@ -1847,18 +1743,14 @@ network = { allow_from = ["main"] }
 #[test]
 fn test_validate_orchestration_rejects_unknown_target() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "multi-runtime-app"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "web"
-driver = "node"
-entrypoint = "server.js"
+runtime = "web/node"
 port = 3000
-
+run = "server.js"
 [services.main]
 target = "missing"
 "#;
@@ -1875,18 +1767,14 @@ target = "missing"
 #[test]
 fn test_validate_orchestration_rejects_target_and_entrypoint_mix() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "multi-runtime-app"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "web"
-driver = "node"
-entrypoint = "server.js"
+runtime = "web/node"
 port = 3000
-
+run = "server.js"
 [services.main]
 target = "web"
 entrypoint = "node server.js"
@@ -1904,16 +1792,13 @@ entrypoint = "node server.js"
 #[test]
 fn test_validate_oci_target_accepts_image_without_entrypoint() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "oci-app"
 version = "0.1.0"
 type = "app"
-default_target = "db"
 
-[targets.db]
 runtime = "oci"
-image = "mysql:8"
-"#;
+image = "mysql:8""#;
 
     let manifest = CapsuleManifest::from_toml(toml).unwrap();
     assert!(manifest.validate().is_ok());
@@ -1922,23 +1807,22 @@ image = "mysql:8"
 #[test]
 fn test_validate_orchestration_rejects_unknown_allow_from() {
     let toml = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "multi-runtime-app"
 version = "0.1.0"
 type = "app"
+
 default_target = "web"
 
 [targets.web]
-runtime = "web"
-driver = "node"
-entrypoint = "server.js"
+runtime = "web/node"
 port = 3000
+run = "server.js"
 
 [targets.db]
 runtime = "oci"
 image = "mysql:8"
 port = 3306
-
 [services.main]
 target = "web"
 depends_on = ["db"]

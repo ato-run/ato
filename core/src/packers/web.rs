@@ -499,18 +499,14 @@ manifest_hash = "sha256:dummy"
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-static-pack"
 version = "0.1.0"
 type = "app"
-default_target = "static"
 
-[targets.static]
-runtime = "web"
-driver = "static"
-entrypoint = "dist"
+runtime = "web/static"
 port = 8080
-"#,
+run = "dist""#,
         )
         .expect("write manifest");
 
@@ -632,18 +628,14 @@ port = 8080
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-static-pack"
 version = "0.1.0"
 type = "app"
-default_target = "static"
 
-[targets.static]
-runtime = "web"
-driver = "static"
-entrypoint = "dist"
+runtime = "web/static"
 port = 8080
-"#,
+run = "dist""#,
         )
         .expect("write manifest");
 
@@ -683,18 +675,14 @@ port = 8080
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-static-repro"
 version = "0.1.0"
 type = "app"
-default_target = "static"
 
-[targets.static]
-runtime = "web"
-driver = "static"
-entrypoint = "dist"
+runtime = "web/static"
 port = 8080
-"#,
+run = "dist""#,
         )
         .expect("write manifest");
 

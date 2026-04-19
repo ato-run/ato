@@ -101,7 +101,7 @@ pub fn build_distribution_manifest(
     let merkle_root = compute_merkle_root(&chunk_hashes);
 
     let mut manifest = base_manifest.clone();
-    manifest.schema_version = "1".to_string();
+    manifest.schema_version = "0.3".to_string();
     manifest.distribution = Some(DistributionInfo {
         manifest_hash: String::new(),
         merkle_root,
@@ -262,16 +262,13 @@ mod tests {
     use std::path::Path;
 
     const VALID_TOML: &str = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "sample"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
 runtime = "source"
-entrypoint = "main.py"
-"#;
+run = "main.py""#;
 
     #[test]
     fn normalize_relative_utf8_path_rejects_parent_dir() {
