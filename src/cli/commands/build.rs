@@ -949,18 +949,27 @@ fn plan_v03_build_provision_command(
                 "bun install"
             });
         }
+        // Priority order: pnpm > npm > yarn > bun
+        let preferred_order = if strict_lockfile {
+            ["pnpm install --frozen-lockfile", "npm ci", "yarn install --frozen-lockfile", "bun install --frozen-lockfile"]
+        } else {
+            ["pnpm install", "npm install", "yarn install", "bun install"]
+        };
         return match matches.as_slice() {
-            [] => Err(AtoExecutionError::lock_incomplete(
-                "source/node target requires one of package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lock, or bun.lockb",
-                Some("package-lock.json"),
-            )
-            .into()),
+            [] => {
+                // No lockfile yet; generate one via npm install (best-effort for source mode)
+                Ok(Some("npm install".to_string()))
+            }
             [command] => Ok(Some((*command).to_string())),
-            _ => Err(AtoExecutionError::lock_incomplete(
-                "multiple node lockfiles detected; keep only one of package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lock, or bun.lockb",
-                Some("package-lock.json"),
-            )
-            .into()),
+            _ => {
+                // Multiple lockfiles: pick the highest-priority one
+                let chosen = preferred_order
+                    .iter()
+                    .find(|&&cmd| matches.contains(&cmd))
+                    .copied()
+                    .unwrap_or(matches[0]);
+                Ok(Some(chosen.to_string()))
+            }
         };
     }
 
