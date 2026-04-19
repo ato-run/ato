@@ -1130,19 +1130,15 @@ fn capsule_manifest_for_provider_run(
 ) -> String {
     let manifest_name = normalize_provider_manifest_name(package_name);
     format!(
-        r#"schema_version = "0.2"
+        r#"schema_version = "0.3"
 name = "{manifest_name}"
 version = "{version}"
 type = "job"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "{driver}"
+runtime = "source/{driver}"
 runtime_version = "{runtime_version}"
-entrypoint = "{entrypoint}"
 source_layout = "anchored_entrypoint"
-"#
+run = "{entrypoint}""#
     )
 }
 

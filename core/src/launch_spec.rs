@@ -101,14 +101,17 @@ fn derive_run_command_launch_spec(
                     anyhow!("source/node run_command must include a script entrypoint")
                 })?;
                 (command, tokens.into_iter().skip(2).collect::<Vec<_>>())
-            } else if first.starts_with("npm:") {
+            } else if first.starts_with("npm:") || matches!(first, "npm" | "pnpm" | "yarn" | "bun")
+            {
+                // Accept package manager invocations: `npm run dev`, `pnpm run dev`,
+                // `yarn dev`, `bun run dev`, etc.
                 (
                     tokens[0].clone(),
                     tokens.into_iter().skip(1).collect::<Vec<_>>(),
                 )
             } else {
                 return Err(anyhow!(
-                    "source/node run_command must start with 'node' or 'npm:<package>', got '{}'",
+                    "source/node run_command must start with 'node', 'npm:<package>', or a package manager (npm/pnpm/yarn/bun), got '{}'",
                     first
                 ));
             }
@@ -182,8 +185,19 @@ fn resolve_launch_working_dir(plan: &ManifestData, command: &str) -> PathBuf {
     }
 
     let source_dir = plan.manifest_dir.join("source");
-    if source_dir.is_dir() && command_path_exists(&source_dir, command) {
-        return source_dir;
+    if source_dir.is_dir() {
+        // For package manager commands (npm, pnpm, yarn, bun), the command itself
+        // is a system binary — not a file inside source/. Check instead whether
+        // source/ looks like a Node.js project (has package.json).
+        // For any command, prefer source/ when source/package.json exists —
+        // system binaries like npm/pnpm/node/vite all need to run where
+        // package.json (and node_modules) live.
+        if source_dir.join("package.json").exists() {
+            return source_dir;
+        }
+        if command_path_exists(&source_dir, command) {
+            return source_dir;
+        }
     }
 
     plan.manifest_dir.clone()

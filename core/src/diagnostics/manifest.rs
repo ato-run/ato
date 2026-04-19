@@ -617,21 +617,16 @@ mod tests {
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "cli-smoke"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11.9"
-entrypoint = "main.py"
-
-[targets.cli.smoke]
 startup_timeout_ms = 0
-"#,
+run = "main.py"
+[smoke]"#,
         )
         .unwrap();
         std::fs::write(dir.path().join("main.py"), "print('ok')").unwrap();
@@ -646,22 +641,17 @@ startup_timeout_ms = 0
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "cli-smoke"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "python"
+runtime = "source/python"
 runtime_version = "3.11.9"
-entrypoint = "main.py"
-
-[targets.cli.smoke]
 startup_timeout_ms = 1500
 check_commands = ["python -V"]
-"#,
+run = "main.py"
+[smoke]"#,
         )
         .unwrap();
         std::fs::write(dir.path().join("main.py"), "print('ok')").unwrap();
@@ -676,18 +666,14 @@ check_commands = ["python -V"]
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-static"
 version = "0.1.0"
 type = "app"
-default_target = "static"
 
-[targets.static]
-runtime = "web"
-driver = "static"
-entrypoint = "dist"
+runtime = "web/static"
 port = 8080
-"#,
+run = "dist""#,
         )
         .unwrap();
 
@@ -707,18 +693,14 @@ port = 8080
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-static"
 version = "0.1.0"
 type = "app"
-default_target = "static"
 
-[targets.static]
-runtime = "web"
-driver = "static"
-entrypoint = "~/dist"
+runtime = "web/static"
 port = 8080
-"#,
+run = "~/dist""#,
         )
         .unwrap();
 
@@ -733,17 +715,13 @@ port = 8080
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-static"
 version = "0.1.0"
 type = "app"
-default_target = "static"
 
-[targets.static]
-runtime = "web"
-driver = "static"
-entrypoint = "dist"
-"#,
+runtime = "web/static"
+run = "dist""#,
         )
         .unwrap();
 
@@ -763,18 +741,14 @@ entrypoint = "dist"
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-node"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "web"
-driver = "node"
-entrypoint = "npm run start"
+runtime = "web/node"
 port = 3000
-"#,
+run = "npm run start""#,
         )
         .unwrap();
 
@@ -791,18 +765,14 @@ port = 3000
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-services"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "web"
-driver = "deno"
+runtime = "web/deno"
 port = 4173
 runtime_tools = { node = "20.11.0" }
-
 [services.main]
 entrypoint = "node apps/dashboard/server.js"
 "#,
@@ -819,17 +789,13 @@ entrypoint = "node apps/dashboard/server.js"
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-services"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "web"
-driver = "deno"
+runtime = "web/deno"
 port = 4173
-
 [services.api]
 entrypoint = "python apps/api/main.py"
 "#,
@@ -847,17 +813,13 @@ entrypoint = "python apps/api/main.py"
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-services"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "web"
-driver = "deno"
+runtime = "web/deno"
 port = 4173
-
 [services.main]
 entrypoint = "node apps/dashboard/server.js"
 "#,
@@ -875,18 +837,14 @@ entrypoint = "node apps/dashboard/server.js"
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-deno"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
-[targets.web]
-runtime = "web"
-driver = "deno"
-entrypoint = "ato-entry.ts"
+runtime = "web/deno"
 port = 4173
-"#,
+run = "ato-entry.ts""#,
         )
         .unwrap();
         std::fs::write(dir.path().join("ato-entry.ts"), "console.log('ok');").unwrap();
@@ -902,20 +860,16 @@ port = 4173
         std::fs::write(
             &manifest_path,
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "pack-test"
 version = "0.1.0"
 type = "app"
-default_target = "web"
 
+runtime = "web/deno"
+port = 4173
+run = "ato-entry.ts"
 [pack]
 include = ["", "apps/**"]
-
-[targets.web]
-runtime = "web"
-driver = "deno"
-entrypoint = "ato-entry.ts"
-port = 4173
 "#,
         )
         .unwrap();

@@ -21,17 +21,14 @@ fn write_file(path: &std::path::Path, contents: &str) {
 fn requirements_manifest(name: &str) -> String {
     format!(
         r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "{name}"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/{name}:latest"
 required_env = ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"]
-
 [isolation]
 allow_env = ["LOG_LEVEL"]
 

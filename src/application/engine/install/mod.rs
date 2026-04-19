@@ -52,7 +52,7 @@ const SEGMENT_MAX_LEN: usize = 63;
 const LEASE_REFRESH_INTERVAL_SECS: u64 = 300;
 const NEGOTIATE_DEFAULT_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const DELTA_RECONSTRUCT_ZSTD_LEVEL: i32 = 3;
-const DEFAULT_GITHUB_DRAFT_NODE_RUNTIME_VERSION: &str = "20.12.0";
+const DEFAULT_GITHUB_DRAFT_NODE_RUNTIME_VERSION: &str = "22.14.0";
 const DEFAULT_GITHUB_DRAFT_PYTHON_RUNTIME_VERSION: &str = "3.11.10";
 
 #[derive(Debug, Serialize)]
@@ -844,10 +844,15 @@ pub async fn download_github_repository_at_ref(
     };
     let response = client
         .get(&archive_url)
-        .header(reqwest::header::USER_AGENT, "ato-cli")
-        .send()
-        .await
-        .with_context(|| format!("Failed to fetch GitHub repository archive: {normalized}"))?;
+        .header(reqwest::header::USER_AGENT, "ato-cli");
+    let response = if let Some(token) = github_api_bearer_token() {
+        response.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+    } else {
+        response
+    }
+    .send()
+    .await
+    .with_context(|| format!("Failed to fetch GitHub repository archive: {normalized}"))?;
     let session_token = crate::auth::current_session_token();
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         if let Some(token) = session_token.as_deref() {

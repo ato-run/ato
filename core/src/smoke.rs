@@ -17,7 +17,7 @@ use crate::error::CapsuleError;
 use crate::isolation::HostIsolationContext;
 
 const DEFAULT_STARTUP_TIMEOUT_MS: u64 = 2000;
-const PORT_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
+const PORT_RETRY_TIMEOUT: Duration = Duration::from_secs(120);
 const PORT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const STDERR_TAIL_MAX_BYTES: usize = 8192;
 const STDERR_CAPTURE_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -545,7 +545,18 @@ fn spawn_main_service(
     isolated_env: &HostIsolationContext,
 ) -> std::io::Result<Child> {
     let cwd_path = resolve_path(root, &service.cwd);
-    let executable = resolve_path_with_cwd(root, &cwd_path, &service.executable);
+    // Resolve `npm:X` → `node_modules/.bin/X` so ato's package-bin references
+    // work inside the smoke's isolated environment.
+    let executable = if let Some(package_bin) = service.executable.trim().strip_prefix("npm:") {
+        let bin = cwd_path.join("node_modules").join(".bin").join(package_bin);
+        if bin.exists() {
+            bin
+        } else {
+            resolve_path_with_cwd(root, &cwd_path, &service.executable)
+        }
+    } else {
+        resolve_path_with_cwd(root, &cwd_path, &service.executable)
+    };
     let mut cmd = Command::new(&executable);
     let args = service
         .args
@@ -558,6 +569,8 @@ fn spawn_main_service(
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::piped());
     apply_isolated_command_env(&mut cmd, root, service, isolated_env);
+    cmd.env("COREPACK_ENABLE_STRICT", "0");
+    cmd.env("npm_config_manage_package_manager_versions", "false");
 
     #[cfg(unix)]
     unsafe {
@@ -637,11 +650,28 @@ fn prepare_smoke_working_directory(
     }
 
     let install = if cwd_path.join("pnpm-lock.yaml").exists() {
-        Some(("pnpm", vec!["install", "--frozen-lockfile"]))
-    } else if cwd_path.join("package-lock.json").exists() {
-        Some(("npm", vec!["ci"]))
+        // Write a project-level .npmrc that disables pnpm's auto-version-switch so the
+        // system pnpm binary is used as-is even if package.json pins a different version.
+        let npmrc_path = cwd_path.join(".npmrc");
+        if !npmrc_path.exists() {
+            let _ = std::fs::write(&npmrc_path, "manage-package-manager-versions=false\n");
+        } else if let Ok(existing) = std::fs::read_to_string(&npmrc_path) {
+            if !existing.contains("manage-package-manager-versions") {
+                let _ = std::fs::write(
+                    &npmrc_path,
+                    format!("{existing}\nmanage-package-manager-versions=false\n"),
+                );
+            }
+        }
+        Some(("pnpm", vec!["install"]))
+    } else if cwd_path.join("package-lock.json").exists()
+        || cwd_path.join("npm-shrinkwrap.json").exists()
+    {
+        Some(("npm", vec!["install", "--legacy-peer-deps"]))
+    } else if cwd_path.join("yarn.lock").exists() {
+        Some(("yarn", vec!["install"]))
     } else if cwd_path.join("bun.lock").exists() || cwd_path.join("bun.lockb").exists() {
-        Some(("bun", vec!["install", "--frozen-lockfile"]))
+        Some(("bun", vec!["install"]))
     } else {
         None
     };
@@ -657,7 +687,32 @@ fn prepare_smoke_working_directory(
     command.stdin(Stdio::null());
     command.stdout(Stdio::null());
     command.stderr(Stdio::piped());
+    // apply_isolated_command_env calls env_clear() internally; set package-manager
+    // compat vars AFTER it so they are not wiped.
     apply_isolated_command_env(&mut command, root, service, isolated_env);
+    // Prevent corepack from enforcing the `packageManager` version pin, which may
+    // refer to a version not yet cached on the host machine.
+    command.env("COREPACK_ENABLE_STRICT", "0");
+    // Disable pnpm 10's auto-manage-package-manager-versions: without this, pnpm
+    // attempts to download and switch to the version pinned in packageManager, which
+    // fails in offline/isolated smoke environments.
+    // "false" (string) is truthy in JS — use "0" so pnpm's bool parser disables the feature.
+    command.env("npm_config_manage_package_manager_versions", "0");
+    // Auto-approve pnpm build scripts without interactive prompt.
+    command.env("npm_config_approve_builds", "on");
+    // Skip git-hooks managers (husky, lefthook, etc.): the smoke workspace has no .git dir.
+    command.env("HUSKY", "0");
+    command.env("LEFTHOOK", "0");
+    // Use the bundled pnpm content-addressable store (fetched during build) so the
+    // smoke install resolves from cache rather than downloading from the network.
+    if program == "pnpm" {
+        if let Some(bundled_store) = resolve_bundled_pnpm_store_dir(root) {
+            command.env("pnpm_config_store_dir", &bundled_store);
+            command.arg("--store-dir");
+            command.arg(&bundled_store);
+            command.arg("--prefer-offline");
+        }
+    }
 
     let output = command.output().map_err(|err| {
         SmokeFailureReport::new(
@@ -721,6 +776,8 @@ fn run_check_commands(
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::piped());
         apply_isolated_command_env(&mut cmd, root, service, isolated_env);
+        cmd.env("COREPACK_ENABLE_STRICT", "0");
+        cmd.env("npm_config_manage_package_manager_versions", "false");
 
         let output = cmd.output().map_err(|e| {
             SmokeFailureReport::new(
@@ -820,6 +877,24 @@ fn resolve_bundled_uv_cache_dir(root: &Path, service: &MainService) -> Option<St
     None
 }
 
+/// Look for the pnpm content-addressable store bundled as an artifact in the
+/// capsule (populated by `pnpm fetch` during the build phase). Using it avoids
+/// a full network download during smoke test dependency preparation.
+fn resolve_bundled_pnpm_store_dir(root: &Path) -> Option<PathBuf> {
+    for base in [workspace_artifacts_dir(root), root.join("artifacts")] {
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let candidate = entry.path().join("pnpm-store");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 fn resolve_smoke_site_packages_dir(root: &Path, service: &MainService) -> Option<PathBuf> {
     let cwd_path = resolve_path(root, &service.cwd);
     let site_packages = cwd_path.join(".ato-smoke-site-packages");
@@ -858,8 +933,12 @@ fn kill_child(child: &mut Child) -> Result<(), CapsuleError> {
 }
 
 fn can_connect_localhost(port: u16) -> bool {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok()
+    // Check both IPv4 (127.0.0.1) and IPv6 (::1) since dev servers like Vite 5+
+    // may bind exclusively to the IPv6 loopback address.
+    let ipv4 = SocketAddr::from(([127, 0, 0, 1], port));
+    let ipv6 = SocketAddr::from(([0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], port));
+    TcpStream::connect_timeout(&ipv4, Duration::from_millis(100)).is_ok()
+        || TcpStream::connect_timeout(&ipv6, Duration::from_millis(100)).is_ok()
 }
 
 fn ensure_required_port_is_free_before_start(

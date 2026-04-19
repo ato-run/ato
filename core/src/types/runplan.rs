@@ -314,22 +314,16 @@ mod tests {
     use super::CapsuleManifest;
 
     const SAMPLE_PYTHON_TOML: &str = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "mlx-qwen3-8b"
 version = "1.0.0"
 type = "inference"
-default_target = "cli"
 
-[targets]
-port = 8081
-
-[targets.cli]
 runtime = "source"
-entrypoint = "server.py"
-
-[targets.cli.env]
+port = 8081
 GUMBALL_MODEL = "qwen3-8b"
-
+run = "server.py"
+[env]
 [capabilities]
 chat = true
 function_calling = true
@@ -341,31 +335,23 @@ source = "hf:org/model"
 "#;
 
     const SAMPLE_DOCKER_TOML: &str = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "hello-docker"
 version = "0.1.0"
 type = "app"
-default_target = "container"
 
-[targets]
-port = 8080
-
-[targets.container]
 runtime = "oci"
-entrypoint = "ghcr.io/example/hello:latest"
-"#;
+port = 8080
+run = "ghcr.io/example/hello:latest""#;
 
     const SAMPLE_DOCKER_STATE_TOML: &str = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "hello-docker"
 version = "0.1.0"
 type = "app"
-default_target = "container"
 
-[targets.container]
 runtime = "oci"
-entrypoint = "ghcr.io/example/hello:latest"
-
+run = "ghcr.io/example/hello:latest"
 [state.data]
 kind = "filesystem"
 durability = "ephemeral"
@@ -380,16 +366,13 @@ target = "/var/lib/app"
 "#;
 
     const SAMPLE_DOCKER_PERSISTENT_STATE_TOML: &str = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "hello-docker"
 version = "0.1.0"
 type = "app"
-default_target = "container"
 
-[targets.container]
 runtime = "oci"
-entrypoint = "ghcr.io/example/hello:latest"
-
+run = "ghcr.io/example/hello:latest"
 [state.data]
 kind = "filesystem"
 durability = "persistent"

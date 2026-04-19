@@ -18,18 +18,14 @@ fn write_ipc_service_fixture(root: &std::path::Path) {
     write_file(
         &root.join("capsule.toml"),
         r#"
-schema_version = "1"
+schema_version = "0.3"
 name = "ipc-invoke-test"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
-runtime = "source"
-driver = "deno"
+runtime = "source/deno"
 runtime_version = "1.46.3"
-entrypoint = "main.ts"
-
+run = "main.ts"
 [ipc.exports]
 name = "invoke-svc"
 

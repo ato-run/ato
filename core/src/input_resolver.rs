@@ -493,18 +493,14 @@ mod tests {
         fs::write(
             dir.join("capsule.toml"),
             format!(
-                r#"schema_version = "0.2"
+                r#"schema_version = "0.3"
 name = "{name}"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
-runtime = "web"
-driver = "static"
-entrypoint = "dist"
+runtime = "web/static"
 port = 4173
-"#
+run = "dist""#
             ),
         )
         .expect("write manifest");

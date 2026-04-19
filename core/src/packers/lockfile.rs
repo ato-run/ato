@@ -582,16 +582,13 @@ mod tests {
         let manifest_path = temp.path().join("capsule.toml");
         std::fs::write(
             &manifest_path,
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "lockfile-test"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
 runtime = "source"
-entrypoint = "python"
-
+run = "python"
 [runtime]
 allowlist = ["nodejs.org", "github.com"]
 "#,

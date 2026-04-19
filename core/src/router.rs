@@ -51,11 +51,47 @@ impl CompatManifestBridge {
         toml::from_str(&self.raw_toml).map_err(|err| anyhow!("parse compat manifest bridge: {err}"))
     }
 
+    /// Build a bridge where the manifest model and the compat raw TOML come from separate sources.
+    /// Use this when the normalized compat TOML (with `[targets]`) cannot be re-parsed via the
+    /// normal `CapsuleManifest::from_toml` path (e.g. it contains v0.2-style `entrypoint` fields
+    /// that the v0.3 validator would reject).
+    pub fn from_compat_normalized(manifest: CapsuleManifest, compat_toml: String) -> Self {
+        Self {
+            sha256: sha256_hex(compat_toml.as_bytes()),
+            raw_toml: compat_toml,
+            manifest,
+        }
+    }
+
     pub fn from_manifest_value(manifest: &toml::Value) -> Result<Self> {
+        // Detect flat v0.3 manifests that need normalization before direct serde
+        // deserialization (e.g. `build = "cmd"` string, `runtime = "source/native"`
+        // composite selectors, etc.). A flat v0.3 manifest has schema_version=0.3
+        // and no [targets] table yet.
+        let is_flat_v03 = crate::types::is_v03_like_schema(manifest)
+            && manifest.get("targets").and_then(|v| v.as_table()).is_none();
+
+        if is_flat_v03 {
+            let raw_toml = toml::to_string(manifest)
+                .map_err(|err| anyhow!("serialize manifest bridge: {err}"))?;
+            let compat_toml = CapsuleManifest::normalize_to_compat_toml(&raw_toml)
+                .map_err(|err| anyhow!(err.to_string()))?;
+            let parsed = toml::from_str::<CapsuleManifest>(&compat_toml)
+                .map_err(|err| anyhow!("parse compat manifest bridge: {err}"))?;
+            return Ok(Self {
+                raw_toml: compat_toml.clone(),
+                manifest: parsed,
+                sha256: sha256_hex(compat_toml.as_bytes()),
+            });
+        }
+
         let raw_toml =
             toml::to_string(manifest).map_err(|err| anyhow!("serialize manifest bridge: {err}"))?;
-        let parsed =
-            CapsuleManifest::from_toml(&raw_toml).map_err(|err| anyhow!(err.to_string()))?;
+        // Use serde deserialization directly — the value is already a structured manifest
+        // (possibly with v0.2-style `entrypoint` in targets). Calling CapsuleManifest::from_toml
+        // would re-run normalization and reject those legacy fields.
+        let parsed = toml::from_str::<CapsuleManifest>(&raw_toml)
+            .map_err(|err| anyhow!("parse compat manifest bridge: {err}"))?;
         Ok(Self {
             raw_toml: raw_toml.clone(),
             manifest: parsed,
@@ -366,8 +402,28 @@ pub fn execution_descriptor_from_manifest_parts(
     target_label: Option<&str>,
     state_source_overrides: HashMap<String, String>,
 ) -> Result<ExecutionDescriptor> {
-    let selected_target = resolve_target_label(&manifest, target_label)?;
-    let runtime_model = synthesize_runtime_model_from_manifest(&manifest, &selected_target)?;
+    // Detect v0.3-native manifests: schema_version == "0.3", or flat v0.3
+    // fields present without a [targets] table (e.g. previewToml from the
+    // ato.run API).
+    let has_targets = manifest.get("targets").and_then(|v| v.as_table()).is_some();
+    let is_v03_native = !has_targets
+        && (manifest
+            .get("schema_version")
+            .and_then(|v| v.as_str())
+            .map(|v| v.trim() == "0.3")
+            .unwrap_or(false)
+            || manifest.get("run").is_some()
+            || manifest.get("packages").is_some());
+
+    let (selected_target, runtime_model) = if is_v03_native {
+        let target = resolve_v03_target(&manifest, target_label)?;
+        let model = synthesize_runtime_model_from_v03(&manifest, &target)?;
+        (target, model)
+    } else {
+        let target = resolve_target_label(&manifest, target_label)?;
+        let model = synthesize_runtime_model_from_manifest(&manifest, &target)?;
+        (target, model)
+    };
 
     Ok(ExecutionDescriptor {
         manifest: manifest.clone(),
@@ -454,7 +510,7 @@ fn synthesize_manifest_from_lock(
     }
     manifest.insert(
         "schema_version".to_string(),
-        toml::Value::String("0.2".to_string()),
+        toml::Value::String("0.3".to_string()),
     );
     manifest.insert(
         "type".to_string(),
@@ -491,12 +547,9 @@ fn synthesize_manifest_from_lock(
         if let Some(image) = runtime.image.as_ref() {
             target.insert("image".to_string(), toml::Value::String(image.clone()));
         }
-        if !runtime.entrypoint.trim().is_empty() {
-            target.insert(
-                "entrypoint".to_string(),
-                toml::Value::String(runtime.entrypoint.clone()),
-            );
-        }
+        // schema_version "0.3" rejects legacy `entrypoint`/`cmd` fields.
+        // Execution entrypoint is read from the lock runtime model directly, not
+        // from this synthesized manifest, so these fields can be omitted here.
         if let Some(run_command) = runtime.run_command.as_ref() {
             if !run_command.trim().is_empty() {
                 target.insert(
@@ -504,19 +557,6 @@ fn synthesize_manifest_from_lock(
                     toml::Value::String(run_command.clone()),
                 );
             }
-        }
-        if !runtime.cmd.is_empty() {
-            target.insert(
-                "cmd".to_string(),
-                toml::Value::Array(
-                    runtime
-                        .cmd
-                        .iter()
-                        .cloned()
-                        .map(toml::Value::String)
-                        .collect(),
-                ),
-            );
         }
         if !runtime.env.is_empty() {
             let env = runtime
@@ -1401,6 +1441,237 @@ fn parse_runtime_kind(value: &str) -> Option<RuntimeKind> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// v0.3-native runtime extraction — reads flat fields directly without [targets]
+// ---------------------------------------------------------------------------
+
+/// Determine the effective target label for a v0.3 manifest.
+///
+/// * Single-app manifests use `default_target` if present, otherwise `"app"`.
+/// * Workspace manifests (`[packages]`) use `default_target` or the first
+///   runnable package name.
+fn resolve_v03_target(manifest: &toml::Value, explicit: Option<&str>) -> Result<String> {
+    if let Some(label) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
+        return Ok(label.to_string());
+    }
+
+    // Honour explicit default_target if present.
+    if let Some(dt) = manifest
+        .get("default_target")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Ok(dt.to_string());
+    }
+
+    // Workspace: pick the first package that declares a runtime.
+    if let Some(packages) = manifest.get("packages").and_then(|v| v.as_table()) {
+        for (name, pkg) in packages {
+            if pkg.get("runtime").and_then(|v| v.as_str()).is_some() {
+                return Ok(name.clone());
+            }
+        }
+        if let Some((name, _)) = packages.iter().next() {
+            return Ok(name.clone());
+        }
+    }
+
+    // Single-app fallback.
+    Ok("app".to_string())
+}
+
+/// Split a v0.3 `runtime` selector (e.g. `"web/static"`, `"source/node"`)
+/// into `(runtime, driver)` pair using the same logic as the v0.3 normalizer.
+fn split_v03_runtime(value: &str) -> (String, Option<String>) {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "web/static" => ("web".to_string(), Some("static".to_string())),
+        "web/node" | "source/node" => ("source".to_string(), Some("node".to_string())),
+        "web/deno" | "source/deno" => ("source".to_string(), Some("deno".to_string())),
+        "web/python" | "source/python" => ("source".to_string(), Some("python".to_string())),
+        "source/native" | "source/go" => ("source".to_string(), Some("native".to_string())),
+        "source" | "web" | "oci" | "wasm" => (normalized, None),
+        other => {
+            if let Some((runtime, driver)) = other.split_once('/') {
+                let runtime = runtime.trim();
+                let driver = driver.trim();
+                let runtime = if runtime == "web" && driver != "static" {
+                    "source"
+                } else {
+                    runtime
+                };
+                (
+                    runtime.to_string(),
+                    (!driver.is_empty()).then(|| driver.to_string()),
+                )
+            } else {
+                (other.to_string(), None)
+            }
+        }
+    }
+}
+
+/// Infer a `language` hint from a v0.3 driver token.
+fn infer_language_from_driver(driver: Option<&str>) -> Option<String> {
+    match driver.map(|v| v.trim().to_ascii_lowercase()) {
+        Some(d) if matches!(d.as_str(), "node" | "python" | "deno" | "bun") => Some(d),
+        _ => None,
+    }
+}
+
+/// Build a `ResolvedLockRuntimeModel` directly from a v0.3 `toml::Value`.
+///
+/// For single-app manifests the runtime fields are read from the top level.
+/// For workspace manifests they are read from `packages.<selected>`.
+fn synthesize_runtime_model_from_v03(
+    manifest: &toml::Value,
+    selected_target: &str,
+) -> Result<ResolvedLockRuntimeModel> {
+    let metadata = LockContractMetadata {
+        name: manifest
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        version: manifest
+            .get("version")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        capsule_type: manifest
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        default_target: Some(selected_target.to_string()),
+    };
+
+    // Determine which table carries the runtime fields.
+    // Workspace: packages.<selected>, Single-app: top-level.
+    let source = manifest
+        .get("packages")
+        .and_then(|pkgs| pkgs.get(selected_target))
+        .unwrap_or(manifest);
+
+    let runtime_selector = source
+        .get("runtime")
+        .and_then(|v| v.as_str())
+        .unwrap_or("source");
+
+    let (runtime, selector_driver) = split_v03_runtime(runtime_selector);
+    // If the runtime selector didn't contain a driver (e.g. `runtime = "source"`),
+    // fall back to an explicit top-level `driver` field (e.g. `driver = "tauri"`).
+    let driver = selector_driver.or_else(|| {
+        source
+            .get("driver")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    });
+    let language = infer_language_from_driver(driver.as_deref());
+
+    let run_command = source
+        .get("run")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let image = source
+        .get("image")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let port = source
+        .get("port")
+        .and_then(|v| v.as_integer())
+        .map(|v| v as u16);
+
+    // For web/static, the `run` field is an entrypoint (directory), not a command.
+    let is_web_static = runtime == "web" && driver.as_deref() == Some("static");
+    let entrypoint = if is_web_static {
+        run_command.clone().unwrap_or_else(|| ".".to_string())
+    } else {
+        String::new()
+    };
+    let effective_run_command = if is_web_static { None } else { run_command };
+
+    let mut env = HashMap::new();
+    if let Some(env_table) = source.get("env").and_then(|v| v.as_table()) {
+        for (k, v) in env_table {
+            if let Some(s) = v.as_str() {
+                env.insert(k.clone(), s.to_string());
+            }
+        }
+    }
+
+    let required_env: Vec<String> = source
+        .get("required_env")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let readiness_probe = source.get("readiness_probe").and_then(|v| {
+        v.as_str()
+            .map(|s| ReadinessProbe {
+                http_get: Some(s.to_string()),
+                tcp_connect: None,
+                port: "PORT".to_string(),
+            })
+            .or_else(|| {
+                v.as_table().map(|table| ReadinessProbe {
+                    http_get: table
+                        .get("http_get")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    tcp_connect: table
+                        .get("tcp_connect")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    port: table
+                        .get("port")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("PORT")
+                        .to_string(),
+                })
+            })
+    });
+
+    let resolved_runtime = ResolvedTargetRuntime {
+        target: selected_target.to_string(),
+        runtime: runtime.clone(),
+        driver: driver.or(language),
+        runtime_version: source
+            .get("runtime_version")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        image,
+        entrypoint,
+        run_command: effective_run_command,
+        cmd: Vec::new(),
+        env,
+        working_dir: None,
+        source_layout: None,
+        port,
+        required_env,
+        mounts: Vec::new(),
+    };
+
+    let selected = LockServiceUnit {
+        name: "main".to_string(),
+        target_label: selected_target.to_string(),
+        runtime: resolved_runtime,
+        depends_on: Vec::new(),
+        readiness_probe,
+    };
+
+    Ok(ResolvedLockRuntimeModel {
+        metadata,
+        network: None,
+        selected: selected.clone(),
+        services: vec![selected],
+    })
+}
+
 fn resolve_target_label(manifest: &toml::Value, target_label: Option<&str>) -> Result<String> {
     let targets = manifest
         .get("targets")
@@ -1456,16 +1727,16 @@ mod tests {
     fn orchestration_mode_detects_target_services() {
         let dir = write_manifest(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
+
 default_target = "web"
 
 [targets.web]
-runtime = "web"
-driver = "node"
-entrypoint = "server.js"
+runtime = "web/node"
+run = "server.js"
 port = 3000
 required_env = ["API_KEY"]
 
@@ -1473,7 +1744,6 @@ required_env = ["API_KEY"]
 runtime = "oci"
 image = "mysql:8"
 port = 3306
-
 [services.main]
 target = "web"
 depends_on = ["db"]
@@ -1582,23 +1852,22 @@ run = "echo 'Hello World' && /app/server --port $PORT"
     fn orchestration_mode_defaults_main_target() {
         let dir = write_manifest(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
+
 default_target = "web"
 
 [targets.web]
-runtime = "web"
-driver = "node"
-entrypoint = "server.js"
+runtime = "web/node"
+run = "server.js"
 port = 3000
 
 [targets.db]
 runtime = "oci"
 image = "mysql:8"
 port = 3306
-
 [services.main]
 depends_on = ["db"]
 
@@ -1627,16 +1896,16 @@ target = "db"
     fn resolve_services_builds_connections() {
         let dir = write_manifest(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
+
 default_target = "web"
 
 [targets.web]
-runtime = "web"
-driver = "node"
-entrypoint = "server.js"
+runtime = "web/node"
+run = "server.js"
 port = 3000
 required_env = ["API_KEY"]
 
@@ -1644,7 +1913,6 @@ required_env = ["API_KEY"]
 runtime = "oci"
 image = "mysql:8"
 port = 3306
-
 [services.main]
 target = "web"
 depends_on = ["db"]
@@ -1684,16 +1952,13 @@ network = { aliases = ["mysql"] }
     fn resolve_services_includes_ephemeral_state_mounts_for_oci_targets() {
         let dir = write_manifest(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
-
 [state.data]
 kind = "filesystem"
 durability = "ephemeral"
@@ -1731,16 +1996,13 @@ target = "/var/lib/app"
     fn resolve_services_requires_explicit_bind_for_persistent_state() {
         let dir = write_manifest(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
-
 [state.data]
 kind = "filesystem"
 durability = "persistent"
@@ -1776,16 +2038,13 @@ target = "/var/lib/app"
     fn resolve_services_uses_explicit_bind_for_persistent_state() {
         let dir = write_manifest(
             r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo-app"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
 runtime = "oci"
 image = "ghcr.io/example/app:latest"
-
 [state.data]
 kind = "filesystem"
 durability = "persistent"
@@ -1824,6 +2083,155 @@ target = "/var/lib/app"
                 target: "/var/lib/app".to_string(),
                 readonly: false,
             }]
+        );
+    }
+
+    // ── v0.3-native extractor tests ──────────────────────────────────────
+
+    #[test]
+    fn v03_resolve_target_defaults_to_app() {
+        let manifest: toml::Value = toml::from_str(
+            r#"
+schema_version = "0.3"
+name = "hello"
+runtime = "web/static"
+run = "index.html"
+"#,
+        )
+        .unwrap();
+        assert_eq!(super::resolve_v03_target(&manifest, None).unwrap(), "app");
+    }
+
+    #[test]
+    fn v03_resolve_target_uses_explicit_label() {
+        let manifest: toml::Value = toml::from_str(
+            r#"
+schema_version = "0.3"
+name = "hello"
+runtime = "web/static"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            super::resolve_v03_target(&manifest, Some("custom")).unwrap(),
+            "custom"
+        );
+    }
+
+    #[test]
+    fn v03_resolve_target_workspace_picks_first_runnable() {
+        let manifest: toml::Value = toml::from_str(
+            r#"
+schema_version = "0.3"
+name = "ws"
+
+[packages.web]
+type = "app"
+runtime = "source/node"
+run = "pnpm start"
+
+[packages.lib]
+type = "library"
+"#,
+        )
+        .unwrap();
+        let target = super::resolve_v03_target(&manifest, None).unwrap();
+        // lib has no runtime, so web is picked
+        assert_eq!(target, "web");
+    }
+
+    #[test]
+    fn v03_synthesize_runtime_web_static() {
+        let manifest: toml::Value = toml::from_str(
+            r#"
+schema_version = "0.3"
+name = "hello"
+version = "1.0.0"
+type = "app"
+runtime = "web/static"
+run = "dist"
+port = 4173
+"#,
+        )
+        .unwrap();
+
+        let model = super::synthesize_runtime_model_from_v03(&manifest, "app").unwrap();
+
+        assert_eq!(model.selected.runtime.runtime, "web");
+        assert_eq!(model.selected.runtime.driver.as_deref(), Some("static"));
+        assert_eq!(model.selected.runtime.entrypoint, "dist");
+        assert!(model.selected.runtime.run_command.is_none());
+        assert_eq!(model.selected.runtime.port, Some(4173));
+        assert_eq!(model.metadata.name.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn v03_synthesize_runtime_source_node() {
+        let manifest: toml::Value = toml::from_str(
+            r#"
+schema_version = "0.3"
+name = "app"
+type = "app"
+runtime = "source/node"
+run = "npm start"
+port = 3000
+"#,
+        )
+        .unwrap();
+
+        let model = super::synthesize_runtime_model_from_v03(&manifest, "app").unwrap();
+
+        assert_eq!(model.selected.runtime.runtime, "source");
+        assert_eq!(model.selected.runtime.driver.as_deref(), Some("node"));
+        assert_eq!(
+            model.selected.runtime.run_command.as_deref(),
+            Some("npm start")
+        );
+        assert_eq!(model.selected.runtime.port, Some(3000));
+    }
+
+    #[test]
+    fn v03_synthesize_runtime_workspace_package() {
+        let manifest: toml::Value = toml::from_str(
+            r#"
+schema_version = "0.3"
+name = "ws"
+
+[packages.api]
+type = "app"
+runtime = "source/python"
+run = "python -m uvicorn main:app"
+port = 8000
+"#,
+        )
+        .unwrap();
+
+        let model = super::synthesize_runtime_model_from_v03(&manifest, "api").unwrap();
+
+        assert_eq!(model.selected.runtime.runtime, "source");
+        assert_eq!(model.selected.runtime.driver.as_deref(), Some("python"));
+        assert_eq!(
+            model.selected.runtime.run_command.as_deref(),
+            Some("python -m uvicorn main:app")
+        );
+        assert_eq!(model.selected.runtime.port, Some(8000));
+        assert_eq!(model.selected.target_label, "api");
+    }
+
+    #[test]
+    fn v03_split_runtime_selector() {
+        assert_eq!(
+            super::split_v03_runtime("web/static"),
+            ("web".to_string(), Some("static".to_string()))
+        );
+        assert_eq!(
+            super::split_v03_runtime("source/node"),
+            ("source".to_string(), Some("node".to_string()))
+        );
+        assert_eq!(super::split_v03_runtime("oci"), ("oci".to_string(), None));
+        assert_eq!(
+            super::split_v03_runtime("source/go"),
+            ("source".to_string(), Some("native".to_string()))
         );
     }
 }
