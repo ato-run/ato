@@ -1388,7 +1388,6 @@ impl CapsuleManifest {
             .map_err(|e| CapsuleError::SerializeError(format!("TOML serialize error: {}", e)))
     }
 
-
     pub fn resolve_default_target(&self) -> Result<&NamedTarget, CapsuleError> {
         let targets = self.targets.as_ref().ok_or_else(|| {
             CapsuleError::ValidationError(

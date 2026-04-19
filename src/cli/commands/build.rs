@@ -821,7 +821,8 @@ fn run_v03_build_lifecycle_steps(
         let working_dir = target_plan.execution_working_directory();
 
         if provisioned_roots.insert(working_dir.clone()) {
-            if let Some(command) = plan_v03_build_provision_command(&target_plan, strict_lockfile)? {
+            if let Some(command) = plan_v03_build_provision_command(&target_plan, strict_lockfile)?
+            {
                 futures::executor::block_on(
                     reporter.notify(format!("⚙️  Provision [{}]: {}", target_label, command)),
                 )?;
@@ -926,7 +927,11 @@ fn plan_v03_build_provision_command(
         );
         let mut matches = Vec::new();
         if package_lock.exists() {
-            matches.push(if strict_lockfile { "npm ci" } else { "npm install" });
+            matches.push(if strict_lockfile {
+                "npm ci"
+            } else {
+                "npm install"
+            });
         }
         if yarn_lock.exists() {
             matches.push(if strict_lockfile {
@@ -951,7 +956,12 @@ fn plan_v03_build_provision_command(
         }
         // Priority order: pnpm > npm > yarn > bun
         let preferred_order = if strict_lockfile {
-            ["pnpm install --frozen-lockfile", "npm ci", "yarn install --frozen-lockfile", "bun install --frozen-lockfile"]
+            [
+                "pnpm install --frozen-lockfile",
+                "npm ci",
+                "yarn install --frozen-lockfile",
+                "bun install --frozen-lockfile",
+            ]
         } else {
             ["pnpm install", "npm install", "yarn install", "bun install"]
         };

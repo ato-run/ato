@@ -654,10 +654,7 @@ fn prepare_smoke_working_directory(
         // system pnpm binary is used as-is even if package.json pins a different version.
         let npmrc_path = cwd_path.join(".npmrc");
         if !npmrc_path.exists() {
-            let _ = std::fs::write(
-                &npmrc_path,
-                "manage-package-manager-versions=false\n",
-            );
+            let _ = std::fs::write(&npmrc_path, "manage-package-manager-versions=false\n");
         } else if let Ok(existing) = std::fs::read_to_string(&npmrc_path) {
             if !existing.contains("manage-package-manager-versions") {
                 let _ = std::fs::write(

@@ -1446,7 +1446,11 @@ pub(crate) fn native_delivery_draft_contract_from_manifest(
             if !target.entrypoint.trim().is_empty() {
                 None // v0.2 entrypoint+cmd path handled below
             } else {
-                target.run_command.as_deref().map(str::trim).filter(|v| !v.is_empty())
+                target
+                    .run_command
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
             }
         });
     let (program, build_args) = if !target.entrypoint.trim().is_empty() && !target.cmd.is_empty() {
@@ -1455,7 +1459,12 @@ pub(crate) fn native_delivery_draft_contract_from_manifest(
         let parts: Vec<&str> = cmd.split_whitespace().collect();
         (
             parts.first().unwrap_or(&"").to_string(),
-            parts.get(1..).unwrap_or(&[]).iter().map(|s| s.to_string()).collect(),
+            parts
+                .get(1..)
+                .unwrap_or(&[])
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         )
     } else if !target.entrypoint.trim().is_empty() {
         (target.entrypoint.trim().to_string(), Vec::new())

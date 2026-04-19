@@ -2141,7 +2141,10 @@ where
                     )
                     .await?;
                 sidecar_cleanup.stop_now();
-                progress.ok(HourglassPhase::Execute, "background node compat execution started");
+                progress.ok(
+                    HourglassPhase::Execute,
+                    "background node compat execution started",
+                );
                 return Ok(());
             }
             let exit = crate::executors::node_compat::execute(
