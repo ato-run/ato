@@ -110,7 +110,9 @@ pub fn probe_ecosystem_lockfile_evidence(project_root: &Path) -> Result<Vec<Impo
         EvidenceKind::Lockfile,
         &[
             PathBuf::from("package-lock.json"),
+            PathBuf::from("npm-shrinkwrap.json"),
             PathBuf::from("source/package-lock.json"),
+            PathBuf::from("source/npm-shrinkwrap.json"),
         ],
         Some("npm importer observed an existing lockfile"),
     )?;
@@ -213,8 +215,8 @@ pub fn probe_required_node_lockfile(project_root: &Path) -> Result<ProbeResult> 
     classify_required_probe(
         candidates,
         ImporterId::Npm,
-        "source/node target requires one of package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lock, or bun.lockb",
-        "multiple node lockfiles detected; keep only one of package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lock, or bun.lockb",
+        "source/node target requires one of package-lock.json, npm-shrinkwrap.json, yarn.lock, pnpm-lock.yaml, bun.lock, or bun.lockb",
+        "multiple node lockfiles detected; keep only one of package-lock.json, npm-shrinkwrap.json, yarn.lock, pnpm-lock.yaml, bun.lock, or bun.lockb",
     )
 }
 
