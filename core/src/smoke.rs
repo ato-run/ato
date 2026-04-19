@@ -650,9 +650,27 @@ fn prepare_smoke_working_directory(
     }
 
     let install = if cwd_path.join("pnpm-lock.yaml").exists() {
+        // Write a project-level .npmrc that disables pnpm's auto-version-switch so the
+        // system pnpm binary is used as-is even if package.json pins a different version.
+        let npmrc_path = cwd_path.join(".npmrc");
+        if !npmrc_path.exists() {
+            let _ = std::fs::write(
+                &npmrc_path,
+                "manage-package-manager-versions=false\n",
+            );
+        } else if let Ok(existing) = std::fs::read_to_string(&npmrc_path) {
+            if !existing.contains("manage-package-manager-versions") {
+                let _ = std::fs::write(
+                    &npmrc_path,
+                    format!("{existing}\nmanage-package-manager-versions=false\n"),
+                );
+            }
+        }
         Some(("pnpm", vec!["install"]))
-    } else if cwd_path.join("package-lock.json").exists() {
-        Some(("npm", vec!["install"]))
+    } else if cwd_path.join("package-lock.json").exists()
+        || cwd_path.join("npm-shrinkwrap.json").exists()
+    {
+        Some(("npm", vec!["install", "--legacy-peer-deps"]))
     } else if cwd_path.join("yarn.lock").exists() {
         Some(("yarn", vec!["install"]))
     } else if cwd_path.join("bun.lock").exists() || cwd_path.join("bun.lockb").exists() {
@@ -681,7 +699,8 @@ fn prepare_smoke_working_directory(
     // Disable pnpm 10's auto-manage-package-manager-versions: without this, pnpm
     // attempts to download and switch to the version pinned in packageManager, which
     // fails in offline/isolated smoke environments.
-    command.env("npm_config_manage_package_manager_versions", "false");
+    // "false" (string) is truthy in JS — use "0" so pnpm's bool parser disables the feature.
+    command.env("npm_config_manage_package_manager_versions", "0");
     // Auto-approve pnpm build scripts without interactive prompt.
     command.env("npm_config_approve_builds", "on");
     // Skip git-hooks managers (husky, lefthook, etc.): the smoke workspace has no .git dir.
