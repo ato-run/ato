@@ -393,6 +393,107 @@ fn parse_auto_fix_port_bound(name: &str, value: &str) -> Result<u16> {
         .with_context(|| format!("Failed to parse {} as a TCP port", name))
 }
 
+/// Corrects the `port` field in a preview TOML when the actual run script
+/// specifies a custom port via `--port <num>`.  Handles repos where the store
+/// falls back to the Vite default (5173) but `scripts.start` (or another
+/// selected script) contains `--port 3000`.
+pub(super) fn correct_port_from_run_script(
+    preview_toml: &str,
+    checkout_dir: &Path,
+) -> Result<String> {
+    let Ok(mut parsed) = toml::from_str::<toml::Value>(preview_toml) else {
+        return Ok(preview_toml.to_string());
+    };
+    let Some(table) = parsed.as_table_mut() else {
+        return Ok(preview_toml.to_string());
+    };
+
+    let run_cmd = table
+        .get("run")
+        .and_then(toml::Value::as_str)
+        .map(str::to_string);
+    let Some(run_cmd) = run_cmd else {
+        return Ok(preview_toml.to_string());
+    };
+
+    // Resolve the package.json script name from the run command.
+    // Handles both `npm run <script>`, `pnpm run <script>`, and `npm:<script>` shorthands.
+    let script_name = extract_script_name_from_run_cmd(&run_cmd);
+    let Some(script_name) = script_name else {
+        return Ok(preview_toml.to_string());
+    };
+
+    let Some(package_json) = read_package_json(checkout_dir) else {
+        return Ok(preview_toml.to_string());
+    };
+    let script_cmd = package_json
+        .get("scripts")
+        .and_then(|s| s.get(&script_name))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let Some(script_cmd) = script_cmd else {
+        return Ok(preview_toml.to_string());
+    };
+
+    let Some(detected_port) = extract_port_from_script_cmd(&script_cmd) else {
+        return Ok(preview_toml.to_string());
+    };
+
+    let current_port = table
+        .get("port")
+        .and_then(toml::Value::as_integer)
+        .unwrap_or(0) as u16;
+    if current_port == detected_port {
+        return Ok(preview_toml.to_string());
+    }
+
+    table.insert(
+        "port".to_string(),
+        toml::Value::Integer(i64::from(detected_port)),
+    );
+    toml::to_string(&parsed).context("Failed to serialize port-corrected GitHub install draft")
+}
+
+fn extract_script_name_from_run_cmd(run_cmd: &str) -> Option<String> {
+    let cmd = run_cmd.trim();
+    // `npm:<script>` / `pnpm:<script>` shorthand
+    if let Some(rest) = cmd
+        .strip_prefix("npm:")
+        .or_else(|| cmd.strip_prefix("pnpm:"))
+        .or_else(|| cmd.strip_prefix("yarn:"))
+        .or_else(|| cmd.strip_prefix("bun:"))
+    {
+        let script = rest.split_whitespace().next()?;
+        return Some(script.to_string());
+    }
+    // `npm run <script>` / `pnpm run <script>` / `yarn run <script>` / `bun run <script>`
+    for prefix in &["npm run ", "pnpm run ", "yarn run ", "bun run "] {
+        if let Some(rest) = cmd.strip_prefix(prefix) {
+            let script = rest.split_whitespace().next()?;
+            return Some(script.to_string());
+        }
+    }
+    None
+}
+
+fn extract_port_from_script_cmd(script_cmd: &str) -> Option<u16> {
+    let parts: Vec<&str> = script_cmd.split_whitespace().collect();
+    for (i, part) in parts.iter().enumerate() {
+        if *part == "--port" {
+            if let Some(next) = parts.get(i + 1) {
+                if let Ok(port) = next.parse::<u16>() {
+                    return Some(port);
+                }
+            }
+        } else if let Some(val) = part.strip_prefix("--port=") {
+            if let Ok(port) = val.parse::<u16>() {
+                return Some(port);
+            }
+        }
+    }
+    None
+}
+
 fn normalize_v03_source_node_typescript_run(
     parsed: &mut toml::Value,
     checkout_dir: &Path,

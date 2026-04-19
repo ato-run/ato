@@ -1406,7 +1406,7 @@ mod tests {
     }
 
     #[test]
-    fn v03_node_provision_rejects_ambiguous_lockfiles() {
+    fn v03_node_provision_prefers_pnpm_on_ambiguous_lockfiles() {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(tmp.path().join("package-lock.json"), "{}").expect("write package lock");
         std::fs::write(tmp.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
@@ -1425,8 +1425,9 @@ mod tests {
             ],
         );
 
-        let err = plan_v03_provision_command(&plan).expect_err("must reject ambiguity");
-        assert!(err.to_string().contains("multiple node lockfiles detected"));
+        // Multiple lockfiles: pnpm takes priority over npm
+        let command = plan_v03_provision_command(&plan).expect("must resolve ambiguity");
+        assert_eq!(command.as_deref(), Some("pnpm install"));
     }
 
     #[test]

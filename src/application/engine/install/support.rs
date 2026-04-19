@@ -1665,6 +1665,16 @@ pub(crate) async fn install_github_repository(
         // first try.
         *draft = draft.normalize_preview_toml_for_checkout(&checkout.checkout_dir)?;
         apply_github_auto_fix_to_draft(draft, &checkout.checkout_dir, auto_fix_mode, false, json)?;
+        // Unconditionally correct port when the run script hard-codes --port <n>
+        if let Some(toml) = draft.preview_toml.as_deref() {
+            let corrected = super::github_inference::correct_port_from_run_script(
+                toml,
+                &checkout.checkout_dir,
+            )?;
+            if corrected != toml {
+                draft.preview_toml = Some(corrected);
+            }
+        }
         preview_session.update_from_install_draft(draft);
     }
     if install_draft.is_some() {
