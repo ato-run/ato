@@ -141,10 +141,7 @@ fn is_non_empty_legacy_value(value: &toml::Value) -> bool {
 
 fn reject_v03_legacy_fields(table: &Table, context: &str) -> Result<(), CapsuleError> {
     for field in ["entrypoint", "cmd"] {
-        if table
-            .get(field)
-            .is_some_and(is_non_empty_legacy_value)
-        {
+        if table.get(field).is_some_and(is_non_empty_legacy_value) {
             return Err(CapsuleError::ParseError(format!(
                 "schema_version=0.3 {context} must not use legacy field '{}'; use 'run' instead",
                 field

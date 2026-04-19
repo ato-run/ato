@@ -204,7 +204,12 @@ pub fn materialize_shadow_manifest(
             .ok_or_else(|| anyhow::anyhow!("manifest must be a TOML table"))?;
         let mut target_table = toml::value::Table::new();
         for key in [
-            "runtime", "run", "port", "runtime_version", "working_dir", "runtime_tools",
+            "runtime",
+            "run",
+            "port",
+            "runtime_version",
+            "working_dir",
+            "runtime_tools",
         ] {
             if let Some(val) = manifest_table.remove(key) {
                 if key == "runtime" {

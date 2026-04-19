@@ -228,26 +228,21 @@ impl ProducerAuthoritativeInput {
         let manifest_ep = manifest_target.entrypoint.trim();
         let lock_ep = selected_runtime.entrypoint.trim();
         let manifest_rc = manifest_target.run_command.as_deref().unwrap_or("").trim();
-        let lock_rc = selected_runtime.run_command.as_deref().unwrap_or("").trim();
         // v0.3 manifests store the command in run_command while v0.2 used
         // entrypoint+cmd. When the manifest uses run_command (v0.3 style) and
         // the lock carries a legacy entrypoint, the per-field comparison is
         // expected to diverge. Skip the strict entrypoint check in that case.
-        let uses_v03_run_command =
-            manifest_ep.is_empty() && !manifest_rc.is_empty();
-        if !uses_v03_run_command {
-            if manifest_ep != lock_ep {
-                anyhow::bail!(
-                    "generated manifest bridge diverged from authoritative lock entrypoint: target '{}' entrypoint '{}' != '{}'",
-                    bridge.manifest_model().default_target,
-                    manifest_ep,
-                    lock_ep
-                );
-            }
+        let uses_v03_run_command = manifest_ep.is_empty() && !manifest_rc.is_empty();
+        if !uses_v03_run_command && manifest_ep != lock_ep {
+            anyhow::bail!(
+                "generated manifest bridge diverged from authoritative lock entrypoint: target '{}' entrypoint '{}' != '{}'",
+                bridge.manifest_model().default_target,
+                manifest_ep,
+                lock_ep
+            );
         }
         if !uses_v03_run_command
-            && manifest_target.run_command.as_deref()
-                != selected_runtime.run_command.as_deref()
+            && manifest_target.run_command.as_deref() != selected_runtime.run_command.as_deref()
         {
             anyhow::bail!(
                 "generated manifest bridge diverged from authoritative lock run_command: target '{}' run_command '{:?}' != '{:?}'",
@@ -643,7 +638,7 @@ args = ["--deep", "--force", "--sign", "-", "dist/Desktop Demo.app"]
 
 runtime = "source/deno"
 run = "main.ts""#
-        .to_string();
+            .to_string();
         std::fs::write(&manifest_path, &manifest_raw).expect("write manifest");
 
         let mut lock = AtoLock::default();

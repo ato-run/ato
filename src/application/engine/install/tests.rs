@@ -141,7 +141,7 @@ run = "node server.js"
         normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
 
     assert!(normalized.contains(r#"schema_version = "0.3""#));
-    assert!(normalized.contains(r#"runtime_version = "20.12.0""#));
+    assert!(normalized.contains(r#"runtime_version = "20.19.0""#));
     assert!(normalized.contains(r#"runtime = "source/node""#));
 }
 
@@ -258,8 +258,11 @@ fn normalize_github_install_preview_toml_rewrites_jsx_run_to_dev_script() {
         r#"{"scripts": {"dev": "vite"}}"#,
     )
     .expect("write package.json");
-    std::fs::write(tmp.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")
-        .expect("write pnpm lock");
+    std::fs::write(
+        tmp.path().join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\n",
+    )
+    .expect("write pnpm lock");
     let manifest = r#"
 schema_version = "0.3"
 name = "my-react-app"
@@ -336,10 +339,10 @@ include = ["src/**", "package.json", "package-lock.json"]
     let normalized =
         normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
 
-    // Should not be rewritten because there is no dev script
+    // Falls back to the start script when dev is missing.
     assert!(
-        normalized.contains("run = \"node src/main.tsx\""),
-        "expected run to be unchanged but got: {normalized}"
+        normalized.contains("run = \"npm run start\""),
+        "expected run to be rewritten to the start script but got: {normalized}"
     );
 }
 
@@ -612,10 +615,14 @@ include = ["apps/web/package.json", "apps/web/src/**"]
 }
 
 #[test]
-fn normalize_github_install_preview_toml_resolves_multiple_lockfiles_by_priority_when_no_package_manager_field() {
+fn normalize_github_install_preview_toml_resolves_multiple_lockfiles_by_priority_when_no_package_manager_field(
+) {
     let tmp = tempfile::tempdir().expect("tempdir");
-    std::fs::write(tmp.path().join("package-lock.json"), "{\"lockfileVersion\":3}")
-        .expect("write npm lock");
+    std::fs::write(
+        tmp.path().join("package-lock.json"),
+        "{\"lockfileVersion\":3}",
+    )
+    .expect("write npm lock");
     std::fs::write(tmp.path().join("bun.lock"), "# bun lockfile v0\n").expect("write bun lock");
     // package.json without packageManager field — bun.lock wins by priority (bun > npm)
     std::fs::write(tmp.path().join("package.json"), r#"{"name":"demo"}"#)
