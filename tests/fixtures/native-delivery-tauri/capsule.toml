@@ -3,8 +3,7 @@ name = "sample-native-capsule"
 version = "0.1.1"
 type = "app"
 runtime = "source/native"
-run = "cargo"
-cmd = ["build", "--manifest-path", "src-tauri/Cargo.toml", "--release"]
+run = "cargo build --manifest-path src-tauri/Cargo.toml --release"
 working_dir = "."
 
 [artifact]
