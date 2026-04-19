@@ -1797,7 +1797,9 @@ fn semantic_manifest_hash(manifest: &CapsuleManifest) -> Result<String> {
 }
 
 fn semantic_manifest_hash_from_text(text: &str) -> Result<String> {
-    let manifest = CapsuleManifest::from_toml(text)
+    // Use serde directly — the text may be compat-normalized TOML (with v0.2-style `entrypoint`
+    // in targets) which CapsuleManifest::from_toml would reject via reject_v03_legacy_fields.
+    let manifest: CapsuleManifest = toml::from_str(text)
         .map_err(|e| CapsuleError::Config(format!("Failed to parse manifest schema: {}", e)))?;
     semantic_manifest_hash(&manifest)
 }

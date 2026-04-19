@@ -503,11 +503,10 @@ mod tests {
 
     #[test]
     fn extract_manifest_from_capsule_archive_succeeds() {
-        let manifest = r#"schema_version = "0.2"
+        let manifest = r#"schema_version = "0.3"
 name = "sample"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 "#;
         let mut bytes = Vec::new();
         {

@@ -1,11 +1,7 @@
-schema_version = "0.2"
+schema_version = "0.3"
 name = "web-path-traversal-capsule"
 version = "0.1.0"
 type = "app"
-default_target = "static"
-
-[targets.static]
-runtime = "web"
-driver = "static"
-entrypoint = "../secret"
+runtime = "web/static"
+run = "../secret"
 port = 8080

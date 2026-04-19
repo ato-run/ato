@@ -495,8 +495,13 @@ pub(crate) fn detect_build_strategy_from_descriptor(
             None => return Ok(None),
         },
     };
-    if let Some(canonical) = &canonical_config {
-        ensure_delivery_config_matches_context(&config, canonical, &source_label)?;
+    // Only enforce canonical defaults when no explicit inline config was provided.
+    // If the user supplies [artifact] + [finalize] in their manifest, those settings
+    // take precedence over auto-inferred defaults.
+    if !has_explicit_delivery_config {
+        if let Some(canonical) = &canonical_config {
+            ensure_delivery_config_matches_context(&config, canonical, &source_label)?;
+        }
     }
 
     let input_relative = PathBuf::from(config.artifact.input.trim());
@@ -693,7 +698,7 @@ fn parse_lock_native_build_command(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .context("desktop-native delivery.build.build_command.working_dir is missing")?;
+        .unwrap_or(".");
     let working_dir_path = PathBuf::from(working_dir_raw);
     let working_dir = if working_dir_path.is_absolute() {
         working_dir_path
@@ -1429,14 +1434,48 @@ pub(crate) fn native_delivery_draft_contract_from_manifest(
         "closure_status".to_string(),
         Value::String("incomplete".to_string()),
     );
-    build.insert(
-        "program".to_string(),
-        Value::String(target.entrypoint.trim().to_string()),
-    );
-    if !target.cmd.is_empty() {
+    // v0.3: build = "sh build-app.sh" → build_command on target
+    // v0.2: entrypoint = "sh", cmd = ["build-app.sh"]
+    // v0.3 fallback: run = "sh build-app.sh" → run_command
+    let build_source = target
+        .build_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            if !target.entrypoint.trim().is_empty() {
+                None // v0.2 entrypoint+cmd path handled below
+            } else {
+                target
+                    .run_command
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+            }
+        });
+    let (program, build_args) = if !target.entrypoint.trim().is_empty() && !target.cmd.is_empty() {
+        (target.entrypoint.trim().to_string(), target.cmd.clone())
+    } else if let Some(cmd) = build_source {
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        (
+            parts.first().unwrap_or(&"").to_string(),
+            parts
+                .get(1..)
+                .unwrap_or(&[])
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        )
+    } else if !target.entrypoint.trim().is_empty() {
+        (target.entrypoint.trim().to_string(), Vec::new())
+    } else {
+        (String::new(), Vec::new())
+    };
+    build.insert("program".to_string(), Value::String(program));
+    if !build_args.is_empty() {
         build.insert(
             "args".to_string(),
-            Value::Array(target.cmd.iter().cloned().map(Value::String).collect()),
+            Value::Array(build_args.into_iter().map(Value::String).collect()),
         );
     }
     if let Some(working_dir) = target.working_dir.as_ref() {
@@ -1577,7 +1616,13 @@ fn detect_native_manifest_contract(
         return Ok(None);
     }
 
-    let input = target.entrypoint.trim();
+    let input = if !target.entrypoint.trim().is_empty() {
+        target.entrypoint.trim()
+    } else if let Some(run_cmd) = target.run_command.as_deref() {
+        run_cmd.trim()
+    } else {
+        return Ok(None);
+    };
     if input.is_empty() {
         return Ok(None);
     }
@@ -1603,12 +1648,40 @@ fn detect_native_build_command(
         return Ok(None);
     }
 
-    let program = target.entrypoint.trim();
-    if program.is_empty() || target.cmd.is_empty() {
+    // In v0.2: entrypoint = "sh", cmd = ["build-app.sh"]
+    // In v0.3 flat: build = "sh build-app.sh" → normalized to build_command on target
+    // In v0.3 fallback: run = "sh build-app.sh" → normalized to run_command
+    let build_source = target
+        .build_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            target
+                .run_command
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+        });
+    let (program, args) = if !target.entrypoint.trim().is_empty() && !target.cmd.is_empty() {
+        (target.entrypoint.trim().to_string(), target.cmd.clone())
+    } else if let Some(build_cmd) = build_source {
+        let parts: Vec<&str> = build_cmd.split_whitespace().collect();
+        if parts.len() < 2 {
+            return Ok(None);
+        }
+        (
+            parts[0].to_string(),
+            parts[1..].iter().map(|s| s.to_string()).collect(),
+        )
+    } else {
+        return Ok(None);
+    };
+    if program.is_empty() {
         return Ok(None);
     }
 
-    let program_path = Path::new(program);
+    let program_path = Path::new(&program);
     if program_path.extension().and_then(|ext| ext.to_str()) == Some("app") {
         return Ok(None);
     }
@@ -1617,8 +1690,8 @@ fn detect_native_build_command(
         resolve_native_build_working_dir(manifest_dir, target.working_dir.as_deref())?;
 
     Ok(Some(NativeBuildCommand {
-        program: program.to_string(),
-        args: target.cmd.clone(),
+        program,
+        args,
         working_dir,
     }))
 }

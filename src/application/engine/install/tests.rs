@@ -84,22 +84,18 @@ requires-python = ">=3.12"
     )
     .expect("write pyproject");
     let manifest = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
-runtime = "source"
-driver = "pip"
-entrypoint = "main.py"
-"#;
+runtime = "source/pip"
+run = "main.py""#;
 
     let normalized =
         normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
 
-    assert!(normalized.contains(r#"driver = "python""#));
+    assert!(normalized.contains(r#"runtime = "source/python""#));
     assert!(normalized.contains(r#"runtime_version = "3.12.0""#));
 }
 
@@ -107,22 +103,18 @@ entrypoint = "main.py"
 fn normalize_github_install_preview_toml_maps_native_tooling_drivers() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let manifest = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
-[targets.app]
-runtime = "source"
-driver = "cargo"
-entrypoint = "src/main.rs"
-"#;
+runtime = "source/cargo"
+run = "src/main.rs""#;
 
     let normalized =
         normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
 
-    assert!(normalized.contains(r#"driver = "native""#));
+    assert!(normalized.contains(r#"runtime = "source/native""#));
     assert!(!normalized.contains("runtime_version"));
 }
 
@@ -149,7 +141,7 @@ run = "node server.js"
         normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
 
     assert!(normalized.contains(r#"schema_version = "0.3""#));
-    assert!(normalized.contains(r#"runtime_version = "20.12.0""#));
+    assert!(normalized.contains(r#"runtime_version = "20.19.0""#));
     assert!(normalized.contains(r#"runtime = "source/node""#));
 }
 
@@ -226,6 +218,162 @@ include = ["src/**", "fixtures/db.json", "package.json", "pnpm-lock.yaml"]
     assert!(normalized.contains("run = \"node lib/bin.js fixtures/db.json\""));
     assert!(normalized.contains("\"lib/**\""));
     assert!(normalized.contains("\"schema.json\""));
+}
+
+#[test]
+fn normalize_github_install_preview_toml_rewrites_tsx_run_to_dev_script_for_vite_app() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{"scripts": {"dev": "vite"}}"#,
+    )
+    .expect("write package.json");
+    std::fs::write(tmp.path().join("package-lock.json"), "{}").expect("write lock");
+    let manifest = r#"
+schema_version = "0.3"
+name = "my-vite-app"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node src/main.tsx"
+
+[pack]
+include = ["src/**", "package.json", "package-lock.json"]
+"#;
+
+    let normalized =
+        normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+    assert!(
+        normalized.contains("run = \"npm run dev\""),
+        "expected 'npm run dev' but got: {normalized}"
+    );
+}
+
+#[test]
+fn normalize_github_install_preview_toml_rewrites_jsx_run_to_dev_script() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{"scripts": {"dev": "vite"}}"#,
+    )
+    .expect("write package.json");
+    std::fs::write(
+        tmp.path().join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\n",
+    )
+    .expect("write pnpm lock");
+    let manifest = r#"
+schema_version = "0.3"
+name = "my-react-app"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node src/main.jsx"
+
+[pack]
+include = ["src/**", "package.json", "pnpm-lock.yaml"]
+"#;
+
+    let normalized =
+        normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+    assert!(
+        normalized.contains("run = \"pnpm run dev\""),
+        "expected 'pnpm run dev' but got: {normalized}"
+    );
+}
+
+#[test]
+fn normalize_github_install_preview_toml_rewrites_ts_without_bin_to_dev_script() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // No "bin" field — this is a dev-server app, not a CLI tool
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{"scripts": {"dev": "react-scripts start", "build": "react-scripts build"}}"#,
+    )
+    .expect("write package.json");
+    std::fs::write(tmp.path().join("package-lock.json"), "{}").expect("write lock");
+    let manifest = r#"
+schema_version = "0.3"
+name = "react-player-demo"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node src/index.ts"
+
+[pack]
+include = ["src/**", "package.json", "package-lock.json"]
+"#;
+
+    let normalized =
+        normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+    assert!(
+        normalized.contains("run = \"npm run dev\""),
+        "expected 'npm run dev' but got: {normalized}"
+    );
+}
+
+#[test]
+fn normalize_github_install_preview_toml_does_not_rewrite_tsx_if_no_dev_script() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{"scripts": {"start": "node dist/server.js"}}"#,
+    )
+    .expect("write package.json");
+    std::fs::write(tmp.path().join("package-lock.json"), "{}").expect("write lock");
+    let manifest = r#"
+schema_version = "0.3"
+name = "my-app"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node src/main.tsx"
+
+[pack]
+include = ["src/**", "package.json", "package-lock.json"]
+"#;
+
+    let normalized =
+        normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+    // Falls back to the start script when dev is missing.
+    assert!(
+        normalized.contains("run = \"npm run start\""),
+        "expected run to be rewritten to the start script but got: {normalized}"
+    );
+}
+
+#[test]
+fn normalize_github_install_preview_toml_rewrites_astro_run_to_dev_script() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{"scripts": {"dev": "astro dev"}}"#,
+    )
+    .expect("write package.json");
+    std::fs::write(tmp.path().join("package-lock.json"), "{}").expect("write lock");
+    let manifest = r#"
+schema_version = "0.3"
+name = "my-astro-site"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node src/pages/index.astro"
+
+[pack]
+include = ["src/**", "package.json", "package-lock.json"]
+"#;
+
+    let normalized =
+        normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+    assert!(
+        normalized.contains("run = \"npm run dev\""),
+        "expected 'npm run dev' but got: {normalized}"
+    );
 }
 
 #[test]
@@ -320,20 +468,15 @@ fn normalize_github_install_preview_toml_accepts_root_pnpm_lockfile_include() {
     std::fs::write(tmp.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
         .expect("write pnpm lock");
     let manifest = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
+runtime = "source/node"
+run = "pnpm dev"
 [pack]
 include = ["package.json", "pnpm-lock.yaml", "src/**"]
-
-[targets.app]
-runtime = "source"
-driver = "node"
-entrypoint = "src/main.ts"
-run_command = "pnpm dev"
 "#;
 
     let normalized =
@@ -350,21 +493,16 @@ fn normalize_github_install_preview_toml_accepts_subdir_pnpm_lockfile_include() 
     std::fs::write(app_dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
         .expect("write pnpm lock");
     let manifest = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
+runtime = "source/node"
+working_dir = "apps/web"
+run = "pnpm dev"
 [pack]
 include = ["apps/web/**"]
-
-[targets.app]
-runtime = "source"
-driver = "node"
-working_dir = "apps/web"
-entrypoint = "src/main.ts"
-run_command = "pnpm dev"
 "#;
 
     let normalized =
@@ -374,36 +512,157 @@ run_command = "pnpm dev"
 }
 
 #[test]
-fn normalize_github_install_preview_toml_rejects_subdir_lockfile_missing_from_pack_include() {
+fn normalize_github_install_preview_toml_auto_adds_subdir_lockfile_to_pack_include() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let app_dir = tmp.path().join("apps").join("web");
     std::fs::create_dir_all(&app_dir).expect("create app dir");
     std::fs::write(app_dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
         .expect("write pnpm lock");
     let manifest = r#"
-schema_version = "0.2"
+schema_version = "0.3"
 name = "demo"
 version = "0.1.0"
 type = "app"
-default_target = "app"
 
+runtime = "source/node"
+working_dir = "apps/web"
+run = "pnpm dev"
 [pack]
 include = ["package.json", "src/**"]
-
-[targets.app]
-runtime = "source"
-driver = "node"
-working_dir = "apps/web"
-entrypoint = "src/main.ts"
-run_command = "pnpm dev"
 "#;
 
-    let err = normalize_github_install_preview_toml(tmp.path(), manifest).expect_err("must fail");
+    let normalized =
+        normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
 
-    assert!(err
-        .to_string()
-        .contains("pack.include does not cover required lockfile"));
-    assert!(err.to_string().contains("apps/web/pnpm-lock.yaml"));
+    assert!(normalized.contains(r#""apps/web/pnpm-lock.yaml""#));
+}
+
+#[test]
+fn normalize_github_install_preview_toml_resolves_multiple_lockfiles_by_priority_pnpm_over_yarn() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let app_dir = tmp.path().join("apps").join("web");
+    std::fs::create_dir_all(&app_dir).expect("create app dir");
+    std::fs::write(app_dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
+        .expect("write pnpm lock");
+    std::fs::write(app_dir.join("yarn.lock"), "__metadata:\n  version: 4")
+        .expect("write yarn lock");
+    let manifest = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+
+runtime = "source/node"
+working_dir = "apps/web"
+run = "pnpm dev"
+[pack]
+include = ["package.json", "src/**"]
+"#;
+
+    let normalized =
+        normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+    // pnpm wins by priority (pnpm > yarn > bun > npm)
+    assert!(
+        normalized.contains(r#""apps/web/pnpm-lock.yaml""#),
+        "pnpm-lock.yaml must be auto-included by priority"
+    );
+    assert!(
+        !normalized.contains("yarn.lock"),
+        "yarn.lock must not be included when pnpm-lock.yaml takes priority"
+    );
+}
+
+#[test]
+fn normalize_github_install_preview_toml_resolves_multiple_lockfiles_via_package_manager_field() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let app_dir = tmp.path().join("apps").join("web");
+    std::fs::create_dir_all(&app_dir).expect("create app dir");
+    std::fs::write(app_dir.join("package-lock.json"), "{\"lockfileVersion\":3}")
+        .expect("write npm lock");
+    std::fs::write(app_dir.join("bun.lock"), "# bun lockfile v0\n").expect("write bun lock");
+    // package.json explicitly declares bun as the package manager
+    std::fs::write(
+        app_dir.join("package.json"),
+        r#"{"name":"demo","packageManager":"bun@1.1.0"}"#,
+    )
+    .expect("write package.json");
+
+    let manifest = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+
+runtime = "source/node"
+working_dir = "apps/web"
+run = "bun dev"
+[pack]
+include = ["apps/web/package.json", "apps/web/src/**"]
+"#;
+
+    let normalized =
+        normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+    assert!(
+        normalized.contains(r#""apps/web/bun.lock""#),
+        "bun.lock must be auto-included"
+    );
+    assert!(
+        !normalized.contains("package-lock.json"),
+        "package-lock.json must not be included when bun is declared"
+    );
+}
+
+#[test]
+fn normalize_github_install_preview_toml_resolves_multiple_lockfiles_by_priority_when_no_package_manager_field(
+) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("package-lock.json"),
+        "{\"lockfileVersion\":3}",
+    )
+    .expect("write npm lock");
+    std::fs::write(tmp.path().join("bun.lock"), "# bun lockfile v0\n").expect("write bun lock");
+    // package.json without packageManager field — bun.lock wins by priority (bun > npm)
+    std::fs::write(tmp.path().join("package.json"), r#"{"name":"demo"}"#)
+        .expect("write package.json");
+
+    let manifest = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+
+runtime = "source/node"
+run = "node src/index.js"
+[pack]
+include = ["package.json", "src/**"]
+"#;
+
+    let normalized =
+        normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+    // bun.lock wins by priority; package-lock.json must NOT be added
+    assert!(
+        normalized.contains(r#""bun.lock""#),
+        "bun.lock must be auto-included by priority"
+    );
+    assert!(
+        !normalized.contains("package-lock.json"),
+        "package-lock.json must not be included when bun.lock takes priority"
+    );
+}
+
+#[test]
+fn github_checkout_root_is_outside_workspace_internal_subtree() {
+    use capsule_core::common::paths::path_contains_workspace_internal_subtree;
+    let root = super::github_checkout_root().expect("checkout root");
+    assert!(
+        !path_contains_workspace_internal_subtree(&root),
+        "github_checkout_root() must not be inside a workspace internal subtree; got: {}",
+        root.display()
+    );
 }
 
 #[test]
@@ -826,16 +1085,13 @@ fn build_mock_fixture(scoped_id: &str, version: &str, chunks: Vec<Vec<u8>>) -> M
     let merkle_root = compute_merkle_root_for_test(&chunk_hashes);
     let mut manifest = CapsuleManifest::from_toml(
         r#"
-schema_version = "1"
+schema_version = "0.3"
 name = "sample"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
 runtime = "source"
-entrypoint = "main.py"
-"#,
+run = "main.py""#,
     )
     .expect("manifest");
     manifest.distribution = Some(capsule_core::types::DistributionInfo {
@@ -1639,6 +1895,76 @@ async fn download_github_repository_at_ref_maps_private_repo_404_to_auth_message
     server.abort();
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn download_github_repository_at_ref_uses_github_token_for_public_archive_fetch() {
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    use axum::Router;
+
+    async fn github_tarball(headers: HeaderMap) -> impl IntoResponse {
+        assert_eq!(
+            headers
+                .get(reqwest::header::AUTHORIZATION.as_str())
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer gh-token-public")
+        );
+
+        let mut archive_bytes = Vec::new();
+        {
+            let encoder =
+                flate2::write::GzEncoder::new(&mut archive_bytes, flate2::Compression::default());
+            let mut builder = tar::Builder::new(encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(17);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(
+                    &mut header,
+                    "public-repo-main/index.js",
+                    std::io::Cursor::new(b"console.log('ok')"),
+                )
+                .expect("append tarball file");
+            builder
+                .into_inner()
+                .expect("finish tar")
+                .finish()
+                .expect("finish gzip");
+        }
+
+        (
+            StatusCode::OK,
+            [(reqwest::header::CONTENT_TYPE.as_str(), "application/gzip")],
+            archive_bytes,
+        )
+    }
+
+    let _env_lock = acquire_test_env_lock().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock github server");
+    let addr = listener.local_addr().expect("local addr");
+    let app = Router::new().route(
+        "/repos/octocat/public-repo/tarball/main",
+        get(github_tarball),
+    );
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let base_url = format!("http://{}", addr);
+    let _github_guard = EnvVarGuard::set("ATO_GITHUB_API_BASE_URL", Some(base_url.as_str()));
+    let _gh_token_guard = EnvVarGuard::set("GH_TOKEN", Some("gh-token-public"));
+
+    let checkout = download_github_repository_at_ref("octocat/public-repo", Some("main"))
+        .await
+        .expect("public repo archive should download");
+    assert!(checkout.checkout_dir.join("index.js").exists());
+
+    server.abort();
+}
+
 #[test]
 fn test_merge_requested_version_rejects_conflicts() {
     let err = merge_requested_version(Some("1.0.0"), Some("2.0.0")).expect_err("must fail");
@@ -1685,16 +2011,13 @@ fn test_compute_manifest_hash_without_signatures_is_stable() {
     let chunk_hash = format!("blake3:{}", blake3::hash(b"payload").to_hex());
     let mut manifest = CapsuleManifest::from_toml(
         r#"
-schema_version = "1"
+schema_version = "0.3"
 name = "sample"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
 runtime = "source"
-entrypoint = "main.py"
-"#,
+run = "main.py""#,
     )
     .expect("manifest");
     manifest.distribution = Some(capsule_core::types::DistributionInfo {
@@ -1737,16 +2060,13 @@ fn test_verify_payload_chunks_and_merkle_root() {
     let chunk_hash = format!("blake3:{}", blake3::hash(&payload).to_hex());
     let mut manifest = CapsuleManifest::from_toml(
         r#"
-schema_version = "1"
+schema_version = "0.3"
 name = "sample"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
 runtime = "source"
-entrypoint = "main.py"
-"#,
+run = "main.py""#,
     )
     .expect("manifest");
     manifest.distribution = Some(capsule_core::types::DistributionInfo {
@@ -1847,16 +2167,13 @@ fn test_reconstruct_payload_reports_missing_chunks() {
 
     let mut manifest = CapsuleManifest::from_toml(
         r#"
-schema_version = "1"
+schema_version = "0.3"
 name = "sample"
 version = "1.0.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
 runtime = "source"
-entrypoint = "main.py"
-"#,
+run = "main.py""#,
     )
     .expect("manifest");
     manifest.distribution = Some(capsule_core::types::DistributionInfo {

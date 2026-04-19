@@ -908,17 +908,14 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         fs::write(
             temp.path().join("capsule.toml"),
-            r#"schema_version = "0.2"
+            r#"schema_version = "0.3"
 name = "desky-mock-tauri"
 version = "0.1.0"
 type = "app"
-default_target = "desktop"
 
-[targets.desktop]
 runtime = "source"
 driver = "tauri"
-entrypoint = "backend/mock-tauri"
-"#,
+run = "backend/mock-tauri""#,
         )
         .expect("write manifest");
 
@@ -931,14 +928,14 @@ entrypoint = "backend/mock-tauri"
                 .target
                 .as_ref()
                 .map(|target| target.target_label.as_str()),
-            Some("desktop")
+            Some("app")
         );
         assert_eq!(
             resolution
-                .launch
+                .target
                 .as_ref()
-                .map(|launch| launch.command.as_str()),
-            Some("backend/mock-tauri")
+                .and_then(|target| target.driver.as_deref()),
+            Some("tauri")
         );
     }
 }

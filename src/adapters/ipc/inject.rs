@@ -394,16 +394,13 @@ mod tests {
         std::fs::create_dir_all(&lazy_service).unwrap();
 
         let service_manifest = r#"
-schema_version = "1.0"
+schema_version = "0.3"
 name = "service"
 version = "0.1.0"
 type = "app"
-default_target = "cli"
 
-[targets.cli]
 runtime = "source"
-entrypoint = "echo ok"
-
+run = "echo ok"
 [ipc.exports]
 name = "service"
 

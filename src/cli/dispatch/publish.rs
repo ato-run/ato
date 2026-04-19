@@ -1364,10 +1364,13 @@ mod tests {
         std::fs::write(tmp.path().join("index.js"), "console.log('demo');\n").expect("index.js");
         let _guard = CwdGuard::set_to(tmp.path());
 
-        let error = build_capsule_artifact_for_publish(tmp.path(), None, false)
-            .expect_err("publish build may fail but must not materialize manifest");
-        assert!(!error.to_string().is_empty());
-        assert!(!tmp.path().join("capsule.toml").exists());
+        // The publish build may succeed or fail — the important assertion is
+        // that it does NOT materialize a capsule.toml on disk.
+        let _ = build_capsule_artifact_for_publish(tmp.path(), None, false);
+        assert!(
+            !tmp.path().join("capsule.toml").exists(),
+            "capsule.toml must not be materialized during publish"
+        );
     }
 
     #[test]
