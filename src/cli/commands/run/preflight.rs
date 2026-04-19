@@ -317,10 +317,16 @@ fn provision_command_from_node_importer(
         }
         ProbeResult::Ambiguous(ambiguity) => {
             // Multiple lockfiles present; prefer pnpm > npm > yarn > bun.
-            let cmd = ambiguity
-                .importer_ids
+            let priority_order = [
+                ImporterId::Pnpm,
+                ImporterId::Npm,
+                ImporterId::Yarn,
+                ImporterId::Bun,
+            ];
+            let cmd = priority_order
                 .iter()
-                .find_map(|id| match id {
+                .find(|id| ambiguity.importer_ids.contains(id))
+                .and_then(|id| match id {
                     ImporterId::Pnpm => Some("pnpm install"),
                     ImporterId::Npm => Some("npm install"),
                     ImporterId::Yarn => Some("yarn install"),
