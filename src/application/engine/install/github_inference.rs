@@ -78,9 +78,7 @@ pub(super) fn normalize_github_install_preview_toml(
         .map(|v| v.trim().to_string())
         .unwrap_or_default();
 
-    if matches!(incoming_schema.as_str(), "0.3" | "0.2")
-        && parsed.get("targets").is_none()
-    {
+    if matches!(incoming_schema.as_str(), "0.3" | "0.2") && parsed.get("targets").is_none() {
         {
             let table = parsed
                 .as_table_mut()
@@ -613,7 +611,10 @@ fn normalize_v03_ui_framework_run_to_dev_server(
     // Also treat `node package.json` as invalid — package.json is not an executable entrypoint.
     let is_package_json = entry == "package.json" || entry.ends_with("/package.json");
     let needs_dev_server = is_package_json
-        || matches!(ext, "ts" | "mts" | "cts" | "tsx" | "jsx" | "astro" | "svelte" | "vue");
+        || matches!(
+            ext,
+            "ts" | "mts" | "cts" | "tsx" | "jsx" | "astro" | "svelte" | "vue"
+        );
     if !needs_dev_server {
         return Ok(());
     }
@@ -625,11 +626,7 @@ fn normalize_v03_ui_framework_run_to_dev_server(
     // Prefer `dev` script; fall back to `start` script for apps without a dev server script.
     let dev_script_body = package_json
         .get("scripts")
-        .and_then(|scripts| {
-            scripts
-                .get("dev")
-                .or_else(|| scripts.get("start"))
-        })
+        .and_then(|scripts| scripts.get("dev").or_else(|| scripts.get("start")))
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|v| !v.is_empty())
@@ -845,7 +842,9 @@ fn inspect_normalized_github_install_preview_manifest(
                         .collect::<Vec<_>>(),
                     &execution_working_directory,
                 )
-                .map(|(name, _, _)| *name == path.file_name().and_then(|n| n.to_str()).unwrap_or(""))
+                .map(|(name, _, _)| {
+                    *name == path.file_name().and_then(|n| n.to_str()).unwrap_or("")
+                })
                 .unwrap_or(true);
                 if !is_canonical {
                     return false;
@@ -1352,10 +1351,7 @@ fn bump_node_runtime_version_if_needed(parsed: &mut toml::Value, checkout_dir: &
     }
 
     // Parse current version as (major, minor).
-    let parts: Vec<u64> = current
-        .split('.')
-        .filter_map(|p| p.parse().ok())
-        .collect();
+    let parts: Vec<u64> = current.split('.').filter_map(|p| p.parse().ok()).collect();
     let (cur_major, cur_minor) = (
         parts.first().copied().unwrap_or(0),
         parts.get(1).copied().unwrap_or(0),
