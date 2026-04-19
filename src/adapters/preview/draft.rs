@@ -149,6 +149,9 @@ fn warning_is_soft_preview_advisory(warning: &str) -> bool {
         // ato run uses plain install (not --frozen-lockfile), so lockfile platform-
         // compatibility warnings from the store draft are not actionable for preview runs.
         || lowered.contains("frozen-lockfile")
+        // "source/node requires a lockfile … for reproducible execution" — provision will
+        // run `npm install` which generates one, so the warning is not a preview blocker.
+        || lowered.contains("requires a lockfile")
 }
 
 fn build_github_preview_session(
