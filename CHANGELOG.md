@@ -4,6 +4,24 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.69] - 2026-04-19
+
+### What Changed
+
+#### Bug Fixes
+
+- Refresh release lint and tests
+- Update native delivery Tauri fixture to the current v0.3 form
+- Default missing native build working directory when parsing release data
+
+#### Tests
+
+- Align install normalization expectations with current runtime inference and start-script fallback behavior
+
+#### Other Changes
+
+- Cargo fmt
+
 ## [0.4.68] - 2026-04-17
 
 ### What Changed
