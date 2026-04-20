@@ -49,6 +49,7 @@ fs2 = "0.4"
 ignore = "0.4"
 globset = "0.4"
 jsonschema = "0.17"
+schemars = { version = "1", features = ["derive"] }
 shell-words = "1.1"
 futures = "0.3"
 tokio-util = "0.7"
