@@ -4,6 +4,118 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.69] - 2026-04-19
+
+### What Changed
+
+#### Bug Fixes
+
+- Refresh release lint and tests
+- Update native delivery Tauri fixture to the current v0.3 form
+- Default missing native build working directory when parsing release data
+
+#### Tests
+
+- Align install normalization expectations with current runtime inference and start-script fallback behavior
+
+#### Other Changes
+
+- Cargo fmt
+
+## [0.4.68] - 2026-04-17
+
+### What Changed
+
+
+#### Bug Fixes
+
+- Move default_git_mode_str import into cfg(test) scope
+
+- Fix remaining clippy errors (sort_by_key, manual_pattern_char_comparison)
+
+- Use exact package name match for AI agent SDK detection
+
+- Handle both nacelle event formats and open_url routing
+
+- Address review findings C-1, C-2, M-1, M-4, m-1
+
+- Add archive source kind for non-git directories
+
+
+#### Features
+
+- Add Vite port detection and dev script inference
+
+- Add AI agent pattern detection and uv entrypoint inference
+
+- Prefix 'Try now' hint with [hint] tag in grey
+
+- Dim 'Try now' hint so execution output stands out
+
+- Resolve bare slugs from local ~/.ato/store for ato run
+
+- Route ato run <share-url> through nacelle via ShareExecutor
+
+
+#### Other Changes
+
+- Cargo fmt
+
+
+#### Refactoring
+
+- Extract share types to capsule-core
+
+
+## [0.4.67] - 2026-04-16
+
+### What Changed
+
+
+#### Security
+
+- Harden env validation
+
+
+## [0.4.66] - 2026-04-15
+
+### What Changed
+
+
+#### Bug Fixes
+
+- Update rustls-webpki 0.103.11 → 0.103.12 (RUSTSEC-2026-0098)
+
+- B2 — add yarn.lock and packageManager yarn@ detection
+
+
+#### Features
+
+- D2 — auto-copy .env.example → .env in GitHub checkout
+
+- Phase 2 — ato secrets subcommand with SecretStore module
+
+- Phase 1e — --dry-run flag with secret pattern scanner
+
+- Phase 1d — rpassword masked input for secret-like env keys
+
+- Phase 1c — SecretStorage abstraction, chmod 600 on env files, CI detection
+
+- Add automatic port assignment for capsules
+
+
+#### Other Changes
+
+- Bump capsule-core 0.9.2 → 0.10.0 for semver-compatible release
+
+- Cargo fmt fixes for env_security tests and Cargo.lock update
+
+
+#### Security
+
+- A1+A2 — env* exclusions and injection denylist
+
+
 ## [0.4.64] - 2026-04-14
 
 ### What Changed
