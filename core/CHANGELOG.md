@@ -2,6 +2,15 @@
 
 All notable changes to `ato-cli` will be documented in this file.
 
+## [0.11.0] - 2026-04-20
+
+### What Changed
+
+#### Breaking Changes
+
+- `CapsuleRequirements`: added `capabilities` field for canonical capability schema (NL2Filter Phase 0)
+- `ShareRunRequest`: added `compat_host` field to support `--compatibility-fallback host` for share URL runs
+
 ## [0.9.2] - 2026-04-04
 
 ### What Changed
