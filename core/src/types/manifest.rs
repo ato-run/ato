@@ -837,6 +837,13 @@ pub struct CapsuleRequirements {
     /// Other Capsule dependencies
     #[serde(default)]
     pub dependencies: Vec<String>,
+
+    /// Optional capability declarations surfaced to registry search and
+    /// agent-facing SKILL.md vocab. See
+    /// `capsule_core::schema::capabilities::Capabilities`. Absence means
+    /// "not declared"; do not infer a default level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<crate::schema::capabilities::Capabilities>,
 }
 
 impl CapsuleRequirements {
