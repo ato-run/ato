@@ -139,6 +139,8 @@ pub(crate) struct RunShareArgs {
     pub(crate) watch: bool,
     pub(crate) background: bool,
     pub(crate) reporter: Arc<CliReporter>,
+    /// When true, bypass nacelle and run directly on the host (mirrors --compatibility-fallback host).
+    pub(crate) compat_host: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -536,6 +538,7 @@ pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
         mode: capsule_core::share::ShareExecutionMode::Inherited,
         nacelle_path: None,
         ato_path: None,
+        compat_host: args.compat_host,
     })?;
 
     match result {
@@ -3515,6 +3518,7 @@ mod tests {
             watch: true,
             background: false,
             reporter,
+            compat_host: false,
         })
         .expect_err("--watch should be rejected");
         assert!(
@@ -3537,6 +3541,7 @@ mod tests {
             watch: false,
             background: true,
             reporter,
+            compat_host: false,
         })
         .expect_err("--background should be rejected");
         assert!(
