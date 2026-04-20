@@ -6,6 +6,4 @@
 
 pub mod capabilities;
 
-pub use capabilities::{
-    Capabilities, FsWrites, Network, SchemaVersion, SideEffects,
-};
+pub use capabilities::{Capabilities, FsWrites, Network, SchemaVersion, SideEffects};
