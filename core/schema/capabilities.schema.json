@@ -1,0 +1,127 @@
+{
+  "$defs": {
+    "FsWrites": {
+      "description": "Filesystem write capability of a capsule.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Purely read-only.",
+          "type": "string"
+        },
+        {
+          "const": "scratch",
+          "description": "Writes only to ephemeral scratch / temp storage scoped to the run.",
+          "type": "string"
+        },
+        {
+          "const": "user-data",
+          "description": "Writes to persistent user data (documents, project files, app state).",
+          "type": "string"
+        },
+        {
+          "const": "system",
+          "description": "Writes to system-owned locations (root, config dirs, global caches).",
+          "type": "string"
+        }
+      ]
+    },
+    "Network": {
+      "description": "Network capability of a capsule.\n\nDetermines what kind of network access the sandbox grants. This is a\nlossy projection of the finer-grained `health.toml` `network_mode` field\n(see README.md for the mapping).",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "No network access at all.",
+          "type": "string"
+        },
+        {
+          "const": "egress",
+          "description": "Outbound only (allowlisted domains or unrestricted egress).",
+          "type": "string"
+        },
+        {
+          "const": "ingress",
+          "description": "Inbound server (capsule listens on a port but does not call out).",
+          "type": "string"
+        },
+        {
+          "const": "bidirectional",
+          "description": "Both inbound and outbound.",
+          "type": "string"
+        }
+      ]
+    },
+    "SideEffects": {
+      "description": "Coarse-grained side-effect classification used for search-time filtering\nand UI warnings.",
+      "oneOf": [
+        {
+          "const": "readonly",
+          "description": "No observable side effects outside the sandbox.",
+          "type": "string"
+        },
+        {
+          "const": "idempotent",
+          "description": "Side effects are safe to repeat (same inputs → same final state).",
+          "type": "string"
+        },
+        {
+          "const": "mutating",
+          "description": "Modifies external state, not safe to repeat without thought.",
+          "type": "string"
+        },
+        {
+          "const": "destructive",
+          "description": "Can delete, overwrite, or otherwise destroy data.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://capsuled.dev/schema/capabilities/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Full capability descriptor attached to a capsule.\n\nThis is an additive, optional block on `CapsuleRequirements`; absence\nmeans \"not declared\" and must not be treated as any particular level.",
+  "properties": {
+    "fs_writes": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FsWrites"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Filesystem write surface."
+    },
+    "network": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Network"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Network access required by the capsule."
+    },
+    "secrets_required": {
+      "description": "Whether the capsule requires any secrets (API keys, tokens) at run\ntime. Used by search to filter to capsules that run without setup.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "side_effects": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SideEffects"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Side-effect classification."
+    }
+  },
+  "title": "ato Capsule Capabilities",
+  "type": "object",
+  "x-capsuled-schema-version": "1"
+}
