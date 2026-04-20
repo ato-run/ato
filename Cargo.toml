@@ -13,7 +13,7 @@ edition = "2021"
 description = "ato CLI (meta-runtime)"
 homepage = "https://ato.run"
 license = "Apache-2.0"
-repository = "https://github.com/Koh0920/ato-cli"
+repository = "https://github.com/ato-run/ato-cli"
 build = "build.rs"
 
 [[bin]]

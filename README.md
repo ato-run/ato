@@ -1,170 +1,155 @@
-# Ato: The Agentic Meta-Runtime 🚀
+# Ato CLI
 
 [![CI](https://github.com/ato-run/ato-cli/actions/workflows/build-multi-os.yml/badge.svg?branch=dev)](https://github.com/ato-run/ato-cli/actions/workflows/build-multi-os.yml)
 [![GitHub Release](https://img.shields.io/github/v/release/ato-run/ato-cli)](https://github.com/ato-run/ato-cli/releases)
+[![GitHub stars](https://img.shields.io/github/stars/ato-run/ato-cli?style=social)](https://github.com/ato-run/ato-cli/stargazers)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
-![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-6f42c1)
-[![Issues](https://img.shields.io/github/issues/ato-run/ato-cli)](https://github.com/ato-run/ato-cli/issues)
-[![Last Commit](https://img.shields.io/github/last-commit/ato-run/ato-cli/dev)](https://github.com/ato-run/ato-cli/commits/dev)
 
-English | [日本語](README_JA.md)
+Ato is a CLI for running shared workspaces, GitHub repositories, and local projects in isolated environments. It infers the runtime from the project, bootstraps only what it needs, and defaults to fail-closed execution so you can try, share, and rebuild software without hand-written containers or custom package recipes.
 
-> The Nix alternative for the AI era. Pass a URL, get a secure runnable environment in seconds.
+Use `ato run` when you want to try code now, `ato encap` when you want to capture and share a workspace, and `ato decap` when you want to rebuild that workspace locally.
 
-Ato turns source code into a runnable environment without asking users to maintain a heavy container build or learn a custom package language. It infers the runtime and dependencies, materializes only what is needed, and runs with fail-closed defaults. For Tier 2 targets such as Python and native binaries, Ato uses the Nacelle sandbox and will normally bootstrap a compatible engine automatically when it is needed.
+[Quick start](#quick-start) · [Why Ato](#why-ato) · [Core commands](#core-commands) · [Contributing](#contributing) · [License](#license)
 
-This README focuses on the MVP path: `run`, `encap`, and `decap`. Advanced store and publishing flows stay out of scope here.
+## Demo
 
----
+[![Demo](https://img.shields.io/badge/demo-asciinema-orange)](assets/ato-demo.cast)
 
-## Three commands
+Illustrative terminal walkthrough: install Ato, run a local script, then capture the workspace.
 
-### 1. Run anything now with `ato run`
+## Install
 
-`ato run` executes a share URL, a GitHub repository, or a local script without polluting your machine. Dependencies are resolved in an isolated path and the execution is treated as disposable by default.
+Install the latest Ato release in one line:
 
 ```bash
-# Run a shared workspace directly
-ato run https://ato.run/s/demo@r1
-
-# Run a GitHub repository directly
-ato run github.com/user/my-app
-
-# Run a single local script
-ato run scrape.py
+curl -fsSL https://ato.run/install.sh | sh
 ```
 
-Use `ato run` when you want to try something immediately. If you want the files on disk, use `ato decap` instead.
+Prefer a manual install path? Download a prebuilt binary from the [GitHub Releases page](https://github.com/ato-run/ato-cli/releases/latest) and place `ato` on your `PATH`.
 
-### 2. Share your current workspace with `ato encap`
+## Quick start
 
-`ato encap` captures the current workspace as a portable share descriptor, writes the local share files, and can upload them to a share URL.
+This path stays local, takes about a minute, and shows the core value of `ato run`.
 
 ```bash
-# Capture the current workspace and upload it
+curl -fsSL https://ato.run/install.sh | sh
+
+mkdir hello-ato
+cd hello-ato
+printf 'print("hello from ato")\n' > hello.py
+
+ato run hello.py
+```
+
+Next steps after that first run:
+
+```bash
+# Capture the current workspace
 ato encap . --share
-# -> https://ato.run/s/myproject@r1
+
+# Rebuild a shared workspace later
+ato decap https://ato.run/s/<share-id>@r1 --into ./hello-ato-copy
 ```
 
-The local capture is written under `.ato/share/`:
+## Why Ato
+
+Most developer workflows ask you to write a container, package recipe, or project-specific setup guide before someone else can run the code. Ato starts from the project itself. It recognizes common Python, Node, Deno, Rust, static web, and single-script layouts, then materializes only what the target needs.
+
+That makes Ato useful in three moments that usually get split across different tools: trying code immediately, sharing a runnable workspace, and rebuilding that workspace later with the same declared boundaries. For higher-risk targets such as Python and native binaries, Ato routes execution through [Nacelle](https://github.com/ato-run/nacelle) and keeps fail-closed defaults around filesystem, network, and environment access.
+
+## Core commands
+
+### Run something now with `ato run`
+
+`ato run` accepts a local path, a share URL, or a GitHub repository reference.
+
+```bash
+ato run .
+ato run hello.py
+ato run github.com/owner/repo
+ato run https://ato.run/s/demo@r1
+```
+
+For local filesystem paths, Ato also supports `--watch` and `--background`.
+
+```bash
+ato run . --watch
+ato run . --background
+ato ps
+ato logs --id <capsule-id> --follow
+ato stop --id <capsule-id>
+```
+
+`ato run <share-url>` does not support `--watch` or `--background` in the current MVP path.
+
+### Share a workspace with `ato encap`
+
+`ato encap` captures the current workspace as a portable share descriptor, writes local share files, and can upload them to a share URL.
+
+```bash
+ato encap . --share
+```
+
+Local capture output is written under `.ato/share/`:
 
 - `share.spec.json`
 - `share.lock.json`
 - `guide.md`
 
-Secrets are never uploaded. Ato records contracts such as required env files, but not secret values.
+Secrets are never uploaded. Ato records contracts such as required environment files, but not secret values.
 
-### 3. Rebuild the workspace locally with `ato decap`
+### Rebuild a workspace with `ato decap`
 
-`ato decap` materializes a shared workspace into a target directory. This is more than unpacking an archive: Ato restores the workspace layout, verifies the share, and runs the declared install steps.
+`ato decap` materializes a share into a target directory, verifies the share, and runs declared install steps.
 
 ```bash
-# Materialize from a share URL
 ato decap https://ato.run/s/myproject@r1 --into ./my-project
-
-# Materialize from a local share descriptor
 ato decap .ato/share/share.spec.json --into ./my-project
 ```
 
----
+## What Ato can run well today
 
-## What Ato handles well
+Ato's inference path already covers common cases such as:
 
-Ato's inference engine already covers common cases such as:
-
-- Share URLs using `https://ato.run/s/...`
+- share URLs using `https://ato.run/s/...`
 - GitHub repositories using `github.com/owner/repo`
-- Single-file Python scripts, including PEP 723 metadata
+- single-file Python scripts, including PEP 723 metadata
 - TypeScript and JavaScript projects detected from `deno.json`, `package.json`, and lockfiles
 - Python projects detected from `pyproject.toml` and `uv.lock`
 - Rust, Go, static web, WebAssembly, and other lock-first project layouts
 
 When Ato can identify a reproducible execution path, it routes the workspace through the same capsule-oriented runtime model.
 
----
-
-## Quick start
-
-Install `ato` with the one-line installer:
-
-```bash
-curl -fsSL https://ato.run/install.sh | sh
-```
-
-Or download a prebuilt binary from the [GitHub Releases page](https://github.com/ato-run/ato-cli/releases/latest) and place it on your `PATH`.
-
-For contributors or local development from source:
-
-```bash
-# Build the CLI
-cargo build -p ato-cli
-
-# Run the current directory
-./target/debug/ato run .
-
-# Watch mode for local development
-./target/debug/ato run . --watch
-
-# Background process management
-./target/debug/ato run . --background
-./target/debug/ato ps
-./target/debug/ato stop --id <capsule-id>
-./target/debug/ato logs --id <capsule-id> --follow
-```
-
----
-
-## Primary command reference
-
-The default CLI help intentionally highlights the smallest useful surface area:
-
-```text
-Usage: ato [OPTIONS] <COMMAND>
-
-Primary Commands:
-  run      Try something now
-  decap    Set up a workspace locally
-  encap    Share your current workspace
-
-Management:
-  ps       List running capsules
-  stop     Stop a running capsule
-  logs     Show logs of a running capsule
-```
-
----
-
-## Security model
+## Security and isolation
 
 Ato is fail-closed by default.
 
-- Sandbox isolation: Tier 2 targets run through [Nacelle](https://github.com/ato-run/nacelle).
-- Filesystem protection: unknown code can be run without giving it unrestricted host access by default.
+- Sandbox isolation: Tier 2 targets such as `source/python`, `web/python`, and `source/native` run through Nacelle.
+- Filesystem protection: unknown code does not get unrestricted host access by default.
 - Network control: unapproved network access is blocked under strict enforcement.
 - Environment handling: missing required environment variables stop execution before launch, and `--prompt-env` can collect them interactively.
 
-For normal local runs, Ato will usually bootstrap a compatible Nacelle release automatically if Tier 2 execution requires it. In CI or offline environments, auto-bootstrap is intentionally restricted, so preinstall or register Nacelle ahead of time if needed.
+For normal local runs, Ato usually bootstraps a compatible Nacelle release automatically when Tier 2 execution requires it. In CI or offline environments, auto-bootstrap is intentionally restricted, so preinstall or register Nacelle ahead of time if needed.
 
----
+## From source
 
-## Runtime isolation tiers
-
-Different runtimes require different isolation levels.
-
-| Runtime family                                       | Tier   | Notes                                                                     |
-| ---------------------------------------------------- | ------ | ------------------------------------------------------------------------- |
-| `web/static`                                         | Tier 1 | Static preview and simple web targets                                     |
-| `web/deno`, `web/node`, `source/deno`, `source/node` | Tier 1 | Runs without manual sandbox bootstrap in the common path                  |
-| `source/python`, `web/python`, `source/native`       | Tier 2 | Requires Nacelle; normally auto-bootstrapped outside CI and offline modes |
-
-Tier 1 targets run without bypass flags. Tier 2 targets use the stronger sandbox path.
-
----
+```bash
+cargo build -p ato-cli
+./target/debug/ato --help
+./target/debug/ato run .
+```
 
 ## Contributing
 
 Bug reports and feature requests are welcome in [GitHub Issues](https://github.com/ato-run/ato-cli/issues).
+
+If you are contributing code, use the standard Rust checks before opening a pull request:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test -p ato-cli
+```
 
 ## License
 
