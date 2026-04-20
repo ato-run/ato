@@ -4,6 +4,33 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.70] - 2026-04-20
+
+### What Changed
+
+
+#### Bug Fixes
+
+- Honor --compatibility-fallback host for share URL runs
+
+
+#### Documentation
+
+- Optimize README for english developers
+
+
+#### Features
+
+- Add NL→filter gold corpus (NL2Filter Phase 1)
+
+- Add canonical capability schema (NL2Filter Phase 0)
+
+
+#### Other Changes
+
+- Bump to v0.11.0 for breaking field additions (capabilities, compat_host)
+
+
 ## [0.4.69] - 2026-04-19
 
 ### What Changed
