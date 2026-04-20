@@ -45,6 +45,9 @@ pub struct ShareRunRequest {
     pub nacelle_path: Option<PathBuf>,
     /// Override ato binary path (for decap).
     pub ato_path: Option<PathBuf>,
+    /// When true, bypass nacelle and run the entry command directly on the host.
+    /// Mirrors `--compatibility-fallback host` for local `ato run` invocations.
+    pub compat_host: bool,
 }
 
 /// A live piped session with channels for PTY I/O.
@@ -94,12 +97,25 @@ pub fn execute_share(request: ShareRunRequest) -> Result<ShareExecutionResult> {
     }
     let run_cwd = workspace.join(&entry.cwd);
 
+    let env_pairs: Vec<(String, String)> = request.env_overlay.into_iter().collect();
+
+    // Step 5 (compat-host): bypass nacelle and run directly on the host.
+    if request.compat_host {
+        match request.mode {
+            ShareExecutionMode::Inherited => {
+                let exit_code = spawn_direct_inherited(&run_command, &run_cwd, &env_pairs)?;
+                return Ok(ShareExecutionResult::Completed { exit_code });
+            }
+            ShareExecutionMode::Piped { .. } => {
+                bail!("compat_host mode does not support Piped execution");
+            }
+        }
+    }
+
     // Step 5: Resolve nacelle
     let nacelle_bin = resolve_nacelle_binary(request.nacelle_path.as_deref())?;
 
     // Step 6: Build envelope and spawn nacelle
-    let env_pairs: Vec<(String, String)> = request.env_overlay.into_iter().collect();
-
     match request.mode {
         ShareExecutionMode::Inherited => {
             let exit_code =
@@ -280,6 +296,28 @@ fn resolve_nacelle_binary(override_path: Option<&Path>) -> Result<PathBuf> {
             bail!("nacelle binary not found — set NACELLE_PATH or install nacelle on PATH")
         }
     }
+}
+
+/// Run the entry command directly on the host (compat-host mode). Returns exit code.
+///
+/// Used when `--compatibility-fallback host` is set: bypasses nacelle entirely
+/// and runs `sh -lc <command>` directly in the entry's working directory.
+fn spawn_direct_inherited(
+    run_command: &str,
+    cwd: &Path,
+    env_pairs: &[(String, String)],
+) -> Result<i32> {
+    info!(cmd = run_command, cwd = %cwd.display(), "spawning directly (compat-host)");
+    let status = Command::new("sh")
+        .args(["-lc", run_command])
+        .current_dir(cwd)
+        .envs(env_pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to spawn command (compat-host)")?;
+    Ok(status.code().unwrap_or(1))
 }
 
 /// Spawn nacelle with inherited stdio (CLI mode). Returns exit code.

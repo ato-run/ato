@@ -87,6 +87,10 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
             watch: args.watch,
             background: args.background,
             reporter: args.reporter,
+            compat_host: matches!(
+                args.compatibility_fallback,
+                Some(CompatibilityFallbackBackend::Host)
+            ),
         });
     }
 
