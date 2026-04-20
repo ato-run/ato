@@ -1163,6 +1163,7 @@ fn resolve_and_start_from_share(share_url: &str) -> Result<CapsuleLaunchSession>
             .ok()
             .map(PathBuf::from)
             .or_else(|| resolve_ato_binary().ok()),
+        compat_host: false,
     })?;
 
     match result {
