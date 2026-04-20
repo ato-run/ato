@@ -3,6 +3,8 @@ name = "capsule-core"
 version = "0.10.0"
 edition = "2021"
 license = "Apache-2.0"
+homepage = "https://ato.run"
+repository = "https://github.com/ato-run/ato-cli"
 
 [package.metadata.dist]
 dist = false
@@ -49,6 +51,7 @@ fs2 = "0.4"
 ignore = "0.4"
 globset = "0.4"
 jsonschema = "0.17"
+schemars = { version = "1", features = ["derive"] }
 shell-words = "1.1"
 futures = "0.3"
 tokio-util = "0.7"
