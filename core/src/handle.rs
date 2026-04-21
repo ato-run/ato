@@ -8,6 +8,13 @@ const OFFICIAL_REGISTRY_DISPLAY_AUTHORITY: &str = "ato.run";
 const OFFICIAL_REGISTRY_IDENTITY: &str = "ato-official";
 const LOOPBACK_REGISTRY_IDENTITY_PREFIX: &str = "ato-loopback";
 
+// Publisher names reserved for first-party use or routing disambiguation.
+// Accepting these as user-registered publishers would create ambiguous URIs
+// (e.g. `capsule://ato.run/search/foo` colliding with a search endpoint).
+const RESERVED_PUBLISHERS: &[&str] = &[
+    "search", "topic", "user", "store", "api", "registry", "help", "docs", "status",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputSurface {
@@ -382,6 +389,12 @@ pub fn normalize_capsule_handle(raw: &str) -> Result<CanonicalHandle> {
         return parse_registry_rest(rest, RegistryIdentity::ato_official());
     }
 
+    // `capsule://store/` is a deprecated alias for `capsule://ato.run/`.
+    // Accept it at parse time and treat it as the official registry.
+    if let Some(rest) = input.strip_prefix("capsule://store/") {
+        return parse_registry_rest(rest, RegistryIdentity::ato_official());
+    }
+
     if let Some(rest) = input.strip_prefix("capsule://") {
         let (authority, registry_rest) = split_capsule_authority(rest)?;
         if let Some(registry) = registry_identity_for_display_authority(authority) {
@@ -475,6 +488,13 @@ fn parse_registry_rest(rest: &str, registry: RegistryIdentity) -> Result<Canonic
         return Err(CapsuleError::Config(
             "registry handle must use publisher/slug".to_string(),
         ));
+    }
+
+    if RESERVED_PUBLISHERS.contains(&publisher.as_str()) {
+        return Err(CapsuleError::Config(format!(
+            "publisher name '{}' is reserved",
+            publisher
+        )));
     }
 
     Ok(CanonicalHandle::RegistryCapsule {

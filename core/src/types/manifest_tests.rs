@@ -961,7 +961,7 @@ run = "node server.js"
     assert_eq!(web.external_dependencies[0].alias, "auth");
     assert_eq!(
         web.external_dependencies[0].source,
-        "capsule://store/acme/auth-svc"
+        "capsule://ato.run/acme/auth-svc"
     );
     assert_eq!(web.external_dependencies[0].source_type, "store");
 }
@@ -997,7 +997,7 @@ run = "npm start"
     assert_eq!(web.external_dependencies.len(), 1);
     assert_eq!(
         web.external_dependencies[0].source,
-        "capsule://store/acme/auth-svc"
+        "capsule://ato.run/acme/auth-svc"
     );
     assert_eq!(
         web.external_dependencies[0]
