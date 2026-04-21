@@ -97,6 +97,7 @@ manifest_hash = "sha256:dummy"
                 config_json,
                 config_path,
                 lockfile_path,
+                signing_key: None,
             },
             Arc::new(capsule_core::reporter::NoOpReporter),
         ))
