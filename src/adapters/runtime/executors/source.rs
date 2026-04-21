@@ -947,6 +947,11 @@ pub(crate) fn spawn_host_lifecycle_events(
                 .unwrap_or(60);
             let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
             while std::time::Instant::now() < deadline {
+                // Stop polling if the process has already exited.
+                #[cfg(unix)]
+                if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+                    break;
+                }
                 if std::net::TcpStream::connect_timeout(
                     &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
                     Duration::from_millis(100),
@@ -970,7 +975,6 @@ pub(crate) fn spawn_host_lifecycle_events(
             });
         }
     });
-    let _ = pid;
 
     event_rx
 }
