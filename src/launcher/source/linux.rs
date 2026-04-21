@@ -15,9 +15,9 @@
 //! those paths with `--tmpfs` so they appear as empty directories inside
 //! the sandbox.
 
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::os::unix::process::CommandExt;
 
 use tracing::{debug, info, warn};
 
@@ -492,7 +492,10 @@ pub async fn launch_with_bubblewrap(
                     // Set PR_SET_NO_NEW_PRIVS so Landlock doesn't require CAP_SYS_ADMIN.
                     let ret = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
                     if ret != 0 {
-                        eprintln!("[nacelle] PR_SET_NO_NEW_PRIVS failed: {}", std::io::Error::last_os_error());
+                        eprintln!(
+                            "[nacelle] PR_SET_NO_NEW_PRIVS failed: {}",
+                            std::io::Error::last_os_error()
+                        );
                     }
                     if let Err(e) = apply_sandbox(&policy) {
                         eprintln!("[nacelle] Landlock apply_sandbox failed: {e}");
@@ -690,7 +693,7 @@ mod tests {
                 }),
                 ipc_socket_paths: vec![],
                 injected_mounts: vec![],
-            ..Default::default()
+                ..Default::default()
             };
 
             let policy = generate_landlock_policy(&target);
