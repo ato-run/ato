@@ -149,7 +149,7 @@ run = "index.html""#,
 
 #[test]
 fn test_validate_invalid_schema_version() {
-    let toml = VALID_TOML.replace("schema_version = \"0.2\"", "schema_version = \"2.0\"");
+    let toml = VALID_TOML.replace("schema_version = \"0.3\"", "schema_version = \"2.0\"");
     let manifest = CapsuleManifest::from_toml(&toml).unwrap();
     let errors = manifest.validate().unwrap_err();
     assert!(errors
@@ -961,7 +961,7 @@ run = "node server.js"
     assert_eq!(web.external_dependencies[0].alias, "auth");
     assert_eq!(
         web.external_dependencies[0].source,
-        "capsule://store/acme/auth-svc"
+        "capsule://ato.run/acme/auth-svc"
     );
     assert_eq!(web.external_dependencies[0].source_type, "store");
 }
@@ -997,7 +997,7 @@ run = "npm start"
     assert_eq!(web.external_dependencies.len(), 1);
     assert_eq!(
         web.external_dependencies[0].source,
-        "capsule://store/acme/auth-svc"
+        "capsule://ato.run/acme/auth-svc"
     );
     assert_eq!(
         web.external_dependencies[0]
@@ -1672,14 +1672,20 @@ schema_version = "0.3"
 name = "legacy-app"
 version = "0.1.0"
 type = "app"
+default_target = "app"
 
+[execution]
+runtime = "source"
+entrypoint = "main.py"
+
+[targets.app]
 runtime = "source"
 run = "main.py""#;
 
     let error = CapsuleManifest::from_toml(legacy_manifest).unwrap_err();
     assert!(error
         .to_string()
-        .contains("legacy [execution] section is not supported in schema_version=0.2"));
+        .contains("legacy [execution] section is not supported in schema_version=0.3"));
 }
 
 #[test]
@@ -1705,7 +1711,7 @@ fn test_rejects_legacy_execution_section_json() {
     let error = CapsuleManifest::from_json(legacy_manifest).unwrap_err();
     assert!(error
         .to_string()
-        .contains("legacy [execution] section is not supported in schema_version=0.2"));
+        .contains("legacy [execution] section is not supported in schema_version=0.3"));
 }
 
 #[test]

@@ -2666,8 +2666,8 @@ fn extract_capsule_into(capsule_path: &Path, target_root: &Path) -> Result<()> {
     archive
         .unpack(target_root)
         .with_context(|| format!("Failed to extract capsule into {}", target_root.display()))?;
-    let cas_provider = capsule_core::capsule_v3::CasProvider::from_env();
-    let _ = capsule_core::capsule_v3::unpack_payload_from_capsule_root_with_provider(
+    let cas_provider = capsule_core::capsule::CasProvider::from_env();
+    capsule_core::capsule::unpack_payload_from_capsule_root_with_provider(
         target_root,
         target_root,
         &cas_provider,

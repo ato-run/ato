@@ -1,4 +1,4 @@
-//! Capsule Manifest v0.2 Schema
+//! Capsule Manifest v0.3 Schema
 //!
 //! Implements the "Everything is a Capsule" paradigm for Gumball v0.3.0.
 //! Supports both TOML (human-authored) and JSON (machine-generated) formats.
@@ -387,12 +387,12 @@ pub struct ReadinessProbe {
     pub port: String,
 }
 
-/// Capsule Manifest v0.2
+/// Capsule Manifest v0.3
 ///
 /// The primary configuration format for all Capsules in Gumball v0.3.0+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapsuleManifest {
-    /// Schema version (must be "0.2")
+    /// Schema version (must be "0.3")
     #[serde(default = "default_schema_version")]
     pub schema_version: String,
 
@@ -508,6 +508,46 @@ pub struct CapsuleManifest {
     /// Distribution metadata generated at pack/publish time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distribution: Option<DistributionInfo>,
+
+    /// Foundation conformance requirements (Part I — spec-level, Foundation scope).
+    ///
+    /// Declares which Foundation-defined runtime profiles and engine versions this capsule
+    /// requires.  Absent means no Foundation conformance assertion; the capsule runs on any
+    /// conformant ato implementation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foundation_requirements: Option<FoundationRequirements>,
+}
+
+/// Foundation conformance requirements (§3.6, Part I of the Capsule Protocol spec).
+///
+/// Declares which Foundation-approved runtime profile and engine constraints this capsule
+/// requires.  A conformant ato implementation MUST reject execution if it cannot satisfy
+/// the declared `profile` or if the requested engines are not available in a compatible
+/// version.
+///
+/// All fields are optional; an empty `FoundationRequirements` block is equivalent to
+/// omitting the section entirely.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FoundationRequirements {
+    /// Foundation-approved runtime profile identifier (e.g. "std.secure", "std.network").
+    ///
+    /// A runtime profile is an opaque string defined by the Foundation registry.  The ato
+    /// implementation MUST verify that the running environment satisfies this profile before
+    /// launching the capsule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+
+    /// List of runtime tool requirements (name@version-range pairs).
+    ///
+    /// Examples: `["python@>=3.11", "node@>=20"]`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtimes: Vec<String>,
+
+    /// List of engine capability requirements (name@version-range pairs).
+    ///
+    /// Examples: `["nacelle@>=0.4", "bwrap@>=0.8"]`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engines: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1164,6 +1204,10 @@ pub struct NamedTarget {
     #[serde(default)]
     pub run_command: Option<String>,
 
+    /// WebAssembly component path for runtime=wasm targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+
     /// Optional readiness probe for top-level target execution.
     #[serde(default)]
     pub readiness_probe: Option<ReadinessProbe>,
@@ -1325,7 +1369,7 @@ impl CapsuleManifest {
 
         if raw.get("execution").is_some() {
             return Err(CapsuleError::ParseError(
-                "legacy [execution] section is not supported in schema_version=0.2".to_string(),
+                "legacy [execution] section is not supported in schema_version=0.3".to_string(),
             ));
         }
 
@@ -1364,7 +1408,7 @@ impl CapsuleManifest {
             .map_err(|e| CapsuleError::ParseError(format!("JSON parse error: {}", e)))?;
         if raw.get("execution").is_some() {
             return Err(CapsuleError::ParseError(
-                "legacy [execution] section is not supported in schema_version=0.2".to_string(),
+                "legacy [execution] section is not supported in schema_version=0.3".to_string(),
             ));
         }
 
@@ -1478,3 +1522,33 @@ impl CapsuleManifest {
 #[cfg(test)]
 #[path = "manifest_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod wasm_component_test {
+    use super::*;
+
+    #[test]
+    fn test_wasm_component_preserved() {
+        let toml = r#"
+schema_version = "0.3"
+name = "wasm-hello"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "wasm"
+driver = "wasmtime"
+run_command = "hello.wasm"
+component = "hello.wasm"
+"#;
+        let model = CapsuleManifest::from_toml(toml).unwrap();
+        let serialized = model.to_toml().unwrap();
+        eprintln!("Serialized:\n{}", serialized);
+
+        let targets = model.targets.as_ref().unwrap();
+        let app_target = targets.named.get("app").unwrap();
+        eprintln!("component field: {:?}", app_target.component);
+        assert_eq!(app_target.component.as_deref(), Some("hello.wasm"));
+    }
+}
