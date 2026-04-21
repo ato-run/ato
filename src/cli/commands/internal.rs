@@ -931,6 +931,7 @@ fn convert_isolation_config(
         read_write_paths,
         network_enabled: config.network.enabled,
         egress_allow: config.network.egress_allow.clone(),
+        egress_id_allow: vec![],
     }
 }
 

@@ -191,7 +191,7 @@ pub async fn launch_with_bubblewrap(
     );
 
     // =====================================================================
-    // Egress Warning: domain-level filtering cannot be enforced by bwrap
+    // Egress enforcement checks
     // =====================================================================
     if let Some(ref iso) = target.isolation {
         if iso.network_enabled && !iso.egress_allow.is_empty() {
@@ -200,6 +200,18 @@ pub async fn launch_with_bubblewrap(
                  Relies on Sidecar Proxy (tsnet/SOCKS5).",
                 iso.egress_allow
             );
+        }
+        // Fail-closed: L3 CIDR rules require a tsnet sidecar that is not yet integrated.
+        // Refuse launch rather than silently permit unrestricted network access.
+        if iso.network_enabled && !iso.egress_id_allow.is_empty() && !target.dev_mode {
+            return Err(RuntimeError::InvalidConfig(format!(
+                "egress_id_allow ({:?}) requires a tsnet sidecar proxy, \
+                 which is not available in this environment. \
+                 Either remove egress_id_allow from capsule.toml, use dev_mode = true \
+                 to bypass enforcement during development, \
+                 or start the ato-tsnetd sidecar before running this capsule.",
+                iso.egress_id_allow
+            )));
         }
     }
 
@@ -636,6 +648,7 @@ mod tests {
                 read_write_paths: vec![PathBuf::from("/data/rw")],
                 network_enabled: false,
                 egress_allow: vec![],
+                egress_id_allow: vec![],
             }),
             ipc_socket_paths: vec![],
             injected_mounts: vec![],
@@ -673,6 +686,7 @@ mod tests {
                     read_write_paths: vec![home.clone()],
                     network_enabled: true,
                     egress_allow: vec![],
+                    egress_id_allow: vec![],
                 }),
                 ipc_socket_paths: vec![],
                 injected_mounts: vec![],
@@ -715,6 +729,7 @@ mod tests {
                 read_write_paths: vec![],
                 network_enabled: true,
                 egress_allow: vec![],
+                egress_id_allow: vec![],
             }),
             ipc_socket_paths: vec![
                 PathBuf::from("/tmp/capsule-ipc/greeter.sock"),

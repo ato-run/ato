@@ -136,8 +136,13 @@ pub struct IsolationPolicy {
     pub read_write_paths: Vec<PathBuf>,
     /// Enable network access
     pub network_enabled: bool,
-    /// Allowed egress domains (for R3 domain filtering)
+    /// Allowed egress domains for L7 domain filtering (requires tsnet sidecar).
     pub egress_allow: Vec<String>,
+    /// Allowed egress IPs/CIDRs for L3 filtering (requires tsnet sidecar).
+    ///
+    /// When non-empty and `network_enabled = true`, the launcher MUST refuse to
+    /// start the capsule unless a tsnet sidecar is available (fail-closed policy).
+    pub egress_id_allow: Vec<String>,
 }
 
 /// Result details returned after successful launch.
