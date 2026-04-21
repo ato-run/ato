@@ -1204,6 +1204,10 @@ pub struct NamedTarget {
     #[serde(default)]
     pub run_command: Option<String>,
 
+    /// WebAssembly component path for runtime=wasm targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+
     /// Optional readiness probe for top-level target execution.
     #[serde(default)]
     pub readiness_probe: Option<ReadinessProbe>,
@@ -1518,3 +1522,33 @@ impl CapsuleManifest {
 #[cfg(test)]
 #[path = "manifest_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod wasm_component_test {
+    use super::*;
+    
+    #[test]
+    fn test_wasm_component_preserved() {
+        let toml = r#"
+schema_version = "0.3"
+name = "wasm-hello"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "wasm"
+driver = "wasmtime"
+run_command = "hello.wasm"
+component = "hello.wasm"
+"#;
+        let model = CapsuleManifest::from_toml(toml).unwrap();
+        let serialized = model.to_toml().unwrap();
+        eprintln!("Serialized:\n{}", serialized);
+        
+        let targets = model.targets.as_ref().unwrap();
+        let app_target = targets.named.get("app").unwrap();
+        eprintln!("component field: {:?}", app_target.component);
+        assert_eq!(app_target.component.as_deref(), Some("hello.wasm"));
+    }
+}
