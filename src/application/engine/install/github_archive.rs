@@ -130,9 +130,9 @@ pub(crate) fn normalize_github_checkout_dir(
     Ok(normalized)
 }
 
-pub(crate) fn extract_payload_v3_manifest_from_capsule(
+pub(crate) fn extract_payload_payload_manifest_from_capsule(
     bytes: &[u8],
-) -> Result<Option<capsule_core::capsule_v3::CapsuleManifestV3>> {
+) -> Result<Option<capsule_core::capsule::PayloadManifest>> {
     let mut archive = tar::Archive::new(std::io::Cursor::new(bytes));
     let entries = archive
         .entries()
@@ -145,17 +145,17 @@ pub(crate) fn extract_payload_v3_manifest_from_capsule(
             .context("Failed to read archive entry path")?
             .to_string_lossy()
             .to_string();
-        if entry_path != capsule_core::capsule_v3::V3_PAYLOAD_MANIFEST_PATH {
+        if entry_path != capsule_core::capsule::PAYLOAD_MANIFEST_PATH {
             continue;
         }
 
         let mut manifest_bytes = Vec::new();
         std::io::Read::read_to_end(&mut entry, &mut manifest_bytes)
             .context("Failed to read payload.v3.manifest.json from artifact")?;
-        let manifest: capsule_core::capsule_v3::CapsuleManifestV3 =
+        let manifest: capsule_core::capsule::PayloadManifest =
             serde_json::from_slice(&manifest_bytes)
                 .context("Failed to parse payload.v3.manifest.json from artifact")?;
-        capsule_core::capsule_v3::verify_artifact_hash(&manifest)
+        capsule_core::capsule::verify_artifact_hash(&manifest)
             .context("Invalid payload.v3.manifest.json artifact_hash")?;
         return Ok(Some(manifest));
     }
@@ -166,12 +166,12 @@ pub(crate) fn extract_payload_v3_manifest_from_capsule(
 pub(crate) async fn sync_v3_chunks_from_manifest(
     client: &reqwest::Client,
     registry: &str,
-    manifest: &capsule_core::capsule_v3::CapsuleManifestV3,
+    manifest: &capsule_core::capsule::PayloadManifest,
 ) -> Result<V3SyncOutcome> {
-    let cas = match capsule_core::capsule_v3::CasProvider::from_env() {
-        capsule_core::capsule_v3::CasProvider::Enabled(store) => store,
-        capsule_core::capsule_v3::CasProvider::Disabled(reason) => {
-            capsule_core::capsule_v3::CasProvider::log_disabled_once(
+    let cas = match capsule_core::capsule::CasProvider::from_env() {
+        capsule_core::capsule::CasProvider::Enabled(store) => store,
+        capsule_core::capsule::CasProvider::Disabled(reason) => {
+            capsule_core::capsule::CasProvider::log_disabled_once(
                 "install_v3_chunk_sync",
                 &reason,
             );
@@ -185,7 +185,7 @@ pub(crate) async fn sync_v3_chunks_from_manifest(
 }
 
 pub(crate) fn emit_cas_disabled_performance_warning_once(
-    reason: &capsule_core::capsule_v3::CasDisableReason,
+    reason: &capsule_core::capsule::CasDisableReason,
     json_output: bool,
 ) {
     if json_output {
@@ -203,8 +203,8 @@ pub(crate) fn emit_cas_disabled_performance_warning_once(
 pub(crate) async fn sync_v3_chunks_from_manifest_with_options(
     client: &reqwest::Client,
     registry: &str,
-    manifest: &capsule_core::capsule_v3::CapsuleManifestV3,
-    cas: capsule_core::capsule_v3::CasStore,
+    manifest: &capsule_core::capsule::PayloadManifest,
+    cas: capsule_core::capsule::CasStore,
     token: Option<String>,
     concurrency: usize,
 ) -> Result<V3SyncOutcome> {
@@ -258,7 +258,7 @@ pub(crate) async fn sync_v3_chunks_from_manifest_with_options(
 pub(crate) async fn download_chunk_to_cas_with_retry(
     client: &reqwest::Client,
     registry: &str,
-    cas: &capsule_core::capsule_v3::CasStore,
+    cas: &capsule_core::capsule::CasStore,
     raw_hash: &str,
     raw_size: u32,
     token: Option<&str>,
