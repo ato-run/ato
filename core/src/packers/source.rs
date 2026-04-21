@@ -8,7 +8,7 @@ use crate::error::{CapsuleError, Result};
 use crate::lockfile;
 use crate::packers::bundle::{build_bundle, PackBundleArgs};
 use crate::packers::capsule as capsule_packer;
-use crate::r3_config;
+use crate::runtime_config;
 use crate::resource::cas::create_cas_client_from_env;
 use crate::router::{CompatManifestBridge, CompatProjectInput, ManifestData};
 use crate::validation;
@@ -18,7 +18,7 @@ use tracing::debug;
 pub struct SourcePackOptions {
     pub compat_input: Option<CompatProjectInput>,
     pub workspace_root: PathBuf,
-    pub config_json: Arc<r3_config::ConfigJson>,
+    pub config_json: Arc<runtime_config::ConfigJson>,
     pub config_path: PathBuf,
     pub output: Option<PathBuf>,
     pub runtime: Option<PathBuf>,
@@ -32,7 +32,7 @@ pub struct SourcePackOptions {
 
 #[derive(Debug, Clone)]
 pub struct PreparedSourceConfig {
-    pub config_json: Arc<r3_config::ConfigJson>,
+    pub config_json: Arc<runtime_config::ConfigJson>,
     pub config_path: PathBuf,
 }
 
@@ -41,12 +41,12 @@ pub fn prepare_source_config(
     enforcement: String,
     standalone: bool,
 ) -> Result<PreparedSourceConfig> {
-    let config_json = Arc::new(r3_config::generate_config(
+    let config_json = Arc::new(runtime_config::generate_config(
         manifest_path,
         Some(enforcement),
         standalone,
     )?);
-    let config_path = r3_config::write_config(manifest_path, config_json.as_ref())?;
+    let config_path = runtime_config::write_config(manifest_path, config_json.as_ref())?;
 
     Ok(PreparedSourceConfig {
         config_json,
@@ -64,12 +64,12 @@ pub fn prepare_source_config_from_descriptor(
     })?;
     let compat_input = CompatProjectInput::from_bridge(plan.workspace_root.clone(), bridge.clone())
         .map_err(|err| CapsuleError::Pack(err.to_string()))?;
-    let config_json = Arc::new(r3_config::generate_config_from_compat_input(
+    let config_json = Arc::new(runtime_config::generate_config_from_compat_input(
         &compat_input,
         Some(enforcement),
         standalone,
     )?);
-    let config_path = r3_config::write_config_in_dir(&plan.workspace_root, config_json.as_ref())?;
+    let config_path = runtime_config::write_config_in_dir(&plan.workspace_root, config_json.as_ref())?;
     Ok(PreparedSourceConfig {
         config_json,
         config_path,
