@@ -611,10 +611,7 @@ fn generate_production_seatbelt_profile(
             profile.push_str(
                 ";; Note: egress_id_allow CIDR rules require tsnet sidecar (not enforced by Seatbelt).\n",
             );
-            profile.push_str(&format!(
-                ";; Configured CIDRs: {:?}\n",
-                iso.egress_id_allow
-            ));
+            profile.push_str(&format!(";; Configured CIDRs: {:?}\n", iso.egress_id_allow));
             warn!(
                 "egress_id_allow ({:?}) is not enforceable via Seatbelt. Relies on tsnet sidecar.",
                 iso.egress_id_allow
