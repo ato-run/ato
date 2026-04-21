@@ -9,7 +9,7 @@ use crate::{RuntimeMetadata, SessionRunner, SessionRunnerConfig};
 
 use crate::engine;
 use crate::packers::bundle::{build_bundle, PackBundleArgs};
-use crate::r3_config;
+use crate::runtime_config;
 use crate::router::ManifestData;
 
 pub fn execute(plan: &ManifestData, nacelle_override: Option<PathBuf>) -> Result<i32> {
@@ -19,7 +19,7 @@ pub fn execute(plan: &ManifestData, nacelle_override: Option<PathBuf>) -> Result
         compat_input: None,
     })?;
 
-    r3_config::generate_and_write_config(
+    runtime_config::generate_and_write_config(
         &plan.manifest_path,
         Some("best_effort".to_string()),
         false,

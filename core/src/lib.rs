@@ -26,7 +26,7 @@ pub mod orchestration;
 pub mod packers;
 pub mod policy;
 pub mod python_runtime;
-pub mod r3_config;
+pub mod runtime_config;
 pub mod reporter;
 pub mod resource;
 pub mod router;
