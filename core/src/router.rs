@@ -823,6 +823,7 @@ impl ExecutionDescriptor {
         self.compat_str(&["targets", &self.selected_target, "component"])
             .or_else(|| self.compat_str(&["targets", &self.selected_target, "path"]))
             .or_else(|| self.execution_entrypoint())
+            .or_else(|| self.execution_run_command())
     }
 
     pub fn targets_wasm_args(&self) -> Vec<String> {
