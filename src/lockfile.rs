@@ -345,6 +345,7 @@ async fn hydrate_python(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn hydrate_node(
     lock: &CapsuleLock,
     target: &TargetEntry,
