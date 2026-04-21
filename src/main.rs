@@ -12,6 +12,11 @@ mod userland;
 mod webview;
 
 fn main() {
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("ato-desktop {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
