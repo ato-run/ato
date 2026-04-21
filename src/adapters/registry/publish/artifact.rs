@@ -58,20 +58,20 @@ struct ArtifactPayload {
     bytes: Vec<u8>,
     sha256: String,
     blake3: String,
-    v3_manifest: Option<capsule_core::capsule_v3::CapsuleManifestV3>,
+    payload_manifest: Option<capsule_core::capsule::PayloadManifest>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct V3SyncPayload {
+pub(crate) struct SyncPayload {
     publisher: String,
     slug: String,
     version: String,
-    manifest: capsule_core::capsule_v3::CapsuleManifestV3,
+    manifest: capsule_core::capsule::PayloadManifest,
 }
 
 impl ArtifactPayload {
-    fn v3_sync_payload(&self) -> Option<V3SyncPayload> {
-        self.v3_manifest.as_ref().map(|manifest| V3SyncPayload {
+    fn sync_payload(&self) -> Option<SyncPayload> {
+        self.payload_manifest.as_ref().map(|manifest| SyncPayload {
             publisher: self.publisher.clone(),
             slug: self.slug.clone(),
             version: self.version.clone(),
@@ -136,7 +136,7 @@ pub(crate) struct SyncCommitRequest {
     pub(crate) publisher: String,
     pub(crate) slug: String,
     pub(crate) version: String,
-    pub(crate) manifest: capsule_core::capsule_v3::CapsuleManifestV3,
+    pub(crate) manifest: capsule_core::capsule::PayloadManifest,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -186,7 +186,7 @@ pub fn publish_artifact_bytes(args: PublishArtifactBytesArgs) -> Result<PublishA
         args.closure_digest,
         args.publish_metadata,
     );
-    let v3_sync_payload = payload.v3_sync_payload();
+    let sync_payload = payload.sync_payload();
     let session = strategy.start_upload(&StartUploadRequest {
         registry_url: base_url.clone(),
         artifact: descriptor.clone(),
@@ -203,7 +203,7 @@ pub fn publish_artifact_bytes(args: PublishArtifactBytesArgs) -> Result<PublishA
         registry_url: base_url,
         artifact: descriptor,
         transfer,
-        v3_sync_payload,
+        sync_payload,
     })
 }
 
@@ -251,7 +251,7 @@ pub fn verify_artifact(path: &Path) -> Result<VerifiedArtifactInfo> {
     let manifest = extract_manifest_from_capsule(&bytes)?;
     let parsed = capsule_core::types::CapsuleManifest::from_toml(&manifest)
         .map_err(|err| anyhow::anyhow!("Failed to parse capsule.toml from artifact: {}", err))?;
-    let _ = extract_payload_v3_manifest_from_capsule(&bytes)?;
+    let _ = extract_payload_payload_manifest_from_capsule(&bytes)?;
 
     Ok(VerifiedArtifactInfo {
         name: parsed.name,
@@ -398,7 +398,7 @@ pub(crate) fn build_direct_upload_headers(
 fn load_artifact_payload_from_bytes(bytes: &[u8], scoped_id: &str) -> Result<ArtifactPayload> {
     let scoped = crate::install::parse_capsule_ref(scoped_id)?;
     let manifest = extract_manifest_from_capsule(bytes)?;
-    let v3_manifest = extract_payload_v3_manifest_from_capsule(bytes)?;
+    let payload_manifest = extract_payload_payload_manifest_from_capsule(bytes)?;
     let parsed = capsule_core::types::CapsuleManifest::from_toml(&manifest)
         .map_err(|err| anyhow::anyhow!("Failed to parse capsule.toml from artifact: {}", err))?;
 
@@ -429,7 +429,7 @@ fn load_artifact_payload_from_bytes(bytes: &[u8], scoped_id: &str) -> Result<Art
         sha256: compute_sha256(bytes),
         blake3: compute_blake3(bytes),
         bytes: bytes.to_vec(),
-        v3_manifest,
+        payload_manifest,
     })
 }
 
@@ -533,9 +533,9 @@ fn infer_publish_metadata_from_finalized_payload(
     Ok(None)
 }
 
-fn extract_payload_v3_manifest_from_capsule(
+fn extract_payload_payload_manifest_from_capsule(
     bytes: &[u8],
-) -> Result<Option<capsule_core::capsule_v3::CapsuleManifestV3>> {
+) -> Result<Option<capsule_core::capsule::PayloadManifest>> {
     let mut archive = tar::Archive::new(Cursor::new(bytes));
     let entries = archive
         .entries()
@@ -548,7 +548,7 @@ fn extract_payload_v3_manifest_from_capsule(
             .context("Failed to read archive entry path")?
             .to_string_lossy()
             .to_string();
-        if entry_path != capsule_core::capsule_v3::V3_PAYLOAD_MANIFEST_PATH {
+        if entry_path != capsule_core::capsule::PAYLOAD_MANIFEST_PATH {
             continue;
         }
 
@@ -556,10 +556,10 @@ fn extract_payload_v3_manifest_from_capsule(
         entry
             .read_to_end(&mut manifest_bytes)
             .context("Failed to read payload.v3.manifest.json from artifact")?;
-        let manifest: capsule_core::capsule_v3::CapsuleManifestV3 =
+        let manifest: capsule_core::capsule::PayloadManifest =
             serde_json::from_slice(&manifest_bytes)
                 .context("Failed to parse payload.v3.manifest.json from artifact")?;
-        capsule_core::capsule_v3::verify_artifact_hash(&manifest)
+        capsule_core::capsule::verify_artifact_hash(&manifest)
             .context("Invalid payload.v3.manifest.json artifact_hash")?;
         return Ok(Some(manifest));
     }
@@ -569,19 +569,16 @@ fn extract_payload_v3_manifest_from_capsule(
 
 pub(crate) fn sync_v3_chunks_if_present(
     base_url: &str,
-    payload: Option<&V3SyncPayload>,
+    payload: Option<&SyncPayload>,
 ) -> Result<()> {
     let Some(payload) = payload else {
         return Ok(());
     };
 
-    let cas = match capsule_core::capsule_v3::CasProvider::from_env() {
-        capsule_core::capsule_v3::CasProvider::Enabled(store) => store,
-        capsule_core::capsule_v3::CasProvider::Disabled(reason) => {
-            capsule_core::capsule_v3::CasProvider::log_disabled_once(
-                "publish_v3_chunk_sync",
-                &reason,
-            );
+    let cas = match capsule_core::capsule::CasProvider::from_env() {
+        capsule_core::capsule::CasProvider::Enabled(store) => store,
+        capsule_core::capsule::CasProvider::Disabled(reason) => {
+            capsule_core::capsule::CasProvider::log_disabled_once("publish_v3_chunk_sync", &reason);
             return Ok(());
         }
     };
@@ -919,7 +916,7 @@ mod tests {
     use axum::response::IntoResponse;
     use axum::routing::{post, put};
     use axum::{Json, Router};
-    use capsule_core::capsule_v3::{set_artifact_hash, CapsuleManifestV3, ChunkMeta};
+    use capsule_core::capsule::{set_artifact_hash, ChunkMeta, PayloadManifest};
     use tar::Builder;
     use tokio::sync::Mutex as AsyncMutex;
     use tokio::time::sleep;
@@ -1111,15 +1108,15 @@ mod tests {
     }
 
     fn build_v3_sync_test_payload(
-        cas: &capsule_core::capsule_v3::CasStore,
+        cas: &capsule_core::capsule::CasStore,
         chunk_count: usize,
-    ) -> (V3SyncPayload, Vec<String>) {
+    ) -> (SyncPayload, Vec<String>) {
         let mut chunks = Vec::new();
         let mut hashes = Vec::new();
 
         for i in 0..chunk_count {
             let raw = vec![(i % 251) as u8; 2_048 + (i % 7) * 13];
-            let raw_hash = capsule_core::capsule_v3::manifest::blake3_digest(&raw);
+            let raw_hash = capsule_core::capsule::manifest::blake3_digest(&raw);
             let zstd = compress_chunk(&raw);
             cas.put_chunk_zstd(&raw_hash, &zstd)
                 .expect("write local CAS chunk");
@@ -1131,11 +1128,11 @@ mod tests {
             });
         }
 
-        let mut manifest = CapsuleManifestV3::new(chunks);
+        let mut manifest = PayloadManifest::new(chunks);
         set_artifact_hash(&mut manifest).expect("artifact hash");
 
         (
-            V3SyncPayload {
+            SyncPayload {
                 publisher: "local".to_string(),
                 slug: "sync-app".to_string(),
                 version: "1.0.0".to_string(),
@@ -1179,9 +1176,9 @@ run = "main.ts""#
         buf
     }
 
-    fn test_capsule_bytes_with_v3_manifest(name: &str, version: &str) -> Vec<u8> {
+    fn test_capsule_bytes_with_payload_manifest(name: &str, version: &str) -> Vec<u8> {
         let bytes = test_capsule_bytes(name, version);
-        let mut v3 = CapsuleManifestV3::new(vec![ChunkMeta {
+        let mut v3 = PayloadManifest::new(vec![ChunkMeta {
             raw_hash: "blake3:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                 .to_string(),
             raw_size: 0,
@@ -1219,7 +1216,7 @@ run = "main.ts""#
             builder
                 .append_data(
                     &mut v3_header,
-                    capsule_core::capsule_v3::V3_PAYLOAD_MANIFEST_PATH,
+                    capsule_core::capsule::PAYLOAD_MANIFEST_PATH,
                     Cursor::new(manifest_bytes),
                 )
                 .expect("append v3 manifest");

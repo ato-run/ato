@@ -285,7 +285,7 @@ impl Diagnostic for CliDiagnostic {
 
     fn url<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
         let url = format!(
-            "https://ato.run/docs/errors#{}",
+            "https://docs.ato.run/errors#{}",
             self.code.as_str().to_ascii_lowercase()
         );
         Some(Box::new(url))

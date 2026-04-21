@@ -485,7 +485,14 @@ fn truncate(s: &str, max: usize) -> String {
 
 /// Default IPC socket directory.
 fn default_socket_dir() -> PathBuf {
-    std::env::temp_dir().join("capsule-ipc")
+    if let Ok(dir) = std::env::var("ATO_SOCKET_DIR") {
+        return PathBuf::from(dir);
+    }
+    dirs::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".ato")
+        .join("run")
+        .join("capsule-ipc")
 }
 
 #[derive(Debug, Clone)]
@@ -694,6 +701,11 @@ mod tests {
     #[test]
     fn test_default_socket_dir() {
         let dir = default_socket_dir();
-        assert!(dir.to_str().unwrap().contains("capsule-ipc"));
+        let s = dir.to_str().unwrap();
+        // Must end under .ato/run/capsule-ipc (or ATO_SOCKET_DIR override)
+        assert!(
+            s.contains("capsule-ipc"),
+            "expected capsule-ipc in path, got: {s}"
+        );
     }
 }

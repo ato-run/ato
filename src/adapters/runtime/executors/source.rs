@@ -34,8 +34,8 @@ use capsule_core::lock_runtime;
 use capsule_core::python_runtime::{
     extend_python_selector_env, normalized_python_runtime_version, python_selector_env,
 };
-use capsule_core::r3_config;
 use capsule_core::router::ManifestData;
+use capsule_core::runtime_config;
 
 pub struct CapsuleProcess {
     pub child: Child,
@@ -77,7 +77,7 @@ pub fn execute(
         let overlay = effective_state
             .map(|state| state.compiler_overlay.clone())
             .unwrap_or_default();
-        let config = r3_config::generate_config_from_lock(
+        let config = runtime_config::generate_config_from_lock(
             lock,
             &resolved,
             &overlay,
@@ -90,9 +90,9 @@ pub fn execute(
                 &effective_state.policy,
             )?;
         }
-        r3_config::write_config(&plan.manifest_path, &config)?;
+        runtime_config::write_config(&plan.manifest_path, &config)?;
     } else {
-        r3_config::generate_and_write_config(
+        runtime_config::generate_and_write_config(
             &plan.manifest_path,
             Some(enforcement.to_string()),
             false,
@@ -947,6 +947,11 @@ pub(crate) fn spawn_host_lifecycle_events(
                 .unwrap_or(60);
             let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
             while std::time::Instant::now() < deadline {
+                // Stop polling if the process has already exited.
+                #[cfg(unix)]
+                if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+                    break;
+                }
                 if std::net::TcpStream::connect_timeout(
                     &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
                     Duration::from_millis(100),
@@ -970,7 +975,6 @@ pub(crate) fn spawn_host_lifecycle_events(
             });
         }
     });
-    let _ = pid;
 
     event_rx
 }

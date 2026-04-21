@@ -281,6 +281,7 @@ fn build_runtime_section(
     } else if matches!(
         (runtime, driver),
         (ExecutionRuntime::Source, ExecutionDriver::Deno)
+            | (ExecutionRuntime::Source, ExecutionDriver::Node)
     ) {
         if let Some(port) = port {
             allow_hosts.push(format!("127.0.0.1:{port}"));

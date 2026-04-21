@@ -459,6 +459,7 @@ fn normalize_source_ref(source: &str) -> Option<String> {
 
     source
         .strip_prefix("capsule://store/")
+        .or_else(|| source.strip_prefix("capsule://ato.run/"))
         .or_else(|| source.strip_prefix("capsule://registry/"))
         .map(str::to_string)
         .or_else(|| source.contains('/').then(|| source.to_string()))

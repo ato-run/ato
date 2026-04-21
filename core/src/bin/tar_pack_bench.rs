@@ -66,13 +66,14 @@ manifest_hash = "sha256:dummy"
         .context("generate source tree")?;
     let generate_elapsed = generate_started.elapsed();
 
-    let config_json = Arc::new(capsule_core::r3_config::generate_config(
+    let config_json = Arc::new(capsule_core::runtime_config::generate_config(
         &manifest_path,
         Some("strict".to_string()),
         false,
     )?);
-    let config_path = capsule_core::r3_config::write_config(&manifest_path, config_json.as_ref())
-        .context("write config.json")?;
+    let config_path =
+        capsule_core::runtime_config::write_config(&manifest_path, config_json.as_ref())
+            .context("write config.json")?;
 
     let decision = capsule_core::router::route_manifest(
         &manifest_path,
@@ -97,6 +98,7 @@ manifest_hash = "sha256:dummy"
                 config_json,
                 config_path,
                 lockfile_path,
+                signing_key: None,
             },
             Arc::new(capsule_core::reporter::NoOpReporter),
         ))

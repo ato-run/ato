@@ -1,61 +1,60 @@
-# Ato CLI
+# ato
 
 [![CI](https://github.com/ato-run/ato-cli/actions/workflows/build-multi-os.yml/badge.svg?branch=dev)](https://github.com/ato-run/ato-cli/actions/workflows/build-multi-os.yml)
 [![GitHub Release](https://img.shields.io/github/v/release/ato-run/ato-cli)](https://github.com/ato-run/ato-cli/releases)
 [![GitHub stars](https://img.shields.io/github/stars/ato-run/ato-cli?style=social)](https://github.com/ato-run/ato-cli/stargazers)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
-Ato is a CLI for running shared workspaces, GitHub repositories, and local projects in isolated environments. It infers the runtime from the project, bootstraps only what it needs, and defaults to fail-closed execution so you can try, share, and rebuild software without hand-written containers or custom package recipes.
+**Run any project instantly. Share it with one URL.**
 
-Use `ato run` when you want to try code now, `ato encap` when you want to capture and share a workspace, and `ato decap` when you want to rebuild that workspace locally.
+Point `ato` at a Python script, a Node app, a Rust binary, or a GitHub repo — it figures out the runtime, bootstraps only what's needed, and runs in a sandboxed environment. No Dockerfile. No setup guide. No manual environment.
 
-[Quick start](#quick-start) · [Why Ato](#why-ato) · [Core commands](#core-commands) · [Contributing](#contributing) · [License](#license)
+[Install](#install) · [Quick start](#quick-start) · [Why Ato](#why-ato) · [Commands](#core-commands) · [Contributing](#contributing)
 
 ## Demo
 
-[![Demo](https://img.shields.io/badge/demo-asciinema-orange)](assets/ato-demo.cast)
-
-Illustrative terminal walkthrough: install Ato, run a local script, then capture the workspace.
+![Demo](assets/demo.svg)
 
 ## Install
 
-Install the latest Ato release in one line:
-
 ```bash
 curl -fsSL https://ato.run/install.sh | sh
 ```
 
-Prefer a manual install path? Download a prebuilt binary from the [GitHub Releases page](https://github.com/ato-run/ato-cli/releases/latest) and place `ato` on your `PATH`.
+Or download a prebuilt binary from the [Releases page](https://github.com/ato-run/ato-cli/releases/latest) and place `ato` on your `PATH`.
 
 ## Quick start
 
-This path stays local, takes about a minute, and shows the core value of `ato run`.
-
 ```bash
+# Install (one line)
 curl -fsSL https://ato.run/install.sh | sh
 
-mkdir hello-ato
-cd hello-ato
+# Run a Python script — no venv, no pip install
 printf 'print("hello from ato")\n' > hello.py
-
 ato run hello.py
-```
 
-Next steps after that first run:
-
-```bash
-# Capture the current workspace
+# Capture the workspace and get a shareable URL
 ato encap . --share
+# → Share URL: https://ato.run/s/hello-ato@r1
 
-# Rebuild a shared workspace later
-ato decap https://ato.run/s/<share-id>@r1 --into ./hello-ato-copy
+# Anyone can rebuild it from the URL
+ato decap https://ato.run/s/hello-ato@r1 --into ./copy
+ato run ./copy
 ```
 
 ## Why Ato
 
-Most developer workflows ask you to write a container, package recipe, or project-specific setup guide before someone else can run the code. Ato starts from the project itself. It recognizes common Python, Node, Deno, Rust, static web, and single-script layouts, then materializes only what the target needs.
+Every time you share a project, someone has to set up an environment before they can run it — virtualenvs, `node_modules`, container builds, README instructions that drift. Ato removes that layer entirely.
 
-That makes Ato useful in three moments that usually get split across different tools: trying code immediately, sharing a runnable workspace, and rebuilding that workspace later with the same declared boundaries. For higher-risk targets such as Python and native binaries, Ato routes execution through [Nacelle](https://github.com/ato-run/nacelle) and keeps fail-closed defaults around filesystem, network, and environment access.
+Ato reads your project directly — `pyproject.toml`, `package.json`, `deno.json`, `Cargo.toml`, a bare script — and materializes only the runtime it needs. No config to write. For Python and native binaries, execution routes through [Nacelle](https://github.com/ato-run/nacelle), a sandboxed runtime that blocks unapproved filesystem and network access by default. `ato encap` captures a reproducible workspace descriptor that anyone can restore with `ato decap`.
+
+| Without Ato | With Ato |
+|---|---|
+| Clone → read README → install deps → run | `ato run github.com/owner/repo` |
+| Write Dockerfile or setup script to share | `ato encap . --share` |
+| Follow multi-step setup to reproduce | `ato decap <share-url>` |
+
+Supported runtimes today: Python (`pyproject.toml`, `uv.lock`, single-file PEP 723), Node / TypeScript / Deno, Rust, Go, static web, WebAssembly, and shell scripts.
 
 ## Core commands
 
@@ -107,19 +106,6 @@ ato decap https://ato.run/s/myproject@r1 --into ./my-project
 ato decap .ato/share/share.spec.json --into ./my-project
 ```
 
-## What Ato can run well today
-
-Ato's inference path already covers common cases such as:
-
-- share URLs using `https://ato.run/s/...`
-- GitHub repositories using `github.com/owner/repo`
-- single-file Python scripts, including PEP 723 metadata
-- TypeScript and JavaScript projects detected from `deno.json`, `package.json`, and lockfiles
-- Python projects detected from `pyproject.toml` and `uv.lock`
-- Rust, Go, static web, WebAssembly, and other lock-first project layouts
-
-When Ato can identify a reproducible execution path, it routes the workspace through the same capsule-oriented runtime model.
-
 ## Security and isolation
 
 Ato is fail-closed by default.
@@ -154,3 +140,29 @@ cargo test -p ato-cli
 ## License
 
 Apache License 2.0 (SPDX: Apache-2.0). See [LICENSE](LICENSE).
+
+## capsule.toml reference
+
+Every capsule is declared by a `capsule.toml` manifest in the project root.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `schema_version` | ✓ | Manifest schema version, e.g. `"0.3"` |
+| `name` | ✓ | Unique capsule identifier (lowercase, hyphens allowed) |
+| `version` | ✓ | Semver string, e.g. `"0.1.0"` |
+| `type` | ✓ | `"app"`, `"service"`, or `"tool"` |
+| `run` | ✓ | Command to execute, e.g. `"python main.py"` |
+| `runtime` | | Runtime hint, e.g. `"source/python"` or `"source/node"` |
+| `runtime_version` | | Pinned version, e.g. `"3.12"` |
+| `description` | | Human-readable description |
+
+Minimal example:
+
+```toml
+schema_version = "0.3"
+name           = "my-capsule"
+version        = "0.1.0"
+type           = "app"
+run            = "python main.py"
+runtime        = "source/python"
+```
