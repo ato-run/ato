@@ -480,7 +480,7 @@ enum DeltaInstallResult {
 enum V3SyncOutcome {
     Synced,
     SkippedUnsupportedRegistry,
-    SkippedDisabledCas(capsule_core::capsule_v3::CasDisableReason),
+    SkippedDisabledCas(capsule_core::capsule::CasDisableReason),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1287,10 +1287,14 @@ async fn complete_install_from_bytes(
         keep_progressive_flow_open,
     } = options;
     let computed_blake3 = compute_blake3(&bytes);
-    if let Some(v3_manifest) = extract_payload_v3_manifest_from_capsule(&bytes)? {
+    if let Some(payload_manifest) = extract_payload_payload_manifest_from_capsule(&bytes)? {
         if let Some(registry_url) = source.registry_url() {
-            match sync_v3_chunks_from_manifest(&reqwest::Client::new(), registry_url, &v3_manifest)
-                .await?
+            match sync_v3_chunks_from_manifest(
+                &reqwest::Client::new(),
+                registry_url,
+                &payload_manifest,
+            )
+            .await?
             {
                 V3SyncOutcome::Synced => {}
                 V3SyncOutcome::SkippedUnsupportedRegistry => {

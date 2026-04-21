@@ -110,7 +110,7 @@ impl UploadStrategy for DirectUploadStrategy {
             .context("Invalid local registry upload response")?;
         super::super::artifact::sync_v3_chunks_if_present(
             &request.registry_url,
-            request.v3_sync_payload.as_ref(),
+            request.sync_payload.as_ref(),
         )
         .with_context(|| "Failed to finalize payload v3 metadata for uploaded release")?;
         Ok(result)

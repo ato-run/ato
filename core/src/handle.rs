@@ -8,6 +8,12 @@ const OFFICIAL_REGISTRY_DISPLAY_AUTHORITY: &str = "ato.run";
 const OFFICIAL_REGISTRY_IDENTITY: &str = "ato-official";
 const LOOPBACK_REGISTRY_IDENTITY_PREFIX: &str = "ato-loopback";
 
+// NOTE: Reserved publisher names (e.g. "search", "api") are enforced by
+// `apps/ato-store`'s publisher registration validator as part of the
+// ato.run authority policy (see `docs/rfcs/accepted/CAPSULE_HANDLE_SPEC.md`
+// §4.2). The ato-cli URL parser is authority-agnostic and therefore
+// accepts any syntactically valid publisher segment.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputSurface {
@@ -379,6 +385,12 @@ pub fn normalize_capsule_handle(raw: &str) -> Result<CanonicalHandle> {
     }
 
     if let Some(rest) = input.strip_prefix("capsule://ato.run/") {
+        return parse_registry_rest(rest, RegistryIdentity::ato_official());
+    }
+
+    // `capsule://store/` is a deprecated alias for `capsule://ato.run/`.
+    // Accept it at parse time and treat it as the official registry.
+    if let Some(rest) = input.strip_prefix("capsule://store/") {
         return parse_registry_rest(rest, RegistryIdentity::ato_official());
     }
 

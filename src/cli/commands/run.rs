@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::RecvTimeoutError;
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::debug;
@@ -186,23 +186,13 @@ async fn prepare_capsule_target(
 
     debug!(extract_dir = %extract_dir.display(), "Capsule extracted");
 
-    let cas_provider = capsule_core::capsule_v3::CasProvider::from_env();
-    let payload_outcome = capsule_core::capsule_v3::unpack_payload_from_capsule_root_with_provider(
+    let cas_provider = capsule_core::capsule::CasProvider::from_env();
+    capsule_core::capsule::unpack_payload_from_capsule_root_with_provider(
         &extract_dir,
         &extract_dir,
         &cas_provider,
     )
-    .with_context(|| "Failed to extract payload from capsule root (v2/v3)")?;
-    match payload_outcome {
-        capsule_core::capsule_v3::PayloadUnpackOutcome::RestoredFromV3
-        | capsule_core::capsule_v3::PayloadUnpackOutcome::RestoredFromV2 => {}
-        capsule_core::capsule_v3::PayloadUnpackOutcome::RestoredFromV2DueToCasDisabled(reason) => {
-            emit_run_cas_disabled_warning_once(&reason);
-        }
-        capsule_core::capsule_v3::PayloadUnpackOutcome::RestoredFromV2DueToV3Error(err) => {
-            emit_run_v3_fallback_warning_once(&err);
-        }
-    }
+    .with_context(|| "Failed to extract payload from capsule root")?;
     fs::remove_file(extract_dir.join("payload.tar.zst")).ok();
     fs::remove_file(extract_dir.join("payload.tar")).ok();
     debug!("Payload extracted");
@@ -230,26 +220,6 @@ async fn prepare_capsule_target(
     }
 
     Ok(manifest_path)
-}
-
-fn emit_run_cas_disabled_warning_once(reason: &capsule_core::capsule_v3::CasDisableReason) {
-    static STDERR_WARN_ONCE: Once = Once::new();
-    STDERR_WARN_ONCE.call_once(|| {
-        eprintln!(
-            "⚠️  Performance warning: CAS is disabled (reason: {}). Falling back to v2 legacy mode.",
-            reason
-        );
-    });
-}
-
-fn emit_run_v3_fallback_warning_once(error_message: &str) {
-    static STDERR_WARN_ONCE: Once = Once::new();
-    STDERR_WARN_ONCE.call_once(|| {
-        eprintln!(
-            "⚠️  Performance warning: v3 payload reconstruction failed ({}). Falling back to v2 legacy mode.",
-            error_message
-        );
-    });
 }
 
 async fn copy_source_files(

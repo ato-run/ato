@@ -888,13 +888,24 @@ fn normalize_v03_workspace_dependency(
 
 fn infer_capsule_dependency_source_type(source: &str) -> Option<&'static str> {
     let source = source.trim();
-    if source.starts_with("capsule://store/") {
+    if source.starts_with("capsule://store/") || source.starts_with("capsule://ato.run/") {
         Some("store")
     } else if source.starts_with("capsule://github.com/") {
         Some("github")
     } else {
         None
     }
+}
+
+/// Normalize the legacy `capsule://store/` prefix to the canonical
+/// `capsule://ato.run/` form. Old manifests that still use the former alias
+/// are accepted at parse time, but the in-memory representation always uses
+/// the canonical prefix.
+fn normalize_store_alias(source: String) -> String {
+    source
+        .strip_prefix("capsule://store/")
+        .map(|rest| format!("capsule://ato.run/{}", rest))
+        .unwrap_or(source)
 }
 
 fn parse_capsule_dependency_source(
@@ -1032,6 +1043,7 @@ fn normalize_v03_external_dependency(
     let (source, source_type, injection_bindings) = if let Some(source) = raw_dependency.as_str() {
         let (source, injection_bindings) =
             parse_capsule_dependency_source(package_name, alias, source)?;
+        let source = normalize_store_alias(source);
         let source_type = infer_capsule_dependency_source_type(&source).ok_or_else(|| {
             CapsuleError::ParseError(format!(
                 "schema_version=0.3 packages.{}.dependencies.{} uses unsupported capsule source '{}'",
@@ -1059,6 +1071,7 @@ fn normalize_v03_external_dependency(
             })?;
         let (source, mut injection_bindings) =
             parse_capsule_dependency_source(package_name, alias, raw_source)?;
+        let source = normalize_store_alias(source);
         let inferred_source_type = infer_capsule_dependency_source_type(&source).ok_or_else(|| {
             CapsuleError::ParseError(format!(
                 "schema_version=0.3 packages.{}.dependencies.{} uses unsupported capsule source '{}'",
