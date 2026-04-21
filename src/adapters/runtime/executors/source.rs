@@ -34,7 +34,7 @@ use capsule_core::lock_runtime;
 use capsule_core::python_runtime::{
     extend_python_selector_env, normalized_python_runtime_version, python_selector_env,
 };
-use capsule_core::r3_config;
+use capsule_core::runtime_config;
 use capsule_core::router::ManifestData;
 
 pub struct CapsuleProcess {
@@ -77,7 +77,7 @@ pub fn execute(
         let overlay = effective_state
             .map(|state| state.compiler_overlay.clone())
             .unwrap_or_default();
-        let config = r3_config::generate_config_from_lock(
+        let config = runtime_config::generate_config_from_lock(
             lock,
             &resolved,
             &overlay,
@@ -90,9 +90,9 @@ pub fn execute(
                 &effective_state.policy,
             )?;
         }
-        r3_config::write_config(&plan.manifest_path, &config)?;
+        runtime_config::write_config(&plan.manifest_path, &config)?;
     } else {
-        r3_config::generate_and_write_config(
+        runtime_config::generate_and_write_config(
             &plan.manifest_path,
             Some(enforcement.to_string()),
             false,
