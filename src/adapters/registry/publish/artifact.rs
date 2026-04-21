@@ -578,10 +578,7 @@ pub(crate) fn sync_v3_chunks_if_present(
     let cas = match capsule_core::capsule::CasProvider::from_env() {
         capsule_core::capsule::CasProvider::Enabled(store) => store,
         capsule_core::capsule::CasProvider::Disabled(reason) => {
-            capsule_core::capsule::CasProvider::log_disabled_once(
-                "publish_v3_chunk_sync",
-                &reason,
-            );
+            capsule_core::capsule::CasProvider::log_disabled_once("publish_v3_chunk_sync", &reason);
             return Ok(());
         }
     };
@@ -919,7 +916,7 @@ mod tests {
     use axum::response::IntoResponse;
     use axum::routing::{post, put};
     use axum::{Json, Router};
-    use capsule_core::capsule::{set_artifact_hash, PayloadManifest, ChunkMeta};
+    use capsule_core::capsule::{set_artifact_hash, ChunkMeta, PayloadManifest};
     use tar::Builder;
     use tokio::sync::Mutex as AsyncMutex;
     use tokio::time::sleep;

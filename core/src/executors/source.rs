@@ -9,8 +9,8 @@ use crate::{RuntimeMetadata, SessionRunner, SessionRunnerConfig};
 
 use crate::engine;
 use crate::packers::bundle::{build_bundle, PackBundleArgs};
-use crate::runtime_config;
 use crate::router::ManifestData;
+use crate::runtime_config;
 
 pub fn execute(plan: &ManifestData, nacelle_override: Option<PathBuf>) -> Result<i32> {
     let nacelle = engine::discover_nacelle(engine::EngineRequest {

@@ -34,8 +34,8 @@ use capsule_core::lock_runtime;
 use capsule_core::python_runtime::{
     extend_python_selector_env, normalized_python_runtime_version, python_selector_env,
 };
-use capsule_core::runtime_config;
 use capsule_core::router::ManifestData;
+use capsule_core::runtime_config;
 
 pub struct CapsuleProcess {
     pub child: Child,
