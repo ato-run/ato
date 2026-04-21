@@ -274,7 +274,15 @@ fn register_resolved_service(
 }
 
 fn default_socket_dir() -> PathBuf {
-    std::env::temp_dir().join("capsule-ipc")
+    // Prefer ATO_SOCKET_DIR env var for testing / override scenarios.
+    if let Ok(dir) = std::env::var("ATO_SOCKET_DIR") {
+        return PathBuf::from(dir);
+    }
+    dirs::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".ato")
+        .join("run")
+        .join("capsule-ipc")
 }
 
 #[cfg(test)]

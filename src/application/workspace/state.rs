@@ -251,7 +251,7 @@ pub(crate) fn validate_execution_plan_against_policy(
 }
 
 pub(crate) fn validate_config_against_policy(
-    config: &capsule_core::r3_config::ConfigJson,
+    config: &capsule_core::runtime_config::ConfigJson,
     policy: &WorkspacePolicyBundle,
 ) -> Result<(), AtoExecutionError> {
     let mut allow_hosts = Vec::new();

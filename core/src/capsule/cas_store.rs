@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::Builder;
 
-use crate::capsule_v3::manifest::{parse_blake3_digest, CapsuleManifestV3};
+use crate::capsule::manifest::{parse_blake3_digest, PayloadManifest};
 use crate::error::{CapsuleError, Result};
 
 const DEFAULT_CAS_DIR: &str = ".capsule/cas";
@@ -215,7 +215,7 @@ impl CasStore {
         self.put_chunk_zstd_inner(raw_hash, zstd_bytes, true)
     }
 
-    pub fn fsck_manifest(&self, manifest: &CapsuleManifestV3) -> Result<FsckReport> {
+    pub fn fsck_manifest(&self, manifest: &PayloadManifest) -> Result<FsckReport> {
         manifest.validate_core()?;
 
         let mut report = FsckReport::default();
@@ -392,7 +392,7 @@ mod tests {
     use zstd;
 
     use super::{sync_parent_directory, CasStore};
-    use crate::capsule_v3::manifest::{blake3_digest, CapsuleManifestV3, CdcParams, ChunkMeta};
+    use crate::capsule::manifest::{blake3_digest, CdcParams, ChunkMeta, PayloadManifest};
 
     fn compress(data: &[u8]) -> Vec<u8> {
         let mut encoder = zstd::Encoder::new(Vec::new(), 3).unwrap();
@@ -400,9 +400,9 @@ mod tests {
         encoder.finish().unwrap()
     }
 
-    fn sample_manifest(chunks: Vec<ChunkMeta>) -> CapsuleManifestV3 {
+    fn sample_manifest(chunks: Vec<ChunkMeta>) -> PayloadManifest {
         let total_raw_size = chunks.iter().map(|chunk| chunk.raw_size as u64).sum();
-        CapsuleManifestV3 {
+        PayloadManifest {
             schema_version: 3,
             artifact_hash:
                 "blake3:0000000000000000000000000000000000000000000000000000000000000000"

@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use crate::application::ports::publish::PublishArtifactMetadata;
 
-use super::artifact::{PublishArtifactResult, V3SyncPayload};
+use super::artifact::{PublishArtifactResult, SyncPayload};
 
 pub(crate) mod direct;
 pub(crate) mod presigned;
@@ -76,7 +76,7 @@ pub(crate) struct FinalizeUploadRequest {
     #[allow(dead_code)]
     pub(crate) artifact: UploadArtifactDescriptor,
     pub(crate) transfer: TransferArtifactResponse,
-    pub(crate) v3_sync_payload: Option<V3SyncPayload>,
+    pub(crate) sync_payload: Option<SyncPayload>,
 }
 
 #[allow(dead_code)]

@@ -3,7 +3,7 @@ use std::sync::Once;
 
 use tracing::warn;
 
-use crate::capsule_v3::cas_store::CasStore;
+use crate::capsule::cas_store::CasStore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CasDisableReason {

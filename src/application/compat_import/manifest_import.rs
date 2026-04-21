@@ -327,6 +327,8 @@ fn import_target_hints(
             "driver": target.driver,
             "language": target.language,
             "runtime_version": target.runtime_version,
+            "image": target.image,
+            "component": target.component,
             "entrypoint": target.entrypoint,
             "run_command": target.run_command,
             "runtime_tools": target.runtime_tools,

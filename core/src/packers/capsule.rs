@@ -10,7 +10,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tracing::debug;
 use zstd::stream::write::Encoder as ZstdEncoder;
 
-use crate::capsule_v3::{CasStore, FastCdcWriter, FastCdcWriterConfig, V3_PAYLOAD_MANIFEST_PATH};
+use crate::capsule::{CasStore, FastCdcWriter, FastCdcWriterConfig, PAYLOAD_MANIFEST_PATH};
 use crate::common::paths::{
     path_contains_workspace_internal_subtree, path_contains_workspace_state_dir,
 };
@@ -22,8 +22,11 @@ use crate::packers::payload::{
     reconstruct_from_chunks,
 };
 use crate::packers::sbom::{generate_embedded_sbom_from_inputs_async, SbomFileInput, SBOM_PATH};
-use crate::r3_config;
 use crate::router::CompatProjectInput;
+use crate::runtime_config;
+use crate::types::signing::{
+    sign_capsule_artifact, CapsuleArtifactSignaturePlaceholder, SignatureJsonContent, StoredKey,
+};
 
 const README_CANDIDATES: [&str; 4] = ["README.md", "README.mdx", "README.txt", "README"];
 
@@ -43,9 +46,12 @@ pub struct CapsulePackOptions {
     pub compat_input: Option<CompatProjectInput>,
     pub workspace_root: PathBuf,
     pub output: Option<PathBuf>,
-    pub config_json: Arc<r3_config::ConfigJson>,
+    pub config_json: Arc<runtime_config::ConfigJson>,
     pub config_path: PathBuf,
     pub lockfile_path: PathBuf,
+    /// Optional signing key. When present, `signature.json` will contain a valid
+    /// Ed25519 signature. When absent, a `{"signed": false, ...}` placeholder is written.
+    pub signing_key: Option<StoredKey>,
 }
 
 #[derive(Debug, Clone)]
@@ -270,7 +276,7 @@ pub async fn pack(
         "Generated manifest hash={}",
         manifest_hash(&distribution_manifest)?
     );
-    let payload_v3_manifest_bytes = maybe_build_payload_v3_manifest(&payload_tar_bytes)?;
+    let payload_payload_manifest_bytes = maybe_build_payload_payload_manifest(&payload_tar_bytes)?;
 
     // Step 4: Create final .capsule archive
     debug!("Phase 3: creating final .capsule archive");
@@ -317,19 +323,38 @@ pub async fn pack(
         reproducible_mtime_epoch(),
     )?;
 
-    // Add signature.json metadata
+    // Build signature.json.
+    // If a signing_key is provided, compute SHA-256 of manifest+payload and produce a real
+    // Ed25519 signature. Otherwise write a placeholder so the file always exists at the
+    // expected position for streaming verifiers.
     let sig_temp_path = temp_dir.path().join("signature.json");
-    let signature = serde_json::json!({
-        "signed": false,
-        "note": "To be signed",
-        "sbom": {
-            "path": SBOM_PATH,
-            "sha256": sbom.sha256,
-            "format": "spdx-json",
-        }
+    let sbom_value = serde_json::json!({
+        "path": SBOM_PATH,
+        "sha256": sbom.sha256,
+        "format": "spdx-json",
     });
-    let signature_bytes = serde_jcs::to_vec(&signature).map_err(|e| {
-        CapsuleError::Pack(format!("Failed to serialize signature metadata (JCS): {e}"))
+    let signature_content: SignatureJsonContent = match &opts.signing_key {
+        Some(stored_key) => {
+            let payload_bytes = fs::read(&payload_zst_path).map_err(|e| {
+                CapsuleError::Pack(format!("Failed to read payload for signing: {e}"))
+            })?;
+            let artifact_sig =
+                sign_capsule_artifact(&manifest_toml_bytes, &payload_bytes, stored_key, None)
+                    .map_err(|e| CapsuleError::Pack(format!("Failed to sign capsule: {e}")))?;
+            debug!(
+                "Signed capsule with key_id={} manifest_hash={} payload_hash={}",
+                artifact_sig.key_id, artifact_sig.manifest_hash, artifact_sig.payload_hash
+            );
+            SignatureJsonContent::Signed(artifact_sig)
+        }
+        None => SignatureJsonContent::Unsigned(CapsuleArtifactSignaturePlaceholder {
+            signed: false,
+            note: "To be signed".to_string(),
+            sbom: Some(sbom_value),
+        }),
+    };
+    let signature_bytes = serde_jcs::to_vec(&signature_content).map_err(|e| {
+        CapsuleError::Pack(format!("Failed to serialize signature.json (JCS): {e}"))
     })?;
     fs::write(&sig_temp_path, signature_bytes)?;
     append_regular_file_normalized(
@@ -347,13 +372,16 @@ pub async fn pack(
         reproducible_mtime_epoch(),
     )?;
 
-    if let Some(payload_v3_manifest_bytes) = payload_v3_manifest_bytes {
-        let payload_v3_manifest_path = temp_dir.path().join(V3_PAYLOAD_MANIFEST_PATH);
-        fs::write(&payload_v3_manifest_path, payload_v3_manifest_bytes)?;
+    if let Some(payload_payload_manifest_bytes) = payload_payload_manifest_bytes {
+        let payload_payload_manifest_path = temp_dir.path().join(PAYLOAD_MANIFEST_PATH);
+        fs::write(
+            &payload_payload_manifest_path,
+            payload_payload_manifest_bytes,
+        )?;
         append_regular_file_normalized(
             &mut outer_ar,
-            &payload_v3_manifest_path,
-            V3_PAYLOAD_MANIFEST_PATH,
+            &payload_payload_manifest_path,
+            PAYLOAD_MANIFEST_PATH,
             reproducible_mtime_epoch(),
         )?;
     }
@@ -879,13 +907,15 @@ fn read_payload_tar_bytes_from_zst(payload_zst_path: &Path) -> CapsuleResult<Vec
     Ok(out)
 }
 
-fn maybe_build_payload_v3_manifest(payload_tar_bytes: &[u8]) -> CapsuleResult<Option<Vec<u8>>> {
+fn maybe_build_payload_payload_manifest(
+    payload_tar_bytes: &[u8],
+) -> CapsuleResult<Option<Vec<u8>>> {
     if !experimental_v3_pack_enabled()? {
         return Ok(None);
     }
 
     let cas = CasStore::from_env()?;
-    let manifest_bytes = build_payload_v3_manifest_bytes_with_cas(
+    let manifest_bytes = build_payload_payload_manifest_bytes_with_cas(
         payload_tar_bytes,
         cas,
         FastCdcWriterConfig::default(),
@@ -893,7 +923,7 @@ fn maybe_build_payload_v3_manifest(payload_tar_bytes: &[u8]) -> CapsuleResult<Op
     Ok(Some(manifest_bytes))
 }
 
-fn build_payload_v3_manifest_bytes_with_cas(
+fn build_payload_payload_manifest_bytes_with_cas(
     payload_tar_bytes: &[u8],
     cas: CasStore,
     config: FastCdcWriterConfig,
@@ -953,7 +983,7 @@ mod tests {
     use tempfile;
     use toml;
 
-    use crate::capsule_v3::{verify_artifact_hash, CapsuleManifestV3};
+    use crate::capsule::{verify_artifact_hash, PayloadManifest};
     use crate::packers::pack_filter::PackFilter;
     use crate::packers::payload::reconstruct_from_chunks;
     use crate::packers::sbom::SBOM_PATH;
@@ -962,7 +992,7 @@ mod tests {
     use crate::types::CapsuleManifest;
 
     use super::{
-        build_payload_v3_manifest_bytes_with_cas, collect_payload_entries,
+        build_payload_payload_manifest_bytes_with_cas, collect_payload_entries,
         find_nearest_readme_candidate, pack, parse_bool_env, select_payload_roots,
         select_payload_source_root, CapsulePackOptions, CasStore, FastCdcWriterConfig,
     };
@@ -1129,18 +1159,18 @@ run = "source/main.sh""#,
     }
 
     #[test]
-    fn build_payload_v3_manifest_populates_cas_and_produces_valid_manifest() {
+    fn build_payload_payload_manifest_populates_cas_and_produces_valid_manifest() {
         let cas_root = tempfile::tempdir().expect("cas tempdir");
         let cas = CasStore::new(cas_root.path()).expect("cas store");
 
-        let manifest_bytes = build_payload_v3_manifest_bytes_with_cas(
+        let manifest_bytes = build_payload_payload_manifest_bytes_with_cas(
             b"payload bytes for v3",
             cas.clone(),
             FastCdcWriterConfig::default(),
         )
         .expect("build payload v3 manifest");
 
-        let manifest: CapsuleManifestV3 =
+        let manifest: PayloadManifest =
             serde_json::from_slice(&manifest_bytes).expect("parse v3 manifest");
         verify_artifact_hash(&manifest).expect("verify artifact hash");
         let fsck = cas.fsck_manifest(&manifest).expect("fsck manifest");
@@ -1184,11 +1214,15 @@ manifest_hash = "sha256:dummy"
         .expect("write lockfile");
 
         let config = Arc::new(
-            crate::r3_config::generate_config(&manifest_path, Some("strict".to_string()), false)
-                .expect("generate config"),
+            crate::runtime_config::generate_config(
+                &manifest_path,
+                Some("strict".to_string()),
+                false,
+            )
+            .expect("generate config"),
         );
-        let config_path =
-            crate::r3_config::write_config(&manifest_path, config.as_ref()).expect("write config");
+        let config_path = crate::runtime_config::write_config(&manifest_path, config.as_ref())
+            .expect("write config");
 
         let decision =
             crate::router::route_manifest(&manifest_path, ExecutionProfile::Release, None)
@@ -1205,6 +1239,7 @@ manifest_hash = "sha256:dummy"
                 config_json: config.clone(),
                 config_path: config_path.clone(),
                 lockfile_path: lock_path.clone(),
+                signing_key: None,
             },
             Arc::new(NoOpReporter),
         )
@@ -1220,6 +1255,7 @@ manifest_hash = "sha256:dummy"
                 config_json: config,
                 config_path,
                 lockfile_path: lock_path,
+                signing_key: None,
             },
             Arc::new(NoOpReporter),
         )
@@ -1263,11 +1299,15 @@ manifest_hash = "sha256:dummy"
         .expect("write lockfile");
 
         let config = Arc::new(
-            crate::r3_config::generate_config(&manifest_path, Some("strict".to_string()), false)
-                .expect("generate config"),
+            crate::runtime_config::generate_config(
+                &manifest_path,
+                Some("strict".to_string()),
+                false,
+            )
+            .expect("generate config"),
         );
-        let config_path =
-            crate::r3_config::write_config(&manifest_path, config.as_ref()).expect("write config");
+        let config_path = crate::runtime_config::write_config(&manifest_path, config.as_ref())
+            .expect("write config");
         let decision =
             crate::router::route_manifest(&manifest_path, ExecutionProfile::Release, None)
                 .expect("route");
@@ -1281,6 +1321,7 @@ manifest_hash = "sha256:dummy"
                 config_json: config,
                 config_path,
                 lockfile_path: lock_path,
+                signing_key: None,
             },
             Arc::new(NoOpReporter),
         )
