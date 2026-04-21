@@ -838,6 +838,7 @@ mod tests {
                 read_only_paths: vec![PathBuf::from("/usr")],
                 network_enabled: true,
                 egress_allow: vec![],
+                egress_id_allow: vec![],
             };
 
             let sandbox = SandboxPolicy::from_isolation_policy(&policy, false);
@@ -910,6 +911,7 @@ mod tests {
             read_only_paths: vec![PathBuf::from("/usr")],
             network_enabled: true,
             egress_allow: vec![],
+            egress_id_allow: vec![],
         };
 
         let sandbox = SandboxPolicy::from_isolation_policy(&isolation, false);

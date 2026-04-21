@@ -606,6 +606,20 @@ fn generate_production_seatbelt_profile(
                 iso.egress_allow
             );
         }
+        if !iso.egress_id_allow.is_empty() {
+            // macOS Seatbelt cannot enforce CIDR-level rules either; document the constraint.
+            profile.push_str(
+                ";; Note: egress_id_allow CIDR rules require tsnet sidecar (not enforced by Seatbelt).\n",
+            );
+            profile.push_str(&format!(
+                ";; Configured CIDRs: {:?}\n",
+                iso.egress_id_allow
+            ));
+            warn!(
+                "egress_id_allow ({:?}) is not enforceable via Seatbelt. Relies on tsnet sidecar.",
+                iso.egress_id_allow
+            );
+        }
         // else: network enabled, no egress restrictions → full network via (allow default)
     } else {
         // Default behavior: network denied for safety
@@ -784,6 +798,7 @@ mod tests {
             read_write_paths: vec![PathBuf::from("/data/writable")],
             network_enabled: true,
             egress_allow: vec!["api.example.com".to_string()],
+            egress_id_allow: vec![],
         };
 
         let target = SourceTarget {
@@ -838,6 +853,7 @@ mod tests {
             read_write_paths: vec![],
             network_enabled: true,
             egress_allow: vec![],
+            egress_id_allow: vec![],
         };
 
         let target = SourceTarget {
@@ -956,6 +972,7 @@ mod tests {
                 read_write_paths: vec![],
                 network_enabled: false,
                 egress_allow: vec![],
+                egress_id_allow: vec![],
             }),
             ipc_socket_paths: vec![],
             injected_mounts: vec![],
