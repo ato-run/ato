@@ -10,8 +10,8 @@ use crate::common::paths::workspace_artifacts_dir;
 use crate::error::{CapsuleError, Result};
 use crate::lockfile::{resolve_existing_lockfile_path, CAPSULE_LOCK_FILE_NAME};
 use crate::packers::pack_filter::load_pack_filter_from_path;
-use crate::runtime_config::resolve_existing_config_path;
 use crate::router::CompatProjectInput;
+use crate::runtime_config::resolve_existing_config_path;
 use crate::types::CapsuleManifest;
 
 /// Magic bytes to identify self-extracting v2 bundles.

@@ -157,10 +157,7 @@ pub fn write_signature_file(
         meta_map.insert("signer".to_string(), Value::String(signer.clone()));
     }
     if let Some(prev_key) = &metadata.previous_key {
-        meta_map.insert(
-            "previous_key".to_string(),
-            Value::String(prev_key.clone()),
-        );
+        meta_map.insert("previous_key".to_string(), Value::String(prev_key.clone()));
     }
     for (key, value) in &metadata.extra {
         meta_map.insert(key.clone(), value.clone());
@@ -359,8 +356,8 @@ pub fn sign_capsule_artifact(
         "manifest_hash": manifest_hash,
         "payload_hash": payload_hash,
     });
-    let canonical = serde_jcs::to_vec(&pre_image)
-        .map_err(|e| anyhow!("JCS canonicalization failed: {e}"))?;
+    let canonical =
+        serde_jcs::to_vec(&pre_image).map_err(|e| anyhow!("JCS canonicalization failed: {e}"))?;
 
     let sig: Signature = signing_key.sign(&canonical);
 
@@ -418,8 +415,8 @@ pub fn verify_capsule_artifact_signature(
         "manifest_hash": sig.manifest_hash,
         "payload_hash": sig.payload_hash,
     });
-    let canonical = serde_jcs::to_vec(&pre_image)
-        .map_err(|e| anyhow!("JCS canonicalization failed: {e}"))?;
+    let canonical =
+        serde_jcs::to_vec(&pre_image).map_err(|e| anyhow!("JCS canonicalization failed: {e}"))?;
 
     let sig_bytes = BASE64
         .decode(&sig.signature)
@@ -558,8 +555,7 @@ mod tests {
 
         let sig = sign_capsule_artifact(manifest_bytes, payload_bytes, &stored, None).unwrap();
         let tampered = b"[package]\nname = \"evil\"";
-        let err =
-            verify_capsule_artifact_signature(&sig, tampered, payload_bytes).unwrap_err();
+        let err = verify_capsule_artifact_signature(&sig, tampered, payload_bytes).unwrap_err();
         assert!(
             err.to_string().contains("manifest_hash mismatch"),
             "expected manifest_hash mismatch, got: {err}"

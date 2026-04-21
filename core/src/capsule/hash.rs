@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::capsule::manifest::{validate_blake3_digest, PayloadManifest, CdcParams};
+use crate::capsule::manifest::{validate_blake3_digest, CdcParams, PayloadManifest};
 use crate::error::{CapsuleError, Result};
 
 #[derive(Serialize)]

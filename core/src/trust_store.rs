@@ -243,4 +243,3 @@ mod tests {
         assert_eq!(back.revoked.len(), 1);
     }
 }
-

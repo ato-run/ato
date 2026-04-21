@@ -1562,7 +1562,10 @@ run = "index.html"
 "#,
         )
         .unwrap();
-        assert_eq!(super::manifest_routing::resolve_v03_target(&manifest, None).unwrap(), "app");
+        assert_eq!(
+            super::manifest_routing::resolve_v03_target(&manifest, None).unwrap(),
+            "app"
+        );
     }
 
     #[test]
@@ -1618,7 +1621,8 @@ port = 4173
         )
         .unwrap();
 
-        let model = super::manifest_routing::synthesize_runtime_model_from_v03(&manifest, "app").unwrap();
+        let model =
+            super::manifest_routing::synthesize_runtime_model_from_v03(&manifest, "app").unwrap();
 
         assert_eq!(model.selected.runtime.runtime, "web");
         assert_eq!(model.selected.runtime.driver.as_deref(), Some("static"));
@@ -1642,7 +1646,8 @@ port = 3000
         )
         .unwrap();
 
-        let model = super::manifest_routing::synthesize_runtime_model_from_v03(&manifest, "app").unwrap();
+        let model =
+            super::manifest_routing::synthesize_runtime_model_from_v03(&manifest, "app").unwrap();
 
         assert_eq!(model.selected.runtime.runtime, "source");
         assert_eq!(model.selected.runtime.driver.as_deref(), Some("node"));
@@ -1669,7 +1674,8 @@ port = 8000
         )
         .unwrap();
 
-        let model = super::manifest_routing::synthesize_runtime_model_from_v03(&manifest, "api").unwrap();
+        let model =
+            super::manifest_routing::synthesize_runtime_model_from_v03(&manifest, "api").unwrap();
 
         assert_eq!(model.selected.runtime.runtime, "source");
         assert_eq!(model.selected.runtime.driver.as_deref(), Some("python"));
@@ -1691,7 +1697,10 @@ port = 8000
             super::manifest_routing::split_v03_runtime("source/node"),
             ("source".to_string(), Some("node".to_string()))
         );
-        assert_eq!(super::manifest_routing::split_v03_runtime("oci"), ("oci".to_string(), None));
+        assert_eq!(
+            super::manifest_routing::split_v03_runtime("oci"),
+            ("oci".to_string(), None)
+        );
         assert_eq!(
             super::manifest_routing::split_v03_runtime("source/go"),
             ("source".to_string(), Some("native".to_string()))

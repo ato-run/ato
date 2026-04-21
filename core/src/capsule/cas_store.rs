@@ -392,7 +392,7 @@ mod tests {
     use zstd;
 
     use super::{sync_parent_directory, CasStore};
-    use crate::capsule::manifest::{blake3_digest, PayloadManifest, CdcParams, ChunkMeta};
+    use crate::capsule::manifest::{blake3_digest, CdcParams, ChunkMeta, PayloadManifest};
 
     fn compress(data: &[u8]) -> Vec<u8> {
         let mut encoder = zstd::Encoder::new(Vec::new(), 3).unwrap();
