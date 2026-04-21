@@ -26,6 +26,7 @@ use anyhow::Result;
 
 use crate::application::ports::OutputPort;
 use crate::auth;
+use crate::cli::shared::EncapVisibility;
 use crate::cli::{Cli, Commands};
 use crate::commands;
 use crate::project as crate_project;
@@ -138,8 +139,9 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
 
         Commands::Encap {
             path,
-            share,
-            save_only,
+            internal,
+            private,
+            local,
             print_plan,
             dry_run,
             git_mode,
@@ -147,19 +149,29 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             allow_dirty,
             yes,
             save_config,
-        } => share::execute_encap_command(share::EncapCommandArgs {
-            path,
-            share,
-            save_only,
-            print_plan,
-            dry_run,
-            git_mode,
-            tool_runtime,
-            allow_dirty,
-            yes,
-            save_config,
-            reporter: reporter.clone(),
-        }),
+        } => {
+            let visibility = if internal {
+                EncapVisibility::Internal
+            } else if private {
+                EncapVisibility::Private
+            } else if local {
+                EncapVisibility::Local
+            } else {
+                EncapVisibility::Public
+            };
+            share::execute_encap_command(share::EncapCommandArgs {
+                path,
+                visibility,
+                print_plan,
+                dry_run,
+                git_mode,
+                tool_runtime,
+                allow_dirty,
+                yes,
+                save_config,
+                reporter: reporter.clone(),
+            })
+        }
 
         Commands::Decap {
             input,
