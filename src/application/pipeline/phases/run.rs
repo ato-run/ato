@@ -1725,7 +1725,7 @@ where
         .map(|driver| {
             matches!(
                 driver.trim().to_ascii_lowercase().as_str(),
-                "deno" | "node" | "python"
+                "deno" | "node" | "python" | "wasmtime"
             )
         })
         .unwrap_or(false);
