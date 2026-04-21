@@ -215,6 +215,7 @@ pub fn pack(
                 config_json: opts.config_json,
                 config_path: opts.config_path,
                 lockfile_path,
+                signing_key: None,
             },
             reporter.clone(),
         ))?;
