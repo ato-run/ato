@@ -124,6 +124,8 @@ pub struct SignatureMetadata {
     pub manifest_sha256: String,
     pub signer: Option<String>,
     pub timestamp: DateTime<Utc>,
+    /// DID of the previous signing key (for key rotation; see §4.4 of the spec).
+    pub previous_key: Option<String>,
     pub extra: BTreeMap<String, Value>,
 }
 
@@ -153,6 +155,12 @@ pub fn write_signature_file(
     );
     if let Some(signer) = &metadata.signer {
         meta_map.insert("signer".to_string(), Value::String(signer.clone()));
+    }
+    if let Some(prev_key) = &metadata.previous_key {
+        meta_map.insert(
+            "previous_key".to_string(),
+            Value::String(prev_key.clone()),
+        );
     }
     for (key, value) in &metadata.extra {
         meta_map.insert(key.clone(), value.clone());
@@ -453,11 +461,11 @@ mod tests {
             manifest_sha256: "def".to_string(),
             signer: None,
             timestamp: Utc::now(),
+            previous_key: None,
             extra: BTreeMap::new(),
         };
-
         let dir = tempdir().unwrap();
-        let path = dir.path().join("developer.sig");
+        let path = dir.path().join("test.sig");
         write_signature_file(&path, &signing_key.verifying_key(), &signature, &metadata).unwrap();
         let sig = read_signature_file(&path).unwrap();
         ensure_signature_matches_manifest(&sig, &stored.developer_key_fingerprint()).unwrap();
@@ -509,6 +517,7 @@ mod tests {
             manifest_sha256: "def".to_string(),
             signer: Some(did.clone()),
             timestamp: Utc::now(),
+            previous_key: None,
             extra: BTreeMap::new(),
         };
 
