@@ -506,7 +506,7 @@ pub fn filter_terminal_env(env: Vec<(String, String)>, mode: &str) -> Vec<(Strin
     match mode {
         "minimal" => env
             .into_iter()
-            .filter(|(k, _)| ALWAYS_ALLOW.iter().any(|allowed| *allowed == k.as_str()))
+            .filter(|(k, _)| ALWAYS_ALLOW.contains(&k.as_str()))
             .collect(),
         "passthrough" => env,
         // "safe" is the default
