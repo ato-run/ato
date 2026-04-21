@@ -338,16 +338,14 @@ mod tests {
     use zstd;
 
     use super::{
-        unpack_payload_from_capsule_root_with_provider, unpack_payload_from_manifest,
-        unpack_payload_from_manifest_file_with_cas, ChainedChunkReader, PAYLOAD_MANIFEST_PATH,
-        STAGING_PREFIX,
+        unpack_payload_from_manifest, unpack_payload_from_manifest_file_with_cas,
+        ChainedChunkReader, PAYLOAD_MANIFEST_PATH, STAGING_PREFIX,
     };
     use crate::capsule::manifest::{blake3_digest, CdcParams, ChunkMeta, PayloadManifest};
     use crate::capsule::set_artifact_hash;
 
-    use crate::capsule::{CasDisableReason, CasProvider, CasStore};
+    use crate::capsule::CasStore;
 
-    use std::collections::BTreeMap;
 
     use std::fs;
 
@@ -442,29 +440,6 @@ mod tests {
     fn write_manifest(root: &Path, manifest: &PayloadManifest) {
         let bytes = serde_jcs::to_vec(manifest).unwrap();
         fs::write(root.join(PAYLOAD_MANIFEST_PATH), bytes).unwrap();
-    }
-
-    fn snapshot_files(dir: &Path) -> BTreeMap<String, String> {
-        let mut map = BTreeMap::new();
-        let mut stack = vec![dir.to_path_buf()];
-        while let Some(current) = stack.pop() {
-            for entry in fs::read_dir(&current).unwrap() {
-                let entry = entry.unwrap();
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                let rel = path
-                    .strip_prefix(dir)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                let bytes = fs::read(&path).unwrap();
-                map.insert(rel, blake3_digest(&bytes));
-            }
-        }
-        map
     }
 
     #[test]

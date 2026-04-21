@@ -489,7 +489,7 @@ fn default_socket_dir() -> PathBuf {
         return PathBuf::from(dir);
     }
     dirs::home_dir()
-        .unwrap_or_else(|| std::env::temp_dir())
+        .unwrap_or_else(std::env::temp_dir)
         .join(".ato")
         .join("run")
         .join("capsule-ipc")
