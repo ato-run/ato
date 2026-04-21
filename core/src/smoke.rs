@@ -354,7 +354,7 @@ fn extract_capsule(capsule_path: &Path, out_dir: &Path) -> Result<(), CapsuleErr
     let mut outer = tar::Archive::new(&mut archive);
     outer.unpack(out_dir).map_err(CapsuleError::Io)?;
 
-    crate::capsule_v3::unpack_payload_from_capsule_root(out_dir, out_dir)?;
+    crate::capsule::unpack_payload_from_capsule_root(out_dir, out_dir)?;
 
     Ok(())
 }

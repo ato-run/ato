@@ -10,7 +10,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tracing::debug;
 use zstd::stream::write::Encoder as ZstdEncoder;
 
-use crate::capsule_v3::{CasStore, FastCdcWriter, FastCdcWriterConfig, V3_PAYLOAD_MANIFEST_PATH};
+use crate::capsule::{CasStore, FastCdcWriter, FastCdcWriterConfig, PAYLOAD_MANIFEST_PATH};
 use crate::common::paths::{
     path_contains_workspace_internal_subtree, path_contains_workspace_state_dir,
 };
@@ -276,7 +276,7 @@ pub async fn pack(
         "Generated manifest hash={}",
         manifest_hash(&distribution_manifest)?
     );
-    let payload_v3_manifest_bytes = maybe_build_payload_v3_manifest(&payload_tar_bytes)?;
+    let payload_payload_manifest_bytes = maybe_build_payload_payload_manifest(&payload_tar_bytes)?;
 
     // Step 4: Create final .capsule archive
     debug!("Phase 3: creating final .capsule archive");
@@ -373,13 +373,13 @@ pub async fn pack(
     )?;
 
 
-    if let Some(payload_v3_manifest_bytes) = payload_v3_manifest_bytes {
-        let payload_v3_manifest_path = temp_dir.path().join(V3_PAYLOAD_MANIFEST_PATH);
-        fs::write(&payload_v3_manifest_path, payload_v3_manifest_bytes)?;
+    if let Some(payload_payload_manifest_bytes) = payload_payload_manifest_bytes {
+        let payload_payload_manifest_path = temp_dir.path().join(PAYLOAD_MANIFEST_PATH);
+        fs::write(&payload_payload_manifest_path, payload_payload_manifest_bytes)?;
         append_regular_file_normalized(
             &mut outer_ar,
-            &payload_v3_manifest_path,
-            V3_PAYLOAD_MANIFEST_PATH,
+            &payload_payload_manifest_path,
+            PAYLOAD_MANIFEST_PATH,
             reproducible_mtime_epoch(),
         )?;
     }
@@ -905,13 +905,13 @@ fn read_payload_tar_bytes_from_zst(payload_zst_path: &Path) -> CapsuleResult<Vec
     Ok(out)
 }
 
-fn maybe_build_payload_v3_manifest(payload_tar_bytes: &[u8]) -> CapsuleResult<Option<Vec<u8>>> {
+fn maybe_build_payload_payload_manifest(payload_tar_bytes: &[u8]) -> CapsuleResult<Option<Vec<u8>>> {
     if !experimental_v3_pack_enabled()? {
         return Ok(None);
     }
 
     let cas = CasStore::from_env()?;
-    let manifest_bytes = build_payload_v3_manifest_bytes_with_cas(
+    let manifest_bytes = build_payload_payload_manifest_bytes_with_cas(
         payload_tar_bytes,
         cas,
         FastCdcWriterConfig::default(),
@@ -919,7 +919,7 @@ fn maybe_build_payload_v3_manifest(payload_tar_bytes: &[u8]) -> CapsuleResult<Op
     Ok(Some(manifest_bytes))
 }
 
-fn build_payload_v3_manifest_bytes_with_cas(
+fn build_payload_payload_manifest_bytes_with_cas(
     payload_tar_bytes: &[u8],
     cas: CasStore,
     config: FastCdcWriterConfig,
@@ -979,7 +979,7 @@ mod tests {
     use tempfile;
     use toml;
 
-    use crate::capsule_v3::{verify_artifact_hash, CapsuleManifestV3};
+    use crate::capsule::{verify_artifact_hash, PayloadManifest};
     use crate::packers::pack_filter::PackFilter;
     use crate::packers::payload::reconstruct_from_chunks;
     use crate::packers::sbom::SBOM_PATH;
@@ -988,7 +988,7 @@ mod tests {
     use crate::types::CapsuleManifest;
 
     use super::{
-        build_payload_v3_manifest_bytes_with_cas, collect_payload_entries,
+        build_payload_payload_manifest_bytes_with_cas, collect_payload_entries,
         find_nearest_readme_candidate, pack, parse_bool_env, select_payload_roots,
         select_payload_source_root, CapsulePackOptions, CasStore, FastCdcWriterConfig,
     };
@@ -1155,18 +1155,18 @@ run = "source/main.sh""#,
     }
 
     #[test]
-    fn build_payload_v3_manifest_populates_cas_and_produces_valid_manifest() {
+    fn build_payload_payload_manifest_populates_cas_and_produces_valid_manifest() {
         let cas_root = tempfile::tempdir().expect("cas tempdir");
         let cas = CasStore::new(cas_root.path()).expect("cas store");
 
-        let manifest_bytes = build_payload_v3_manifest_bytes_with_cas(
+        let manifest_bytes = build_payload_payload_manifest_bytes_with_cas(
             b"payload bytes for v3",
             cas.clone(),
             FastCdcWriterConfig::default(),
         )
         .expect("build payload v3 manifest");
 
-        let manifest: CapsuleManifestV3 =
+        let manifest: PayloadManifest =
             serde_json::from_slice(&manifest_bytes).expect("parse v3 manifest");
         verify_artifact_hash(&manifest).expect("verify artifact hash");
         let fsck = cas.fsck_manifest(&manifest).expect("fsck manifest");
