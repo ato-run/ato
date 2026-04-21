@@ -140,3 +140,29 @@ cargo test -p ato-cli
 ## License
 
 Apache License 2.0 (SPDX: Apache-2.0). See [LICENSE](LICENSE).
+
+## capsule.toml reference
+
+Every capsule is declared by a `capsule.toml` manifest in the project root.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `schema_version` | ✓ | Manifest schema version, e.g. `"0.3"` |
+| `name` | ✓ | Unique capsule identifier (lowercase, hyphens allowed) |
+| `version` | ✓ | Semver string, e.g. `"0.1.0"` |
+| `type` | ✓ | `"app"`, `"service"`, or `"tool"` |
+| `run` | ✓ | Command to execute, e.g. `"python main.py"` |
+| `runtime` | | Runtime hint, e.g. `"source/python"` or `"source/node"` |
+| `runtime_version` | | Pinned version, e.g. `"3.12"` |
+| `description` | | Human-readable description |
+
+Minimal example:
+
+```toml
+schema_version = "0.3"
+name           = "my-capsule"
+version        = "0.1.0"
+type           = "app"
+run            = "python main.py"
+runtime        = "source/python"
+```
