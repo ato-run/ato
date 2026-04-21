@@ -508,6 +508,46 @@ pub struct CapsuleManifest {
     /// Distribution metadata generated at pack/publish time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distribution: Option<DistributionInfo>,
+
+    /// Foundation conformance requirements (Part I — spec-level, Foundation scope).
+    ///
+    /// Declares which Foundation-defined runtime profiles and engine versions this capsule
+    /// requires.  Absent means no Foundation conformance assertion; the capsule runs on any
+    /// conformant ato implementation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foundation_requirements: Option<FoundationRequirements>,
+}
+
+/// Foundation conformance requirements (§3.6, Part I of the Capsule Protocol spec).
+///
+/// Declares which Foundation-approved runtime profile and engine constraints this capsule
+/// requires.  A conformant ato implementation MUST reject execution if it cannot satisfy
+/// the declared `profile` or if the requested engines are not available in a compatible
+/// version.
+///
+/// All fields are optional; an empty `FoundationRequirements` block is equivalent to
+/// omitting the section entirely.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FoundationRequirements {
+    /// Foundation-approved runtime profile identifier (e.g. "std.secure", "std.network").
+    ///
+    /// A runtime profile is an opaque string defined by the Foundation registry.  The ato
+    /// implementation MUST verify that the running environment satisfies this profile before
+    /// launching the capsule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+
+    /// List of runtime tool requirements (name@version-range pairs).
+    ///
+    /// Examples: `["python@>=3.11", "node@>=20"]`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtimes: Vec<String>,
+
+    /// List of engine capability requirements (name@version-range pairs).
+    ///
+    /// Examples: `["nacelle@>=0.4", "bwrap@>=0.8"]`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engines: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
