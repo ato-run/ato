@@ -24,6 +24,9 @@ use crate::packers::payload::{
 use crate::packers::sbom::{generate_embedded_sbom_from_inputs_async, SbomFileInput, SBOM_PATH};
 use crate::r3_config;
 use crate::router::CompatProjectInput;
+use crate::types::signing::{
+    sign_capsule_artifact, CapsuleArtifactSignaturePlaceholder, SignatureJsonContent, StoredKey,
+};
 
 const README_CANDIDATES: [&str; 4] = ["README.md", "README.mdx", "README.txt", "README"];
 
@@ -46,6 +49,9 @@ pub struct CapsulePackOptions {
     pub config_json: Arc<r3_config::ConfigJson>,
     pub config_path: PathBuf,
     pub lockfile_path: PathBuf,
+    /// Optional signing key. When present, `signature.json` will contain a valid
+    /// Ed25519 signature. When absent, a `{"signed": false, ...}` placeholder is written.
+    pub signing_key: Option<StoredKey>,
 }
 
 #[derive(Debug, Clone)]
@@ -317,19 +323,38 @@ pub async fn pack(
         reproducible_mtime_epoch(),
     )?;
 
-    // Add signature.json metadata
+    // Build signature.json.
+    // If a signing_key is provided, compute SHA-256 of manifest+payload and produce a real
+    // Ed25519 signature. Otherwise write a placeholder so the file always exists at the
+    // expected position for streaming verifiers.
     let sig_temp_path = temp_dir.path().join("signature.json");
-    let signature = serde_json::json!({
-        "signed": false,
-        "note": "To be signed",
-        "sbom": {
-            "path": SBOM_PATH,
-            "sha256": sbom.sha256,
-            "format": "spdx-json",
-        }
+    let sbom_value = serde_json::json!({
+        "path": SBOM_PATH,
+        "sha256": sbom.sha256,
+        "format": "spdx-json",
     });
-    let signature_bytes = serde_jcs::to_vec(&signature).map_err(|e| {
-        CapsuleError::Pack(format!("Failed to serialize signature metadata (JCS): {e}"))
+    let signature_content: SignatureJsonContent = match &opts.signing_key {
+        Some(stored_key) => {
+            let payload_bytes = fs::read(&payload_zst_path).map_err(|e| {
+                CapsuleError::Pack(format!("Failed to read payload for signing: {e}"))
+            })?;
+            let artifact_sig =
+                sign_capsule_artifact(&manifest_toml_bytes, &payload_bytes, stored_key, None)
+                    .map_err(|e| CapsuleError::Pack(format!("Failed to sign capsule: {e}")))?;
+            debug!(
+                "Signed capsule with key_id={} manifest_hash={} payload_hash={}",
+                artifact_sig.key_id, artifact_sig.manifest_hash, artifact_sig.payload_hash
+            );
+            SignatureJsonContent::Signed(artifact_sig)
+        }
+        None => SignatureJsonContent::Unsigned(CapsuleArtifactSignaturePlaceholder {
+            signed: false,
+            note: "To be signed".to_string(),
+            sbom: Some(sbom_value),
+        }),
+    };
+    let signature_bytes = serde_jcs::to_vec(&signature_content).map_err(|e| {
+        CapsuleError::Pack(format!("Failed to serialize signature.json (JCS): {e}"))
     })?;
     fs::write(&sig_temp_path, signature_bytes)?;
     append_regular_file_normalized(
@@ -346,6 +371,7 @@ pub async fn pack(
         "payload.tar.zst",
         reproducible_mtime_epoch(),
     )?;
+
 
     if let Some(payload_v3_manifest_bytes) = payload_v3_manifest_bytes {
         let payload_v3_manifest_path = temp_dir.path().join(V3_PAYLOAD_MANIFEST_PATH);
@@ -1205,6 +1231,7 @@ manifest_hash = "sha256:dummy"
                 config_json: config.clone(),
                 config_path: config_path.clone(),
                 lockfile_path: lock_path.clone(),
+                signing_key: None,
             },
             Arc::new(NoOpReporter),
         )
@@ -1220,6 +1247,7 @@ manifest_hash = "sha256:dummy"
                 config_json: config,
                 config_path,
                 lockfile_path: lock_path,
+                signing_key: None,
             },
             Arc::new(NoOpReporter),
         )
@@ -1281,6 +1309,7 @@ manifest_hash = "sha256:dummy"
                 config_json: config,
                 config_path,
                 lockfile_path: lock_path,
+                signing_key: None,
             },
             Arc::new(NoOpReporter),
         )
