@@ -1,4 +1,4 @@
-//! Capsule Manifest v0.2 Schema
+//! Capsule Manifest v0.3 Schema
 //!
 //! Implements the "Everything is a Capsule" paradigm for Gumball v0.3.0.
 //! Supports both TOML (human-authored) and JSON (machine-generated) formats.
@@ -387,12 +387,12 @@ pub struct ReadinessProbe {
     pub port: String,
 }
 
-/// Capsule Manifest v0.2
+/// Capsule Manifest v0.3
 ///
 /// The primary configuration format for all Capsules in Gumball v0.3.0+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapsuleManifest {
-    /// Schema version (must be "0.2")
+    /// Schema version (must be "0.3")
     #[serde(default = "default_schema_version")]
     pub schema_version: String,
 
@@ -1325,7 +1325,7 @@ impl CapsuleManifest {
 
         if raw.get("execution").is_some() {
             return Err(CapsuleError::ParseError(
-                "legacy [execution] section is not supported in schema_version=0.2".to_string(),
+                "legacy [execution] section is not supported in schema_version=0.3".to_string(),
             ));
         }
 
@@ -1364,7 +1364,7 @@ impl CapsuleManifest {
             .map_err(|e| CapsuleError::ParseError(format!("JSON parse error: {}", e)))?;
         if raw.get("execution").is_some() {
             return Err(CapsuleError::ParseError(
-                "legacy [execution] section is not supported in schema_version=0.2".to_string(),
+                "legacy [execution] section is not supported in schema_version=0.3".to_string(),
             ));
         }
 
