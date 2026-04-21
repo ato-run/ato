@@ -685,7 +685,7 @@ mod tests {
                 registry_url: base_url,
                 artifact,
                 transfer,
-                v3_sync_payload: None,
+                sync_payload: None,
             })
             .expect("finalize");
 
@@ -771,7 +771,7 @@ mod tests {
                 registry_url: base_url,
                 artifact,
                 transfer,
-                v3_sync_payload: None,
+                sync_payload: None,
             })
             .expect("finalize");
 
