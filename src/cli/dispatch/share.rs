@@ -3,13 +3,12 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::application::share;
-use crate::cli::shared::{GitMode, ShareToolRuntime};
+use crate::cli::shared::{EncapVisibility, GitMode, ShareToolRuntime};
 use crate::reporters::CliReporter;
 
 pub(crate) struct EncapCommandArgs {
     pub(crate) path: std::path::PathBuf,
-    pub(crate) share: bool,
-    pub(crate) save_only: bool,
+    pub(crate) visibility: EncapVisibility,
     pub(crate) print_plan: bool,
     pub(crate) dry_run: bool,
     pub(crate) git_mode: GitMode,
@@ -33,8 +32,7 @@ pub(crate) fn execute_encap_command(args: EncapCommandArgs) -> Result<()> {
     share::execute_encap(
         share::EncapArgs {
             path: args.path,
-            share: args.share,
-            save_only: args.save_only,
+            visibility: args.visibility,
             print_plan: args.print_plan,
             dry_run: args.dry_run,
             git_mode: args.git_mode,

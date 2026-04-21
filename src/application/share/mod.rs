@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::application::auth;
-use crate::cli::{GitMode, ShareToolRuntime};
+use crate::cli::{EncapVisibility, GitMode, ShareToolRuntime};
 use crate::fs_copy;
 use crate::reporters::CliReporter;
 
@@ -108,8 +108,7 @@ struct CapsuleTomlShare {
 #[derive(Debug, Clone)]
 pub(crate) struct EncapArgs {
     pub(crate) path: PathBuf,
-    pub(crate) share: bool,
-    pub(crate) save_only: bool,
+    pub(crate) visibility: EncapVisibility,
     pub(crate) print_plan: bool,
     pub(crate) dry_run: bool,
     pub(crate) git_mode: GitMode,
@@ -441,8 +440,8 @@ pub(crate) fn execute_encap(args: EncapArgs, reporter: Arc<CliReporter>) -> Resu
         output.guide_path.display()
     )))?;
 
-    if args.share && !args.save_only {
-        match upload_share(&spec, &lock, &guide) {
+    if args.visibility != EncapVisibility::Local {
+        match upload_share(&spec, &lock, &guide, args.visibility.as_api_str()) {
             Ok(uploaded) => {
                 futures::executor::block_on(reporter.notify(format!(
                     "🔗 Share URL: {}\n🔒 Revision URL: {}",
@@ -2274,7 +2273,12 @@ fn api_base_for_share_host(host: &str) -> String {
     format!("https://{}", host)
 }
 
-fn upload_share(spec: &ShareSpec, lock: &ShareLock, guide: &str) -> Result<ShareRevisionPayload> {
+fn upload_share(
+    spec: &ShareSpec,
+    lock: &ShareLock,
+    guide: &str,
+    visibility: &str,
+) -> Result<ShareRevisionPayload> {
     let token = auth::require_session_token()?;
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(DEFAULT_API_TIMEOUT_SECS))
@@ -2286,7 +2290,7 @@ fn upload_share(spec: &ShareSpec, lock: &ShareLock, guide: &str) -> Result<Share
         .header("Accept", "application/json")
         .json(&ShareApiCreateRequest {
             title: spec.name.clone(),
-            visibility: "unlisted".to_string(),
+            visibility: visibility.to_string(),
             spec: spec.clone(),
             lock: lock.clone(),
             guide_markdown: guide.to_string(),
