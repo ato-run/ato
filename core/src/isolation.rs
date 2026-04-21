@@ -130,6 +130,12 @@ impl HostIsolationContext {
                 command.env(key, value);
             }
         }
+        // Pass through CAPSULE_* prefix vars from the host environment (spec §2.4).
+        for (key, value) in std::env::vars() {
+            if key.starts_with("CAPSULE_") {
+                command.env(&key, value);
+            }
+        }
         command.envs(&self.vars);
         for (key, value) in extra_env {
             if self.protects_key(&key) {
@@ -140,6 +146,16 @@ impl HostIsolationContext {
     }
 }
 
+/// Environment variables passed through from the host to the capsule subprocess.
+///
+/// Spec §2.4 baseline: `PATH`, `LANG`, `HOME` (reconstructed by `HostIsolationContext`),
+/// and `CAPSULE_*` prefix (handled separately in `apply_to_command`).
+///
+/// The proxy and TLS certificate variables below are pragmatic additions beyond the
+/// strict spec minimum. They are needed for capsules running behind corporate proxies
+/// or on systems with custom CA bundles, where stripping them would silently break
+/// outbound TLS. The Windows-specific vars (`SYSTEMROOT`, `WINDIR`, `COMSPEC`,
+/// `PATHEXT`) are required for the Windows runtime to function at all.
 pub fn passthrough_env_keys() -> &'static [&'static str] {
     &[
         "PATH",
