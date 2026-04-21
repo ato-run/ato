@@ -1031,9 +1031,12 @@ struct LockfileStoreDistributionResponse {
 
 fn parse_store_capsule_source(source: &str) -> Result<StoreCapsuleSource> {
     let raw = source.trim();
-    let raw = raw.strip_prefix("capsule://store/").ok_or_else(|| {
-        CapsuleError::Pack(format!("Unsupported capsule dependency source: {}", source))
-    })?;
+    let raw = raw
+        .strip_prefix("capsule://store/")
+        .or_else(|| raw.strip_prefix("capsule://ato.run/"))
+        .ok_or_else(|| {
+            CapsuleError::Pack(format!("Unsupported capsule dependency source: {}", source))
+        })?;
     let raw = raw.split_once('?').map(|(path, _)| path).unwrap_or(raw);
     let (path_part, version) = raw
         .rsplit_once('@')

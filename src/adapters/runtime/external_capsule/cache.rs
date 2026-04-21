@@ -117,9 +117,10 @@ fn verify_artifact_bytes(locked: &LockedCapsuleDependency, bytes: &[u8]) -> Resu
 }
 
 fn parse_store_source_identity(source: &str) -> Result<(String, String)> {
-    let raw = source
-        .trim()
+    let raw = source.trim();
+    let raw = raw
         .strip_prefix("capsule://store/")
+        .or_else(|| raw.strip_prefix("capsule://ato.run/"))
         .ok_or_else(|| anyhow::anyhow!("unsupported store source '{}'", source))?;
     let raw = raw.split_once('?').map(|(path, _)| path).unwrap_or(raw);
     let raw = raw.split_once('@').map(|(path, _)| path).unwrap_or(raw);
