@@ -19,7 +19,7 @@ export function LocalFooter(): JSX.Element {
         </div>
         <nav className="flex space-x-6 text-sm text-[var(--fg-secondary,#525252)]" aria-label="footer">
           <a
-            href="https://store.ato.run/privacy"
+            href="https://ato.run/privacy"
             className="hover:text-[var(--fg,#0a0a0a)] transition-colors"
             target="_blank"
             rel="noreferrer"

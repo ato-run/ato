@@ -896,7 +896,7 @@ mod tests {
 
     #[test]
     fn build_resolution_for_web_url_uses_web_strategy() {
-        let resolution = build_resolution("https://store.ato.run", None, None).expect("resolve");
+        let resolution = build_resolution("https://ato.run", None, None).expect("resolve");
         assert_eq!(resolution.kind, HandleKind::WebUrl);
         assert_eq!(resolution.render_strategy, RenderStrategy::Web);
         assert!(resolution.target.is_none());
