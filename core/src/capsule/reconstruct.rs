@@ -3,8 +3,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::capsule::{
-    verify_artifact_hash, PayloadManifest, CasProvider, CasStore,
-    PAYLOAD_MANIFEST_PATH,
+    verify_artifact_hash, CasProvider, CasStore, PayloadManifest, PAYLOAD_MANIFEST_PATH,
 };
 use crate::error::{CapsuleError, Result};
 
@@ -339,11 +338,11 @@ mod tests {
     use zstd;
 
     use super::{
-        unpack_payload_from_capsule_root_with_provider,
-        unpack_payload_from_manifest_file_with_cas, unpack_payload_from_manifest,
-        ChainedChunkReader, PAYLOAD_MANIFEST_PATH, STAGING_PREFIX,
+        unpack_payload_from_capsule_root_with_provider, unpack_payload_from_manifest,
+        unpack_payload_from_manifest_file_with_cas, ChainedChunkReader, PAYLOAD_MANIFEST_PATH,
+        STAGING_PREFIX,
     };
-    use crate::capsule::manifest::{blake3_digest, PayloadManifest, CdcParams, ChunkMeta};
+    use crate::capsule::manifest::{blake3_digest, CdcParams, ChunkMeta, PayloadManifest};
     use crate::capsule::set_artifact_hash;
 
     use crate::capsule::{CasDisableReason, CasProvider, CasStore};
@@ -557,11 +556,7 @@ mod tests {
         let staging_leftover = fs::read_dir(out.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .any(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with(STAGING_PREFIX)
-            });
+            .any(|e| e.file_name().to_string_lossy().starts_with(STAGING_PREFIX));
         assert!(!staging_leftover);
     }
 
@@ -589,11 +584,7 @@ mod tests {
         let staging_leftover = fs::read_dir(out.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .any(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with(STAGING_PREFIX)
-            });
+            .any(|e| e.file_name().to_string_lossy().starts_with(STAGING_PREFIX));
         assert!(!staging_leftover);
 
         let large_files = fs::read_dir(out.path())

@@ -144,9 +144,7 @@ pub struct TsnetSidecarConfig {
     pub allow_net: Vec<String>,
 }
 
-
 mod builder;
-
 
 pub fn generate_and_write_config(
     manifest_path: &Path,

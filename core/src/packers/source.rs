@@ -8,9 +8,9 @@ use crate::error::{CapsuleError, Result};
 use crate::lockfile;
 use crate::packers::bundle::{build_bundle, PackBundleArgs};
 use crate::packers::capsule as capsule_packer;
-use crate::runtime_config;
 use crate::resource::cas::create_cas_client_from_env;
 use crate::router::{CompatManifestBridge, CompatProjectInput, ManifestData};
+use crate::runtime_config;
 use crate::validation;
 use tracing::debug;
 
@@ -69,7 +69,8 @@ pub fn prepare_source_config_from_descriptor(
         Some(enforcement),
         standalone,
     )?);
-    let config_path = runtime_config::write_config_in_dir(&plan.workspace_root, config_json.as_ref())?;
+    let config_path =
+        runtime_config::write_config_in_dir(&plan.workspace_root, config_json.as_ref())?;
     Ok(PreparedSourceConfig {
         config_json,
         config_path,

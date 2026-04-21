@@ -189,12 +189,7 @@ mod tests {
                 "alias {} hash should start with sha256:",
                 alias
             );
-            assert_eq!(
-                hash.len(),
-                7 + 64,
-                "alias {} hash has wrong length",
-                alias
-            );
+            assert_eq!(hash.len(), 7 + 64, "alias {} hash has wrong length", alias);
         }
     }
 
@@ -214,4 +209,3 @@ mod tests {
         assert_eq!(resolved, custom_hash);
     }
 }
-

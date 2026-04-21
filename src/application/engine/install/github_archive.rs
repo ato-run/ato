@@ -171,10 +171,7 @@ pub(crate) async fn sync_v3_chunks_from_manifest(
     let cas = match capsule_core::capsule::CasProvider::from_env() {
         capsule_core::capsule::CasProvider::Enabled(store) => store,
         capsule_core::capsule::CasProvider::Disabled(reason) => {
-            capsule_core::capsule::CasProvider::log_disabled_once(
-                "install_v3_chunk_sync",
-                &reason,
-            );
+            capsule_core::capsule::CasProvider::log_disabled_once("install_v3_chunk_sync", &reason);
             return Ok(V3SyncOutcome::SkippedDisabledCas(reason));
         }
     };

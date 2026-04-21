@@ -1526,7 +1526,7 @@ mod tests;
 #[cfg(test)]
 mod wasm_component_test {
     use super::*;
-    
+
     #[test]
     fn test_wasm_component_preserved() {
         let toml = r#"
@@ -1545,7 +1545,7 @@ component = "hello.wasm"
         let model = CapsuleManifest::from_toml(toml).unwrap();
         let serialized = model.to_toml().unwrap();
         eprintln!("Serialized:\n{}", serialized);
-        
+
         let targets = model.targets.as_ref().unwrap();
         let app_target = targets.named.get("app").unwrap();
         eprintln!("component field: {:?}", app_target.component);
