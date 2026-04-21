@@ -8,12 +8,11 @@ const OFFICIAL_REGISTRY_DISPLAY_AUTHORITY: &str = "ato.run";
 const OFFICIAL_REGISTRY_IDENTITY: &str = "ato-official";
 const LOOPBACK_REGISTRY_IDENTITY_PREFIX: &str = "ato-loopback";
 
-// Publisher names reserved for first-party use or routing disambiguation.
-// Accepting these as user-registered publishers would create ambiguous URIs
-// (e.g. `capsule://ato.run/search/foo` colliding with a search endpoint).
-const RESERVED_PUBLISHERS: &[&str] = &[
-    "search", "topic", "user", "store", "api", "registry", "help", "docs", "status",
-];
+// NOTE: Reserved publisher names (e.g. "search", "api") are enforced by
+// `apps/ato-store`'s publisher registration validator as part of the
+// ato.run authority policy (see `docs/rfcs/accepted/CAPSULE_HANDLE_SPEC.md`
+// §4.2). The ato-cli URL parser is authority-agnostic and therefore
+// accepts any syntactically valid publisher segment.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -488,13 +487,6 @@ fn parse_registry_rest(rest: &str, registry: RegistryIdentity) -> Result<Canonic
         return Err(CapsuleError::Config(
             "registry handle must use publisher/slug".to_string(),
         ));
-    }
-
-    if RESERVED_PUBLISHERS.contains(&publisher.as_str()) {
-        return Err(CapsuleError::Config(format!(
-            "publisher name '{}' is reserved",
-            publisher
-        )));
     }
 
     Ok(CanonicalHandle::RegistryCapsule {
