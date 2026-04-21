@@ -149,9 +149,15 @@ pub struct TerminalConfig {
     pub env_filter: String,
 }
 
-fn default_cols() -> u16 { 80 }
-fn default_rows() -> u16 { 24 }
-fn default_env_filter() -> String { "safe".to_string() }
+fn default_cols() -> u16 {
+    80
+}
+fn default_rows() -> u16 {
+    24
+}
+fn default_env_filter() -> String {
+    "safe".to_string()
+}
 
 /// Request envelope for exec command
 #[derive(Debug, Deserialize)]
@@ -1099,15 +1105,11 @@ async fn handle_exec_v1_shell(envelope: ExecEnvelope) -> Result<()> {
         None => default_shell(),
     };
 
-    let source_dir = envelope
-        .cwd
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("/"))
-        });
+    let source_dir = envelope.cwd.as_ref().map(PathBuf::from).unwrap_or_else(|| {
+        std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/"))
+    });
 
     let env_pairs = merge_workload_env(envelope.env, envelope.ipc_env);
 
@@ -1137,7 +1139,11 @@ async fn handle_exec_v1_shell(envelope: ExecEnvelope) -> Result<()> {
     let request = LaunchRequest {
         workload_id: &run_id,
         bundle_root: source_dir,
-        env: if env_pairs.is_empty() { None } else { Some(env_pairs) },
+        env: if env_pairs.is_empty() {
+            None
+        } else {
+            Some(env_pairs)
+        },
         args: None,
         source_target: Some(source_target),
         socket_manager: None,
@@ -1219,14 +1225,7 @@ async fn execute_prepared_launch(
 
     let (term_cols, term_rows, term_shell, term_env_filter) = terminal
         .as_ref()
-        .map(|t| {
-            (
-                t.cols,
-                t.rows,
-                t.shell.clone(),
-                t.env_filter.clone(),
-            )
-        })
+        .map(|t| (t.cols, t.rows, t.shell.clone(), t.env_filter.clone()))
         .unwrap_or((80, 24, None, "safe".to_string()));
 
     let source_target = SourceTarget {

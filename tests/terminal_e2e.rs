@@ -51,10 +51,15 @@ impl TerminalHarness {
         fs::write(&envelope_path, envelope.to_string()).expect("write envelope");
 
         let mut cmd = Command::new(nacelle_bin());
-        cmd.args(["internal", "--input", &envelope_path.to_string_lossy(), "exec"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.args([
+            "internal",
+            "--input",
+            &envelope_path.to_string_lossy(),
+            "exec",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
         for (k, v) in extra_env {
             cmd.env(k, v);
@@ -260,7 +265,12 @@ fn t02_shell_allowlist_rejects_unlisted_binary() {
     let envelope_path = write_envelope(temp_dir.path(), &envelope);
 
     let output = Command::new(nacelle_bin())
-        .args(["internal", "--input", &envelope_path.to_string_lossy(), "exec"])
+        .args([
+            "internal",
+            "--input",
+            &envelope_path.to_string_lossy(),
+            "exec",
+        ])
         .output()
         .expect("run nacelle");
 
@@ -286,7 +296,12 @@ fn t12_shell_workload_requires_interactive_true() {
     let envelope_path = write_envelope(temp_dir.path(), &envelope);
 
     let output = Command::new(nacelle_bin())
-        .args(["internal", "--input", &envelope_path.to_string_lossy(), "exec"])
+        .args([
+            "internal",
+            "--input",
+            &envelope_path.to_string_lossy(),
+            "exec",
+        ])
         .output()
         .expect("run nacelle");
 
@@ -324,11 +339,8 @@ fn t13_nacelle_exits_after_shell_exit_with_code() {
 
 #[test]
 fn t03_env_filter_safe_strips_secrets() {
-    let mut h = TerminalHarness::spawn_with_env(
-        "/bin/sh",
-        "safe",
-        &[("FAKE_API_KEY", "LEAKED_VALUE_42")],
-    );
+    let mut h =
+        TerminalHarness::spawn_with_env("/bin/sh", "safe", &[("FAKE_API_KEY", "LEAKED_VALUE_42")]);
 
     thread::sleep(Duration::from_millis(500));
 
@@ -349,11 +361,8 @@ fn t03_env_filter_safe_strips_secrets() {
 
 #[test]
 fn t04_env_filter_blocks_dangerous_vars() {
-    let mut h = TerminalHarness::spawn_with_env(
-        "/bin/sh",
-        "safe",
-        &[("LD_PRELOAD", "/tmp/evil.so")],
-    );
+    let mut h =
+        TerminalHarness::spawn_with_env("/bin/sh", "safe", &[("LD_PRELOAD", "/tmp/evil.so")]);
 
     thread::sleep(Duration::from_millis(500));
 
@@ -461,11 +470,8 @@ fn t08_output_sanitizer_strips_osc52_clipboard() {
 
 #[test]
 fn t05_env_filter_minimal_only_allows_safe_vars() {
-    let mut h = TerminalHarness::spawn_with_env(
-        "/bin/sh",
-        "minimal",
-        &[("CUSTOM_SHOULD_VANISH", "gone")],
-    );
+    let mut h =
+        TerminalHarness::spawn_with_env("/bin/sh", "minimal", &[("CUSTOM_SHOULD_VANISH", "gone")]);
 
     thread::sleep(Duration::from_millis(500));
 
