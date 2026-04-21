@@ -138,7 +138,12 @@ mod tests {
         assert!(json.contains(r#""kind":"invoke""#));
         assert!(json.contains("42"));
         let back: GuestBridgeRequest = serde_json::from_str(&json).unwrap();
-        if let GuestBridgeRequest::Invoke { request_id, command, .. } = back {
+        if let GuestBridgeRequest::Invoke {
+            request_id,
+            command,
+            ..
+        } = back
+        {
             assert_eq!(request_id, 42);
             assert_eq!(command, "read-file");
         } else {

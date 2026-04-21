@@ -71,8 +71,9 @@ manifest_hash = "sha256:dummy"
         Some("strict".to_string()),
         false,
     )?);
-    let config_path = capsule_core::runtime_config::write_config(&manifest_path, config_json.as_ref())
-        .context("write config.json")?;
+    let config_path =
+        capsule_core::runtime_config::write_config(&manifest_path, config_json.as_ref())
+            .context("write config.json")?;
 
     let decision = capsule_core::router::route_manifest(
         &manifest_path,

@@ -5,7 +5,7 @@ use std::thread;
 
 use crate::capsule::hash::set_artifact_hash;
 use crate::capsule::manifest::blake3_digest;
-use crate::capsule::{PayloadManifest, CasStore, CdcParams, ChunkMeta};
+use crate::capsule::{CasStore, CdcParams, ChunkMeta, PayloadManifest};
 use crate::error::{CapsuleError, Result};
 
 const COMPACTION_THRESHOLD_BYTES: usize = 8 * 1024 * 1024;

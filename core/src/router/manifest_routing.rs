@@ -77,10 +77,7 @@ pub(super) fn synthesize_runtime_model_from_manifest(
 /// * Single-app manifests use `default_target` if present, otherwise `"app"`.
 /// * Workspace manifests (`[packages]`) use `default_target` or the first
 ///   runnable package name.
-pub(super) fn resolve_v03_target(
-    manifest: &toml::Value,
-    explicit: Option<&str>,
-) -> Result<String> {
+pub(super) fn resolve_v03_target(manifest: &toml::Value, explicit: Option<&str>) -> Result<String> {
     if let Some(label) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
         return Ok(label.to_string());
     }

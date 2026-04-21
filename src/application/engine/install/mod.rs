@@ -1289,8 +1289,12 @@ async fn complete_install_from_bytes(
     let computed_blake3 = compute_blake3(&bytes);
     if let Some(payload_manifest) = extract_payload_payload_manifest_from_capsule(&bytes)? {
         if let Some(registry_url) = source.registry_url() {
-            match sync_v3_chunks_from_manifest(&reqwest::Client::new(), registry_url, &payload_manifest)
-                .await?
+            match sync_v3_chunks_from_manifest(
+                &reqwest::Client::new(),
+                registry_url,
+                &payload_manifest,
+            )
+            .await?
             {
                 V3SyncOutcome::Synced => {}
                 V3SyncOutcome::SkippedUnsupportedRegistry => {

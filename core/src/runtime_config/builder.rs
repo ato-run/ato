@@ -52,7 +52,6 @@ struct ManifestReadinessProbe {
     port: String,
 }
 
-
 pub(super) fn build_config_json(
     compat_input: &CompatProjectInput,
     enforcement_override: Option<String>,
@@ -280,7 +279,10 @@ fn build_target_service_spec(service: &ResolvedService, standalone: bool) -> Res
     })
 }
 
-pub(super) fn build_lock_service_spec(service: &LockServiceUnit, standalone: bool) -> Result<ServiceSpec> {
+pub(super) fn build_lock_service_spec(
+    service: &LockServiceUnit,
+    standalone: bool,
+) -> Result<ServiceSpec> {
     let layout = source_layout_hint(service.runtime.source_layout.as_deref());
     let (executable, args, env) = resolve_target_command(&service.runtime, standalone, layout);
     Ok(ServiceSpec {
@@ -1288,4 +1290,3 @@ fn sha256_hex(data: &[u8]) -> String {
     let digest = hasher.finalize();
     hex::encode(digest)
 }
-
