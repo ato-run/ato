@@ -2,12 +2,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CapsuleError, Result};
 
-pub const CAPSULE_MANIFEST_V3_SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 3;
 pub const BLAKE3_PREFIX: &str = "blake3:";
-pub const V3_PAYLOAD_MANIFEST_PATH: &str = "payload.v3.manifest.json";
+pub const PAYLOAD_MANIFEST_PATH: &str = "payload.v3.manifest.json";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct CapsuleManifestV3 {
+pub struct PayloadManifest {
     pub schema_version: u32,
     pub artifact_hash: String,
     pub cdc_params: CdcParams,
@@ -31,11 +31,11 @@ pub struct ChunkMeta {
     pub zstd_size_hint: Option<u32>,
 }
 
-impl CapsuleManifestV3 {
+impl PayloadManifest {
     pub fn new(chunks: Vec<ChunkMeta>) -> Self {
         let total_raw_size = chunks.iter().map(|chunk| chunk.raw_size as u64).sum();
         Self {
-            schema_version: CAPSULE_MANIFEST_V3_SCHEMA_VERSION,
+            schema_version: SCHEMA_VERSION,
             artifact_hash: String::new(),
             cdc_params: CdcParams::default_fastcdc(),
             total_raw_size,
@@ -49,10 +49,10 @@ impl CapsuleManifestV3 {
     }
 
     pub(crate) fn validate_core(&self) -> Result<()> {
-        if self.schema_version != CAPSULE_MANIFEST_V3_SCHEMA_VERSION {
+        if self.schema_version != SCHEMA_VERSION {
             return Err(CapsuleError::Config(format!(
-                "capsule v3 schema_version must be {}, got {}",
-                CAPSULE_MANIFEST_V3_SCHEMA_VERSION, self.schema_version
+                "payload schema_version must be {}, got {}",
+                SCHEMA_VERSION, self.schema_version
             )));
         }
 
@@ -64,7 +64,7 @@ impl CapsuleManifestV3 {
         let computed_total: u64 = self.chunks.iter().map(|chunk| chunk.raw_size as u64).sum();
         if computed_total != self.total_raw_size {
             return Err(CapsuleError::Config(format!(
-                "capsule v3 total_raw_size mismatch: expected {}, got {}",
+                "payload total_raw_size mismatch: expected {}, got {}",
                 computed_total, self.total_raw_size
             )));
         }
@@ -153,11 +153,11 @@ pub fn validate_blake3_digest(label: &str, value: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{blake3_digest, CapsuleManifestV3, ChunkMeta};
+    use super::{blake3_digest, PayloadManifest, ChunkMeta};
 
     #[test]
     fn validate_rejects_invalid_schema_version() {
-        let mut manifest = CapsuleManifestV3::new(Vec::new());
+        let mut manifest = PayloadManifest::new(Vec::new());
         manifest.schema_version = 2;
         manifest.artifact_hash = blake3_digest(b"manifest");
         assert!(manifest.validate().is_err());
@@ -165,14 +165,14 @@ mod tests {
 
     #[test]
     fn validate_rejects_invalid_digest() {
-        let mut manifest = CapsuleManifestV3::new(Vec::new());
+        let mut manifest = PayloadManifest::new(Vec::new());
         manifest.artifact_hash = "blake3:XYZ".to_string();
         assert!(manifest.validate().is_err());
     }
 
     #[test]
     fn validate_rejects_size_mismatch() {
-        let mut manifest = CapsuleManifestV3::new(vec![ChunkMeta {
+        let mut manifest = PayloadManifest::new(vec![ChunkMeta {
             raw_hash: blake3_digest(b"abc"),
             raw_size: 3,
             zstd_size_hint: Some(10),

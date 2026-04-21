@@ -1,10 +1,10 @@
 use serde::Serialize;
 
-use crate::capsule_v3::manifest::{validate_blake3_digest, CapsuleManifestV3, CdcParams};
+use crate::capsule::manifest::{validate_blake3_digest, PayloadManifest, CdcParams};
 use crate::error::{CapsuleError, Result};
 
 #[derive(Serialize)]
-struct CapsuleManifestV3HashCore<'a> {
+struct PayloadManifestHashCore<'a> {
     schema_version: u32,
     cdc_params: &'a CdcParams,
     total_raw_size: u64,
@@ -17,7 +17,7 @@ struct ChunkMetaHashCore<'a> {
     raw_size: u32,
 }
 
-pub fn compute_artifact_hash_jcs_blake3(manifest: &CapsuleManifestV3) -> Result<String> {
+pub fn compute_artifact_hash_jcs_blake3(manifest: &PayloadManifest) -> Result<String> {
     manifest.validate_core()?;
 
     let core = build_hash_core(manifest);
@@ -30,12 +30,12 @@ pub fn compute_artifact_hash_jcs_blake3(manifest: &CapsuleManifestV3) -> Result<
     Ok(format!("blake3:{}", blake3::hash(&canonical).to_hex()))
 }
 
-pub fn set_artifact_hash(manifest: &mut CapsuleManifestV3) -> Result<()> {
+pub fn set_artifact_hash(manifest: &mut PayloadManifest) -> Result<()> {
     manifest.artifact_hash = compute_artifact_hash_jcs_blake3(manifest)?;
     Ok(())
 }
 
-pub fn verify_artifact_hash(manifest: &CapsuleManifestV3) -> Result<()> {
+pub fn verify_artifact_hash(manifest: &PayloadManifest) -> Result<()> {
     validate_blake3_digest("artifact_hash", &manifest.artifact_hash)?;
     let expected = compute_artifact_hash_jcs_blake3(manifest)?;
     if manifest.artifact_hash != expected {
@@ -47,8 +47,8 @@ pub fn verify_artifact_hash(manifest: &CapsuleManifestV3) -> Result<()> {
     Ok(())
 }
 
-fn build_hash_core(manifest: &CapsuleManifestV3) -> CapsuleManifestV3HashCore<'_> {
-    CapsuleManifestV3HashCore {
+fn build_hash_core(manifest: &PayloadManifest) -> PayloadManifestHashCore<'_> {
+    PayloadManifestHashCore {
         schema_version: manifest.schema_version,
         cdc_params: &manifest.cdc_params,
         total_raw_size: manifest.total_raw_size,
@@ -66,11 +66,11 @@ fn build_hash_core(manifest: &CapsuleManifestV3) -> CapsuleManifestV3HashCore<'_
 #[cfg(test)]
 mod tests {
     use super::{compute_artifact_hash_jcs_blake3, set_artifact_hash, verify_artifact_hash};
-    use crate::capsule_v3::manifest::{blake3_digest, CdcParams, ChunkMeta};
-    use crate::capsule_v3::CapsuleManifestV3;
+    use crate::capsule::manifest::{blake3_digest, CdcParams, ChunkMeta};
+    use crate::capsule::PayloadManifest;
 
-    fn sample_manifest() -> CapsuleManifestV3 {
-        CapsuleManifestV3 {
+    fn sample_manifest() -> PayloadManifest {
+        PayloadManifest {
             schema_version: 3,
             artifact_hash: String::new(),
             cdc_params: CdcParams::default_fastcdc(),
@@ -111,8 +111,8 @@ mod tests {
             "artifact_hash":"",
             "schema_version":3
         }"#;
-        let left: CapsuleManifestV3 = serde_json::from_str(json_a).unwrap();
-        let right: CapsuleManifestV3 = serde_json::from_str(json_b).unwrap();
+        let left: PayloadManifest = serde_json::from_str(json_a).unwrap();
+        let right: PayloadManifest = serde_json::from_str(json_b).unwrap();
         let left_hash = compute_artifact_hash_jcs_blake3(&left).unwrap();
         let right_hash = compute_artifact_hash_jcs_blake3(&right).unwrap();
         assert_eq!(left_hash, right_hash);
