@@ -502,10 +502,7 @@ const ALWAYS_ALLOW: &[&str] = &[
 /// - `"safe"`: Remove vars matching `SECRET_PATTERNS` or `DANGEROUS_VARS`
 /// - `"minimal"`: Keep only vars in `ALWAYS_ALLOW`
 /// - `"passthrough"`: No filtering (development mode only)
-pub fn filter_terminal_env(
-    env: Vec<(String, String)>,
-    mode: &str,
-) -> Vec<(String, String)> {
+pub fn filter_terminal_env(env: Vec<(String, String)>, mode: &str) -> Vec<(String, String)> {
     match mode {
         "minimal" => env
             .into_iter()
@@ -597,7 +594,11 @@ fn find_osc_end(data: &[u8], start: usize) -> usize {
 
 fn is_safe_osc(osc: &[u8]) -> bool {
     // osc starts with ESC ]
-    let body = if osc.len() >= 2 { &osc[2..] } else { return false };
+    let body = if osc.len() >= 2 {
+        &osc[2..]
+    } else {
+        return false;
+    };
 
     // Parse OSC number
     let semi = body.iter().position(|&b| b == b';');
@@ -663,7 +664,10 @@ mod tests {
     fn test_default_shell_fallback() {
         // Even if $SHELL is unset or invalid, default_shell returns a valid path
         let shell = default_shell();
-        assert!(shell.starts_with('/'), "default_shell must return an absolute path");
+        assert!(
+            shell.starts_with('/'),
+            "default_shell must return an absolute path"
+        );
     }
 
     // ── Environment filter tests ─────────────────────────────────────────────
@@ -736,7 +740,10 @@ mod tests {
         let input = b"\x1bPsomepayload\x1b\\visible";
         let output = sanitize_pty_output(input);
         let output_str = std::str::from_utf8(&output).unwrap();
-        assert!(!output_str.contains("somepayload"), "DCS should be stripped");
+        assert!(
+            !output_str.contains("somepayload"),
+            "DCS should be stripped"
+        );
         assert!(output_str.contains("visible"));
     }
 
