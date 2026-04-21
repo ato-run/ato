@@ -22,7 +22,7 @@ use crate::packers::payload::{
     reconstruct_from_chunks,
 };
 use crate::packers::sbom::{generate_embedded_sbom_from_inputs_async, SbomFileInput, SBOM_PATH};
-use crate::r3_config;
+use crate::runtime_config;
 use crate::router::CompatProjectInput;
 use crate::types::signing::{
     sign_capsule_artifact, CapsuleArtifactSignaturePlaceholder, SignatureJsonContent, StoredKey,
@@ -46,7 +46,7 @@ pub struct CapsulePackOptions {
     pub compat_input: Option<CompatProjectInput>,
     pub workspace_root: PathBuf,
     pub output: Option<PathBuf>,
-    pub config_json: Arc<r3_config::ConfigJson>,
+    pub config_json: Arc<runtime_config::ConfigJson>,
     pub config_path: PathBuf,
     pub lockfile_path: PathBuf,
     /// Optional signing key. When present, `signature.json` will contain a valid
@@ -1210,11 +1210,11 @@ manifest_hash = "sha256:dummy"
         .expect("write lockfile");
 
         let config = Arc::new(
-            crate::r3_config::generate_config(&manifest_path, Some("strict".to_string()), false)
+            crate::runtime_config::generate_config(&manifest_path, Some("strict".to_string()), false)
                 .expect("generate config"),
         );
         let config_path =
-            crate::r3_config::write_config(&manifest_path, config.as_ref()).expect("write config");
+            crate::runtime_config::write_config(&manifest_path, config.as_ref()).expect("write config");
 
         let decision =
             crate::router::route_manifest(&manifest_path, ExecutionProfile::Release, None)
@@ -1291,11 +1291,11 @@ manifest_hash = "sha256:dummy"
         .expect("write lockfile");
 
         let config = Arc::new(
-            crate::r3_config::generate_config(&manifest_path, Some("strict".to_string()), false)
+            crate::runtime_config::generate_config(&manifest_path, Some("strict".to_string()), false)
                 .expect("generate config"),
         );
         let config_path =
-            crate::r3_config::write_config(&manifest_path, config.as_ref()).expect("write config");
+            crate::runtime_config::write_config(&manifest_path, config.as_ref()).expect("write config");
         let decision =
             crate::router::route_manifest(&manifest_path, ExecutionProfile::Release, None)
                 .expect("route");
