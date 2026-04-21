@@ -17,8 +17,8 @@ use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
-use capsule_core::capsule_v3::manifest::validate_blake3_digest;
-use capsule_core::capsule_v3::{verify_artifact_hash, CasStore};
+use capsule_core::capsule::manifest::validate_blake3_digest;
+use capsule_core::capsule::{verify_artifact_hash, CasStore};
 use chrono::Utc;
 #[cfg(feature = "webui")]
 use rust_embed::RustEmbed;

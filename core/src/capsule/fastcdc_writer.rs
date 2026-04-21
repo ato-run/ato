@@ -3,9 +3,9 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::capsule_v3::hash::set_artifact_hash;
-use crate::capsule_v3::manifest::blake3_digest;
-use crate::capsule_v3::{CapsuleManifestV3, CasStore, CdcParams, ChunkMeta};
+use crate::capsule::hash::set_artifact_hash;
+use crate::capsule::manifest::blake3_digest;
+use crate::capsule::{PayloadManifest, CasStore, CdcParams, ChunkMeta};
 use crate::error::{CapsuleError, Result};
 
 const COMPACTION_THRESHOLD_BYTES: usize = 8 * 1024 * 1024;
@@ -40,7 +40,7 @@ impl Default for FastCdcWriterConfig {
 
 #[derive(Debug, Clone)]
 pub struct FastCdcWriteReport {
-    pub manifest: CapsuleManifestV3,
+    pub manifest: PayloadManifest,
     pub chunks_inserted: usize,
     pub chunks_reused: usize,
     pub total_raw_size: u64,
@@ -155,7 +155,7 @@ impl FastCdcWriter {
             chunks.push(chunk);
         }
 
-        let mut manifest = CapsuleManifestV3::new(chunks);
+        let mut manifest = PayloadManifest::new(chunks);
         manifest.cdc_params = CdcParams {
             algorithm: "fastcdc".to_string(),
             min_size: self.config.cdc_min,
