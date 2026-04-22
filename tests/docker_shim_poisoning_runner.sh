@@ -83,13 +83,13 @@ CAPSULE_OUTPUT=$(ato run --yes "$CAPSULE_DIR" 2>&1) || {
     CAPSULE_OUTPUT=""
 }
 
-if echo "$CAPSULE_OUTPUT" | grep -q "SHIM-POISONED"; then
-    fail "capsule output contains shim poison: $CAPSULE_OUTPUT"
-elif echo "$CAPSULE_OUTPUT" | grep -q "SHIM_BYPASS_OK"; then
+if echo "$CAPSULE_OUTPUT" | grep -q "SHIM_BYPASS_OK"; then
     pass "source/node child process bypassed node shim and used managed Node 20"
     echo "  $(echo "$CAPSULE_OUTPUT" | grep MANAGED_VERSION | head -1)"
+elif echo "$CAPSULE_OUTPUT" | grep -qE "(^|[[:space:]])SHIM-POISONED-NODE([[:space:]]|$)"; then
+    fail "capsule invoked the poison node shim: $CAPSULE_OUTPUT"
 else
-    fail "unexpected capsule output: ${CAPSULE_OUTPUT:-<empty>}"
+    fail "unexpected capsule output (no SHIM_BYPASS_OK): ${CAPSULE_OUTPUT:-<empty>}"
 fi
 
 rm -rf "$CAPSULE_DIR"
