@@ -542,8 +542,10 @@ fn build_host_node_package_command(
         .effective_cwd()
         .map_or(runtime_dir, |value| value);
 
-    let mut cmd = Command::new(node_bin);
+    let mut cmd = Command::new(&node_bin);
     cmd.current_dir(command_cwd).arg(&bin_path);
+
+    prepend_managed_node_to_path(&mut cmd, &node_bin);
 
     for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
         cmd.env(key, value);
@@ -590,8 +592,10 @@ fn build_host_node_entrypoint_command(
         runtime_dir.join(entrypoint)
     };
 
-    let mut cmd = Command::new(node_bin);
+    let mut cmd = Command::new(&node_bin);
     cmd.current_dir(command_cwd).arg(entrypoint_path);
+
+    prepend_managed_node_to_path(&mut cmd, &node_bin);
 
     for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
         cmd.env(key, value);
@@ -615,6 +619,29 @@ fn build_host_node_entrypoint_command(
         #[cfg(unix)]
         _secret_fd_guard: None,
     })
+}
+
+/// Prepend the managed Node binary's directory to the child process `PATH`.
+///
+/// Fix for #294 (v0.5 pinpoint): without this, scripts spawned by the managed
+/// Node (e.g. `execSync('node ...')`, `child_process.spawn('npm', ...)`) pick up
+/// the host `node`/`npm` if one is installed, causing ato-managed runs to leak
+/// to host tooling. We prepend unconditionally so the managed bin dir wins.
+///
+/// This helper intentionally does not abstract `ManagedRuntimePath`; that
+/// abstraction lands in v0.5.x minor 1 (see RFC UNIFIED_EXECUTION_MODEL §4.2).
+fn prepend_managed_node_to_path(cmd: &mut Command, node_bin: &Path) {
+    if let Some(node_dir) = node_bin.parent() {
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        #[cfg(windows)]
+        let separator = ";";
+        #[cfg(not(windows))]
+        let separator = ":";
+        cmd.env(
+            "PATH",
+            format!("{}{}{}", node_dir.display(), separator, current_path),
+        );
+    }
 }
 
 fn is_package_manager_entrypoint(entrypoint: &str) -> bool {
@@ -650,10 +677,7 @@ fn build_package_manager_command(
     cmd.current_dir(runtime_dir);
 
     // Ensure the managed node binary directory is on PATH so npm can invoke node.
-    if let Some(node_dir) = node_bin.parent() {
-        let current_path = std::env::var("PATH").unwrap_or_default();
-        cmd.env("PATH", format!("{}:{}", node_dir.display(), current_path));
-    }
+    prepend_managed_node_to_path(&mut cmd, &node_bin);
 
     for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
         cmd.env(key, value);
@@ -948,7 +972,7 @@ fn verify_execution_plan_hashes(execution_plan: &ExecutionPlan) -> Result<()> {
 mod tests {
     use super::{
         is_provider_backed_node_workspace, map_deno_permission_error, map_node_compat_error,
-        provider_resolution_metadata_path,
+        prepend_managed_node_to_path, provider_resolution_metadata_path,
     };
 
     use capsule_core::launch_spec::{derive_launch_spec, LaunchSpecSource};
@@ -1097,5 +1121,57 @@ run = "node lib.js fixtures/db.json --port 3000"
         let stderr = b"error: This API is not implemented in Deno";
         let err = map_node_compat_error(stderr).expect("must map");
         assert_eq!(err.code, "ATO_ERR_POLICY_VIOLATION");
+    }
+
+    /// #294 pinpoint regression test: the managed Node `bin` directory must be
+    /// prepended to `PATH` before the command is spawned, so child processes
+    /// (`execSync('node ...')`, `spawn('npm', ...)`) resolve to the managed
+    /// binary rather than any host-installed version.
+    #[test]
+    fn prepend_managed_node_to_path_places_managed_bin_first() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let node_bin = tmp.path().join("bin").join("node");
+        std::fs::create_dir_all(node_bin.parent().unwrap()).expect("create bin dir");
+        // No need to touch the file — prepend_managed_node_to_path just uses the
+        // parent directory; it does not check the binary exists.
+
+        // Force a deterministic baseline PATH for this test.
+        let original_path = std::env::var_os("PATH");
+        // SAFETY: tests are currently single-threaded per integration runner for
+        // this crate; if that ever changes we'll need a test fixture instead of
+        // mutating process env. For a pinpoint regression this is acceptable.
+        unsafe {
+            std::env::set_var("PATH", "/usr/bin:/bin");
+        }
+
+        let mut cmd = std::process::Command::new(&node_bin);
+        prepend_managed_node_to_path(&mut cmd, &node_bin);
+
+        let applied_path = cmd
+            .get_envs()
+            .find_map(|(key, value)| {
+                if key == "PATH" {
+                    value.map(|v| v.to_string_lossy().into_owned())
+                } else {
+                    None
+                }
+            })
+            .expect("PATH must be set on the command");
+
+        // restore before asserting so a panic doesn't poison env
+        unsafe {
+            match original_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+
+        let managed_dir = node_bin.parent().unwrap().display().to_string();
+        let separator = if cfg!(windows) { ";" } else { ":" };
+        let expected = format!("{}{}{}", managed_dir, separator, "/usr/bin:/bin");
+        assert_eq!(
+            applied_path, expected,
+            "managed Node bin dir must be first entry of PATH (#294)"
+        );
     }
 }
