@@ -2,7 +2,8 @@
 # This keeps the context small and avoids stale compiled artifacts.
 
 target/
-**/target/
+core/target/
+lock-draft-engine/target/
 .tmp/
 .git/
 **/.git/
