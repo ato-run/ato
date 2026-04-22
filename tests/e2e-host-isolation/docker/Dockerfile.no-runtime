@@ -13,10 +13,11 @@
 #     ghcr.io/ato-run/ato-no-runtime-tester \
 #     bash /tests/docker_no_runtime_runner.sh
 
-FROM debian:bookworm-slim
+FROM ubuntu:24.04
 
 # Install only bare essentials (no runtimes!)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# ubuntu:24.04 provides glibc 2.39 which satisfies binaries built on ubuntu-latest.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     bash \
