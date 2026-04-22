@@ -4,6 +4,16 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.72] - 2026-04-22
+
+### What Changed
+
+
+#### Features
+
+- Replace --share/--save-only with --internal/--private/--local flags
+
+
 ## [0.4.71] - 2026-04-21
 
 ### What Changed
