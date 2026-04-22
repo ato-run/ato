@@ -51,6 +51,21 @@ pub(crate) enum HourglassFlow {
     ConsumerRun,
     ProducerPublish,
     ProducerPublishFinalize,
+    // v0.5.x: Add WorkspaceMaterialize (decap) and WorkspaceCapture (encap local capture).
+    //
+    // decap already runs semantically equivalent Install + Verify stages:
+    //   - "install steps" from share spec   ≡  Install stage
+    //   - manifest hash / signature / payload_hash checks  ≡  Verify stage
+    //
+    // WorkspaceMaterialize phases: [Install, Verify]          (no Execute, no Publish)
+    // WorkspaceCapture     phases: [Prepare, Verify]          (no Execute, no Publish)
+    //
+    // Trigger: when §04 sandbox network enforcement is added to Verify, the same
+    // enforcement logic must not be duplicated in share/mod.rs. Unifying under
+    // HourglassFlow lets error taxonomy (§14), rollback, progress UI, and capability
+    // gate be implemented once.
+    //
+    // See: docs/rfcs/accepted/ATO_CLI_SPEC.md §3.1 内部実装注記
 }
 
 impl HourglassFlow {
