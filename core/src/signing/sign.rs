@@ -38,6 +38,13 @@ pub struct CapsuleSignature {
 ///
 /// # Returns
 /// Signature metadata written to `.signature` file
+///
+/// # Deprecated
+/// This function uses the legacy `.signature` directory-bundle format (content_hash over
+/// `capsule.toml` only). New capsule artifacts use `signature.json` inside the TAR with
+/// `manifest_hash` + `payload_hash`. Use `capsule_core::types::signing::sign_capsule_artifact`
+/// for packing, or `signing::sign_artifact` for sidecar `.sig` files on release artifacts.
+#[allow(dead_code)]
 pub fn sign_bundle(
     bundle_path: &Path,
     key_path: &Path,
