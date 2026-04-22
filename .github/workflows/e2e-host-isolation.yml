@@ -237,9 +237,8 @@ jobs:
       - name: "[06] child-spawn"
         run: bash tests/e2e-host-isolation/cases/06-child-spawn/run.sh
 
-      # Test 07: sh-lc-trap
-      - name: "[07] sh-lc-trap"
-        run: bash tests/e2e-host-isolation/cases/07-sh-lc-trap/run.sh
+      # Test 07: sh-lc-trap is Linux-only — macOS /etc/profile does not source
+      # /etc/profile.d/, so the profile.d poison mechanism does not apply here.
 
       # Test 09: macos-path-helper (macOS only)
       - name: "[09] macos-path-helper"
@@ -366,7 +365,7 @@ jobs:
           | 04 | shim-poisoning | $LINUX_EMOJI | $MACOS_EMOJI | $WINDOWS_EMOJI |
           | 05 | cwd-untouched | $LINUX_EMOJI | $MACOS_EMOJI | $WINDOWS_EMOJI |
           | 06 | child-spawn | $LINUX_EMOJI | $MACOS_EMOJI | $WINDOWS_EMOJI |
-          | 07 | sh-lc-trap | $LINUX_EMOJI | $MACOS_EMOJI | — |
+          | 07 | sh-lc-trap | $LINUX_EMOJI | — | — |
           | 08 | windows-path-case | — | — | $WINDOWS_EMOJI |
           | 09 | macos-path-helper | — | $MACOS_EMOJI | — |
           | 10 | symlink-shim | $LINUX_EMOJI | $MACOS_EMOJI | — |
