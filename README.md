@@ -1,6 +1,6 @@
 # ato
 
-[![CI](https://github.com/ato-run/ato-cli/actions/workflows/build-multi-os.yml/badge.svg?branch=dev)](https://github.com/ato-run/ato-cli/actions/workflows/build-multi-os.yml)
+[![CI](https://github.com/ato-run/ato-cli/actions/workflows/build-multi-os.yml/badge.svg?branch=main)](https://github.com/ato-run/ato-cli/actions/workflows/build-multi-os.yml)
 [![GitHub Release](https://img.shields.io/github/v/release/ato-run/ato-cli)](https://github.com/ato-run/ato-cli/releases)
 [![GitHub stars](https://img.shields.io/github/stars/ato-run/ato-cli?style=social)](https://github.com/ato-run/ato-cli/stargazers)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
@@ -145,6 +145,28 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test -p ato-cli
 ```
 
+## Known limitations
+
+Some v0.5 behaviours differ from the full spec intent. See [docs/known-limitations.md](docs/known-limitations.md) for the full list. Key gaps:
+
+- `egress_allow` is advisory on source runtimes (deny-all via `network.enabled = false` is enforced)
+- `required_env` missing entries warn but do not abort execution
+- `--sandbox` flag not yet supported for `source/python`
+
+## Foundation readiness
+
+The Capsule Protocol defines open-governance transfer criteria (§11.2). Current status:
+
+| KPI | Status |
+|-----|--------|
+| ≥1 external conforming runtime | 0 / 1 |
+| Conformance suite ≥70% pass | skeleton only — see [`conformance/`](conformance/) |
+| External maintainers ≥3 | 0 / 3 |
+| ≥100 publishers | 0 / 100 |
+| ≥5 adversarial security reports | 0 / 5 |
+
+Foundation transfer is not a v0.5 milestone. Published for transparency.
+
 ## License
 
 Apache License 2.0 (SPDX: Apache-2.0). See [LICENSE](LICENSE).
@@ -153,15 +175,17 @@ Apache License 2.0 (SPDX: Apache-2.0). See [LICENSE](LICENSE).
 
 Every capsule is declared by a `capsule.toml` manifest in the project root.
 
+### Core fields
+
 | Field | Required | Description |
 |-------|----------|-------------|
-| `schema_version` | ✓ | Manifest schema version, e.g. `"0.3"` |
+| `schema_version` | ✓ | Manifest schema version. Use `"0.3"` |
 | `name` | ✓ | Unique capsule identifier (lowercase, hyphens allowed) |
-| `version` | ✓ | Semver string, e.g. `"0.1.0"` |
+| `version` | | Semver string, e.g. `"0.1.0"` |
 | `type` | ✓ | `"app"`, `"service"`, or `"tool"` |
-| `run` | ✓ | Command to execute, e.g. `"python main.py"` |
-| `runtime` | | Runtime hint, e.g. `"source/python"` or `"source/node"` |
-| `runtime_version` | | Pinned version, e.g. `"3.12"` |
+| `run` | | Default run command (inference may set this automatically) |
+| `runtime` | | Runtime hint: `"source/python"`, `"source/node"`, `"wasm"`, `"oci"` |
+| `runtime_version` | | Pinned version, e.g. `"3.12"` or `"20"` |
 | `description` | | Human-readable description |
 
 Minimal example:
@@ -173,4 +197,120 @@ version        = "0.1.0"
 type           = "app"
 run            = "python main.py"
 runtime        = "source/python"
+```
+
+### `[network]` — egress control
+
+Controls outbound network access. By default (`network.enabled = false`) all egress is denied.
+
+```toml
+[network]
+egress_allow = ["api.openai.com", "huggingface.co"]
+```
+
+| Field | Description |
+|-------|-------------|
+| `egress_allow` | Allowlisted hostnames for L7 proxy |
+| `egress_id_allow` | Allowlisted IPs/CIDRs at L3, e.g. `[{type="cidr", value="10.0.0.0/8"}]` |
+
+> **Note (v0.5):** `egress_allow` is advisory on source runtimes. `network.enabled = false` (deny-all) is fully enforced. See [known limitations](docs/known-limitations.md).
+
+### `[isolation]` — host passthrough
+
+Controls which host environment variables are passed into the capsule.
+
+```toml
+[isolation]
+allow_env = ["HF_TOKEN", "CUDA_HOME", "LD_LIBRARY_PATH"]
+```
+
+### `[transparency]` — binary policy
+
+Declares policy for binary files included in the capsule payload.
+
+```toml
+[transparency]
+level           = "source-preferred"   # "source-only" | "source-preferred" | "opaque"
+allowed_binaries = ["lib/**/*.so", "venv/bin/*"]
+```
+
+### `[targets]` — multi-target execution
+
+Declares multiple runtime targets; the engine selects the best match at launch time.
+
+```toml
+[targets]
+preference = ["wasm", "source", "oci"]
+
+[targets.wasm]
+file = "dist/capsule.wasm"
+
+[targets.source]
+runtime = "source/python"
+run     = "python main.py"
+
+[targets.oci]
+image = "ghcr.io/owner/repo:latest"
+```
+
+### `[services]` — supervisor mode (multi-process)
+
+Run multiple processes as a single capsule, with dependency ordering.
+
+```toml
+[services.db]
+entrypoint = "postgres -D /data"
+
+[services.api]
+entrypoint = "python server.py"
+depends_on = ["db"]
+expose     = ["PORT"]
+env        = { DATABASE_URL = "postgres://localhost/app" }
+
+[services.api.readiness_probe]
+http_get = "/health"
+port     = "PORT"
+```
+
+### `[foundation_requirements]` — conformance assertions
+
+Declares which Foundation-approved runtime profile and engine versions this capsule requires. A conformant ato implementation rejects execution if it cannot satisfy these constraints.
+
+```toml
+[foundation_requirements]
+profile  = "std.secure"
+runtimes = ["python@>=3.11", "node@>=20"]
+engines  = ["nacelle@>=0.4"]
+```
+
+### `[build]` — packaging behavior
+
+Controls how the capsule is packaged at publish time.
+
+```toml
+[build]
+gpu = true  # apply GPU-oriented packaging defaults
+
+[build.lifecycle]
+prepare = "pip install -r requirements.txt"
+build   = "python compile.py"
+package = "ato pack"
+
+[build.inputs]
+lockfiles    = ["requirements.lock"]
+toolchain    = "python@3.12"
+allow_network = false
+
+[build.outputs]
+capsule     = "dist/capsule.atoc"
+sha256      = true
+attestation = true
+```
+
+### `[pack]` — payload filter
+
+```toml
+[pack]
+include = ["src/**", "requirements.txt"]
+exclude = ["**/__pycache__", "*.pyc", "tests/**"]
 ```

@@ -51,6 +51,21 @@ pub(crate) enum HourglassFlow {
     ConsumerRun,
     ProducerPublish,
     ProducerPublishFinalize,
+    // v0.5.x: Add WorkspaceMaterialize (decap) and WorkspaceCapture (encap local capture).
+    //
+    // decap already runs semantically equivalent Install + Verify stages:
+    //   - "install steps" from share spec   ≡  Install stage
+    //   - manifest hash / signature / payload_hash checks  ≡  Verify stage
+    //
+    // WorkspaceMaterialize phases: [Install, Verify]          (no Execute, no Publish)
+    // WorkspaceCapture     phases: [Prepare, Verify]          (no Execute, no Publish)
+    //
+    // Trigger: when §04 sandbox network enforcement is added to Verify, the same
+    // enforcement logic must not be duplicated in share/mod.rs. Unifying under
+    // HourglassFlow lets error taxonomy (§14), rollback, progress UI, and capability
+    // gate be implemented once.
+    //
+    // See: docs/rfcs/accepted/ATO_CLI_SPEC.md §3.1 内部実装注記
 }
 
 impl HourglassFlow {
@@ -373,3 +388,73 @@ mod tests {
         assert!(!selection.runs_execute());
     }
 }
+
+        /// Lock the ProducerPublishFinalize phase order explicitly.
+        /// Any change is a breaking change that requires RFC §3.1 update.
+        #[test]
+        fn hourglass_flow_producer_publish_finalize_phase_order_is_locked() {
+            assert_eq!(
+                HourglassFlow::ProducerPublishFinalize.phases(),
+                &[
+                    HourglassPhase::Prepare,
+                    HourglassPhase::Build,
+                    HourglassPhase::Install,
+                    HourglassPhase::Finalize,
+                    HourglassPhase::Verify,
+                    HourglassPhase::DryRun,
+                    HourglassPhase::Publish,
+                ],
+                "ProducerPublishFinalize phase order changed — update RFC §3.1"
+            );
+        }
+
+        /// Security invariant: Verify must always precede Execute in ConsumerRun.
+        /// If this fails, hash checks and policy enforcement would run AFTER user
+        /// code, which is a critical security regression.
+        #[test]
+        fn hourglass_verify_precedes_execute_in_consumer_run() {
+            let phases = HourglassFlow::ConsumerRun.phases();
+            let verify_pos = phases
+                .iter()
+                .position(|p| *p == HourglassPhase::Verify)
+                .expect("ConsumerRun must include Verify");
+            let execute_pos = phases
+                .iter()
+                .position(|p| *p == HourglassPhase::Execute)
+                .expect("ConsumerRun must include Execute");
+            assert!(
+                verify_pos < execute_pos,
+                "SECURITY: Verify (pos {}) must come before Execute (pos {}) in ConsumerRun",
+                verify_pos,
+                execute_pos
+            );
+        }
+
+        /// All current flow variants must define at least 2 phases.
+        /// If this fails after adding a new variant, add a phase-order lock test too.
+        #[test]
+        fn hourglass_all_flow_variants_have_at_least_two_phases() {
+            let variants = [
+                HourglassFlow::ConsumerRun,
+                HourglassFlow::ProducerPublish,
+                HourglassFlow::ProducerPublishFinalize,
+            ];
+            for variant in variants {
+                assert!(
+                    variant.phases().len() >= 2,
+                    "Flow {:?} must define at least 2 phases",
+                    variant
+                );
+            }
+        }
+
+        // v0.5.x: When WorkspaceMaterialize is added to HourglassFlow, add:
+        //
+        // #[test]
+        // #[ignore = "until-hourglass-workspace-materialize-v0.5.x"]
+        // fn workspace_materialize_phase_order_is_locked() {
+        //     assert_eq!(
+        //         HourglassFlow::WorkspaceMaterialize.phases(),
+        //         &[HourglassPhase::Install, HourglassPhase::Verify],
+        //     );
+        // }
