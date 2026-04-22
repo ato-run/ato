@@ -1,0 +1,386 @@
+name: E2E Host Isolation
+
+on:
+  workflow_dispatch:
+    inputs:
+      ato_ref:
+        description: Branch, tag, or SHA to build ato-cli from.
+        required: false
+        default: dev
+        type: string
+      log_level:
+        description: ato log verbosity level.
+        required: false
+        default: info
+        type: choice
+        options:
+          - error
+          - warn
+          - info
+          - debug
+          - trace
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  ATO_LOG: ${{ inputs.log_level || 'info' }}
+
+concurrency:
+  group: e2e-host-isolation-${{ github.ref }}
+  cancel-in-progress: true
+
+# ─── 1. Build ─────────────────────────────────────────────────────────────────
+jobs:
+  build:
+    name: Build ${{ matrix.artifact_name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact_name: linux-x86_64
+            os: ubuntu-latest
+            binary_name: ato
+            build_target: x86_64-unknown-linux-gnu
+            rustflags: ""
+          - artifact_name: macos-host
+            os: macos-14
+            binary_name: ato
+            build_target: ""
+            rustflags: ""
+          - artifact_name: windows-x86_64
+            os: windows-latest
+            binary_name: ato.exe
+            build_target: x86_64-pc-windows-msvc
+            rustflags: -C target-feature=+crt-static
+
+    steps:
+      - name: Checkout ${{ inputs.ato_ref || 'dev' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ato_ref || 'dev' }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Add Rust target
+        if: ${{ matrix.build_target != '' }}
+        shell: bash
+        run: rustup target add "${{ matrix.build_target }}"
+
+      - name: Build release binary
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ matrix.build_target }}" ]]; then
+            cargo build --release --locked --target "${{ matrix.build_target }}" --bin ato
+          else
+            cargo build --release --locked --bin ato
+          fi
+
+      - name: Collect binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          if [[ -n "${{ matrix.build_target }}" ]]; then
+            cp "target/${{ matrix.build_target }}/release/${{ matrix.binary_name }}" "dist/${{ matrix.binary_name }}"
+          else
+            cp "target/release/${{ matrix.binary_name }}" "dist/${{ matrix.binary_name }}"
+          fi
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-bin-${{ matrix.artifact_name }}
+          path: dist/${{ matrix.binary_name }}
+          retention-days: 1
+          if-no-files-found: error
+
+# ─── 2. Linux E2E ─────────────────────────────────────────────────────────────
+  linux:
+    name: E2E Linux
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ato_ref || 'dev' }}
+
+      - name: Download Linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-bin-linux-x86_64
+          path: ato-bin
+
+      - name: Install binary
+        run: |
+          chmod +x ato-bin/ato
+          echo "$PWD/ato-bin" >> "$GITHUB_PATH"
+
+      - name: Verify ato binary
+        run: ato --version
+
+      # Test 01: no-runtime (Docker)
+      - name: Build no-runtime tester image
+        run: |
+          docker build -t ato-no-runtime-tester \
+            -f tests/e2e-host-isolation/docker/Dockerfile.no-runtime \
+            tests/e2e-host-isolation/docker/
+
+      - name: "[01] no-runtime (Docker)"
+        run: |
+          docker run --rm \
+            -v "$PWD/ato-bin/ato":/usr/local/bin/ato:ro \
+            -v "$PWD/tests":/tests:ro \
+            ato-no-runtime-tester \
+            bash /tests/docker_no_runtime_runner.sh
+
+      # Test 02: wrong-node
+      - name: "[02] wrong-node"
+        run: bash tests/e2e-host-isolation/cases/02-wrong-node/run.sh
+
+      # Test 03: wrong-python (continue-on-error — PythonProvisioner pending)
+      - name: "[03] wrong-python [until-pythonprovisioner-v0.5.x]"
+        continue-on-error: true
+        run: bash tests/e2e-host-isolation/cases/03-wrong-python/run.sh
+
+      # Test 04: shim-poisoning
+      - name: "[04] shim-poisoning"
+        run: bash tests/e2e-host-isolation/cases/04-shim-poisoning/run.sh
+
+      # Test 05: cwd-untouched
+      - name: "[05] cwd-untouched"
+        run: bash tests/e2e-host-isolation/cases/05-cwd-untouched/run.sh
+
+      # Test 06: child-spawn
+      - name: "[06] child-spawn"
+        run: bash tests/e2e-host-isolation/cases/06-child-spawn/run.sh
+
+      # Test 07: sh-lc-trap
+      - name: "[07] sh-lc-trap"
+        run: bash tests/e2e-host-isolation/cases/07-sh-lc-trap/run.sh
+
+      # Test 10: symlink-shim
+      - name: "[10] symlink-shim"
+        run: bash tests/e2e-host-isolation/cases/10-symlink-shim/run.sh
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ato-logs-linux-${{ github.run_id }}
+          path: ~/.ato/logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
+# ─── 3. macOS E2E ─────────────────────────────────────────────────────────────
+  macos:
+    name: E2E macOS
+    needs: build
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ato_ref || 'dev' }}
+
+      - name: Download macOS binary
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-bin-macos-host
+          path: ato-bin
+
+      - name: Install binary
+        run: |
+          chmod +x ato-bin/ato
+          echo "$PWD/ato-bin" >> "$GITHUB_PATH"
+
+      - name: Verify ato binary
+        run: ato --version
+
+      # Install Node 22 via Homebrew to create "wrong node" state.
+      # brew link --force --overwrite ensures node@22 is on PATH before any
+      # managed Node ato might download, giving a concrete version mismatch.
+      - name: Install host Node 22 (wrong-node precondition)
+        run: |
+          brew install node@22
+          brew link --force --overwrite node@22
+          node --version
+
+      # Test 02: wrong-node
+      - name: "[02] wrong-node"
+        run: bash tests/e2e-host-isolation/cases/02-wrong-node/run.sh
+
+      # Test 03: wrong-python (continue-on-error)
+      - name: "[03] wrong-python [until-pythonprovisioner-v0.5.x]"
+        continue-on-error: true
+        run: bash tests/e2e-host-isolation/cases/03-wrong-python/run.sh
+
+      # Test 04: shim-poisoning
+      - name: "[04] shim-poisoning"
+        run: bash tests/e2e-host-isolation/cases/04-shim-poisoning/run.sh
+
+      # Test 05: cwd-untouched
+      - name: "[05] cwd-untouched"
+        run: bash tests/e2e-host-isolation/cases/05-cwd-untouched/run.sh
+
+      # Test 06: child-spawn
+      - name: "[06] child-spawn"
+        run: bash tests/e2e-host-isolation/cases/06-child-spawn/run.sh
+
+      # Test 07: sh-lc-trap
+      - name: "[07] sh-lc-trap"
+        run: bash tests/e2e-host-isolation/cases/07-sh-lc-trap/run.sh
+
+      # Test 09: macos-path-helper (macOS only)
+      - name: "[09] macos-path-helper"
+        run: bash tests/e2e-host-isolation/cases/09-macos-path-helper/run.sh
+
+      # Test 10: symlink-shim
+      - name: "[10] symlink-shim"
+        run: bash tests/e2e-host-isolation/cases/10-symlink-shim/run.sh
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ato-logs-macos-${{ github.run_id }}
+          path: ~/.ato/logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
+# ─── 4. Windows E2E ───────────────────────────────────────────────────────────
+  windows:
+    name: E2E Windows
+    needs: build
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ato_ref || 'dev' }}
+
+      - name: Download Windows binary
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-bin-windows-x86_64
+          path: ato-bin
+
+      - name: Install binary
+        run: |
+          $atoDir = (Resolve-Path "ato-bin").Path
+          "$atoDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Verify ato binary
+        run: ato --version
+
+      # Test 02: wrong-node
+      - name: "[02] wrong-node"
+        run: pwsh tests/e2e-host-isolation/cases/02-wrong-node/run.ps1
+
+      # Test 03: wrong-python (continue-on-error)
+      - name: "[03] wrong-python [until-pythonprovisioner-v0.5.x]"
+        continue-on-error: true
+        run: pwsh tests/e2e-host-isolation/cases/03-wrong-python/run.ps1
+
+      # Test 04: shim-poisoning
+      - name: "[04] shim-poisoning"
+        run: pwsh tests/e2e-host-isolation/cases/04-shim-poisoning/run.ps1
+
+      # Test 05: cwd-untouched
+      - name: "[05] cwd-untouched"
+        run: pwsh tests/e2e-host-isolation/cases/05-cwd-untouched/run.ps1
+
+      # Test 06: child-spawn
+      - name: "[06] child-spawn"
+        run: pwsh tests/e2e-host-isolation/cases/06-child-spawn/run.ps1
+
+      # Test 08: windows-path-case (Windows only)
+      - name: "[08] windows-path-case"
+        run: pwsh tests/e2e-host-isolation/cases/08-windows-path-case/run.ps1
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ato-logs-windows-${{ github.run_id }}
+          path: ${{ env.USERPROFILE }}/.ato/logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
+# ─── 5. Summary ───────────────────────────────────────────────────────────────
+  summary:
+    name: E2E Summary
+    needs: [linux, macos, windows]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write GITHUB_STEP_SUMMARY
+        env:
+          LINUX_RESULT:   ${{ needs.linux.result }}
+          MACOS_RESULT:   ${{ needs.macos.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
+        run: |
+          status_emoji() {
+            case "$1" in
+              success)   echo "✅" ;;
+              failure)   echo "❌" ;;
+              cancelled) echo "⚠️" ;;
+              skipped)   echo "⏭️" ;;
+              *)         echo "❓" ;;
+            esac
+          }
+
+          LINUX_EMOJI=$(status_emoji "$LINUX_RESULT")
+          MACOS_EMOJI=$(status_emoji "$MACOS_RESULT")
+          WINDOWS_EMOJI=$(status_emoji "$WINDOWS_RESULT")
+
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          ## E2E Host Isolation Results
+
+          | Job | Result |
+          |-----|--------|
+          | Linux   | $LINUX_EMOJI \`$LINUX_RESULT\` |
+          | macOS   | $MACOS_EMOJI \`$MACOS_RESULT\` |
+          | Windows | $WINDOWS_EMOJI \`$WINDOWS_RESULT\` |
+
+          ### Test Case Matrix
+
+          | # | Case | Linux | macOS | Windows |
+          |---|------|:-----:|:-----:|:-------:|
+          | 01 | no-runtime (Docker) | $LINUX_EMOJI | — | — |
+          | 02 | wrong-node | $LINUX_EMOJI | $MACOS_EMOJI | $WINDOWS_EMOJI |
+          | 03 | wrong-python *(expected-fail)* | $LINUX_EMOJI | $MACOS_EMOJI | $WINDOWS_EMOJI |
+          | 04 | shim-poisoning | $LINUX_EMOJI | $MACOS_EMOJI | $WINDOWS_EMOJI |
+          | 05 | cwd-untouched | $LINUX_EMOJI | $MACOS_EMOJI | $WINDOWS_EMOJI |
+          | 06 | child-spawn | $LINUX_EMOJI | $MACOS_EMOJI | $WINDOWS_EMOJI |
+          | 07 | sh-lc-trap | $LINUX_EMOJI | $MACOS_EMOJI | — |
+          | 08 | windows-path-case | — | — | $WINDOWS_EMOJI |
+          | 09 | macos-path-helper | — | $MACOS_EMOJI | — |
+          | 10 | symlink-shim | $LINUX_EMOJI | $MACOS_EMOJI | — |
+
+          > Test 03 uses \`continue-on-error: true\` — PythonProvisioner not yet implemented.
+
+          Ref: \`${{ inputs.ato_ref || 'dev' }}\` · Run: [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          EOF
+
+      - name: Fail if any required job failed
+        if: >
+          needs.linux.result == 'failure' ||
+          needs.macos.result == 'failure' ||
+          needs.windows.result == 'failure'
+        run: |
+          echo "One or more E2E jobs failed." >&2
+          exit 1
