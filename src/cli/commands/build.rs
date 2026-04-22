@@ -19,6 +19,7 @@ use crate::application::producer_input::resolve_producer_authoritative_input;
 use crate::build::native_delivery;
 use crate::project::init;
 use crate::reporters;
+use crate::runtime::manager as runtime_manager;
 use crate::runtime::overrides as runtime_overrides;
 
 const BUILD_CACHE_LAYOUT_VERSION: &str = "chml-build-cache-v1";
@@ -1350,17 +1351,31 @@ fn run_build_lifecycle_shell_command(
     command: &str,
     phase: &str,
 ) -> Result<()> {
+    // Prepend ato-managed Node bin dir to PATH inside the command string (#294).
+    // `sh -l` sources profile scripts that reset PATH, so we inject after the reset.
+    // Use `ensure_node_binary_with_authority(plan, None)` so provider-backed targets
+    // (npm:pkg) that store runtime_version in capsule.toml are handled correctly.
+    let managed_node_path_prefix: String =
+        match runtime_manager::ensure_node_binary_with_authority(plan, None) {
+            Ok(node_bin) => node_bin
+                .parent()
+                .map(|dir| format!("export PATH={}:$PATH; ", dir.display()))
+                .unwrap_or_default(),
+            Err(_) => String::new(),
+        };
+    let effective_command = format!("{}{}", managed_node_path_prefix, command);
+
     #[cfg(windows)]
     let mut cmd = {
         let mut cmd = std::process::Command::new("cmd");
-        cmd.args(["/C", command]);
+        cmd.args(["/C", &effective_command]);
         cmd
     };
 
     #[cfg(not(windows))]
     let mut cmd = {
         let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-lc", command]);
+        cmd.args(["-lc", &effective_command]);
         cmd
     };
 
