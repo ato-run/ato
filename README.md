@@ -34,7 +34,7 @@ printf 'print("hello from ato")\n' > hello.py
 ato run hello.py
 
 # Capture the workspace and get a shareable URL
-ato encap . --share
+ato encap
 # → Share URL: https://ato.run/s/hello-ato@r1
 
 # Anyone can rebuild it from the URL
@@ -51,7 +51,7 @@ Ato reads your project directly — `pyproject.toml`, `package.json`, `deno.json
 | Without Ato | With Ato |
 |---|---|
 | Clone → read README → install deps → run | `ato run github.com/owner/repo` |
-| Write Dockerfile or setup script to share | `ato encap . --share` |
+| Write Dockerfile or setup script to share | `ato encap` |
 | Follow multi-step setup to reproduce | `ato decap <share-url>` |
 
 Supported runtimes today: Python (`pyproject.toml`, `uv.lock`, single-file PEP 723), Node / TypeScript / Deno, Rust, Go, static web, WebAssembly, and shell scripts.
@@ -83,10 +83,18 @@ ato stop --id <capsule-id>
 
 ### Share a workspace with `ato encap`
 
-`ato encap` captures the current workspace as a portable share descriptor, writes local share files, and can upload them to a share URL.
+`ato encap` captures the current workspace as a portable share descriptor, uploads it, and prints a share URL. Run it from the project directory — no arguments needed.
 
 ```bash
-ato encap . --share
+ato encap
+```
+
+To control visibility:
+
+```bash
+ato encap --internal   # organisation-internal access
+ato encap --private    # authenticated owner only
+ato encap --local      # local save only, no upload
 ```
 
 Local capture output is written under `.ato/share/`:

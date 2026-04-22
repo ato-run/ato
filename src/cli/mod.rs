@@ -44,8 +44,8 @@ pub(crate) use root::{Cli, Commands};
 pub(crate) use secrets::SecretsCommands;
 #[allow(unused_imports)]
 pub(crate) use shared::{
-    CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, GitMode, ProviderToolchain,
-    RunAgentMode, ShareToolRuntime, DEFAULT_RUN_REGISTRY_URL,
+    CompatibilityFallbackBackend, EncapVisibility, EnforcementMode, GitHubAutoFixMode, GitMode,
+    ProviderToolchain, RunAgentMode, ShareToolRuntime, DEFAULT_RUN_REGISTRY_URL,
 };
 #[allow(unused_imports)]
 pub(crate) use source::SourceCommands;

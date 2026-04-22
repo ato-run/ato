@@ -18,6 +18,13 @@ use crate::error::{CapsuleError, Result};
 ///
 /// # Returns
 /// Ok if signature is valid, Err otherwise
+///
+/// # Deprecated
+/// This function verifies the legacy `.signature` directory-bundle format (content_hash over
+/// `capsule.toml` only). Packed `.ato` capsule artifacts embed `signature.json` (with
+/// `manifest_hash` + `payload_hash`) and are verified with
+/// `capsule_core::types::signing::verify_capsule_artifact_signature`. Release artifact
+/// sidecar `.sig` files are verified by the `ato verify` CLI command.
 #[allow(dead_code)]
 pub fn verify_bundle(bundle_path: &Path, trusted_public_keys: &[String]) -> Result<()> {
     // Read signature file
