@@ -346,7 +346,6 @@ mod tests {
 
     use crate::capsule::CasStore;
 
-
     use std::fs;
 
     use std::path::Path;
