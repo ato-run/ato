@@ -100,6 +100,35 @@ fi
 
 rm -rf "$CAPSULE_DIR"
 
+# ─── Test 4: User cwd is never touched by ato run (regression for #0.4.42+) ───
+# Previous bugs in 0.4.42, 0.4.45, 0.4.47 caused ato to write node_modules,
+# package.json, or .ato/ into the caller's working directory. This test
+# asserts that running `ato run npm:semver` from a sentinel directory leaves
+# that directory completely untouched.
+echo ""
+echo "=== Test 4: User cwd is not polluted by ato run npm:semver ==="
+SENTINEL_DIR=$(mktemp -d)
+
+# Record everything that exists before the run.
+BEFORE=$(find "$SENTINEL_DIR" -maxdepth 3 2>/dev/null | sort)
+
+# Run from inside the sentinel directory.
+(cd "$SENTINEL_DIR" && ato run npm:semver --yes -- 0.0.1 >/dev/null 2>&1) || true
+
+# Record everything after the run.
+AFTER=$(find "$SENTINEL_DIR" -maxdepth 3 2>/dev/null | sort)
+
+CWD_POLLUTED=0
+[ -d "$SENTINEL_DIR/node_modules" ] && { fail "node_modules created in user cwd"; CWD_POLLUTED=1; }
+[ -f "$SENTINEL_DIR/package.json" ] && { fail "package.json created in user cwd"; CWD_POLLUTED=1; }
+[ -f "$SENTINEL_DIR/package-lock.json" ] && { fail "package-lock.json created in user cwd"; CWD_POLLUTED=1; }
+[ -d "$SENTINEL_DIR/.ato" ] && { fail ".ato/ created in user cwd"; CWD_POLLUTED=1; }
+[ "$BEFORE" != "$AFTER" ] && [ "$CWD_POLLUTED" -eq 0 ] && { fail "user cwd was modified (unexpected files: $(diff <(echo "$BEFORE") <(echo "$AFTER") | grep '^>' | head -5))"; CWD_POLLUTED=1; }
+
+[ "$CWD_POLLUTED" -eq 0 ] && pass "user cwd untouched after ato run npm:semver"
+
+rm -rf "$SENTINEL_DIR"
+
 # ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "====================================="

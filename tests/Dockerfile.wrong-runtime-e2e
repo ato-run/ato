@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1
+# Docker E2E test: verifies ato uses its managed Node when the host has a
+# *wrong* (higher) Node version already installed (#294 regression test).
+#
+# Stage 1 (builder): compiles ato from source
+# Stage 2 (tester):  node:22-bookworm-slim (host has Node 22), runs tests
+
+# ─── Stage 1: Build ato binary ────────────────────────────────────────────────
+FROM rust:1.88-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    perl \
+    make \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+RUN cargo fetch && \
+    cargo build --release --bin ato
+
+# ─── Stage 2: Test environment WITH a wrong-version Node on PATH ──────────────
+# We deliberately start from a node image so there is a "wrong" host Node.
+# The ato runtime must still pick its own managed Node, not this host one.
+FROM node:22-bookworm-slim AS tester
+
+# Confirm Node 22 is the host version.
+RUN node --version | grep -E '^v22\.' || (echo "ERROR: expected Node 22 from base image" && exit 1)
+
+# ato needs curl + ca-certificates to download managed Node, xz-utils + tar to
+# extract the .tar.xz bundle.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    xz-utils \
+    tar \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /src/target/release/ato /usr/local/bin/ato
+COPY tests/docker_wrong_runtime_runner.sh /run-tests.sh
+RUN chmod +x /run-tests.sh
+
+ENV HOME=/root
+CMD ["/run-tests.sh"]
