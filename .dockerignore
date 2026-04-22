@@ -1,0 +1,20 @@
+# Exclude build artifacts and generated files from Docker build context.
+# This keeps the context small and avoids stale compiled artifacts.
+
+target/
+.tmp/
+.git/
+**/.git/
+
+# macOS / editor noise
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Docs/chat logs (large, not needed for build)
+docs/chats/
+
+# Lock file is included (needed for reproducible Cargo builds)
+# Cargo.lock is intentionally NOT excluded
