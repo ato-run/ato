@@ -412,17 +412,35 @@ fn run_lifecycle_shell_command(
         false
     };
 
+    // Prepend the ato-managed Node bin dir to PATH inside the command string itself
+    // (#294). We cannot rely on setting PATH in the subprocess env because `sh -l`
+    // sources login profile scripts (e.g. /etc/profile) which unconditionally reset
+    // PATH. By prefixing "export PATH=<dir>:$PATH;" we run after the profile reset
+    // and guarantee the managed npm/node are found first.
+    // Use `ensure_node_binary_with_authority(plan, None)` so provider-backed targets
+    // (npm:pkg) that store runtime_version in capsule.toml are handled correctly —
+    // `ensure_node_binary` alone requires capsule.lock.json which providers don't create.
+    let managed_node_path_prefix: String =
+        match runtime_manager::ensure_node_binary_with_authority(plan, None) {
+            Ok(node_bin) => node_bin
+                .parent()
+                .map(|dir| format!("export PATH={}:$PATH; ", dir.display()))
+                .unwrap_or_default(),
+            Err(_) => String::new(),
+        };
+    let effective_command = format!("{}{}", managed_node_path_prefix, command);
+
     #[cfg(windows)]
     let mut cmd = {
         let mut cmd = std::process::Command::new("cmd");
-        cmd.args(["/C", command]);
+        cmd.args(["/C", &effective_command]);
         cmd
     };
 
     #[cfg(not(windows))]
     let mut cmd = {
         let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-lc", command]);
+        cmd.args(["-lc", &effective_command]);
         cmd
     };
 
