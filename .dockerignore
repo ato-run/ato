@@ -2,6 +2,7 @@
 # This keeps the context small and avoids stale compiled artifacts.
 
 target/
+**/target/
 .tmp/
 .git/
 **/.git/

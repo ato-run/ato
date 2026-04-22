@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1
+# Docker E2E test: verifies ato is not tricked by shim-style "wrong" binaries
+# placed in /usr/local/bin (as asdf, mise, nvm, pyenv, rbenv etc. do).
+#
+# Stage 1 (builder): compiles ato from source
+# Stage 2 (tester):  Debian slim with poisoned /usr/local/bin/node shim
+
+# ─── Stage 1: Build ato binary ────────────────────────────────────────────────
+FROM rust:1.88-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    perl \
+    make \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+RUN cargo fetch && \
+    cargo build --release --bin ato
+
+# ─── Stage 2: Environment with poisoned shims in /usr/local/bin ───────────────
+FROM debian:bookworm-slim AS tester
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    xz-utils \
+    tar \
+    && rm -rf /var/lib/apt/lists/*
+
+# Place shim binaries that output a distinguishable poison string.
+# These mimic what asdf, nvm, mise, pyenv etc. write to /usr/local/bin.
+RUN printf '#!/bin/sh\necho "SHIM-POISONED-NODE"\n' > /usr/local/bin/node \
+    && chmod +x /usr/local/bin/node \
+    && printf '#!/bin/sh\necho "SHIM-POISONED-NPM"\n' > /usr/local/bin/npm \
+    && chmod +x /usr/local/bin/npm
+
+# Verify the shims are on PATH before ato is installed.
+RUN node 2>/dev/null | grep -q "SHIM-POISONED-NODE" || (echo "ERROR: shim not working" && exit 1)
+
+COPY --from=builder /src/target/release/ato /usr/local/bin/ato
+COPY tests/docker_shim_poisoning_runner.sh /run-tests.sh
+RUN chmod +x /run-tests.sh
+
+ENV HOME=/root
+CMD ["/run-tests.sh"]
