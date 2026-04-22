@@ -16,6 +16,85 @@ All notable changes to `ato-cli` will be documented in this file.
 
 - Added RFC draft `docs/rfcs/draft/UNIFIED_EXECUTION_MODEL.md` outlining the unified Pipeline Spine (`HourglassFlow` variants) and Runtime Spine (`RuntimeProvisioner` + `ManagedRuntimePath`) model targeted for v0.5.x minor 1 / minor 2. Updated `docs/rfcs/accepted/ATO_CLI_SPEC.md` §3.1 to clarify the narrative vs. pipeline separation.
 
+## [0.4.72] - 2026-04-22
+
+### What Changed
+
+
+#### Features
+
+- Replace --share/--save-only with --internal/--private/--local flags
+
+
+## [0.4.71] - 2026-04-21
+
+### What Changed
+
+
+#### Bug Fixes
+
+- Resolve clippy warnings in presigned, inject, ipc, share, reconstruct
+
+- Include image and component fields in import_target_hints
+
+- Update store domain store.ato.run → ato.run
+
+- Add wasm/wasmtime executor support
+
+- Correct docs URL to docs.ato.run/errors
+
+- Stop readiness port polling when process has already exited
+
+- Move IPC socket dir from /tmp to ~/.ato/run
+
+- Normalize capsule://store/ to capsule://ato.run/ and add reserved publishers
+
+
+#### Documentation
+
+- Add capsule.toml reference section to README
+
+- P0-1 README english optimization — punchy hero, embedded demo SVG
+
+
+#### Other Changes
+
+- Cargo fmt
+
+
+#### Refactoring
+
+- Remove dead CapsuleSigner / legacy_signer.rs (YAGNI)
+
+- Rename capsule_v3 → capsule, drop V2 compat (YAGNI)
+
+
+## [0.4.70] - 2026-04-20
+
+### What Changed
+
+
+#### Bug Fixes
+
+- Honor --compatibility-fallback host for share URL runs
+
+
+#### Documentation
+
+- Optimize README for english developers
+
+
+#### Features
+
+- Add NL→filter gold corpus (NL2Filter Phase 1)
+
+- Add canonical capability schema (NL2Filter Phase 0)
+
+
+#### Other Changes
+
+- Bump to v0.11.0 for breaking field additions (capabilities, compat_host)
+
 ## [0.4.69] - 2026-04-19
 
 ### What Changed
