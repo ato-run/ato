@@ -128,6 +128,36 @@ impl ShareToolRuntime {
     }
 }
 
+/// Visibility scope for `ato encap` uploads.
+///
+/// `Public` maps to the API string `"unlisted"` — the share URL is accessible to anyone with
+/// the link but is not listed in any public index. When a true public-index feature is added,
+/// the API mapping will change without touching this enum name.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum EncapVisibility {
+    /// Anyone with the URL can access (API: "unlisted"). Default.
+    #[default]
+    Public,
+    /// Organisation-internal access (API: "internal").
+    Internal,
+    /// Authenticated owner only (API: "private").
+    Private,
+    /// Local save only — no upload.
+    Local,
+}
+
+impl EncapVisibility {
+    pub(crate) fn as_api_str(self) -> &'static str {
+        match self {
+            // Maps to "unlisted": URL-accessible but not indexed.
+            EncapVisibility::Public => "unlisted",
+            EncapVisibility::Internal => "internal",
+            EncapVisibility::Private => "private",
+            EncapVisibility::Local => "local",
+        }
+    }
+}
+
 pub(super) fn cli_styles() -> clap::builder::Styles {
     use clap::builder::styling::{AnsiColor, Effects};
 

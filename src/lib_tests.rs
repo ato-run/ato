@@ -277,21 +277,93 @@ fn run_command_parses_entry_and_env_flags() {
 }
 
 #[test]
-fn encap_command_parses_primary_flags() {
-    let cli = Cli::try_parse_from(["ato", "encap", ".", "--share"]).expect("parse");
+fn encap_command_parses_default_flags() {
+    let cli = Cli::try_parse_from(["ato", "encap", "."]).expect("parse");
     match cli.command {
         Commands::Encap {
             path,
-            share,
-            save_only,
+            internal,
+            private,
+            local,
             print_plan,
             ..
         } => {
             assert_eq!(path, PathBuf::from("."));
-            assert!(share);
-            assert!(!save_only);
+            assert!(!internal);
+            assert!(!private);
+            assert!(!local);
             assert!(!print_plan);
         }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn encap_command_parses_internal_flag() {
+    let cli = Cli::try_parse_from(["ato", "encap", "--internal"]).expect("parse");
+    match cli.command {
+        Commands::Encap {
+            internal,
+            private,
+            local,
+            ..
+        } => {
+            assert!(internal);
+            assert!(!private);
+            assert!(!local);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn encap_command_parses_private_flag() {
+    let cli = Cli::try_parse_from(["ato", "encap", "--private"]).expect("parse");
+    match cli.command {
+        Commands::Encap {
+            internal,
+            private,
+            local,
+            ..
+        } => {
+            assert!(!internal);
+            assert!(private);
+            assert!(!local);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn encap_command_parses_local_flag() {
+    let cli = Cli::try_parse_from(["ato", "encap", "--local"]).expect("parse");
+    match cli.command {
+        Commands::Encap {
+            internal,
+            private,
+            local,
+            ..
+        } => {
+            assert!(!internal);
+            assert!(!private);
+            assert!(local);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn encap_command_mutual_exclusion_fails() {
+    assert!(Cli::try_parse_from(["ato", "encap", "--internal", "--private"]).is_err());
+    assert!(Cli::try_parse_from(["ato", "encap", "--internal", "--local"]).is_err());
+    assert!(Cli::try_parse_from(["ato", "encap", "--private", "--local"]).is_err());
+}
+
+#[test]
+fn encap_command_default_path_is_cwd() {
+    let cli = Cli::try_parse_from(["ato", "encap"]).expect("parse");
+    match cli.command {
+        Commands::Encap { path, .. } => assert_eq!(path, PathBuf::from(".")),
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 }
