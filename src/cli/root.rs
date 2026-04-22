@@ -229,17 +229,21 @@ pub(crate) enum Commands {
         about = "Share your current workspace"
     )]
     Encap {
-        /// Local workspace path to capture
+        /// Local workspace path to capture (default: current directory)
         #[arg(default_value = ".")]
         path: PathBuf,
 
-        /// Upload the captured share after writing local outputs
-        #[arg(long, default_value_t = false)]
-        share: bool,
+        /// Upload with organisation-internal visibility (conflicts with --private, --local)
+        #[arg(long, default_value_t = false, conflicts_with_all = ["private", "local"])]
+        internal: bool,
 
-        /// Write local outputs only
-        #[arg(long, default_value_t = false)]
-        save_only: bool,
+        /// Upload with private visibility — authenticated owner only (conflicts with --internal, --local)
+        #[arg(long, default_value_t = false, conflicts_with_all = ["internal", "local"])]
+        private: bool,
+
+        /// Write local outputs only; do not upload (conflicts with --internal, --private)
+        #[arg(long, default_value_t = false, conflicts_with_all = ["internal", "private"])]
+        local: bool,
 
         /// Print the detected capture plan without writing files
         #[arg(long, default_value_t = false)]
