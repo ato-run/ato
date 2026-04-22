@@ -4,6 +4,18 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- **#294 runtime PATH leak (pinpoint fix)**: `build_host_node_package_command` and `build_host_node_entrypoint_command` now prepend the managed Node binary directory to `PATH` before spawning the child process. Previously only `build_package_manager_command` did so, meaning direct Node script executions could pick up a host `node`/`npm` and leak out of the managed runtime. A shared `prepend_managed_node_to_path` helper now keeps all three code paths consistent. The broader `RuntimeProvisioner` + `ManagedRuntimePath` abstraction that supersedes this pinpoint fix lands in v0.5.x minor 1 (see RFC `docs/rfcs/draft/UNIFIED_EXECUTION_MODEL.md` §4.2).
+
+### Known Limitations
+
+- **Synthetic workspace cache is not GC'd in v0.5**: `~/.ato/cache/synthetic/` accumulates one directory per `(provider, package, version)` tuple and is never automatically cleaned in this release. Heavy users (e.g. daily `npm:mintlify` invocations over weeks) will accumulate on the order of hundreds of MB to several GB. Use `du -sh ~/.ato/cache/synthetic/` to inspect, and remove stale directories manually if disk pressure arises. Automatic LRU-based GC with a `ato gc --synthetic` command ships in v0.5.x minor 1 (tracking: RFC `UNIFIED_EXECUTION_MODEL.md` §4.3 / §7.2).
+
+### Docs
+
+- Added RFC draft `docs/rfcs/draft/UNIFIED_EXECUTION_MODEL.md` outlining the unified Pipeline Spine (`HourglassFlow` variants) and Runtime Spine (`RuntimeProvisioner` + `ManagedRuntimePath`) model targeted for v0.5.x minor 1 / minor 2. Updated `docs/rfcs/accepted/ATO_CLI_SPEC.md` §3.1 to clarify the narrative vs. pipeline separation.
+
 ## [0.4.69] - 2026-04-19
 
 ### What Changed
