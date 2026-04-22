@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1
+# Docker E2E test: verifies ato does not source /etc/profile.d/ scripts when
+# launching child processes (i.e., ato does NOT use `sh -lc` or `bash -lc`).
+#
+# Stage 1 (builder): compiles ato from source
+# Stage 2 (tester):  Ubuntu with a /etc/profile.d/ trap that exports a wrong PATH
+
+# ─── Stage 1: Build ato binary ────────────────────────────────────────────────
+FROM rust:1.88-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    perl \
+    make \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+RUN cargo fetch && \
+    cargo build --release --bin ato
+
+# ─── Stage 2: Environment with /etc/profile.d/ trap ──────────────────────────
+FROM debian:bookworm-slim AS tester
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    xz-utils \
+    tar \
+    bash \
+    && rm -rf /var/lib/apt/lists/*
+
+# /etc/profile.d/ trap: export a poisoned PATH entry.
+# If ato uses `sh -lc` or `bash -lc` to launch child processes, this will be
+# sourced and the poisoned npm will appear before ato's managed binary.
+RUN mkdir -p /opt/wrong/bin \
+    && printf '#!/bin/sh\necho "PROFILE-POISONED-NPM"\n' > /opt/wrong/bin/npm \
+    && chmod +x /opt/wrong/bin/npm \
+    && printf '#!/bin/sh\necho "PROFILE-POISONED-NODE"\n' > /opt/wrong/bin/node \
+    && chmod +x /opt/wrong/bin/node \
+    && printf 'export PATH="/opt/wrong/bin:$PATH"\n' > /etc/profile.d/wrong-path.sh
+
+# Verify the trap works for login shells (so the test setup is valid).
+RUN bash -lc 'echo "$PATH"' | grep -q "/opt/wrong/bin" || \
+    (echo "ERROR: profile.d trap not active for login shells" && exit 1)
+RUN bash -lc 'npm' 2>/dev/null | grep -q "PROFILE-POISONED-NPM" || \
+    (echo "ERROR: poisoned npm not reachable via login shell" && exit 1)
+
+COPY --from=builder /src/target/release/ato /usr/local/bin/ato
+COPY tests/docker_sh_lc_trap_runner.sh /run-tests.sh
+RUN chmod +x /run-tests.sh
+
+ENV HOME=/root
+CMD ["/run-tests.sh"]
