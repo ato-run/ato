@@ -42,8 +42,23 @@ use serde_json::{json, Value};
 use walkdir::WalkDir;
 
 const GLOBAL_RUN_SOURCE_INFERENCE_DIR: &str = "source-inference";
+/// Dead code since `USE_HOME_RUN_STATE = true`; retained until the
+/// `use_global_run_state` field is removed in v0.5.x (PR 4).
+#[allow(dead_code)]
 const WORKSPACE_RUN_SOURCE_INFERENCE_DIR: &str = ".ato/tmp/source-inference";
 const SINGLE_SCRIPT_CACHE_SUBDIR: &str = "source-inference/single-script-cache";
+
+/// Run-attempt state is always stored under `~/.ato/runs/` rather than the
+/// caller's working directory.  Keeping ephemeral artifacts out of the project
+/// tree satisfies the "cwd untouched" invariant and makes GC straightforward.
+///
+/// Historical note: prior to this constant, `use_global_run_state` was `false`
+/// for directory-based projects (commit f44b1b8 only migrated single-scripts).
+/// No functional reason to keep directory-project attempts in cwd was found.
+///
+/// TODO(v0.5.x): Remove the `use_global_run_state` field from
+/// `MaterializationAdapter` entirely — it is always `true` now.
+const USE_HOME_RUN_STATE: bool = true;
 #[derive(Debug, Clone)]
 pub(crate) enum SourceInferenceInput {
     SourceEvidence(SourceEvidenceInput),
@@ -115,6 +130,7 @@ struct MaterializationAdapter {
     workspace_root: PathBuf,
     project_root: PathBuf,
     original_manifest: Option<toml::Value>,
+    // TODO(v0.5.x): Remove this field; it is always USE_HOME_RUN_STATE (true).
     use_global_run_state: bool,
 }
 
@@ -334,7 +350,7 @@ pub(crate) fn materialize_run_from_explicit_native_artifact(
         workspace_root: project_root.clone(),
         project_root: project_root.clone(),
         original_manifest: None,
-        use_global_run_state: false,
+        use_global_run_state: USE_HOME_RUN_STATE,
     };
     let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
         project_root,
@@ -387,7 +403,7 @@ fn prepare_run_materialization_adapter(
         workspace_root: source.project_root.clone(),
         project_root,
         original_manifest: None,
-        use_global_run_state: source.single_script.is_some(),
+        use_global_run_state: USE_HOME_RUN_STATE,
     })
 }
 
@@ -815,7 +831,7 @@ pub(crate) fn materialize_run_from_canonical_lock(
         workspace_root: canonical.project_root.clone(),
         project_root: canonical.project_root.clone(),
         original_manifest: None,
-        use_global_run_state: false,
+        use_global_run_state: USE_HOME_RUN_STATE,
     };
     let input = SourceInferenceInput::CanonicalLock(CanonicalLockInput {
         project_root: canonical.project_root.clone(),
@@ -840,7 +856,7 @@ pub(crate) fn materialize_run_from_compatibility(
         workspace_root: project.project_root.clone(),
         project_root: project.project_root.clone(),
         original_manifest: Some(original_manifest),
-        use_global_run_state: false,
+        use_global_run_state: USE_HOME_RUN_STATE,
     };
     let mut result = execute_shared_engine(
         SourceInferenceInput::DraftLock(draft_input),
