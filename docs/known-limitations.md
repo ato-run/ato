@@ -110,6 +110,32 @@ and Windows (registry) during install. On Linux, registration requires a manual
 
 ---
 
+## L7 — Synthetic workspace cache is not GC'd
+
+**Spec intent:** Managed package caches under `~/.ato/cache/` should be
+automatically pruned to prevent unbounded disk growth.
+
+**Current behaviour (v0.5):** `~/.ato/cache/synthetic/` accumulates one
+directory per `(provider, package, version)` tuple and is never automatically
+cleaned. Heavy usage — for example, running `npm:mintlify` daily over weeks —
+can accumulate hundreds of MB to several GB.
+
+```bash
+# Inspect disk usage
+du -sh ~/.ato/cache/synthetic/
+
+# Manual cleanup (safe to delete; will be re-created on next run)
+rm -rf ~/.ato/cache/synthetic/<stale-entry>
+```
+
+**Workaround:** Periodically remove stale entries from `~/.ato/cache/synthetic/`
+manually when disk pressure arises.
+
+**Resolution:** Automatic LRU-based GC with a `ato gc --synthetic` command.
+Targeted for v0.5.1 (tracked in RFC `UNIFIED_EXECUTION_MODEL.md` §4.3 / §7.2).
+
+---
+
 ## Foundation readiness (informational)
 
 The following Foundation KPIs (§11.2 of the Capsule Protocol spec) are tracked for
