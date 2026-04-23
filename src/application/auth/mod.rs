@@ -29,11 +29,12 @@ pub(super) const DEFAULT_STORE_API_URL: &str = "https://api.ato.run";
 pub(super) const DEFAULT_STORE_SITE_URL: &str = "https://ato.run";
 pub(super) const ENV_STORE_API_URL: &str = "ATO_STORE_API_URL";
 pub(super) const ENV_STORE_SITE_URL: &str = "ATO_STORE_SITE_URL";
+/// Legacy env var for a Store session token. `EnvBackend` reads this as an
+/// alias for `ATO_CRED_AUTH_SESSION__SESSION_TOKEN`; kept as a symbolic
+/// constant so tests can refer to it without duplicating the string literal.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) const ENV_ATO_TOKEN: &str = "ATO_TOKEN";
 pub(super) const ENV_XDG_CONFIG_HOME: &str = "XDG_CONFIG_HOME";
-pub(super) const KEYRING_SERVICE_NAME: &str = "run.ato.cli";
-pub(super) const KEYRING_SESSION_ACCOUNT: &str = "current_session";
-pub(super) const KEYRING_GITHUB_ACCOUNT: &str = "github_token";
 pub(super) const GITHUB_APP_INSTALL_TIMEOUT_SECS: u64 = 5 * 60;
 pub(super) const GITHUB_APP_INSTALL_POLL_SECS: u64 = 3;
 pub(super) const GITHUB_APP_INSTALL_NOTICE_INTERVAL_SECS: u64 = 12;
@@ -88,16 +89,6 @@ pub struct AuthManager {
     /// production; overridable in tests so each temp dir gets its own age
     /// identity and credential layout.
     pub(super) age_home: PathBuf,
-    // Kept so #[cfg(test)] hooks can reach the in-process legacy-keychain
-    // store by service/account. The shared `auth_store` owns the production
-    // copies; production code never reads these fields directly, and not
-    // every test exercises the github slot.
-    #[allow(dead_code)]
-    pub(super) keyring_service: String,
-    #[allow(dead_code)]
-    pub(super) keyring_session_account: String,
-    #[allow(dead_code)]
-    pub(super) keyring_github_account: String,
     /// Eagerly-constructed `AuthStore`. Cached so the in-process
     /// `MemoryBackend` survives across `resolve_*` / `persist_*` calls — every
     /// call going through a fresh `AuthStore` would otherwise discard its own
@@ -114,9 +105,7 @@ pub(super) fn read_env_non_empty(key: &str) -> Option<String> {
 
 #[cfg(test)]
 pub(super) fn shared_env_lock() -> &'static std::sync::Mutex<()> {
-    use std::sync::{Mutex, OnceLock};
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+    crate::application::credential::test_env_lock()
 }
 
 #[cfg(test)]
