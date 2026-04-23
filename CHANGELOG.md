@@ -4,6 +4,21 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.74] - 2026-04-23
+
+### What Changed
+
+
+#### Bug Fixes
+
+- Allow npm packages with prepare-only lifecycle scripts
+
+
+#### Documentation
+
+- Foundation Readiness 0/6, L7 cache GC, TESTING.md
+
+
 ## [0.4.73] - 2026-04-23
 
 ### What Changed
