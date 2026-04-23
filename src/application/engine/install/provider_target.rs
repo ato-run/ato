@@ -872,15 +872,20 @@ fn resolve_npm_bin_metadata(
         );
     }
     if entries.len() > 1 {
-        let names = entries
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        bail!(
-            "Package '{}' exposes multiple bin entrypoints ({names}). Explicit entrypoint selection is not supported yet.",
-            requested_package
-        );
+        let canonical = default_npm_bin_name(&package_name);
+        if let Some(pos) = entries.iter().position(|(name, _)| name == &canonical) {
+            entries = vec![entries.remove(pos)];
+        } else {
+            let names = entries
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "Package '{}' exposes multiple bin entrypoints ({names}). Explicit entrypoint selection is not supported yet.",
+                requested_package
+            );
+        }
     }
 
     let (entrypoint_name, entrypoint_value) = entries.remove(0);
@@ -2074,6 +2079,27 @@ Tag: py3-none-any\n";
         let err = resolve_npm_bin_metadata(temp.path(), "demo-npm-multi-bin")
             .expect_err("multiple bins must fail");
         assert!(err.to_string().contains("multiple bin entrypoints"));
+    }
+
+    #[test]
+    fn resolve_npm_bin_metadata_selects_matching_bin_from_multiple() {
+        let temp = workspace_tempdir("provider-target-npm-multi-bin-match-");
+        write_npm_package_manifest(
+            temp.path(),
+            json!({
+                "name": "cowsay",
+                "version": "1.5.0",
+                "bin": {
+                    "cowsay":   "cli.js",
+                    "cowthink": "cli.js",
+                },
+            }),
+            &[("cli.js", "#!/usr/bin/env node\n")],
+        );
+
+        let resolved =
+            resolve_npm_bin_metadata(temp.path(), "cowsay").expect("should resolve to cowsay bin");
+        assert_eq!(resolved.entrypoint_name, "cowsay");
     }
 
     #[test]
