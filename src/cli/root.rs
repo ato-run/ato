@@ -610,13 +610,16 @@ pub(crate) enum Commands {
         command: BindingCommands,
     },
 
-    #[command(
-        hide = true,
-        about = "Manage secrets (age-encrypted files; OS keychain for passphrase cache only)"
-    )]
+    #[command(hide = true, about = "Manage secrets (age-encrypted files; OS keychain for passphrase cache only)")]
     Secrets {
         #[command(subcommand)]
         command: crate::cli::SecretsCommands,
+    },
+
+    #[command(hide = true, about = "Manage the age identity session (unlock once, reuse across commands)")]
+    Session {
+        #[command(subcommand)]
+        command: crate::cli::IdentitySessionCommands,
     },
 
     #[command(hide = true, about = "Login to Ato registry")]

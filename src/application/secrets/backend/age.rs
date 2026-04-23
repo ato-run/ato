@@ -190,6 +190,20 @@ impl AgeFileBackend {
         self.identity.lock().unwrap().is_some()
     }
 
+    /// Return the raw `AGE-SECRET-KEY-1...` string for session key file export.
+    ///
+    /// Only called by `ato session start`; the string is written to a chmod 600
+    /// session file and never logged or displayed.
+    pub(crate) fn identity_for_session(&self) -> Option<String> {
+        let guard = self.identity.lock().unwrap();
+        guard.as_ref().map(|id| id.to_string().expose_secret().to_string())
+    }
+
+    /// Directly install an already-loaded identity (used by session key file path).
+    pub(crate) fn install_identity(&mut self, identity: x25519::Identity) {
+        *self.identity.lock().unwrap() = Some(identity);
+    }
+
     fn get_identity(&self) -> Result<x25519::Identity> {
         let guard = self.identity.lock().unwrap();
         guard
@@ -557,4 +571,216 @@ fn clone_identity(id: &x25519::Identity) -> x25519::Identity {
         .expose_secret()
         .parse::<x25519::Identity>()
         .expect("round-trip identity parse failed")
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn tmp_backend() -> (TempDir, AgeFileBackend) {
+        let dir = TempDir::new().expect("tempdir");
+        let backend = AgeFileBackend::new(dir.path().to_path_buf());
+        (dir, backend)
+    }
+
+    fn init_backend() -> (TempDir, AgeFileBackend) {
+        let (dir, backend) = tmp_backend();
+        backend.init_identity(None).expect("init_identity");
+        (dir, backend)
+    }
+
+    fn make_key(name: &str) -> SecretKey {
+        SecretKey::new(name)
+    }
+
+    fn make_ns_key(ns: &str, name: &str) -> SecretKey {
+        SecretKey::with_namespace(ns, name)
+    }
+
+    // ── identity_exists ───────────────────────────────────────────────────────
+
+    #[test]
+    fn identity_not_exists_before_init() {
+        let (_dir, backend) = tmp_backend();
+        assert!(!backend.identity_exists());
+    }
+
+    #[test]
+    fn identity_exists_after_init() {
+        let (_dir, backend) = init_backend();
+        assert!(backend.identity_exists());
+    }
+
+    // ── init_identity ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn init_identity_creates_key_and_pub_files() {
+        let (dir, backend) = tmp_backend();
+        backend.init_identity(None).expect("init_identity");
+        assert!(dir.path().join(".ato/keys/identity.key").exists());
+        assert!(dir.path().join(".ato/keys/identity.pub").exists());
+    }
+
+    #[test]
+    fn init_identity_returns_loaded_identity() {
+        let (_dir, backend) = tmp_backend();
+        backend.init_identity(None).expect("init_identity");
+        assert!(backend.is_identity_loaded());
+    }
+
+    // ── roundtrip: set / get ──────────────────────────────────────────────────
+
+    #[test]
+    fn roundtrip_set_get_default_namespace() {
+        let (_dir, backend) = init_backend();
+        let key = make_key("API_KEY");
+        backend
+            .set(&key, "secret-value".into(), None, None, None)
+            .expect("set");
+        let got = backend.get(&key).expect("get");
+        assert_eq!(got, Some("secret-value".to_string()));
+    }
+
+    #[test]
+    fn get_returns_none_for_missing_key() {
+        let (_dir, backend) = init_backend();
+        let key = make_key("NONEXISTENT");
+        let got = backend.get(&key).expect("get");
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn roundtrip_with_description_and_acl() {
+        let (_dir, backend) = init_backend();
+        let key = make_key("DB_PASS");
+        backend
+            .set(
+                &key,
+                "hunter2".into(),
+                Some("database password"),
+                Some(vec!["capsule:myapp".into()]),
+                None,
+            )
+            .expect("set");
+        let entries = backend.list("default").expect("list");
+        let entry = entries.iter().find(|e| e.key == "DB_PASS").expect("entry");
+        assert_eq!(entry.description.as_deref(), Some("database password"));
+        assert_eq!(entry.allow.as_deref(), Some(&["capsule:myapp".to_string()][..]));
+    }
+
+    // ── delete ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn delete_removes_key() {
+        let (_dir, backend) = init_backend();
+        let key = make_key("TEMP");
+        backend.set(&key, "x".into(), None, None, None).expect("set");
+        backend.delete(&key).expect("delete");
+        assert_eq!(backend.get(&key).expect("get"), None);
+    }
+
+    #[test]
+    fn delete_nonexistent_is_noop() {
+        let (_dir, backend) = init_backend();
+        let key = make_key("GHOST");
+        backend.delete(&key).expect("delete nonexistent should be ok");
+    }
+
+    // ── list ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn list_empty_namespace_returns_empty() {
+        let (_dir, backend) = init_backend();
+        let entries = backend.list("default").expect("list");
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn list_returns_all_keys_sorted() {
+        let (_dir, backend) = init_backend();
+        for k in &["ZEBRA", "ALPHA", "MIDDLE"] {
+            backend.set(&make_key(k), "v".into(), None, None, None).expect("set");
+        }
+        let entries = backend.list("default").expect("list");
+        let names: Vec<_> = entries.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(names, vec!["ALPHA", "MIDDLE", "ZEBRA"]);
+    }
+
+    // ── namespace isolation ───────────────────────────────────────────────────
+
+    #[test]
+    fn namespace_isolation_default_vs_custom() {
+        let (_dir, backend) = init_backend();
+        let default_key = make_ns_key("default", "FOO");
+        let other_key   = make_ns_key("project_a", "FOO");
+
+        backend.set(&default_key, "default-value".into(), None, None, None).expect("set default");
+        backend.set(&other_key,   "project-value".into(), None, None, None).expect("set project");
+
+        assert_eq!(backend.get(&default_key).expect("get default"), Some("default-value".to_string()));
+        assert_eq!(backend.get(&other_key).expect("get project"),   Some("project-value".to_string()));
+    }
+
+    #[test]
+    fn list_namespaces_returns_created_namespaces() {
+        let (_dir, backend) = init_backend();
+        backend.set(&make_ns_key("ns_a", "K"), "v".into(), None, None, None).expect("set");
+        backend.set(&make_ns_key("ns_b", "K"), "v".into(), None, None, None).expect("set");
+        let ns = backend.list_namespaces();
+        assert!(ns.contains(&"ns_a".to_string()), "ns_a not in {:?}", ns);
+        assert!(ns.contains(&"ns_b".to_string()), "ns_b not in {:?}", ns);
+    }
+
+    // ── schema versioning ─────────────────────────────────────────────────────
+
+    #[test]
+    fn namespace_file_has_correct_schema_version() {
+        let (_dir, backend) = init_backend();
+        backend.set(&make_key("X"), "y".into(), None, None, None).expect("set");
+        // Read and decrypt to verify schema_version in JSON.
+        let identity = {
+            let guard = backend.identity.lock().unwrap();
+            guard
+                .as_ref()
+                .map(|id| {
+                    id.to_string()
+                        .expose_secret()
+                        .parse::<x25519::Identity>()
+                        .unwrap()
+                })
+                .unwrap()
+        };
+        let path = backend.namespace_path("default");
+        let ciphertext = std::fs::read(&path).unwrap();
+        let decryptor = match age::Decryptor::new(&ciphertext[..]).unwrap() {
+            age::Decryptor::Recipients(d) => d,
+            _ => panic!("expected recipient encryption"),
+        };
+        let mut plaintext = Vec::new();
+        let mut reader = decryptor
+            .decrypt(std::iter::once(&identity as &dyn age::Identity))
+            .unwrap();
+        std::io::Read::read_to_end(&mut reader, &mut plaintext).unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
+        assert_eq!(data["schema_version"], "0.1");
+    }
+
+    // ── load_identity_with_passphrase ─────────────────────────────────────────
+
+    #[test]
+    fn load_identity_plain_text_succeeds() {
+        let (dir, _backend) = init_backend();
+        let fresh = AgeFileBackend::new(dir.path().to_path_buf());
+        assert!(fresh.load_identity_with_passphrase(None).is_ok());
+        assert!(fresh.is_identity_loaded());
+    }
+
+    #[test]
+    fn load_identity_nonexistent_returns_err() {
+        let (_dir, backend) = tmp_backend();
+        assert!(backend.load_identity_with_passphrase(None).is_err());
+    }
 }
