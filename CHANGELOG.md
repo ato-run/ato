@@ -4,6 +4,30 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.78] - 2026-04-23
+
+### What Changed
+
+
+#### Bug Fixes
+
+- Prune excluded dirs with filter_entry; add artifacts/locks/dist to skip list
+
+- Remove all keychain support from secrets subsystem
+
+
+#### Features
+
+- Wire session commands and add priority-config support
+
+- Migrate secrets backend to age file encryption
+
+
+#### Refactoring
+
+- Remove migrate-from-keychain command
+
+
 ## [0.4.77] - 2026-04-23
 
 ### What Changed
