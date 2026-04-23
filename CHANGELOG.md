@@ -4,6 +4,16 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.75] - 2026-04-23
+
+### What Changed
+
+
+#### Bug Fixes
+
+- Select package-name-matching bin when npm package has multiple entrypoints
+
+
 ## [0.4.74] - 2026-04-23
 
 ### What Changed
