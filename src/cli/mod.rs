@@ -13,6 +13,7 @@ mod registry;
 mod root;
 pub(crate) mod scoped_id_prompt;
 mod secrets;
+mod session;
 mod shared;
 mod source;
 mod state;
@@ -42,6 +43,7 @@ pub(crate) use registry::RegistryCommands;
 pub(crate) use root::{Cli, Commands};
 #[allow(unused_imports)]
 pub(crate) use secrets::SecretsCommands;
+pub(crate) use session::IdentitySessionCommands;
 #[allow(unused_imports)]
 pub(crate) use shared::{
     CompatibilityFallbackBackend, EncapVisibility, EnforcementMode, GitHubAutoFixMode, GitMode,
