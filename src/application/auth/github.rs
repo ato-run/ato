@@ -307,13 +307,13 @@ pub async fn login_with_token(token: String) -> Result<()> {
     let username = verify_github_token(&token).await?;
 
     let manager = AuthManager::new()?;
-    manager.save_github_token_async(token).await?;
+    let write_location = manager.save_github_token_async(token).await?;
     let mut creds = manager.load()?.unwrap_or_default();
     creds.github_username = Some(username.clone());
     manager.save(&creds)?;
 
     println!("✅ Authenticated as @{}", username);
-    println!("   GitHub token storage: OS keyring");
+    println!("   GitHub token storage: {}", write_location.display());
     if manager.credentials_path().exists() {
         println!("   Metadata file: {:?}", manager.credentials_path());
     }

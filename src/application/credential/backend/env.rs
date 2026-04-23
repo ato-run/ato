@@ -20,11 +20,7 @@ impl EnvBackend {
     }
 
     fn env_key_for(namespace: &str, name: &str) -> String {
-        format!(
-            "ATO_CRED_{}__{}",
-            namespace_to_env_segment(namespace),
-            name
-        )
+        format!("ATO_CRED_{}__{}", namespace_to_env_segment(namespace), name)
     }
 
     fn env_prefix_for(namespace: &str) -> String {
@@ -115,7 +111,10 @@ mod tests {
 
     #[test]
     fn namespace_to_env_segment_simple() {
-        assert_eq!(namespace_to_env_segment("secrets/default"), "SECRETS_DEFAULT");
+        assert_eq!(
+            namespace_to_env_segment("secrets/default"),
+            "SECRETS_DEFAULT"
+        );
     }
 
     #[test]
