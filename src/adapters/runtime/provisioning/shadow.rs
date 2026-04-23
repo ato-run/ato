@@ -4,7 +4,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use capsule_core::common::paths::workspace_tmp_dir;
+use capsule_core::common::paths::ato_cache_dir;
 use capsule_core::router::ManifestData;
 use toml::Value;
 use walkdir::WalkDir;
@@ -34,8 +34,8 @@ pub fn prepare_shadow_workspace(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let root_dir = workspace_tmp_dir(manifest_dir)
-        .join("ato-auto-provision")
+    let root_dir = ato_cache_dir()
+        .join("auto-provision")
         .join(format!("run-{}", run_id));
     fs::create_dir_all(&root_dir)
         .with_context(|| format!("Failed to create shadow workspace: {}", root_dir.display()))?;
@@ -624,6 +624,7 @@ fn should_skip_snapshot(relative: &Path) -> bool {
         matches!(
             name.as_ref(),
             ".git"
+                | ".ato"
                 | ".tmp"
                 | "target"
                 | "node_modules"

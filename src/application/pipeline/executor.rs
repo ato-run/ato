@@ -18,6 +18,7 @@ impl HourglassPipeline {
         R: HourglassPhaseRunner,
     {
         let mut attempt = PipelineAttemptContext::default();
+        attempt.activate_sigint_cleanup();
 
         for phase in self.selection.flow.phases() {
             if !runner.should_continue() {

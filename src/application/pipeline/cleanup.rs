@@ -3,7 +3,7 @@
 use std::error::Error as StdError;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Error;
 use capsule_core::execution_plan::error::{
@@ -134,6 +134,33 @@ impl SharedCleanupJournal {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         journal.unwind()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SIGINT cleanup registry
+//
+// When a pipeline attempt is active, we store a weak reference to its cleanup
+// journal here. If the user presses Ctrl+C (SIGINT), `run_sigint_cleanup()`
+// is called from the ctrlc handler, which unwinds any registered dirs before
+// the process exits.
+// ---------------------------------------------------------------------------
+
+static SIGINT_JOURNAL: OnceLock<Mutex<Option<SharedCleanupJournal>>> = OnceLock::new();
+
+fn sigint_journal() -> &'static Mutex<Option<SharedCleanupJournal>> {
+    SIGINT_JOURNAL.get_or_init(|| Mutex::new(None))
+}
+
+/// Called from the ctrlc handler to clean up in-flight run artifacts.
+/// Best-effort: errors are silently ignored so the process can exit cleanly.
+pub(crate) fn run_sigint_cleanup() {
+    let journal = sigint_journal()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take();
+    if let Some(j) = journal {
+        j.unwind();
     }
 }
 
@@ -296,8 +323,18 @@ impl PipelineAttemptContext {
         self.cleanup.unwind()
     }
 
+    /// Register this attempt's cleanup journal as the SIGINT handler target.
+    /// Call once at the start of a pipeline run; call `mark_committed` or let
+    /// `unwind_cleanup` run when the pipeline completes normally.
+    pub(crate) fn activate_sigint_cleanup(&self) {
+        *sigint_journal().lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(self.cleanup.clone());
+    }
+
     pub(crate) fn mark_committed(&mut self) {
         self.committed_terminal_state = true;
+        // Dirs are committed — SIGINT should no longer clean them up.
+        *sigint_journal().lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 }
 
