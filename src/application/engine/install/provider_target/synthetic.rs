@@ -543,15 +543,20 @@ fn resolve_npm_entrypoint_from_manifest(
         );
     }
     if entries.len() > 1 {
-        let names = entries
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        bail!(
-            "Package '{}' exposes multiple bin entrypoints ({names}). Explicit entrypoint selection is not supported yet.",
-            requested_package
-        );
+        let canonical = default_npm_bin_name(&package_name);
+        if let Some(pos) = entries.iter().position(|(name, _)| name == &canonical) {
+            entries = vec![entries.remove(pos)];
+        } else {
+            let names = entries
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "Package '{}' exposes multiple bin entrypoints ({names}). Explicit entrypoint selection is not supported yet.",
+                requested_package
+            );
+        }
     }
 
     let (entrypoint_name, entrypoint_value) = entries.remove(0);
@@ -698,7 +703,9 @@ fn synthetic_workspace_package_name(package_name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::wheel_candidate_for_url;
+    use super::{resolve_npm_entrypoint_from_manifest, wheel_candidate_for_url};
+    use crate::application::engine::install::provider_target::NpmPackageManifest;
+    use serde_json::json;
 
     #[test]
     fn wheel_candidate_accepts_fragment_bearing_pypi_links() {
@@ -710,5 +717,36 @@ mod tests {
 
         assert_eq!(candidate.version, "0.0.1a1");
         assert!(candidate.url.contains("#sha256="));
+    }
+
+    #[test]
+    fn resolve_npm_entrypoint_selects_matching_bin_from_multiple() {
+        let manifest: NpmPackageManifest = serde_json::from_value(json!({
+            "name": "cowsay",
+            "version": "1.6.0",
+            "bin": {
+                "cowsay": "./bin/cowsay",
+                "cowthink": "./bin/cowthink"
+            }
+        }))
+        .unwrap();
+        let result = resolve_npm_entrypoint_from_manifest(manifest, "cowsay").unwrap();
+        assert_eq!(result.entrypoint_name, "cowsay");
+        assert_eq!(result.entrypoint_value, "./bin/cowsay");
+    }
+
+    #[test]
+    fn resolve_npm_entrypoint_rejects_multiple_unmatched_bins() {
+        let manifest: NpmPackageManifest = serde_json::from_value(json!({
+            "name": "multi-tool",
+            "version": "1.0.0",
+            "bin": {
+                "tool-a": "./bin/a",
+                "tool-b": "./bin/b"
+            }
+        }))
+        .unwrap();
+        let err = resolve_npm_entrypoint_from_manifest(manifest, "multi-tool").unwrap_err();
+        assert!(err.to_string().contains("multiple bin entrypoints"));
     }
 }
