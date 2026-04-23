@@ -14,7 +14,7 @@ use std::thread;
 use std::time::Duration;
 use tracing::debug;
 
-use capsule_core::common::paths::{workspace_artifacts_dir, workspace_tmp_dir};
+use capsule_core::common::paths::{ato_cache_dir, workspace_artifacts_dir};
 use capsule_core::runtime::native::NativeHandle;
 use capsule_core::{RuntimeMetadata, SessionRunner, SessionRunnerConfig};
 
@@ -253,12 +253,14 @@ pub fn execute_open_path(app_path: &Path, mode: ExecuteMode) -> Result<CapsulePr
 
 fn apply_host_isolation(
     cmd: &mut Command,
-    plan: &ManifestData,
+    _plan: &ManifestData,
     launch_env: &std::collections::HashMap<String, String>,
     launch_port: Option<u16>,
     launch_ctx: &RuntimeLaunchContext,
 ) -> Result<()> {
-    let isolation_root = workspace_tmp_dir(&plan.workspace_root);
+    // Host isolation dirs (HOME, TMPDIR, npm/pip/pnpm caches) live under
+    // ~/.ato/cache/run-host/ so the user's project directory stays clean.
+    let isolation_root = ato_cache_dir().join("run-host");
     fs::create_dir_all(&isolation_root).with_context(|| {
         format!(
             "Failed to create host isolation root: {}",

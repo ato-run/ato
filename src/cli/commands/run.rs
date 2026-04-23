@@ -19,7 +19,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::debug;
 
-use crate::application::pipeline::cleanup::PipelineAttemptContext;
+use crate::application::pipeline::cleanup::{run_sigint_cleanup, PipelineAttemptContext};
 use crate::application::pipeline::consumer::ConsumerRunPipeline;
 use crate::application::pipeline::executor::HourglassPhaseRunner;
 use crate::application::pipeline::hourglass;
@@ -825,6 +825,12 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
 }
 
 async fn execute_normal_mode(args: RunArgs) -> Result<()> {
+    // Register a Ctrl+C handler so in-flight run artifacts are cleaned up on SIGINT.
+    let _ = ctrlc::set_handler(|| {
+        run_sigint_cleanup();
+        std::process::exit(130);
+    });
+
     let pipeline = ConsumerRunPipeline::standard();
     let mut runner = ConsumerRunPhaseRunner {
         args: &args,
@@ -1295,6 +1301,7 @@ fn execute_watch_mode(args: RunArgs) -> Result<()> {
     let reporter_for_cleanup = args.reporter.clone();
 
     ctrlc::set_handler(move || {
+        run_sigint_cleanup();
         let _ = capsule_handle.stop();
         let _ = futures::executor::block_on(CapsuleReporter::warn(
             &*reporter_for_cleanup,

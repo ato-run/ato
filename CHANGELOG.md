@@ -21,6 +21,23 @@ All notable changes to `ato-cli` will be documented in this file.
   previously created an orphaned run-attempt directory (no cleanup scope).
   It is now cleaned up immediately after the preliminary normalization completes.
 
+- **cwd pollution — host isolation**: `apply_host_isolation` previously created
+  `<cwd>/.ato/tmp/.ato-run-host/{home,tmp,cache,config}` on every `ato run .`.
+  These dirs are now created under `~/.ato/cache/run-host/` so the user's project
+  directory is never written to.
+
+- **cwd pollution — auto-provision shadow workspace**: `prepare_shadow_workspace`
+  previously created `<cwd>/.ato/tmp/ato-auto-provision/run-<nanos>/` when a
+  project needed auto-provisioning. These dirs are now created under
+  `~/.ato/cache/auto-provision/`. Additionally, `.ato/` is now excluded from
+  snapshot copies (alongside `.git`, `node_modules`, etc.) to prevent recursive
+  growth across repeated runs.
+
+- **SIGINT cleanup**: Pressing Ctrl+C during `ato run` now triggers cleanup of
+  in-flight run artifacts (registered via `CleanupScope::register_remove_dir`)
+  before the process exits. Previously, SIGINT would leave temporary directories
+  on disk. Both non-watch mode (exit 130) and watch mode (exit 0) are covered.
+
 ## [0.4.78] - 2026-04-23
 
 ### What Changed
