@@ -15,6 +15,7 @@ pub(crate) mod registry;
 mod run;
 mod scaffold;
 mod secrets;
+mod session;
 mod setup;
 mod share;
 mod source;
@@ -521,6 +522,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         Commands::Ipc { command } => execute_ipc_command(command),
 
         Commands::Secrets { command } => secrets::execute_secrets_command(command),
+
+        Commands::Session { command } => session::execute_session_command(command),
 
         Commands::Login { token, headless } => {
             let rt = tokio::runtime::Runtime::new()?;
