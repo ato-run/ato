@@ -83,20 +83,11 @@ fn cmd_start(ttl: &str) -> Result<()> {
 
     // Try loading without passphrase first (plain-text identity).
     if age.load_identity_with_passphrase(None).is_err() {
-        // Need passphrase – try keychain cache.
-        let kc = crate::application::secrets::backend::KeychainBackend::new();
-        let loaded = if let Some(pp) = kc.get_passphrase() {
-            age.load_identity_with_passphrase(Some(&pp)).is_ok()
-        } else {
-            false
-        };
-
-        if !loaded {
-            let pp = rpassword::prompt_password("Passphrase for identity.key: ")
-                .context("failed to read passphrase")?;
-            age.load_identity_with_passphrase(Some(&pp))
-                .context("wrong passphrase")?;
-        }
+        // Need passphrase – prompt interactively.
+        let pp = rpassword::prompt_password("Passphrase for identity.key: ")
+            .context("failed to read passphrase")?;
+        age.load_identity_with_passphrase(Some(&pp))
+            .context("wrong passphrase")?;
     }
 
     // Write session key file: plain AGE-SECRET-KEY-1... (chmod 600).

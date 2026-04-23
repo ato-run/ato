@@ -5,7 +5,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::backend::{
-    AgeFileBackend, BackendEntry, EnvBackend, KeychainBackend, MemoryBackend, SecretBackend,
+    AgeFileBackend, BackendEntry, EnvBackend, MemoryBackend, SecretBackend,
     SecretKey, load_identity_bytes,
 };
 use super::policy::SecretPolicy;
@@ -42,66 +42,49 @@ pub(crate) enum SecretScope {
 ///   1. EnvBackend       – ATO_SECRET_* environment variables (CI/override)
 ///   2. MemoryBackend    – in-process session cache
 ///   3. AgeFileBackend   – ~/.ato/secrets/<ns>.age  (primary persistent)
-///   4. Legacy keychain  – OS keychain + chmod-600 fallback file (migration path)
 pub(crate) struct SecretStore {
     home: PathBuf,
     env: EnvBackend,
     memory: MemoryBackend,
     age: Option<AgeFileBackend>,
-    keychain: KeychainBackend,
-    /// Legacy: use OS keychain as fallback when age identity is absent.
-    legacy_use_keyring: bool,
     /// Configured backend resolution order (from `~/.ato/config.toml [secrets] backends`).
-    /// Default order: env → memory → age → keychain.
+    /// Default order: env → memory → age.
     backend_order: Vec<String>,
 }
 
 impl SecretStore {
     /// Open the secret store.
     ///
-    /// Loads the age identity non-interactively (tries keychain for passphrase
-    /// if the identity is passphrase-protected).  Falls back to the legacy
-    /// keychain backend when no age identity is found.
+    /// Loads the age identity non-interactively (session key file or plain-text key).
+    /// When the identity is passphrase-protected and no session key is active, the age
+    /// backend is disabled; callers should prompt via `ato session start` or
+    /// `ato secrets init`.
     pub(crate) fn open() -> Result<Self> {
         let home = dirs::home_dir().context("failed to resolve home directory")?;
-        let keychain = KeychainBackend::new();
         let memory = MemoryBackend::new(None);
         let env = EnvBackend::new();
 
         let mut age_backend = AgeFileBackend::new(home.clone());
-        let loaded = try_load_identity(&mut age_backend, &keychain);
+        let loaded = try_load_identity(&mut age_backend);
         let age = if loaded { Some(age_backend) } else { None };
 
-        let legacy_use_keyring = super::storage::is_keyring_available();
         let backend_order = read_secrets_backend_order(&home).unwrap_or_else(|| {
-            vec!["env".into(), "memory".into(), "age".into(), "keychain".into()]
+            vec!["env".into(), "memory".into(), "age".into()]
         });
 
-        Ok(Self {
-            home,
-            env,
-            memory,
-            age,
-            keychain,
-            legacy_use_keyring,
-            backend_order,
-        })
+        Ok(Self { home, env, memory, age, backend_order })
     }
 
     /// Open with an already-unlocked age backend (used internally by `init` / `session`).
     pub(crate) fn open_with_age(home: PathBuf, age_backend: AgeFileBackend) -> Result<Self> {
-        let keychain = KeychainBackend::new();
-        let legacy_use_keyring = super::storage::is_keyring_available();
         let backend_order = read_secrets_backend_order(&home).unwrap_or_else(|| {
-            vec!["env".into(), "memory".into(), "age".into(), "keychain".into()]
+            vec!["env".into(), "memory".into(), "age".into()]
         });
         Ok(Self {
             home,
             env: EnvBackend::new(),
             memory: MemoryBackend::new(None),
             age: Some(age_backend),
-            keychain,
-            legacy_use_keyring,
             backend_order,
         })
     }
@@ -109,11 +92,6 @@ impl SecretStore {
     /// Reference to the age backend, if loaded.
     pub(crate) fn age(&self) -> Option<&AgeFileBackend> {
         self.age.as_ref()
-    }
-
-    /// Reference to the keychain backend.
-    pub(crate) fn keychain(&self) -> &KeychainBackend {
-        &self.keychain
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -130,14 +108,13 @@ impl SecretStore {
             .context("refused to store unsafe secret")?;
 
         let sk = SecretKey::new(key);
-
-        if let Some(age) = &self.age {
-            return age.set(&sk, value.to_string(), description, allow, deny);
+        match &self.age {
+            Some(age) => age.set(&sk, value.to_string(), description, allow, deny),
+            None => bail!(
+                "no age identity loaded — run `ato secrets init` to create one,\n\
+                 or `ato session start` to unlock an existing passphrase-protected identity"
+            ),
         }
-
-        // Legacy path.
-        self.legacy_write(key, value)?;
-        self.legacy_update_metadata(key, description, allow, deny, false)
     }
 
     pub(crate) fn set_in_namespace(
@@ -153,14 +130,13 @@ impl SecretStore {
             .context("refused to store unsafe secret")?;
 
         let sk = SecretKey::with_namespace(namespace, key);
-
-        if let Some(age) = &self.age {
-            return age.set(&sk, value.to_string(), description, allow, deny);
+        match &self.age {
+            Some(age) => age.set(&sk, value.to_string(), description, allow, deny),
+            None => bail!(
+                "no age identity loaded — run `ato secrets init` to create one,\n\
+                 or `ato session start` to unlock an existing passphrase-protected identity"
+            ),
         }
-
-        // Fall back to default namespace on legacy path.
-        self.legacy_write(key, value)?;
-        self.legacy_update_metadata(key, description, allow, deny, false)
     }
 
     pub(crate) fn get(&self, key: &str) -> Result<Option<String>> {
@@ -170,7 +146,7 @@ impl SecretStore {
                 "env" => self.env.get(&sk)?,
                 "memory" => self.memory.get(&sk)?,
                 "age" => self.age.as_ref().and_then(|a| a.get(&sk).ok().flatten()),
-                "keychain" => self.legacy_read(key).ok().flatten(),
+                "keychain" => None, // keychain no longer supported
                 _ => None,
             };
             if let Some(v) = result { return Ok(Some(v)); }
@@ -216,38 +192,32 @@ impl SecretStore {
             }
             // Also check default namespace explicitly.
             age.delete(&sk).ok();
+            return Ok(());
         }
-        self.legacy_delete(key)
+        bail!(
+            "no age identity loaded — run `ato secrets init` to create one,\n\
+             or `ato session start` to unlock an existing passphrase-protected identity"
+        )
     }
 
     pub(crate) fn list(&self) -> Result<Vec<SecretEntry>> {
         let mut entries: Vec<SecretEntry> = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
-        // Age backend: all namespaces.
         if let Some(age) = &self.age {
             for ns in age.list_namespaces() {
-                let backend_entries = age.list(&ns).unwrap_or_default();
-                for be in backend_entries {
+                for be in age.list(&ns).unwrap_or_default() {
                     if seen.insert(be.key.clone()) {
                         entries.push(backend_entry_to_secret_entry(be));
                     }
                 }
             }
-            // Also list default if no namespaces found on disk (may be new store).
             if age.list_namespaces().is_empty() {
                 for be in age.list("default").unwrap_or_default() {
                     if seen.insert(be.key.clone()) {
                         entries.push(backend_entry_to_secret_entry(be));
                     }
                 }
-            }
-        }
-
-        // Legacy: only add entries not already seen.
-        for entry in self.legacy_list()? {
-            if seen.insert(entry.key.clone()) {
-                entries.push(entry);
             }
         }
 
@@ -271,159 +241,20 @@ impl SecretStore {
         deny: Option<Vec<String>>,
     ) -> Result<()> {
         let sk = SecretKey::new(key);
-        if let Some(age) = &self.age {
-            return age.update_acl(&sk, allow, deny);
+        match &self.age {
+            Some(age) => age.update_acl(&sk, allow, deny),
+            None => bail!(
+                "no age identity loaded — run `ato secrets init` to create one,\n\
+                 or `ato session start` to unlock an existing passphrase-protected identity"
+            ),
         }
-        self.legacy_update_metadata(key, None, allow, deny, true)
-    }
-
-    // ── Legacy helpers (keychain + env file) ─────────────────────────────────
-
-    fn legacy_write(&self, key: &str, value: &str) -> Result<()> {
-        const GLOBAL_SERVICE: &str = "ato.secrets.global";
-        if self.legacy_use_keyring {
-            let entry = keyring::Entry::new(GLOBAL_SERVICE, key)?;
-            entry
-                .set_password(value)
-                .with_context(|| format!("keychain write failed for '{}'", key))?;
-        } else {
-            let path = self.legacy_fallback_path(GLOBAL_SERVICE);
-            let mut pairs = read_env_file(&path).unwrap_or_default();
-            if let Some(pos) = pairs.iter().position(|(k, _)| k == key) {
-                pairs[pos].1 = value.to_string();
-            } else {
-                pairs.push((key.to_string(), value.to_string()));
-            }
-            write_env_file(&path, &pairs)?;
-        }
-        Ok(())
-    }
-
-    fn legacy_read(&self, key: &str) -> Result<Option<String>> {
-        const GLOBAL_SERVICE: &str = "ato.secrets.global";
-        if self.legacy_use_keyring {
-            let entry = keyring::Entry::new(GLOBAL_SERVICE, key)?;
-            match entry.get_password() {
-                Ok(v) => return Ok(Some(v)),
-                Err(keyring::Error::NoEntry) => {}
-                Err(e) if is_nonfatal_keyring_error(&e) => {}
-                Err(e) => bail!("keychain read failed for '{}': {}", key, e),
-            }
-        }
-        let path = self.legacy_fallback_path(GLOBAL_SERVICE);
-        if path.exists() {
-            let pairs = read_env_file(&path).unwrap_or_default();
-            if let Some((_, v)) = pairs.into_iter().find(|(k, _)| k == key) {
-                return Ok(Some(v));
-            }
-        }
-        Ok(None)
-    }
-
-    fn legacy_delete(&self, key: &str) -> Result<()> {
-        const GLOBAL_SERVICE: &str = "ato.secrets.global";
-        if self.legacy_use_keyring {
-            let entry = keyring::Entry::new(GLOBAL_SERVICE, key)?;
-            match entry.delete_password() {
-                Ok(()) | Err(keyring::Error::NoEntry) => {}
-                Err(e) => bail!("keychain delete failed: {}", e),
-            }
-        }
-        let fallback = self.legacy_fallback_path(GLOBAL_SERVICE);
-        if fallback.exists() {
-            let mut pairs = read_env_file(&fallback).unwrap_or_default();
-            pairs.retain(|(k, _)| k != key);
-            write_env_file(&fallback, &pairs)?;
-        }
-        // Remove from metadata too.
-        let mut meta = self.legacy_load_metadata()?;
-        meta.secrets.remove(key);
-        self.legacy_save_metadata(&meta)
-    }
-
-    fn legacy_list(&self) -> Result<Vec<SecretEntry>> {
-        let meta = self.legacy_load_metadata()?;
-        let mut entries: Vec<_> = meta.secrets.into_values().collect();
-        entries.sort_by(|a, b| a.key.cmp(&b.key));
-        Ok(entries)
-    }
-
-    fn legacy_update_metadata(
-        &self,
-        key: &str,
-        description: Option<&str>,
-        allow: Option<Vec<String>>,
-        deny: Option<Vec<String>>,
-        require_existing: bool,
-    ) -> Result<()> {
-        let now = chrono::Utc::now().to_rfc3339();
-        let mut meta = self.legacy_load_metadata()?;
-        if require_existing {
-            let entry = meta
-                .secrets
-                .get_mut(key)
-                .with_context(|| format!("secret '{}' not found", key))?;
-            if let Some(a) = allow { entry.allow = Some(a); }
-            if let Some(d) = deny  { entry.deny  = Some(d); }
-            entry.updated_at = now;
-        } else {
-            let entry = meta.secrets.entry(key.to_string()).or_insert_with(|| SecretEntry {
-                key: key.to_string(),
-                scope: SecretScope::Global,
-                description: None,
-                created_at: now.clone(),
-                updated_at: now.clone(),
-                allow: None,
-                deny: None,
-            });
-            entry.updated_at = now;
-            if let Some(d) = description { entry.description = Some(d.to_string()); }
-            if allow.is_some() { entry.allow = allow; }
-            if deny.is_some()  { entry.deny  = deny; }
-        }
-        self.legacy_save_metadata(&meta)
-    }
-
-    fn legacy_fallback_path(&self, service: &str) -> PathBuf {
-        let safe = service
-            .chars()
-            .map(|c| if matches!(c, '.' | '/') { '_' } else { c })
-            .collect::<String>();
-        self.home.join(".ato/secrets").join(format!("{}.env", safe))
-    }
-
-    fn legacy_metadata_path(&self) -> PathBuf {
-        self.home.join(".ato/secrets/metadata.json")
-    }
-
-    fn legacy_load_metadata(&self) -> Result<LegacyMetadata> {
-        let path = self.legacy_metadata_path();
-        if !path.exists() {
-            return Ok(LegacyMetadata::default());
-        }
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read secrets metadata from {}", path.display()))?;
-        serde_json::from_str(&raw)
-            .with_context(|| format!("failed to parse secrets metadata from {}", path.display()))
-    }
-
-    fn legacy_save_metadata(&self, meta: &LegacyMetadata) -> Result<()> {
-        let path = self.legacy_metadata_path();
-        let rendered = serde_json::to_string_pretty(meta)?;
-        write_secure_file(&path, rendered.as_bytes())
     }
 
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct LegacyMetadata {
-    #[serde(default)]
-    secrets: std::collections::HashMap<String, SecretEntry>,
-}
-
-fn try_load_identity(age: &mut AgeFileBackend, keychain: &KeychainBackend) -> bool {
+fn try_load_identity(age: &mut AgeFileBackend) -> bool {
     // Check for a session key file exported by `ato session start`.
     if let Ok(session_path) = std::env::var("ATO_SESSION_KEY_FILE") {
         let p = std::path::Path::new(&session_path);
@@ -440,23 +271,14 @@ fn try_load_identity(age: &mut AgeFileBackend, keychain: &KeychainBackend) -> bo
     if !age.identity_exists() {
         return false;
     }
-    // Try plain text first (no passphrase).
-    if age.load_identity_with_passphrase(None).is_ok() {
-        return true;
-    }
-    // Try cached passphrase from keychain.
-    if let Some(pp) = keychain.get_passphrase() {
-        if age.load_identity_with_passphrase(Some(&pp)).is_ok() {
-            return true;
-        }
-    }
-    // Can't load non-interactively – age backend disabled.
-    false
+    // Try plain text (no passphrase).
+    age.load_identity_with_passphrase(None).is_ok()
+    // Passphrase-protected identities require `ato session start` or interactive init.
 }
 
 /// Read `~/.ato/config.toml` and return the `[secrets] backends` list if present.
 ///
-/// Allowed backend names: `"env"`, `"memory"`, `"age"`, `"keychain"`.
+/// Allowed backend names: `"env"`, `"memory"`, `"age"`.
 /// If the key is absent or the file doesn't exist, returns `None` (use default order).
 fn read_secrets_backend_order(home: &Path) -> Option<Vec<String>> {
     let config_path = home.join(".ato").join("config.toml");
@@ -505,13 +327,6 @@ fn namespace_to_scope(ns: &str) -> SecretScope {
     }
 }
 
-fn is_nonfatal_keyring_error(e: &keyring::Error) -> bool {
-    matches!(
-        e,
-        keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_)
-    )
-}
-
 fn read_env_file(path: &Path) -> Result<Vec<(String, String)>> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -529,15 +344,6 @@ fn read_env_file(path: &Path) -> Result<Vec<(String, String)>> {
         }
     }
     Ok(pairs)
-}
-
-fn write_env_file(path: &Path, pairs: &[(String, String)]) -> Result<()> {
-    let rendered = pairs
-        .iter()
-        .map(|(k, v)| format!("{}={}", k, v))
-        .collect::<Vec<_>>()
-        .join("\n");
-    write_secure_file(path, format!("{}\n", rendered).as_bytes())
 }
 
 /// Write a file with 0600 permissions, using an atomic temp-rename.
