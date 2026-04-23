@@ -264,6 +264,7 @@ pub fn materialize_shadow_manifest(
         for key in [
             "runtime",
             "run",
+            "build",
             "port",
             "runtime_version",
             "working_dir",
@@ -283,6 +284,8 @@ pub fn materialize_shadow_manifest(
                 }
                 if key == "run" {
                     target_table.insert("run_command".to_string(), val);
+                } else if key == "build" {
+                    target_table.insert("build_command".to_string(), val);
                 } else {
                     target_table.insert(key.to_string(), val);
                 }
@@ -748,6 +751,60 @@ run = "node server.js""#,
                 .and_then(|target| target.get("working_dir"))
                 .and_then(toml::Value::as_str),
             Some("workspace")
+        );
+    }
+
+    #[test]
+    fn materializes_shadow_manifest_preserves_build_command_from_flat_v03() {
+        // Regression test for #301: flat v0.3 `build = "..."` must survive into the
+        // shadow manifest so that run_v03_lifecycle_steps can execute it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan = test_plan(
+            dir.path(),
+            r#"
+schema_version = "0.3"
+name = "my-app"
+version = "0.1.0"
+type = "app"
+runtime = "web/node"
+run = "node server.js"
+build = "npm run build"
+"#,
+        );
+        let shadow = test_shadow_workspace(dir.path(), "run-301");
+        let summary = ProvisioningPlan {
+            issues: Vec::new(),
+            actions: vec![ProvisioningAction::SelectRuntime {
+                target: "app".to_string(),
+                runtime: "web".to_string(),
+                driver: "node".to_string(),
+                safety: ProvisioningSafetyClass::SafeDefault,
+            }],
+        };
+
+        let shadow_manifest = materialize_shadow_manifest(&plan, &summary, &shadow)
+            .expect("shadow manifest result")
+            .expect("shadow manifest path");
+        let rendered = std::fs::read_to_string(shadow_manifest).expect("rendered manifest");
+        let parsed: toml::Value = toml::from_str(&rendered).expect("parsed shadow manifest");
+
+        assert_eq!(
+            parsed
+                .get("targets")
+                .and_then(|targets| targets.get("app"))
+                .and_then(|target| target.get("build_command"))
+                .and_then(toml::Value::as_str),
+            Some("npm run build"),
+            "build_command must be present in shadow manifest targets"
+        );
+        assert_eq!(
+            parsed
+                .get("targets")
+                .and_then(|targets| targets.get("app"))
+                .and_then(|target| target.get("run_command"))
+                .and_then(toml::Value::as_str),
+            Some("node server.js"),
+            "run_command must be present in shadow manifest targets"
         );
     }
 
