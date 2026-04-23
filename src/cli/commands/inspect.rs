@@ -210,7 +210,6 @@ pub fn try_emit_json_error(err: &AnyhowError) -> bool {
 
 const INSPECT_SCHEMA_VERSION: &str = "1";
 const GLOBAL_RUN_SOURCE_INFERENCE_DIR: &str = "source-inference";
-const RUN_SOURCE_INFERENCE_DIR: &str = ".ato/tmp/source-inference";
 const WORKSPACE_SOURCE_INFERENCE_DIR: &str = ".ato/source-inference";
 const WORKSPACE_BINDING_SEED_PATH: &str = ".ato/binding/seed.json";
 
@@ -595,7 +594,7 @@ fn load_inspection_snapshot(path: &Path) -> Result<InspectionSnapshot> {
                 Some(sidecar_paths.provenance_path),
                 Some(sidecar_paths.cache_path),
                 Some(sidecar_paths.binding_seed_path),
-                canonical.project_root.join(RUN_SOURCE_INFERENCE_DIR),
+                ato_runs_dir().join(GLOBAL_RUN_SOURCE_INFERENCE_DIR),
                 advisories.into_iter().map(|value| value.message).collect(),
                 result,
             ))
@@ -633,7 +632,7 @@ fn load_inspection_snapshot(path: &Path) -> Result<InspectionSnapshot> {
                         .join("provenance-cache.json"),
                 ),
                 Some(project.project_root.join(WORKSPACE_BINDING_SEED_PATH)),
-                project.project_root.join(RUN_SOURCE_INFERENCE_DIR),
+                ato_runs_dir().join(GLOBAL_RUN_SOURCE_INFERENCE_DIR),
                 advisories.into_iter().map(|value| value.message).collect(),
                 result,
             ))
@@ -676,11 +675,7 @@ fn load_inspection_snapshot(path: &Path) -> Result<InspectionSnapshot> {
                         .join("provenance-cache.json"),
                 ),
                 Some(source.project_root.join(WORKSPACE_BINDING_SEED_PATH)),
-                if source.single_script.is_some() {
-                    ato_runs_dir().join(GLOBAL_RUN_SOURCE_INFERENCE_DIR)
-                } else {
-                    source.project_root.join(RUN_SOURCE_INFERENCE_DIR)
-                },
+                ato_runs_dir().join(GLOBAL_RUN_SOURCE_INFERENCE_DIR),
                 advisories.into_iter().map(|value| value.message).collect(),
                 result,
             ))
