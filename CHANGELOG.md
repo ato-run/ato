@@ -4,6 +4,16 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.76] - 2026-04-23
+
+### What Changed
+
+
+#### Bug Fixes
+
+- Apply multi-bin selection fix to synthetic npm path
+
+
 ## [0.4.75] - 2026-04-23
 
 ### What Changed
