@@ -2,15 +2,11 @@
 //! `CredentialBackend` layer introduced in Phase 1.
 //!
 //! `AuthStore` is the auth counterpart to `SecretStore`:
-//!   - **Reads** go through a `BackendChain`
-//!     (`env → memory → age → legacy_keychain`).
+//!   - **Reads** go through a `BackendChain` (`env → memory → age`).
 //!   - **Writes** land in the age file when an identity is available, and in
-//!     an in-process memory cache. The legacy OS keyring backend is read-only
-//!     — pre-v0.6 users can still authenticate, but new tokens do not leak
-//!     into the keychain.
-//!   - **Deletes** (logout) are explicitly broadcast to every backend that
-//!     might hold a copy, including the legacy keychain, so a full purge is
-//!     possible regardless of writability flags.
+//!     an in-process memory cache.
+//!   - **Deletes** (logout) are broadcast to every backend that might hold a
+//!     copy, so a full purge is possible regardless of writability flags.
 //!
 //! Namespaces:
 //!   - `auth/session` / `SESSION_TOKEN` — Store device-flow session token
@@ -20,13 +16,15 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::application::credential::backend::legacy_keychain::{
-    GITHUB_CRED_NAME, GITHUB_NAMESPACE, SESSION_CRED_NAME, SESSION_NAMESPACE,
-};
 use crate::application::credential::{
     self, backend::CredentialBackend, AgeFileBackend, BackendChain, CredentialKey, EnvBackend,
-    LegacyKeychainBackend, MemoryBackend,
+    MemoryBackend,
 };
+
+pub(crate) const SESSION_NAMESPACE: &str = "auth/session";
+pub(crate) const SESSION_CRED_NAME: &str = "SESSION_TOKEN";
+pub(crate) const GITHUB_NAMESPACE: &str = "auth/github";
+pub(crate) const GITHUB_CRED_NAME: &str = "GITHUB_TOKEN";
 
 /// Which backend physically stores a freshly written token.
 ///
@@ -53,43 +51,31 @@ pub(crate) struct AuthStore {
     chain: BackendChain,
     age: Option<Arc<AgeFileBackend>>,
     memory: Arc<MemoryBackend>,
-    legacy: Arc<LegacyKeychainBackend>,
 }
 
 impl AuthStore {
     /// Build an `AuthStore` from already-constructed backends.
     ///
     /// The `order` vector controls read priority for the chain (env / memory
-    /// / age / legacy_keychain). `age` is optional — callers that can't
-    /// unlock the identity (e.g. passphrase without a running session) still
-    /// get working env/legacy fallback reads.
+    /// / age). `age` is optional — callers that can't unlock the identity
+    /// (e.g. passphrase without a running session) still get working env
+    /// fallback reads.
     pub(crate) fn with_backends(
         order: &[String],
         age: Option<Arc<AgeFileBackend>>,
         memory: Arc<MemoryBackend>,
-        legacy: Arc<LegacyKeychainBackend>,
     ) -> Self {
-        let chain = build_chain(order, age.clone(), memory.clone(), legacy.clone());
-        Self {
-            chain,
-            age,
-            memory,
-            legacy,
-        }
+        let chain = build_chain(order, age.clone(), memory.clone());
+        Self { chain, age, memory }
     }
 
     /// Standard constructor: tries to unlock `<home>/.ato/keys/identity.key`
-    /// non-interactively and wires up the given legacy keychain accounts.
+    /// non-interactively.
     ///
     /// `home` is passed explicitly so tests (and anything else that wants to
     /// redirect the age backend) can operate out of a temp directory without
     /// mutating `$HOME`.
-    pub(crate) fn open_for_home(
-        home: &std::path::Path,
-        keyring_service: impl Into<String>,
-        keyring_session_account: impl Into<String>,
-        keyring_github_account: impl Into<String>,
-    ) -> Result<Self> {
+    pub(crate) fn open_for_home(home: &std::path::Path) -> Result<Self> {
         let mut age_backend = AgeFileBackend::new(home.to_path_buf());
         let age = if try_load_identity_non_interactive(&mut age_backend) {
             Some(Arc::new(age_backend))
@@ -98,16 +84,11 @@ impl AuthStore {
         };
 
         let memory = Arc::new(MemoryBackend::new(None));
-        let legacy = Arc::new(LegacyKeychainBackend::new(
-            keyring_service,
-            keyring_session_account,
-            keyring_github_account,
-        ));
 
         let order =
             credential::config::read_order(home).unwrap_or_else(credential::config::default_order);
 
-        Ok(Self::with_backends(&order, age, memory, legacy))
+        Ok(Self::with_backends(&order, age, memory))
     }
 
     // ── Reads ────────────────────────────────────────────────────────────────
@@ -146,7 +127,7 @@ impl AuthStore {
 
     // ── Deletes (logout) ─────────────────────────────────────────────────────
 
-    /// Purge one token from **every** backend (memory, age, legacy keychain).
+    /// Purge one token from **every** backend (memory, age).
     ///
     /// Errors from individual backends are swallowed: logout is best-effort
     /// and must not leave the user unable to try again. Env is never purged
@@ -170,7 +151,6 @@ impl AuthStore {
         if let Some(age) = &self.age {
             let _ = age.delete(key);
         }
-        let _ = self.legacy.delete(key);
     }
 
     // ── Diagnostics ──────────────────────────────────────────────────────────
@@ -183,13 +163,6 @@ impl AuthStore {
         } else {
             WriteLocation::Memory.display()
         }
-    }
-
-    /// True when the legacy OS keyring currently holds a session token. Used
-    /// by `ato status` to warn pre-v0.6 users that their token is still in
-    /// the keychain and should be migrated.
-    pub(crate) fn legacy_session_token_present(&self) -> Result<bool> {
-        Ok(self.legacy.get(&session_key())?.is_some())
     }
 }
 
@@ -205,10 +178,8 @@ fn build_chain(
     order: &[String],
     age: Option<Arc<AgeFileBackend>>,
     memory: Arc<MemoryBackend>,
-    legacy: Arc<LegacyKeychainBackend>,
 ) -> BackendChain {
     let mut backends: Vec<Arc<dyn CredentialBackend>> = Vec::new();
-    let mut saw_legacy = false;
     for name in order {
         match name.as_str() {
             "env" => backends.push(Arc::new(EnvBackend::new())),
@@ -218,18 +189,8 @@ fn build_chain(
                     backends.push(a.clone() as Arc<dyn CredentialBackend>);
                 }
             }
-            "legacy_keychain" => {
-                backends.push(legacy.clone() as Arc<dyn CredentialBackend>);
-                saw_legacy = true;
-            }
             _ => {}
         }
-    }
-    // Always keep legacy keychain as the last-resort read fallback so pre-v0.6
-    // users can still authenticate, even when they haven't opted into it
-    // explicitly via `[credentials] order`.
-    if !saw_legacy {
-        backends.push(legacy as Arc<dyn CredentialBackend>);
     }
     BackendChain::new(backends)
 }
@@ -259,7 +220,6 @@ fn try_load_identity_non_interactive(age: &mut AgeFileBackend) -> bool {
 mod tests {
     use super::*;
     use crate::application::auth::shared_env_lock as env_lock;
-    use crate::application::credential::backend::legacy_keychain::test_support;
     use tempfile::TempDir;
 
     /// RAII guard that restores an env var on drop — survives panics so a
@@ -289,7 +249,18 @@ mod tests {
         }
     }
 
-    fn test_store(tag: &str, with_age: bool) -> (TempDir, AuthStore) {
+    /// Build an AuthStore with a chain that deliberately excludes env so
+    /// concurrent env-mutating tests (our own or other modules') can't cause
+    /// spurious reads. `env_override_wins` overrides this with `test_store_with_env`.
+    fn test_store(with_age: bool) -> (TempDir, AuthStore) {
+        test_store_with_order(with_age, vec!["memory".into(), "age".into()])
+    }
+
+    fn test_store_with_env(with_age: bool) -> (TempDir, AuthStore) {
+        test_store_with_order(with_age, credential::config::default_order())
+    }
+
+    fn test_store_with_order(with_age: bool, order: Vec<String>) -> (TempDir, AuthStore) {
         let dir = TempDir::new().unwrap();
         let age = if with_age {
             let a = AgeFileBackend::new(dir.path().to_path_buf());
@@ -299,26 +270,20 @@ mod tests {
             None
         };
         let memory = Arc::new(MemoryBackend::new(None));
-        let legacy = Arc::new(LegacyKeychainBackend::new(
-            "run.ato.cli.test",
-            format!("current_session-authstore-{tag}"),
-            format!("github_token-authstore-{tag}"),
-        ));
-        let order = credential::config::default_order();
-        let store = AuthStore::with_backends(&order, age, memory, legacy);
+        let store = AuthStore::with_backends(&order, age, memory);
         (dir, store)
     }
 
     #[test]
     fn get_returns_none_when_nothing_stored() {
-        let (_dir, store) = test_store("empty", true);
+        let (_dir, store) = test_store(true);
         assert!(store.get_session_token().unwrap().is_none());
         assert!(store.get_github_token().unwrap().is_none());
     }
 
     #[test]
     fn set_then_get_roundtrips_via_age() {
-        let (_dir, store) = test_store("roundtrip", true);
+        let (_dir, store) = test_store(true);
         let loc = store.set_session_token("abc").unwrap();
         assert_eq!(loc, WriteLocation::AgeFile);
         assert_eq!(store.get_session_token().unwrap(), Some("abc".into()));
@@ -326,62 +291,23 @@ mod tests {
 
     #[test]
     fn set_without_age_falls_back_to_memory() {
-        let (_dir, store) = test_store("nomem", false);
+        let (_dir, store) = test_store(false);
         let loc = store.set_session_token("abc").unwrap();
         assert_eq!(loc, WriteLocation::Memory);
         assert_eq!(store.get_session_token().unwrap(), Some("abc".into()));
     }
 
     #[test]
-    fn legacy_keychain_provides_read_fallback() {
-        let (_dir, store) = test_store("legacy-read", true);
-        // Seed the legacy OS-keyring slot directly.
-        test_support::set(
-            "run.ato.cli.test",
-            "current_session-authstore-legacy-read",
-            "legacy-token",
-        );
-        assert_eq!(
-            store.get_session_token().unwrap(),
-            Some("legacy-token".into())
-        );
-        // Cleanup so later tests aren't affected.
-        test_support::delete("run.ato.cli.test", "current_session-authstore-legacy-read");
-    }
-
-    #[test]
-    fn memory_beats_legacy_keychain_on_read() {
-        let (_dir, store) = test_store("priority", true);
-        test_support::set(
-            "run.ato.cli.test",
-            "current_session-authstore-priority",
-            "legacy-val",
-        );
-        store.set_session_token("fresh-val").unwrap();
-        assert_eq!(store.get_session_token().unwrap(), Some("fresh-val".into()));
-        test_support::delete("run.ato.cli.test", "current_session-authstore-priority");
-    }
-
-    #[test]
     fn delete_session_token_purges_every_backend() {
-        let (_dir, store) = test_store("purge", true);
+        let (_dir, store) = test_store(true);
         store.set_session_token("abc").unwrap();
-        test_support::set(
-            "run.ato.cli.test",
-            "current_session-authstore-purge",
-            "legacy",
-        );
         store.delete_session_token().unwrap();
         assert!(store.get_session_token().unwrap().is_none());
-        assert_eq!(
-            test_support::get("run.ato.cli.test", "current_session-authstore-purge"),
-            None
-        );
     }
 
     #[test]
     fn delete_all_clears_both_auth_tokens() {
-        let (_dir, store) = test_store("deleteall", true);
+        let (_dir, store) = test_store(true);
         store.set_session_token("s").unwrap();
         store.set_github_token("g").unwrap();
         store.delete_all_auth_tokens().unwrap();
@@ -392,25 +318,22 @@ mod tests {
     #[test]
     fn env_override_wins() {
         let _serial = env_lock().lock().unwrap();
-        let (_dir, store) = test_store("env-override", true);
+        let (_dir, store) = test_store_with_env(true);
         store.set_session_token("age-val").unwrap();
-        let _guard = EnvVarGuard::set(
-            "ATO_CRED_AUTH_SESSION__SESSION_TOKEN",
-            Some("env-val"),
-        );
+        let _guard = EnvVarGuard::set("ATO_CRED_AUTH_SESSION__SESSION_TOKEN", Some("env-val"));
         let got = store.get_session_token().unwrap();
         assert_eq!(got, Some("env-val".into()));
     }
 
     #[test]
     fn primary_write_backend_label_reports_age_when_loaded() {
-        let (_dir, store) = test_store("label-age", true);
+        let (_dir, store) = test_store(true);
         assert_eq!(store.primary_write_backend_label(), "age file");
     }
 
     #[test]
     fn primary_write_backend_label_reports_memory_when_not_loaded() {
-        let (_dir, store) = test_store("label-mem", false);
+        let (_dir, store) = test_store(false);
         assert!(store.primary_write_backend_label().contains("in-memory"));
     }
 }

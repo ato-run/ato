@@ -70,8 +70,8 @@ impl SecretStore {
             None
         };
 
-        let order = credential::config::read_order(&home)
-            .unwrap_or_else(credential::config::default_order);
+        let order =
+            credential::config::read_order(&home).unwrap_or_else(credential::config::default_order);
 
         Ok(Self {
             chain: build_chain(&order, age.clone()),
@@ -83,8 +83,8 @@ impl SecretStore {
     #[cfg(test)]
     pub(crate) fn open_with_age(home: PathBuf, age_backend: AgeFileBackend) -> Result<Self> {
         let age = Some(Arc::new(age_backend));
-        let order = credential::config::read_order(&home)
-            .unwrap_or_else(credential::config::default_order);
+        let order =
+            credential::config::read_order(&home).unwrap_or_else(credential::config::default_order);
         Ok(Self {
             chain: build_chain(&order, age.clone()),
             age,
@@ -181,10 +181,7 @@ impl SecretStore {
         if let Some(age) = &self.age {
             let subs = age.list_sub_namespaces("secrets");
             if subs.is_empty() {
-                for be in age
-                    .list(&secrets_ns("default"))
-                    .unwrap_or_default()
-                {
+                for be in age.list(&secrets_ns("default")).unwrap_or_default() {
                     if seen.insert(be.key.clone()) {
                         entries.push(backend_entry_to_secret_entry(be));
                     }

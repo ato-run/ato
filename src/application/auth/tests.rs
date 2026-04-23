@@ -5,7 +5,7 @@ use tempfile::TempDir;
 
 use super::publisher::PublisherMeResponse;
 use super::shared_env_lock as env_lock;
-use super::storage::{keyring_user_interaction_not_allowed_message, TokenStorageLocation};
+use super::storage::TokenStorageLocation;
 use super::store::{hydrate_publisher_identity_with, is_local_store_api_base_url};
 use super::{
     current_session_token, require_session_token, AuthManager, Credentials, ENV_ATO_TOKEN,
@@ -186,19 +186,12 @@ fn test_delete_credentials_keeps_legacy_file() {
     manager.write_canonical_credentials(&creds).unwrap();
     fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
     fs::write(&legacy_path, r#"{"publisher_handle":"legacy-user"}"#).unwrap();
-    manager.test_keyring_set(&manager.keyring_session_account, "keyring-token");
     assert!(creds_path.exists());
     assert!(legacy_path.exists());
 
     manager.delete().unwrap();
     assert!(!creds_path.exists());
     assert!(legacy_path.exists());
-    assert_eq!(
-        manager
-            .load_keyring_token(&manager.keyring_session_account)
-            .unwrap(),
-        None
-    );
 }
 
 #[test]
@@ -302,16 +295,6 @@ fn is_local_store_api_base_url_detects_loopback_hosts() {
 }
 
 #[test]
-fn keyring_user_interaction_not_allowed_message_detects_macos_error() {
-    assert!(keyring_user_interaction_not_allowed_message(
-        "Platform secure storage failure: User interaction is not allowed."
-    ));
-    assert!(!keyring_user_interaction_not_allowed_message(
-        "Platform secure storage failure: Item not found."
-    ));
-}
-
-#[test]
 fn save_preserves_existing_canonical_tokens() {
     let temp_dir = TempDir::new().unwrap();
     let (manager, _, _) = test_manager(&temp_dir);
@@ -388,7 +371,7 @@ fn canonical_file_wins_over_legacy_for_session_resolution() {
 }
 
 #[test]
-fn require_uses_canonical_file_token_when_keyring_is_unavailable() {
+fn require_uses_canonical_file_token_when_no_age_identity() {
     let _guard = env_lock().lock().unwrap();
     let _token_guard = EnvVarGuard::set(ENV_ATO_TOKEN, None);
     let temp_dir = TempDir::new().unwrap();
@@ -434,8 +417,8 @@ async fn persist_session_token_headless_uses_canonical_file_with_0600() {
 async fn persist_session_token_interactive_falls_back_to_memory_without_identity() {
     // Phase 2: interactive logins now default to the shared age file. With
     // no identity initialized under the test's age_home, `AuthStore` falls
-    // back to its in-process memory cache and returns `Memory` — neither the
-    // canonical credentials file nor the legacy OS keyring should be touched.
+    // back to its in-process memory cache and returns `Memory`. The canonical
+    // credentials file must not be touched.
     let _serial = env_lock().lock().unwrap();
     let _token_guard = EnvVarGuard::set(ENV_ATO_TOKEN, None);
     let _cred_guard = EnvVarGuard::set(ENV_CRED_AUTH_SESSION_TOKEN, None);
@@ -449,12 +432,6 @@ async fn persist_session_token_interactive_falls_back_to_memory_without_identity
 
     assert_eq!(storage, TokenStorageLocation::Memory);
     assert!(!canonical_path.exists());
-    assert_eq!(
-        manager
-            .load_keyring_token(&manager.keyring_session_account)
-            .unwrap(),
-        None
-    );
     // Subsequent reads resolve the value from the in-process memory cache
     // that AuthStore keeps alive via its `Arc` backends.
     assert_eq!(
@@ -467,7 +444,7 @@ async fn persist_session_token_interactive_falls_back_to_memory_without_identity
 async fn persist_session_token_interactive_writes_to_age_when_identity_loaded() {
     // With an age identity initialized at the test's age_home, interactive
     // logins should land in the age file and subsequent reads resolve
-    // through the chain without any keyring hit.
+    // through the chain.
     //
     // NOTE: `AuthManager` caches its `AuthStore` eagerly (so the in-process
     // memory backend survives across calls). The identity must therefore be
@@ -491,12 +468,6 @@ async fn persist_session_token_interactive_writes_to_age_when_identity_loaded() 
 
     assert_eq!(storage, TokenStorageLocation::AgeFile);
     assert!(!canonical_path.exists());
-    assert_eq!(
-        manager
-            .load_keyring_token(&manager.keyring_session_account)
-            .unwrap(),
-        None
-    );
     assert_eq!(
         manager.resolve_session_token().unwrap().as_deref(),
         Some("interactive-token")
