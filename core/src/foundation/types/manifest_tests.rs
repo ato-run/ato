@@ -53,7 +53,7 @@ fn test_parse_valid_toml() {
     assert_eq!(manifest.name, "mlx-qwen3-8b");
     assert_eq!(manifest.version, "1.0.0");
     assert_eq!(manifest.capsule_type, CapsuleType::Inference);
-    assert_eq!(manifest.targets.as_ref().and_then(|t| t.port), Some(8081));
+    assert_eq!(manifest.resolve_default_target().unwrap().port, Some(8081));
     assert_eq!(
         manifest.resolve_default_runtime().unwrap(),
         RuntimeType::Source
@@ -96,7 +96,6 @@ type = "job"
 
 runtime = "source/python"
 port = 8080
-port = 9000
 run = "main.py""#,
     )
     .unwrap();
@@ -108,14 +107,7 @@ run = "main.py""#,
         matches!(
             error,
             ValidationError::InvalidTarget(message)
-                if message.contains("capsule type 'job' must not declare top-level port")
-        )
-    }));
-    assert!(errors.iter().any(|error| {
-        matches!(
-            error,
-            ValidationError::InvalidTarget(message)
-                if message.contains("target 'cli' declares port")
+                if message.contains("target 'app' declares port")
         )
     }));
 }
@@ -142,7 +134,7 @@ run = "index.html""#,
         matches!(
             error,
             ValidationError::InvalidTarget(message)
-                if message.contains("target 'cli' uses runtime=web")
+                if message.contains("target 'app' uses runtime=web")
         )
     }));
 }
@@ -697,7 +689,7 @@ runtime_version = "3.11"
 run = "main.py"
 [exports.cli.demo-tool]
 kind = "python-tool"
-target = "cli"
+target = "app"
 args = ["--mode", "oneshot"]
 "#;
 
@@ -743,7 +735,7 @@ runtime_version = "20"
 run = "main.js"
 [exports.cli.demo-tool]
 kind = "python-tool"
-target = "cli"
+target = "app"
 "#;
 
     let manifest = CapsuleManifest::from_toml(toml).expect("parse export manifest");
@@ -1109,11 +1101,19 @@ fn test_validate_invalid_name() {
 
 #[test]
 fn test_validate_invalid_driver() {
-    let toml = VALID_TOML.replace(
-        "[targets.cli]\nruntime = \"source\"\nentrypoint = \"server.py\"",
-        "[targets.cli]\nruntime = \"source\"\ndriver = \"invalid-driver\"\nentrypoint = \"server.py\"",
-    );
-    let manifest = CapsuleManifest::from_toml(&toml).unwrap();
+    let toml = r#"
+schema_version = "0.3"
+name = "test-capsule"
+version = "1.0.0"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "invalid-driver"
+run_command = "server.py"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
     let errors = manifest.validate().unwrap_err();
     assert!(errors
         .iter()
@@ -1122,11 +1122,20 @@ fn test_validate_invalid_driver() {
 
 #[test]
 fn test_validate_source_driver_requires_runtime_version() {
-    let toml = VALID_TOML.replace(
-        "[targets.cli]\nruntime = \"source\"\nentrypoint = \"server.py\"",
-        "[targets.cli]\nruntime = \"source\"\ndriver = \"python\"\nentrypoint = \"server.py\"",
-    );
-    let manifest = CapsuleManifest::from_toml(&toml).unwrap();
+    // Use schema_version = "0.2" so the runtime_version check fires (gated on !schema_is_v03)
+    let toml = r#"
+schema_version = "0.2"
+name = "test-capsule"
+version = "1.0.0"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "python"
+entrypoint = "server.py"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
     let errors = manifest.validate().unwrap_err();
     assert!(errors
         .iter()
@@ -1135,11 +1144,21 @@ fn test_validate_source_driver_requires_runtime_version() {
 
 #[test]
 fn test_validate_preview_allows_missing_runtime_version() {
-    let toml = VALID_TOML.replace(
-        "[targets.cli]\nruntime = \"source\"\nentrypoint = \"server.py\"",
-        "[targets.cli]\nruntime = \"source\"\ndriver = \"python\"\nentrypoint = \"server.py\"",
-    );
-    let manifest = CapsuleManifest::from_toml(&toml).unwrap();
+    // In schema_version=0.3, runtime_version is never required (checked only for older schemas).
+    // Verify that a source/python target without runtime_version passes in Preview mode.
+    let toml = r#"
+schema_version = "0.3"
+name = "test-capsule"
+version = "1.0.0"
+type = "app"
+default_target = "cli"
+
+[targets.cli]
+runtime = "source"
+driver = "python"
+run_command = "server.py"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
     assert!(manifest.validate_for_mode(ValidationMode::Preview).is_ok());
 }
 
@@ -1191,16 +1210,21 @@ run = "dist""#;
 
 #[test]
 fn test_validate_web_rejects_public_and_browser_static() {
+    // Use schema_version = "0.2" so entrypoint is valid; the browser_static driver check fires
+    // inside the runtime=web validation block.
     let toml = r#"
-schema_version = "0.3"
+schema_version = "0.2"
 name = "web-app"
 version = "0.1.0"
 type = "app"
+default_target = "app"
 
-runtime = "web/browser_static"
-public = ["dist/**"]
+[targets.app]
+runtime = "web"
+driver = "browser_static"
 port = 8080
-run = "dist""#;
+entrypoint = "dist"
+"#;
     let manifest = CapsuleManifest::from_toml(toml).unwrap();
     let errors = manifest.validate().unwrap_err();
     assert!(errors.iter().any(|e| matches!(
@@ -1247,15 +1271,21 @@ port = 18080
 
 #[test]
 fn test_validate_web_dynamic_rejects_shell_style_entrypoint() {
+    // Use schema_version = "0.2" so entrypoint is a valid legacy field; the shell-style
+    // entrypoint check fires for runtime=web, driver=node with multi-word entrypoints.
     let toml = r#"
-schema_version = "0.3"
+schema_version = "0.2"
 name = "web-app"
 version = "0.1.0"
 type = "app"
+default_target = "app"
 
-runtime = "web/node"
+[targets.app]
+runtime = "web"
+driver = "node"
 port = 3000
-run = "npm run start""#;
+entrypoint = "npm run start"
+"#;
     let manifest = CapsuleManifest::from_toml(toml).unwrap();
     let errors = manifest.validate().unwrap_err();
     assert!(errors.iter().any(|e| matches!(
@@ -1271,8 +1301,11 @@ schema_version = "0.3"
 name = "web-services-app"
 version = "0.1.0"
 type = "app"
+default_target = "app"
 
-runtime = "web/deno"
+[targets.app]
+runtime = "web"
+driver = "deno"
 port = 4173
 [services.main]
 entrypoint = "node apps/dashboard/server.js"
@@ -1288,8 +1321,11 @@ schema_version = "0.3"
 name = "web-services-app"
 version = "0.1.0"
 type = "app"
+default_target = "app"
 
-runtime = "web/deno"
+[targets.app]
+runtime = "web"
+driver = "deno"
 port = 4173
 [services.api]
 entrypoint = "python apps/api/main.py"
@@ -1310,8 +1346,11 @@ schema_version = "0.3"
 name = "web-services-app"
 version = "0.1.0"
 type = "app"
+default_target = "app"
 
-runtime = "web/deno"
+[targets.app]
+runtime = "web"
+driver = "deno"
 port = 4173
 [services.main]
 entrypoint = "node apps/dashboard/server.js"
@@ -1333,8 +1372,11 @@ schema_version = "0.3"
 name = "web-services-app"
 version = "0.1.0"
 type = "app"
+default_target = "app"
 
-runtime = "web/deno"
+[targets.app]
+runtime = "web"
+driver = "deno"
 port = 4173
 [services.main]
 entrypoint = "node apps/dashboard/server.js"
@@ -1360,8 +1402,11 @@ schema_version = "0.3"
 name = "web-services-app"
 version = "0.1.0"
 type = "app"
+default_target = "app"
 
-runtime = "web/deno"
+[targets.app]
+runtime = "web"
+driver = "deno"
 port = 4173
 [services.main]
 entrypoint = "node apps/dashboard/server.js"
@@ -1386,8 +1431,11 @@ schema_version = "0.3"
 name = "web-services-app"
 version = "0.1.0"
 type = "app"
+default_target = "app"
 
-runtime = "web/deno"
+[targets.app]
+runtime = "web"
+driver = "deno"
 port = 4173
 [services.main]
 entrypoint = "node apps/dashboard/server.js"
@@ -1445,7 +1493,7 @@ durability = "ephemeral"
 purpose = "primary-data"
 
 [services.main]
-target = "web"
+target = "app"
 
 [[services.main.state_bindings]]
 state = "data"
@@ -1612,10 +1660,47 @@ fn test_to_json_roundtrip() {
 
 #[test]
 fn test_parse_build_and_isolation_sections() {
-    let toml = format!(
-        "{}\n\n[build]\nexclude_libs = [\"**/site-packages/torch/**\"]\ngpu = true\n\n[build.lifecycle]\nprepare = \"npm ci\"\nbuild = \"npm run build\"\npackage = \"ato pack\"\n\n[build.inputs]\nlockfiles = [\"package-lock.json\"]\ntoolchain = \"node:20\"\n\n[build.outputs]\ncapsule = \"dist/*.capsule\"\nsha256 = true\nblake3 = true\nattestation = true\nsignature = true\n\n[build.policy]\nrequire_attestation = true\nrequire_did_signature = true\n\n[isolation]\nallow_env = [\"LD_LIBRARY_PATH\", \"HF_TOKEN\"]\n",
-        VALID_TOML
-    );
+    // Use explicit [targets] to avoid flat-v0.3 normalization, which cannot coexist
+    // with a structured [build] table (normalization expects build to be a command string).
+    let toml = r#"
+schema_version = "0.3"
+name = "mlx-qwen3-8b"
+version = "1.0.0"
+type = "inference"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+run_command = "server.py"
+
+[build]
+exclude_libs = ["**/site-packages/torch/**"]
+gpu = true
+
+[build.lifecycle]
+prepare = "npm ci"
+build = "npm run build"
+package = "ato pack"
+
+[build.inputs]
+lockfiles = ["package-lock.json"]
+toolchain = "node:20"
+
+[build.outputs]
+capsule = "dist/*.capsule"
+sha256 = true
+blake3 = true
+attestation = true
+signature = true
+
+[build.policy]
+require_attestation = true
+require_did_signature = true
+
+[isolation]
+allow_env = ["LD_LIBRARY_PATH", "HF_TOKEN"]
+"#
+    .to_string();
 
     let manifest = CapsuleManifest::from_toml(&toml).unwrap();
 

@@ -1201,7 +1201,7 @@ pub struct NamedTarget {
     pub build_env: Vec<String>,
 
     /// Preserved shell-native run command for schema v0.3.
-    #[serde(default)]
+    #[serde(default, alias = "run")]
     pub run_command: Option<String>,
 
     /// WebAssembly component path for runtime=wasm targets.
