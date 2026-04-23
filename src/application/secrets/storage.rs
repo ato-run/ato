@@ -6,7 +6,7 @@
 pub(crate) fn is_keyring_available() -> bool {
     #[cfg(test)]
     {
-        return false;
+        false
     }
     #[cfg(not(test))]
     {
