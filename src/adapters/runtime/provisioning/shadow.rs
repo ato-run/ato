@@ -9,6 +9,8 @@ use capsule_core::router::ManifestData;
 use toml::Value;
 use walkdir::WalkDir;
 
+use crate::application::secrets::store::{write_secure_file, SecretStore};
+
 use super::types::{
     ProvisioningAction, ProvisioningAudit, ProvisioningMaterializationStatus, ProvisioningPlan,
     ShadowWorkspaceRef,
@@ -57,6 +59,9 @@ pub fn materialize_synthetic_env(
     shadow_workspace: &ShadowWorkspaceRef,
     audit: &mut ProvisioningAudit,
 ) -> Result<std::collections::HashMap<String, String>> {
+    // Open the secret store once (best-effort — if unavailable, all keys fall back to placeholders).
+    let store = SecretStore::open().ok();
+
     let env_values = summary
         .actions
         .iter()
@@ -69,7 +74,10 @@ pub fn materialize_synthetic_env(
             _ => None,
         })
         .flatten()
-        .map(|key| (key.clone(), synthetic_env_value(key, shadow_workspace)))
+        .map(|key| {
+            let value = resolve_env_value(key, shadow_workspace, store.as_ref());
+            (key.clone(), value)
+        })
         .collect::<std::collections::HashMap<_, _>>();
 
     if env_values.is_empty() {
@@ -77,41 +85,91 @@ pub fn materialize_synthetic_env(
     }
 
     let env_path = shadow_execution_working_directory(plan, shadow_workspace)?.join(".env");
-    if let Some(parent) = env_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create env parent: {}", parent.display()))?;
-    }
 
+    // Build the .env content; skip multiline values (e.g. PEM certificates) to prevent
+    // breaking the KEY=value\n format — they get injected as placeholders instead.
     let mut lines = String::new();
     for (key, value) in &env_values {
-        lines.push_str(key);
-        lines.push('=');
-        lines.push_str(value);
+        if value.contains('\n') {
+            // Multiline secrets would corrupt .env syntax; keep the synthetic placeholder.
+            let placeholder = synthetic_env_value(key, shadow_workspace);
+            lines.push_str(key);
+            lines.push('=');
+            lines.push_str(&placeholder);
+        } else {
+            lines.push_str(key);
+            lines.push('=');
+            lines.push_str(value);
+        }
         lines.push('\n');
     }
-    fs::write(&env_path, lines)
+
+    // Write with 0600 permissions so real secrets are not world-readable.
+    write_secure_file(&env_path, lines.as_bytes())
         .with_context(|| format!("Failed to write synthetic env file: {}", env_path.display()))?;
+
+    let (real_keys, placeholder_keys): (Vec<_>, Vec<_>) = env_values
+        .iter()
+        .partition(|(_, v)| v.as_str() != "ato-placeholder");
+
+    let audit_detail = {
+        let fmt_keys = |pairs: &[(&String, &String)]| -> String {
+            pairs
+                .iter()
+                .map(|(k, _)| k.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut parts = Vec::new();
+        if !real_keys.is_empty() {
+            parts.push(format!(
+                "resolved from secret store: {}",
+                fmt_keys(&real_keys)
+            ));
+        }
+        if !placeholder_keys.is_empty() {
+            parts.push(format!(
+                "synthetic placeholder: {}",
+                fmt_keys(&placeholder_keys)
+            ));
+        }
+        format!(
+            "wrote .env at {} ({})",
+            env_path.display(),
+            parts.join("; ")
+        )
+    };
+
     audit.record_materialization(
         "synthetic_env",
         plan.selected_target_label(),
         plan.execution_driver().as_deref(),
         ProvisioningMaterializationStatus::Applied,
-        {
-            let mut keys = String::new();
-            for key in env_values.keys() {
-                if !keys.is_empty() {
-                    keys.push_str(", ");
-                }
-                keys.push_str(key);
-            }
-            format!(
-                "wrote synthetic .env with placeholder values for {} at {}",
-                keys,
-                env_path.display()
-            )
-        },
+        audit_detail,
     );
     Ok(env_values)
+}
+
+/// Resolves the value for a single env key:
+/// - DB/Redis/Port keys always use their fixed synthetic values (not from the store).
+/// - All other keys try the secret store first; fall back to `synthetic_env_value` if absent.
+fn resolve_env_value(
+    key: &str,
+    shadow_workspace: &ShadowWorkspaceRef,
+    store: Option<&SecretStore>,
+) -> String {
+    let synthetic = synthetic_env_value(key, shadow_workspace);
+    // Only query the store when the synthetic value is a placeholder; DB/Redis/Port
+    // synthetic values are intentional and must not be overridden by stored secrets.
+    if synthetic != "ato-placeholder" {
+        return synthetic;
+    }
+    if let Some(store) = store {
+        if let Ok(Some(real_value)) = store.get(key) {
+            return real_value;
+        }
+    }
+    synthetic
 }
 
 pub fn materialize_shadow_lockfiles(
@@ -750,6 +808,80 @@ run_command = "node server.js"
         assert_eq!(record.stage, "synthetic_env");
         assert_eq!(record.status, ProvisioningMaterializationStatus::Applied);
         assert!(record.detail.contains("DATABASE_URL"));
+    }
+
+    /// `resolve_env_value` must return "ato-placeholder" when no store is available.
+    #[test]
+    fn resolve_env_value_returns_placeholder_without_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shadow = test_shadow_workspace(dir.path(), "run-rv1");
+        let value = super::resolve_env_value("OPENAI_API_KEY", &shadow, None);
+        assert_eq!(value, "ato-placeholder");
+    }
+
+    /// DB/Redis/Port keys must keep their synthetic values even when the secret store
+    /// hypothetically has an entry for them (the store is irrelevant for these keys).
+    #[test]
+    fn resolve_env_value_preserves_db_synthetic_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shadow = test_shadow_workspace(dir.path(), "run-rv2");
+        // DATABASE_URL synthetic value should be an sqlite:// URL, not "ato-placeholder"
+        let value = super::resolve_env_value("DATABASE_URL", &shadow, None);
+        assert!(
+            value.starts_with("sqlite://"),
+            "expected sqlite:// but got: {value}"
+        );
+    }
+
+    /// The .env file written by materialize_synthetic_env must have mode 0600.
+    #[cfg(unix)]
+    #[test]
+    fn synthetic_env_file_has_secure_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+            toml::from_str(
+                r#"
+name = "demo"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "node"
+run_command = "node server.js"
+"#,
+            )
+            .expect("manifest"),
+            dir.path().join("capsule.toml"),
+            dir.path().to_path_buf(),
+            ExecutionProfile::Dev,
+            Some("app"),
+            HashMap::new(),
+        )
+        .expect("execution descriptor");
+        let shadow = test_shadow_workspace(dir.path(), "run-sec");
+        let summary = ProvisioningPlan {
+            issues: Vec::new(),
+            actions: vec![ProvisioningAction::InjectSyntheticEnv {
+                target: "app".to_string(),
+                missing_keys: vec!["API_KEY".to_string()],
+                safety: ProvisioningSafetyClass::SafeDefault,
+            }],
+        };
+        let mut audit = test_audit(&plan, &summary);
+        materialize_synthetic_env(&plan, &summary, &shadow, &mut audit).expect("env values");
+        let env_file = shadow.workspace_dir.join(".env");
+        let mode = std::fs::metadata(&env_file)
+            .expect("env metadata")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "expected 0600 permissions but got {:o}",
+            mode & 0o777
+        );
     }
 
     #[test]
