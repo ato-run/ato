@@ -130,10 +130,6 @@ pub(crate) fn execute_secrets_command(command: SecretsCommands) -> Result<()> {
             Ok(())
         }
 
-        SecretsCommands::MigrateFromKeychain { delete_keychain } => {
-            cmd_migrate_from_keychain(delete_keychain)
-        }
-
         SecretsCommands::RotateIdentity { new_identity } => {
             cmd_rotate_identity(new_identity)
         }
@@ -189,89 +185,6 @@ fn cmd_init(
         eprintln!("   Protected with passphrase.");
     } else {
         eprintln!("   ⚠️  No passphrase — protected by file permissions (chmod 600).");
-    }
-    Ok(())
-}
-
-fn cmd_migrate_from_keychain(delete_keychain: bool) -> Result<()> {
-    let store = SecretStore::open()?;
-
-    // Collect legacy keys.
-    let legacy_keys = store.legacy_list_all_keys();
-    if legacy_keys.is_empty() {
-        eprintln!("No secrets found in the legacy keychain store.");
-        return Ok(());
-    }
-
-    // Ensure age backend is available.
-    if store.age().is_none() {
-        bail!(
-            "age identity not loaded.\n\
-             Run `ato secrets init` first, then retry migration."
-        );
-    }
-
-    eprintln!("Found {} secret(s) in legacy store:", legacy_keys.len());
-    for k in &legacy_keys {
-        eprintln!("  - {k}");
-    }
-    eprint!("\nProceed? [y/N]: ");
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
-    if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
-        eprintln!("Aborted.");
-        return Ok(());
-    }
-
-    let mut migrated = 0usize;
-    let mut failed = 0usize;
-    for key in &legacy_keys {
-        match store.legacy_get(key) {
-            Ok(Some(value)) => {
-                match store.set(key, &value, None, None, None) {
-                    Ok(()) => { migrated += 1; }
-                    Err(e) => {
-                        eprintln!("  ⚠️  failed to store '{key}': {e}");
-                        failed += 1;
-                    }
-                }
-            }
-            Ok(None) => { eprintln!("  ⚠️  '{key}' not found in keychain, skipping."); }
-            Err(e) => {
-                eprintln!("  ⚠️  failed to read '{key}': {e}");
-                failed += 1;
-            }
-        }
-    }
-
-    if delete_keychain && failed == 0 {
-        // Delete from legacy keychain.
-        for key in &legacy_keys {
-            store.legacy_delete_key(key).ok();
-        }
-        eprintln!("🗑  Legacy keychain entries deleted.");
-    }
-
-    // Write migration log.
-    let home = dirs::home_dir().context("failed to resolve home directory")?;
-    let log_path = home.join(".ato/MIGRATION.md");
-    let log = format!(
-        "# ato secrets migration log\n\n\
-         Date: {}\n\
-         Migrated {} secret(s) from legacy keychain to age file backend.\n\
-         Failed: {}\n\
-         Keychain entries deleted: {}\n",
-        chrono::Utc::now().to_rfc3339(),
-        migrated,
-        failed,
-        delete_keychain && failed == 0
-    );
-    std::fs::create_dir_all(home.join(".ato"))?;
-    std::fs::write(&log_path, log)?;
-
-    eprintln!("\n✅ Migrated {migrated} secret(s). Log: {}", log_path.display());
-    if failed > 0 {
-        eprintln!("⚠️  {failed} secret(s) failed to migrate.");
     }
     Ok(())
 }
