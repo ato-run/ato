@@ -505,10 +505,15 @@ Alias:
 
 Auth source precedence:
 
-1. ATO_TOKEN
-2. OS keyring
-3. ${XDG_CONFIG_HOME:-~/.config}/ato/credentials.toml
-4. legacy ~/.ato/credentials.json as read-only fallback
+1. `ATO_TOKEN` / `ATO_CRED_AUTH_SESSION__SESSION_TOKEN` env vars (EnvBackend)
+2. In-process memory cache (for headless/CI runs without an age identity)
+3. `~/.ato/credentials/auth/session.age` (encrypted age file, default sink for new logins)
+4. `${XDG_CONFIG_HOME:-~/.config}/ato/credentials.toml` (canonical TOML; only written in headless mode)
+5. `~/.ato/credentials.json` (legacy JSON, read-only fallback)
+
+Note: the OS keyring has been removed as of v0.6. Existing keychain entries
+from pre-v0.6 CLIs are no longer consulted — run `ato login` again to save the
+token under the new age-file backend.
 
 ## 3.4 Advanced Commands
 

@@ -14,13 +14,27 @@ pub(crate) mod chain;
 pub(crate) mod config;
 
 pub(crate) use backend::{
-    load_identity_bytes, AgeFileBackend, BackendEntry, CredentialKey, EnvBackend,
-    LegacyKeychainBackend, MemoryBackend,
+    load_identity_bytes, AgeFileBackend, BackendEntry, CredentialKey, EnvBackend, MemoryBackend,
 };
 pub(crate) use chain::BackendChain;
 
 use std::io::Write as _;
 use std::path::Path;
+
+/// Process-wide mutex that test code can acquire before mutating env vars.
+///
+/// `EnvBackend` (and all consumers that read env vars through the chain) is
+/// sensitive to concurrent `std::env::set_var` calls: cargo runs tests in
+/// parallel threads within the same process, so any test that toggles an
+/// `ATO_*` variable must serialize against every other env-mutating test —
+/// including those in sibling modules (`auth`, `secrets`). Centralizing the
+/// mutex here keeps a single lock across the whole credential surface.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 use anyhow::{Context, Result};
 

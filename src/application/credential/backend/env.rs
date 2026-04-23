@@ -10,9 +10,16 @@ use super::traits::{BackendEntry, CredentialBackend, CredentialKey};
 ///   - namespace `"secrets/capsule:myapp"`, key `"DB_PASS"` → `ATO_CRED_SECRETS_CAPSULE_MYAPP__DB_PASS`
 ///   - namespace `"auth/session"`, key `"SESSION_TOKEN"` → `ATO_CRED_AUTH_SESSION__SESSION_TOKEN`
 ///
-/// Legacy env vars (`ATO_SECRET_*`, `ATO_TOKEN`) are **not** accepted. This is a
-/// breaking change from the pre-v0.5.x behavior.
+/// Legacy `ATO_SECRET_*` env vars are **not** accepted (breaking change from
+/// pre-v0.5.x behavior). `ATO_TOKEN` is retained as a compatibility alias for
+/// `auth/session`/`SESSION_TOKEN` — it's the documented way to pass a session
+/// token in CI/headless environments and removing it would break downstream
+/// scripts.
 pub(crate) struct EnvBackend;
+
+/// Per-(namespace, name) legacy aliases. When the canonical
+/// `ATO_CRED_<NS>__<KEY>` variable is unset, fall back to these.
+const LEGACY_ALIASES: &[(&str, &str, &str)] = &[("auth/session", "SESSION_TOKEN", "ATO_TOKEN")];
 
 impl EnvBackend {
     pub(crate) fn new() -> Self {
@@ -39,7 +46,18 @@ impl CredentialBackend for EnvBackend {
 
     fn get(&self, key: &CredentialKey) -> Result<Option<String>> {
         let env_key = Self::env_key_for(&key.namespace, &key.name);
-        Ok(std::env::var(env_key).ok().filter(|v| !v.is_empty()))
+        if let Some(value) = std::env::var(env_key).ok().filter(|v| !v.is_empty()) {
+            return Ok(Some(value));
+        }
+        // Legacy alias fallback (e.g. ATO_TOKEN → auth/session/SESSION_TOKEN).
+        for (ns, name, alias) in LEGACY_ALIASES {
+            if key.namespace == *ns && key.name == *name {
+                if let Some(value) = std::env::var(alias).ok().filter(|v| !v.is_empty()) {
+                    return Ok(Some(value));
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn set(
@@ -140,6 +158,9 @@ mod tests {
 
     #[test]
     fn get_reads_from_env_when_set() {
+        let _guard = crate::application::credential::test_env_lock()
+            .lock()
+            .unwrap();
         // Use a unique name to avoid polluting other tests.
         let var = "ATO_CRED_SECRETS_DEFAULT__CRED_ENV_BACKEND_TEST_GET";
         std::env::set_var(var, "hello");
@@ -168,6 +189,9 @@ mod tests {
 
     #[test]
     fn legacy_ato_secret_is_ignored() {
+        let _guard = crate::application::credential::test_env_lock()
+            .lock()
+            .unwrap();
         // Breaking change: the old ATO_SECRET_FOO form must not be read.
         std::env::set_var("ATO_SECRET_LEGACY_SHIM_TEST", "old");
         let backend = EnvBackend::new();
@@ -183,5 +207,38 @@ mod tests {
         let backend = EnvBackend::new();
         let key = CredentialKey::new("secrets/default", "X");
         assert!(backend.set(&key, "v".into(), None, None, None).is_err());
+    }
+
+    #[test]
+    fn ato_token_alias_resolves_session_token() {
+        let _guard = crate::application::credential::test_env_lock()
+            .lock()
+            .unwrap();
+        // Legacy alias: ATO_TOKEN maps to auth/session/SESSION_TOKEN.
+        // Canonical var must be unset so the alias actually kicks in.
+        std::env::remove_var("ATO_CRED_AUTH_SESSION__SESSION_TOKEN");
+        std::env::set_var("ATO_TOKEN", "legacy-session-val");
+        let backend = EnvBackend::new();
+        let got = backend
+            .get(&CredentialKey::new("auth/session", "SESSION_TOKEN"))
+            .unwrap();
+        std::env::remove_var("ATO_TOKEN");
+        assert_eq!(got, Some("legacy-session-val".into()));
+    }
+
+    #[test]
+    fn canonical_var_beats_ato_token_alias() {
+        let _guard = crate::application::credential::test_env_lock()
+            .lock()
+            .unwrap();
+        std::env::set_var("ATO_CRED_AUTH_SESSION__SESSION_TOKEN", "canonical-val");
+        std::env::set_var("ATO_TOKEN", "legacy-val");
+        let backend = EnvBackend::new();
+        let got = backend
+            .get(&CredentialKey::new("auth/session", "SESSION_TOKEN"))
+            .unwrap();
+        std::env::remove_var("ATO_CRED_AUTH_SESSION__SESSION_TOKEN");
+        std::env::remove_var("ATO_TOKEN");
+        assert_eq!(got, Some("canonical-val".into()));
     }
 }
