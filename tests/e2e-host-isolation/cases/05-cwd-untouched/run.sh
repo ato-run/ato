@@ -48,3 +48,13 @@ TOMLEOF
 ENTRIES_UNDER_TMP=$(find "$PROJECT/.ato/tmp/source-inference" 2>/dev/null | wc -l | tr -d ' ')
 assert_equal "$ENTRIES_UNDER_TMP" "0" \
   "directory project: cwd .ato/tmp/source-inference/ was polluted"
+
+# Host isolation dirs (.ato-run-host/) must also be absent from cwd.
+ENTRIES_UNDER_HOST=$(find "$PROJECT/.ato" -name ".ato-run-host" 2>/dev/null | wc -l | tr -d ' ')
+assert_equal "$ENTRIES_UNDER_HOST" "0" \
+  "directory project: cwd .ato/.ato-run-host/ was polluted by host isolation"
+
+# Auto-provision shadow dirs must be absent from cwd.
+ENTRIES_UNDER_PROVISION=$(find "$PROJECT/.ato" -name "ato-auto-provision" 2>/dev/null | wc -l | tr -d ' ')
+assert_equal "$ENTRIES_UNDER_PROVISION" "0" \
+  "directory project: cwd .ato/ato-auto-provision/ was polluted by shadow workspace"
