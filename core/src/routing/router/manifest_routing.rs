@@ -40,10 +40,12 @@ pub(super) fn synthesize_runtime_model_from_manifest(
     let named_target: NamedTarget = target
         .try_into()
         .map_err(|_| CapsuleError::Config(format!("targets.{} is not a valid target table", selected_target)))?;
+    let (normalized_runtime, compound_driver) = split_v03_runtime(&named_target.runtime);
+    let driver = compound_driver.or(named_target.driver);
     let runtime = ResolvedTargetRuntime {
         target: selected_target.to_string(),
-        runtime: named_target.runtime,
-        driver: named_target.driver,
+        runtime: normalized_runtime,
+        driver,
         runtime_version: named_target.runtime_version,
         image: named_target.image,
         entrypoint: named_target.entrypoint,
@@ -300,21 +302,21 @@ pub(super) fn resolve_target_label(
         .and_then(|v| v.as_table())
         .ok_or_else(|| CapsuleError::Config("Missing required [targets] table".into()))?;
 
-    let default_target = manifest
-        .get("default_target")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| CapsuleError::Config("Missing required field: default_target".into()))?;
+    let selected = if let Some(label) = target_label.map(str::trim).filter(|s| !s.is_empty()) {
+        label.to_string()
+    } else {
+        manifest
+            .get("default_target")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| CapsuleError::Config("Missing required field: default_target".into()))?
+            .to_string()
+    };
 
-    let selected = target_label
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(default_target);
-
-    if !targets.contains_key(selected) {
+    if !targets.contains_key(selected.as_str()) {
         return Err(CapsuleError::Config(format!("Target '{}' not found under [targets]", selected)));
     }
 
-    Ok(selected.to_string())
+    Ok(selected)
 }
