@@ -41,9 +41,6 @@ pub(crate) struct BackendEntry {
 
 /// Core backend trait.
 pub(crate) trait SecretBackend: Send + Sync {
-    fn is_available(&self) -> bool;
-    fn is_writable(&self) -> bool;
-
     fn get(&self, key: &SecretKey) -> Result<Option<String>>;
 
     fn set(

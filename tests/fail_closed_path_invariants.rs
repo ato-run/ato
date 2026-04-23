@@ -40,19 +40,11 @@ mod path_invariants {
         ];
 
         // Linux-specific.
-        dirs.extend([
-            "/snap/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/usr/sbin",
-        ]);
+        dirs.extend(["/snap/bin", "/usr/local/bin", "/usr/bin", "/usr/sbin"]);
 
         // macOS-specific.
         #[cfg(target_os = "macos")]
-        dirs.extend([
-            "/usr/local/bin",
-            "/usr/local/sbin",
-        ]);
+        dirs.extend(["/usr/local/bin", "/usr/local/sbin"]);
 
         dirs
     }
@@ -220,8 +212,7 @@ mod path_invariants {
         let first = composed.split(':').next().unwrap_or("");
 
         assert_eq!(
-            first,
-            "/root/.ato/runtimes/node/20.11.0/bin",
+            first, "/root/.ato/runtimes/node/20.11.0/bin",
             "Managed node dir must always be the first PATH entry; got: '{}'",
             first
         );

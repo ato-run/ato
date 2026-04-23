@@ -42,14 +42,6 @@ impl MemoryBackend {
 }
 
 impl SecretBackend for MemoryBackend {
-    fn is_available(&self) -> bool {
-        true
-    }
-
-    fn is_writable(&self) -> bool {
-        true
-    }
-
     fn get(&self, key: &SecretKey) -> Result<Option<String>> {
         let cache = self.cache.read().unwrap();
         let k = (key.namespace.clone(), key.name.clone());
@@ -73,14 +65,17 @@ impl SecretBackend for MemoryBackend {
         let now_str = chrono::Utc::now().to_rfc3339();
         let mut cache = self.cache.write().unwrap();
         let k = (key.namespace.clone(), key.name.clone());
-        cache.insert(k, CachedEntry {
-            value,
-            cached_at: Instant::now(),
-            description: description.map(|s| s.to_string()),
-            allow,
-            deny,
-            created_at: now_str,
-        });
+        cache.insert(
+            k,
+            CachedEntry {
+                value,
+                cached_at: Instant::now(),
+                description: description.map(|s| s.to_string()),
+                allow,
+                deny,
+                created_at: now_str,
+            },
+        );
         Ok(())
     }
 
