@@ -4,6 +4,16 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.77] - 2026-04-23
+
+### What Changed
+
+
+#### Bug Fixes
+
+- Inject real secrets from secret store in auto-provisioning
+
+
 ## [0.4.76] - 2026-04-23
 
 ### What Changed
