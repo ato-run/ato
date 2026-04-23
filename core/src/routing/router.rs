@@ -432,7 +432,7 @@ pub fn execution_descriptor_from_manifest_parts(
 
     Ok(ExecutionDescriptor {
         manifest: manifest.clone(),
-        compat_manifest: Some(CompatManifestBridge::from_manifest_value(&manifest)?),
+        compat_manifest: CompatManifestBridge::from_manifest_value(&manifest).ok(),
         manifest_path,
         manifest_dir: workspace_root.clone(),
         lock: AtoLock::default(),
@@ -1151,7 +1151,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn parse_runtime_kind(value: &str) -> Option<RuntimeKind> {
-    match value.to_ascii_lowercase().as_str() {
+    let (base, _) = manifest_routing::split_v03_runtime(value);
+    match base.as_str() {
         "oci" | "docker" | "youki" | "runc" => Some(RuntimeKind::Oci),
         "wasm" => Some(RuntimeKind::Wasm),
         "source" | "native" => Some(RuntimeKind::Source),

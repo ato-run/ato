@@ -200,9 +200,6 @@ fn resolve_launch_working_dir(plan: &ManifestData, command: &str) -> PathBuf {
         if source_dir.join("package.json").exists() {
             return source_dir;
         }
-        if command_path_exists(&source_dir, command) {
-            return source_dir;
-        }
     }
 
     plan.manifest_dir.clone()
