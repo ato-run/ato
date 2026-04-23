@@ -6,15 +6,15 @@ use std::sync::Arc;
 use super::credential_store::{AuthStore, WriteLocation};
 use super::{
     read_env_non_empty, AuthManager, Credentials, CANONICAL_CREDENTIALS_DIR,
-    CANONICAL_CREDENTIALS_FILE, ENV_ATO_TOKEN, ENV_XDG_CONFIG_HOME, KEYRING_GITHUB_ACCOUNT,
-    KEYRING_SERVICE_NAME, KEYRING_SESSION_ACCOUNT, LEGACY_CREDENTIALS_DIR, LEGACY_CREDENTIALS_FILE,
+    CANONICAL_CREDENTIALS_FILE, ENV_XDG_CONFIG_HOME, LEGACY_CREDENTIALS_DIR,
+    LEGACY_CREDENTIALS_FILE,
 };
 
 /// Physical destination of a freshly persisted token.
 ///
-/// Historical variants (`OsKeyring`) have been replaced in Phase 2: new
-/// interactive logins land in the shared age file, not the OS keyring. The
-/// keyring remains a **read-only** fallback via `LegacyKeychainBackend`.
+/// Phase 5: OS keyring has been removed entirely. New tokens land in the
+/// shared age file (`AgeFile`), the canonical TOML file (headless), or the
+/// in-process memory cache as a last-resort fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TokenStorageLocation {
     /// Shared encrypted age file at `~/.ato/credentials/auth/session.age` (or
@@ -52,57 +52,29 @@ impl AuthManager {
         let home = dirs::home_dir().context("Cannot determine home directory")?;
         let credentials_path = canonical_credentials_path(&home);
         let legacy_credentials_path = legacy_credentials_path(&home);
-        let keyring_service = KEYRING_SERVICE_NAME.to_string();
-        let keyring_session_account = KEYRING_SESSION_ACCOUNT.to_string();
-        let keyring_github_account = KEYRING_GITHUB_ACCOUNT.to_string();
-        let auth_store = Arc::new(AuthStore::open_for_home(
-            &home,
-            &keyring_service,
-            &keyring_session_account,
-            &keyring_github_account,
-        )?);
+        let auth_store = Arc::new(AuthStore::open_for_home(&home)?);
         Ok(Self {
             credentials_path,
             legacy_credentials_path,
             age_home: home,
-            keyring_service,
-            keyring_session_account,
-            keyring_github_account,
             auth_store,
         })
     }
 
     #[cfg(test)]
     pub fn with_paths(credentials_path: PathBuf, legacy_credentials_path: PathBuf) -> Self {
-        let suffix =
-            hex::encode(blake3::hash(credentials_path.to_string_lossy().as_bytes()).as_bytes())
-                .chars()
-                .take(8)
-                .collect::<String>();
         // Age backends are per-temp-dir so tests don't share encrypted state.
         // Anchor the temp home on the canonical path's great-grandparent when
         // possible (the tests use `<temp>/config/ato/credentials.toml`), else
         // the legacy path's grandparent (`<temp>/home/.ato/...`).
         let age_home = derive_test_age_home(&credentials_path, &legacy_credentials_path);
-        let keyring_service = format!("{}.test", KEYRING_SERVICE_NAME);
-        let keyring_session_account = format!("{}-{}", KEYRING_SESSION_ACCOUNT, suffix);
-        let keyring_github_account = format!("{}-{}", KEYRING_GITHUB_ACCOUNT, suffix);
         let auth_store = Arc::new(
-            AuthStore::open_for_home(
-                &age_home,
-                &keyring_service,
-                &keyring_session_account,
-                &keyring_github_account,
-            )
-            .expect("build AuthStore for test AuthManager"),
+            AuthStore::open_for_home(&age_home).expect("build AuthStore for test AuthManager"),
         );
         Self {
             credentials_path,
             legacy_credentials_path,
             age_home,
-            keyring_service,
-            keyring_session_account,
-            keyring_github_account,
             auth_store,
         }
     }
@@ -136,7 +108,7 @@ impl AuthManager {
 
         if creds.session_token.is_none() && creds.github_token.is_none() {
             anyhow::bail!(
-                "Not authenticated. Run:\n  ato login\n\nNo usable token found in ATO_TOKEN, age file, OS keyring, {:?}, or {:?}",
+                "Not authenticated. Run:\n  ato login\n\nNo usable token found in ATO_TOKEN, age file, {:?}, or {:?}",
                 self.credentials_path,
                 self.legacy_credentials_path
             );
@@ -147,10 +119,9 @@ impl AuthManager {
 
     /// Delete stored credentials (logout).
     ///
-    /// Purges every backend that might hold a token: memory cache, the age
-    /// file, and the legacy OS keyring. Also deletes the canonical TOML
-    /// credentials file. The legacy `credentials.json` is intentionally left
-    /// alone.
+    /// Purges every backend that might hold a token: memory cache and the age
+    /// file. Also deletes the canonical TOML credentials file. The legacy
+    /// `credentials.json` is intentionally left alone.
     pub fn delete(&self) -> Result<()> {
         self.auth_store().delete_all_auth_tokens()?;
 
@@ -175,14 +146,9 @@ impl AuthManager {
     }
 
     pub(super) fn resolve_session_token(&self) -> Result<Option<String>> {
-        // ATO_TOKEN is the legacy override and lives outside the
-        // `CredentialBackend` env layer (which only reads
-        // `ATO_CRED_AUTH_SESSION__SESSION_TOKEN`). Phase 5 will unify the
-        // two; for now we preserve the pre-existing highest-priority slot.
-        if let Some(token) = read_env_non_empty(ENV_ATO_TOKEN) {
-            return Ok(Some(token));
-        }
-
+        // `ATO_TOKEN` is handled inside `EnvBackend` as a legacy alias for
+        // `ATO_CRED_AUTH_SESSION__SESSION_TOKEN`, so reading through the
+        // AuthStore chain honors both forms without a dedicated check here.
         if let Some(token) = self.auth_store().get_session_token()? {
             return Ok(Some(token));
         }
@@ -286,59 +252,6 @@ impl AuthManager {
 
         let location = self.save_session_token_async(token).await?;
         Ok(TokenStorageLocation::from_write_location(location))
-    }
-
-    // ── Test hooks ────────────────────────────────────────────────────────────
-    //
-    // Historical hooks retained so auth tests can keep calling
-    // `manager.test_keyring_*` and `manager.load_keyring_token()`. Internally
-    // they route through `legacy_keychain::test_support`, the same in-process
-    // store consulted by `LegacyKeychainBackend` when its service name ends
-    // with `.test`.
-
-    #[cfg(test)]
-    pub(super) fn is_test_keyring(&self) -> bool {
-        self.keyring_service.ends_with(".test")
-    }
-
-    #[cfg(test)]
-    pub(super) fn test_keyring_get(&self, account: &str) -> Option<String> {
-        crate::application::credential::backend::legacy_keychain::test_support::get(
-            &self.keyring_service,
-            account,
-        )
-    }
-
-    #[cfg(test)]
-    pub(super) fn test_keyring_set(&self, account: &str, value: &str) {
-        crate::application::credential::backend::legacy_keychain::test_support::set(
-            &self.keyring_service,
-            account,
-            value,
-        );
-    }
-
-    /// Read the token currently stored in the legacy OS keyring slot.
-    ///
-    /// Kept for test coverage of the read-only fallback semantics. Production
-    /// code reads tokens through `resolve_session_token` / `resolve_github_token`,
-    /// which already include the keyring in their chain.
-    #[cfg(test)]
-    pub(super) fn load_keyring_token(&self, account: &str) -> Result<Option<String>> {
-        if self.is_test_keyring() {
-            return Ok(self.test_keyring_get(account));
-        }
-        // Real-keyring path is only hit by integration tests; keep it simple.
-        use keyring::{Entry, Error as KeyringError};
-        let entry = Entry::new(&self.keyring_service, account)
-            .context("Failed to initialize OS keyring entry")?;
-        match entry.get_password() {
-            Ok(value) => Ok(Some(value)),
-            Err(KeyringError::NoEntry) => Ok(None),
-            Err(err) => Err(anyhow::anyhow!(
-                "failed to read token from OS keyring: {err}"
-            )),
-        }
     }
 }
 
@@ -475,11 +388,4 @@ fn set_dir_permissions_if_supported(path: &Path) -> Result<()> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-pub(super) fn keyring_user_interaction_not_allowed_message(message: &str) -> bool {
-    message
-        .to_ascii_lowercase()
-        .contains("user interaction is not allowed")
 }

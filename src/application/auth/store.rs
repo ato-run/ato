@@ -499,7 +499,7 @@ pub fn logout() -> Result<()> {
     manager.delete()?;
     println!("✅ Logged out successfully");
     println!(
-        "   Purged auth tokens from: age file, OS keyring, memory cache, and {:?}",
+        "   Purged auth tokens from: age file, memory cache, and {:?}",
         manager.credentials_path()
     );
     if manager.legacy_credentials_path().exists() {
@@ -557,9 +557,7 @@ pub fn status() -> Result<()> {
                 println!("   GitHub App Account: {}", login);
             }
             let auth_store = manager.auth_store();
-            if auth_store.legacy_session_token_present()? {
-                println!("   Session storage: OS keyring (legacy — run `ato logout && ato login` to migrate to the age file)");
-            } else if creds.session_token.is_some() {
+            if creds.session_token.is_some() {
                 println!(
                     "   Session storage: {}",
                     auth_store.primary_write_backend_label()
