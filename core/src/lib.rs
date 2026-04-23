@@ -19,7 +19,6 @@ pub mod launch_spec;
 pub mod lifecycle;
 pub mod lock_runtime;
 pub mod lockfile;
-pub mod mag_uri;
 pub mod manifest;
 pub mod metrics;
 pub mod orchestration;
