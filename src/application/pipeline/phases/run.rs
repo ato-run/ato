@@ -687,6 +687,23 @@ where
             state_source_overrides,
         )?;
         decision.plan.workspace_root = authoritative_input.workspace_root.clone();
+        // Patch compat_manifest from capsule.toml when present so that v0.3-specific
+        // fields (build_command, language, package_type, etc.) are available to
+        // run_v03_lifecycle_steps. The inferred lock used by route_lock_with_state_overrides
+        // does not preserve these fields, causing the build step to be skipped (#301).
+        let capsule_toml = authoritative_input.workspace_root.join("capsule.toml");
+        if capsule_toml.exists() {
+            if let Ok(loaded) = capsule_core::manifest::load_manifest_with_validation_mode(
+                &capsule_toml,
+                validation_mode,
+            ) {
+                if let Ok(bridge) =
+                    capsule_core::router::CompatManifestBridge::from_manifest_value(&loaded.raw)
+                {
+                    decision.plan.compat_manifest = Some(bridge);
+                }
+            }
+        }
         decision
     } else {
         let loaded_manifest = capsule_core::manifest::load_manifest_with_validation_mode(
@@ -856,6 +873,8 @@ where
                     "Auto-provisioning: rerouting execution through the shadow workspace",
                 )?;
             }
+            // Save before decision is moved — needed to re-read capsule.toml below (#301).
+            let pre_reroute_workspace_root = decision.plan.workspace_root.clone();
             (decision, launch_ctx, prepared) = reroute_auto_provisioned_execution(
                 decision,
                 launch_ctx,
@@ -865,6 +884,23 @@ where
                 shadow_manifest_path,
             )
             .await?;
+            // The shadow manifest is derived from the inferred lock which does not carry
+            // build_command (it is not stored in the lock schema). Re-read capsule.toml
+            // from the original workspace and patch compat_manifest so that
+            // run_v03_lifecycle_steps sees the build step (#301).
+            let capsule_toml = pre_reroute_workspace_root.join("capsule.toml");
+            if capsule_toml.exists() {
+                if let Ok(loaded) = capsule_core::manifest::load_manifest_with_validation_mode(
+                    &capsule_toml,
+                    validation_mode,
+                ) {
+                    if let Ok(bridge) =
+                        capsule_core::router::CompatManifestBridge::from_manifest_value(&loaded.raw)
+                    {
+                        decision.plan.compat_manifest = Some(bridge);
+                    }
+                }
+            }
         }
     }
 
