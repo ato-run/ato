@@ -616,7 +616,10 @@ pub(crate) enum Commands {
         command: crate::cli::SecretsCommands,
     },
 
-    #[command(hide = true, about = "Manage the age identity session (unlock once, reuse across commands)")]
+    #[command(
+        hide = true,
+        about = "Manage the age identity session (unlock once, reuse across commands)"
+    )]
     Session {
         #[command(subcommand)]
         command: crate::cli::IdentitySessionCommands,

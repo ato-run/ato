@@ -389,7 +389,7 @@ mod tests {
     }
 
     /// Lock the ProducerPublishFinalize phase order explicitly.
-        /// Any change is a breaking change that requires RFC §3.1 update.
+    /// Any change is a breaking change that requires RFC §3.1 update.
     #[test]
     fn hourglass_flow_producer_publish_finalize_phase_order_is_locked() {
         assert_eq!(
@@ -407,9 +407,9 @@ mod tests {
         );
     }
 
-        /// Security invariant: Verify must always precede Execute in ConsumerRun.
-        /// If this fails, hash checks and policy enforcement would run AFTER user
-        /// code, which is a critical security regression.
+    /// Security invariant: Verify must always precede Execute in ConsumerRun.
+    /// If this fails, hash checks and policy enforcement would run AFTER user
+    /// code, which is a critical security regression.
     #[test]
     fn hourglass_verify_precedes_execute_in_consumer_run() {
         let phases = HourglassFlow::ConsumerRun.phases();
@@ -429,8 +429,8 @@ mod tests {
         );
     }
 
-        /// All current flow variants must define at least 2 phases.
-        /// If this fails after adding a new variant, add a phase-order lock test too.
+    /// All current flow variants must define at least 2 phases.
+    /// If this fails after adding a new variant, add a phase-order lock test too.
     #[test]
     fn hourglass_all_flow_variants_have_at_least_two_phases() {
         let variants = [
@@ -447,14 +447,14 @@ mod tests {
         }
     }
 
-        // v0.5.x: When WorkspaceMaterialize is added to HourglassFlow, add:
-        //
-        // #[test]
-        // #[ignore = "until-hourglass-workspace-materialize-v0.5.x"]
-        // fn workspace_materialize_phase_order_is_locked() {
-        //     assert_eq!(
-        //         HourglassFlow::WorkspaceMaterialize.phases(),
-        //         &[HourglassPhase::Install, HourglassPhase::Verify],
-        //     );
-        // }
+    // v0.5.x: When WorkspaceMaterialize is added to HourglassFlow, add:
+    //
+    // #[test]
+    // #[ignore = "until-hourglass-workspace-materialize-v0.5.x"]
+    // fn workspace_materialize_phase_order_is_locked() {
+    //     assert_eq!(
+    //         HourglassFlow::WorkspaceMaterialize.phases(),
+    //         &[HourglassPhase::Install, HourglassPhase::Verify],
+    //     );
+    // }
 }
