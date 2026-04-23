@@ -1,8 +1,0 @@
-{
-  "name": "demo-npm-multi-bin",
-  "version": "1.0.0",
-  "bin": {
-    "demo-a": "bin/a.mjs",
-    "demo-b": "bin/b.mjs"
-  }
-}
