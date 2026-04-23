@@ -658,9 +658,7 @@ mod tests {
         backend
             .set(&key, "v".into(), None, None, None)
             .expect("set");
-        let path = dir
-            .path()
-            .join(".ato/credentials/secrets/default.age");
+        let path = dir.path().join(".ato/credentials/secrets/default.age");
         assert!(path.exists(), "expected file at {}", path.display());
     }
 
@@ -721,7 +719,13 @@ mod tests {
     fn list_sub_namespaces_enumerates_domain() {
         let (_dir, backend) = init_backend();
         backend
-            .set(&ns_key("secrets/default", "K"), "v".into(), None, None, None)
+            .set(
+                &ns_key("secrets/default", "K"),
+                "v".into(),
+                None,
+                None,
+                None,
+            )
             .unwrap();
         backend
             .set(
