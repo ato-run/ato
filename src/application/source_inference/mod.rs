@@ -57,8 +57,12 @@ const SINGLE_SCRIPT_CACHE_SUBDIR: &str = "source-inference/single-script-cache";
 /// No functional reason to keep directory-project attempts in cwd was found.
 ///
 /// TODO(v0.5.x): Remove the `use_global_run_state` field from
-/// `MaterializationAdapter` entirely — it is always `true` now.
+/// `MaterializationAdapter` and this constant — the field only exists to make
+/// the dead `else` branch in `materialize_run_result` compile until PR 4.
 const USE_HOME_RUN_STATE: bool = true;
+// Compile-time assertion: USE_HOME_RUN_STATE must remain true until the field
+// is removed.  If you are tempted to set it false, delete the field instead.
+const _: () = assert!(USE_HOME_RUN_STATE, "USE_HOME_RUN_STATE must be true; remove the field instead");
 #[derive(Debug, Clone)]
 pub(crate) enum SourceInferenceInput {
     SourceEvidence(SourceEvidenceInput),
