@@ -125,16 +125,17 @@ async fn execute_watch_mode_with_install(args: RunArgs) -> Result<()> {
     // Create a temporary attempt context for the pre-watch normalization.
     // The attempt dir it creates is ephemeral: execute_watch_mode() performs
     // its own independent normalization (L1217), so this one is never used.
-    // Calling unwind_cleanup() afterwards ensures the orphaned attempt dir
-    // under ~/.ato/runs/source-inference/ is removed immediately.
+    // unwind_cleanup() is called unconditionally — before the `?` propagation —
+    // so the attempt dir is removed whether normalization succeeds or fails.
     let mut pre_watch_attempt = PipelineAttemptContext::default();
-    let normalized = normalize_run_target_after_install(
+    let result = normalize_run_target_after_install(
         &args,
         &install.resolved_target,
         Some(&mut pre_watch_attempt),
     )
-    .await?;
+    .await;
     pre_watch_attempt.unwind_cleanup();
+    let normalized = result?;
     execute_watch_mode(RunArgs {
         target: normalized.target,
         agent_local_root: install.resolved_target.agent_local_root,

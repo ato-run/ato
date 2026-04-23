@@ -43,6 +43,8 @@ TOMLEOF
 # Run ato; ignore exit code — we only care about filesystem side-effects
 (cd "$PROJECT" && ato run . --yes > /dev/null 2>&1) || true
 
-ENTRIES_UNDER_TMP=$(find "$PROJECT/.ato/tmp/source-inference" -type f 2>/dev/null | wc -l | tr -d ' ')
+# Count all entries (files AND directories) so that empty attempt-<nanos>/
+# dirs are not masked by a -type f filter. The path must not exist at all.
+ENTRIES_UNDER_TMP=$(find "$PROJECT/.ato/tmp/source-inference" 2>/dev/null | wc -l | tr -d ' ')
 assert_equal "$ENTRIES_UNDER_TMP" "0" \
   "directory project: cwd .ato/tmp/source-inference/ was polluted"
