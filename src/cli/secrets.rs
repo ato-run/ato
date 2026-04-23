@@ -4,11 +4,27 @@ use clap::Subcommand;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum SecretsCommands {
-    /// Store a secret value in the keychain (or secure local file)
+    /// Initialize the age identity (run once before using secrets)
+    #[command(name = "init")]
+    Init {
+        /// Store identity as plain text without passphrase protection (chmod 600)
+        #[arg(long, default_value_t = false)]
+        no_passphrase: bool,
+
+        /// Use an existing SSH ed25519 key as the identity
+        #[arg(long, value_name = "PATH")]
+        ssh_key: Option<PathBuf>,
+    },
+
+    /// Store a secret value in the secure store
     #[command(name = "set")]
     Set {
         /// Secret key name (e.g. OPENAI_API_KEY)
         key: String,
+
+        /// Namespace: "default", "publish", or "capsule:<name>"
+        #[arg(long, value_name = "NS", default_value = "default")]
+        namespace: String,
 
         /// Optional description for this secret
         #[arg(long)]
@@ -28,6 +44,10 @@ pub(crate) enum SecretsCommands {
     Get {
         /// Secret key name
         key: String,
+
+        /// Namespace to read from
+        #[arg(long, value_name = "NS", default_value = "default")]
+        namespace: String,
     },
 
     /// List all stored secrets (metadata only, no values)
@@ -43,6 +63,10 @@ pub(crate) enum SecretsCommands {
     Delete {
         /// Secret key name
         key: String,
+
+        /// Namespace to delete from ("*" to remove from all namespaces)
+        #[arg(long, value_name = "NS", default_value = "default")]
+        namespace: String,
     },
 
     /// Import secrets from a .env file into the secure store
@@ -51,6 +75,10 @@ pub(crate) enum SecretsCommands {
         /// Path to the .env file to import
         #[arg(long, value_name = "PATH")]
         env_file: PathBuf,
+
+        /// Target namespace
+        #[arg(long, value_name = "NS", default_value = "default")]
+        namespace: String,
     },
 
     /// Grant a capsule ID access to a secret
@@ -69,5 +97,21 @@ pub(crate) enum SecretsCommands {
         key: String,
         /// Capsule ID or glob pattern to deny
         capsule_id: String,
+    },
+
+    /// Migrate secrets from the OS keychain to the age file backend
+    #[command(name = "migrate-from-keychain")]
+    MigrateFromKeychain {
+        /// Also delete the original keychain entries after migration
+        #[arg(long, default_value_t = false)]
+        delete_keychain: bool,
+    },
+
+    /// Re-encrypt all secrets under a new age identity
+    #[command(name = "rotate-identity")]
+    RotateIdentity {
+        /// Path to the new identity file (generated if omitted)
+        #[arg(long, value_name = "PATH")]
+        new_identity: Option<PathBuf>,
     },
 }

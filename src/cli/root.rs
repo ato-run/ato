@@ -612,7 +612,7 @@ pub(crate) enum Commands {
 
     #[command(
         hide = true,
-        about = "Manage secrets stored in OS keychain or secure local store"
+        about = "Manage secrets (age-encrypted files; OS keychain for passphrase cache only)"
     )]
     Secrets {
         #[command(subcommand)]
