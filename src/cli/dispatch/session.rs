@@ -97,8 +97,7 @@ fn cmd_start(ttl: &str) -> Result<()> {
         guard.context("identity not loaded after unlock")?
     };
 
-    std::fs::create_dir_all(path.parent().unwrap())
-        .context("failed to create ~/.ato/run/")?;
+    std::fs::create_dir_all(path.parent().unwrap()).context("failed to create ~/.ato/run/")?;
     crate::application::secrets::store::write_secure_file(&path, key_str.as_bytes())?;
 
     // Compute and store expiry.
@@ -157,7 +156,11 @@ fn cmd_status() -> Result<()> {
     // Also check ATO_SESSION_KEY_FILE.
     let active_path = if let Ok(p) = std::env::var("ATO_SESSION_KEY_FILE") {
         let ep = std::path::PathBuf::from(p);
-        if ep.exists() { ep } else { path.clone() }
+        if ep.exists() {
+            ep
+        } else {
+            path.clone()
+        }
     } else {
         path.clone()
     };

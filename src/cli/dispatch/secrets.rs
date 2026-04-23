@@ -44,7 +44,10 @@ pub(crate) fn execute_secrets_command(command: SecretsCommands) -> Result<()> {
                 store.get_in_namespace(&key, &namespace)?
             };
             match value {
-                Some(v) => { println!("{v}"); Ok(()) }
+                Some(v) => {
+                    println!("{v}");
+                    Ok(())
+                }
                 None => bail!("secret '{}' not found", key),
             }
         }
@@ -62,9 +65,7 @@ pub(crate) fn execute_secrets_command(command: SecretsCommands) -> Result<()> {
 
         SecretsCommands::Delete { key, namespace } => {
             let store = SecretStore::open()?;
-            if namespace == "*" {
-                store.delete(&key)?;
-            } else if namespace == "default" {
+            if namespace == "*" || namespace == "default" {
                 store.delete(&key)?;
             } else {
                 // Delete from specific namespace only.
@@ -80,7 +81,10 @@ pub(crate) fn execute_secrets_command(command: SecretsCommands) -> Result<()> {
             Ok(())
         }
 
-        SecretsCommands::Import { env_file, namespace } => {
+        SecretsCommands::Import {
+            env_file,
+            namespace,
+        } => {
             let store = SecretStore::open()?;
             if namespace == "default" {
                 let count = store.import_env_file(&env_file)?;
@@ -92,13 +96,18 @@ pub(crate) fn execute_secrets_command(command: SecretsCommands) -> Result<()> {
                 let mut count = 0usize;
                 for line in raw.lines() {
                     let t = line.trim();
-                    if t.is_empty() || t.starts_with('#') { continue; }
+                    if t.is_empty() || t.starts_with('#') {
+                        continue;
+                    }
                     if let Some((k, v)) = t.split_once('=') {
                         store.set_in_namespace(k.trim(), &namespace, v.trim(), None, None, None)?;
                         count += 1;
                     }
                 }
-                eprintln!("✅ Imported {count} secret(s) from {} into namespace '{namespace}'.", env_file.display());
+                eprintln!(
+                    "✅ Imported {count} secret(s) from {} into namespace '{namespace}'.",
+                    env_file.display()
+                );
             }
             Ok(())
         }
@@ -129,18 +138,13 @@ pub(crate) fn execute_secrets_command(command: SecretsCommands) -> Result<()> {
             Ok(())
         }
 
-        SecretsCommands::RotateIdentity { new_identity } => {
-            cmd_rotate_identity(new_identity)
-        }
+        SecretsCommands::RotateIdentity { new_identity } => cmd_rotate_identity(new_identity),
     }
 }
 
 // ── Subcommand implementations ───────────────────────────────────────────────
 
-fn cmd_init(
-    no_passphrase: bool,
-    ssh_key: Option<std::path::PathBuf>,
-) -> Result<()> {
+fn cmd_init(no_passphrase: bool, ssh_key: Option<std::path::PathBuf>) -> Result<()> {
     if ssh_key.is_some() {
         bail!("--ssh-key is not yet implemented; use the default X25519 identity");
     }
@@ -161,7 +165,11 @@ fn cmd_init(
     } else {
         let pp = rpassword::prompt_password("Passphrase for identity.key (leave empty to skip): ")
             .context("failed to read passphrase")?;
-        if pp.is_empty() { None } else { Some(pp) }
+        if pp.is_empty() {
+            None
+        } else {
+            Some(pp)
+        }
     };
 
     let identity = age.init_identity(passphrase.as_deref())?;
@@ -180,9 +188,7 @@ fn cmd_init(
     Ok(())
 }
 
-fn cmd_rotate_identity(
-    new_identity_path: Option<std::path::PathBuf>,
-) -> Result<()> {
+fn cmd_rotate_identity(new_identity_path: Option<std::path::PathBuf>) -> Result<()> {
     let store = SecretStore::open()?;
 
     let age = store.age().ok_or_else(|| {
@@ -194,8 +200,8 @@ fn cmd_rotate_identity(
 
     // Generate or load the new identity.
     let new_id_secret = if let Some(ref path) = new_identity_path {
-        let raw = std::fs::read(path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
+        let raw =
+            std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         // Load passphrase if needed.
         let pp_str;
         let pp = if raw.starts_with(b"-----BEGIN") || raw.starts_with(b"age-encryption") {
@@ -219,8 +225,7 @@ fn cmd_rotate_identity(
     let key_path = age.identity_key_path();
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S");
     let backup_path = key_path.with_extension(format!("key.old-{timestamp}"));
-    std::fs::copy(&key_path, &backup_path)
-        .context("failed to back up current identity")?;
+    std::fs::copy(&key_path, &backup_path).context("failed to back up current identity")?;
     eprintln!("🔒 Old identity backed up to {}", backup_path.display());
 
     // Re-encrypt all namespace files.
@@ -233,7 +238,10 @@ fn cmd_rotate_identity(
     let pub_str = new_identity.to_public().to_string();
     write_secure_file(&age.identity_pub_path(), pub_str.as_bytes())?;
 
-    eprintln!("✅ Identity rotated. New public key: {}", new_identity.to_public());
+    eprintln!(
+        "✅ Identity rotated. New public key: {}",
+        new_identity.to_public()
+    );
     eprintln!("   Backup: {}", backup_path.display());
     Ok(())
 }

@@ -71,13 +71,6 @@ impl AgeFileBackend {
         }
     }
 
-    pub(crate) fn with_identity(home: PathBuf, identity: x25519::Identity) -> Self {
-        Self {
-            home,
-            identity: Mutex::new(Some(identity)),
-        }
-    }
-
     pub(crate) fn keys_dir(&self) -> PathBuf {
         self.home.join(".ato/keys")
     }
@@ -104,29 +97,23 @@ impl AgeFileBackend {
     /// If `passphrase` is `Some`, the identity file is encrypted with that
     /// passphrase (armored age format).  With `None` the key is stored as plain
     /// text with `chmod 600`.
-    pub(crate) fn init_identity(
-        &self,
-        passphrase: Option<&str>,
-    ) -> Result<x25519::Identity> {
+    pub(crate) fn init_identity(&self, passphrase: Option<&str>) -> Result<x25519::Identity> {
         let identity = x25519::Identity::generate();
         let identity_secret = identity.to_string();
         let identity_str = identity_secret.expose_secret();
         let public_str = identity.to_public().to_string();
 
-        std::fs::create_dir_all(self.keys_dir())
-            .context("failed to create ~/.ato/keys/")?;
+        std::fs::create_dir_all(self.keys_dir()).context("failed to create ~/.ato/keys/")?;
 
         let key_path = self.identity_key_path();
 
         if let Some(pp) = passphrase {
             // Encrypt the identity string with the passphrase (armored age).
-            let encryptor =
-                age::Encryptor::with_user_passphrase(Secret::new(pp.to_string()));
+            let encryptor = age::Encryptor::with_user_passphrase(Secret::new(pp.to_string()));
             let mut encrypted = vec![];
             {
-                let mut armored =
-                    ArmoredWriter::wrap_output(&mut encrypted, Format::AsciiArmor)
-                        .context("failed to create armored writer")?;
+                let mut armored = ArmoredWriter::wrap_output(&mut encrypted, Format::AsciiArmor)
+                    .context("failed to create armored writer")?;
                 let mut writer = encryptor
                     .wrap_output(&mut armored)
                     .context("failed to wrap output for passphrase encryption")?;
@@ -155,10 +142,7 @@ impl AgeFileBackend {
 
     /// Ensure identity is loaded, using the provided passphrase if the key file
     /// is passphrase-encrypted.  Returns `Err` if no identity exists yet.
-    pub(crate) fn load_identity_with_passphrase(
-        &self,
-        passphrase: Option<&str>,
-    ) -> Result<()> {
+    pub(crate) fn load_identity_with_passphrase(&self, passphrase: Option<&str>) -> Result<()> {
         {
             let guard = self.identity.lock().unwrap();
             if guard.is_some() {
@@ -178,14 +162,15 @@ impl AgeFileBackend {
         let raw = std::fs::read(&key_path)
             .with_context(|| format!("failed to read {}", key_path.display()))?;
 
-        let identity = load_identity_bytes(&raw, passphrase)
-            .context("failed to load age identity")?;
+        let identity =
+            load_identity_bytes(&raw, passphrase).context("failed to load age identity")?;
 
         *self.identity.lock().unwrap() = Some(identity);
         Ok(())
     }
 
     /// Return true when an identity is already loaded in memory.
+    #[cfg(test)]
     pub(crate) fn is_identity_loaded(&self) -> bool {
         self.identity.lock().unwrap().is_some()
     }
@@ -196,7 +181,9 @@ impl AgeFileBackend {
     /// session file and never logged or displayed.
     pub(crate) fn identity_for_session(&self) -> Option<String> {
         let guard = self.identity.lock().unwrap();
-        guard.as_ref().map(|id| id.to_string().expose_secret().to_string())
+        guard
+            .as_ref()
+            .map(|id| id.to_string().expose_secret().to_string())
     }
 
     /// Directly install an already-loaded identity (used by session key file path).
@@ -215,9 +202,7 @@ impl AgeFileBackend {
                     .expect("round-trip identity parse failed")
             })
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "age identity not loaded – run `ato secrets init` first"
-                )
+                anyhow::anyhow!("age identity not loaded – run `ato secrets init` first")
             })
     }
 
@@ -233,12 +218,10 @@ impl AgeFileBackend {
         }
 
         let identity = self.get_identity()?;
-        let raw = std::fs::read(&path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
+        let raw =
+            std::fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
 
-        let decryptor = match age::Decryptor::new(&raw[..])
-            .context("failed to parse age file")?
-        {
+        let decryptor = match age::Decryptor::new(&raw[..]).context("failed to parse age file")? {
             age::Decryptor::Recipients(d) => d,
             age::Decryptor::Passphrase(_) => {
                 bail!("unexpected passphrase-encrypted namespace file")
@@ -260,14 +243,10 @@ impl AgeFileBackend {
 
     fn write_namespace(&self, namespace: &str, data: &NamespaceData) -> Result<()> {
         let identity = self.get_identity()?;
-        let recipient: Box<dyn age::Recipient + Send + 'static> =
-            Box::new(identity.to_public());
+        let recipient: Box<dyn age::Recipient + Send + 'static> = Box::new(identity.to_public());
 
         let final_path = self.namespace_path(namespace);
-        let tmp_path = final_path.with_extension(format!(
-            "age.tmp.{}",
-            std::process::id()
-        ));
+        let tmp_path = final_path.with_extension(format!("age.tmp.{}", std::process::id()));
 
         std::fs::create_dir_all(self.secrets_dir())
             .context("failed to create secrets directory")?;
@@ -285,7 +264,9 @@ impl AgeFileBackend {
             let mut writer = encryptor
                 .wrap_output(&mut encrypted)
                 .context("failed to wrap encryption output")?;
-            writer.write_all(&json).context("failed to write plaintext")?;
+            writer
+                .write_all(&json)
+                .context("failed to write plaintext")?;
             writer.finish().context("failed to finish encryption")?;
         }
 
@@ -303,18 +284,13 @@ impl AgeFileBackend {
 
     /// Decrypt ALL namespace files and re-encrypt to a new identity.
     /// Used by `rotate-identity`.
-    pub(crate) fn reencrypt_all(
-        &self,
-        new_identity: &x25519::Identity,
-    ) -> Result<()> {
+    pub(crate) fn reencrypt_all(&self, new_identity: &x25519::Identity) -> Result<()> {
         let secrets_dir = self.secrets_dir();
         if !secrets_dir.exists() {
             return Ok(());
         }
 
-        for entry in std::fs::read_dir(&secrets_dir)
-            .context("failed to read secrets dir")?
-        {
+        for entry in std::fs::read_dir(&secrets_dir).context("failed to read secrets dir")? {
             let entry = entry?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("age") {
@@ -331,8 +307,7 @@ impl AgeFileBackend {
 
             // Temporarily swap identity to new one.
             let old_identity = self.identity.lock().unwrap().take();
-            *self.identity.lock().unwrap() =
-                Some(clone_identity(new_identity));
+            *self.identity.lock().unwrap() = Some(clone_identity(new_identity));
 
             let result = self.write_namespace(&stem, &data);
 
@@ -366,14 +341,6 @@ impl AgeFileBackend {
 }
 
 impl SecretBackend for AgeFileBackend {
-    fn is_available(&self) -> bool {
-        self.identity.lock().unwrap().is_some()
-    }
-
-    fn is_writable(&self) -> bool {
-        self.identity.lock().unwrap().is_some()
-    }
-
     fn get(&self, key: &SecretKey) -> Result<Option<String>> {
         let data = self.read_namespace(&key.namespace)?;
         Ok(data.entries.get(&key.name).map(|e| e.value.clone()))
@@ -389,14 +356,17 @@ impl SecretBackend for AgeFileBackend {
     ) -> Result<()> {
         let mut data = self.read_namespace(&key.namespace)?;
         let now = chrono::Utc::now().to_rfc3339();
-        let entry = data.entries.entry(key.name.clone()).or_insert_with(|| NamespaceEntry {
-            value: String::new(),
-            created_at: now.clone(),
-            updated_at: now.clone(),
-            description: None,
-            allow: None,
-            deny: None,
-        });
+        let entry = data
+            .entries
+            .entry(key.name.clone())
+            .or_insert_with(|| NamespaceEntry {
+                value: String::new(),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                description: None,
+                allow: None,
+                deny: None,
+            });
         entry.value = value;
         entry.updated_at = now;
         if let Some(d) = description {
@@ -445,10 +415,12 @@ impl SecretBackend for AgeFileBackend {
         deny: Option<Vec<String>>,
     ) -> Result<()> {
         let mut data = self.read_namespace(&key.namespace)?;
-        let entry = data
-            .entries
-            .get_mut(&key.name)
-            .with_context(|| format!("secret '{}' not found in namespace '{}'", key.name, key.namespace))?;
+        let entry = data.entries.get_mut(&key.name).with_context(|| {
+            format!(
+                "secret '{}' not found in namespace '{}'",
+                key.name, key.namespace
+            )
+        })?;
         if allow.is_some() {
             entry.allow = allow;
         }
@@ -482,10 +454,7 @@ pub(crate) fn load_identity_bytes(
     passphrase: Option<&str>,
 ) -> Result<x25519::Identity> {
     // Detect format: armored age starts with "-----BEGIN"
-    let is_armored = raw
-        .get(..11)
-        .map(|h| h == b"-----BEGIN ")
-        .unwrap_or(false);
+    let is_armored = raw.get(..11).map(|h| h == b"-----BEGIN ").unwrap_or(false);
     // Binary age header
     let is_age_binary = raw
         .get(..14)
@@ -494,16 +463,14 @@ pub(crate) fn load_identity_bytes(
 
     if is_armored || is_age_binary {
         let pp = passphrase.ok_or_else(|| {
-            anyhow::anyhow!(
-                "identity.key is passphrase-protected but no passphrase was provided"
-            )
+            anyhow::anyhow!("identity.key is passphrase-protected but no passphrase was provided")
         })?;
 
         let plaintext = if is_armored {
             let armored = ArmoredReader::new(raw);
             decrypt_passphrase(armored, pp)?
         } else {
-            decrypt_passphrase(&raw[..], pp)?
+            decrypt_passphrase(raw, pp)?
         };
 
         let text = String::from_utf8(plaintext).context("identity key is not valid UTF-8")?;
@@ -552,17 +519,18 @@ fn acquire_lock(lock_path: &Path) -> Result<File> {
         .open(lock_path)
         .with_context(|| format!("failed to open lock file {}", lock_path.display()))?;
     // Try for up to 5 seconds.
-    file.try_lock_exclusive().or_else(|_| {
-        // Retry once after a short sleep.
-        std::thread::sleep(std::time::Duration::from_secs(5));
-        file.try_lock_exclusive()
-    })
-    .with_context(|| {
-        format!(
-            "failed to acquire exclusive lock on {} – another ato process may be running",
-            lock_path.display()
-        )
-    })?;
+    file.try_lock_exclusive()
+        .or_else(|_| {
+            // Retry once after a short sleep.
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            file.try_lock_exclusive()
+        })
+        .with_context(|| {
+            format!(
+                "failed to acquire exclusive lock on {} – another ato process may be running",
+                lock_path.display()
+            )
+        })?;
     Ok(file)
 }
 
@@ -668,7 +636,10 @@ mod tests {
         let entries = backend.list("default").expect("list");
         let entry = entries.iter().find(|e| e.key == "DB_PASS").expect("entry");
         assert_eq!(entry.description.as_deref(), Some("database password"));
-        assert_eq!(entry.allow.as_deref(), Some(&["capsule:myapp".to_string()][..]));
+        assert_eq!(
+            entry.allow.as_deref(),
+            Some(&["capsule:myapp".to_string()][..])
+        );
     }
 
     // ── delete ────────────────────────────────────────────────────────────────
@@ -677,7 +648,9 @@ mod tests {
     fn delete_removes_key() {
         let (_dir, backend) = init_backend();
         let key = make_key("TEMP");
-        backend.set(&key, "x".into(), None, None, None).expect("set");
+        backend
+            .set(&key, "x".into(), None, None, None)
+            .expect("set");
         backend.delete(&key).expect("delete");
         assert_eq!(backend.get(&key).expect("get"), None);
     }
@@ -686,7 +659,9 @@ mod tests {
     fn delete_nonexistent_is_noop() {
         let (_dir, backend) = init_backend();
         let key = make_key("GHOST");
-        backend.delete(&key).expect("delete nonexistent should be ok");
+        backend
+            .delete(&key)
+            .expect("delete nonexistent should be ok");
     }
 
     // ── list ──────────────────────────────────────────────────────────────────
@@ -702,7 +677,9 @@ mod tests {
     fn list_returns_all_keys_sorted() {
         let (_dir, backend) = init_backend();
         for k in &["ZEBRA", "ALPHA", "MIDDLE"] {
-            backend.set(&make_key(k), "v".into(), None, None, None).expect("set");
+            backend
+                .set(&make_key(k), "v".into(), None, None, None)
+                .expect("set");
         }
         let entries = backend.list("default").expect("list");
         let names: Vec<_> = entries.iter().map(|e| e.key.as_str()).collect();
@@ -715,20 +692,34 @@ mod tests {
     fn namespace_isolation_default_vs_custom() {
         let (_dir, backend) = init_backend();
         let default_key = make_ns_key("default", "FOO");
-        let other_key   = make_ns_key("project_a", "FOO");
+        let other_key = make_ns_key("project_a", "FOO");
 
-        backend.set(&default_key, "default-value".into(), None, None, None).expect("set default");
-        backend.set(&other_key,   "project-value".into(), None, None, None).expect("set project");
+        backend
+            .set(&default_key, "default-value".into(), None, None, None)
+            .expect("set default");
+        backend
+            .set(&other_key, "project-value".into(), None, None, None)
+            .expect("set project");
 
-        assert_eq!(backend.get(&default_key).expect("get default"), Some("default-value".to_string()));
-        assert_eq!(backend.get(&other_key).expect("get project"),   Some("project-value".to_string()));
+        assert_eq!(
+            backend.get(&default_key).expect("get default"),
+            Some("default-value".to_string())
+        );
+        assert_eq!(
+            backend.get(&other_key).expect("get project"),
+            Some("project-value".to_string())
+        );
     }
 
     #[test]
     fn list_namespaces_returns_created_namespaces() {
         let (_dir, backend) = init_backend();
-        backend.set(&make_ns_key("ns_a", "K"), "v".into(), None, None, None).expect("set");
-        backend.set(&make_ns_key("ns_b", "K"), "v".into(), None, None, None).expect("set");
+        backend
+            .set(&make_ns_key("ns_a", "K"), "v".into(), None, None, None)
+            .expect("set");
+        backend
+            .set(&make_ns_key("ns_b", "K"), "v".into(), None, None, None)
+            .expect("set");
         let ns = backend.list_namespaces();
         assert!(ns.contains(&"ns_a".to_string()), "ns_a not in {:?}", ns);
         assert!(ns.contains(&"ns_b".to_string()), "ns_b not in {:?}", ns);
@@ -739,7 +730,9 @@ mod tests {
     #[test]
     fn namespace_file_has_correct_schema_version() {
         let (_dir, backend) = init_backend();
-        backend.set(&make_key("X"), "y".into(), None, None, None).expect("set");
+        backend
+            .set(&make_key("X"), "y".into(), None, None, None)
+            .expect("set");
         // Read and decrypt to verify schema_version in JSON.
         let identity = {
             let guard = backend.identity.lock().unwrap();
