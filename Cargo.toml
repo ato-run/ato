@@ -72,6 +72,7 @@ urlencoding = "2.1"
 hickory-resolver = "0.24"
 libc = "0.2"
 goblin = "0.8"
+age = { version = "0.10", features = ["armor"] }
 keyring = "2.3"
 rpassword = "7"
 globset = "0.4"
