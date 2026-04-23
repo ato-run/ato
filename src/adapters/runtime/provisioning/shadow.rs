@@ -565,21 +565,27 @@ fn copy_workspace_snapshot(
     destination_root: &Path,
     shadow_root: &Path,
 ) -> Result<()> {
-    for entry in WalkDir::new(source_root).into_iter().filter_map(Result::ok) {
+    // Use filter_entry to prune excluded directories before WalkDir descends into them.
+    // This is critical for large directories like node_modules (10k+ files) and artifacts.
+    for entry in WalkDir::new(source_root)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.path().starts_with(shadow_root) {
+                return false;
+            }
+            let relative = match e.path().strip_prefix(source_root) {
+                Ok(r) => r,
+                Err(_) => return true,
+            };
+            relative.as_os_str().is_empty() || !should_skip_snapshot(relative)
+        })
+        .filter_map(Result::ok)
+    {
         let path = entry.path();
-        if path == shadow_root || path.starts_with(shadow_root) {
-            continue;
-        }
         let relative = match path.strip_prefix(source_root) {
             Ok(relative) if !relative.as_os_str().is_empty() => relative,
             _ => continue,
         };
-        if should_skip_snapshot(relative) {
-            if entry.file_type().is_dir() {
-                continue;
-            }
-            continue;
-        }
 
         let destination = destination_root.join(relative);
         if entry.file_type().is_dir() {
@@ -617,7 +623,16 @@ fn should_skip_snapshot(relative: &Path) -> bool {
         let name = component.as_os_str().to_string_lossy();
         matches!(
             name.as_ref(),
-            ".git" | ".tmp" | "target" | "node_modules" | ".venv"
+            ".git"
+                | ".tmp"
+                | "target"
+                | "node_modules"
+                | ".venv"
+                | "artifacts"
+                | "locks"
+                | "dist"
+                | ".next"
+                | "__pycache__"
         )
     })
 }
