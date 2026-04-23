@@ -4,6 +4,7 @@
 //! Stores canonical credentials in `$XDG_CONFIG_HOME/ato/credentials.toml`.
 
 pub(crate) mod consent_store;
+mod credential_store;
 mod github;
 mod prompt;
 mod publisher;
@@ -12,11 +13,9 @@ mod store;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 
-#[cfg(test)]
-use std::collections::HashMap;
-#[cfg(test)]
-use std::sync::{Mutex, OnceLock};
+use credential_store::AuthStore;
 
 #[allow(unused_imports)]
 pub(crate) use github::login_with_token;
@@ -43,10 +42,6 @@ pub(super) const LEGACY_CREDENTIALS_DIR: &str = ".ato";
 pub(super) const LEGACY_CREDENTIALS_FILE: &str = "credentials.json";
 pub(super) const CANONICAL_CREDENTIALS_DIR: &str = "ato";
 pub(super) const CANONICAL_CREDENTIALS_FILE: &str = "credentials.toml";
-
-#[cfg(test)]
-pub(super) static TEST_KEYRING: OnceLock<Mutex<HashMap<(String, String), String>>> =
-    OnceLock::new();
 
 /// User credentials stored locally
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -88,9 +83,26 @@ pub struct Credentials {
 pub struct AuthManager {
     pub(super) credentials_path: PathBuf,
     pub(super) legacy_credentials_path: PathBuf,
+    /// Home directory used by the shared credential layer
+    /// (`AuthStore`/`AgeFileBackend`). Defaults to the user's real home in
+    /// production; overridable in tests so each temp dir gets its own age
+    /// identity and credential layout.
+    pub(super) age_home: PathBuf,
+    // Kept so #[cfg(test)] hooks can reach the in-process legacy-keychain
+    // store by service/account. The shared `auth_store` owns the production
+    // copies; production code never reads these fields directly, and not
+    // every test exercises the github slot.
+    #[allow(dead_code)]
     pub(super) keyring_service: String,
+    #[allow(dead_code)]
     pub(super) keyring_session_account: String,
+    #[allow(dead_code)]
     pub(super) keyring_github_account: String,
+    /// Eagerly-constructed `AuthStore`. Cached so the in-process
+    /// `MemoryBackend` survives across `resolve_*` / `persist_*` calls — every
+    /// call going through a fresh `AuthStore` would otherwise discard its own
+    /// memory cache the moment the handle is dropped.
+    pub(super) auth_store: Arc<AuthStore>,
 }
 
 pub(super) fn read_env_non_empty(key: &str) -> Option<String> {
@@ -98,6 +110,13 @@ pub(super) fn read_env_non_empty(key: &str) -> Option<String> {
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+}
+
+#[cfg(test)]
+pub(super) fn shared_env_lock() -> &'static std::sync::Mutex<()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[cfg(test)]
