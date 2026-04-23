@@ -99,14 +99,6 @@ pub(crate) enum SecretsCommands {
         capsule_id: String,
     },
 
-    /// Migrate secrets from the OS keychain to the age file backend
-    #[command(name = "migrate-from-keychain")]
-    MigrateFromKeychain {
-        /// Also delete the original keychain entries after migration
-        #[arg(long, default_value_t = false)]
-        delete_keychain: bool,
-    },
-
     /// Re-encrypt all secrets under a new age identity
     #[command(name = "rotate-identity")]
     RotateIdentity {

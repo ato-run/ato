@@ -394,22 +394,6 @@ impl SecretStore {
         write_secure_file(&path, rendered.as_bytes())
     }
 
-    /// Delete a legacy keychain entry (for migration).
-    pub(crate) fn legacy_delete_key(&self, key: &str) -> Result<()> {
-        self.legacy_delete(key)
-    }
-
-    /// List legacy keychain entries (for migrate-from-keychain).
-    pub(crate) fn legacy_list_all_keys(&self) -> Vec<String> {
-        self.legacy_load_metadata()
-            .map(|m| m.secrets.into_keys().collect())
-            .unwrap_or_default()
-    }
-
-    /// Read a legacy keychain entry directly (for migration).
-    pub(crate) fn legacy_get(&self, key: &str) -> Result<Option<String>> {
-        self.legacy_read(key)
-    }
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
