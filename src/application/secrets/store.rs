@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::backend::{
     AgeFileBackend, BackendEntry, EnvBackend, KeychainBackend, MemoryBackend, SecretBackend,
-    SecretKey,
+    SecretKey, load_identity_bytes,
 };
 use super::policy::SecretPolicy;
 
@@ -51,6 +51,9 @@ pub(crate) struct SecretStore {
     keychain: KeychainBackend,
     /// Legacy: use OS keychain as fallback when age identity is absent.
     legacy_use_keyring: bool,
+    /// Configured backend resolution order (from `~/.ato/config.toml [secrets] backends`).
+    /// Default order: env → memory → age → keychain.
+    backend_order: Vec<String>,
 }
 
 impl SecretStore {
@@ -70,6 +73,9 @@ impl SecretStore {
         let age = if loaded { Some(age_backend) } else { None };
 
         let legacy_use_keyring = super::storage::is_keyring_available();
+        let backend_order = read_secrets_backend_order(&home).unwrap_or_else(|| {
+            vec!["env".into(), "memory".into(), "age".into(), "keychain".into()]
+        });
 
         Ok(Self {
             home,
@@ -78,6 +84,7 @@ impl SecretStore {
             age,
             keychain,
             legacy_use_keyring,
+            backend_order,
         })
     }
 
@@ -85,6 +92,9 @@ impl SecretStore {
     pub(crate) fn open_with_age(home: PathBuf, age_backend: AgeFileBackend) -> Result<Self> {
         let keychain = KeychainBackend::new();
         let legacy_use_keyring = super::storage::is_keyring_available();
+        let backend_order = read_secrets_backend_order(&home).unwrap_or_else(|| {
+            vec!["env".into(), "memory".into(), "age".into(), "keychain".into()]
+        });
         Ok(Self {
             home,
             env: EnvBackend::new(),
@@ -92,6 +102,7 @@ impl SecretStore {
             age: Some(age_backend),
             keychain,
             legacy_use_keyring,
+            backend_order,
         })
     }
 
@@ -154,22 +165,30 @@ impl SecretStore {
 
     pub(crate) fn get(&self, key: &str) -> Result<Option<String>> {
         let sk = SecretKey::new(key);
-        if let Some(v) = self.env.get(&sk)? { return Ok(Some(v)); }
-        if let Some(v) = self.memory.get(&sk)? { return Ok(Some(v)); }
-        if let Some(age) = &self.age {
-            if let Some(v) = age.get(&sk)? { return Ok(Some(v)); }
+        for backend in &self.backend_order {
+            let result = match backend.as_str() {
+                "env" => self.env.get(&sk)?,
+                "memory" => self.memory.get(&sk)?,
+                "age" => self.age.as_ref().and_then(|a| a.get(&sk).ok().flatten()),
+                "keychain" => self.legacy_read(key).ok().flatten(),
+                _ => None,
+            };
+            if let Some(v) = result { return Ok(Some(v)); }
         }
-        self.legacy_read(key)
+        Ok(None)
     }
 
     pub(crate) fn get_in_namespace(&self, key: &str, namespace: &str) -> Result<Option<String>> {
         let sk = SecretKey::with_namespace(namespace, key);
-        if let Some(v) = self.env.get(&sk)? { return Ok(Some(v)); }
-        if let Some(v) = self.memory.get(&sk)? { return Ok(Some(v)); }
-        if let Some(age) = &self.age {
-            if let Some(v) = age.get(&sk)? { return Ok(Some(v)); }
+        for backend in &self.backend_order {
+            let result = match backend.as_str() {
+                "env" => self.env.get(&sk)?,
+                "memory" => self.memory.get(&sk)?,
+                "age" => self.age.as_ref().and_then(|a| a.get(&sk).ok().flatten()),
+                _ => None, // legacy doesn't support namespaces
+            };
+            if let Some(v) = result { return Ok(Some(v)); }
         }
-        // Legacy doesn't support namespaces, skip.
         Ok(None)
     }
 
@@ -405,6 +424,19 @@ struct LegacyMetadata {
 }
 
 fn try_load_identity(age: &mut AgeFileBackend, keychain: &KeychainBackend) -> bool {
+    // Check for a session key file exported by `ato session start`.
+    if let Ok(session_path) = std::env::var("ATO_SESSION_KEY_FILE") {
+        let p = std::path::Path::new(&session_path);
+        if p.exists() {
+            if let Ok(raw) = std::fs::read(p) {
+                if let Ok(id) = load_identity_bytes(&raw, None) {
+                    age.install_identity(id);
+                    return true;
+                }
+            }
+        }
+    }
+
     if !age.identity_exists() {
         return false;
     }
@@ -420,6 +452,24 @@ fn try_load_identity(age: &mut AgeFileBackend, keychain: &KeychainBackend) -> bo
     }
     // Can't load non-interactively – age backend disabled.
     false
+}
+
+/// Read `~/.ato/config.toml` and return the `[secrets] backends` list if present.
+///
+/// Allowed backend names: `"env"`, `"memory"`, `"age"`, `"keychain"`.
+/// If the key is absent or the file doesn't exist, returns `None` (use default order).
+fn read_secrets_backend_order(home: &Path) -> Option<Vec<String>> {
+    let config_path = home.join(".ato").join("config.toml");
+    let raw = std::fs::read_to_string(config_path).ok()?;
+    let doc: toml::Value = raw.parse().ok()?;
+    let backends = doc
+        .get("secrets")?
+        .get("backends")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_ascii_lowercase()))
+        .collect::<Vec<_>>();
+    if backends.is_empty() { None } else { Some(backends) }
 }
 
 fn build_policy(entry: &SecretEntry) -> Result<SecretPolicy> {
@@ -535,4 +585,132 @@ pub(crate) fn write_secure_file(path: &Path, contents: &[u8]) -> Result<()> {
             path.display()
         )
     })
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use crate::application::secrets::backend::AgeFileBackend;
+
+    fn init_store(dir: &TempDir) -> SecretStore {
+        let home = dir.path().to_path_buf();
+        let mut age = AgeFileBackend::new(home.clone());
+        age.init_identity(None).expect("init_identity");
+        SecretStore::open_with_age(home, age).expect("open_with_age")
+    }
+
+    // ── set / get ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn set_and_get_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let store = init_store(&dir);
+        store.set("TOKEN", "abc123", None, None, None).unwrap();
+        assert_eq!(store.get("TOKEN").unwrap(), Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn get_missing_key_returns_none() {
+        let dir = TempDir::new().unwrap();
+        let store = init_store(&dir);
+        assert_eq!(store.get("MISSING").unwrap(), None);
+    }
+
+    // ── env override has highest priority ─────────────────────────────────────
+
+    #[test]
+    fn env_backend_overrides_age_store() {
+        let dir = TempDir::new().unwrap();
+        let store = init_store(&dir);
+
+        // Store value in age backend.
+        store.set("MY_KEY", "age-value", None, None, None).unwrap();
+
+        // Inject env override.
+        std::env::set_var("ATO_SECRET_MY_KEY", "env-value");
+        let result = store.get("MY_KEY").unwrap();
+        std::env::remove_var("ATO_SECRET_MY_KEY");
+
+        assert_eq!(result, Some("env-value".to_string()));
+    }
+
+    // ── namespace ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn set_in_namespace_isolated_from_default() {
+        let dir = TempDir::new().unwrap();
+        let store = init_store(&dir);
+        store.set("KEY", "default-val", None, None, None).unwrap();
+        store.set_in_namespace("KEY", "project", "project-val", None, None, None).unwrap();
+
+        assert_eq!(store.get("KEY").unwrap(), Some("default-val".to_string()));
+        assert_eq!(store.get_in_namespace("KEY", "project").unwrap(), Some("project-val".to_string()));
+    }
+
+    // ── delete ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn delete_removes_from_default_namespace() {
+        let dir = TempDir::new().unwrap();
+        let store = init_store(&dir);
+        store.set("GONE", "value", None, None, None).unwrap();
+        store.delete("GONE").unwrap();
+        assert_eq!(store.get("GONE").unwrap(), None);
+    }
+
+    // ── list ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn list_returns_stored_entries() {
+        let dir = TempDir::new().unwrap();
+        let store = init_store(&dir);
+        store.set("A", "1", None, None, None).unwrap();
+        store.set("B", "2", None, None, None).unwrap();
+        let entries = store.list().unwrap();
+        let keys: Vec<_> = entries.iter().map(|e| e.key.as_str()).collect();
+        assert!(keys.contains(&"A"), "expected A in {:?}", keys);
+        assert!(keys.contains(&"B"), "expected B in {:?}", keys);
+    }
+
+    // ── ACL check via load() ──────────────────────────────────────────────────
+
+    #[test]
+    fn load_allows_capsule_on_allowlist() {
+        let dir = TempDir::new().unwrap();
+        let store = init_store(&dir);
+        store
+            .set("SECRET", "val", None, Some(vec!["capsule:allowed".into()]), None)
+            .unwrap();
+        let result = store.load("SECRET", Some("capsule:allowed")).unwrap();
+        assert_eq!(result, Some("val".to_string()));
+    }
+
+    #[test]
+    fn load_denies_capsule_not_on_allowlist() {
+        let dir = TempDir::new().unwrap();
+        let store = init_store(&dir);
+        store
+            .set("SECRET", "val", None, Some(vec!["capsule:allowed".into()]), None)
+            .unwrap();
+        let result = store.load("SECRET", Some("capsule:other")).unwrap();
+        assert_eq!(result, None);
+    }
+
+    // ── import_env_file ───────────────────────────────────────────────────────
+
+    #[test]
+    fn import_env_file_stores_all_pairs() {
+        let dir = TempDir::new().unwrap();
+        let store = init_store(&dir);
+
+        let env_path = dir.path().join("test.env");
+        std::fs::write(&env_path, "ALPHA=one\nBETA=two\n# comment\n\n").unwrap();
+        let count = store.import_env_file(&env_path).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(store.get("ALPHA").unwrap(), Some("one".to_string()));
+        assert_eq!(store.get("BETA").unwrap(), Some("two".to_string()));
+    }
 }
