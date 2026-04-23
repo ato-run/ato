@@ -610,7 +610,7 @@ pub(crate) enum Commands {
         command: BindingCommands,
     },
 
-    #[command(hide = true, about = "Manage secrets (age-encrypted files; OS keychain for passphrase cache only)")]
+    #[command(hide = true, about = "Manage secrets (age-encrypted files)")]
     Secrets {
         #[command(subcommand)]
         command: crate::cli::SecretsCommands,
