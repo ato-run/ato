@@ -4,7 +4,6 @@ use std::io::IsTerminal;
 use age::secrecy::ExposeSecret;
 
 use crate::application::secrets::backend::age::load_identity_bytes;
-use crate::application::secrets::backend::traits::SecretBackend;
 use crate::application::secrets::store::{SecretEntry, SecretScope};
 use crate::application::secrets::{AgeFileBackend, SecretStore};
 use crate::cli::secrets::SecretsCommands;
@@ -167,15 +166,6 @@ fn cmd_init(
 
     let identity = age.init_identity(passphrase.as_deref())?;
 
-    // Cache passphrase in keychain so subsequent open() calls don't need to prompt.
-    if let Some(ref pp) = passphrase {
-        let kc = crate::application::secrets::backend::KeychainBackend::new();
-        if kc.is_available() {
-            kc.set_passphrase(pp)?;
-            eprintln!("🔑 Passphrase cached in OS keychain for future use.");
-        }
-    }
-
     eprintln!(
         "✅ age identity created at {}",
         age.identity_key_path().display()
@@ -183,6 +173,7 @@ fn cmd_init(
     eprintln!("   Public key: {}", identity.to_public());
     if passphrase.is_some() {
         eprintln!("   Protected with passphrase.");
+        eprintln!("   Run `ato session start` to unlock once per shell session.");
     } else {
         eprintln!("   ⚠️  No passphrase — protected by file permissions (chmod 600).");
     }
