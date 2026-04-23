@@ -1,12 +1,14 @@
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::backend::{
-    AgeFileBackend, BackendEntry, EnvBackend, MemoryBackend, SecretBackend,
-    SecretKey, load_identity_bytes,
+    load_identity_bytes, AgeFileBackend, BackendEntry, EnvBackend, MemoryBackend, SecretBackend,
+    SecretKey,
 };
 use super::policy::SecretPolicy;
 
@@ -43,7 +45,6 @@ pub(crate) enum SecretScope {
 ///   2. MemoryBackend    – in-process session cache
 ///   3. AgeFileBackend   – ~/.ato/secrets/<ns>.age  (primary persistent)
 pub(crate) struct SecretStore {
-    home: PathBuf,
     env: EnvBackend,
     memory: MemoryBackend,
     age: Option<AgeFileBackend>,
@@ -68,20 +69,23 @@ impl SecretStore {
         let loaded = try_load_identity(&mut age_backend);
         let age = if loaded { Some(age_backend) } else { None };
 
-        let backend_order = read_secrets_backend_order(&home).unwrap_or_else(|| {
-            vec!["env".into(), "memory".into(), "age".into()]
-        });
+        let backend_order = read_secrets_backend_order(&home)
+            .unwrap_or_else(|| vec!["env".into(), "memory".into(), "age".into()]);
 
-        Ok(Self { home, env, memory, age, backend_order })
+        Ok(Self {
+            env,
+            memory,
+            age,
+            backend_order,
+        })
     }
 
     /// Open with an already-unlocked age backend (used internally by `init` / `session`).
+    #[cfg(test)]
     pub(crate) fn open_with_age(home: PathBuf, age_backend: AgeFileBackend) -> Result<Self> {
-        let backend_order = read_secrets_backend_order(&home).unwrap_or_else(|| {
-            vec!["env".into(), "memory".into(), "age".into()]
-        });
+        let backend_order = read_secrets_backend_order(&home)
+            .unwrap_or_else(|| vec!["env".into(), "memory".into(), "age".into()]);
         Ok(Self {
-            home,
             env: EnvBackend::new(),
             memory: MemoryBackend::new(None),
             age: Some(age_backend),
@@ -149,7 +153,9 @@ impl SecretStore {
                 "keychain" => None, // keychain no longer supported
                 _ => None,
             };
-            if let Some(v) = result { return Ok(Some(v)); }
+            if let Some(v) = result {
+                return Ok(Some(v));
+            }
         }
         Ok(None)
     }
@@ -163,7 +169,9 @@ impl SecretStore {
                 "age" => self.age.as_ref().and_then(|a| a.get(&sk).ok().flatten()),
                 _ => None, // legacy doesn't support namespaces
             };
-            if let Some(v) = result { return Ok(Some(v)); }
+            if let Some(v) = result {
+                return Ok(Some(v));
+            }
         }
         Ok(None)
     }
@@ -249,7 +257,6 @@ impl SecretStore {
             ),
         }
     }
-
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -291,7 +298,11 @@ fn read_secrets_backend_order(home: &Path) -> Option<Vec<String>> {
         .iter()
         .filter_map(|v| v.as_str().map(|s| s.to_ascii_lowercase()))
         .collect::<Vec<_>>();
-    if backends.is_empty() { None } else { Some(backends) }
+    if backends.is_empty() {
+        None
+    } else {
+        Some(backends)
+    }
 }
 
 fn build_policy(entry: &SecretEntry) -> Result<SecretPolicy> {
@@ -398,12 +409,12 @@ pub(crate) fn write_secure_file(path: &Path, contents: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use crate::application::secrets::backend::AgeFileBackend;
+    use tempfile::TempDir;
 
     fn init_store(dir: &TempDir) -> SecretStore {
         let home = dir.path().to_path_buf();
-        let mut age = AgeFileBackend::new(home.clone());
+        let age = AgeFileBackend::new(home.clone());
         age.init_identity(None).expect("init_identity");
         SecretStore::open_with_age(home, age).expect("open_with_age")
     }
@@ -450,10 +461,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = init_store(&dir);
         store.set("KEY", "default-val", None, None, None).unwrap();
-        store.set_in_namespace("KEY", "project", "project-val", None, None, None).unwrap();
+        store
+            .set_in_namespace("KEY", "project", "project-val", None, None, None)
+            .unwrap();
 
         assert_eq!(store.get("KEY").unwrap(), Some("default-val".to_string()));
-        assert_eq!(store.get_in_namespace("KEY", "project").unwrap(), Some("project-val".to_string()));
+        assert_eq!(
+            store.get_in_namespace("KEY", "project").unwrap(),
+            Some("project-val".to_string())
+        );
     }
 
     // ── delete ────────────────────────────────────────────────────────────────
@@ -488,7 +504,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = init_store(&dir);
         store
-            .set("SECRET", "val", None, Some(vec!["capsule:allowed".into()]), None)
+            .set(
+                "SECRET",
+                "val",
+                None,
+                Some(vec!["capsule:allowed".into()]),
+                None,
+            )
             .unwrap();
         let result = store.load("SECRET", Some("capsule:allowed")).unwrap();
         assert_eq!(result, Some("val".to_string()));
@@ -499,7 +521,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = init_store(&dir);
         store
-            .set("SECRET", "val", None, Some(vec!["capsule:allowed".into()]), None)
+            .set(
+                "SECRET",
+                "val",
+                None,
+                Some(vec!["capsule:allowed".into()]),
+                None,
+            )
             .unwrap();
         let result = store.load("SECRET", Some("capsule:other")).unwrap();
         assert_eq!(result, None);
