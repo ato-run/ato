@@ -57,6 +57,9 @@ impl<'a> AuditReporter<'a> {
         }
 
         if injected_synthetic_env {
+            let has_real_secrets = self.audit.materialization_records.iter().any(|r| {
+                r.stage == "synthetic_env" && r.detail.contains("resolved from secret store:")
+            });
             let injected_database_env = self.audit.actions.iter().any(|action| {
                 matches!(
                     action,
@@ -69,9 +72,15 @@ impl<'a> AuditReporter<'a> {
             } else {
                 "environment"
             };
-            lines.push(format!(
-                "Injected placeholder {env_kind} variables via a synthetic .env file."
-            ));
+            if has_real_secrets {
+                lines.push(format!(
+                    "Injected {env_kind} variables via a synthetic .env file (real secrets resolved from secret store)."
+                ));
+            } else {
+                lines.push(format!(
+                    "Injected placeholder {env_kind} variables via a synthetic .env file."
+                ));
+            }
         }
 
         if self.audit.shadow_manifest_path.is_some() {
