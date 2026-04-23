@@ -911,7 +911,7 @@ fn reject_npm_lifecycle_scripts(
         return Ok(());
     };
 
-    let lifecycle = ["preinstall", "install", "postinstall", "prepare"]
+    let lifecycle = ["preinstall", "install", "postinstall"]
         .into_iter()
         .filter(|name| {
             scripts
