@@ -145,6 +145,8 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test -p ato-cli
 ```
 
+See [TESTING.md](TESTING.md) for the full testing guide, including manual pre-release test suites.
+
 ## Known limitations
 
 Some v0.5 behaviours differ from the full spec intent. See [docs/known-limitations.md](docs/known-limitations.md) for the full list. Key gaps:
@@ -153,17 +155,18 @@ Some v0.5 behaviours differ from the full spec intent. See [docs/known-limitatio
 - `required_env` missing entries warn but do not abort execution
 - `--sandbox` flag not yet supported for `source/python`
 
-## Foundation readiness
+## Foundation readiness — 0 / 6
 
-The Capsule Protocol defines open-governance transfer criteria (§11.2). Current status:
+The Capsule Protocol defines open-governance transfer criteria (§11.2). Current status (0 of 6 KPIs met):
 
-| KPI | Status |
-|-----|--------|
-| ≥1 external conforming runtime | 0 / 1 |
-| Conformance suite ≥70% pass | skeleton only — see [`conformance/`](conformance/) |
-| External maintainers ≥3 | 0 / 3 |
-| ≥100 publishers | 0 / 100 |
-| ≥5 adversarial security reports | 0 / 5 |
+| KPI | Target | Status |
+|-----|--------|--------|
+| External conforming runtime | ≥1 | 0 / 1 |
+| Conformance suite pass rate | ≥70% | skeleton only — see [`conformance/`](conformance/) |
+| External maintainers | ≥3 | 0 / 3 |
+| TSC non-ato majority | required | 0 / required |
+| Publishers | ≥100 | 0 / 100 |
+| Adversarial security reports | ≥5 | 0 / 5 |
 
 Foundation transfer is not a v0.5 milestone. Published for transparency.
 
