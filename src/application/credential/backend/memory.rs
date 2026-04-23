@@ -1,10 +1,10 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use super::traits::{BackendEntry, SecretBackend, SecretKey};
+use super::traits::{BackendEntry, CredentialBackend, CredentialKey};
 
 struct CachedEntry {
     value: String,
@@ -15,19 +15,19 @@ struct CachedEntry {
     created_at: String,
 }
 
-/// In-process secret cache with optional TTL.
+/// In-process credential cache with optional TTL.
 ///
-/// Used for session-scoped secrets so that after the identity is unlocked
-/// once, subsequent `get()` calls don't need to decrypt from disk again.
+/// Namespace-generic: any credential domain (`secrets/*`, `auth/*`) can share
+/// the same memory backend.
 pub(crate) struct MemoryBackend {
-    cache: Arc<RwLock<HashMap<(String, String), CachedEntry>>>,
+    cache: RwLock<HashMap<(String, String), CachedEntry>>,
     ttl: Option<Duration>,
 }
 
 impl MemoryBackend {
     pub(crate) fn new(ttl: Option<Duration>) -> Self {
         Self {
-            cache: Arc::new(RwLock::new(HashMap::new())),
+            cache: RwLock::new(HashMap::new()),
             ttl,
         }
     }
@@ -41,8 +41,12 @@ impl MemoryBackend {
     }
 }
 
-impl SecretBackend for MemoryBackend {
-    fn get(&self, key: &SecretKey) -> Result<Option<String>> {
+impl CredentialBackend for MemoryBackend {
+    fn name(&self) -> &'static str {
+        "memory"
+    }
+
+    fn get(&self, key: &CredentialKey) -> Result<Option<String>> {
         let cache = self.cache.read().unwrap();
         let k = (key.namespace.clone(), key.name.clone());
         Ok(cache.get(&k).and_then(|e| {
@@ -56,7 +60,7 @@ impl SecretBackend for MemoryBackend {
 
     fn set(
         &self,
-        key: &SecretKey,
+        key: &CredentialKey,
         value: String,
         description: Option<&str>,
         allow: Option<Vec<String>>,
@@ -79,7 +83,7 @@ impl SecretBackend for MemoryBackend {
         Ok(())
     }
 
-    fn delete(&self, key: &SecretKey) -> Result<()> {
+    fn delete(&self, key: &CredentialKey) -> Result<()> {
         let mut cache = self.cache.write().unwrap();
         cache.remove(&(key.namespace.clone(), key.name.clone()));
         Ok(())
@@ -107,7 +111,7 @@ impl SecretBackend for MemoryBackend {
 
     fn update_acl(
         &self,
-        key: &SecretKey,
+        key: &CredentialKey,
         allow: Option<Vec<String>>,
         deny: Option<Vec<String>>,
     ) -> Result<()> {
@@ -122,5 +126,73 @@ impl SecretBackend for MemoryBackend {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_set_get() {
+        let backend = MemoryBackend::new(None);
+        let key = CredentialKey::new("secrets/default", "K");
+        backend.set(&key, "v".into(), None, None, None).unwrap();
+        assert_eq!(backend.get(&key).unwrap(), Some("v".into()));
+    }
+
+    #[test]
+    fn namespace_isolation() {
+        let backend = MemoryBackend::new(None);
+        let a = CredentialKey::new("secrets/default", "K");
+        let b = CredentialKey::new("auth/session", "K");
+        backend.set(&a, "secret".into(), None, None, None).unwrap();
+        backend.set(&b, "auth".into(), None, None, None).unwrap();
+        assert_eq!(backend.get(&a).unwrap(), Some("secret".into()));
+        assert_eq!(backend.get(&b).unwrap(), Some("auth".into()));
+    }
+
+    #[test]
+    fn delete_removes_entry() {
+        let backend = MemoryBackend::new(None);
+        let key = CredentialKey::new("secrets/default", "K");
+        backend.set(&key, "v".into(), None, None, None).unwrap();
+        backend.delete(&key).unwrap();
+        assert_eq!(backend.get(&key).unwrap(), None);
+    }
+
+    #[test]
+    fn ttl_expires_entry() {
+        let backend = MemoryBackend::new(Some(Duration::from_millis(10)));
+        let key = CredentialKey::new("secrets/default", "K");
+        backend.set(&key, "v".into(), None, None, None).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(backend.get(&key).unwrap(), None);
+    }
+
+    #[test]
+    fn list_only_requested_namespace() {
+        let backend = MemoryBackend::new(None);
+        backend
+            .set(
+                &CredentialKey::new("secrets/default", "A"),
+                "1".into(),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        backend
+            .set(
+                &CredentialKey::new("auth/session", "B"),
+                "2".into(),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let entries = backend.list("secrets/default").unwrap();
+        let keys: Vec<_> = entries.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(keys, vec!["A"]);
     }
 }

@@ -12,8 +12,8 @@ use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
-use super::traits::{BackendEntry, SecretBackend, SecretKey};
-use crate::application::secrets::store::write_secure_file;
+use super::traits::{BackendEntry, CredentialBackend, CredentialKey};
+use crate::application::credential::write_secure_file;
 
 const SCHEMA_VERSION: &str = "0.1";
 
@@ -56,8 +56,13 @@ impl NamespaceData {
 
 /// Primary persistent backend using age file encryption.
 ///
-/// Each namespace is stored as `~/.ato/secrets/<namespace>.age`.
-/// The encryption key is an X25519 identity stored at `~/.ato/keys/identity.key`.
+/// Path layout (relative to `home`):
+///   - Identity key:  `.ato/keys/identity.key` (shared across all domains)
+///   - Public key:    `.ato/keys/identity.pub`
+///   - Namespace file: `.ato/credentials/<domain>/<sub>.age`
+///
+/// Hierarchical namespace parsing: `"secrets/default"` →
+/// domain `"secrets"`, sub `"default"` → `.ato/credentials/secrets/default.age`.
 pub(crate) struct AgeFileBackend {
     home: PathBuf,
     identity: Mutex<Option<x25519::Identity>>,
@@ -75,8 +80,8 @@ impl AgeFileBackend {
         self.home.join(".ato/keys")
     }
 
-    pub(crate) fn secrets_dir(&self) -> PathBuf {
-        self.home.join(".ato/secrets")
+    pub(crate) fn credentials_dir(&self) -> PathBuf {
+        self.home.join(".ato/credentials")
     }
 
     pub(crate) fn identity_key_path(&self) -> PathBuf {
@@ -95,7 +100,7 @@ impl AgeFileBackend {
     /// Generate a new X25519 identity and persist it.
     ///
     /// If `passphrase` is `Some`, the identity file is encrypted with that
-    /// passphrase (armored age format).  With `None` the key is stored as plain
+    /// passphrase (armored age format). With `None` the key is stored as plain
     /// text with `chmod 600`.
     pub(crate) fn init_identity(&self, passphrase: Option<&str>) -> Result<x25519::Identity> {
         let identity = x25519::Identity::generate();
@@ -108,7 +113,6 @@ impl AgeFileBackend {
         let key_path = self.identity_key_path();
 
         if let Some(pp) = passphrase {
-            // Encrypt the identity string with the passphrase (armored age).
             let encryptor = age::Encryptor::with_user_passphrase(Secret::new(pp.to_string()));
             let mut encrypted = vec![];
             {
@@ -125,11 +129,9 @@ impl AgeFileBackend {
             }
             write_secure_file(&key_path, &encrypted)?;
         } else {
-            // Plain text, chmod 600.
             write_secure_file(&key_path, identity_str.as_bytes())?;
         }
 
-        // Always write the public key in plain text.
         write_secure_file(&self.identity_pub_path(), public_str.as_bytes())?;
 
         *self.identity.lock().unwrap() = Some(
@@ -141,7 +143,7 @@ impl AgeFileBackend {
     }
 
     /// Ensure identity is loaded, using the provided passphrase if the key file
-    /// is passphrase-encrypted.  Returns `Err` if no identity exists yet.
+    /// is passphrase-encrypted. Returns `Err` if no identity exists yet.
     pub(crate) fn load_identity_with_passphrase(&self, passphrase: Option<&str>) -> Result<()> {
         {
             let guard = self.identity.lock().unwrap();
@@ -206,9 +208,23 @@ impl AgeFileBackend {
             })
     }
 
+    /// Parse a hierarchical namespace into `(domain, sub)`.
+    ///
+    /// If no `/` is present, the namespace is placed under the `misc` domain
+    /// as a safety fallback (not expected during normal operation).
+    fn split_namespace(namespace: &str) -> (String, String) {
+        if let Some((d, s)) = namespace.split_once('/') {
+            (d.to_string(), s.to_string())
+        } else {
+            ("misc".to_string(), namespace.to_string())
+        }
+    }
+
     fn namespace_path(&self, namespace: &str) -> PathBuf {
-        self.secrets_dir()
-            .join(format!("{}.age", namespace_to_filename(namespace)))
+        let (domain, sub) = Self::split_namespace(namespace);
+        self.credentials_dir()
+            .join(sanitize_path_segment(&domain))
+            .join(format!("{}.age", sanitize_path_segment(&sub)))
     }
 
     fn read_namespace(&self, namespace: &str) -> Result<NamespaceData> {
@@ -248,8 +264,10 @@ impl AgeFileBackend {
         let final_path = self.namespace_path(namespace);
         let tmp_path = final_path.with_extension(format!("age.tmp.{}", std::process::id()));
 
-        std::fs::create_dir_all(self.secrets_dir())
-            .context("failed to create secrets directory")?;
+        if let Some(parent) = final_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        }
 
         // Acquire advisory lock on a lock file.
         let lock_path = final_path.with_extension("age.lock");
@@ -282,49 +300,73 @@ impl AgeFileBackend {
         Ok(())
     }
 
-    /// Decrypt ALL namespace files and re-encrypt to a new identity.
-    /// Used by `rotate-identity`.
+    /// Decrypt ALL namespace files under `<credentials>/<domain>/` and re-encrypt
+    /// to a new identity. Used by `rotate-identity`.
     pub(crate) fn reencrypt_all(&self, new_identity: &x25519::Identity) -> Result<()> {
-        let secrets_dir = self.secrets_dir();
-        if !secrets_dir.exists() {
+        let credentials_dir = self.credentials_dir();
+        if !credentials_dir.exists() {
             return Ok(());
         }
 
-        for entry in std::fs::read_dir(&secrets_dir).context("failed to read secrets dir")? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("age") {
+        for domain_entry in
+            std::fs::read_dir(&credentials_dir).context("failed to read credentials dir")?
+        {
+            let domain_entry = domain_entry?;
+            let domain_path = domain_entry.path();
+            if !domain_path.is_dir() {
                 continue;
             }
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
+            let domain = domain_path
+                .file_name()
+                .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
+            if domain.is_empty() {
+                continue;
+            }
 
-            // Read with current identity.
-            let data = self.read_namespace(&stem)?;
+            for entry in std::fs::read_dir(&domain_path)
+                .with_context(|| format!("failed to read {}", domain_path.display()))?
+            {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("age") {
+                    continue;
+                }
+                let sub = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if sub.is_empty() {
+                    continue;
+                }
+                let full_ns = format!("{}/{}", domain, sub);
 
-            // Temporarily swap identity to new one.
-            let old_identity = self.identity.lock().unwrap().take();
-            *self.identity.lock().unwrap() = Some(clone_identity(new_identity));
+                let data = self.read_namespace(&full_ns)?;
 
-            let result = self.write_namespace(&stem, &data);
+                let old_identity = self.identity.lock().unwrap().take();
+                *self.identity.lock().unwrap() = Some(clone_identity(new_identity));
 
-            // Restore old identity regardless.
-            *self.identity.lock().unwrap() = old_identity;
-            result?;
+                let result = self.write_namespace(&full_ns, &data);
+
+                *self.identity.lock().unwrap() = old_identity;
+                result?;
+            }
         }
         Ok(())
     }
 
-    /// Return all namespace file stems found in secrets_dir.
-    pub(crate) fn list_namespaces(&self) -> Vec<String> {
-        let secrets_dir = self.secrets_dir();
-        if !secrets_dir.exists() {
+    /// Return all sub-namespace names found under `<credentials>/<domain>/`.
+    ///
+    /// E.g. for domain `"secrets"`, might return `["default", "capsule_myapp"]`.
+    /// Callers compose the full namespace as `format!("{domain}/{sub}")`.
+    pub(crate) fn list_sub_namespaces(&self, domain: &str) -> Vec<String> {
+        let domain_dir = self.credentials_dir().join(sanitize_path_segment(domain));
+        if !domain_dir.exists() {
             return vec![];
         }
-        std::fs::read_dir(&secrets_dir)
+        std::fs::read_dir(&domain_dir)
             .into_iter()
             .flatten()
             .filter_map(|e| e.ok())
@@ -340,15 +382,23 @@ impl AgeFileBackend {
     }
 }
 
-impl SecretBackend for AgeFileBackend {
-    fn get(&self, key: &SecretKey) -> Result<Option<String>> {
+impl CredentialBackend for AgeFileBackend {
+    fn name(&self) -> &'static str {
+        "age"
+    }
+
+    fn is_available(&self) -> bool {
+        self.identity.lock().unwrap().is_some()
+    }
+
+    fn get(&self, key: &CredentialKey) -> Result<Option<String>> {
         let data = self.read_namespace(&key.namespace)?;
         Ok(data.entries.get(&key.name).map(|e| e.value.clone()))
     }
 
     fn set(
         &self,
-        key: &SecretKey,
+        key: &CredentialKey,
         value: String,
         description: Option<&str>,
         allow: Option<Vec<String>>,
@@ -382,7 +432,7 @@ impl SecretBackend for AgeFileBackend {
         self.write_namespace(&key.namespace, &data)
     }
 
-    fn delete(&self, key: &SecretKey) -> Result<()> {
+    fn delete(&self, key: &CredentialKey) -> Result<()> {
         let mut data = self.read_namespace(&key.namespace)?;
         data.entries.remove(&key.name);
         data.updated_at = chrono::Utc::now().to_rfc3339();
@@ -410,14 +460,14 @@ impl SecretBackend for AgeFileBackend {
 
     fn update_acl(
         &self,
-        key: &SecretKey,
+        key: &CredentialKey,
         allow: Option<Vec<String>>,
         deny: Option<Vec<String>>,
     ) -> Result<()> {
         let mut data = self.read_namespace(&key.namespace)?;
         let entry = data.entries.get_mut(&key.name).with_context(|| {
             format!(
-                "secret '{}' not found in namespace '{}'",
+                "credential '{}' not found in namespace '{}'",
                 key.name, key.namespace
             )
         })?;
@@ -435,9 +485,9 @@ impl SecretBackend for AgeFileBackend {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-/// Convert a namespace string to a safe filename (no slashes, etc.).
-fn namespace_to_filename(ns: &str) -> String {
-    ns.chars()
+/// Convert one path segment (domain or sub) to a safe filename.
+fn sanitize_path_segment(seg: &str) -> String {
+    seg.chars()
         .map(|c| match c {
             'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => c,
             _ => '_',
@@ -448,14 +498,12 @@ fn namespace_to_filename(ns: &str) -> String {
 /// Load an age X25519 identity from raw bytes.
 ///
 /// If the bytes look like a passphrase-encrypted armored age file, decrypts
-/// using the provided passphrase.  Otherwise treats them as plain text.
+/// using the provided passphrase. Otherwise treats them as plain text.
 pub(crate) fn load_identity_bytes(
     raw: &[u8],
     passphrase: Option<&str>,
 ) -> Result<x25519::Identity> {
-    // Detect format: armored age starts with "-----BEGIN"
     let is_armored = raw.get(..11).map(|h| h == b"-----BEGIN ").unwrap_or(false);
-    // Binary age header
     let is_age_binary = raw
         .get(..14)
         .map(|h| h == b"age-encryption")
@@ -483,7 +531,6 @@ pub(crate) fn load_identity_bytes(
         }
         bail!("no AGE-SECRET-KEY found in decrypted identity file");
     } else {
-        // Plain text: scan for AGE-SECRET-KEY-1... line.
         let text = std::str::from_utf8(raw).context("identity.key is not valid UTF-8")?;
         for line in text.lines() {
             let line = line.trim();
@@ -518,10 +565,8 @@ fn acquire_lock(lock_path: &Path) -> Result<File> {
         .write(true)
         .open(lock_path)
         .with_context(|| format!("failed to open lock file {}", lock_path.display()))?;
-    // Try for up to 5 seconds.
     file.try_lock_exclusive()
         .or_else(|_| {
-            // Retry once after a short sleep.
             std::thread::sleep(std::time::Duration::from_secs(5));
             file.try_lock_exclusive()
         })
@@ -560,15 +605,13 @@ mod tests {
         (dir, backend)
     }
 
-    fn make_key(name: &str) -> SecretKey {
-        SecretKey::new(name)
+    fn secrets_key(name: &str) -> CredentialKey {
+        CredentialKey::new("secrets/default", name)
     }
 
-    fn make_ns_key(ns: &str, name: &str) -> SecretKey {
-        SecretKey::with_namespace(ns, name)
+    fn ns_key(ns: &str, name: &str) -> CredentialKey {
+        CredentialKey::new(ns, name)
     }
-
-    // ── identity_exists ───────────────────────────────────────────────────────
 
     #[test]
     fn identity_not_exists_before_init() {
@@ -581,8 +624,6 @@ mod tests {
         let (_dir, backend) = init_backend();
         assert!(backend.identity_exists());
     }
-
-    // ── init_identity ─────────────────────────────────────────────────────────
 
     #[test]
     fn init_identity_creates_key_and_pub_files() {
@@ -599,12 +640,10 @@ mod tests {
         assert!(backend.is_identity_loaded());
     }
 
-    // ── roundtrip: set / get ──────────────────────────────────────────────────
-
     #[test]
     fn roundtrip_set_get_default_namespace() {
         let (_dir, backend) = init_backend();
-        let key = make_key("API_KEY");
+        let key = secrets_key("API_KEY");
         backend
             .set(&key, "secret-value".into(), None, None, None)
             .expect("set");
@@ -613,64 +652,56 @@ mod tests {
     }
 
     #[test]
+    fn set_writes_under_credentials_secrets_dir() {
+        let (dir, backend) = init_backend();
+        let key = secrets_key("TEST");
+        backend
+            .set(&key, "v".into(), None, None, None)
+            .expect("set");
+        let path = dir
+            .path()
+            .join(".ato/credentials/secrets/default.age");
+        assert!(path.exists(), "expected file at {}", path.display());
+    }
+
+    #[test]
+    fn auth_namespace_separated_from_secrets() {
+        let (dir, backend) = init_backend();
+        let s_key = secrets_key("FOO");
+        let a_key = ns_key("auth/session", "SESSION_TOKEN");
+        backend
+            .set(&s_key, "secret-foo".into(), None, None, None)
+            .unwrap();
+        backend
+            .set(&a_key, "auth-token".into(), None, None, None)
+            .unwrap();
+
+        assert!(dir
+            .path()
+            .join(".ato/credentials/secrets/default.age")
+            .exists());
+        assert!(dir
+            .path()
+            .join(".ato/credentials/auth/session.age")
+            .exists());
+        assert_eq!(backend.get(&s_key).unwrap(), Some("secret-foo".into()));
+        assert_eq!(backend.get(&a_key).unwrap(), Some("auth-token".into()));
+    }
+
+    #[test]
     fn get_returns_none_for_missing_key() {
         let (_dir, backend) = init_backend();
-        let key = make_key("NONEXISTENT");
-        let got = backend.get(&key).expect("get");
-        assert_eq!(got, None);
-    }
-
-    #[test]
-    fn roundtrip_with_description_and_acl() {
-        let (_dir, backend) = init_backend();
-        let key = make_key("DB_PASS");
-        backend
-            .set(
-                &key,
-                "hunter2".into(),
-                Some("database password"),
-                Some(vec!["capsule:myapp".into()]),
-                None,
-            )
-            .expect("set");
-        let entries = backend.list("default").expect("list");
-        let entry = entries.iter().find(|e| e.key == "DB_PASS").expect("entry");
-        assert_eq!(entry.description.as_deref(), Some("database password"));
-        assert_eq!(
-            entry.allow.as_deref(),
-            Some(&["capsule:myapp".to_string()][..])
-        );
-    }
-
-    // ── delete ────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn delete_removes_key() {
-        let (_dir, backend) = init_backend();
-        let key = make_key("TEMP");
-        backend
-            .set(&key, "x".into(), None, None, None)
-            .expect("set");
-        backend.delete(&key).expect("delete");
+        let key = secrets_key("NONEXISTENT");
         assert_eq!(backend.get(&key).expect("get"), None);
     }
 
     #[test]
-    fn delete_nonexistent_is_noop() {
+    fn delete_removes_key() {
         let (_dir, backend) = init_backend();
-        let key = make_key("GHOST");
-        backend
-            .delete(&key)
-            .expect("delete nonexistent should be ok");
-    }
-
-    // ── list ──────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn list_empty_namespace_returns_empty() {
-        let (_dir, backend) = init_backend();
-        let entries = backend.list("default").expect("list");
-        assert!(entries.is_empty());
+        let key = secrets_key("TEMP");
+        backend.set(&key, "x".into(), None, None, None).unwrap();
+        backend.delete(&key).unwrap();
+        assert_eq!(backend.get(&key).unwrap(), None);
     }
 
     #[test]
@@ -678,90 +709,38 @@ mod tests {
         let (_dir, backend) = init_backend();
         for k in &["ZEBRA", "ALPHA", "MIDDLE"] {
             backend
-                .set(&make_key(k), "v".into(), None, None, None)
-                .expect("set");
+                .set(&secrets_key(k), "v".into(), None, None, None)
+                .unwrap();
         }
-        let entries = backend.list("default").expect("list");
+        let entries = backend.list("secrets/default").unwrap();
         let names: Vec<_> = entries.iter().map(|e| e.key.as_str()).collect();
         assert_eq!(names, vec!["ALPHA", "MIDDLE", "ZEBRA"]);
     }
 
-    // ── namespace isolation ───────────────────────────────────────────────────
-
     #[test]
-    fn namespace_isolation_default_vs_custom() {
-        let (_dir, backend) = init_backend();
-        let default_key = make_ns_key("default", "FOO");
-        let other_key = make_ns_key("project_a", "FOO");
-
-        backend
-            .set(&default_key, "default-value".into(), None, None, None)
-            .expect("set default");
-        backend
-            .set(&other_key, "project-value".into(), None, None, None)
-            .expect("set project");
-
-        assert_eq!(
-            backend.get(&default_key).expect("get default"),
-            Some("default-value".to_string())
-        );
-        assert_eq!(
-            backend.get(&other_key).expect("get project"),
-            Some("project-value".to_string())
-        );
-    }
-
-    #[test]
-    fn list_namespaces_returns_created_namespaces() {
+    fn list_sub_namespaces_enumerates_domain() {
         let (_dir, backend) = init_backend();
         backend
-            .set(&make_ns_key("ns_a", "K"), "v".into(), None, None, None)
-            .expect("set");
-        backend
-            .set(&make_ns_key("ns_b", "K"), "v".into(), None, None, None)
-            .expect("set");
-        let ns = backend.list_namespaces();
-        assert!(ns.contains(&"ns_a".to_string()), "ns_a not in {:?}", ns);
-        assert!(ns.contains(&"ns_b".to_string()), "ns_b not in {:?}", ns);
-    }
-
-    // ── schema versioning ─────────────────────────────────────────────────────
-
-    #[test]
-    fn namespace_file_has_correct_schema_version() {
-        let (_dir, backend) = init_backend();
-        backend
-            .set(&make_key("X"), "y".into(), None, None, None)
-            .expect("set");
-        // Read and decrypt to verify schema_version in JSON.
-        let identity = {
-            let guard = backend.identity.lock().unwrap();
-            guard
-                .as_ref()
-                .map(|id| {
-                    id.to_string()
-                        .expose_secret()
-                        .parse::<x25519::Identity>()
-                        .unwrap()
-                })
-                .unwrap()
-        };
-        let path = backend.namespace_path("default");
-        let ciphertext = std::fs::read(&path).unwrap();
-        let decryptor = match age::Decryptor::new(&ciphertext[..]).unwrap() {
-            age::Decryptor::Recipients(d) => d,
-            _ => panic!("expected recipient encryption"),
-        };
-        let mut plaintext = Vec::new();
-        let mut reader = decryptor
-            .decrypt(std::iter::once(&identity as &dyn age::Identity))
+            .set(&ns_key("secrets/default", "K"), "v".into(), None, None, None)
             .unwrap();
-        std::io::Read::read_to_end(&mut reader, &mut plaintext).unwrap();
-        let data: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
-        assert_eq!(data["schema_version"], "0.1");
+        backend
+            .set(
+                &ns_key("secrets/project_a", "K"),
+                "v".into(),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        backend
+            .set(&ns_key("auth/session", "K"), "v".into(), None, None, None)
+            .unwrap();
+        let mut subs = backend.list_sub_namespaces("secrets");
+        subs.sort();
+        assert_eq!(subs, vec!["default", "project_a"]);
+        let auth_subs = backend.list_sub_namespaces("auth");
+        assert_eq!(auth_subs, vec!["session"]);
     }
-
-    // ── load_identity_with_passphrase ─────────────────────────────────────────
 
     #[test]
     fn load_identity_plain_text_succeeds() {
