@@ -4,6 +4,23 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+### What Changed
+
+#### Bug Fixes
+
+- **Performance**: `ato run .` on directory projects no longer accumulates
+  `attempt-<nanos>/` directories under `<cwd>/.ato/tmp/source-inference/`.
+  All run-attempt state is now always stored in `~/.ato/runs/source-inference/`
+  regardless of whether the target is a single script, directory project,
+  canonical lock, or compatibility project (`USE_HOME_RUN_STATE`).
+  Fixes the "cwd is heavy after repeated runs" regression introduced in v0.4.42.
+  (Commit f44b1b8 partially migrated single-scripts to home but left directory
+  projects writing to cwd.)
+
+- **Watch mode**: The pre-watch normalization in `execute_watch_mode_with_install`
+  previously created an orphaned run-attempt directory (no cleanup scope).
+  It is now cleaned up immediately after the preliminary normalization completes.
+
 ## [0.4.78] - 2026-04-23
 
 ### What Changed
@@ -26,7 +43,6 @@ All notable changes to `ato-cli` will be documented in this file.
 #### Refactoring
 
 - Remove migrate-from-keychain command
-
 
 ## [0.4.77] - 2026-04-23
 
