@@ -798,7 +798,7 @@ fn test_inspect_preview_surface_reports_durable_and_ephemeral_paths() {
         value
             .get("path")
             .and_then(|entry| entry.as_str())
-            .map(|entry| entry.contains(".ato/tmp/source-inference/<attempt>/ato.lock.json"))
+            .map(|entry| entry.contains(".ato/runs/source-inference/<attempt>/ato.lock.json"))
             .unwrap_or(false)
     }));
 }
@@ -2486,5 +2486,61 @@ fn test_source_rebuild_accepts_reference_alias() {
         predicate::str::contains("Failed to preflight source operation").or(
             predicate::str::contains("Source operation requires authentication"),
         ),
+    );
+}
+
+/// Regression test: `ato run .` on a directory project must NOT create
+/// `<cwd>/.ato/tmp/source-inference/` run-attempt directories.
+///
+/// Before the fix (USE_HOME_RUN_STATE), `use_global_run_state` was `false` for
+/// directory projects, causing attempt-<nanos>/ dirs to accumulate in cwd.
+///
+/// This test validates the display path emitted by `inspect preview` always
+/// points to `~/.ato/runs/source-inference/` regardless of whether the input
+/// is a canonical lock, compatibility project, or source-only directory.
+#[test]
+fn test_inspect_preview_run_attempt_path_uses_home_not_cwd() {
+    let tmp = tempdir().unwrap();
+    write_inspect_lock_workspace(tmp.path());
+
+    let output = Command::cargo_bin("ato")
+        .unwrap()
+        .current_dir(tmp.path())
+        .args(["inspect", "preview", ".", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let run_outputs = payload
+        .get("preview")
+        .and_then(|v| v.get("runAttemptMaterialization"))
+        .and_then(|v| v.get("outputs"))
+        .and_then(|v| v.as_array())
+        .expect("run outputs array");
+
+    // All run-attempt paths must point to ~/.ato/runs/, never to .ato/tmp/
+    for entry in run_outputs {
+        if let Some(path) = entry.get("path").and_then(|v| v.as_str()) {
+            assert!(
+                !path.contains(".ato/tmp/source-inference"),
+                "run-attempt path points to cwd (regression): {path}"
+            );
+        }
+    }
+
+    // At least one path should reference the home runs directory
+    assert!(
+        run_outputs.iter().any(|v| v
+            .get("path")
+            .and_then(|p| p.as_str())
+            .map(|p| p.contains(".ato/runs/source-inference"))
+            .unwrap_or(false)),
+        "no run-attempt path under ~/.ato/runs/source-inference/ found"
     );
 }
