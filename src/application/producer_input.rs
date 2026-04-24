@@ -686,7 +686,7 @@ run = "main.ts""#
                 origin: LegacyProducerBridgeOrigin::CompatibilityInput,
             }),
             _cleanup: ProducerMaterializationCleanup {
-                run_state_dir: dir.path().join(".tmp"),
+                run_state_dir: dir.path().join("run-state"),
             },
         };
 
@@ -873,7 +873,7 @@ playground = true
                 origin: LegacyProducerBridgeOrigin::CompatibilityInput,
             }),
             _cleanup: ProducerMaterializationCleanup {
-                run_state_dir: dir.path().join(".tmp"),
+                run_state_dir: dir.path().join("run-state"),
             },
         };
 

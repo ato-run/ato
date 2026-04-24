@@ -7,7 +7,7 @@ safe_path.write_text("safe-write-ok\n", encoding="utf-8")
 
 blocked_paths = [
     Path("../pwned-outside.txt"),
-    Path("../.tmp/ato_host_leak_test_17.txt"),
+    Path("../pwn-probe/ato_host_leak_test_17.txt"),
 ]
 
 for blocked in blocked_paths:

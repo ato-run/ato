@@ -262,7 +262,7 @@ fn read_command_output(
 }
 
 fn run_command_with_timeout(mut command: Command, cwd: &Path, label: &str) -> Result<Output> {
-    let output_dir = cwd.join(".tmp");
+    let output_dir = cwd.join(".ato").join("test-scratch");
     std::fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
     let stdout_file = NamedTempFile::new_in(&output_dir)
@@ -370,7 +370,7 @@ fn command_available(program: &str, args: &[&str]) -> bool {
 }
 
 fn sample_project_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".tmp/sample-native-capsule")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".ato/test-scratch/sample-native-capsule")
 }
 
 fn windows_fixture_project_dir() -> PathBuf {
