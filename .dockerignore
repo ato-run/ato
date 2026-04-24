@@ -4,6 +4,7 @@
 target/
 core/target/
 lock-draft-engine/target/
+.ato/
 .tmp/
 .git/
 **/.git/

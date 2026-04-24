@@ -122,7 +122,7 @@ mod tests {
                     status: CleanupActionStatus::Succeeded,
                     detail: Some({
                         events.lock().unwrap().push("cleanup".to_string());
-                        ".tmp/work".to_string()
+                        ".ato/tmp/work".to_string()
                     }),
                 });
                 return Err(anyhow!("prepare failed"));

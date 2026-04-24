@@ -1617,7 +1617,8 @@ run = "node server.js""#,
         .expect("write original manifest");
         let shadow_root = tmp
             .path()
-            .join(".tmp")
+            .join(".ato")
+            .join("test-scratch")
             .join("ato-auto-provision")
             .join("run-1");
         std::fs::create_dir_all(&shadow_root).expect("shadow root");

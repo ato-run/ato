@@ -292,7 +292,7 @@ pub struct RegistryCache {
 impl RegistryCache {
     pub fn new() -> Self {
         let path = dirs::cache_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from(".").join(".tmp"))
+            .unwrap_or_else(capsule_core::common::paths::home_dir_or_workspace_tmp)
             .join("capsule")
             .join("registry_cache");
         Self { path }

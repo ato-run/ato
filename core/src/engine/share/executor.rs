@@ -361,8 +361,8 @@ fn spawn_nacelle_inherited(
     let envelope_json = serde_json::to_string(&envelope)
         .map_err(|e| CapsuleError::Runtime(format!("failed to serialize envelope: {e}")))?;
 
-    // Write envelope to temp file
-    let tmp_dir = cwd.join(".tmp");
+    // Write envelope to workspace-local tmp dir.
+    let tmp_dir = crate::common::paths::workspace_tmp_dir(cwd);
     std::fs::create_dir_all(&tmp_dir).ok();
     let envelope_path = tmp_dir.join("share-exec.json");
     std::fs::write(&envelope_path, &envelope_json)?;
@@ -403,8 +403,8 @@ fn spawn_nacelle_piped(
     let envelope_json = serde_json::to_string(&envelope)
         .map_err(|e| CapsuleError::Runtime(format!("failed to serialize envelope: {e}")))?;
 
-    // Write envelope to temp file
-    let tmp_dir = cwd.join(".tmp");
+    // Write envelope to workspace-local tmp dir.
+    let tmp_dir = crate::common::paths::workspace_tmp_dir(cwd);
     std::fs::create_dir_all(&tmp_dir).ok();
     let envelope_path = tmp_dir.join("share-exec.json");
     std::fs::write(&envelope_path, &envelope_json)?;

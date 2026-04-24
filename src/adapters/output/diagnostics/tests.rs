@@ -180,8 +180,8 @@ fn maps_security_policy_error_to_e301() {
 fn maps_manual_intervention_execution_error_to_e102() {
     let err = anyhow!(AtoExecutionError::manual_intervention_required(
         "manual intervention required: DATABASE_URL is required
-Generated capsule.toml: /repo/.tmp/capsule.toml",
-        Some("/repo/.tmp/capsule.toml"),
+Generated capsule.toml: /repo/.ato/capsule.toml",
+        Some("/repo/.ato/capsule.toml"),
         vec![
             "Set DATABASE_URL before rerunning.".to_string(),
             "Review the generated capsule.toml.".to_string(),
