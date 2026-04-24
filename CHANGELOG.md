@@ -4,6 +4,46 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.79] - 2026-04-24
+
+### What Changed
+
+
+#### Bug Fixes
+
+- Fix all clippy -D warnings errors (unused var, dead code, redundant closures)
+
+- Set submodules: false to unblock CI for private samples submodule
+
+- Move host-isolation and shadow-workspace out of cwd, add SIGINT cleanup
+
+- Address code review items from cwd pollution fix
+
+- Clean up orphaned pre-watch normalization attempt
+
+- Move directory run-attempt state to ~/.ato/runs/
+
+
+#### Other Changes
+
+- Apply cargo fmt and clean up .ato/share artifacts
+
+- Add CHANGELOG entries for cwd pollution fixes
+
+
+#### Refactoring
+
+- Remove OS keyring from auth storage (Phase 5)
+
+- Replace samples/ dir with sample-capsules submodule
+
+- Migrate auth tokens onto shared credential backend (Phase 2)
+
+- Introduce shared credential backend layer (Phase 1)
+
+- Remove unused mag:// URI scheme module
+
+
 ### What Changed
 
 #### Bug Fixes
