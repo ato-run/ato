@@ -238,6 +238,23 @@ pub(super) fn parse_store_error_text(body: &str) -> String {
 
 #[allow(clippy::needless_return)]
 pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
+    // Bootstrap the age identity before the browser flow. Without an identity
+    // the session token can only be held in memory and will not survive the
+    // process — we'd rather the user deal with the one-time prompt here than
+    // complete the browser handshake and discover afterward that nothing was
+    // persisted. Headless mode writes to the canonical TOML file directly and
+    // does not need age, so we skip the prompt there.
+    if !headless {
+        if let Err(error) =
+            tokio::task::spawn_blocking(crate::application::secrets::ensure_identity_interactive)
+                .await
+                .context("failed to run age identity bootstrap")?
+        {
+            eprintln!("⚠️  Skipping age identity bootstrap: {error}");
+            eprintln!("   Login will proceed, but the token may not persist across sessions.");
+        }
+    }
+
     let api_base = store_api_base_url();
     let site_base = store_site_base_url();
     let client = reqwest::Client::new();
@@ -471,7 +488,7 @@ pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
                     TokenStorageLocation::Memory => {
                         println!("   Store session saved to: {}", storage.display());
                         println!(
-                            "   ⚠️  Token will not survive this process. Run `ato secrets init` to create an age identity."
+                            "   ⚠️  Token will not survive this process. Re-run `ato login` in an interactive shell, or run `ato secrets init` to create an age identity."
                         );
                     }
                 }
