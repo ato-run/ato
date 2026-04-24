@@ -77,6 +77,9 @@ pub enum CapsuleError {
 
     #[error("Strict manifest fallback is not allowed: {0}")]
     StrictManifestFallbackNotAllowed(String),
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
