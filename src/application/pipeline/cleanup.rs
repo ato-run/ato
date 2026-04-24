@@ -327,8 +327,7 @@ impl PipelineAttemptContext {
     /// Call once at the start of a pipeline run; call `mark_committed` or let
     /// `unwind_cleanup` run when the pipeline completes normally.
     pub(crate) fn activate_sigint_cleanup(&self) {
-        *sigint_journal().lock().unwrap_or_else(|p| p.into_inner()) =
-            Some(self.cleanup.clone());
+        *sigint_journal().lock().unwrap_or_else(|p| p.into_inner()) = Some(self.cleanup.clone());
     }
 
     pub(crate) fn mark_committed(&mut self) {

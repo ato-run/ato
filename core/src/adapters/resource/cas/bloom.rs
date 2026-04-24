@@ -125,9 +125,9 @@ impl AtoBloomFilter {
     }
 
     pub fn from_wire(wire: &AtoBloomWire) -> crate::error::Result<Self> {
-        let bits = BASE64
-            .decode(wire.bitset_base64.as_bytes())
-            .map_err(|e| crate::error::CapsuleError::Runtime(format!("bloom base64 decode: {e}")))?;
+        let bits = BASE64.decode(wire.bitset_base64.as_bytes()).map_err(|e| {
+            crate::error::CapsuleError::Runtime(format!("bloom base64 decode: {e}"))
+        })?;
         if bits.is_empty() {
             return Err(crate::error::CapsuleError::Runtime(
                 "bloom bitset must not be empty".into(),

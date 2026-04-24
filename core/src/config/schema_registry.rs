@@ -140,7 +140,6 @@ fn registry_path() -> Result<PathBuf> {
     Ok(config::config_dir()?.join("schema_registry.json"))
 }
 
-
 fn validate_sha256_hash(schema_hash: &str) -> Result<()> {
     let Some(hash) = schema_hash.strip_prefix("sha256:") else {
         return Err(CapsuleError::Config(format!(

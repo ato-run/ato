@@ -36,10 +36,18 @@ pub(super) fn synthesize_runtime_model_from_manifest(
         .get("targets")
         .and_then(|targets| targets.get(selected_target))
         .cloned()
-        .ok_or_else(|| CapsuleError::Config(format!("Missing required [targets.{}] table", selected_target)))?;
-    let named_target: NamedTarget = target
-        .try_into()
-        .map_err(|_| CapsuleError::Config(format!("targets.{} is not a valid target table", selected_target)))?;
+        .ok_or_else(|| {
+            CapsuleError::Config(format!(
+                "Missing required [targets.{}] table",
+                selected_target
+            ))
+        })?;
+    let named_target: NamedTarget = target.try_into().map_err(|_| {
+        CapsuleError::Config(format!(
+            "targets.{} is not a valid target table",
+            selected_target
+        ))
+    })?;
     let (normalized_runtime, compound_driver) = split_v03_runtime(&named_target.runtime);
     let driver = compound_driver.or(named_target.driver);
     let runtime = ResolvedTargetRuntime {
@@ -315,7 +323,10 @@ pub(super) fn resolve_target_label(
     };
 
     if !targets.contains_key(selected.as_str()) {
-        return Err(CapsuleError::Config(format!("Target '{}' not found under [targets]", selected)));
+        return Err(CapsuleError::Config(format!(
+            "Target '{}' not found under [targets]",
+            selected
+        )));
     }
 
     Ok(selected)
