@@ -414,6 +414,7 @@ async fn persist_session_token_headless_uses_canonical_file_with_0600() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)]
 async fn persist_session_token_interactive_falls_back_to_memory_without_identity() {
     // Phase 2: interactive logins now default to the shared age file. With
     // no identity initialized under the test's age_home, `AuthStore` falls
@@ -441,6 +442,7 @@ async fn persist_session_token_interactive_falls_back_to_memory_without_identity
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)]
 async fn persist_session_token_interactive_writes_to_age_when_identity_loaded() {
     // With an age identity initialized at the test's age_home, interactive
     // logins should land in the age file and subsequent reads resolve

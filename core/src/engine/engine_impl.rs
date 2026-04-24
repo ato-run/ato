@@ -96,7 +96,7 @@ fn validate_engine_path(path: PathBuf) -> Result<PathBuf> {
         ))
     })?;
 
-    let meta = std::fs::metadata(&canonical).map_err(|e| CapsuleError::Io(e))?;
+    let meta = std::fs::metadata(&canonical).map_err(CapsuleError::Io)?;
 
     if !meta.is_file() {
         return Err(CapsuleError::Config(format!(
