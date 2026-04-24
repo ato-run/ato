@@ -290,6 +290,15 @@ pub(super) async fn run_publisher_onboarding_flow(
 
     let publisher =
         if let Some(existing) = fetch_publisher_me(&client, &api_base, session_token).await? {
+            // Ensure the local signing key exists even when the publisher is already registered.
+            // On a fresh machine or after keys are wiped, the key file won't exist even though
+            // the publisher record is already in the store.
+            let local_key = ensure_publisher_signing_key()?;
+            let local_did = local_key.did()?;
+            if local_did != existing.author_did {
+                // Local key was just generated (or is stale) — sync the new DID to the store.
+                update_publisher_did(&client, &api_base, session_token, &local_key).await?;
+            }
             existing
         } else {
             let created =
@@ -311,4 +320,50 @@ pub(super) async fn run_publisher_onboarding_flow(
         publisher_did: publisher.author_did,
         installation,
     })
+}
+
+async fn update_publisher_did(
+    client: &reqwest::Client,
+    api_base: &str,
+    session_token: &str,
+    signing_key: &capsule_core::types::signing::StoredKey,
+) -> Result<()> {
+    let did = signing_key.did()?;
+    let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let signature = signing_key
+        .to_signing_key()?
+        .sign(timestamp.as_bytes())
+        .to_bytes();
+    let signature_b64 = BASE64_STANDARD.encode(signature);
+
+    let payload = serde_json::json!({
+        "author_did": did,
+        "did_proof": {
+            "did": did,
+            "timestamp": timestamp,
+            "signature": signature_b64,
+        }
+    });
+
+    let response = client
+        .patch(format!("{}/v1/publishers/me", api_base))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header("Cookie", store_session_cookie_header(session_token))
+        .json(&payload)
+        .send()
+        .await
+        .context("Failed to update publisher DID")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "Publisher DID update failed ({}): {}",
+            status,
+            parse_store_error_text(&body)
+        );
+    }
+
+    Ok(())
 }

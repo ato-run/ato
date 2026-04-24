@@ -11,6 +11,55 @@ use super::{
     UploadPreflightRequest, UploadSession, UploadStrategy,
 };
 
+fn describe_curl_response(
+    status_code: u16,
+    response: &super::curl_upload::CurlUploadResponse,
+) -> String {
+    let status = reqwest::StatusCode::from_u16(status_code)
+        .unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    let cf_ray = response.headers.get("cf-ray").cloned();
+    let request_id = response.headers.get("x-request-id").cloned();
+    let body = &response.body;
+
+    let parsed: Option<serde_json::Value> = serde_json::from_str(body).ok();
+    let (error_code, message) = match &parsed {
+        Some(v) => (
+            v.get("error").and_then(|x| x.as_str()).map(String::from),
+            v.get("message").and_then(|x| x.as_str()).map(String::from),
+        ),
+        None => (None, None),
+    };
+
+    let mut parts = vec![format!("HTTP {}", status)];
+    match (error_code, message) {
+        (Some(e), Some(m)) if !m.is_empty() => parts.push(format!("{}: {}", e, m)),
+        (Some(e), _) => parts.push(e),
+        (_, Some(m)) if !m.is_empty() => parts.push(m),
+        _ if !body.trim().is_empty() => parts.push(body.trim().to_string()),
+        _ => {}
+    }
+    if let Some(id) = request_id {
+        parts.push(format!("request_id={}", id));
+    }
+    if let Some(ray) = cf_ray {
+        parts.push(format!("cf-ray={}", ray));
+    }
+    if status.is_server_error() {
+        parts.push(
+            "この障害はサーバー側の問題です。cf-ray / request_id を添えてサポートに連絡してください。"
+                .to_string(),
+        );
+    }
+    parts.join(" | ")
+}
+
+fn curl_auth_headers() -> Vec<(String, String)> {
+    match crate::registry::http::current_ato_token() {
+        Some(token) => vec![("authorization".to_string(), format!("Bearer {}", token))],
+        None => Vec::new(),
+    }
+}
+
 pub(crate) struct PresignedUploadSession {
     pub(crate) capsule_id: String,
     pub(crate) version: String,
@@ -79,19 +128,18 @@ impl UploadStrategy for PresignedUploadStrategy {
             bail!("presigned upload strategy requires a presigned upload session")
         };
 
-        let response = reqwest::blocking::Client::builder()
-            .build()
-            .context("Failed to create presigned upload client")?
-            .put(&session.upload_url)
-            .header("content-type", "application/octet-stream")
-            .body(artifact_bytes)
-            .send()
-            .with_context(|| format!("Failed to upload artifact to {}", session.upload_url))?;
+        let response = super::curl_upload::put_bytes(&session.upload_url, &artifact_bytes, &[])
+            .with_context(|| {
+                format!(
+                    "Failed to upload artifact to presigned URL (size={} bytes)",
+                    artifact_bytes.len()
+                )
+            })?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().unwrap_or_default();
-            let error = super::super::artifact::classify_upload_failure(status, &body);
+        if !response.is_success() {
+            let status = reqwest::StatusCode::from_u16(response.status)
+                .unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+            let error = super::super::artifact::classify_upload_failure(status, &response.body);
             return Err(error.into());
         }
 
@@ -112,20 +160,20 @@ impl UploadStrategy for PresignedUploadStrategy {
             bail!("presigned upload strategy requires a presigned transfer response")
         };
 
-        let response = authenticated_request(
-            &request.registry_url,
-            authenticated_registry_client(&request.registry_url)?.post(format!(
+        let response = super::curl_upload::post_json(
+            &format!(
                 "{}/v1/capsules/{}/releases/{}/finalize",
                 request.registry_url, transfer.capsule_id, transfer.version
-            )),
+            ),
+            b"{}",
+            &curl_auth_headers(),
         )
-        .send()
         .context("Failed to finalize presigned artifact upload")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().unwrap_or_default();
-            let error = super::super::artifact::classify_upload_failure(status, &body);
+        if !response.is_success() {
+            let status = reqwest::StatusCode::from_u16(response.status)
+                .unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+            let error = super::super::artifact::classify_upload_failure(status, &response.body);
             return Err(error.into());
         }
 
@@ -207,31 +255,20 @@ struct CreateReleaseSignature {
     signed_at: i64,
 }
 
-fn authenticated_registry_client(registry_url: &str) -> Result<reqwest::blocking::Client> {
-    let _ = crate::auth::require_session_token()?;
-    crate::registry::http::blocking_client_builder(registry_url)
-        .build()
-        .context("Failed to create registry client")
-}
-
 fn fetch_publisher_identity(registry_url: &str) -> Result<PublisherIdentityResponse> {
-    let response = crate::registry::http::with_blocking_ato_token(
-        authenticated_registry_client(registry_url)?
-            .get(format!("{}/v1/publishers/me", registry_url)),
-    )
-    .send()
-    .context("Failed to fetch publisher identity")?;
+    let _ = crate::auth::require_session_token()?;
+    let url = format!("{}/v1/publishers/me", registry_url);
+    let response = super::curl_upload::get(&url, &curl_auth_headers())
+        .context("Failed to fetch publisher identity")?;
 
-    if !response.status().is_success() {
+    if !response.is_success() {
         bail!(
-            "Failed to resolve publisher identity (HTTP {}): {}",
-            response.status(),
-            response.text().unwrap_or_default()
+            "Failed to resolve publisher identity: {}",
+            describe_curl_response(response.status, &response)
         );
     }
 
-    response
-        .json::<PublisherIdentityResponse>()
+    serde_json::from_str::<PublisherIdentityResponse>(&response.body)
         .context("Failed to parse publisher identity response")
 }
 
@@ -262,30 +299,24 @@ fn resolve_or_create_capsule_id(
     artifact: &super::UploadArtifactDescriptor,
 ) -> Result<String> {
     let lookup_url = format!(
-        "{}/v1/capsules/by/{}/{}",
+        "{}/v1/capsules/by/{}/{}?format=id",
         registry_url,
         urlencoding::encode(&artifact.publisher),
         urlencoding::encode(&artifact.slug)
     );
-    let response = authenticated_request(
-        registry_url,
-        authenticated_registry_client(registry_url)?.get(&lookup_url),
-    )
-    .send()
-    .context("Failed to resolve scoped capsule id for presigned publish")?;
+    let response = super::curl_upload::get(&lookup_url, &curl_auth_headers())
+        .context("Failed to resolve scoped capsule id for presigned publish")?;
 
-    if response.status().is_success() {
-        return response
-            .json::<CapsuleLookupResponse>()
+    if response.is_success() {
+        return serde_json::from_str::<CapsuleLookupResponse>(&response.body)
             .map(|payload| payload.id)
             .context("Failed to parse scoped capsule lookup response");
     }
 
-    if response.status() != reqwest::StatusCode::NOT_FOUND {
+    if response.status != 404 {
         bail!(
-            "Scoped capsule lookup failed (HTTP {}): {}",
-            response.status(),
-            response.text().unwrap_or_default()
+            "Scoped capsule lookup failed: {}",
+            describe_curl_response(response.status, &response)
         );
     }
 
@@ -296,30 +327,28 @@ fn resolve_or_create_capsule_id(
         category: "other".to_string(),
         capsule_type: "app".to_string(),
     };
-    let create_response = authenticated_request(
-        registry_url,
-        authenticated_registry_client(registry_url)?
-            .post(format!("{}/v1/capsules", registry_url))
-            .json(&create_body),
+    let body_bytes =
+        serde_json::to_vec(&create_body).context("Failed to serialize create capsule body")?;
+    let create_response = super::curl_upload::post_json(
+        &format!("{}/v1/capsules", registry_url),
+        &body_bytes,
+        &curl_auth_headers(),
     )
-    .send()
     .context("Failed to create capsule for presigned publish")?;
 
-    if create_response.status().is_success() {
-        return create_response
-            .json::<CreateCapsuleResponse>()
+    if create_response.is_success() {
+        return serde_json::from_str::<CreateCapsuleResponse>(&create_response.body)
             .map(|payload| payload.id)
             .context("Failed to parse create capsule response");
     }
 
-    if create_response.status() == reqwest::StatusCode::CONFLICT {
+    if create_response.status == 409 {
         return resolve_or_create_capsule_id_retry_lookup(registry_url, artifact);
     }
 
     bail!(
-        "Create capsule failed (HTTP {}): {}",
-        create_response.status(),
-        create_response.text().unwrap_or_default()
+        "Create capsule failed: {}",
+        describe_curl_response(create_response.status, &create_response)
     )
 }
 
@@ -328,26 +357,20 @@ fn resolve_or_create_capsule_id_retry_lookup(
     artifact: &super::UploadArtifactDescriptor,
 ) -> Result<String> {
     let lookup_url = format!(
-        "{}/v1/capsules/by/{}/{}",
+        "{}/v1/capsules/by/{}/{}?format=id",
         registry_url,
         urlencoding::encode(&artifact.publisher),
         urlencoding::encode(&artifact.slug)
     );
-    let response = authenticated_request(
-        registry_url,
-        authenticated_registry_client(registry_url)?.get(lookup_url),
-    )
-    .send()
-    .context("Failed to re-fetch capsule after slug conflict")?;
-    if !response.status().is_success() {
+    let response = super::curl_upload::get(&lookup_url, &curl_auth_headers())
+        .context("Failed to re-fetch capsule after slug conflict")?;
+    if !response.is_success() {
         bail!(
-            "Scoped capsule lookup after slug conflict failed (HTTP {}): {}",
-            response.status(),
-            response.text().unwrap_or_default()
+            "Scoped capsule lookup after slug conflict failed: {}",
+            describe_curl_response(response.status, &response)
         );
     }
-    response
-        .json::<CapsuleLookupResponse>()
+    serde_json::from_str::<CapsuleLookupResponse>(&response.body)
         .map(|payload| payload.id)
         .context("Failed to parse scoped capsule lookup response")
 }
@@ -378,19 +401,16 @@ fn create_release(
             signed_at: chrono::Utc::now().timestamp(),
         },
     };
-    let response = authenticated_request(
-        registry_url,
-        authenticated_registry_client(registry_url)?
-            .post(format!(
-                "{}/v1/capsules/{}/releases",
-                registry_url, capsule_id
-            ))
-            .json(&body),
+    let body_bytes =
+        serde_json::to_vec(&body).context("Failed to serialize create release body")?;
+    let response = super::curl_upload::post_json(
+        &format!("{}/v1/capsules/{}/releases", registry_url, capsule_id),
+        &body_bytes,
+        &curl_auth_headers(),
     )
-    .send()
     .context("Failed to create release for presigned publish")?;
 
-    if response.status() == reqwest::StatusCode::CONFLICT {
+    if response.status == 409 {
         return Err(
             super::super::artifact::PublishArtifactError::VersionExists {
                 message: "same version is already published".to_string(),
@@ -399,16 +419,14 @@ fn create_release(
         );
     }
 
-    if !response.status().is_success() {
+    if !response.is_success() {
         bail!(
-            "Create release failed (HTTP {}): {}",
-            response.status(),
-            response.text().unwrap_or_default()
+            "Create release failed: {}",
+            describe_curl_response(response.status, &response)
         );
     }
 
-    response
-        .json::<CreateReleaseResponse>()
+    serde_json::from_str::<CreateReleaseResponse>(&response.body)
         .context("Failed to parse create release response")
 }
 
@@ -464,13 +482,6 @@ fn build_download_url(registry_url: &str, publisher: &str, slug: &str, version: 
         urlencoding::encode(slug),
         urlencoding::encode(version)
     )
-}
-
-fn authenticated_request(
-    _registry_url: &str,
-    builder: reqwest::blocking::RequestBuilder,
-) -> reqwest::blocking::RequestBuilder {
-    crate::registry::http::with_blocking_ato_token(builder)
 }
 
 #[cfg(test)]
