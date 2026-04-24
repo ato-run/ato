@@ -181,7 +181,7 @@ fn derive_run_command_launch_spec(
     })
 }
 
-fn resolve_launch_working_dir(plan: &ManifestData, command: &str) -> PathBuf {
+fn resolve_launch_working_dir(plan: &ManifestData, _command: &str) -> PathBuf {
     if let Some(working_dir) = plan
         .execution_working_dir()
         .filter(|value| !value.trim().is_empty())
@@ -203,14 +203,6 @@ fn resolve_launch_working_dir(plan: &ManifestData, command: &str) -> PathBuf {
     }
 
     plan.manifest_dir.clone()
-}
-
-fn command_path_exists(base: &Path, command: &str) -> bool {
-    let path = Path::new(command.trim());
-    if path.is_absolute() {
-        return path.exists();
-    }
-    base.join(path).exists()
 }
 
 fn resolve_launch_language(plan: &ManifestData, driver: Option<&str>) -> Option<String> {

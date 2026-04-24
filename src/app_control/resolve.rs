@@ -41,7 +41,6 @@ pub(super) enum RenderStrategy {
     Web,
     Terminal,
     GuestWebview,
-    Unsupported,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -815,7 +814,6 @@ fn render_strategy_label(strategy: &RenderStrategy) -> &'static str {
         RenderStrategy::Web => "web",
         RenderStrategy::Terminal => "terminal",
         RenderStrategy::GuestWebview => "guest-webview",
-        RenderStrategy::Unsupported => "unsupported",
     }
 }
 
