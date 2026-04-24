@@ -28,7 +28,23 @@ Or download a prebuilt binary from the [Releases page](https://github.com/ato-ru
 ```bash
 # Install (one line)
 curl -fsSL https://ato.run/install.sh | sh
+```
 
+**Consuming — run someone else's project:**
+
+```bash
+# Try once in a sandbox
+ato run github.com/owner/repo
+ato run https://ato.run/s/demo@r1       # runnable workspaces only (see note below)
+
+# Keep it locally
+ato decap https://ato.run/s/demo@r1 --into ./demo
+ato run ./demo
+```
+
+**Producing — share your own project:**
+
+```bash
 # Run a Python script — no venv, no pip install
 printf 'print("hello from ato")\n' > hello.py
 ato run hello.py
@@ -36,10 +52,6 @@ ato run hello.py
 # Capture the workspace and get a shareable URL
 ato encap
 # → Share URL: https://ato.run/s/hello-ato@r1
-
-# Anyone can rebuild it from the URL
-ato decap https://ato.run/s/hello-ato@r1 --into ./copy
-ato run ./copy
 ```
 
 ## Why Ato
@@ -47,6 +59,17 @@ ato run ./copy
 Every time you share a project, someone has to set up an environment before they can run it — virtualenvs, `node_modules`, container builds, README instructions that drift. Ato removes that layer entirely.
 
 Ato reads your project directly — `pyproject.toml`, `package.json`, `deno.json`, `Cargo.toml`, a bare script — and materializes only the runtime it needs. No config to write. For Python and native binaries, execution routes through [Nacelle](https://github.com/ato-run/nacelle), a sandboxed runtime that blocks unapproved filesystem and network access by default. `ato encap` captures a reproducible workspace descriptor that anyone can restore with `ato decap`.
+
+### Mental model: Try → Keep → Share
+
+Four commands map to two axes — the direction (consume vs. produce) and the persistence of the result (ephemeral vs. persistent):
+
+|                                  | Just try it (ephemeral)                       | Set it up (persistent)                |
+|----------------------------------|-----------------------------------------------|---------------------------------------|
+| **Consume** someone else's code  | `ato run <url>` *(runnable workspaces only)*  | `ato decap <url>` *(any workspace)*   |
+| **Produce** your own code        | `ato run .`                                   | `ato encap` *(→ `ato publish` later)* |
+
+And the classic pain point comparison:
 
 | Without Ato | With Ato |
 |---|---|
@@ -58,20 +81,24 @@ Supported runtimes today: Python (`pyproject.toml`, `uv.lock`, single-file PEP 7
 
 ## Core commands
 
-### Run something now with `ato run`
+Commands are ordered by the Try → Keep → Share journey.
 
-`ato run` accepts a local path, a share URL, or a GitHub repository reference.
+### Try it with `ato run`
+
+`ato run` accepts a local path, a share URL, or a GitHub repository reference. It covers two distinct use cases:
+
+**Run it — try any project in a sandbox (consume):**
 
 ```bash
-ato run .
 ato run hello.py
 ato run github.com/owner/repo
 ato run https://ato.run/s/demo@r1
 ```
 
-For local filesystem paths, Ato also supports `--watch` and `--background`.
+**Develop it — iterate on your own workspace (produce):**
 
 ```bash
+ato run .
 ato run . --watch
 ato run . --background
 ato ps
@@ -79,9 +106,24 @@ ato logs --id <capsule-id> --follow
 ato stop --id <capsule-id>
 ```
 
-`ato run <share-url>` does not support `--watch` or `--background` in the current MVP path.
+`--watch` and `--background` are only available for local filesystem paths. `ato run <share-url>` does not support them in the current MVP path.
 
-### Share a workspace with `ato encap`
+> **When `run` works on a share URL**
+>
+> `ato run <share-url>` works only when the shared workspace is declared as runnable in its `capsule.toml` — specifically, `type = "app"` or `"tool"` with an entrypoint defined via `run`, `[targets.*]`, or `[services]`.
+>
+> Workspaces without an entrypoint (libraries, datasets, templates, `type = "library"`) are still shareable, but receivers must use `ato decap` to expand them and run locally. `ato run` fails closed before launch if the share is not runnable. See [Runnable workspace](#runnable-workspace) for the full rules.
+
+### Keep it with `ato decap`
+
+`ato decap` materializes a share into a target directory, verifies it, and runs declared install steps. Use this when you want a persistent copy, or when the share is not runnable.
+
+```bash
+ato decap https://ato.run/s/myproject@r1 --into ./my-project
+ato decap .ato/share/share.spec.json --into ./my-project
+```
+
+### Share it with `ato encap`
 
 `ato encap` captures the current workspace as a portable share descriptor, uploads it, and prints a share URL. Run it from the project directory — no arguments needed.
 
@@ -105,14 +147,12 @@ Local capture output is written under `.ato/share/`:
 
 Secrets are never uploaded. Ato records contracts such as required environment files, but not secret values.
 
-### Rebuild a workspace with `ato decap`
+#### `encap` vs `publish`
 
-`ato decap` materializes a share into a target directory, verifies the share, and runs declared install steps.
+- `ato encap` — turn a workspace into a **shareable descriptor**. Choose between a local save (`--local`) and an upload that returns a share URL. Intended for ad-hoc sharing and reproducibility.
+- `ato publish` — release the workspace as a **capsule to the registry**. Involves versioning, signing, and CI integration. Intended for distribution as a named artifact.
 
-```bash
-ato decap https://ato.run/s/myproject@r1 --into ./my-project
-ato decap .ato/share/share.spec.json --into ./my-project
-```
+Use `encap` for private/informal sharing; use `publish` when you want a durable, versioned release.
 
 ## Security and isolation
 
@@ -201,6 +241,18 @@ type           = "app"
 run            = "python main.py"
 runtime        = "source/python"
 ```
+
+### Runnable workspace
+
+`ato run <share-url>` launches a shared workspace directly only if its `capsule.toml` declares an entrypoint. A workspace is **runnable** when at least one of the following is true:
+
+- A top-level `run = "..."` is defined
+- `[targets.*]` declares at least one executable target
+- `[services]` is defined
+
+Workspaces that satisfy none of the above are still shareable via `ato encap`, but receivers must use `ato decap` to expand them before executing anything locally. `type = "library"` is always treated as non-runnable regardless of other fields.
+
+This is a contract enforced at the receiving end: the publisher decides whether their workspace is runnable by how they author `capsule.toml`, and `ato run` fails closed if the contract is not met.
 
 ### `[network]` — egress control
 

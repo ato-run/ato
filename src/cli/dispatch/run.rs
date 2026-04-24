@@ -246,7 +246,7 @@ fn report_next_step(args: &RunLikeCommandArgs, raw_target: &str) -> Result<()> {
     let message = if crate::local_input::should_treat_input_as_local(raw_target, &expanded_local)
         && expanded_local.is_dir()
     {
-        Some("Share it next: ato encap --share".to_string())
+        Some("Share it next: ato encap".to_string())
     } else if looks_like_remote_try_target(raw_target) {
         Some(format!(
             "Set it up locally next: ato decap {} --into ./{}",
