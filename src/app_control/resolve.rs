@@ -33,7 +33,6 @@ pub(super) enum HandleKind {
     LocalCapsule,
     StoreCapsule,
     RemoteSourceRef,
-    StateUri,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -42,7 +41,6 @@ pub(super) enum RenderStrategy {
     Web,
     Terminal,
     GuestWebview,
-    Unsupported,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -102,7 +100,6 @@ pub(super) enum NormalizedHandleKind {
     LocalPath(PathBuf),
     StoreCapsule,
     RemoteSourceRef,
-    StateUri,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,24 +159,6 @@ pub(super) fn build_resolution(
             target: None,
             launch: None,
             notes: Vec::new(),
-        }),
-        NormalizedHandleKind::StateUri => Ok(HandleResolution {
-            input: normalized.input,
-            normalized_handle: normalized.normalized_handle,
-            kind: HandleKind::StateUri,
-            render_strategy: RenderStrategy::Unsupported,
-            canonical_handle: None,
-            source: Some("state".to_string()),
-            trust_state: TrustState::Unknown,
-            restricted: false,
-            launch_plan: None,
-            snapshot: None,
-            guest: None,
-            target: None,
-            launch: None,
-            notes: vec![
-                "mag:// state views are not implemented yet; keep this handle in Desky as a future state-view route.".to_string(),
-            ],
         }),
         NormalizedHandleKind::RemoteSourceRef => build_github_resolution(
             normalized.input,
@@ -648,16 +627,6 @@ pub(super) fn normalize_handle(raw: &str) -> Result<NormalizedHandle> {
         });
     }
 
-    if input.starts_with("mag://") {
-        return Ok(NormalizedHandle {
-            normalized_handle: input.clone(),
-            input,
-            kind: NormalizedHandleKind::StateUri,
-            canonical: None,
-            cli_ref: None,
-        });
-    }
-
     if input.starts_with("ato://") {
         anyhow::bail!(
             "`ato://` is reserved for host routes and cannot be resolved as a capsule handle"
@@ -714,7 +683,7 @@ pub(super) fn normalize_handle(raw: &str) -> Result<NormalizedHandle> {
     }
 }
 
-fn experimental_guest_driver_from_error(err: &anyhow::Error) -> Option<&'static str> {
+fn experimental_guest_driver_from_error(err: &dyn std::error::Error) -> Option<&'static str> {
     let message = err.to_string().to_ascii_lowercase();
     ["tauri", "electron", "wails"]
         .into_iter()
@@ -837,7 +806,6 @@ fn handle_kind_label(kind: &HandleKind) -> &'static str {
         HandleKind::LocalCapsule => "local_capsule",
         HandleKind::StoreCapsule => "store_capsule",
         HandleKind::RemoteSourceRef => "remote_source_ref",
-        HandleKind::StateUri => "state_uri",
     }
 }
 
@@ -846,7 +814,6 @@ fn render_strategy_label(strategy: &RenderStrategy) -> &'static str {
         RenderStrategy::Web => "web",
         RenderStrategy::Terminal => "terminal",
         RenderStrategy::GuestWebview => "guest-webview",
-        RenderStrategy::Unsupported => "unsupported",
     }
 }
 

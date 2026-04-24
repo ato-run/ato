@@ -72,7 +72,7 @@ fn cmd_start(ttl: &str) -> Result<()> {
 
     // Load the identity (will prompt for passphrase if needed).
     let home = dirs::home_dir().context("failed to resolve home directory")?;
-    let age = crate::application::secrets::backend::AgeFileBackend::new(home.clone());
+    let age = crate::application::credential::AgeFileBackend::new(home.clone());
 
     if !age.identity_exists() {
         bail!(
@@ -98,7 +98,7 @@ fn cmd_start(ttl: &str) -> Result<()> {
     };
 
     std::fs::create_dir_all(path.parent().unwrap()).context("failed to create ~/.ato/run/")?;
-    crate::application::secrets::store::write_secure_file(&path, key_str.as_bytes())?;
+    crate::application::credential::write_secure_file(&path, key_str.as_bytes())?;
 
     // Compute and store expiry.
     let expires_at = std::time::SystemTime::now()
@@ -113,7 +113,7 @@ fn cmd_start(ttl: &str) -> Result<()> {
         std::process::id(),
         expires_at
     );
-    crate::application::secrets::store::write_secure_file(&meta_path, meta.as_bytes())?;
+    crate::application::credential::write_secure_file(&meta_path, meta.as_bytes())?;
 
     // Export for child processes.
     let path_str = path.to_string_lossy();
