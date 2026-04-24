@@ -459,8 +459,6 @@ mod tests {
     use std::sync::Arc;
 
     // external
-    use hex;
-    use sha2::{Digest, Sha256};
     use tar;
     use toml;
 
@@ -468,15 +466,10 @@ mod tests {
     use super::{
         pack, WebPackOptions, CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME, SBOM_PATH,
     };
+    use crate::common::hash::sha256_hex;
     use crate::reporter::NoOpReporter;
     use crate::router::ExecutionProfile;
     use crate::types::CapsuleManifest;
-
-    fn sha256_hex(data: &[u8]) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        hex::encode(hasher.finalize())
-    }
 
     #[test]
     fn pack_static_emits_capsule_with_lock_and_without_config() {

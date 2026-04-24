@@ -3,7 +3,7 @@ use std::io::IsTerminal;
 
 use age::secrecy::ExposeSecret;
 
-use crate::application::secrets::backend::age::load_identity_bytes;
+use crate::application::credential::backend::age_file::load_identity_bytes;
 use crate::application::secrets::store::{SecretEntry, SecretScope};
 use crate::application::secrets::{AgeFileBackend, SecretStore};
 use crate::cli::secrets::SecretsCommands;
@@ -70,9 +70,14 @@ pub(crate) fn execute_secrets_command(command: SecretsCommands) -> Result<()> {
             } else {
                 // Delete from specific namespace only.
                 if let Some(age) = store.age() {
-                    use crate::application::secrets::backend::traits::{SecretBackend, SecretKey};
-                    let sk = SecretKey::with_namespace(&namespace, &key);
-                    age.delete(&sk)?;
+                    use crate::application::credential::backend::traits::{
+                        CredentialBackend, CredentialKey,
+                    };
+                    let ck = CredentialKey::new(
+                        crate::application::secrets::store::secrets_ns(&namespace),
+                        &key,
+                    );
+                    age.delete(&ck)?;
                 } else {
                     store.delete(&key)?;
                 }
@@ -233,7 +238,7 @@ fn cmd_rotate_identity(new_identity_path: Option<std::path::PathBuf>) -> Result<
         .context("failed to re-encrypt secrets")?;
 
     // Write the new identity (no passphrase – user can re-init with passphrase).
-    use crate::application::secrets::store::write_secure_file;
+    use crate::application::credential::write_secure_file;
     write_secure_file(&key_path, new_id_secret.expose_secret().as_bytes())?;
     let pub_str = new_identity.to_public().to_string();
     write_secure_file(&age.identity_pub_path(), pub_str.as_bytes())?;

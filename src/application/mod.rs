@@ -1,6 +1,7 @@
 pub(crate) mod agent;
 pub(crate) mod auth;
 pub(crate) mod compat_import;
+pub(crate) mod credential;
 pub(crate) mod engine;
 pub(crate) mod pipeline;
 pub(crate) mod ports;
