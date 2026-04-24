@@ -4,6 +4,21 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.81] - 2026-04-24
+
+### What Changed
+
+
+#### Bug Fixes
+
+- Enable trusted publishing for release-plz
+
+
+#### Features
+
+- Auto-bootstrap age identity during interactive auth login
+
+
 ## [0.4.80] - 2026-04-24
 
 ### What Changed
