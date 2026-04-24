@@ -186,7 +186,9 @@ fn decap_into(ato_bin: &Path, input: &str, workspace: &Path) -> Result<()> {
         .args(["decap", input, "--into"])
         .arg(workspace)
         .output()
-        .map_err(|e| CapsuleError::Runtime(format!("failed to spawn ato decap for {input}: {e}")))?;
+        .map_err(|e| {
+            CapsuleError::Runtime(format!("failed to spawn ato decap for {input}: {e}"))
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -280,7 +282,9 @@ fn resolve_ato_binary(override_path: Option<&Path>) -> Result<PathBuf> {
             return Ok(candidate);
         }
     }
-    Err(CapsuleError::NotFound("ato binary not found on PATH".into()))
+    Err(CapsuleError::NotFound(
+        "ato binary not found on PATH".into(),
+    ))
 }
 
 /// Resolve the nacelle binary path.
@@ -340,7 +344,9 @@ fn spawn_direct_inherited(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-        .map_err(|e| CapsuleError::Runtime(format!("failed to spawn command (compat-host): {e}")))?;
+        .map_err(|e| {
+            CapsuleError::Runtime(format!("failed to spawn command (compat-host): {e}"))
+        })?;
     Ok(status.code().unwrap_or(1))
 }
 

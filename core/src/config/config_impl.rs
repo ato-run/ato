@@ -82,11 +82,7 @@ pub fn save_config(cfg: &CapsuleConfig) -> Result<()> {
 
 fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
     let tmp = path.with_extension("toml.tmp");
-    fs::write(&tmp, content).map_err(|e| {
-        CapsuleError::Io(e)
-    })?;
-    fs::rename(&tmp, path).map_err(|e| {
-        CapsuleError::Io(e)
-    })?;
+    fs::write(&tmp, content).map_err(|e| CapsuleError::Io(e))?;
+    fs::rename(&tmp, path).map_err(|e| CapsuleError::Io(e))?;
     Ok(())
 }

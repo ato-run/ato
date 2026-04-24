@@ -7,6 +7,7 @@ use chrono::Utc;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::common::hash::sha256_hex;
 use crate::error::{CapsuleError, Result};
 
 pub const SBOM_PATH: &str = "sbom.spdx.json";
@@ -211,12 +212,6 @@ pub fn extract_and_verify_embedded_sbom(capsule_path: &Path) -> Result<String> {
     Ok(text)
 }
 
-fn sha256_hex(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    format!("{:x}", hasher.finalize())
-}
-
 fn sha256_hex_file(path: &Path) -> Result<String> {
     let file = fs::File::open(path).map_err(CapsuleError::Io)?;
     let mut reader = BufReader::new(file);
@@ -237,8 +232,7 @@ fn reproducible_created_at() -> chrono::DateTime<Utc> {
         .ok()
         .and_then(|v| v.trim().parse::<i64>().ok())
         .unwrap_or(DEFAULT_REPRO_EPOCH);
-    chrono::DateTime::<Utc>::from_timestamp(epoch, 0)
-        .unwrap_or_else(|| chrono::DateTime::<Utc>::from_timestamp(0, 0).expect("unix epoch"))
+    chrono::DateTime::<Utc>::from_timestamp(epoch, 0).unwrap_or(chrono::DateTime::<Utc>::UNIX_EPOCH)
 }
 
 fn collect_lockfile_packages_from_inputs(files: &[SbomFileInput]) -> Vec<SpdxPackage> {

@@ -27,9 +27,9 @@ pub fn parse_developer_key(value: &str) -> Result<[u8; 32]> {
     }
 
     // Legacy ed25519:base64 format
-    let value = value
-        .strip_prefix("ed25519:")
-        .ok_or_else(|| CapsuleError::Crypto("developer_key must start with ed25519: or did:key:".into()))?;
+    let value = value.strip_prefix("ed25519:").ok_or_else(|| {
+        CapsuleError::Crypto("developer_key must start with ed25519: or did:key:".into())
+    })?;
     let decoded = BASE64
         .decode(value)
         .map_err(|err| CapsuleError::Crypto(format!("failed to decode developer_key: {err}")))?;
@@ -74,10 +74,7 @@ impl StoredKey {
         let payload = serde_json::to_string_pretty(self)
             .map_err(|e| CapsuleError::Runtime(format!("failed to serialize key: {e}")))?;
         fs::write(path, format!("{}\n", payload)).map_err(|e| {
-            CapsuleError::Runtime(format!(
-                "failed to write key file {}: {e}",
-                path.display()
-            ))
+            CapsuleError::Runtime(format!("failed to write key file {}: {e}", path.display()))
         })?;
         Ok(())
     }
@@ -186,8 +183,9 @@ pub fn write_signature_file(
         meta_map.insert(key.clone(), value.clone());
     }
     let metadata_json = Value::Object(meta_map);
-    let metadata_bytes = serde_json::to_vec(&metadata_json)
-        .map_err(|e| CapsuleError::Crypto(format!("failed to serialize signature metadata: {e}")))?;
+    let metadata_bytes = serde_json::to_vec(&metadata_json).map_err(|e| {
+        CapsuleError::Crypto(format!("failed to serialize signature metadata: {e}"))
+    })?;
     if metadata_bytes.len() > u16::MAX as usize {
         return Err(CapsuleError::Crypto(format!(
             "signature metadata too large ({} bytes)",
@@ -213,10 +211,7 @@ pub fn write_signature_file(
     }
 
     fs::write(path, buffer).map_err(|e| {
-        CapsuleError::Runtime(format!(
-            "failed to write signature {}: {e}",
-            path.display()
-        ))
+        CapsuleError::Runtime(format!("failed to write signature {}: {e}", path.display()))
     })?;
 
     Ok(())
@@ -266,8 +261,9 @@ pub fn read_signature_file(path: &Path) -> Result<SignatureFile> {
         ));
     }
     let metadata_bytes = &data[offset..offset + metadata_len];
-    let metadata: Value = serde_json::from_slice(metadata_bytes)
-        .map_err(|e| CapsuleError::Crypto(format!("failed to parse signature metadata JSON: {e}")))?;
+    let metadata: Value = serde_json::from_slice(metadata_bytes).map_err(|e| {
+        CapsuleError::Crypto(format!("failed to parse signature metadata JSON: {e}"))
+    })?;
 
     Ok(SignatureFile {
         version,

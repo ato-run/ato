@@ -56,7 +56,12 @@ async fn run_bundle_with_metrics(bundle_path: &Path, manifest_dir: &Path) -> Res
     let child = Command::new(bundle_path)
         .current_dir(manifest_dir)
         .spawn()
-        .map_err(|e| CapsuleError::ProcessStart(format!("Failed to execute bundle {}: {e}", bundle_path.display())))?;
+        .map_err(|e| {
+            CapsuleError::ProcessStart(format!(
+                "Failed to execute bundle {}: {e}",
+                bundle_path.display()
+            ))
+        })?;
 
     let pid = child.id();
     drop(child);

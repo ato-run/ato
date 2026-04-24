@@ -212,14 +212,19 @@ impl CapsuleManifest {
         for (label, target) in &named_targets {
             let runtime_raw = target.runtime.trim().to_ascii_lowercase();
             // Split compound selectors (e.g. "web/node" → base="web", compound_driver=Some("node"))
-            let (runtime, compound_driver) = if let Some((base, suffix)) = runtime_raw.split_once('/') {
-                (
-                    base.to_string(),
-                    if suffix.is_empty() { None } else { Some(suffix.to_string()) },
-                )
-            } else {
-                (runtime_raw, None)
-            };
+            let (runtime, compound_driver) =
+                if let Some((base, suffix)) = runtime_raw.split_once('/') {
+                    (
+                        base.to_string(),
+                        if suffix.is_empty() {
+                            None
+                        } else {
+                            Some(suffix.to_string())
+                        },
+                    )
+                } else {
+                    (runtime_raw, None)
+                };
             let entrypoint = target.entrypoint.trim();
             let has_run_command = target
                 .run_command
@@ -321,8 +326,7 @@ impl CapsuleManifest {
                 }
 
                 let mut normalized_driver: Option<String> = None;
-                let effective_driver = target.driver.as_deref()
-                    .or(compound_driver.as_deref());
+                let effective_driver = target.driver.as_deref().or(compound_driver.as_deref());
                 match effective_driver {
                     None => errors.push(ValidationError::InvalidWebTarget(
                         label.clone(),
