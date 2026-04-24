@@ -299,7 +299,7 @@ fn resolve_or_create_capsule_id(
     artifact: &super::UploadArtifactDescriptor,
 ) -> Result<String> {
     let lookup_url = format!(
-        "{}/v1/capsules/by/{}/{}",
+        "{}/v1/capsules/by/{}/{}?format=id",
         registry_url,
         urlencoding::encode(&artifact.publisher),
         urlencoding::encode(&artifact.slug)
@@ -357,7 +357,7 @@ fn resolve_or_create_capsule_id_retry_lookup(
     artifact: &super::UploadArtifactDescriptor,
 ) -> Result<String> {
     let lookup_url = format!(
-        "{}/v1/capsules/by/{}/{}",
+        "{}/v1/capsules/by/{}/{}?format=id",
         registry_url,
         urlencoding::encode(&artifact.publisher),
         urlencoding::encode(&artifact.slug)
