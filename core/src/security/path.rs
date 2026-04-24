@@ -7,8 +7,21 @@ use std::{
 ///
 /// Checks:
 /// 1. Path must be absolute
-/// 2. Path must be within allowed_paths
-/// 3. Path must not contain traversal components (..)
+/// 2. Path must not contain traversal components (`..`)
+/// 3. The canonicalized form of the path must be within one of `allowed_paths`
+///
+/// # Security
+///
+/// **TOCTOU constraint**: this function canonicalizes the path at call time using
+/// [`std::fs::canonicalize`]. There is an inherent race between the time of check
+/// and the time of use: an attacker who can replace a path component with a symlink
+/// between this call and the subsequent file operation may bypass the check.
+/// Callers must either hold an exclusive lock on the relevant directory tree or
+/// accept this residual risk in low-privilege contexts.
+///
+/// Symbolic links that exist *at check time* are detected correctly because
+/// canonicalization follows them and the resulting absolute path is then compared
+/// against the allow-list.
 pub fn validate_path(path_str: &str, allowed_paths: &[String]) -> Result<(), String> {
     let path = Path::new(path_str);
 

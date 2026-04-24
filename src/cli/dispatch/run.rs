@@ -340,7 +340,7 @@ fn persist_env_file(path: &std::path::Path, envs: &[(String, String)]) -> Result
         .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>()
         .join("\n");
-    crate::application::secrets::store::write_secure_file(path, format!("{rendered}\n").as_bytes())
+    crate::application::credential::write_secure_file(path, format!("{rendered}\n").as_bytes())
 }
 
 fn prompt_for_missing_env(missing_keys: &[String]) -> Result<Vec<(String, String)>> {

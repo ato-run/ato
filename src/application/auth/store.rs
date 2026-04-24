@@ -452,13 +452,26 @@ pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
                     println!("   GitHub App Installation: {}", id);
                 }
                 match storage {
-                    TokenStorageLocation::OsKeyring => {
-                        println!("   Store session saved to: OS keyring");
+                    TokenStorageLocation::AgeFile => {
+                        println!(
+                            "   Store session saved to: {} ({})",
+                            storage.display(),
+                            manager
+                                .age_home
+                                .join(".ato/credentials/auth/session.age")
+                                .display()
+                        );
                     }
                     TokenStorageLocation::CanonicalFile => {
                         println!(
                             "   Store session saved to: {:?}",
                             manager.credentials_path()
+                        );
+                    }
+                    TokenStorageLocation::Memory => {
+                        println!("   Store session saved to: {}", storage.display());
+                        println!(
+                            "   ⚠️  Token will not survive this process. Run `ato secrets init` to create an age identity."
                         );
                     }
                 }
@@ -486,7 +499,7 @@ pub fn logout() -> Result<()> {
     manager.delete()?;
     println!("✅ Logged out successfully");
     println!(
-        "   Removed session tokens from: OS keyring and {:?}",
+        "   Purged auth tokens from: age file, memory cache, and {:?}",
         manager.credentials_path()
     );
     if manager.legacy_credentials_path().exists() {
@@ -543,11 +556,12 @@ pub fn status() -> Result<()> {
             if let Some(login) = &creds.github_app_account_login {
                 println!("   GitHub App Account: {}", login);
             }
-            if manager
-                .load_keyring_token(&manager.keyring_session_account)?
-                .is_some()
-            {
-                println!("   Session storage: OS keyring");
+            let auth_store = manager.auth_store();
+            if creds.session_token.is_some() {
+                println!(
+                    "   Session storage: {}",
+                    auth_store.primary_write_backend_label()
+                );
             }
             if manager.credentials_path().exists() {
                 println!("   Credential file: {:?}", manager.credentials_path());

@@ -4,6 +4,7 @@
 //! Stores canonical credentials in `$XDG_CONFIG_HOME/ato/credentials.toml`.
 
 pub(crate) mod consent_store;
+mod credential_store;
 mod github;
 mod prompt;
 mod publisher;
@@ -12,11 +13,9 @@ mod store;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 
-#[cfg(test)]
-use std::collections::HashMap;
-#[cfg(test)]
-use std::sync::{Mutex, OnceLock};
+use credential_store::AuthStore;
 
 #[allow(unused_imports)]
 pub(crate) use github::login_with_token;
@@ -30,11 +29,12 @@ pub(super) const DEFAULT_STORE_API_URL: &str = "https://api.ato.run";
 pub(super) const DEFAULT_STORE_SITE_URL: &str = "https://ato.run";
 pub(super) const ENV_STORE_API_URL: &str = "ATO_STORE_API_URL";
 pub(super) const ENV_STORE_SITE_URL: &str = "ATO_STORE_SITE_URL";
+/// Legacy env var for a Store session token. `EnvBackend` reads this as an
+/// alias for `ATO_CRED_AUTH_SESSION__SESSION_TOKEN`; kept as a symbolic
+/// constant so tests can refer to it without duplicating the string literal.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) const ENV_ATO_TOKEN: &str = "ATO_TOKEN";
 pub(super) const ENV_XDG_CONFIG_HOME: &str = "XDG_CONFIG_HOME";
-pub(super) const KEYRING_SERVICE_NAME: &str = "run.ato.cli";
-pub(super) const KEYRING_SESSION_ACCOUNT: &str = "current_session";
-pub(super) const KEYRING_GITHUB_ACCOUNT: &str = "github_token";
 pub(super) const GITHUB_APP_INSTALL_TIMEOUT_SECS: u64 = 5 * 60;
 pub(super) const GITHUB_APP_INSTALL_POLL_SECS: u64 = 3;
 pub(super) const GITHUB_APP_INSTALL_NOTICE_INTERVAL_SECS: u64 = 12;
@@ -43,10 +43,6 @@ pub(super) const LEGACY_CREDENTIALS_DIR: &str = ".ato";
 pub(super) const LEGACY_CREDENTIALS_FILE: &str = "credentials.json";
 pub(super) const CANONICAL_CREDENTIALS_DIR: &str = "ato";
 pub(super) const CANONICAL_CREDENTIALS_FILE: &str = "credentials.toml";
-
-#[cfg(test)]
-pub(super) static TEST_KEYRING: OnceLock<Mutex<HashMap<(String, String), String>>> =
-    OnceLock::new();
 
 /// User credentials stored locally
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -88,9 +84,16 @@ pub struct Credentials {
 pub struct AuthManager {
     pub(super) credentials_path: PathBuf,
     pub(super) legacy_credentials_path: PathBuf,
-    pub(super) keyring_service: String,
-    pub(super) keyring_session_account: String,
-    pub(super) keyring_github_account: String,
+    /// Home directory used by the shared credential layer
+    /// (`AuthStore`/`AgeFileBackend`). Defaults to the user's real home in
+    /// production; overridable in tests so each temp dir gets its own age
+    /// identity and credential layout.
+    pub(super) age_home: PathBuf,
+    /// Eagerly-constructed `AuthStore`. Cached so the in-process
+    /// `MemoryBackend` survives across `resolve_*` / `persist_*` calls — every
+    /// call going through a fresh `AuthStore` would otherwise discard its own
+    /// memory cache the moment the handle is dropped.
+    pub(super) auth_store: Arc<AuthStore>,
 }
 
 pub(super) fn read_env_non_empty(key: &str) -> Option<String> {
@@ -98,6 +101,11 @@ pub(super) fn read_env_non_empty(key: &str) -> Option<String> {
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+}
+
+#[cfg(test)]
+pub(super) fn shared_env_lock() -> &'static std::sync::Mutex<()> {
+    crate::application::credential::test_env_lock()
 }
 
 #[cfg(test)]

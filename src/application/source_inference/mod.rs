@@ -62,7 +62,11 @@ const SINGLE_SCRIPT_CACHE_SUBDIR: &str = "source-inference/single-script-cache";
 const USE_HOME_RUN_STATE: bool = true;
 // Compile-time assertion: USE_HOME_RUN_STATE must remain true until the field
 // is removed.  If you are tempted to set it false, delete the field instead.
-const _: () = assert!(USE_HOME_RUN_STATE, "USE_HOME_RUN_STATE must be true; remove the field instead");
+#[allow(clippy::assertions_on_constants)]
+const _: () = assert!(
+    USE_HOME_RUN_STATE,
+    "USE_HOME_RUN_STATE must be true; remove the field instead"
+);
 #[derive(Debug, Clone)]
 pub(crate) enum SourceInferenceInput {
     SourceEvidence(SourceEvidenceInput),

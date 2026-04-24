@@ -1,20 +1,17 @@
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
 
 use tempfile::TempDir;
 
 use super::publisher::PublisherMeResponse;
-use super::storage::{keyring_user_interaction_not_allowed_message, TokenStorageLocation};
+use super::shared_env_lock as env_lock;
+use super::storage::TokenStorageLocation;
 use super::store::{hydrate_publisher_identity_with, is_local_store_api_base_url};
 use super::{
     current_session_token, require_session_token, AuthManager, Credentials, ENV_ATO_TOKEN,
 };
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+const ENV_CRED_AUTH_SESSION_TOKEN: &str = "ATO_CRED_AUTH_SESSION__SESSION_TOKEN";
 
 struct EnvVarGuard {
     key: &'static str,
@@ -189,19 +186,12 @@ fn test_delete_credentials_keeps_legacy_file() {
     manager.write_canonical_credentials(&creds).unwrap();
     fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
     fs::write(&legacy_path, r#"{"publisher_handle":"legacy-user"}"#).unwrap();
-    manager.test_keyring_set(&manager.keyring_session_account, "keyring-token");
     assert!(creds_path.exists());
     assert!(legacy_path.exists());
 
     manager.delete().unwrap();
     assert!(!creds_path.exists());
     assert!(legacy_path.exists());
-    assert_eq!(
-        manager
-            .load_keyring_token(&manager.keyring_session_account)
-            .unwrap(),
-        None
-    );
 }
 
 #[test]
@@ -305,16 +295,6 @@ fn is_local_store_api_base_url_detects_loopback_hosts() {
 }
 
 #[test]
-fn keyring_user_interaction_not_allowed_message_detects_macos_error() {
-    assert!(keyring_user_interaction_not_allowed_message(
-        "Platform secure storage failure: User interaction is not allowed."
-    ));
-    assert!(!keyring_user_interaction_not_allowed_message(
-        "Platform secure storage failure: Item not found."
-    ));
-}
-
-#[test]
 fn save_preserves_existing_canonical_tokens() {
     let temp_dir = TempDir::new().unwrap();
     let (manager, _, _) = test_manager(&temp_dir);
@@ -391,7 +371,7 @@ fn canonical_file_wins_over_legacy_for_session_resolution() {
 }
 
 #[test]
-fn require_uses_canonical_file_token_when_keyring_is_unavailable() {
+fn require_uses_canonical_file_token_when_no_age_identity() {
     let _guard = env_lock().lock().unwrap();
     let _token_guard = EnvVarGuard::set(ENV_ATO_TOKEN, None);
     let temp_dir = TempDir::new().unwrap();
@@ -434,7 +414,15 @@ async fn persist_session_token_headless_uses_canonical_file_with_0600() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn persist_session_token_interactive_uses_keyring_without_creating_file() {
+#[allow(clippy::await_holding_lock)]
+async fn persist_session_token_interactive_falls_back_to_memory_without_identity() {
+    // Phase 2: interactive logins now default to the shared age file. With
+    // no identity initialized under the test's age_home, `AuthStore` falls
+    // back to its in-process memory cache and returns `Memory`. The canonical
+    // credentials file must not be touched.
+    let _serial = env_lock().lock().unwrap();
+    let _token_guard = EnvVarGuard::set(ENV_ATO_TOKEN, None);
+    let _cred_guard = EnvVarGuard::set(ENV_CRED_AUTH_SESSION_TOKEN, None);
     let temp_dir = TempDir::new().unwrap();
     let (manager, canonical_path, _) = test_manager(&temp_dir);
 
@@ -443,13 +431,51 @@ async fn persist_session_token_interactive_uses_keyring_without_creating_file() 
         .await
         .unwrap();
 
-    assert_eq!(storage, TokenStorageLocation::OsKeyring);
+    assert_eq!(storage, TokenStorageLocation::Memory);
     assert!(!canonical_path.exists());
+    // Subsequent reads resolve the value from the in-process memory cache
+    // that AuthStore keeps alive via its `Arc` backends.
     assert_eq!(
-        manager
-            .load_keyring_token(&manager.keyring_session_account)
-            .unwrap()
-            .as_deref(),
+        manager.resolve_session_token().unwrap().as_deref(),
         Some("interactive-token")
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)]
+async fn persist_session_token_interactive_writes_to_age_when_identity_loaded() {
+    // With an age identity initialized at the test's age_home, interactive
+    // logins should land in the age file and subsequent reads resolve
+    // through the chain.
+    //
+    // NOTE: `AuthManager` caches its `AuthStore` eagerly (so the in-process
+    // memory backend survives across calls). The identity must therefore be
+    // initialized BEFORE constructing the manager — otherwise the cached
+    // store sees `age_exists = false` and downgrades to the memory backend.
+    let _serial = env_lock().lock().unwrap();
+    let _token_guard = EnvVarGuard::set(ENV_ATO_TOKEN, None);
+    let _cred_guard = EnvVarGuard::set(ENV_CRED_AUTH_SESSION_TOKEN, None);
+    let temp_dir = TempDir::new().unwrap();
+    // `test_manager` places files at `<tempdir>/{config,home}/...`, which
+    // `derive_test_age_home` resolves to `<tempdir>` itself.
+    let age = crate::application::credential::AgeFileBackend::new(temp_dir.path().to_path_buf());
+    age.init_identity(None).unwrap();
+
+    let (manager, canonical_path, _) = test_manager(&temp_dir);
+
+    let storage = manager
+        .persist_session_token("interactive-token".to_string(), false)
+        .await
+        .unwrap();
+
+    assert_eq!(storage, TokenStorageLocation::AgeFile);
+    assert!(!canonical_path.exists());
+    assert_eq!(
+        manager.resolve_session_token().unwrap().as_deref(),
+        Some("interactive-token")
+    );
+    assert!(manager
+        .age_home
+        .join(".ato/credentials/auth/session.age")
+        .exists());
 }
