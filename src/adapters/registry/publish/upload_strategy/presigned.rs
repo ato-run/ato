@@ -11,6 +11,54 @@ use super::{
     UploadPreflightRequest, UploadSession, UploadStrategy,
 };
 
+fn describe_store_response(
+    status: reqwest::StatusCode,
+    response: reqwest::blocking::Response,
+) -> String {
+    let cf_ray = response
+        .headers()
+        .get("cf-ray")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let body = response.text().unwrap_or_default();
+
+    let parsed: Option<serde_json::Value> = serde_json::from_str(&body).ok();
+    let (error_code, message) = match &parsed {
+        Some(v) => (
+            v.get("error").and_then(|x| x.as_str()).map(String::from),
+            v.get("message").and_then(|x| x.as_str()).map(String::from),
+        ),
+        None => (None, None),
+    };
+
+    let mut parts = vec![format!("HTTP {}", status)];
+    match (error_code, message) {
+        (Some(e), Some(m)) if !m.is_empty() => parts.push(format!("{}: {}", e, m)),
+        (Some(e), _) => parts.push(e),
+        (_, Some(m)) if !m.is_empty() => parts.push(m),
+        _ if !body.trim().is_empty() => parts.push(body.trim().to_string()),
+        _ => {}
+    }
+    if let Some(id) = request_id {
+        parts.push(format!("request_id={}", id));
+    }
+    if let Some(ray) = cf_ray {
+        parts.push(format!("cf-ray={}", ray));
+    }
+    if status.is_server_error() {
+        parts.push(
+            "この障害はサーバー側の問題です。cf-ray / request_id を添えてサポートに連絡してください。"
+                .to_string(),
+        );
+    }
+    parts.join(" | ")
+}
+
 pub(crate) struct PresignedUploadSession {
     pub(crate) capsule_id: String,
     pub(crate) version: String,
@@ -223,10 +271,10 @@ fn fetch_publisher_identity(registry_url: &str) -> Result<PublisherIdentityRespo
     .context("Failed to fetch publisher identity")?;
 
     if !response.status().is_success() {
+        let status = response.status();
         bail!(
-            "Failed to resolve publisher identity (HTTP {}): {}",
-            response.status(),
-            response.text().unwrap_or_default()
+            "Failed to resolve publisher identity: {}",
+            describe_store_response(status, response)
         );
     }
 
@@ -282,10 +330,10 @@ fn resolve_or_create_capsule_id(
     }
 
     if response.status() != reqwest::StatusCode::NOT_FOUND {
+        let status = response.status();
         bail!(
-            "Scoped capsule lookup failed (HTTP {}): {}",
-            response.status(),
-            response.text().unwrap_or_default()
+            "Scoped capsule lookup failed: {}",
+            describe_store_response(status, response)
         );
     }
 
@@ -316,10 +364,10 @@ fn resolve_or_create_capsule_id(
         return resolve_or_create_capsule_id_retry_lookup(registry_url, artifact);
     }
 
+    let status = create_response.status();
     bail!(
-        "Create capsule failed (HTTP {}): {}",
-        create_response.status(),
-        create_response.text().unwrap_or_default()
+        "Create capsule failed: {}",
+        describe_store_response(status, create_response)
     )
 }
 
@@ -340,10 +388,10 @@ fn resolve_or_create_capsule_id_retry_lookup(
     .send()
     .context("Failed to re-fetch capsule after slug conflict")?;
     if !response.status().is_success() {
+        let status = response.status();
         bail!(
-            "Scoped capsule lookup after slug conflict failed (HTTP {}): {}",
-            response.status(),
-            response.text().unwrap_or_default()
+            "Scoped capsule lookup after slug conflict failed: {}",
+            describe_store_response(status, response)
         );
     }
     response
@@ -400,10 +448,10 @@ fn create_release(
     }
 
     if !response.status().is_success() {
+        let status = response.status();
         bail!(
-            "Create release failed (HTTP {}): {}",
-            response.status(),
-            response.text().unwrap_or_default()
+            "Create release failed: {}",
+            describe_store_response(status, response)
         );
     }
 
