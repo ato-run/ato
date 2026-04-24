@@ -1,51 +1,91 @@
 use anyhow::{Context, Result};
-use keyring::{Entry, Error as KeyringError};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-#[cfg(test)]
-use super::TEST_KEYRING;
+use super::credential_store::{AuthStore, WriteLocation};
 use super::{
     read_env_non_empty, AuthManager, Credentials, CANONICAL_CREDENTIALS_DIR,
-    CANONICAL_CREDENTIALS_FILE, ENV_ATO_TOKEN, ENV_XDG_CONFIG_HOME, KEYRING_GITHUB_ACCOUNT,
-    KEYRING_SERVICE_NAME, KEYRING_SESSION_ACCOUNT, LEGACY_CREDENTIALS_DIR, LEGACY_CREDENTIALS_FILE,
+    CANONICAL_CREDENTIALS_FILE, ENV_XDG_CONFIG_HOME, LEGACY_CREDENTIALS_DIR,
+    LEGACY_CREDENTIALS_FILE,
 };
 
+/// Physical destination of a freshly persisted token.
+///
+/// Phase 5: OS keyring has been removed entirely. New tokens land in the
+/// shared age file (`AgeFile`), the canonical TOML file (headless), or the
+/// in-process memory cache as a last-resort fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TokenStorageLocation {
-    OsKeyring,
+    /// Shared encrypted age file at `~/.ato/credentials/auth/session.age` (or
+    /// `auth/github.age`).
+    AgeFile,
+    /// Canonical TOML metadata file — used in headless mode and when the age
+    /// identity isn't unlocked.
     CanonicalFile,
+    /// In-process memory cache only. Reached when no age identity is
+    /// available; surfaced so the UI can warn the user their token will not
+    /// survive the process.
+    Memory,
+}
+
+impl TokenStorageLocation {
+    pub(super) fn display(&self) -> &'static str {
+        match self {
+            TokenStorageLocation::AgeFile => "age file",
+            TokenStorageLocation::CanonicalFile => "credentials file",
+            TokenStorageLocation::Memory => "in-memory cache (age identity not loaded)",
+        }
+    }
+
+    fn from_write_location(loc: WriteLocation) -> Self {
+        match loc {
+            WriteLocation::AgeFile => TokenStorageLocation::AgeFile,
+            WriteLocation::Memory => TokenStorageLocation::Memory,
+        }
+    }
 }
 
 impl AuthManager {
-    /// Create a new AuthManager with default credentials path
+    /// Create a new AuthManager with default credentials path.
     pub fn new() -> Result<Self> {
         let home = dirs::home_dir().context("Cannot determine home directory")?;
         let credentials_path = canonical_credentials_path(&home);
         let legacy_credentials_path = legacy_credentials_path(&home);
+        let auth_store = Arc::new(AuthStore::open_for_home(&home)?);
         Ok(Self {
             credentials_path,
             legacy_credentials_path,
-            keyring_service: KEYRING_SERVICE_NAME.to_string(),
-            keyring_session_account: KEYRING_SESSION_ACCOUNT.to_string(),
-            keyring_github_account: KEYRING_GITHUB_ACCOUNT.to_string(),
+            age_home: home,
+            auth_store,
         })
     }
 
     #[cfg(test)]
     pub fn with_paths(credentials_path: PathBuf, legacy_credentials_path: PathBuf) -> Self {
-        let suffix =
-            hex::encode(blake3::hash(credentials_path.to_string_lossy().as_bytes()).as_bytes())
-                .chars()
-                .take(8)
-                .collect::<String>();
+        // Age backends are per-temp-dir so tests don't share encrypted state.
+        // Anchor the temp home on the canonical path's great-grandparent when
+        // possible (the tests use `<temp>/config/ato/credentials.toml`), else
+        // the legacy path's grandparent (`<temp>/home/.ato/...`).
+        let age_home = derive_test_age_home(&credentials_path, &legacy_credentials_path);
+        let auth_store = Arc::new(
+            AuthStore::open_for_home(&age_home).expect("build AuthStore for test AuthManager"),
+        );
         Self {
             credentials_path,
             legacy_credentials_path,
-            keyring_service: format!("{}.test", KEYRING_SERVICE_NAME),
-            keyring_session_account: format!("{}-{}", KEYRING_SESSION_ACCOUNT, suffix),
-            keyring_github_account: format!("{}-{}", KEYRING_GITHUB_ACCOUNT, suffix),
+            age_home,
+            auth_store,
         }
+    }
+
+    /// Borrow the eagerly-constructed `AuthStore`.
+    ///
+    /// Returned by reference so every caller shares the same in-process
+    /// `MemoryBackend`; cloning the `Arc` is reserved for places (like
+    /// `spawn_blocking`) that need `'static` ownership.
+    pub(super) fn auth_store(&self) -> &AuthStore {
+        &self.auth_store
     }
 
     /// Load sanitized credentials metadata from canonical TOML or legacy JSON.
@@ -68,7 +108,7 @@ impl AuthManager {
 
         if creds.session_token.is_none() && creds.github_token.is_none() {
             anyhow::bail!(
-                "Not authenticated. Run:\n  ato login\n\nNo usable token found in ATO_TOKEN, OS keyring, {:?}, or {:?}",
+                "Not authenticated. Run:\n  ato login\n\nNo usable token found in ATO_TOKEN, age file, {:?}, or {:?}",
                 self.credentials_path,
                 self.legacy_credentials_path
             );
@@ -77,10 +117,13 @@ impl AuthManager {
         Ok(creds)
     }
 
-    /// Delete stored credentials (logout)
+    /// Delete stored credentials (logout).
+    ///
+    /// Purges every backend that might hold a token: memory cache and the age
+    /// file. Also deletes the canonical TOML credentials file. The legacy
+    /// `credentials.json` is intentionally left alone.
     pub fn delete(&self) -> Result<()> {
-        self.delete_keyring_token(&self.keyring_session_account)?;
-        self.delete_keyring_token(&self.keyring_github_account)?;
+        self.auth_store().delete_all_auth_tokens()?;
 
         if self.credentials_path.exists() {
             fs::remove_file(&self.credentials_path).with_context(|| {
@@ -102,127 +145,61 @@ impl AuthManager {
         &self.legacy_credentials_path
     }
 
-    pub(super) fn resolve_persisted_token<F>(
-        &self,
-        env_key: Option<&str>,
-        keyring_account: &str,
-        selector: F,
-    ) -> Result<Option<String>>
-    where
-        F: Fn(&Credentials) -> Option<&String>,
-    {
-        if let Some(key) = env_key {
-            if let Some(token) = read_env_non_empty(key) {
-                return Ok(Some(token));
-            }
-        }
-        if let Some(token) = self.load_keyring_token(keyring_account)? {
+    pub(super) fn resolve_session_token(&self) -> Result<Option<String>> {
+        // `ATO_TOKEN` is handled inside `EnvBackend` as a legacy alias for
+        // `ATO_CRED_AUTH_SESSION__SESSION_TOKEN`, so reading through the
+        // AuthStore chain honors both forms without a dedicated check here.
+        if let Some(token) = self.auth_store().get_session_token()? {
             return Ok(Some(token));
         }
-        if let Some(creds) = self.load_canonical_credentials()? {
-            if let Some(token) = selector(&creds).filter(|value| !value.trim().is_empty()) {
-                return Ok(Some(token.clone()));
-            }
+
+        if let Some(token) = self
+            .load_canonical_credentials()?
+            .and_then(|c| nonempty(c.session_token))
+        {
+            return Ok(Some(token));
         }
-        if let Some(creds) = self.load_legacy_credentials()? {
-            if let Some(token) = selector(&creds).filter(|value| !value.trim().is_empty()) {
-                return Ok(Some(token.clone()));
-            }
+        if let Some(token) = self
+            .load_legacy_credentials()?
+            .and_then(|c| nonempty(c.session_token))
+        {
+            return Ok(Some(token));
         }
         Ok(None)
     }
 
-    pub(super) fn resolve_session_token(&self) -> Result<Option<String>> {
-        self.resolve_persisted_token(
-            Some(ENV_ATO_TOKEN),
-            &self.keyring_session_account,
-            |creds| creds.session_token.as_ref(),
-        )
-    }
-
     pub(super) fn resolve_github_token(&self) -> Result<Option<String>> {
-        self.resolve_persisted_token(None, &self.keyring_github_account, |creds| {
-            creds.github_token.as_ref()
-        })
-    }
-
-    pub(super) async fn save_keyring_token_async(
-        &self,
-        account: &str,
-        token: String,
-    ) -> Result<()> {
-        #[cfg(test)]
-        if self.is_test_keyring() {
-            self.test_keyring_set(account, &token);
-            return Ok(());
+        if let Some(token) = self.auth_store().get_github_token()? {
+            return Ok(Some(token));
         }
 
-        let service = self.keyring_service.clone();
-        let account = account.to_string();
-        tokio::task::spawn_blocking(move || {
-            let entry = Entry::new(&service, &account)
-                .map_err(|err| anyhow::anyhow!(format_keyring_error_message("save", &err)))?;
-            entry
-                .set_password(&token)
-                .map_err(|err| anyhow::anyhow!(format_keyring_error_message("save", &err)))
-        })
-        .await
-        .map_err(|err| anyhow::anyhow!("Keyring worker failed: {err}"))?
+        if let Some(token) = self
+            .load_canonical_credentials()?
+            .and_then(|c| nonempty(c.github_token))
+        {
+            return Ok(Some(token));
+        }
+        if let Some(token) = self
+            .load_legacy_credentials()?
+            .and_then(|c| nonempty(c.github_token))
+        {
+            return Ok(Some(token));
+        }
+        Ok(None)
     }
 
-    pub(super) async fn save_session_token_async(&self, token: String) -> Result<()> {
-        self.save_keyring_token_async(&self.keyring_session_account, token)
+    pub(super) async fn save_session_token_async(&self, token: String) -> Result<WriteLocation> {
+        let store = self.auth_store.clone();
+        tokio::task::spawn_blocking(move || store.set_session_token(&token))
             .await
+            .map_err(|err| anyhow::anyhow!("credential worker failed: {err}"))?
     }
 
-    pub(super) async fn save_github_token_async(&self, token: String) -> Result<()> {
-        self.save_keyring_token_async(&self.keyring_github_account, token)
+    pub(super) async fn save_github_token_async(&self, token: String) -> Result<WriteLocation> {
+        let store = self.auth_store.clone();
+        tokio::task::spawn_blocking(move || store.set_github_token(&token))
             .await
-    }
-
-    fn keyring_entry(&self, account: &str) -> Result<Entry> {
-        Entry::new(&self.keyring_service, account)
-            .with_context(|| "Failed to initialize OS keyring entry")
-    }
-
-    pub(super) fn load_keyring_token(&self, account: &str) -> Result<Option<String>> {
-        #[cfg(test)]
-        if self.is_test_keyring() {
-            return Ok(self.test_keyring_get(account));
-        }
-        let entry = match self.keyring_entry(account) {
-            Ok(entry) => entry,
-            Err(err) if self.is_nonfatal_keyring_access_error(err.as_ref()) => return Ok(None),
-            Err(err) => return Err(err),
-        };
-        match entry.get_password() {
-            Ok(value) => Ok(Some(value)),
-            Err(KeyringError::NoEntry) => Ok(None),
-            Err(err) if self.is_nonfatal_keyring_error(&err) => Ok(None),
-            Err(err) => Err(self.keyring_error(err, "load")),
-        }
-    }
-
-    fn delete_keyring_token(&self, account: &str) -> Result<()> {
-        #[cfg(test)]
-        if self.is_test_keyring() {
-            self.test_keyring_delete(account);
-            return Ok(());
-        }
-        let entry = match self.keyring_entry(account) {
-            Ok(entry) => entry,
-            Err(err) if self.is_nonfatal_keyring_access_error(err.as_ref()) => return Ok(()),
-            Err(err) => return Err(err),
-        };
-        match entry.delete_password() {
-            Ok(_) | Err(KeyringError::NoEntry) => Ok(()),
-            Err(err) if self.is_nonfatal_keyring_error(&err) => Ok(()),
-            Err(err) => Err(self.keyring_error(err, "delete")),
-        }
-    }
-
-    fn keyring_error(&self, err: KeyringError, action: &str) -> anyhow::Error {
-        anyhow::anyhow!(format_keyring_error_message(action, &err))
+            .map_err(|err| anyhow::anyhow!("credential worker failed: {err}"))?
     }
 
     pub(super) fn write_canonical_credentials(&self, creds: &Credentials) -> Result<()> {
@@ -249,14 +226,18 @@ impl AuthManager {
         if self.credentials_path.exists() || self.legacy_credentials_path.exists() {
             return Ok(true);
         }
-        Ok(self
-            .load_keyring_token(&self.keyring_session_account)?
-            .is_some()
-            || self
-                .load_keyring_token(&self.keyring_github_account)?
-                .is_some())
+        let store = self.auth_store();
+        Ok(store.get_session_token()?.is_some() || store.get_github_token()?.is_some())
     }
 
+    /// Persist a fresh session token.
+    ///
+    /// - **Headless**: writes the token into the canonical credentials TOML
+    ///   so shell redirection and CI can round-trip the value through a
+    ///   persistent file. This path never touches the age backend.
+    /// - **Interactive**: hands the token to `AuthStore`, which prefers the
+    ///   age file but falls back to the in-process memory cache when the
+    ///   identity is unavailable (caller should hint at `ato secrets init`).
     pub(super) async fn persist_session_token(
         &self,
         token: String,
@@ -269,57 +250,8 @@ impl AuthManager {
             return Ok(TokenStorageLocation::CanonicalFile);
         }
 
-        self.save_session_token_async(token).await?;
-        Ok(TokenStorageLocation::OsKeyring)
-    }
-
-    #[cfg(test)]
-    pub(super) fn is_test_keyring(&self) -> bool {
-        self.keyring_service.ends_with(".test")
-    }
-
-    #[cfg(test)]
-    pub(super) fn test_keyring_get(&self, account: &str) -> Option<String> {
-        TEST_KEYRING
-            .get_or_init(Default::default)
-            .lock()
-            .expect("test keyring lock")
-            .get(&(self.keyring_service.clone(), account.to_string()))
-            .cloned()
-    }
-
-    #[cfg(test)]
-    pub(super) fn test_keyring_set(&self, account: &str, value: &str) {
-        TEST_KEYRING
-            .get_or_init(Default::default)
-            .lock()
-            .expect("test keyring lock")
-            .insert(
-                (self.keyring_service.clone(), account.to_string()),
-                value.to_string(),
-            );
-    }
-
-    #[cfg(test)]
-    pub(super) fn test_keyring_delete(&self, account: &str) {
-        TEST_KEYRING
-            .get_or_init(Default::default)
-            .lock()
-            .expect("test keyring lock")
-            .remove(&(self.keyring_service.clone(), account.to_string()));
-    }
-
-    fn is_nonfatal_keyring_error(&self, err: &KeyringError) -> bool {
-        matches!(
-            err,
-            KeyringError::PlatformFailure(_) | KeyringError::NoStorageAccess(_)
-        )
-    }
-
-    fn is_nonfatal_keyring_access_error(&self, err: &(dyn std::error::Error + 'static)) -> bool {
-        err.downcast_ref::<KeyringError>()
-            .map(|inner| self.is_nonfatal_keyring_error(inner))
-            .unwrap_or(false)
+        let location = self.save_session_token_async(token).await?;
+        Ok(TokenStorageLocation::from_write_location(location))
     }
 }
 
@@ -339,6 +271,30 @@ fn legacy_credentials_path(home: &Path) -> PathBuf {
         .join(LEGACY_CREDENTIALS_FILE)
 }
 
+#[cfg(test)]
+fn derive_test_age_home(canonical: &Path, legacy: &Path) -> PathBuf {
+    // In tests we need a dedicated "home" for the age backend so it writes
+    // under `<tempdir>/.ato/credentials/auth/...`. Both paths share the
+    // tempdir root (e.g. `<tempdir>/config/ato/...` and
+    // `<tempdir>/home/.ato/...`), so walk up until we find a segment literally
+    // named "config" or "home" and return its parent.
+    for p in canonical.ancestors().chain(legacy.ancestors()) {
+        let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if (name == "config" || name == "home") && p.parent().is_some() {
+            return p.parent().unwrap().to_path_buf();
+        }
+    }
+    // Last-resort: co-locate under the canonical file's directory so age
+    // data lives alongside the test's credentials file (and never escapes to
+    // a real filesystem root like `/`).
+    canonical
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| legacy.to_path_buf())
+}
+
 fn sanitize_credentials(mut creds: Credentials) -> Credentials {
     creds.session_token = None;
     creds.github_token = None;
@@ -352,6 +308,12 @@ pub(super) fn merge_metadata(target: &mut Credentials, incoming: &Credentials) {
     target.github_app_installation_id = incoming.github_app_installation_id;
     target.github_app_account_login = incoming.github_app_account_login.clone();
     target.github_username = incoming.github_username.clone();
+}
+
+fn nonempty(value: Option<String>) -> Option<String> {
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 fn read_toml_credentials_file(path: &Path) -> Result<Option<Credentials>> {
@@ -426,24 +388,4 @@ fn set_dir_permissions_if_supported(path: &Path) -> Result<()> {
     }
 
     Ok(())
-}
-
-pub(super) fn keyring_user_interaction_not_allowed_message(message: &str) -> bool {
-    message
-        .to_ascii_lowercase()
-        .contains("user interaction is not allowed")
-}
-
-fn format_keyring_error_message(action: &str, err: &KeyringError) -> String {
-    let err_text = err.to_string();
-    let mut message = format!("Failed to {} token in OS keyring ({}).", action, err_text);
-
-    if keyring_user_interaction_not_allowed_message(&err_text) {
-        message.push_str(
-            " macOS denied Keychain access. This usually means the login keychain is locked or this shell cannot show Keychain prompts (for example: ssh, tmux, sudo, launchd, or a backgrounded GUI session). Unlock the login keychain or allow your terminal app in Keychain Access, then retry.",
-        );
-    }
-
-    message.push_str(" Use ATO_TOKEN or `ato login --headless` for this environment.");
-    message
 }

@@ -1,16 +1,16 @@
-use std::io::Write as _;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use super::backend::{
-    load_identity_bytes, AgeFileBackend, BackendEntry, EnvBackend, MemoryBackend, SecretBackend,
-    SecretKey,
-};
 use super::policy::SecretPolicy;
+use crate::application::credential::{
+    self, backend::CredentialBackend, AgeFileBackend, BackendChain, BackendEntry, CredentialKey,
+    EnvBackend, MemoryBackend,
+};
 
 // ── Public types (kept for backward compat) ──────────────────────────────────
 
@@ -38,19 +38,18 @@ pub(crate) enum SecretScope {
 
 // ── SecretStore ───────────────────────────────────────────────────────────────
 
-/// The main handle for reading/writing secrets.
+/// Domain-layer handle for secrets (namespaces under `secrets/*`).
 ///
-/// Priority chain (highest to lowest):
-///   1. EnvBackend       – ATO_SECRET_* environment variables (CI/override)
-///   2. MemoryBackend    – in-process session cache
-///   3. AgeFileBackend   – ~/.ato/secrets/<ns>.age  (primary persistent)
+/// Wraps a shared `BackendChain` with the `secrets`-prefixed namespace map.
+/// Reads (`get`) go through the chain (default priority: env → memory → age).
+/// Writes (`set`/`delete`/`update_acl`) go directly to the persistent age
+/// backend.
+///
+/// External env overrides use `ATO_CRED_SECRETS_<SUB>__<KEY>`. The legacy
+/// `ATO_SECRET_*` form was removed in v0.5.
 pub(crate) struct SecretStore {
-    env: EnvBackend,
-    memory: MemoryBackend,
-    age: Option<AgeFileBackend>,
-    /// Configured backend resolution order (from `~/.ato/config.toml [secrets] backends`).
-    /// Default order: env → memory → age.
-    backend_order: Vec<String>,
+    chain: BackendChain,
+    age: Option<Arc<AgeFileBackend>>,
 }
 
 impl SecretStore {
@@ -62,40 +61,39 @@ impl SecretStore {
     /// `ato secrets init`.
     pub(crate) fn open() -> Result<Self> {
         let home = dirs::home_dir().context("failed to resolve home directory")?;
-        let memory = MemoryBackend::new(None);
-        let env = EnvBackend::new();
 
         let mut age_backend = AgeFileBackend::new(home.clone());
         let loaded = try_load_identity(&mut age_backend);
-        let age = if loaded { Some(age_backend) } else { None };
+        let age = if loaded {
+            Some(Arc::new(age_backend))
+        } else {
+            None
+        };
 
-        let backend_order = read_secrets_backend_order(&home)
-            .unwrap_or_else(|| vec!["env".into(), "memory".into(), "age".into()]);
+        let order =
+            credential::config::read_order(&home).unwrap_or_else(credential::config::default_order);
 
         Ok(Self {
-            env,
-            memory,
+            chain: build_chain(&order, age.clone()),
             age,
-            backend_order,
         })
     }
 
     /// Open with an already-unlocked age backend (used internally by `init` / `session`).
     #[cfg(test)]
     pub(crate) fn open_with_age(home: PathBuf, age_backend: AgeFileBackend) -> Result<Self> {
-        let backend_order = read_secrets_backend_order(&home)
-            .unwrap_or_else(|| vec!["env".into(), "memory".into(), "age".into()]);
+        let age = Some(Arc::new(age_backend));
+        let order =
+            credential::config::read_order(&home).unwrap_or_else(credential::config::default_order);
         Ok(Self {
-            env: EnvBackend::new(),
-            memory: MemoryBackend::new(None),
-            age: Some(age_backend),
-            backend_order,
+            chain: build_chain(&order, age.clone()),
+            age,
         })
     }
 
     /// Reference to the age backend, if loaded.
     pub(crate) fn age(&self) -> Option<&AgeFileBackend> {
-        self.age.as_ref()
+        self.age.as_deref()
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -108,17 +106,7 @@ impl SecretStore {
         allow: Option<Vec<String>>,
         deny: Option<Vec<String>>,
     ) -> Result<()> {
-        crate::common::env_security::check_user_env_safety(key, value)
-            .context("refused to store unsafe secret")?;
-
-        let sk = SecretKey::new(key);
-        match &self.age {
-            Some(age) => age.set(&sk, value.to_string(), description, allow, deny),
-            None => bail!(
-                "no age identity loaded — run `ato secrets init` to create one,\n\
-                 or `ato session start` to unlock an existing passphrase-protected identity"
-            ),
-        }
+        self.set_in_namespace(key, "default", value, description, allow, deny)
     }
 
     pub(crate) fn set_in_namespace(
@@ -133,9 +121,9 @@ impl SecretStore {
         crate::common::env_security::check_user_env_safety(key, value)
             .context("refused to store unsafe secret")?;
 
-        let sk = SecretKey::with_namespace(namespace, key);
+        let ck = CredentialKey::new(secrets_ns(namespace), key);
         match &self.age {
-            Some(age) => age.set(&sk, value.to_string(), description, allow, deny),
+            Some(age) => age.set(&ck, value.to_string(), description, allow, deny),
             None => bail!(
                 "no age identity loaded — run `ato secrets init` to create one,\n\
                  or `ato session start` to unlock an existing passphrase-protected identity"
@@ -144,36 +132,13 @@ impl SecretStore {
     }
 
     pub(crate) fn get(&self, key: &str) -> Result<Option<String>> {
-        let sk = SecretKey::new(key);
-        for backend in &self.backend_order {
-            let result = match backend.as_str() {
-                "env" => self.env.get(&sk)?,
-                "memory" => self.memory.get(&sk)?,
-                "age" => self.age.as_ref().and_then(|a| a.get(&sk).ok().flatten()),
-                "keychain" => None, // keychain no longer supported
-                _ => None,
-            };
-            if let Some(v) = result {
-                return Ok(Some(v));
-            }
-        }
-        Ok(None)
+        let ck = CredentialKey::new(secrets_ns("default"), key);
+        self.chain.get(&ck)
     }
 
     pub(crate) fn get_in_namespace(&self, key: &str, namespace: &str) -> Result<Option<String>> {
-        let sk = SecretKey::with_namespace(namespace, key);
-        for backend in &self.backend_order {
-            let result = match backend.as_str() {
-                "env" => self.env.get(&sk)?,
-                "memory" => self.memory.get(&sk)?,
-                "age" => self.age.as_ref().and_then(|a| a.get(&sk).ok().flatten()),
-                _ => None, // legacy doesn't support namespaces
-            };
-            if let Some(v) = result {
-                return Ok(Some(v));
-            }
-        }
-        Ok(None)
+        let ck = CredentialKey::new(secrets_ns(namespace), key);
+        self.chain.get(&ck)
     }
 
     /// Load a secret with ACL check for a specific capsule_id.
@@ -191,21 +156,22 @@ impl SecretStore {
     }
 
     pub(crate) fn delete(&self, key: &str) -> Result<()> {
-        let sk = SecretKey::new(key);
-        if let Some(age) = &self.age {
-            // Remove from all namespaces.
-            for ns in age.list_namespaces() {
-                let nsk = SecretKey::with_namespace(&ns, key);
-                age.delete(&nsk).ok();
-            }
-            // Also check default namespace explicitly.
-            age.delete(&sk).ok();
-            return Ok(());
+        let age = self.age.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no age identity loaded — run `ato secrets init` to create one,\n\
+                 or `ato session start` to unlock an existing passphrase-protected identity"
+            )
+        })?;
+        // Remove from every secrets sub-namespace.
+        for sub in age.list_sub_namespaces("secrets") {
+            let ck = CredentialKey::new(format!("secrets/{}", sub), key);
+            age.delete(&ck).ok();
         }
-        bail!(
-            "no age identity loaded — run `ato secrets init` to create one,\n\
-             or `ato session start` to unlock an existing passphrase-protected identity"
-        )
+        // Also remove from the default namespace explicitly (covers
+        // fresh-install case where no sub-ns file exists yet).
+        let default_key = CredentialKey::new(secrets_ns("default"), key);
+        age.delete(&default_key).ok();
+        Ok(())
     }
 
     pub(crate) fn list(&self) -> Result<Vec<SecretEntry>> {
@@ -213,17 +179,20 @@ impl SecretStore {
         let mut seen = std::collections::HashSet::new();
 
         if let Some(age) = &self.age {
-            for ns in age.list_namespaces() {
-                for be in age.list(&ns).unwrap_or_default() {
+            let subs = age.list_sub_namespaces("secrets");
+            if subs.is_empty() {
+                for be in age.list(&secrets_ns("default")).unwrap_or_default() {
                     if seen.insert(be.key.clone()) {
                         entries.push(backend_entry_to_secret_entry(be));
                     }
                 }
-            }
-            if age.list_namespaces().is_empty() {
-                for be in age.list("default").unwrap_or_default() {
-                    if seen.insert(be.key.clone()) {
-                        entries.push(backend_entry_to_secret_entry(be));
+            } else {
+                for sub in subs {
+                    let ns = format!("secrets/{}", sub);
+                    for be in age.list(&ns).unwrap_or_default() {
+                        if seen.insert(be.key.clone()) {
+                            entries.push(backend_entry_to_secret_entry(be));
+                        }
                     }
                 }
             }
@@ -248,9 +217,9 @@ impl SecretStore {
         allow: Option<Vec<String>>,
         deny: Option<Vec<String>>,
     ) -> Result<()> {
-        let sk = SecretKey::new(key);
+        let ck = CredentialKey::new(secrets_ns("default"), key);
         match &self.age {
-            Some(age) => age.update_acl(&sk, allow, deny),
+            Some(age) => age.update_acl(&ck, allow, deny),
             None => bail!(
                 "no age identity loaded — run `ato secrets init` to create one,\n\
                  or `ato session start` to unlock an existing passphrase-protected identity"
@@ -261,13 +230,42 @@ impl SecretStore {
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
+/// Prepend the `secrets/` domain prefix to a user-facing namespace name.
+///
+/// `"default"` → `"secrets/default"`, `"capsule:foo"` → `"secrets/capsule:foo"`.
+pub(crate) fn secrets_ns(user_facing: &str) -> String {
+    if user_facing.starts_with("secrets/") {
+        user_facing.to_string()
+    } else {
+        format!("secrets/{}", user_facing)
+    }
+}
+
+fn build_chain(order: &[String], age: Option<Arc<AgeFileBackend>>) -> BackendChain {
+    let mut backends: Vec<Arc<dyn CredentialBackend>> = Vec::new();
+    for name in order {
+        match name.as_str() {
+            "env" => backends.push(Arc::new(EnvBackend::new())),
+            "memory" => backends.push(Arc::new(MemoryBackend::new(None))),
+            "age" => {
+                if let Some(a) = &age {
+                    backends.push(a.clone() as Arc<dyn CredentialBackend>);
+                }
+            }
+            // Silently ignore unknown / deprecated names (e.g. legacy "keychain").
+            _ => {}
+        }
+    }
+    BackendChain::new(backends)
+}
+
 fn try_load_identity(age: &mut AgeFileBackend) -> bool {
     // Check for a session key file exported by `ato session start`.
     if let Ok(session_path) = std::env::var("ATO_SESSION_KEY_FILE") {
         let p = std::path::Path::new(&session_path);
         if p.exists() {
             if let Ok(raw) = std::fs::read(p) {
-                if let Ok(id) = load_identity_bytes(&raw, None) {
+                if let Ok(id) = credential::load_identity_bytes(&raw, None) {
                     age.install_identity(id);
                     return true;
                 }
@@ -281,28 +279,6 @@ fn try_load_identity(age: &mut AgeFileBackend) -> bool {
     // Try plain text (no passphrase).
     age.load_identity_with_passphrase(None).is_ok()
     // Passphrase-protected identities require `ato session start` or interactive init.
-}
-
-/// Read `~/.ato/config.toml` and return the `[secrets] backends` list if present.
-///
-/// Allowed backend names: `"env"`, `"memory"`, `"age"`.
-/// If the key is absent or the file doesn't exist, returns `None` (use default order).
-fn read_secrets_backend_order(home: &Path) -> Option<Vec<String>> {
-    let config_path = home.join(".ato").join("config.toml");
-    let raw = std::fs::read_to_string(config_path).ok()?;
-    let doc: toml::Value = raw.parse().ok()?;
-    let backends = doc
-        .get("secrets")?
-        .get("backends")?
-        .as_array()?
-        .iter()
-        .filter_map(|v| v.as_str().map(|s| s.to_ascii_lowercase()))
-        .collect::<Vec<_>>();
-    if backends.is_empty() {
-        None
-    } else {
-        Some(backends)
-    }
 }
 
 fn build_policy(entry: &SecretEntry) -> Result<SecretPolicy> {
@@ -329,12 +305,14 @@ fn backend_entry_to_secret_entry(be: BackendEntry) -> SecretEntry {
 }
 
 fn namespace_to_scope(ns: &str) -> SecretScope {
-    if ns == "default" {
+    // Strip the `secrets/` domain prefix before mapping to user-facing scope.
+    let sub = ns.strip_prefix("secrets/").unwrap_or(ns);
+    if sub == "default" {
         SecretScope::Global
-    } else if let Some(name) = ns.strip_prefix("capsule:") {
+    } else if let Some(name) = sub.strip_prefix("capsule:") {
         SecretScope::Capsule(name.to_string())
     } else {
-        SecretScope::Capsule(ns.to_string())
+        SecretScope::Capsule(sub.to_string())
     }
 }
 
@@ -357,51 +335,10 @@ fn read_env_file(path: &Path) -> Result<Vec<(String, String)>> {
     Ok(pairs)
 }
 
-/// Write a file with 0600 permissions, using an atomic temp-rename.
+/// Write a file with 0600 permissions. Thin forwarder kept for callers that
+/// imported from `secrets::store::write_secure_file`.
 pub(crate) fn write_secure_file(path: &Path, contents: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("secrets path must have a parent directory")?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create directory {}", parent.display()))?;
-
-    let tmp_path = path.with_extension("tmp");
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .open(&tmp_path)
-            .with_context(|| format!("failed to open {}", tmp_path.display()))?;
-        file.write_all(contents)
-            .with_context(|| format!("failed to write {}", tmp_path.display()))?;
-        file.flush()
-            .with_context(|| format!("failed to flush {}", tmp_path.display()))?;
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("failed to chmod {}", tmp_path.display()))?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        let mut file = std::fs::File::create(&tmp_path)
-            .with_context(|| format!("failed to open {}", tmp_path.display()))?;
-        file.write_all(contents)
-            .with_context(|| format!("failed to write {}", tmp_path.display()))?;
-        file.flush()
-            .with_context(|| format!("failed to flush {}", tmp_path.display()))?;
-    }
-
-    std::fs::rename(&tmp_path, path).with_context(|| {
-        format!(
-            "failed to rename {} → {}",
-            tmp_path.display(),
-            path.display()
-        )
-    })
+    credential::write_secure_file(path, contents)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -409,7 +346,6 @@ pub(crate) fn write_secure_file(path: &Path, contents: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::secrets::backend::AgeFileBackend;
     use tempfile::TempDir;
 
     fn init_store(dir: &TempDir) -> SecretStore {
@@ -446,12 +382,28 @@ mod tests {
         // Store value in age backend.
         store.set("MY_KEY", "age-value", None, None, None).unwrap();
 
-        // Inject env override.
-        std::env::set_var("ATO_SECRET_MY_KEY", "env-value");
+        // New env var form: ATO_CRED_SECRETS_DEFAULT__<KEY>
+        std::env::set_var("ATO_CRED_SECRETS_DEFAULT__MY_KEY", "env-value");
         let result = store.get("MY_KEY").unwrap();
-        std::env::remove_var("ATO_SECRET_MY_KEY");
+        std::env::remove_var("ATO_CRED_SECRETS_DEFAULT__MY_KEY");
 
         assert_eq!(result, Some("env-value".to_string()));
+    }
+
+    #[test]
+    fn legacy_ato_secret_env_is_ignored() {
+        // Breaking change: ATO_SECRET_* must no longer override.
+        let dir = TempDir::new().unwrap();
+        let store = init_store(&dir);
+        store
+            .set("BREAKING_KEY", "age-value", None, None, None)
+            .unwrap();
+
+        std::env::set_var("ATO_SECRET_BREAKING_KEY", "legacy-value");
+        let got = store.get("BREAKING_KEY").unwrap();
+        std::env::remove_var("ATO_SECRET_BREAKING_KEY");
+
+        assert_eq!(got, Some("age-value".to_string()));
     }
 
     // ── namespace ─────────────────────────────────────────────────────────────

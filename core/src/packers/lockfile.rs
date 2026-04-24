@@ -5,10 +5,12 @@ use std::sync::Arc;
 use chrono::Utc;
 use serde::Serialize;
 
+use crate::common::platform::bun_platform_triple;
 use crate::error::{CapsuleError, Result};
 use crate::lockfile::CAPSULE_LOCK_FILE_NAME;
 use crate::manifest;
 use crate::packers::payload;
+use crate::packers::runtime_fetcher::RuntimeFetcher;
 use crate::reporter::CapsuleReporter;
 
 const LOCKFILE_VERSION: &str = "1";
@@ -356,25 +358,7 @@ pub fn write_lockfile(
 }
 
 fn detect_platform() -> Result<(String, String)> {
-    let os = if cfg!(target_os = "linux") {
-        "linux"
-    } else if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "windows") {
-        "windows"
-    } else {
-        return Err(CapsuleError::Pack("Unsupported OS".to_string()));
-    };
-
-    let arch = if cfg!(target_arch = "x86_64") {
-        "x86_64"
-    } else if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else {
-        return Err(CapsuleError::Pack("Unsupported architecture".to_string()));
-    };
-
-    Ok((os.to_string(), arch.to_string()))
+    RuntimeFetcher::detect_platform()
 }
 
 fn reproducible_created_at() -> chrono::DateTime<Utc> {
@@ -382,8 +366,7 @@ fn reproducible_created_at() -> chrono::DateTime<Utc> {
         .ok()
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(0);
-    chrono::DateTime::<Utc>::from_timestamp(epoch, 0)
-        .unwrap_or_else(|| chrono::DateTime::<Utc>::from_timestamp(0, 0).expect("unix epoch"))
+    chrono::DateTime::<Utc>::from_timestamp(epoch, 0).unwrap_or_default()
 }
 
 fn target_triple(os: &str, arch: &str) -> Result<String> {
@@ -402,17 +385,6 @@ fn target_triple(os: &str, arch: &str) -> Result<String> {
         }
     };
     Ok(triple.to_string())
-}
-
-fn bun_platform_triple(rust_triple: &str) -> Option<&'static str> {
-    match rust_triple {
-        "aarch64-apple-darwin" => Some("darwin-aarch64"),
-        "x86_64-apple-darwin" => Some("darwin-x86_64"),
-        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" => Some("linux-x64"),
-        "aarch64-unknown-linux-gnu" | "aarch64-unknown-linux-musl" => Some("linux-aarch64"),
-        "x86_64-pc-windows-msvc" => Some("windows-x64.exe"),
-        _ => None,
-    }
 }
 
 fn detect_languages(

@@ -3,8 +3,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
 use serde::Serialize;
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(Debug, Clone, Copy)]
 struct Args {
@@ -30,11 +31,11 @@ fn main() -> Result<()> {
 
 fn run(args: Args) -> Result<()> {
     if args.files == 0 {
-        bail!("--files must be greater than zero");
+        return Err("--files must be greater than zero".into());
     }
 
     let total_started = Instant::now();
-    let tmp = tempfile::tempdir().context("create tempdir")?;
+    let tmp = tempfile::tempdir().map_err(|e| format!("create tempdir: {e}"))?;
     let project_root = tmp.path();
     let manifest_path = project_root.join("capsule.toml");
     let lockfile_path = project_root.join("capsule.lock");
@@ -50,7 +51,7 @@ type = "app"
 runtime = "source/native"
 run = "source/group-000/file-000000.txt""#,
     )
-    .context("write capsule.toml")?;
+    .map_err(|e| format!("write capsule.toml: {e}"))?;
     fs::write(
         &lockfile_path,
         r#"version = "1"
@@ -60,10 +61,10 @@ created_at = "2026-01-01T00:00:00Z"
 manifest_hash = "sha256:dummy"
 "#,
     )
-    .context("write capsule.lock")?;
+    .map_err(|e| format!("write capsule.lock: {e}"))?;
 
     let generated_bytes = generate_source_tree(project_root, args.files, args.size_bytes)
-        .context("generate source tree")?;
+        .map_err(|e| format!("generate source tree: {e}"))?;
     let generate_elapsed = generate_started.elapsed();
 
     let config_json = Arc::new(capsule_core::runtime_config::generate_config(
@@ -73,21 +74,21 @@ manifest_hash = "sha256:dummy"
     )?);
     let config_path =
         capsule_core::runtime_config::write_config(&manifest_path, config_json.as_ref())
-            .context("write config.json")?;
+            .map_err(|e| format!("write config.json: {e}"))?;
 
     let decision = capsule_core::router::route_manifest(
         &manifest_path,
         capsule_core::router::ExecutionProfile::Release,
         None,
     )
-    .context("route manifest")?;
+    .map_err(|e| format!("route manifest: {e}"))?;
 
     let output = project_root.join("tar-pack-bench.capsule");
     let pack_started = Instant::now();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .context("build tokio runtime")?;
+        .map_err(|e| format!("build tokio runtime: {e}"))?;
     let artifact_path = runtime
         .block_on(capsule_core::packers::capsule::pack(
             &decision.plan,
@@ -102,10 +103,10 @@ manifest_hash = "sha256:dummy"
             },
             Arc::new(capsule_core::reporter::NoOpReporter),
         ))
-        .context("pack capsule")?;
+        .map_err(|e| format!("pack capsule: {e}"))?;
     let pack_elapsed = pack_started.elapsed();
     let artifact_bytes = fs::metadata(&artifact_path)
-        .with_context(|| format!("stat artifact {}", artifact_path.display()))?
+        .map_err(|e| format!("stat artifact {}: {e}", artifact_path.display()))?
         .len();
 
     let result = BenchResult {
@@ -125,11 +126,11 @@ manifest_hash = "sha256:dummy"
 fn generate_source_tree(root: &Path, files: usize, size_bytes: usize) -> Result<u64> {
     let source_root = root.join("source");
     fs::create_dir_all(&source_root)
-        .with_context(|| format!("create {}", source_root.display()))?;
+        .map_err(|e| format!("create {}: {e}", source_root.display()))?;
 
     for shard in 0..256usize {
         let dir = source_root.join(format!("group-{shard:03}"));
-        fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     }
 
     let payload = vec![b'x'; size_bytes];
@@ -137,7 +138,7 @@ fn generate_source_tree(root: &Path, files: usize, size_bytes: usize) -> Result<
         let dir = source_root.join(format!("group-{:03}", idx % 256));
         let file_path = dir.join(format!("file-{idx:06}.txt"));
         fs::write(&file_path, &payload)
-            .with_context(|| format!("write {}", file_path.display()))?;
+            .map_err(|e| format!("write {}: {e}", file_path.display()))?;
     }
 
     Ok((files as u64) * (size_bytes as u64))
@@ -151,18 +152,22 @@ fn parse_args() -> Result<Args> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--files" => {
-                let value = args.next().context("--files requires a value")?;
-                files = value.parse().context("invalid --files value")?;
+                let value = args.next().ok_or("--files requires a value")?;
+                files = value
+                    .parse()
+                    .map_err(|e| format!("invalid --files value: {e}"))?;
             }
             "--size-bytes" => {
-                let value = args.next().context("--size-bytes requires a value")?;
-                size_bytes = value.parse().context("invalid --size-bytes value")?;
+                let value = args.next().ok_or("--size-bytes requires a value")?;
+                size_bytes = value
+                    .parse()
+                    .map_err(|e| format!("invalid --size-bytes value: {e}"))?;
             }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
             }
-            other => bail!("unknown argument: {}", other),
+            other => return Err(format!("unknown argument: {other}").into()),
         }
     }
 

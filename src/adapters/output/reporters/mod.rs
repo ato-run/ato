@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use std::io::{IsTerminal, Write};
 
+use capsule_core::error::{CapsuleError, Result};
 use capsule_core::{CapsuleReporter, UnifiedMetrics, UsageReporter};
 
 use crate::application::ports::output::OutputPort;
@@ -38,14 +39,14 @@ impl OutputPort for CliReporter {
 
 #[async_trait]
 impl UsageReporter for CliReporter {
-    async fn report_sample(&self, metrics: &UnifiedMetrics) -> anyhow::Result<()> {
+    async fn report_sample(&self, metrics: &UnifiedMetrics) -> Result<()> {
         match self {
             Self::Text(reporter) => reporter.report_sample(metrics).await,
             Self::Json(reporter) => reporter.report_sample(metrics).await,
         }
     }
 
-    async fn report_final(&self, metrics: &UnifiedMetrics) -> anyhow::Result<()> {
+    async fn report_final(&self, metrics: &UnifiedMetrics) -> Result<()> {
         match self {
             Self::Text(reporter) => reporter.report_final(metrics).await,
             Self::Json(reporter) => reporter.report_final(metrics).await,
@@ -55,35 +56,35 @@ impl UsageReporter for CliReporter {
 
 #[async_trait]
 impl CapsuleReporter for CliReporter {
-    async fn notify(&self, message: String) -> anyhow::Result<()> {
+    async fn notify(&self, message: String) -> Result<()> {
         match self {
             Self::Text(reporter) => reporter.notify(message).await,
             Self::Json(reporter) => reporter.notify(message).await,
         }
     }
 
-    async fn warn(&self, message: String) -> anyhow::Result<()> {
+    async fn warn(&self, message: String) -> Result<()> {
         match self {
             Self::Text(reporter) => reporter.warn(message).await,
             Self::Json(reporter) => reporter.warn(message).await,
         }
     }
 
-    async fn progress_start(&self, label: String, total: Option<u64>) -> anyhow::Result<()> {
+    async fn progress_start(&self, label: String, total: Option<u64>) -> Result<()> {
         match self {
             Self::Text(reporter) => reporter.progress_start(label, total).await,
             Self::Json(reporter) => reporter.progress_start(label, total).await,
         }
     }
 
-    async fn progress_inc(&self, amount: u64) -> anyhow::Result<()> {
+    async fn progress_inc(&self, amount: u64) -> Result<()> {
         match self {
             Self::Text(reporter) => reporter.progress_inc(amount).await,
             Self::Json(reporter) => reporter.progress_inc(amount).await,
         }
     }
 
-    async fn progress_finish(&self, message: Option<String>) -> anyhow::Result<()> {
+    async fn progress_finish(&self, message: Option<String>) -> Result<()> {
         match self {
             Self::Text(reporter) => reporter.progress_finish(message).await,
             Self::Json(reporter) => reporter.progress_finish(message).await,
@@ -98,7 +99,7 @@ enum TextStream {
 }
 
 impl TextStream {
-    fn print_line(self, message: &str) -> anyhow::Result<()> {
+    fn print_line(self, message: &str) -> Result<()> {
         match self {
             Self::Stdout => println!("{}", message),
             Self::Stderr => eprintln!("{}", message),
@@ -106,7 +107,7 @@ impl TextStream {
         Ok(())
     }
 
-    fn write_progress_start(self, label: &str, total: Option<u64>) -> anyhow::Result<()> {
+    fn write_progress_start(self, label: &str, total: Option<u64>) -> Result<()> {
         match self {
             Self::Stdout => {
                 if std::io::stdout().is_terminal() {
@@ -115,7 +116,7 @@ impl TextStream {
                     } else {
                         print!("\r{}", label);
                     }
-                    std::io::stdout().flush()?;
+                    std::io::stdout().flush().map_err(CapsuleError::Io)?;
                 } else if let Some(total) = total {
                     println!("{} ({} bytes)", label, total);
                 } else {
@@ -129,7 +130,7 @@ impl TextStream {
                     } else {
                         eprint!("\r{}", label);
                     }
-                    std::io::stderr().flush()?;
+                    std::io::stderr().flush().map_err(CapsuleError::Io)?;
                 } else if let Some(total) = total {
                     eprintln!("{} ({} bytes)", label, total);
                 } else {
@@ -140,7 +141,7 @@ impl TextStream {
         Ok(())
     }
 
-    fn write_progress_finish(self, message: Option<String>) -> anyhow::Result<()> {
+    fn write_progress_finish(self, message: Option<String>) -> Result<()> {
         match self {
             Self::Stdout => {
                 if std::io::stdout().is_terminal() {
@@ -148,7 +149,7 @@ impl TextStream {
                     if let Some(message) = message {
                         println!("{}", message);
                     } else {
-                        std::io::stdout().flush()?;
+                        std::io::stdout().flush().map_err(CapsuleError::Io)?;
                     }
                 } else if let Some(message) = message {
                     println!("{}", message);
@@ -160,7 +161,7 @@ impl TextStream {
                     if let Some(message) = message {
                         eprintln!("{}", message);
                     } else {
-                        std::io::stderr().flush()?;
+                        std::io::stderr().flush().map_err(CapsuleError::Io)?;
                     }
                 } else if let Some(message) = message {
                     eprintln!("{}", message);
@@ -178,11 +179,11 @@ pub struct TextReporter {
 
 #[async_trait]
 impl UsageReporter for TextReporter {
-    async fn report_sample(&self, _metrics: &UnifiedMetrics) -> anyhow::Result<()> {
+    async fn report_sample(&self, _metrics: &UnifiedMetrics) -> Result<()> {
         Ok(())
     }
 
-    async fn report_final(&self, metrics: &UnifiedMetrics) -> anyhow::Result<()> {
+    async fn report_final(&self, metrics: &UnifiedMetrics) -> Result<()> {
         self.stream.print_line(&format!(
             "📈 Metrics: session={}, duration_ms={}, peak_memory_bytes={}",
             metrics.session_id, metrics.resources.duration_ms, metrics.resources.peak_memory_bytes
@@ -192,24 +193,24 @@ impl UsageReporter for TextReporter {
 
 #[async_trait]
 impl CapsuleReporter for TextReporter {
-    async fn notify(&self, message: String) -> anyhow::Result<()> {
+    async fn notify(&self, message: String) -> Result<()> {
         self.stream.print_line(&message)
     }
 
-    async fn warn(&self, message: String) -> anyhow::Result<()> {
+    async fn warn(&self, message: String) -> Result<()> {
         eprintln!("{}", message);
         Ok(())
     }
 
-    async fn progress_start(&self, label: String, total: Option<u64>) -> anyhow::Result<()> {
+    async fn progress_start(&self, label: String, total: Option<u64>) -> Result<()> {
         self.stream.write_progress_start(&label, total)
     }
 
-    async fn progress_inc(&self, _amount: u64) -> anyhow::Result<()> {
+    async fn progress_inc(&self, _amount: u64) -> Result<()> {
         Ok(())
     }
 
-    async fn progress_finish(&self, message: Option<String>) -> anyhow::Result<()> {
+    async fn progress_finish(&self, message: Option<String>) -> Result<()> {
         self.stream.write_progress_finish(message)
     }
 }
@@ -219,11 +220,11 @@ pub struct JsonReporter;
 
 #[async_trait]
 impl UsageReporter for JsonReporter {
-    async fn report_sample(&self, _metrics: &UnifiedMetrics) -> anyhow::Result<()> {
+    async fn report_sample(&self, _metrics: &UnifiedMetrics) -> Result<()> {
         Ok(())
     }
 
-    async fn report_final(&self, metrics: &UnifiedMetrics) -> anyhow::Result<()> {
+    async fn report_final(&self, metrics: &UnifiedMetrics) -> Result<()> {
         let payload = serde_json::json!({
             "type": "metrics",
             "session_id": metrics.session_id,
@@ -232,56 +233,80 @@ impl UsageReporter for JsonReporter {
             "started_at": metrics.started_at,
             "ended_at": metrics.ended_at,
         });
-        println!("{}", serde_json::to_string(&payload)?);
+        println!(
+            "{}",
+            serde_json::to_string(&payload)
+                .map_err(|e| CapsuleError::Runtime(format!("JSON serialization error: {}", e)))?
+        );
         Ok(())
     }
 }
 
 #[async_trait]
 impl CapsuleReporter for JsonReporter {
-    async fn notify(&self, message: String) -> anyhow::Result<()> {
+    async fn notify(&self, message: String) -> Result<()> {
         let payload = serde_json::json!({
             "type": "notify",
             "message": message,
         });
-        println!("{}", serde_json::to_string(&payload)?);
+        println!(
+            "{}",
+            serde_json::to_string(&payload)
+                .map_err(|e| CapsuleError::Runtime(format!("JSON serialization error: {}", e)))?
+        );
         Ok(())
     }
 
-    async fn warn(&self, message: String) -> anyhow::Result<()> {
+    async fn warn(&self, message: String) -> Result<()> {
         let payload = serde_json::json!({
             "type": "warn",
             "message": message,
         });
-        println!("{}", serde_json::to_string(&payload)?);
+        println!(
+            "{}",
+            serde_json::to_string(&payload)
+                .map_err(|e| CapsuleError::Runtime(format!("JSON serialization error: {}", e)))?
+        );
         Ok(())
     }
 
-    async fn progress_start(&self, label: String, total: Option<u64>) -> anyhow::Result<()> {
+    async fn progress_start(&self, label: String, total: Option<u64>) -> Result<()> {
         let payload = serde_json::json!({
             "type": "progress_start",
             "label": label,
             "total": total,
         });
-        println!("{}", serde_json::to_string(&payload)?);
+        println!(
+            "{}",
+            serde_json::to_string(&payload)
+                .map_err(|e| CapsuleError::Runtime(format!("JSON serialization error: {}", e)))?
+        );
         Ok(())
     }
 
-    async fn progress_inc(&self, amount: u64) -> anyhow::Result<()> {
+    async fn progress_inc(&self, amount: u64) -> Result<()> {
         let payload = serde_json::json!({
             "type": "progress_inc",
             "amount": amount,
         });
-        println!("{}", serde_json::to_string(&payload)?);
+        println!(
+            "{}",
+            serde_json::to_string(&payload)
+                .map_err(|e| CapsuleError::Runtime(format!("JSON serialization error: {}", e)))?
+        );
         Ok(())
     }
 
-    async fn progress_finish(&self, message: Option<String>) -> anyhow::Result<()> {
+    async fn progress_finish(&self, message: Option<String>) -> Result<()> {
         let payload = serde_json::json!({
             "type": "progress_finish",
             "message": message,
         });
-        println!("{}", serde_json::to_string(&payload)?);
+        println!(
+            "{}",
+            serde_json::to_string(&payload)
+                .map_err(|e| CapsuleError::Runtime(format!("JSON serialization error: {}", e)))?
+        );
         Ok(())
     }
 }
