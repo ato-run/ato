@@ -45,16 +45,6 @@ pub fn with_ato_token(request: reqwest::RequestBuilder) -> reqwest::RequestBuild
     }
 }
 
-pub fn with_blocking_ato_token(
-    request: reqwest::blocking::RequestBuilder,
-) -> reqwest::blocking::RequestBuilder {
-    if let Some(token) = current_ato_token() {
-        request.header("authorization", format!("Bearer {}", token))
-    } else {
-        request
-    }
-}
-
 pub fn current_ato_token() -> Option<String> {
     crate::auth::current_session_token()
 }
