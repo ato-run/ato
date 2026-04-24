@@ -8,6 +8,7 @@ use crate::application::ports::publish::PublishArtifactMetadata;
 
 use super::artifact::{PublishArtifactResult, SyncPayload};
 
+pub(crate) mod curl_upload;
 pub(crate) mod direct;
 pub(crate) mod presigned;
 
@@ -66,6 +67,7 @@ pub(crate) struct StartUploadRequest {
 }
 
 pub(crate) struct TransferArtifactRequest {
+    #[allow(dead_code)]
     pub(crate) registry_url: String,
     pub(crate) session: UploadSession,
     pub(crate) artifact_bytes: Vec<u8>,

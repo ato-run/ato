@@ -782,7 +782,7 @@ fn build_generic_decap_summary(input: &str, into: &Path, state: &WorkspaceShareS
         format!("Verification: {}", state.verification.result),
         "Next:".to_string(),
         "  - Open the workspace locally".to_string(),
-        "  - Share it later with: ato encap --share".to_string(),
+        "  - Share it later with: ato encap".to_string(),
     ];
     if !state.verification.issues.is_empty() {
         lines.push("Issues:".to_string());
