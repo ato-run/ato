@@ -37,7 +37,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -95,7 +95,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -439,7 +439,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -464,7 +464,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -488,7 +488,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
