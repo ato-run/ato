@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /src
 
-# Copy the entire workspace. .dockerignore excludes target/, .tmp/, .git/.
+# Copy the entire workspace. .dockerignore excludes target/, .ato/, .git/.
 COPY . .
 
 # Fetch dependencies first (cached layer unless Cargo.lock changes),

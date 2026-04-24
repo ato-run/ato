@@ -1337,14 +1337,14 @@ required = ["DATABASE_URL"]
     let message = build_github_manual_intervention_message(
         "github.com/octocat/hello-world",
         &draft,
-        std::path::Path::new("/repo/.tmp/ato-inference/attempt/capsule.toml"),
+        std::path::Path::new("/repo/.ato/source-inference/attempt/capsule.toml"),
         "Smoke failed",
     );
 
     assert!(message.contains("manual intervention required"));
     assert!(message.contains("DATABASE_URL"));
     assert!(message.contains("github.com/octocat/hello-world"));
-    assert!(message.contains("/repo/.tmp/ato-inference/attempt/capsule.toml"));
+    assert!(message.contains("/repo/.ato/source-inference/attempt/capsule.toml"));
 }
 
 #[test]

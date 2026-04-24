@@ -247,7 +247,7 @@ mod tests {
 
         std::env::set_current_dir(original_dir).expect("restore cwd");
         let resolved_root = std::fs::canonicalize(&env.root_dir).expect("canonical root");
-        let resolved_prefix = std::fs::canonicalize(dir.path().join(".tmp/ato/publish/install"))
+        let resolved_prefix = std::fs::canonicalize(dir.path().join(".ato/publish/install"))
             .expect("canonical prefix");
         assert!(resolved_root.starts_with(&resolved_prefix));
         assert_eq!(

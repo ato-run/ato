@@ -2557,8 +2557,10 @@ mod tests {
     use crate::reporters::CliReporter;
 
     fn workspace_tempdir(name: &str) -> tempfile::TempDir {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(".tmp");
-        fs::create_dir_all(&root).expect("create workspace .tmp");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(".ato")
+            .join("test-scratch");
+        fs::create_dir_all(&root).expect("create workspace .ato/test-scratch");
         tempfile::Builder::new()
             .prefix(name)
             .tempdir_in(root)

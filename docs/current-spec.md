@@ -197,7 +197,7 @@ Important rules:
 - JSON mode requires -y for auto-installing missing capsules in non-interactive flows
 - if a local directory or local manifest path does not resolve to a valid capsule.toml, ato pauses normal execution and offers to generate a new capsule.toml through the existing init flow
 - if consent is granted or -y is passed, the generated manifest is written to the local project root before the run pipeline continues
-- if an invalid capsule.toml already exists, ato first backs it up under `.tmp/ato/run-invalid-manifests/` before regeneration
+- if an invalid capsule.toml already exists, ato first backs it up under `.ato/tmp/run-invalid-manifests/` before regeneration
 - when `ato run publisher/slug` resolves to an installed desktop-native capsule that has already completed host-local derivation, Execute launches the locally derived app bundle through the platform launcher instead of supervising the extracted runtime-tree bundle as a long-running service
 - for that desktop-native open-only path, `--background` records the launch request and returns success without waiting for service-style readiness events
 

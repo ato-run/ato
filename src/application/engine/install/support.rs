@@ -1111,7 +1111,8 @@ pub(crate) async fn resolve_run_target_or_install(
 fn relocate_github_run_checkout(checkout_root: &Path) -> Result<PathBuf> {
     let invocation_dir =
         std::env::current_dir().context("Failed to resolve current directory for GitHub run")?;
-    let transient_root = invocation_dir.join(".tmp").join("gh-run");
+    let transient_root =
+        capsule_core::common::paths::workspace_tmp_dir(&invocation_dir).join("gh-run");
     std::fs::create_dir_all(&transient_root).with_context(|| {
         format!(
             "Failed to create transient GitHub run root: {}",
