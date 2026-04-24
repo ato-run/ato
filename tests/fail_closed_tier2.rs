@@ -20,7 +20,7 @@ fn tier2_native_fs_isolation_enforced() {
     let leak_tmp = fixture
         .parent()
         .expect("fixture must have parent")
-        .join(".tmp")
+        .join("pwn-probe")
         .join("ato_host_leak_test_17.txt");
     let _ = fs::remove_file(&leak_outside);
     let _ = fs::remove_file(&leak_tmp);

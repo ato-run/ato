@@ -2526,7 +2526,9 @@ fn ephemeral_run_root(loaded: &LoadedShareInput, entry: &ShareEntrySpec) -> Resu
     // sha256_label returns "sha256:<hex>"; strip the prefix so the directory
     // name contains no colon (some tools reject CWD paths with ':' in them).
     let digest = raw.trim_start_matches("sha256:");
-    Ok(cwd.join(".tmp").join("ato-run").join(digest))
+    Ok(capsule_core::common::paths::workspace_tmp_dir(&cwd)
+        .join("ato-run")
+        .join(digest))
 }
 
 #[allow(dead_code)]

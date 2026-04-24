@@ -560,7 +560,7 @@ pub(super) async fn handle_delete_local_capsule(
 }
 
 pub(super) fn process_log_path(id: &str) -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from(".").join(".tmp"));
+    let home = capsule_core::common::paths::home_dir_or_workspace_tmp();
     home.join(".ato").join("logs").join(format!("{id}.log"))
 }
 

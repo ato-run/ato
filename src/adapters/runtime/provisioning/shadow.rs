@@ -677,7 +677,7 @@ mod tests {
     }
 
     fn test_shadow_workspace(dir: &Path, run_id: &str) -> ShadowWorkspaceRef {
-        let shadow_root = dir.join(".tmp").join(run_id);
+        let shadow_root = dir.join(".ato").join("test-scratch").join(run_id);
         let workspace_dir = shadow_root.join("workspace");
         std::fs::create_dir_all(&workspace_dir).expect("workspace root");
         ShadowWorkspaceRef {
@@ -727,7 +727,7 @@ run = "node server.js""#,
             HashMap::new(),
         )
         .expect("execution descriptor");
-        let shadow_root = dir.path().join(".tmp").join("run-1");
+        let shadow_root = dir.path().join(".ato").join("test-scratch").join("run-1");
         std::fs::create_dir_all(&shadow_root).expect("shadow root");
         let shadow = ShadowWorkspaceRef {
             root_dir: shadow_root.clone(),
@@ -848,7 +848,7 @@ run_command = "node server.js"
             HashMap::new(),
         )
         .expect("execution descriptor");
-        let shadow_root = dir.path().join(".tmp").join("run-2");
+        let shadow_root = dir.path().join(".ato").join("test-scratch").join("run-2");
         let workspace_dir = shadow_root.join("workspace");
         std::fs::create_dir_all(&workspace_dir).expect("workspace root");
         let shadow = ShadowWorkspaceRef {
@@ -1132,7 +1132,7 @@ run_command = "python app.py"
 
     // --- Read-only guarantee tests (policy: issue #169) ---
     // All provisioning operations must write only to the shadow workspace under
-    // `.tmp/ato-auto-provision/run-<id>/`. The original source directory must
+    // `.ato/tmp/ato-auto-provision/run-<id>/`. The original source directory must
     // never be modified or have new files created directly in it.
 
     #[test]

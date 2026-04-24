@@ -37,8 +37,9 @@ struct TestWheelSpec<'a> {
 fn workspace_tempdir(prefix: &str) -> TempDir {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join(".tmp");
-    fs::create_dir_all(&root).expect("create workspace .tmp");
+        .join(".ato")
+        .join("test-scratch");
+    fs::create_dir_all(&root).expect("create workspace .ato/test-scratch");
     tempfile::Builder::new()
         .prefix(prefix)
         .tempdir_in(root)

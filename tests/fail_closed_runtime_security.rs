@@ -41,7 +41,7 @@ fn consent_store_permissions_are_hardened() {
 fn npm_lifecycle_isolation() {
     let (_workspace, fixture) = prepare_fixture_workspace("malicious-npm-capsule");
     let home = prepare_consent_home(&fixture);
-    let pwn_target = fixture.join(".tmp").join("ato_pwned_test_6");
+    let pwn_target = fixture.join("pwn-probe").join("ato_pwned_test_6");
     let _ = fs::remove_file(&pwn_target);
 
     let output = ato_cmd()
