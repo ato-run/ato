@@ -79,22 +79,23 @@ pub fn public_key_to_did(public_key: &[u8; 32]) -> String {
 /// - The decoded key is not 32 bytes
 pub fn did_to_public_key(did: &str) -> Result<[u8; 32]> {
     // Validate prefix
-    let multibase = did
-        .strip_prefix("did:key:z")
-        .ok_or_else(|| CapsuleError::Crypto("Invalid did:key format: must start with 'did:key:z'".into()))?;
+    let multibase = did.strip_prefix("did:key:z").ok_or_else(|| {
+        CapsuleError::Crypto("Invalid did:key format: must start with 'did:key:z'".into())
+    })?;
 
     // Decode base58btc
     let bytes = base58_decode(multibase)?;
 
     // Validate multicodec prefix
     if bytes.len() < 2 {
-        return Err(CapsuleError::Crypto("Invalid did:key: decoded bytes too short".into()));
+        return Err(CapsuleError::Crypto(
+            "Invalid did:key: decoded bytes too short".into(),
+        ));
     }
     if bytes[0] != ED25519_MULTICODEC[0] || bytes[1] != ED25519_MULTICODEC[1] {
         return Err(CapsuleError::Crypto(format!(
             "Invalid did:key: expected Ed25519 multicodec (0xed01), got {:02x}{:02x}",
-            bytes[0],
-            bytes[1]
+            bytes[0], bytes[1]
         )));
     }
 
@@ -151,7 +152,10 @@ pub fn parse_internal_key(internal: &str) -> Result<[u8; 32]> {
         .map_err(|e| CapsuleError::Crypto(format!("Failed to decode base64: {e}")))?;
 
     if decoded.len() != 32 {
-        return Err(CapsuleError::Crypto(format!("Public key must be 32 bytes, got {} bytes", decoded.len())));
+        return Err(CapsuleError::Crypto(format!(
+            "Public key must be 32 bytes, got {} bytes",
+            decoded.len()
+        )));
     }
 
     let mut key = [0u8; 32];
@@ -255,7 +259,9 @@ fn base58_decode(s: &str) -> Result<Vec<u8>> {
     for c in s.chars() {
         let c_byte = c as usize;
         if c_byte >= 128 || alphabet_map[c_byte] == 255 {
-            return Err(CapsuleError::Crypto(format!("Invalid base58 character: '{c}'")));
+            return Err(CapsuleError::Crypto(format!(
+                "Invalid base58 character: '{c}'"
+            )));
         }
         let digit = alphabet_map[c_byte] as u32;
 

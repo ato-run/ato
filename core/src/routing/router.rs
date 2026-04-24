@@ -40,8 +40,8 @@ pub struct CompatManifestBridge {
 
 impl CompatManifestBridge {
     pub fn from_normalized_toml(raw_toml: String) -> Result<Self> {
-        let parsed =
-            CapsuleManifest::from_toml(&raw_toml).map_err(|err| CapsuleError::Config(err.to_string()))?;
+        let parsed = CapsuleManifest::from_toml(&raw_toml)
+            .map_err(|err| CapsuleError::Config(err.to_string()))?;
         Ok(Self {
             raw_toml: raw_toml.clone(),
             manifest: parsed,
@@ -50,7 +50,8 @@ impl CompatManifestBridge {
     }
 
     pub fn toml_value(&self) -> Result<toml::Value> {
-        toml::from_str(&self.raw_toml).map_err(|err| CapsuleError::Config(format!("parse compat manifest bridge: {err}")))
+        toml::from_str(&self.raw_toml)
+            .map_err(|err| CapsuleError::Config(format!("parse compat manifest bridge: {err}")))
     }
 
     /// Build a bridge where the manifest model and the compat raw TOML come from separate sources.
@@ -78,8 +79,9 @@ impl CompatManifestBridge {
                 .map_err(|err| CapsuleError::Config(format!("serialize manifest bridge: {err}")))?;
             let compat_toml = CapsuleManifest::normalize_to_compat_toml(&raw_toml)
                 .map_err(|err| CapsuleError::Config(err.to_string()))?;
-            let parsed = toml::from_str::<CapsuleManifest>(&compat_toml)
-                .map_err(|err| CapsuleError::Config(format!("parse compat manifest bridge: {err}")))?;
+            let parsed = toml::from_str::<CapsuleManifest>(&compat_toml).map_err(|err| {
+                CapsuleError::Config(format!("parse compat manifest bridge: {err}"))
+            })?;
             return Ok(Self {
                 raw_toml: compat_toml.clone(),
                 manifest: parsed,
@@ -87,8 +89,8 @@ impl CompatManifestBridge {
             });
         }
 
-        let raw_toml =
-            toml::to_string(manifest).map_err(|err| CapsuleError::Config(format!("serialize manifest bridge: {err}")))?;
+        let raw_toml = toml::to_string(manifest)
+            .map_err(|err| CapsuleError::Config(format!("serialize manifest bridge: {err}")))?;
         // Use serde deserialization directly — the value is already a structured manifest
         // (possibly with v0.2-style `entrypoint` in targets). Calling CapsuleManifest::from_toml
         // would re-run normalization and reject those legacy fields.
@@ -376,8 +378,7 @@ pub fn route_manifest_with_state_overrides_and_validation_mode(
     let chosen = parse_runtime_kind(&runtime).ok_or_else(|| {
         CapsuleError::Config(format!(
             "Unsupported runtime '{}' for target '{}'",
-            runtime,
-            plan.selected_target
+            runtime, plan.selected_target
         ))
     })?;
 
@@ -476,8 +477,7 @@ pub fn route_lock_with_state_overrides(
     let chosen = parse_runtime_kind(&runtime).ok_or_else(|| {
         CapsuleError::Config(format!(
             "Unsupported runtime '{}' for target '{}'",
-            runtime,
-            runtime_model.selected.target_label
+            runtime, runtime_model.selected.target_label
         ))
     })?;
     let compat_manifest = CompatManifestBridge::from_lock(lock, &runtime_model)?;
@@ -645,8 +645,7 @@ impl ExecutionDescriptor {
                 if !targets.contains_key(&dependency) {
                     return Err(CapsuleError::Config(format!(
                         "Target '{}' depends on unknown workspace package '{}'",
-                        target,
-                        dependency
+                        target, dependency
                     )));
                 }
                 stack.push(dependency);
@@ -1109,14 +1108,15 @@ impl ExecutionDescriptor {
             .ok_or_else(|| {
                 CapsuleError::Config(format!(
                     "services.{}.target '{}' does not exist",
-                    service_name,
-                    target_label
+                    service_name, target_label
                 ))
             })?;
-        value
-            .clone()
-            .try_into()
-            .map_err(|_| CapsuleError::Config(format!("targets.{} is not a valid target table", target_label)))
+        value.clone().try_into().map_err(|_| {
+            CapsuleError::Config(format!(
+                "targets.{} is not a valid target table",
+                target_label
+            ))
+        })
     }
 
     fn compat_value(&self, path: &[&str]) -> Option<toml::Value> {

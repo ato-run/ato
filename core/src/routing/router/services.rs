@@ -52,10 +52,7 @@ impl ManifestData {
 
         for name in &names {
             let service = services.get(name).ok_or_else(|| {
-                CapsuleError::Config(format!(
-                    "services.{} is missing from parsed manifest",
-                    name
-                ))
+                CapsuleError::Config(format!("services.{} is missing from parsed manifest", name))
             })?;
 
             if !service.entrypoint.trim().is_empty() {
@@ -65,11 +62,9 @@ impl ManifestData {
                 )));
             }
 
-            let target_label = self
-                .target_for_service(name)?
-                .ok_or_else(|| {
-                    CapsuleError::Config(format!("services.{}.target is required", name))
-                })?;
+            let target_label = self.target_for_service(name)?.ok_or_else(|| {
+                CapsuleError::Config(format!("services.{}.target is required", name))
+            })?;
             let target = self.target_named(name, &target_label)?;
             let depends_on = service.depends_on.clone().unwrap_or_default();
             let runtime_kind = parse_runtime_kind(&target.runtime).ok_or_else(|| {
@@ -205,10 +200,7 @@ impl ManifestData {
 
                 let dependency_runtime =
                     resolved_runtime_by_name.get(dependency).ok_or_else(|| {
-                        CapsuleError::Config(format!(
-                            "service '{}' is unresolved",
-                            dependency
-                        ))
+                        CapsuleError::Config(format!("service '{}' is unresolved", dependency))
                     })?;
                 if service.runtime.is_oci() && *dependency_runtime != RuntimeKind::Oci {
                     return Err(CapsuleError::Config(format!(
