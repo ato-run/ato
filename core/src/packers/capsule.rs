@@ -156,7 +156,10 @@ impl Read for PayloadChunkReader {
     }
 }
 
+/// pack は一度だけオフラインで実行するため圧縮率を優先する。
+/// level 19 は level 3 比で ~3× 小さく、~4× 遅い。解凍速度は変わらない。
 const ZSTD_COMPRESSION_LEVEL: i32 = 19;
+/// syscall オーバーヘッドを抑えつつ一時アロケーションを小さく抑えるため 64 KiB を選択。
 const PAYLOAD_CHUNK_BYTES: usize = 64 * 1024;
 const PAYLOAD_CHANNEL_DEPTH: usize = 8;
 const DEFAULT_REPRO_MTIME: u64 = 0;
@@ -978,12 +981,12 @@ mod tests {
     use std::io::Read;
     use std::sync::Arc;
 
-    use hex;
     use serde_json;
     use tempfile;
     use toml;
 
     use crate::capsule::{verify_artifact_hash, PayloadManifest};
+    use crate::common::hash::sha256_hex;
     use crate::packers::pack_filter::PackFilter;
     use crate::packers::payload::reconstruct_from_chunks;
     use crate::packers::sbom::SBOM_PATH;
@@ -996,14 +999,6 @@ mod tests {
         find_nearest_readme_candidate, pack, parse_bool_env, select_payload_roots,
         select_payload_source_root, CapsulePackOptions, CasStore, FastCdcWriterConfig,
     };
-
-    fn sha256_hex(data: &[u8]) -> String {
-        use sha2::Digest;
-
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(data);
-        hex::encode(hasher.finalize())
-    }
 
     #[test]
     fn select_payload_source_root_prefers_manifest_root_for_stale_source_snapshot() {

@@ -47,8 +47,7 @@ pub fn discover_nacelle(req: EngineRequest) -> Result<PathBuf> {
 
     // 5) User registry (~/.ato/config.toml)
     {
-        let cfg = config::load_config()
-            .map_err(|e| CapsuleError::Config(e.to_string()))?;
+        let cfg = config::load_config().map_err(|e| CapsuleError::Config(e.to_string()))?;
         if let Some(default_name) = cfg.default_engine.as_deref() {
             if let Some(entry) = cfg.engines.get(default_name) {
                 return validate_engine_path(PathBuf::from(&entry.path)).map_err(|e| {
@@ -97,9 +96,7 @@ fn validate_engine_path(path: PathBuf) -> Result<PathBuf> {
         ))
     })?;
 
-    let meta = std::fs::metadata(&canonical).map_err(|e| {
-        CapsuleError::Io(e)
-    })?;
+    let meta = std::fs::metadata(&canonical).map_err(|e| CapsuleError::Io(e))?;
 
     if !meta.is_file() {
         return Err(CapsuleError::Config(format!(
@@ -173,8 +170,7 @@ fn resolve_from_manifest(manifest_path: &Path) -> Result<Option<PathBuf>> {
         .and_then(|t| t.get("source"))
         .and_then(|v| v.as_str())
     {
-        let cfg = config::load_config()
-            .map_err(|e| CapsuleError::Config(e.to_string()))?;
+        let cfg = config::load_config().map_err(|e| CapsuleError::Config(e.to_string()))?;
         if let Some(entry) = cfg.engines.get(alias) {
             return Ok(Some(PathBuf::from(&entry.path)));
         }
@@ -193,8 +189,7 @@ fn resolve_from_compat_input(compat_input: &CompatProjectInput) -> Result<Option
     }
 
     if let Some(alias) = compat_input.engine_source_alias() {
-        let cfg = config::load_config()
-            .map_err(|e| CapsuleError::Config(e.to_string()))?;
+        let cfg = config::load_config().map_err(|e| CapsuleError::Config(e.to_string()))?;
         if let Some(entry) = cfg.engines.get(alias) {
             return Ok(Some(PathBuf::from(&entry.path)));
         }
@@ -234,14 +229,13 @@ pub fn run_internal(engine: &Path, subcommand: &str, payload: &Value) -> Result<
         })?;
 
     {
-        let mut stdin = child.stdin.take().ok_or_else(|| {
-            CapsuleError::ProcessStart("Failed to open engine stdin".to_string())
-        })?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| CapsuleError::ProcessStart("Failed to open engine stdin".to_string()))?;
         let bytes = serde_json::to_vec(payload)
             .map_err(|e| CapsuleError::Runtime(format!("Failed to serialize payload: {}", e)))?;
-        stdin
-            .write_all(&bytes)
-            .map_err(CapsuleError::Io)?;
+        stdin.write_all(&bytes).map_err(CapsuleError::Io)?;
     }
 
     let output = child.wait_with_output().map_err(|e| {
@@ -299,14 +293,13 @@ pub fn run_internal_streaming(engine: &Path, subcommand: &str, payload: &Value) 
         })?;
 
     {
-        let mut stdin = child.stdin.take().ok_or_else(|| {
-            CapsuleError::ProcessStart("Failed to open engine stdin".to_string())
-        })?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| CapsuleError::ProcessStart("Failed to open engine stdin".to_string()))?;
         let bytes = serde_json::to_vec(payload)
             .map_err(|e| CapsuleError::Runtime(format!("Failed to serialize payload: {}", e)))?;
-        stdin
-            .write_all(&bytes)
-            .map_err(CapsuleError::Io)?;
+        stdin.write_all(&bytes).map_err(CapsuleError::Io)?;
     }
 
     let child_slot: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(Some(child)));

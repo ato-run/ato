@@ -127,7 +127,8 @@ impl ProducerAuthoritativeInput {
     }
 
     pub(crate) fn packaging_compat_project_input(&self) -> Result<Option<CompatProjectInput>> {
-        self.legacy_producer_bridge
+        Ok(self
+            .legacy_producer_bridge
             .as_ref()
             .map(|bridge| {
                 CompatProjectInput::from_bridge(
@@ -135,7 +136,7 @@ impl ProducerAuthoritativeInput {
                     bridge.bridge.clone(),
                 )
             })
-            .transpose()
+            .transpose()?)
     }
 
     #[allow(dead_code)]

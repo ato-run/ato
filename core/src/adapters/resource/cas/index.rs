@@ -153,8 +153,11 @@ impl LocalCasIndex {
         if !stale.is_empty() {
             let tx = conn.unchecked_transaction().map_err(r)?;
             for hash in stale {
-                tx.execute("DELETE FROM local_chunks WHERE chunk_hash=?1", params![hash])
-                    .map_err(r)?;
+                tx.execute(
+                    "DELETE FROM local_chunks WHERE chunk_hash=?1",
+                    params![hash],
+                )
+                .map_err(r)?;
             }
             tx.commit().map_err(r)?;
         }
@@ -197,8 +200,11 @@ impl LocalCasIndex {
         if !stale.is_empty() {
             let tx = conn.unchecked_transaction().map_err(r)?;
             for hash in stale {
-                tx.execute("DELETE FROM local_chunks WHERE chunk_hash=?1", params![hash])
-                    .map_err(r)?;
+                tx.execute(
+                    "DELETE FROM local_chunks WHERE chunk_hash=?1",
+                    params![hash],
+                )
+                .map_err(r)?;
             }
             tx.commit().map_err(r)?;
         }

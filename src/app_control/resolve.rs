@@ -684,7 +684,7 @@ pub(super) fn normalize_handle(raw: &str) -> Result<NormalizedHandle> {
     }
 }
 
-fn experimental_guest_driver_from_error(err: &anyhow::Error) -> Option<&'static str> {
+fn experimental_guest_driver_from_error(err: &dyn std::error::Error) -> Option<&'static str> {
     let message = err.to_string().to_ascii_lowercase();
     ["tauri", "electron", "wails"]
         .into_iter()

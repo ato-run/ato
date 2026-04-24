@@ -20,12 +20,12 @@ use crate::reporter::CapsuleReporter;
 use super::lockfile_support::{
     cached_sha256, ensure_node, ensure_pnpm, ensure_uv, metadata_cache_path,
 };
-use crate::common::hash::sha256_hex;
 use super::{
     artifact_root, read_dependencies_path, read_target_entrypoint, reset_dir, sha256_dir,
-    ArtifactEntry, RuntimeArtifact, RuntimeEntry, RuntimePlatform, ToolArtifact,
-    ToolTargets, BUN_VERSION, PNPM_VERSION, UV_VERSION, YARN_CLASSIC_VERSION,
+    ArtifactEntry, RuntimeArtifact, RuntimeEntry, RuntimePlatform, ToolArtifact, ToolTargets,
+    BUN_VERSION, PNPM_VERSION, UV_VERSION, YARN_CLASSIC_VERSION,
 };
+use crate::common::hash::sha256_hex;
 
 pub(super) async fn generate_uv_lock(
     manifest_dir: &Path,

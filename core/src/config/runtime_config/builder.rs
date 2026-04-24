@@ -686,9 +686,8 @@ pub(super) fn validate_config_json(config: &ConfigJson) -> Result<()> {
         .compile(schema_json)
         .map_err(|e| CapsuleError::Config(format!("Failed to compile config schema: {}", e)))?;
 
-    let instance = serde_json::to_value(config).map_err(|e| {
-        CapsuleError::Config(format!("Failed to convert config to JSON: {}", e))
-    })?;
+    let instance = serde_json::to_value(config)
+        .map_err(|e| CapsuleError::Config(format!("Failed to convert config to JSON: {}", e)))?;
     if let Err(errors) = compiled.validate(&instance) {
         let details: Vec<String> = errors.map(|e| e.to_string()).collect();
         return Err(CapsuleError::Config(format!(
@@ -1296,4 +1295,3 @@ pub(super) fn validate_services_dag(services: &HashMap<String, ServiceSpec>) -> 
 
     Ok(())
 }
-

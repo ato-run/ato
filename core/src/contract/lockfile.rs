@@ -1649,8 +1649,7 @@ async fn configure_deno_lockfile(
 
     let is_web_static = selected_target_runtime(ctx.manifest_raw).as_deref() == Some("web")
         && selected_target_driver(ctx.manifest_raw).as_deref() == Some("static");
-    let skip_deno_lock_generation =
-        selected_target_cmd_contains(ctx.manifest_raw, "--no-lock");
+    let skip_deno_lock_generation = selected_target_cmd_contains(ctx.manifest_raw, "--no-lock");
     if !is_web_static && !skip_deno_lock_generation {
         let step_started = Instant::now();
         let _ = generate_deno_lock(
@@ -1793,7 +1792,11 @@ macro_rules! ensure_runtime_if_missing {
 }
 
 ensure_runtime_if_missing!(ensure_node_runtime_if_missing, node, resolve_node_runtime);
-ensure_runtime_if_missing!(ensure_python_runtime_if_missing, python, resolve_python_runtime);
+ensure_runtime_if_missing!(
+    ensure_python_runtime_if_missing,
+    python,
+    resolve_python_runtime
+);
 ensure_runtime_if_missing!(ensure_deno_runtime_if_missing, deno, resolve_deno_runtime);
 
 async fn ensure_uv_tool_if_missing(
@@ -2128,7 +2131,6 @@ fn platform_triple() -> Result<String> {
 
     Ok(triple.to_string())
 }
-
 
 fn sha256_dir(root: &Path) -> Result<String> {
     let mut entries = Vec::new();
