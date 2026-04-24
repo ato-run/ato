@@ -1,5 +1,3 @@
-use std::error::Error as _;
-
 use anyhow::{Context, Result};
 
 use super::{
@@ -13,7 +11,8 @@ pub(crate) struct DirectUploadSession {
 }
 
 pub(crate) struct DirectTransferArtifactResponse {
-    pub(crate) response: reqwest::blocking::Response,
+    pub(crate) status: u16,
+    pub(crate) body: String,
 }
 
 #[derive(Debug, Default)]
@@ -62,30 +61,23 @@ impl UploadStrategy for DirectUploadStrategy {
             anyhow::bail!("direct upload strategy requires a direct upload session")
         };
 
-        let mut client_builder =
-            crate::registry::http::blocking_client_builder(&request.registry_url);
-        if super::super::artifact::is_managed_store_direct_registry(&request.registry_url) {
-            client_builder = client_builder.http1_only();
+        let mut extra_headers = session.headers.clone();
+        if let Some(token) = crate::registry::http::current_ato_token() {
+            extra_headers.push(("authorization".to_string(), format!("Bearer {}", token)));
         }
-        let client = client_builder
-            .build()
-            .context("Failed to create registry upload client")?;
-        let mut builder = client.put(&session.endpoint);
-        for (name, value) in &session.headers {
-            builder = builder.header(name, value);
-        }
-        builder = crate::registry::http::with_blocking_ato_token(builder);
 
-        let response = builder.body(request.artifact_bytes).send().map_err(|err| {
-            anyhow::anyhow!(
-                "Failed to upload artifact to {}: {}",
-                session.endpoint,
-                format_reqwest_transport_error(&err),
-            )
-        })?;
+        let response = super::curl_upload::put_bytes(
+            &session.endpoint,
+            &request.artifact_bytes,
+            &extra_headers,
+        )
+        .with_context(|| format!("Failed to upload artifact to {}", session.endpoint))?;
 
         Ok(TransferArtifactResponse::Direct(
-            DirectTransferArtifactResponse { response },
+            DirectTransferArtifactResponse {
+                status: response.status,
+                body: response.body,
+            },
         ))
     }
 
@@ -97,17 +89,21 @@ impl UploadStrategy for DirectUploadStrategy {
             anyhow::bail!("direct upload strategy requires a direct transfer response")
         };
 
-        if !transfer.response.status().is_success() {
-            let status = transfer.response.status();
-            let body = transfer.response.text().unwrap_or_default();
-            let error = super::super::artifact::classify_upload_failure(status, &body);
+        if !(200..300).contains(&transfer.status) {
+            let status = reqwest::StatusCode::from_u16(transfer.status)
+                .unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+            let error = super::super::artifact::classify_upload_failure(status, &transfer.body);
             return Err(error.into());
         }
 
-        let result = transfer
-            .response
-            .json::<super::super::artifact::PublishArtifactResult>()
-            .context("Invalid local registry upload response")?;
+        let result: super::super::artifact::PublishArtifactResult =
+            serde_json::from_str(&transfer.body).with_context(|| {
+                let preview: String = transfer.body.chars().take(500).collect();
+                format!(
+                    "Invalid local registry upload response (status={}): {}",
+                    transfer.status, preview
+                )
+            })?;
         super::super::artifact::sync_v3_chunks_if_present(
             &request.registry_url,
             request.sync_payload.as_ref(),
@@ -115,18 +111,4 @@ impl UploadStrategy for DirectUploadStrategy {
         .with_context(|| "Failed to finalize payload v3 metadata for uploaded release")?;
         Ok(result)
     }
-}
-
-fn format_reqwest_transport_error(err: &reqwest::Error) -> String {
-    let mut rendered = err.to_string();
-    let mut source = err.source();
-    while let Some(cause) = source {
-        let detail = cause.to_string();
-        if !detail.is_empty() && !rendered.contains(&detail) {
-            rendered.push_str(": ");
-            rendered.push_str(&detail);
-        }
-        source = cause.source();
-    }
-    rendered
 }
