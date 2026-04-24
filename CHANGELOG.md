@@ -4,6 +4,32 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.80] - 2026-04-24
+
+### What Changed
+
+
+#### Bug Fixes
+
+- Surface structured store errors (cf-ray, request_id) in publish flow
+
+- Ensure publisher signing key exists for existing publishers on login
+
+- Remove invalid --share flag from post-run and decap suggestions
+
+
+#### Documentation
+
+- Enhance usage instructions for consuming and producing projects
+
+
+#### Features
+
+- Use ?format=id for scoped capsule id lookup
+
+- Migrate upload HTTP to curl with exponential backoff retry
+
+
 ## [0.4.79] - 2026-04-24
 
 ### What Changed
