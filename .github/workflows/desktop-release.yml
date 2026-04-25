@@ -52,6 +52,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout ato-cli sibling for capsule-core path dep
+        # Cargo.toml has `capsule-core = { path = "../ato-cli/core" }`,
+        # so the ato-cli repo must live next to this checkout.
+        shell: bash
+        run: git clone --depth 1 https://github.com/ato-run/ato-cli.git ../ato-cli
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -102,6 +108,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout ato-cli sibling for capsule-core path dep
+        shell: bash
+        run: git clone --depth 1 https://github.com/ato-run/ato-cli.git ../ato-cli
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -150,6 +160,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Checkout ato-cli sibling for capsule-core path dep
+        shell: bash
+        run: git clone --depth 1 https://github.com/ato-run/ato-cli.git ../ato-cli
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
