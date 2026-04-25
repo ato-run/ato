@@ -136,6 +136,101 @@ Targeted for v0.5.1 (tracked in RFC `UNIFIED_EXECUTION_MODEL.md` §4.3 / §7.2).
 
 ---
 
+## L8 — Windows / Linux Desktop are beta-quality
+
+**Spec intent:** `ato-desktop` should provide first-class capsule
+orchestration UX on macOS, Windows, and Linux equally.
+
+**Current behaviour (v0.5):** Desktop is gold on macOS only. Windows
+and Linux builds compile from the same source and pass the same unit
+tests, but the underlying GPUI fork has known regressions on those
+platforms — IME composition glitches, occasional WebView blank-frame
+on first paint, and missing native menu integration. The bundled
+`ato` CLI is gold on all three platforms; only the Desktop GUI carries
+the beta label.
+
+**Workaround:** Use `--cli-only` (or the headless install path) on
+Windows / Linux for production work. Desktop installers ship for
+those platforms so contributors can test the GUI, but the v0.5
+release notes flag them as beta.
+
+**Resolution:** Per-platform GPUI parity is tracked alongside
+upstream Zed; structural readiness (signed/notarized bundles,
+URL-scheme registration, install.sh routing) lands in v0.5 so the
+flip to "gold" in v0.6 is a label change, not a build change.
+
+---
+
+## L9 — CCP wire shape is fixed at v1; no bidirectional streaming
+
+**Spec intent:** The Capsule Control Protocol may eventually grow
+bidirectional streaming so the desktop can push commands to a running
+capsule without re-spawning the CLI.
+
+**Current behaviour (v0.5):** Each desktop → CLI interaction is a
+separate `ato`-process invocation that returns one CCP envelope on
+stdout (`schema_version: "ccp/v1"`). The desktop tolerates additive
+fields per `apps/ato-cli/docs/specs/CCP_SPEC.md` so v1.x CLI changes
+land non-breakingly, but the request/response shape itself is fixed.
+
+**Workaround:** None required for v0.5 use cases. Long-running
+capsules are managed via repeated `session_status` polls.
+
+**Resolution:** A `ccp/v2` schema with stdin/stdout streaming is on
+the v0.6+ roadmap when a concrete UX (live logs, capsule-to-desktop
+events) drives the requirement.
+
+---
+
+## L10 — Windows MSI is unsigned in v0.5
+
+**Spec intent:** The Windows Desktop / CLI MSI should be signed with an
+EV code-signing certificate so SmartScreen accepts it without the
+"Windows protected your PC" dialog.
+
+**Current behaviour (v0.5):** The MSI ships unsigned. On first
+install, SmartScreen displays a warning dialog and requires the user
+to click "More info" → "Run anyway". After install, no further
+SmartScreen prompts are shown. The xtask + WiX pipeline already
+includes the `signtool` invocation gated on
+`WINDOWS_CODESIGN_PFX` / `WINDOWS_CODESIGN_PASSWORD`; flipping these
+secrets in CI is the only delta needed once the EV cert is procured.
+
+**Workaround:** Click through the SmartScreen dialog on first
+install. Documented in the v0.5 release notes and install-win.ps1
+output.
+
+**Resolution:** EV certificate procurement and CI rollout in v0.5.x
+(PR-12 placeholder in the distribution plan).
+
+---
+
+## L11 — macOS Desktop is ad-hoc signed (not Apple Developer ID)
+
+**Spec intent:** Long term, the Desktop bundle should be signed with
+an Apple Developer ID Application identity and notarized so Gatekeeper
+accepts it without the "developer cannot be verified" dialog.
+
+**Current behaviour (v0.5):** The bundle is ad-hoc signed
+(`codesign --sign -`) with hardened-runtime entitlements. Direct
+download flows hit Gatekeeper friction on first launch; `install.sh`
+runs `xattr -dr com.apple.quarantine` on the staged bundle to strip
+the flag, and Homebrew Cask (`auto_updates true`) gets the same
+treatment for free. The xtask code-sign mode is env-resolved
+(`MAC_DEVELOPER_ID_NAME`); switching to Developer ID is a secrets
+flip plus the notarize step (already implemented, gated on
+`APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` / `APPLE_TEAM_ID`).
+
+**Workaround:** Either install via Homebrew Cask (`brew install --cask
+ato`) or accept the install.sh quarantine strip. Direct double-click
+from a Finder download requires right-click → Open the first time.
+
+**Resolution:** Apple Developer ID + notarize in v0.6 once adoption
+justifies the annual program fee. Same Keychain identifiers
+(`run.ato.desktop`) — no migration friction expected.
+
+---
+
 ## Foundation readiness (informational)
 
 The following Foundation KPIs (§11.2 of the Capsule Protocol spec) are tracked for
