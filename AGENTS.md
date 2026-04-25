@@ -264,7 +264,10 @@ Ato は、あらゆるソフトウェアを capsule として宣言し、同じ�
 ## Temp Files
 
 - NEVER write to `/tmp` or `/var/tmp`.
-- Always create a `.tmp/` folder in the current working directory for temporary files.
+- NEVER create a `.tmp/` folder anywhere — all workspace-local scratch must live
+  under `.ato/`. Use `capsule_core::common::paths::workspace_tmp_dir(root)` for
+  runtime temp state (resolves to `<root>/.ato/tmp`) and prefer nested
+  subdirectories like `.ato/test-scratch/` for test fixtures.
 - Clean up temp files when no longer needed.
 
 ## Useful Paths

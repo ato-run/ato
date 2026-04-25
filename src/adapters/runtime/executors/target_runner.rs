@@ -294,37 +294,48 @@ pub fn preflight_required_environment_variables(
     plan: &ManifestData,
     launch_ctx: &RuntimeLaunchContext,
 ) -> Result<()> {
-    let required = plan.execution_required_envs();
-    if required.is_empty() {
+    let resolved = plan.execution_resolved_config_schema();
+    if resolved.is_empty() {
         return Ok(());
     }
 
     let base_env = runtime_overrides::merged_env(plan.execution_env());
     let launch_env = launch_ctx.merged_env();
-    let missing: Vec<String> = required
-        .into_iter()
-        .filter(|name| {
-            if launch_env
-                .get(name)
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false)
-            {
-                return false;
-            }
-            if base_env
-                .get(name)
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false)
-            {
-                return false;
-            }
-            std::env::var(name)
-                .map(|value| value.trim().is_empty())
-                .unwrap_or(true)
-        })
-        .collect();
 
-    if missing.is_empty() {
+    // Single filter pass collecting both the bare names (back-compat with
+    // legacy CLI consumers like `dispatch/run.rs::missing_required_env_keys`)
+    // and the rich `ConfigField` entries (consumed by the desktop dynamic
+    // form via the E103 envelope). The two arrays are constructed from the
+    // same iterator so they stay index-aligned by construction:
+    // `missing_schema[i].name == missing_keys[i]`.
+    let mut missing_keys: Vec<String> = Vec::new();
+    let mut missing_schema: Vec<capsule_core::types::ConfigField> = Vec::new();
+    for field in resolved {
+        if launch_env
+            .get(&field.name)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if base_env
+            .get(&field.name)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if std::env::var(&field.name)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        missing_keys.push(field.name.clone());
+        missing_schema.push(field);
+    }
+
+    if missing_keys.is_empty() {
         return Ok(());
     }
 
@@ -332,9 +343,10 @@ pub fn preflight_required_environment_variables(
         format!(
             "missing required environment variables for target '{}': {} (set them before `ato run`)",
             plan.selected_target_label(),
-            missing.join(", ")
+            missing_keys.join(", ")
         ),
-        missing,
+        missing_keys,
+        missing_schema,
         Some(plan.selected_target_label()),
     )
     .into())

@@ -1504,6 +1504,7 @@ mod tests {
         let err = anyhow::anyhow!(AtoExecutionError::missing_required_env(
             "missing required environment variables for target 'app': DATABASE_URL",
             vec!["DATABASE_URL".to_string()],
+            Vec::new(),
             Some("app"),
         ));
         assert!(AgentFailureClassifier::classify(&err, "prepare").is_none());

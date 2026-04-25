@@ -231,7 +231,7 @@ run_command = "node server.js"
             &summary,
         );
         audit.shadow_manifest_path =
-            Some("/workspace/.tmp/ato-auto-provision/run-1/capsule.toml".to_string());
+            Some("/workspace/.ato/tmp/ato-auto-provision/run-1/capsule.toml".to_string());
         audit.record_materialization(
             "shadow_lockfile",
             "app",
