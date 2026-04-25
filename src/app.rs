@@ -53,6 +53,8 @@ actions!(
         AllowPermissionOnce,
         AllowPermissionForSession,
         DenyPermissionPrompt,
+        SaveConfigForm,
+        CancelConfigForm,
         ToggleDevConsole,
         ToggleAutoDevtools,
         Quit

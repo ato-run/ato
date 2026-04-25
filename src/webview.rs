@@ -36,14 +36,16 @@ use crate::automation::AutomationHost;
 use crate::bridge::{BridgeProxy, GuestBridgeResponse, GuestSessionContext, ShellEvent};
 use crate::config::SecretEntry;
 use crate::orchestrator::{
-    resolve_and_start_guest, spawn_cli_session, spawn_log_tail_session, spawn_terminal_session,
+    resolve_and_start_guest, spawn_cli_session, spawn_log_tail_session,
     stop_guest_session, take_pending_cli_command, take_pending_share_terminal, GuestLaunchSession,
-    TerminalProcess,
+    LaunchError, SpawnKind, SpawnSpec, spawn_terminal,
 };
 use crate::state::{
     ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry, AuthSessionStatus,
-    BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, ShellMode, WebSessionState,
+    BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PendingConfigRequest, ShellMode,
+    WebSessionState,
 };
+use crate::terminal::{TerminalCore, TryRecvOutput};
 use capsule_core::handle::CapsuleDisplayStrategy;
 use tracing::{debug, error, info, warn};
 
@@ -133,9 +135,11 @@ pub struct WebViewManager {
     visibility_cache: HashMap<usize, bool>,
     pending_auth_handoffs: Arc<Mutex<Vec<AuthHandoffSignal>>>,
     /// Live PTY sessions keyed by session_id.
-    terminal_sessions: HashMap<String, TerminalProcess>,
+    terminal_sessions: HashMap<String, Box<dyn TerminalCore>>,
     /// Session IDs that have already exited — prevents re-spawning a shell after a share terminal ends.
     completed_terminal_sessions: HashSet<String>,
+    /// Spawn errors queued until terminal page is loaded, then shown via xterm error banner.
+    pending_terminal_errors: HashMap<String, String>,
     /// Automation host — handles AI-agent socket requests.
     automation: AutomationHost,
 }
@@ -204,7 +208,11 @@ struct PendingLaunch {
 
 struct PendingLaunchResult {
     route_key: String,
-    session: Result<GuestLaunchSession, String>,
+    /// Carries either the live session or a typed `LaunchError`. The
+    /// `MissingConfig` variant must reach `drain_pending_launches`
+    /// intact so the modal can be populated — collapsing to `String`
+    /// here would erase the structured payload Day 4 retry depends on.
+    session: Result<GuestLaunchSession, LaunchError>,
 }
 
 impl WebViewManager {
@@ -246,6 +254,7 @@ impl WebViewManager {
             pending_auth_handoffs: Arc::new(Mutex::new(Vec::new())),
             terminal_sessions: HashMap::new(),
             completed_terminal_sessions: HashSet::new(),
+            pending_terminal_errors: HashMap::new(),
             automation,
         }
     }
@@ -429,33 +438,52 @@ impl WebViewManager {
                 // Priority 1: pending share terminal (spawned by capsule-core executor).
                 if let Some(proc) = take_pending_share_terminal(&session_id) {
                     info!(session_id = %session_id, "Using share-spawned terminal session");
-                    self.terminal_sessions.insert(session_id.clone(), proc);
+                    self.terminal_sessions
+                        .insert(session_id.clone(), Box::new(proc));
                     state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
                 } else if let Some(spec) = take_pending_cli_command(&session_id) {
                     // Priority 2: pending CLI launch spec from an `ato://cli` deep link.
                     match spawn_cli_session(session_id.clone(), 80, 24, spec.clone(), Vec::new()) {
                         Ok(proc) => {
                             info!(session_id = %session_id, ?spec, "Spawned CLI session from ato://cli");
-                            self.terminal_sessions.insert(session_id.clone(), proc);
+                            self.terminal_sessions
+                                .insert(session_id.clone(), Box::new(proc));
                             state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
                         }
                         Err(e) => {
                             error!(session_id = %session_id, error = %e, "Failed to spawn CLI session");
-                            state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
+                            self.pending_terminal_errors.insert(
+                                session_id.clone(),
+                                format!("Failed to spawn CLI session: {e}"),
+                            );
+                            self.completed_terminal_sessions.insert(session_id.clone());
+                            state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
                         }
                     }
                 } else {
                     // Priority 3: default interactive shell via nacelle.
                     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-                    match spawn_terminal_session(session_id.clone(), &shell, 80, 24) {
+                    match spawn_terminal(SpawnSpec {
+                        session_id: session_id.clone(),
+                        cols: 80,
+                        rows: 24,
+                        kind: SpawnKind::NacelleShell { shell },
+                        secrets: Vec::new(),
+                    }) {
                         Ok(proc) => {
                             info!(session_id = %session_id, "Spawned terminal PTY session");
-                            self.terminal_sessions.insert(session_id.clone(), proc);
+                            self.terminal_sessions
+                                .insert(session_id.clone(), Box::new(proc));
                             state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
                         }
                         Err(e) => {
                             error!(session_id = %session_id, error = %e, "Failed to spawn terminal PTY");
-                            state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
+                            self.pending_terminal_errors.insert(
+                                session_id.clone(),
+                                format!("Failed to spawn terminal PTY: {e}"),
+                            );
+                            self.completed_terminal_sessions.insert(session_id.clone());
+                            state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
                         }
                     }
                 }
@@ -468,17 +496,16 @@ impl WebViewManager {
                     if let Some(proc) = self.terminal_sessions.get(&session_id) {
                         let mut disconnected = false;
                         loop {
-                            use std::sync::mpsc::TryRecvError;
-                            match proc.output_rx.try_recv() {
-                                Ok(b64) => {
+                            match proc.try_recv_output() {
+                                TryRecvOutput::Data(b64) => {
                                     let json = serde_json::to_string(&b64).unwrap_or_default();
                                     let script = format!("window.__ato_write_terminal({json});");
                                     if let Err(e) = view.webview.evaluate_script(&script) {
                                         warn!(error = %e, "evaluate_script for terminal output failed");
                                     }
                                 }
-                                Err(TryRecvError::Empty) => break,
-                                Err(TryRecvError::Disconnected) => {
+                                TryRecvOutput::Empty => break,
+                                TryRecvOutput::Disconnected => {
                                     let _ = view
                                         .webview
                                         .evaluate_script("window.__ato_terminal_exit(0);");
@@ -490,6 +517,14 @@ impl WebViewManager {
                         if disconnected {
                             self.terminal_sessions.remove(&session_id);
                             self.completed_terminal_sessions.insert(session_id.clone());
+                        }
+                    }
+
+                    if let Some(error_message) = self.pending_terminal_errors.remove(&session_id) {
+                        let json = serde_json::to_string(&error_message).unwrap_or_default();
+                        let script = format!("window.__ato_terminal_error({json});");
+                        if let Err(e) = view.webview.evaluate_script(&script) {
+                            warn!(session_id = %session_id, error = %e, "failed to report terminal startup error");
                         }
                     }
                 }
@@ -779,7 +814,7 @@ impl WebViewManager {
                         // Decode base64 and forward to PTY stdin.
                         match base64::engine::general_purpose::STANDARD.decode(data_b64) {
                             Ok(bytes) => {
-                                if proc.input_tx.send(bytes).is_err() {
+                                if !proc.send_input(bytes) {
                                     warn!(session_id = %session_id, "PTY input channel closed");
                                 }
                             }
@@ -797,7 +832,7 @@ impl WebViewManager {
                     rows,
                 } => {
                     if let Some(proc) = self.terminal_sessions.get(session_id) {
-                        if proc.resize_tx.send((*cols, *rows)).is_err() {
+                        if !proc.send_resize(*cols, *rows) {
                             warn!(session_id = %session_id, "PTY resize channel closed");
                         }
                     } else {
@@ -852,9 +887,9 @@ impl WebViewManager {
                         pending.pane_id,
                         PendingLaunchResult {
                             route_key: pending.route_key.clone(),
-                            session: Err(
-                                "guest session worker disconnected before completion".to_string()
-                            ),
+                            session: Err(LaunchError::Other(
+                                "guest session worker disconnected before completion".to_string(),
+                            )),
                         },
                     ));
                 }
@@ -907,7 +942,7 @@ impl WebViewManager {
                         {
                             info!(pane_id, session_id = %terminal_session_id, "using share-spawned piped terminal session");
                             self.terminal_sessions
-                                .insert(terminal_session_id.clone(), proc);
+                                .insert(terminal_session_id.clone(), Box::new(proc));
                             true
                         } else {
                             // Fallback: log-tail for capsule sessions managed by ato-cli
@@ -917,7 +952,7 @@ impl WebViewManager {
                                         Ok(proc) => {
                                             info!(pane_id, session_id = %terminal_session_id, "log-tail session spawned for terminal_stream");
                                             self.terminal_sessions
-                                                .insert(terminal_session_id.clone(), proc);
+                                                .insert(terminal_session_id.clone(), Box::new(proc));
                                             true
                                         }
                                         Err(e) => {
@@ -1032,14 +1067,42 @@ impl WebViewManager {
                         }
                     }
                 }
-                Err(error) => {
-                    error!(pane_id, %error, "guest session failed");
+                Err(LaunchError::MissingConfig {
+                    handle,
+                    target,
+                    fields,
+                    original_secrets,
+                }) => {
+                    // Recoverable: the capsule is missing user-supplied
+                    // config. Pin the request on AppState so the next
+                    // render surfaces the modal; do NOT push an error
+                    // toast (the modal IS the surface) and do NOT mark
+                    // the pane as `LaunchFailed` — Day 4's Save handler
+                    // will re-arm the launch by clearing
+                    // `pending_config` and re-entering this same
+                    // `ensure_pending_local_launch` path.
+                    info!(
+                        pane_id,
+                        handle = %handle,
+                        target = ?target,
+                        field_count = fields.len(),
+                        "guest session needs config; surfacing modal"
+                    );
+                    state.set_pending_config(PendingConfigRequest {
+                        handle,
+                        target,
+                        fields,
+                        original_secrets,
+                    });
+                }
+                Err(LaunchError::Other(message)) => {
+                    error!(pane_id, error = %message, "guest session failed");
                     // Use LaunchFailed (not Closed) to prevent ensure_pending_local_launch
                     // from re-queuing a new attempt on every render frame.
                     state.sync_web_session_state(active.pane_id, WebSessionState::LaunchFailed);
                     state.push_activity(
                         ActivityTone::Error,
-                        format!("Failed to start guest session: {error}"),
+                        format!("Failed to start guest session: {message}"),
                     );
                 }
             }
@@ -1068,6 +1131,18 @@ impl WebViewManager {
             }
         }
 
+        // Second gate: if a config modal is open for THIS handle, the
+        // user is mid-edit. Re-spawning would just re-trip the same
+        // E103 in the background and rebuild the modal under their
+        // cursor. The Save handler clears `pending_config`, which
+        // collapses this guard on the next render and re-arms the
+        // launch with the freshly stored secrets.
+        if let Some(pending) = &state.pending_config {
+            if pending.handle == handle {
+                return;
+            }
+        }
+
         info!(pane_id, handle, "queuing guest session launch");
         let (sender, receiver) = channel();
         let route_key = route_key.to_string();
@@ -1084,6 +1159,10 @@ impl WebViewManager {
             .into_iter()
             .cloned()
             .collect();
+        // Same idea for plaintext config — capture a snapshot now so
+        // the background thread doesn't reach back into AppState.
+        let plain_configs: Vec<(String, String)> =
+            state.capsule_config_store.configs_for_capsule(&handle);
 
         self.pending_launches.insert(
             key,
@@ -1099,12 +1178,17 @@ impl WebViewManager {
         );
 
         let launch_task = background_executor.spawn(async move {
+            // Propagate `LaunchError` end-to-end — `drain_pending_launches`
+            // needs the typed enum to distinguish E103 (modal) from the
+            // opaque toast path. Logging happens at the consumer so the
+            // structured payload survives the channel.
             let result = PendingLaunchResult {
                 route_key: route_key.clone(),
-                session: resolve_and_start_guest(&handle, &secrets).map_err(|e| {
-                    error!(handle = %handle, error = %e, "guest session launch failed");
-                    e.to_string()
-                }),
+                session: resolve_and_start_guest(&handle, &secrets, &plain_configs).inspect_err(
+                    |err| {
+                        error!(handle = %handle, error = %err, "guest session launch failed");
+                    },
+                ),
             };
             if result.session.is_ok() {
                 info!(handle = %handle, route_key = %result.route_key, "guest session launched");

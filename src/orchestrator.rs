@@ -13,6 +13,7 @@ use serde::Deserialize;
 use tracing::{debug, error, info, warn};
 
 use crate::config::SecretEntry;
+use crate::terminal::{TerminalCore, TryRecvOutput};
 
 /// Pending terminal processes spawned by share URL executor.
 /// `webview.rs` drains these when creating Terminal panes.
@@ -143,8 +144,83 @@ impl CapsuleLaunchSession {
 
 pub type GuestLaunchSession = CapsuleLaunchSession;
 
-pub fn resolve_and_start_guest(handle: &str, secrets: &[SecretEntry]) -> Result<GuestLaunchSession> {
-    resolve_and_start_capsule(handle, secrets)
+/// Typed failure returned by `resolve_and_start_guest` /
+/// `resolve_and_start_capsule`. The two variants are deliberately
+/// asymmetric: `MissingConfig` carries enough structured payload to
+/// reconstitute a UI modal and retry the launch (Day 4), while `Other`
+/// flattens any non-recoverable failure to a string for display in the
+/// existing activity log / toast surface.
+///
+/// # Why a typed enum instead of `anyhow::Error`
+///
+/// The drain path in `webview.rs` runs on the foreground thread and
+/// needs to *branch* on the failure: E103 → modal, anything else →
+/// toast. Anyhow's `downcast_ref` is awkward across the
+/// `mpsc::channel` send (the `anyhow::Error` is `Send` but not
+/// `Sync`, and the existing code already collapses to `String`), so a
+/// dedicated enum is both clearer at the call site and channel-safe.
+#[derive(Debug, Clone)]
+pub enum LaunchError {
+    /// The CLI aborted with E103 — the capsule needs config the user
+    /// hasn't supplied. Carries the parsed schema and a snapshot of
+    /// the launch args so `webview.rs` can populate
+    /// `AppState::pending_config` and Day 4 can retry the same
+    /// `start_capsule` invocation post-Save.
+    MissingConfig {
+        /// Original handle the user asked to launch — re-fed into
+        /// `resolve_and_start_capsule` on retry.
+        handle: String,
+        /// Optional `target` from the CLI's `details.target` (e.g.
+        /// `"main"`). Surfaces in the modal title; not used in retry.
+        target: Option<String>,
+        /// `details.missing_schema` verbatim — drives the dynamic
+        /// form. Iterated as-is by the modal; never index-aligned
+        /// with `details.missing_keys`.
+        fields: Vec<crate::cli_envelope::ConfigFieldDto>,
+        /// Snapshot of secrets passed to the original
+        /// `start_capsule` call. Cloned at error-construction time so
+        /// a concurrent SecretStore mutation can't corrupt the retry.
+        original_secrets: Vec<SecretEntry>,
+    },
+    /// Any other failure — opaque string suitable for direct display.
+    Other(String),
+}
+
+impl LaunchError {
+    /// Wrap any `Display` value (typically `anyhow::Error`,
+    /// `io::Error`, or `&str`) as the opaque variant.
+    pub fn other<E: std::fmt::Display>(err: E) -> Self {
+        Self::Other(err.to_string())
+    }
+}
+
+impl std::fmt::Display for LaunchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingConfig { handle, .. } => {
+                write!(f, "guest launch needs configuration for '{handle}'")
+            }
+            Self::Other(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for LaunchError {}
+
+impl From<anyhow::Error> for LaunchError {
+    fn from(err: anyhow::Error) -> Self {
+        // `{:#}` includes the chain of contexts so the toast surface
+        // doesn't lose the "while doing X" framing the helpers add.
+        Self::Other(format!("{err:#}"))
+    }
+}
+
+pub fn resolve_and_start_guest(
+    handle: &str,
+    secrets: &[SecretEntry],
+    plain_configs: &[(String, String)],
+) -> Result<GuestLaunchSession, LaunchError> {
+    resolve_and_start_capsule(handle, secrets, plain_configs)
 }
 
 pub fn stop_guest_session(session_id: &str) -> Result<bool> {
@@ -265,13 +341,24 @@ pub fn is_share_url(s: &str) -> bool {
     true
 }
 
-pub fn resolve_and_start_capsule(handle: &str, secrets: &[SecretEntry]) -> Result<CapsuleLaunchSession> {
+pub fn resolve_and_start_capsule(
+    handle: &str,
+    secrets: &[SecretEntry],
+    plain_configs: &[(String, String)],
+) -> Result<CapsuleLaunchSession, LaunchError> {
     info!(handle, "resolving capsule");
     if is_share_url(handle) {
-        return resolve_and_start_from_share(handle);
+        // Share-URL launches don't go through preflight/E103 today —
+        // any failure is opaque, matching pre-Day-3 behavior.
+        return resolve_and_start_from_share(handle).map_err(LaunchError::from);
     }
+    // `resolve_capsule` and `build_launch_session` return
+    // `anyhow::Result`; the `?` operator lifts those into
+    // `LaunchError::Other` via `From<anyhow::Error>`. `start_capsule`
+    // already returns `Result<_, LaunchError>` so its `MissingConfig`
+    // variant flows through unchanged.
     let resolved = resolve_capsule(handle)?;
-    let started = start_capsule(handle, secrets)?;
+    let started = start_capsule(handle, secrets, plain_configs)?;
     let session = build_launch_session(handle, resolved, started)?;
     info!(
         session_id = %session.session_id,
@@ -341,8 +428,12 @@ fn resolve_capsule(handle: &str) -> Result<ResolvePayload> {
     Ok(envelope.resolution)
 }
 
-fn start_capsule(handle: &str, secrets: &[SecretEntry]) -> Result<SessionStartInfo> {
-    let ato_bin = resolve_ato_binary()?;
+fn start_capsule(
+    handle: &str,
+    secrets: &[SecretEntry],
+    plain_configs: &[(String, String)],
+) -> Result<SessionStartInfo, LaunchError> {
+    let ato_bin = resolve_ato_binary().map_err(LaunchError::from)?;
     debug!(bin = %ato_bin.display(), handle, "spawning ato helper for session start");
     let mut cmd = Command::new(&ato_bin);
     cmd.args(["app", "session", "start", handle, "--json"]);
@@ -356,21 +447,68 @@ fn start_capsule(handle: &str, secrets: &[SecretEntry]) -> Result<SessionStartIn
         );
     }
 
-    let output = cmd.output().with_context(|| {
-        format!(
-            "failed to run ato helper '{}' for session start",
+    // Inject non-secret config (model name, port, etc.) directly as
+    // env vars on the child. We deliberately do *not* use the
+    // `ATO_SECRET_` prefix — these values are plaintext by design and
+    // the capsule reads them under their schema-supplied name (e.g.
+    // `MODEL`, `PORT`). No file is materialized — the values flow
+    // memory → child env in one hop.
+    //
+    // # Why a Vec<(String, String)> instead of `&HashMap`
+    //
+    // The desktop's `CapsuleConfigStore` is keyed by handle and the
+    // value is a `HashMap<String,String>`, but the orchestrator
+    // doesn't need the map shape — it just iterates. Taking a slice
+    // of pairs keeps the orchestrator decoupled from the storage
+    // layout, so a future move to a different backing store (e.g. a
+    // SQLite table) requires no signature change here.
+    for (key, value) in plain_configs {
+        cmd.env(key, value);
+    }
+
+    let output = cmd.output().map_err(|err| {
+        LaunchError::Other(format!(
+            "failed to run ato helper '{}' for session start: {err}",
             ato_bin.display()
-        )
+        ))
     })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         error!(handle, stderr = %stderr, "ato session start failed");
-        bail!("ato session start failed: {stderr}");
+
+        // Try to lift the trailing JSONL fatal envelope out of the
+        // stderr stream — the CLI emits exactly one such line right
+        // before exit (see `apps/ato-cli/src/utils/error.rs::
+        // emit_ato_error_jsonl`). If the envelope is E103 with a
+        // non-empty `missing_schema`, surface a typed
+        // `MissingConfig` so `webview.rs` can drive the UI modal
+        // instead of a generic toast. Anything else (parse failure,
+        // non-E103 fatal, empty schema) falls back to the opaque
+        // string variant — the user still sees the error, just
+        // without the "fix it inline" affordance.
+        if let Some(event) = crate::cli_envelope::parse_cli_error_event(&stderr) {
+            if event.code == "E103" {
+                if let Some(details) = event.missing_env_details() {
+                    if !details.missing_schema.is_empty() {
+                        return Err(LaunchError::MissingConfig {
+                            handle: handle.to_string(),
+                            target: details.target.or(event.target),
+                            fields: details.missing_schema,
+                            original_secrets: secrets.to_vec(),
+                        });
+                    }
+                }
+            }
+        }
+
+        return Err(LaunchError::Other(format!(
+            "ato session start failed: {stderr}"
+        )));
     }
 
     serde_json::from_slice(&output.stdout)
-        .context("failed to parse session start response")
+        .map_err(|err| LaunchError::Other(format!("failed to parse session start response: {err}")))
 }
 
 fn run_ato_json<T>(args: &[&str]) -> Result<T>
@@ -1637,7 +1775,7 @@ mod tests {
         }
 
         // Materialise the share URL and start a session.
-        let session = super::resolve_and_start_capsule(SHARE_URL, &[])
+        let session = super::resolve_and_start_capsule(SHARE_URL, &[], &[])
             .expect("resolve_and_start_capsule should succeed for the share URL");
 
         eprintln!("[e2e] session_id  = {}", session.session_id);
@@ -1941,6 +2079,29 @@ pub struct TerminalProcess {
     pub output_rx: Receiver<String>,
 }
 
+impl TerminalCore for TerminalProcess {
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    fn send_input(&self, data: Vec<u8>) -> bool {
+        self.input_tx.send(data).is_ok()
+    }
+
+    fn send_resize(&self, cols: u16, rows: u16) -> bool {
+        self.resize_tx.send((cols, rows)).is_ok()
+    }
+
+    fn try_recv_output(&self) -> TryRecvOutput {
+        use std::sync::mpsc::TryRecvError;
+        match self.output_rx.try_recv() {
+            Ok(chunk) => TryRecvOutput::Data(chunk),
+            Err(TryRecvError::Empty) => TryRecvOutput::Empty,
+            Err(TryRecvError::Disconnected) => TryRecvOutput::Disconnected,
+        }
+    }
+}
+
 /// Spawn a terminal session routed through nacelle for a given `session_id`.
 ///
 /// Routes: ato-desktop → nacelle (interactive:true, type:"shell") → PTY → /bin/zsh
@@ -2206,6 +2367,55 @@ pub fn spawn_log_tail_session(session_id: String, log_path: PathBuf) -> Result<T
 ///   command through `ato run`).
 /// - `RawShell(shell)` → `spawn_terminal_session` (nacelle-backed PTY shell).
 /// - `RawAto` → a nacelle-backed PTY running the `ato` binary directly.
+#[derive(Clone, Debug)]
+pub struct SpawnSpec {
+    pub session_id: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub kind: SpawnKind,
+    pub secrets: Vec<SecretEntry>,
+}
+
+#[derive(Clone, Debug)]
+pub enum SpawnKind {
+    AtoRunRepl {
+        prelude: Option<String>,
+        initial_allow_hosts: Vec<String>,
+    },
+    NacelleShell {
+        shell: String,
+    },
+    RawAto,
+    LogTail {
+        log_path: PathBuf,
+    },
+}
+
+pub fn spawn_terminal(spec: SpawnSpec) -> Result<TerminalProcess> {
+    match spec.kind {
+        SpawnKind::AtoRunRepl {
+            prelude,
+            initial_allow_hosts,
+        } => spawn_ato_run_repl(
+            spec.session_id,
+            spec.cols,
+            spec.rows,
+            prelude,
+            initial_allow_hosts,
+            spec.secrets,
+        ),
+        SpawnKind::NacelleShell { shell } => {
+            spawn_terminal_session(spec.session_id, &shell, spec.cols, spec.rows)
+        }
+        SpawnKind::RawAto => {
+            let ato_bin =
+                resolve_ato_binary().context("cannot resolve ato binary for SpawnKind::RawAto")?;
+            spawn_terminal_session(spec.session_id, &ato_bin.to_string_lossy(), spec.cols, spec.rows)
+        }
+        SpawnKind::LogTail { log_path } => spawn_log_tail_session(spec.session_id, log_path),
+    }
+}
+
 pub fn spawn_cli_session(
     session_id: String,
     cols: u16,
@@ -2213,21 +2423,24 @@ pub fn spawn_cli_session(
     spec: CliLaunchSpec,
     secrets: Vec<SecretEntry>,
 ) -> Result<TerminalProcess> {
-    match spec {
+    let kind = match spec {
         CliLaunchSpec::AtoRunRepl {
             prelude,
             initial_allow_hosts,
-        } => spawn_ato_run_repl(session_id, cols, rows, prelude, initial_allow_hosts, secrets),
-        CliLaunchSpec::RawShell(shell) => spawn_terminal_session(session_id, &shell, cols, rows),
-        CliLaunchSpec::RawAto => {
-            // Run `ato` under nacelle by using it as the shell. nacelle will
-            // exec it in an interactive PTY; if the user's `ato` has no REPL
-            // the process exits and xterm.js shows a session-ended notice.
-            let ato_bin =
-                resolve_ato_binary().context("cannot resolve ato binary for ato://cli?cmd=ato")?;
-            spawn_terminal_session(session_id, &ato_bin.to_string_lossy(), cols, rows)
-        }
-    }
+        } => SpawnKind::AtoRunRepl {
+            prelude,
+            initial_allow_hosts,
+        },
+        CliLaunchSpec::RawShell(shell) => SpawnKind::NacelleShell { shell },
+        CliLaunchSpec::RawAto => SpawnKind::RawAto,
+    };
+    spawn_terminal(SpawnSpec {
+        session_id,
+        cols,
+        rows,
+        kind,
+        secrets,
+    })
 }
 
 /// Spawn a line-oriented REPL that routes each input line through `ato run`.
