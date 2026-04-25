@@ -3,6 +3,7 @@ mod automation;
 mod bridge;
 mod ccp_envelope;
 mod cli_envelope;
+mod cli_install;
 mod config;
 mod egress_policy;
 mod egress_proxy;
