@@ -4,6 +4,21 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.83] - 2026-04-25
+
+### What Changed
+
+
+#### Documentation
+
+- Document v0.5 distribution channels (Plan B)
+
+
+#### Features
+
+- Freeze schema_version to ccp/v1 (PR-1a)
+
+
 ## [0.4.82] - 2026-04-25
 
 ### What Changed
