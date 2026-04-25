@@ -1,12 +1,17 @@
 # Desktop bundle release pipeline.
 #
-# v0.5 scope (this file): macOS .dmg only — see
-# docs/v0.5-distribution-plan.md PR-4. Linux .AppImage and Windows
-# .msi are added by PR-9.
+# Multi-platform Desktop bundle pipeline (post-PR-9).
 #
 # Build matrix:
-#   - macos-14   → aarch64-apple-darwin (Apple Silicon)
-#   - macos-13   → x86_64-apple-darwin  (Intel — covers v0.5 maturity matrix §6)
+#   - macos-14    → aarch64-apple-darwin (Apple Silicon)
+#   - macos-13    → x86_64-apple-darwin  (Intel — covers v0.5 maturity matrix §6)
+#   - windows-2022 → x86_64-pc-windows-msvc (.msi via WiX 3.x)
+#   - ubuntu-22.04 → x86_64-unknown-linux-gnu (.AppImage)
+#   - ubuntu-22.04-arm → aarch64-unknown-linux-gnu (.AppImage)
+#
+# Linux/Windows ship beta per CPDS §6 (L8/L10/L11) — they're built by
+# the same xtask scaffolding so platform parity is structural rather
+# than aspirational.
 #
 # Code-signing: ad-hoc by default (CodesignMode::AdHoc in xtask). To
 # upgrade to Developer ID, set MAC_DEVELOPER_ID_NAME in the repo's
@@ -84,9 +89,107 @@ jobs:
           path: dist/${{ matrix.target }}/*.dmg
           if-no-files-found: error
 
+  bundle-windows:
+    name: bundle Windows (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            target: windows-x86_64
+            rust_target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache cargo registry / target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-release-${{ matrix.target }}
+
+      - name: Install WiX Toolset 3.x
+        # candle/light are required by xtask::package_msi. WiX 3.14 is
+        # the v0.5 baseline; the chocolatey package ships those exact
+        # binaries on PATH.
+        run: choco install wixtoolset --version=3.14.0 --no-progress
+
+      - name: Bundle and package .msi
+        # signtool gating: WINDOWS_CODESIGN_PFX/PASSWORD are unset by
+        # default for v0.5 (D-4) — xtask emits an unsigned MSI.
+        env:
+          WINDOWS_CODESIGN_PFX: ${{ secrets.WINDOWS_CODESIGN_PFX }}
+          WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
+        run: |
+          cd xtask
+          cargo run --release -- bundle --target ${{ matrix.target }} --msi
+
+      - name: Upload .msi artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ato-desktop-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/*.msi
+          if-no-files-found: error
+
+  bundle-linux:
+    name: bundle Linux (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: linux-x86_64
+            rust_target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: linux-arm64
+            rust_target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache cargo registry / target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-release-${{ matrix.target }}
+
+      - name: Install AppImage build deps
+        # appimagetool is shipped as a single AppImage; we drop it on
+        # PATH so xtask::package_appimage's Command::new("appimagetool")
+        # resolves it. libfuse2 is required by AppImage runtime.
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libfuse2 file
+          arch_suffix=$([ "${{ matrix.target }}" = "linux-arm64" ] && echo "aarch64" || echo "x86_64")
+          curl -L -o /tmp/appimagetool \
+            "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${arch_suffix}.AppImage"
+          chmod +x /tmp/appimagetool
+          sudo mv /tmp/appimagetool /usr/local/bin/appimagetool
+
+      - name: Bundle and package .AppImage
+        run: |
+          cd xtask
+          cargo run --release -- bundle --target ${{ matrix.target }} --appimage
+
+      - name: Upload .AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ato-desktop-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/*.AppImage
+          if-no-files-found: error
+
   publish-release:
     name: Publish GitHub Release
-    needs: bundle-macos
+    needs: [bundle-macos, bundle-windows, bundle-linux]
     if: startsWith(github.ref, 'refs/tags/ato-desktop-v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     steps:
@@ -121,6 +224,6 @@ jobs:
               --notes "Automated build — see CHANGELOG.md for details." \
               --draft
           fi
-          # Upload every .dmg the matrix produced.
-          find artifacts -name "*.dmg" -print0 \
+          # Upload every bundle artifact the matrix produced.
+          find artifacts \( -name "*.dmg" -o -name "*.msi" -o -name "*.AppImage" \) -print0 \
             | xargs -0 -I {} gh release upload "$tag" {} --clobber
