@@ -1120,6 +1120,77 @@ pub struct CliExportSpec {
     pub description: Option<String>,
 }
 
+/// Kind of a user-facing config field. Drives per-kind UI rendering on the
+/// desktop (masked input for `Secret`, dropdown for `Enum`, etc.) and
+/// downstream persistence (secrets go to the `SecretStore`; others to a
+/// capsule-scoped `.env` file).
+///
+/// Serialized with internal tagging under the `kind` discriminator so the
+/// flattened TOML form reads naturally:
+///
+/// ```toml
+/// [[targets.main.config_schema]]
+/// name = "OPENAI_API_KEY"
+/// kind = "secret"
+/// label = "OpenAI API Key"
+/// ```
+///
+/// ```toml
+/// [[targets.main.config_schema]]
+/// name = "MODEL"
+/// kind = "enum"
+/// choices = ["gpt-4", "gpt-5"]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ConfigKind {
+    /// Write-only secret. Masked in UI and stored in the SecretStore.
+    Secret,
+    /// Free-form string.
+    String,
+    /// Numeric value.
+    Number,
+    /// One-of selection.
+    Enum { choices: Vec<String> },
+}
+
+impl Default for ConfigKind {
+    fn default() -> Self {
+        Self::Secret
+    }
+}
+
+/// Rich metadata for a single config input surfaced by the capsule. When a
+/// capsule populates `config_schema` on a target, the desktop uses this
+/// metadata to render a dynamic form (label/description/placeholder/default)
+/// instead of a bare env-var name.
+///
+/// `config_schema` is additive alongside the legacy `required_env: Vec<String>`
+/// list — the resolver (`NamedTarget::resolved_config_schema`) prefers
+/// `config_schema` when non-empty and otherwise derives default
+/// `ConfigKind::Secret` entries from `required_env`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfigField {
+    /// Environment variable name used at runtime (e.g. `OPENAI_API_KEY`).
+    pub name: String,
+    /// Human-readable label for the UI (e.g. "OpenAI API Key").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Helper text rendered under the input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Input kind + kind-specific data, flattened into the outer table so
+    /// `kind = "enum"` sits next to `choices = [...]` in the TOML source.
+    #[serde(flatten)]
+    pub kind: ConfigKind,
+    /// Optional default value prefilled in the form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    /// Optional placeholder hint shown in empty inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+}
+
 /// v0.2 named target definition under [targets.<label>].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NamedTarget {
@@ -1167,6 +1238,13 @@ pub struct NamedTarget {
     /// Required environment variable names.
     #[serde(default)]
     pub required_env: Vec<String>,
+
+    /// Optional rich schema for user-facing config inputs. When populated,
+    /// consumers (desktop dynamic form, `ato run` preflight error details)
+    /// prefer this over the flat `required_env` list. See
+    /// `NamedTarget::resolved_config_schema` for the resolution rule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_schema: Vec<ConfigField>,
 
     /// Legacy public asset allowlist (deprecated for runtime=web; rejected by validation).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1223,6 +1301,31 @@ pub struct NamedTarget {
     /// v0.3 external data injection contracts.
     #[serde(default)]
     pub external_injection: HashMap<String, ExternalInjectionSpec>,
+}
+
+impl NamedTarget {
+    /// Returns the authoritative config schema for this target.
+    ///
+    /// - If `config_schema` is populated (rich form), it wins verbatim.
+    /// - Otherwise, derives a default `ConfigKind::Secret` entry per name in
+    ///   `required_env` so legacy capsules still drive the desktop dynamic
+    ///   form (as masked secret inputs).
+    pub fn resolved_config_schema(&self) -> Vec<ConfigField> {
+        if !self.config_schema.is_empty() {
+            return self.config_schema.clone();
+        }
+        self.required_env
+            .iter()
+            .map(|name| ConfigField {
+                name: name.clone(),
+                label: None,
+                description: None,
+                kind: ConfigKind::Secret,
+                default: None,
+                placeholder: None,
+            })
+            .collect()
+    }
 }
 
 /// WebAssembly Component Model target configuration

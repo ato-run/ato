@@ -1,8 +1,8 @@
 use std::fs;
 
 use super::{
-    is_kebab_case, is_semver, CapsuleManifest, CapsuleType, RouteWeight, RuntimeType,
-    ValidationError, ValidationMode,
+    is_kebab_case, is_semver, CapsuleManifest, CapsuleType, ConfigField, ConfigKind, RouteWeight,
+    RuntimeType, ValidationError, ValidationMode,
 };
 
 const VALID_TOML: &str = r#"
@@ -1950,4 +1950,146 @@ fn test_is_semver() {
     assert!(is_semver("1.0.0-alpha"));
     assert!(!is_semver("1.0"));
     assert!(!is_semver("v1.0.0"));
+}
+
+// ─── Config schema (Day 1 of schema-driven dynamic config UI) ──────────────
+
+#[test]
+fn resolved_config_schema_derives_secret_from_legacy_required_env() {
+    // Legacy form: only `required_env = ["FOO"]` is set. The resolver should
+    // synthesize a default ConfigField { kind: Secret } per entry so existing
+    // capsules automatically feed the desktop dynamic form.
+    let toml = r#"
+schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "main"
+
+[targets.main]
+runtime = "source"
+driver = "node"
+entrypoint = "server.js"
+required_env = ["OPENAI_API_KEY"]
+"#;
+
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse");
+    let target = manifest.resolve_default_target().expect("default target");
+
+    assert!(target.config_schema.is_empty(), "rich form not used");
+    let resolved = target.resolved_config_schema();
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].name, "OPENAI_API_KEY");
+    assert!(matches!(resolved[0].kind, ConfigKind::Secret));
+    assert!(resolved[0].label.is_none());
+}
+
+#[test]
+fn config_schema_rich_form_parses_all_kinds_and_wins_over_required_env() {
+    // Rich form with one of each kind. When config_schema is non-empty it
+    // must take precedence over required_env.
+    let toml = r#"
+schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "main"
+
+[targets.main]
+runtime = "source"
+driver = "node"
+entrypoint = "server.js"
+required_env = ["LEGACY_KEY"]
+
+[[targets.main.config_schema]]
+name = "OPENAI_API_KEY"
+kind = "secret"
+label = "OpenAI API Key"
+description = "Your OpenAI API key"
+placeholder = "sk-..."
+
+[[targets.main.config_schema]]
+name = "USERNAME"
+kind = "string"
+label = "Username"
+default = "guest"
+
+[[targets.main.config_schema]]
+name = "PORT"
+kind = "number"
+default = "8080"
+
+[[targets.main.config_schema]]
+name = "MODEL"
+kind = "enum"
+choices = ["gpt-4", "gpt-5"]
+default = "gpt-4"
+"#;
+
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse");
+    let target = manifest.resolve_default_target().expect("default target");
+
+    let resolved = target.resolved_config_schema();
+    assert_eq!(resolved.len(), 4, "config_schema wins over required_env");
+
+    assert_eq!(resolved[0].name, "OPENAI_API_KEY");
+    assert!(matches!(resolved[0].kind, ConfigKind::Secret));
+    assert_eq!(resolved[0].label.as_deref(), Some("OpenAI API Key"));
+    assert_eq!(resolved[0].placeholder.as_deref(), Some("sk-..."));
+
+    assert!(matches!(resolved[1].kind, ConfigKind::String));
+    assert_eq!(resolved[1].default.as_deref(), Some("guest"));
+
+    assert!(matches!(resolved[2].kind, ConfigKind::Number));
+
+    match &resolved[3].kind {
+        ConfigKind::Enum { choices } => {
+            assert_eq!(choices, &vec!["gpt-4".to_string(), "gpt-5".to_string()]);
+        }
+        other => panic!("expected Enum, got {:?}", other),
+    }
+}
+
+#[test]
+fn config_kind_round_trips_through_toml_and_json() {
+    // Round-trip via serde_json (which the E103 details envelope will use on
+    // the wire) to guarantee the desktop can reconstruct ConfigField verbatim.
+    let field = ConfigField {
+        name: "OPENAI_API_KEY".to_string(),
+        label: Some("OpenAI API Key".to_string()),
+        description: Some("Your key".to_string()),
+        kind: ConfigKind::Enum {
+            choices: vec!["a".to_string(), "b".to_string()],
+        },
+        default: Some("a".to_string()),
+        placeholder: None,
+    };
+
+    let json = serde_json::to_string(&field).expect("serialize");
+    let parsed: ConfigField = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(parsed, field);
+
+    // Confirm the JSON carries `kind` + `choices` at the top level (flat).
+    assert!(json.contains(r#""kind":"enum""#));
+    assert!(json.contains(r#""choices":["a","b"]"#));
+}
+
+#[test]
+fn resolved_config_schema_returns_empty_when_both_fields_absent() {
+    let toml = r#"
+schema_version = "0.2"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "main"
+
+[targets.main]
+runtime = "source"
+driver = "node"
+entrypoint = "server.js"
+"#;
+
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse");
+    let target = manifest.resolve_default_target().expect("default target");
+    assert!(target.resolved_config_schema().is_empty());
 }

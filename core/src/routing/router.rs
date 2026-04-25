@@ -8,9 +8,10 @@ use crate::lock_runtime::{self, ResolvedLockRuntimeModel};
 use crate::manifest;
 use crate::orchestration;
 use crate::types::{
-    CapsuleManifest, ExternalInjectionSpec, Mount, NamedTarget, OrchestrationPlan, ReadinessProbe,
-    ResolvedService, ResolvedServiceNetwork, ResolvedServiceRuntime, ResolvedTargetRuntime,
-    ServiceConnectionInfo, ServiceSpec, ValidationMode,
+    CapsuleManifest, ConfigField, ConfigKind, ExternalInjectionSpec, Mount, NamedTarget,
+    OrchestrationPlan, ReadinessProbe, ResolvedService, ResolvedServiceNetwork,
+    ResolvedServiceRuntime, ResolvedTargetRuntime, ServiceConnectionInfo, ServiceSpec,
+    ValidationMode,
 };
 
 mod lock_routing;
@@ -608,6 +609,45 @@ impl ExecutionDescriptor {
         }
 
         ordered
+    }
+
+    /// Returns the resolved schema for user-facing config inputs on the
+    /// selected target. Mirrors `NamedTarget::resolved_config_schema`:
+    ///
+    /// - If the target declares `[[config_schema]]` entries (rich form),
+    ///   they win verbatim.
+    /// - Otherwise, default `ConfigKind::Secret` entries are synthesised
+    ///   from `execution_required_envs()` so legacy capsules still feed the
+    ///   desktop dynamic form.
+    ///
+    /// The returned vec preserves the order of `execution_required_envs()`
+    /// in the legacy fallback and the TOML order in the rich case.
+    pub fn execution_resolved_config_schema(&self) -> Vec<ConfigField> {
+        if let Some(schema) =
+            self.compat_array(&["targets", &self.selected_target, "config_schema"])
+        {
+            let mut fields = Vec::with_capacity(schema.len());
+            for value in &schema {
+                if let Ok(field) = value.clone().try_into::<ConfigField>() {
+                    fields.push(field);
+                }
+            }
+            if !fields.is_empty() {
+                return fields;
+            }
+        }
+
+        self.execution_required_envs()
+            .into_iter()
+            .map(|name| ConfigField {
+                name,
+                label: None,
+                description: None,
+                kind: ConfigKind::Secret,
+                default: None,
+                placeholder: None,
+            })
+            .collect()
     }
 
     pub fn execution_working_directory(&self) -> PathBuf {
