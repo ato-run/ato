@@ -26,7 +26,15 @@ pub use resolve::resolve_handle;
 pub use session::{start_session, stop_session};
 
 const DESKY_PACKAGE_ID: &str = "ato/desky";
-const SCHEMA_VERSION: &str = "desky-control-plane/v1";
+/// CCP (Capsule Control Protocol) schema version.
+///
+/// Stamped on every `ato app {resolve,session start,session stop}` JSON envelope.
+/// See `docs/specs/CCP_SPEC.md` for the additive-only versioning contract.
+///
+/// History:
+///   - `desky-control-plane/v1` (pre-v0.5): legacy name, retired in v0.5.0
+///   - `ccp/v1` (v0.5.0+): canonical name aligned with PAS §4.1
+const SCHEMA_VERSION: &str = "ccp/v1";
 const STATE_VERSION: u32 = 1;
 const MANAGED_ENVIRONMENT_NOT_MATERIALIZED_ERROR: &str = "managed_environment_not_materialized";
 const UNMATERIALIZED_SERVICE_STATUS: &str = "unmaterialized";
