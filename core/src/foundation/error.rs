@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 
+use super::types::ConfigField;
+
 /// Internal propagation error.
 ///
 /// Returned by library functions that can fail.  Use `?` to propagate.
@@ -145,6 +147,13 @@ pub enum AtoError {
         message: String,
         hint: Option<String>,
         missing_keys: Vec<String>,
+        /// Rich schema for the unresolved fields, surfaced to the desktop
+        /// dynamic config UI. Must satisfy `missing_schema[i].name ==
+        /// missing_keys[i]` (same order, same length) when constructed by the
+        /// CLI preflight. The desktop deserializer is required to iterate
+        /// `missing_schema` only and ignore `missing_keys` — see the E103
+        /// wire contract in the plan.
+        missing_schema: Vec<ConfigField>,
         target: Option<String>,
     },
     DependencyLockMissing {
@@ -580,9 +589,14 @@ impl AtoError {
             Self::EntrypointInvalid { field, .. } => Some(json!({ "field": field })),
             Self::MissingRequiredEnv {
                 missing_keys,
+                missing_schema,
                 target,
                 ..
-            } => Some(json!({ "missing_keys": missing_keys, "target": target })),
+            } => Some(json!({
+                "missing_keys": missing_keys,
+                "missing_schema": missing_schema,
+                "target": target,
+            })),
             Self::DependencyLockMissing {
                 lockfile,
                 package_manager,
