@@ -223,6 +223,12 @@ pub async fn pack(
             .await?,
         );
     }
+    // Verify the staged payload contains the project marker required by the declared
+    // runtime/driver BEFORE we add internal files (config.json, capsule.toml, etc.).
+    // Running this on the raw collected entries gives a clean error pointing the user
+    // at the missing source files rather than letting them ship a broken capsule.
+    validate_payload_contains_project_marker(plan, &payload_entries)?;
+
     payload_entries.push(PayloadEntry::File(
         payload_file_entry(&config_path, "config.json".to_string()).await?,
     ));
@@ -766,6 +772,20 @@ fn select_payload_source_root(manifest_dir: &Path) -> (PathBuf, Option<&'static 
         return (manifest_dir.to_path_buf(), None);
     }
 
+    // If source/ has no project markers (package.json, pyproject.toml, Cargo.toml, …)
+    // but manifest_dir does, prefer manifest_dir. This catches stale or empty source/
+    // snapshots that would otherwise cause every project file to be excluded from the
+    // archive — observed in the wild when `ato publish` was run with a leftover empty
+    // source/ directory next to a workspace-rooted project.
+    if !has_project_marker(&source_dir) && has_project_marker(manifest_dir) {
+        return (
+            manifest_dir.to_path_buf(),
+            Some(
+                "source/ directory contains no project markers (package.json, pyproject.toml, Cargo.toml, go.mod, deno.json) while manifest_dir does; packaging from manifest_dir to keep project files.",
+            ),
+        );
+    }
+
     // If both roots exist and only the project root has Next standalone node_modules,
     // prefer project root to avoid publishing stale source/ snapshots.
     if has_next_standalone_node_modules(manifest_dir)
@@ -780,6 +800,118 @@ fn select_payload_source_root(manifest_dir: &Path) -> (PathBuf, Option<&'static 
     }
 
     (source_dir, None)
+}
+
+/// Files that mark a directory as the root of a recognizable project for one of the
+/// runtimes ato supports. Used by `select_payload_source_root` to detect stale empty
+/// `source/` snapshots, and by `validate_payload_contains_project_marker` as a publish
+/// gate.
+const PROJECT_MARKERS: &[&str] = &[
+    // Node / JavaScript / TypeScript
+    "package.json",
+    // Python
+    "pyproject.toml",
+    "requirements.txt",
+    "setup.py",
+    "setup.cfg",
+    // Rust
+    "Cargo.toml",
+    // Go
+    "go.mod",
+    // Deno
+    "deno.json",
+    "deno.jsonc",
+];
+
+fn has_project_marker(dir: &Path) -> bool {
+    PROJECT_MARKERS.iter().any(|m| dir.join(m).is_file())
+}
+
+/// Driver-specific markers required for a successful publish. Returning `None` means
+/// the driver is unknown / not gated; the publish proceeds without this check.
+fn required_markers_for_driver(driver: &str) -> Option<&'static [&'static str]> {
+    match driver.trim().to_ascii_lowercase().as_str() {
+        "node" => Some(&["package.json"]),
+        "python" => Some(&["pyproject.toml", "requirements.txt", "setup.py"]),
+        "rust" => Some(&["Cargo.toml"]),
+        "go" => Some(&["go.mod"]),
+        "deno" => Some(&["deno.json", "deno.jsonc"]),
+        _ => None,
+    }
+}
+
+/// Resolve the language token from `runtime` ("web/node", "source/python", "node", …)
+/// when `driver` is not explicitly set.
+fn driver_token_from_runtime(runtime: &str) -> Option<String> {
+    let trimmed = runtime.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let token = trimmed
+        .rsplit_once('/')
+        .map(|(_, tail)| tail)
+        .unwrap_or(trimmed);
+    Some(token.to_ascii_lowercase())
+}
+
+/// Publish-time gate: confirm the staged payload contains the project marker required
+/// by the declared runtime/driver. Catches the byok-ai-chat-class bug where every
+/// project file is silently excluded from the archive.
+fn validate_payload_contains_project_marker(
+    plan: &crate::router::ManifestData,
+    payload_entries: &[PayloadEntry],
+) -> CapsuleResult<()> {
+    let driver = plan
+        .execution_driver()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty());
+    let runtime = plan.execution_runtime().unwrap_or_default();
+
+    let driver_token = driver
+        .clone()
+        .or_else(|| driver_token_from_runtime(&runtime));
+
+    let Some(token) = driver_token else {
+        return Ok(());
+    };
+    let Some(required) = required_markers_for_driver(&token) else {
+        return Ok(());
+    };
+
+    let has_marker = payload_entries.iter().any(|entry| {
+        let archive_path = entry.archive_path();
+        let Some(file_name) = Path::new(archive_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+        else {
+            return false;
+        };
+        required.contains(&file_name)
+    });
+
+    if has_marker {
+        return Ok(());
+    }
+
+    let packed_preview: Vec<String> = payload_entries
+        .iter()
+        .take(20)
+        .map(|entry| entry.archive_path().to_string())
+        .collect();
+    let preview_suffix = if payload_entries.len() > packed_preview.len() {
+        format!(" (+ {} more)", payload_entries.len() - packed_preview.len())
+    } else {
+        String::new()
+    };
+
+    Err(CapsuleError::Pack(format!(
+        "publish aborted: declared runtime '{runtime}' (driver '{token}') requires {} but the staged payload does not contain it. \
+         Common causes: an empty source/ directory next to project files, an over-broad .capsuleignore, or running ato publish from the wrong directory. \
+         Packed entries (first {}): {:?}{preview_suffix}",
+        required.join(" or "),
+        packed_preview.len(),
+        packed_preview,
+    )))
 }
 
 fn select_payload_roots(
@@ -996,8 +1128,10 @@ mod tests {
 
     use super::{
         build_payload_payload_manifest_bytes_with_cas, collect_payload_entries,
-        find_nearest_readme_candidate, pack, parse_bool_env, select_payload_roots,
-        select_payload_source_root, CapsulePackOptions, CasStore, FastCdcWriterConfig,
+        driver_token_from_runtime, find_nearest_readme_candidate, pack, parse_bool_env,
+        required_markers_for_driver, select_payload_roots, select_payload_source_root,
+        validate_payload_contains_project_marker, CapsulePackOptions, CasStore,
+        FastCdcWriterConfig, PayloadEntry, PayloadFileEntry,
     };
 
     #[test]
@@ -1478,5 +1612,176 @@ run = "main.py""#,
             names.contains(&"source/artifacts/macos-arm64/uv-cache/marker.txt".to_string()),
             "names={names:?}"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Fix A: empty / unmarked source/ snapshots fall back to manifest_dir.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn select_payload_source_root_falls_back_when_source_has_no_project_marker() {
+        // Reproduces the byok-ai-chat case: empty source/ at workspace root, project
+        // files (package.json, app/, lib/, …) live directly under manifest_dir.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("source")).expect("mkdir empty source/");
+        std::fs::write(tmp.path().join("package.json"), r#"{"name":"demo"}"#)
+            .expect("write package.json at workspace root");
+
+        let (selected, warning) = select_payload_source_root(tmp.path());
+        assert_eq!(
+            selected.as_path(),
+            tmp.path(),
+            "empty source/ must not shadow project files at workspace root"
+        );
+        let message = warning.expect("user-visible warning expected");
+        assert!(
+            message.contains("no project markers"),
+            "warning should explain why fallback fired: {message}"
+        );
+    }
+
+    #[test]
+    fn select_payload_source_root_keeps_source_when_it_has_project_marker() {
+        // Layout where the actual project lives under source/ — must not regress.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let source = tmp.path().join("source");
+        std::fs::create_dir_all(&source).expect("mkdir source/");
+        std::fs::write(source.join("package.json"), r#"{"name":"demo"}"#)
+            .expect("write source/package.json");
+
+        let (selected, warning) = select_payload_source_root(tmp.path());
+        assert_eq!(selected.as_path(), source.as_path());
+        assert!(warning.is_none(), "no warning expected for healthy layout");
+    }
+
+    #[test]
+    fn select_payload_source_root_keeps_source_when_neither_has_project_marker() {
+        // No marker on either side → keep existing behavior (use source/), since the
+        // emptiness diagnostic only fires when manifest_dir clearly has the project.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let source = tmp.path().join("source");
+        std::fs::create_dir_all(&source).expect("mkdir source/");
+
+        let (selected, warning) = select_payload_source_root(tmp.path());
+        assert_eq!(selected.as_path(), source.as_path());
+        assert!(warning.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // Fix B: publish-time gate on declared runtime/driver markers.
+    // -------------------------------------------------------------------------
+
+    fn dummy_payload_file_entry(archive_path: &str) -> PayloadEntry {
+        PayloadEntry::File(PayloadFileEntry {
+            archive_path: archive_path.to_string(),
+            disk_path: std::path::PathBuf::from("/dev/null"),
+            size: 0,
+            mode: 0o644,
+        })
+    }
+
+    fn node_app_plan(tmp: &std::path::Path) -> crate::router::ManifestData {
+        let manifest_path = tmp.join("capsule.toml");
+        std::fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.3"
+name = "marker-validation"
+version = "0.1.0"
+type = "app"
+
+runtime = "web/node"
+run = "node server.js"
+"#,
+        )
+        .expect("write manifest");
+        crate::router::route_manifest(&manifest_path, ExecutionProfile::Release, None)
+            .expect("route")
+            .plan
+    }
+
+    #[test]
+    fn driver_token_extracts_language_from_runtime_string() {
+        assert_eq!(driver_token_from_runtime("web/node").as_deref(), Some("node"));
+        assert_eq!(
+            driver_token_from_runtime("source/python").as_deref(),
+            Some("python")
+        );
+        assert_eq!(driver_token_from_runtime("node").as_deref(), Some("node"));
+        assert_eq!(driver_token_from_runtime("").as_deref(), None);
+    }
+
+    #[test]
+    fn required_markers_for_known_drivers_cover_supported_runtimes() {
+        assert!(required_markers_for_driver("node")
+            .unwrap()
+            .contains(&"package.json"));
+        assert!(required_markers_for_driver("python")
+            .unwrap()
+            .contains(&"pyproject.toml"));
+        assert!(required_markers_for_driver("rust")
+            .unwrap()
+            .contains(&"Cargo.toml"));
+        assert!(required_markers_for_driver("native").is_none());
+    }
+
+    #[test]
+    fn validate_payload_passes_when_node_marker_present() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = node_app_plan(tmp.path());
+        let entries = vec![
+            dummy_payload_file_entry("source/package.json"),
+            dummy_payload_file_entry("source/server.js"),
+        ];
+        validate_payload_contains_project_marker(&plan, &entries)
+            .expect("node payload with package.json must validate");
+    }
+
+    #[test]
+    fn validate_payload_rejects_node_payload_without_package_json() {
+        // Reproduces byok-ai-chat: archive only contains stale provision artifacts.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = node_app_plan(tmp.path());
+        let entries = vec![
+            dummy_payload_file_entry("source/artifacts/macos-arm64/pnpm-store/v10/index/foo"),
+            dummy_payload_file_entry("source/artifacts/macos-arm64/pnpm-store/v10/files/bar"),
+        ];
+        let err = validate_payload_contains_project_marker(&plan, &entries)
+            .expect_err("missing package.json must fail publish");
+        let message = err.to_string();
+        assert!(
+            message.contains("package.json"),
+            "error must name the missing marker: {message}"
+        );
+        assert!(
+            message.contains("publish aborted"),
+            "error must signal publish abort: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_payload_skips_unknown_drivers() {
+        // runtime = "source/native" → no marker required; must not block publish.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = tmp.path().join("capsule.toml");
+        std::fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.3"
+name = "native-app"
+version = "0.1.0"
+type = "app"
+
+runtime = "source/native"
+run = "source/main.sh"
+"#,
+        )
+        .expect("write manifest");
+        let plan = crate::router::route_manifest(&manifest_path, ExecutionProfile::Release, None)
+            .expect("route")
+            .plan;
+        let entries = vec![dummy_payload_file_entry("source/main.sh")];
+        validate_payload_contains_project_marker(&plan, &entries)
+            .expect("unknown driver must be a no-op");
     }
 }
