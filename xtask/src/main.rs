@@ -16,6 +16,8 @@ fn main() -> Result<()> {
             let mut sign = false;
             let mut do_notarize = false;
             let mut do_dmg = false;
+            let mut do_msi = false;
+            let mut do_appimage = false;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--target" => {
@@ -26,20 +28,45 @@ fn main() -> Result<()> {
                     "--sign" => sign = true,
                     "--notarize" => do_notarize = true,
                     "--dmg" => do_dmg = true,
+                    "--msi" => do_msi = true,
+                    "--appimage" => do_appimage = true,
                     other => bail!("unsupported xtask argument: {}", other),
                 }
             }
-            let bundle = bundle_macos_app(&target)?;
-            if sign {
-                codesign_bundle(&bundle)?;
+            // Dispatch by target family. Each platform has its own
+            // staging layout — keeping them in distinct functions
+            // makes the per-platform invariants (Helpers/ato vs
+            // bin\ato.exe vs usr/bin/ato) easy to verify.
+            match target.as_str() {
+                "darwin-arm64" | "darwin-x86_64" => {
+                    let bundle = bundle_macos_app(&target)?;
+                    if sign {
+                        codesign_bundle(&bundle)?;
+                    }
+                    if do_notarize {
+                        notarize_bundle(&bundle)?;
+                    }
+                    if do_dmg {
+                        package_dmg(&bundle, &target)?;
+                    }
+                    Ok(())
+                }
+                "windows-x86_64" => {
+                    let staging = bundle_windows_app(&target)?;
+                    if do_msi {
+                        package_msi(&staging, &target)?;
+                    }
+                    Ok(())
+                }
+                "linux-x86_64" | "linux-arm64" => {
+                    let staging = bundle_linux_app(&target)?;
+                    if do_appimage {
+                        package_appimage(&staging, &target)?;
+                    }
+                    Ok(())
+                }
+                other => bail!("unsupported bundle target: {}", other),
             }
-            if do_notarize {
-                notarize_bundle(&bundle)?;
-            }
-            if do_dmg {
-                package_dmg(&bundle, &target)?;
-            }
-            Ok(())
         }
         Some("notarize") => {
             let bundle = args
@@ -61,6 +88,30 @@ fn main() -> Result<()> {
                 .to_string();
             package_dmg(Path::new(&bundle), &target)
         }
+        Some("msi") => {
+            let staging = args
+                .next()
+                .context("msi requires a path to the staging directory")?;
+            let target = Path::new(&staging)
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|s| s.to_str())
+                .unwrap_or("windows-x86_64")
+                .to_string();
+            package_msi(Path::new(&staging), &target)
+        }
+        Some("appimage") => {
+            let staging = args
+                .next()
+                .context("appimage requires a path to the staging directory")?;
+            let target = Path::new(&staging)
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|s| s.to_str())
+                .unwrap_or("linux-x86_64")
+                .to_string();
+            package_appimage(Path::new(&staging), &target)
+        }
         Some("help") | Some("--help") | Some("-h") | None => {
             print_help();
             Ok(())
@@ -73,13 +124,300 @@ fn print_help() {
     println!(
         "ato-desktop xtask\n\n\
          Commands:\n  \
-           bundle [--target darwin-arm64|darwin-x86_64] [--sign] [--notarize] [--dmg]\n  \
-           notarize <bundle>   Submit an .app to Apple notary (no-op without APPLE_* env)\n  \
-           dmg <bundle>        Wrap a signed .app in an .dmg via hdiutil\n\n\
-         Code-signing modes (resolved at runtime):\n  \
+           bundle [--target TARGET] [--sign] [--notarize] [--dmg] [--msi] [--appimage]\n  \
+           notarize <bundle>     Submit an .app to Apple notary (no-op without APPLE_* env)\n  \
+           dmg      <bundle>     Wrap a signed .app in an .dmg via hdiutil\n  \
+           msi      <staging>    Wrap a Windows staging tree in an .msi via WiX (candle/light)\n  \
+           appimage <staging>    Wrap a Linux staging tree in an .AppImage via appimagetool\n\n\
+         Targets:\n  \
+           darwin-arm64 (default), darwin-x86_64, windows-x86_64, linux-x86_64, linux-arm64\n\n\
+         macOS code-signing modes (resolved at runtime):\n  \
            - if MAC_DEVELOPER_ID_NAME is set: real Developer ID (hardened runtime + entitlements)\n  \
-           - else:                            ad-hoc (`codesign --sign -`) — v0.5 default\n"
+           - else:                            ad-hoc (`codesign --sign -`) — v0.5 default\n\n\
+         Windows: signtool integration is scaffolded but env-gated; v0.5 ships unsigned (L10).\n"
     );
+}
+
+/// Build the `ato-desktop` and `ato` binaries for a given Rust target.
+/// Returns the *target staging root*, populated as either:
+///   - macOS:   `dist/<target>/Ato Desktop.app/Contents/...`
+///   - Windows: `dist/<target>/Ato/{ato-desktop.exe, bin/ato.exe, assets/}`
+///   - Linux:   `dist/<target>/AppDir/usr/{bin/{ato-desktop,ato},share/applications/...}`
+fn bundle_windows_app(target: &str) -> Result<PathBuf> {
+    let rust_target = match target {
+        "windows-x86_64" => "x86_64-pc-windows-msvc",
+        other => bail!("unsupported windows target: {}", other),
+    };
+    let paths = WorkspacePaths::discover()?;
+    run_cargo_build(&paths.desktop_manifest, "ato-desktop", rust_target)?;
+    run_cargo_build(&paths.ato_manifest, "ato", rust_target)?;
+
+    let staging = paths.desktop_root.join("dist").join(target).join("Ato");
+    if staging.exists() {
+        fs::remove_dir_all(&staging)
+            .with_context(|| format!("failed to remove old staging {}", staging.display()))?;
+    }
+    let bin_dir = staging.join("bin");
+    let assets_dir = staging.join("assets");
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&assets_dir)?;
+
+    let profile_dir = format!("{rust_target}/release");
+    let desktop_exe = paths
+        .desktop_root
+        .join("target")
+        .join(&profile_dir)
+        .join("ato-desktop.exe");
+    let helper_exe = paths
+        .ato_root
+        .join("target")
+        .join(&profile_dir)
+        .join("ato.exe");
+    fs::copy(&desktop_exe, staging.join("ato-desktop.exe")).with_context(|| {
+        format!(
+            "failed to copy {} to staging — was the cross-build successful?",
+            desktop_exe.display()
+        )
+    })?;
+    fs::copy(&helper_exe, bin_dir.join("ato.exe")).with_context(|| {
+        format!("failed to copy {} to staging", helper_exe.display())
+    })?;
+    copy_dir_recursive(&paths.desktop_root.join("assets"), &assets_dir)?;
+
+    println!("Staged Windows install tree at {}", staging.display());
+    Ok(staging)
+}
+
+fn bundle_linux_app(target: &str) -> Result<PathBuf> {
+    let rust_target = match target {
+        "linux-x86_64" => "x86_64-unknown-linux-gnu",
+        "linux-arm64" => "aarch64-unknown-linux-gnu",
+        other => bail!("unsupported linux target: {}", other),
+    };
+    let paths = WorkspacePaths::discover()?;
+    run_cargo_build(&paths.desktop_manifest, "ato-desktop", rust_target)?;
+    run_cargo_build(&paths.ato_manifest, "ato", rust_target)?;
+
+    let staging = paths.desktop_root.join("dist").join(target).join("AppDir");
+    if staging.exists() {
+        fs::remove_dir_all(&staging)?;
+    }
+    let bin_dir = staging.join("usr").join("bin");
+    let app_dir = staging.join("usr").join("share").join("applications");
+    let metainfo_dir = staging.join("usr").join("share").join("metainfo");
+    let assets_dir = staging.join("usr").join("share").join("ato-desktop").join("assets");
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&app_dir)?;
+    fs::create_dir_all(&metainfo_dir)?;
+    fs::create_dir_all(&assets_dir)?;
+
+    let profile_dir = format!("{rust_target}/release");
+    fs::copy(
+        paths
+            .desktop_root
+            .join("target")
+            .join(&profile_dir)
+            .join("ato-desktop"),
+        bin_dir.join("ato-desktop"),
+    )
+    .context("failed to stage ato-desktop binary")?;
+    fs::copy(
+        paths.ato_root.join("target").join(&profile_dir).join("ato"),
+        bin_dir.join("ato"),
+    )
+    .context("failed to stage ato helper binary")?;
+
+    // Copy declarative installer metadata if present. These ship from
+    // PR-8's installer/ folder and let `xdg-mime` pick up our URL
+    // schemes after install.
+    let installer_dir = paths.desktop_root.join("installer");
+    let desktop_file = installer_dir.join("ato-desktop.desktop");
+    if desktop_file.exists() {
+        fs::copy(&desktop_file, app_dir.join("ato-desktop.desktop"))?;
+    }
+    let appdata_file = installer_dir.join("ato-desktop.appdata.xml");
+    if appdata_file.exists() {
+        fs::copy(&appdata_file, metainfo_dir.join("ato-desktop.appdata.xml"))?;
+    }
+    copy_dir_recursive(&paths.desktop_root.join("assets"), &assets_dir)?;
+
+    println!("Staged Linux AppDir at {}", staging.display());
+    Ok(staging)
+}
+
+/// Wrap a Windows staging tree in an .msi via WiX. v0.5 ships
+/// unsigned per docs/v0.5-distribution-plan.md D-4 / L10 — the
+/// signtool path is scaffolded below but gated on
+/// `WINDOWS_CODESIGN_PFX` so it stays a no-op until v0.5.x lands the
+/// EV cert.
+fn package_msi(staging: &Path, target: &str) -> Result<()> {
+    let wxs = locate_wix_source()?;
+    let arch = match target {
+        "windows-x86_64" => "x64",
+        other => bail!("unsupported msi target: {}", other),
+    };
+    let version = env!("CARGO_PKG_VERSION");
+    let dist_dir = staging
+        .parent()
+        .context("staging path has no parent")?;
+    let obj_path = dist_dir.join("ato.wixobj");
+    let msi_path = dist_dir.join(format!("Ato-Desktop-{version}-{target}.msi"));
+
+    // candle = compile .wxs → .wixobj
+    let status = Command::new("candle")
+        .args([
+            "-arch",
+            arch,
+            "-dStagingDir=",
+            // candle's preprocessor lets us inject the staging dir as
+            // a variable the .wxs references via $(var.StagingDir).
+        ])
+        .arg(format!(
+            "-dStagingDir={}",
+            staging.to_str().context("staging path is not UTF-8")?
+        ))
+        .arg(format!("-dProductVersion={version}"))
+        .arg("-out")
+        .arg(&obj_path)
+        .arg(&wxs)
+        .status()
+        .context("failed to invoke `candle` — install WiX Toolset 3.x and ensure it is on PATH")?;
+    if !status.success() {
+        bail!("candle failed for {} ({})", wxs.display(), status);
+    }
+
+    let status = Command::new("light")
+        .args(["-ext", "WixUIExtension", "-ext", "WixUtilExtension"])
+        .arg("-out")
+        .arg(&msi_path)
+        .arg(&obj_path)
+        .status()
+        .context("failed to invoke `light` — install WiX Toolset 3.x")?;
+    if !status.success() {
+        bail!("light failed ({status})");
+    }
+
+    // Optional signtool — only runs when both env vars are set. v0.5
+    // intentionally leaves these unset (D-4) so CI builds an unsigned
+    // MSI; v0.5.x will populate WINDOWS_CODESIGN_PFX after EV cert
+    // procurement.
+    if let (Ok(pfx), Ok(pwd)) = (
+        std::env::var("WINDOWS_CODESIGN_PFX"),
+        std::env::var("WINDOWS_CODESIGN_PASSWORD"),
+    ) {
+        let status = Command::new("signtool")
+            .args([
+                "sign",
+                "/fd",
+                "SHA256",
+                "/td",
+                "SHA256",
+                "/tr",
+                "http://timestamp.digicert.com",
+                "/f",
+                &pfx,
+                "/p",
+                &pwd,
+            ])
+            .arg(&msi_path)
+            .status()
+            .context("failed to invoke signtool")?;
+        if !status.success() {
+            bail!("signtool failed ({status})");
+        }
+        println!("Signed MSI with {pfx}");
+    } else {
+        println!(
+            "package_msi: signtool skipped (WINDOWS_CODESIGN_PFX / \
+             WINDOWS_CODESIGN_PASSWORD not set) — v0.5 default per \
+             docs/v0.5-distribution-plan.md L10"
+        );
+    }
+
+    println!("Built {}", msi_path.display());
+    Ok(())
+}
+
+fn locate_wix_source() -> Result<PathBuf> {
+    let xtask_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let path = xtask_root
+        .parent()
+        .context("xtask must live under apps/ato-desktop/xtask")?
+        .join("installer")
+        .join("wix.wxs");
+    if !path.exists() {
+        bail!(
+            "WiX source missing at {} — expected from PR-7 scaffolding",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+/// Wrap a Linux AppDir staging tree into a single AppImage. Uses
+/// `appimagetool` from PATH (CI installs it via apt or
+/// AppImageKit-continuous releases). The staging tree must already
+/// contain `usr/bin/ato-desktop`, `usr/share/applications/
+/// ato-desktop.desktop`, and an `AppRun` entry — the latter is
+/// generated here as a thin shell wrapper to avoid hand-editing.
+fn package_appimage(staging: &Path, target: &str) -> Result<()> {
+    let arch = match target {
+        "linux-x86_64" => "x86_64",
+        "linux-arm64" => "aarch64",
+        other => bail!("unsupported appimage target: {}", other),
+    };
+
+    // AppRun is the AppImage entry point; it must live at the AppDir
+    // root and exec the real binary. Keep this wrapper tiny so it is
+    // obvious what AppImage does at runtime.
+    let app_run = staging.join("AppRun");
+    fs::write(
+        &app_run,
+        "#!/bin/sh\n\
+         HERE=\"$(dirname \"$(readlink -f \"$0\")\")\"\n\
+         exec \"$HERE/usr/bin/ato-desktop\" \"$@\"\n",
+    )
+    .context("failed to write AppRun")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&app_run)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&app_run, perms)?;
+    }
+
+    // appimagetool requires a `.desktop` file at the AppDir root that
+    // matches the one under usr/share/applications. Copy it up.
+    let inner_desktop = staging
+        .join("usr")
+        .join("share")
+        .join("applications")
+        .join("ato-desktop.desktop");
+    if inner_desktop.exists() {
+        fs::copy(&inner_desktop, staging.join("ato-desktop.desktop")).ok();
+    }
+
+    let version = env!("CARGO_PKG_VERSION");
+    let out_path = staging
+        .parent()
+        .context("staging has no parent")?
+        .join(format!("Ato-Desktop-{version}-{arch}.AppImage"));
+
+    let status = Command::new("appimagetool")
+        .arg(staging)
+        .arg(&out_path)
+        .env("ARCH", arch)
+        .status()
+        .context(
+            "failed to invoke appimagetool — install from \
+             https://github.com/AppImage/AppImageKit/releases and ensure it is on PATH",
+        )?;
+    if !status.success() {
+        bail!("appimagetool failed ({status})");
+    }
+
+    println!("Built {}", out_path.display());
+    Ok(())
 }
 
 /// Code-signing strategy resolved from environment.
