@@ -4,6 +4,34 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.84] - 2026-04-25
+
+### What Changed
+
+
+#### CI
+
+- Add intel mac target and core-crate purity lint (PR-2)
+
+
+#### Documentation
+
+- Add monorepo consolidation plan for post-v0.5.0 migration
+
+- Add L8/L9/L10/L11 for v0.5 distribution scope
+
+
+#### Other Changes
+
+- Merge pull request #326 from ato-run/dev
+
+- Add authors + WiX template for cargo-dist MSI
+
+- Add WiX upgrade-guid/path-guid for cargo-dist MSI
+
+- Generate Windows MSI for CLI-only installs
+
+
 ## [0.4.83] - 2026-04-25
 
 ### What Changed
