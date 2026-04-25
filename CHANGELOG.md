@@ -4,6 +4,28 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.82] - 2026-04-25
+
+### What Changed
+
+
+#### CI
+
+- Fix gitleaks false positives and retire obsolete v3-parity workflow
+
+
+#### Features
+
+- Advance release work
+
+- Emit missing_schema in E103 envelope for desktop config UI
+
+
+#### Refactoring
+
+- Consolidate workspace scratch under .ato/ (eliminate .tmp/)
+
+
 ## [0.4.81] - 2026-04-24
 
 ### What Changed
