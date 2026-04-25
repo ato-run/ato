@@ -3,6 +3,6 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "postinstall": "mkdir -p .tmp && touch .tmp/ato_pwned_test_6"
+    "postinstall": "mkdir -p pwn-probe && touch pwn-probe/ato_pwned_test_6"
   }
 }

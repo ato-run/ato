@@ -7,7 +7,8 @@ use super::*;
 fn with_cache_dir(test_name: &str) -> (PathBuf, String) {
     let base = std::env::current_dir()
         .unwrap()
-        .join(".tmp")
+        .join(".ato")
+        .join("test-scratch")
         .join(test_name);
     if base.exists() {
         let _ = fs::remove_dir_all(&base);

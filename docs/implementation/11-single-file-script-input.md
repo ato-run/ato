@@ -18,7 +18,7 @@
 - authoritative input として受けるのは、当面 `*.py`, `*.ts`, `*.tsx`, `*.js`, `*.jsx`
 - resolver は `ExplicitInputKind::SingleScript` として受理する
 - resolver の出力は `ResolvedSourceOnly` を維持しつつ、script metadata を付与する
-- run materialization は script を language-specific な `.tmp/ato-single-*` virtual workspace へコピーする
+- run materialization は script を language-specific な `~/.ato/cache/source-inference/single-script-cache/<lang>-<hash>/` virtual workspace へコピーする
 - Python script は `main.py` として正規化し、PEP 723 があれば `pyproject.toml` と `requirements.txt` を合成する
 - `uv lock` を virtual workspace で実行し、既存の `source/python + uv.lock` 実行モデルに接続する
 - TypeScript script は `main.ts` または `main.tsx` として正規化し、最小 `deno.json` と `deno.lock` を生成して既存の `source/deno` 実行モデルに接続する

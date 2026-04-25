@@ -226,7 +226,7 @@ impl RuntimeManager {
 
             let temp_dir = self
                 .cache_root
-                .join(".tmp")
+                .join("extract-staging")
                 .join(format!("{}-{}-{}", name, version, self.target_triple));
             if temp_dir.exists() {
                 fs::remove_dir_all(&temp_dir)?;

@@ -579,9 +579,7 @@ pub fn format_duration(duration: std::time::Duration) -> String {
 impl Default for ProcessManager {
     fn default() -> Self {
         Self::new().unwrap_or_else(|_| {
-            let run_dir = dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from(".").join(".tmp"))
-                .join(RUN_DIR);
+            let run_dir = capsule_core::common::paths::home_dir_or_workspace_tmp().join(RUN_DIR);
             Self { run_dir }
         })
     }
