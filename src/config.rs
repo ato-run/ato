@@ -210,6 +210,117 @@ pub fn save_secrets(store: &SecretStore) {
     }
 }
 
+// ── Capsule Config Store (non-secret) ─────────────────────────────────────────
+
+/// Per-capsule plaintext configuration (model name, port, etc.).
+///
+/// Mirrors `SecretStore` for non-secret kinds — `String`, `Number`,
+/// `Enum` from `ConfigField`. Two reasons we keep this separate from
+/// the secret store rather than overloading `SecretStore`:
+///
+/// 1. **Threat model.** Secrets are write-only in the UI (masked
+///    input, never re-displayed); non-secret values are read-write
+///    and intentionally rendered back into the modal so the user can
+///    see what they previously chose. Mixing them invites a bug
+///    where a secret leaks into the read-back path.
+/// 2. **Grant model.** Secrets require an explicit per-capsule grant
+///    (`SecretStore.grants`) so a capsule can only read keys the
+///    user has approved for it. Non-secret config has no such
+///    isolation requirement — it lives next to the capsule that
+///    asked for it. The shared map shape would force an unused
+///    grant table on the non-secret path.
+///
+/// Persisted at `~/.ato/capsule-configs.json` as a flat JSON object.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CapsuleConfigStore {
+    /// `handle` → (`name` → `value`). Empty maps are kept to make
+    /// "this capsule has been configured before, just not for these
+    /// keys" distinguishable from "never configured" — Day 6's UX
+    /// may want to surface that distinction in the modal.
+    #[serde(default)]
+    pub configs: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+}
+
+impl CapsuleConfigStore {
+    /// Set (or overwrite) a single config value for a capsule.
+    pub fn set_config(&mut self, capsule_handle: &str, key: String, value: String) {
+        self.configs
+            .entry(capsule_handle.to_string())
+            .or_default()
+            .insert(key, value);
+    }
+
+    /// Snapshot of all `KEY = value` pairs configured for `handle`.
+    /// Returns an empty vec when the capsule has no recorded
+    /// configuration yet — callers should treat the empty case as
+    /// "let preflight tell us what's missing" rather than as an
+    /// error.
+    pub fn configs_for_capsule(&self, handle: &str) -> Vec<(String, String)> {
+        match self.configs.get(handle) {
+            Some(map) => map
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Remove a single config entry. Used by future Day 7+ "Reset
+    /// configuration" affordances; not wired into the modal yet.
+    #[allow(dead_code)]
+    pub fn clear_config(&mut self, capsule_handle: &str, key: &str) {
+        if let Some(map) = self.configs.get_mut(capsule_handle) {
+            map.remove(key);
+        }
+    }
+}
+
+fn capsule_configs_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".ato").join("capsule-configs.json"))
+}
+
+pub fn load_capsule_configs() -> CapsuleConfigStore {
+    let Some(path) = capsule_configs_path() else {
+        return CapsuleConfigStore::default();
+    };
+
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match serde_json::from_str(&content) {
+            Ok(store) => {
+                info!(path = %path.display(), "Loaded capsule config store");
+                store
+            }
+            Err(e) => {
+                warn!(path = %path.display(), error = %e, "Failed to parse capsule config store, using empty");
+                CapsuleConfigStore::default()
+            }
+        },
+        Err(_) => CapsuleConfigStore::default(),
+    }
+}
+
+pub fn save_capsule_configs(store: &CapsuleConfigStore) {
+    let Some(path) = capsule_configs_path() else {
+        warn!("Cannot determine home directory, capsule configs not saved");
+        return;
+    };
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    match serde_json::to_string_pretty(store) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                warn!(path = %path.display(), error = %e, "Failed to write capsule config store");
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to serialize capsule config store");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,5 +343,44 @@ mod tests {
         assert_eq!(parsed.theme, ThemeConfig::Light);
         assert_eq!(parsed.terminal_font_size, 14);
         assert!(parsed.default_egress_allow.is_empty());
+    }
+
+    #[test]
+    fn capsule_config_store_set_and_query_roundtrip() {
+        let mut store = CapsuleConfigStore::default();
+        store.set_config("capsule.byok-ai-chat", "MODEL".into(), "gpt-4".into());
+        store.set_config("capsule.byok-ai-chat", "PORT".into(), "8080".into());
+        store.set_config("capsule.other", "MODEL".into(), "claude".into());
+
+        let mut byok = store.configs_for_capsule("capsule.byok-ai-chat");
+        byok.sort();
+        assert_eq!(
+            byok,
+            vec![
+                ("MODEL".to_string(), "gpt-4".to_string()),
+                ("PORT".to_string(), "8080".to_string()),
+            ],
+            "configs_for_capsule must isolate per-handle entries",
+        );
+        // Missing handle returns empty — never an error.
+        assert!(store.configs_for_capsule("capsule.unknown").is_empty());
+
+        // JSON round-trip preserves the nested shape.
+        let json = serde_json::to_string(&store).unwrap();
+        let parsed: CapsuleConfigStore = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.configs.len(), 2);
+        assert_eq!(
+            parsed.configs.get("capsule.byok-ai-chat").unwrap().get("MODEL"),
+            Some(&"gpt-4".to_string())
+        );
+    }
+
+    #[test]
+    fn capsule_config_store_overwrites_same_key() {
+        let mut store = CapsuleConfigStore::default();
+        store.set_config("capsule.x", "MODEL".into(), "gpt-4".into());
+        store.set_config("capsule.x", "MODEL".into(), "gpt-5".into());
+        let configs = store.configs_for_capsule("capsule.x");
+        assert_eq!(configs, vec![("MODEL".to_string(), "gpt-5".to_string())]);
     }
 }

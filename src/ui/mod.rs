@@ -1,4 +1,5 @@
 mod chrome;
+mod modals;
 mod panels;
 mod share;
 mod sidebar;
@@ -26,13 +27,14 @@ use self::sidebar::{favicon_request_url, render_task_rail, FaviconState};
 
 use crate::app::{
     AllowPermissionForSession, AllowPermissionOnce, BrowserBack, BrowserForward, BrowserReload,
-    CancelAuthHandoff, CycleHandle, DenyPermissionPrompt, DismissTransient, ExpandSplit,
-    FocusCommandBar, NativeCopy, NativeCut, NativePaste, NativeRedo, NativeSelectAll, NativeUndo,
-    NavigateToUrl, NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, OpenCloudDock,
-    OpenLocalRegistry, OpenUrlBridge, PreviousTask, PreviousWorkspace, ResumeAfterAuth, SelectTask,
-    ShowSettings, ShrinkSplit, SignInToAtoRun, SplitPane, ToggleAutoDevtools, ToggleDevConsole,
-    ToggleOverview, ToggleTheme,
+    CancelAuthHandoff, CancelConfigForm, CycleHandle, DenyPermissionPrompt, DismissTransient,
+    ExpandSplit, FocusCommandBar, NativeCopy, NativeCut, NativePaste, NativeRedo, NativeSelectAll,
+    NativeUndo, NavigateToUrl, NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, OpenCloudDock,
+    OpenLocalRegistry, OpenUrlBridge, PreviousTask, PreviousWorkspace, ResumeAfterAuth,
+    SaveConfigForm, SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SplitPane,
+    ToggleAutoDevtools, ToggleDevConsole, ToggleOverview, ToggleTheme,
 };
+use crate::cli_envelope::ConfigKindDto;
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
     ActivityTone, AppState, AuthSessionStatus, PaneBounds, PaneId, PaneSurface, ShellMode,
@@ -83,7 +85,7 @@ fn search_local_registry(query: &str) -> Vec<crate::state::CapsuleSearchResult> 
             _ => format!("%{:02X}", b),
         })
         .collect();
-    let url = format!("http://127.0.0.1:8787/api/capsules?q={encoded}");
+    let url = format!("http://127.0.0.1:8787/v1/capsules?q={encoded}");
 
     let response = match ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(2))
@@ -112,18 +114,26 @@ fn search_local_registry(query: &str) -> Vec<crate::state::CapsuleSearchResult> 
         .iter()
         .take(5)
         .filter_map(|item| {
-            let handle = item.get("handle").or_else(|| item.get("name"))?.as_str()?;
+            // CLI registry (`/v1/capsules`) returns `scoped_id` ("publisher/slug")
+            // as the canonical handle; legacy mock catalogs used `handle`.
+            // Display name comes from `name` (canonical) or `display_name` (legacy).
+            let handle = item
+                .get("scoped_id")
+                .or_else(|| item.get("scopedId"))
+                .or_else(|| item.get("handle"))
+                .and_then(|v| v.as_str())?;
+            let display_name = item
+                .get("name")
+                .or_else(|| item.get("display_name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(handle);
             Some(crate::state::CapsuleSearchResult {
                 handle: handle.to_string(),
-                display_name: item
-                    .get("display_name")
-                    .or_else(|| item.get("name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(handle)
-                    .to_string(),
+                display_name: display_name.to_string(),
                 description: item
                     .get("description")
                     .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
                     .map(|s| s.to_string()),
             })
         })
@@ -139,6 +149,12 @@ pub struct DesktopShell {
     terminal_sessions: TerminalSessionManager,
     open_url_bridge: Arc<OpenUrlBridge>,
     capsule_search_rx: Option<std::sync::mpsc::Receiver<Vec<crate::state::CapsuleSearchResult>>>,
+    /// Lazy-allocated by `render` whenever `state.pending_config`
+    /// flips from `None → Some` (or to a different request). Owns
+    /// the per-field `InputState` entities so keystroke/cursor state
+    /// survives across re-renders. Dropped when `pending_config`
+    /// returns to `None`.
+    config_modal: Option<modals::config_form::ConfigModal>,
 }
 
 impl DesktopShell {
@@ -228,6 +244,7 @@ impl DesktopShell {
             terminal_sessions: TerminalSessionManager::new(),
             open_url_bridge,
             capsule_search_rx: None,
+            config_modal: None,
         }
     }
 
@@ -709,6 +726,171 @@ impl DesktopShell {
         });
     }
 
+    /// Reconcile `self.config_modal` with `state.pending_config`.
+    ///
+    /// Called once per render pass before child elements are built, so
+    /// `.when(self.config_modal.is_some())` further down sees a fresh
+    /// view of the world. The modal is the *render projection* of
+    /// `pending_config`; AppState is authoritative for "should the
+    /// modal exist," this method just owns the local `InputState`
+    /// allocations needed to actually paint it.
+    fn sync_config_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match (&self.state.pending_config, &self.config_modal) {
+            (None, None) => {}
+            (None, Some(_)) => {
+                // Pending request was cleared (Save / Cancel) — drop
+                // the modal so its `InputState` entities are freed.
+                self.config_modal = None;
+            }
+            (Some(req), None) => {
+                self.config_modal = Some(modals::config_form::ConfigModal::new(
+                    req.clone(),
+                    window,
+                    cx,
+                ));
+            }
+            (Some(req), Some(modal)) => {
+                if modal.should_rebuild_for(req) {
+                    // Schema or capsule changed under us — rebuild
+                    // wholesale rather than reconcile fields. Mid-
+                    // session schema flux is rare; correctness wins
+                    // over preserving stale input.
+                    self.config_modal = Some(modals::config_form::ConfigModal::new(
+                        req.clone(),
+                        window,
+                        cx,
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Handler for the `SaveConfigForm` action emitted by the modal's
+    /// "Save & Launch" button. Walks the form, persists each field
+    /// according to its kind, clears `pending_config`, and lets the
+    /// next render pass re-arm the launch via
+    /// `ensure_pending_local_launch` (which is gated on
+    /// `pending_config.is_none()` for the same handle).
+    fn on_save_config_form(
+        &mut self,
+        _: &SaveConfigForm,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(modal) = self.config_modal.as_ref() else {
+            return;
+        };
+
+        // Snapshot what we need before mutating AppState — `inputs`
+        // entities are read against `cx` and we'll need the `request`
+        // payload to grant the right capsule.
+        let handle = modal.request.handle.clone();
+        let mut secret_writes: Vec<(String, String)> = Vec::new();
+        let mut config_writes: Vec<(String, String)> = Vec::new();
+        for field in &modal.request.fields {
+            let Some(input) = modal.inputs.get(&field.name) else {
+                continue;
+            };
+            let value = input.read(cx).value().to_string();
+            match &field.kind {
+                ConfigKindDto::Secret => {
+                    if value.is_empty() {
+                        // Empty secret = the user left it blank. Save
+                        // would just store an empty value and the
+                        // retry would fail preflight again. Bail
+                        // early so the modal stays visible; Day 7
+                        // adds in-modal validation messaging.
+                        return;
+                    }
+                    secret_writes.push((field.name.clone(), value));
+                }
+                ConfigKindDto::String | ConfigKindDto::Number => {
+                    if value.is_empty() {
+                        // Same logic as secrets: storing an empty
+                        // string would just round-trip into an empty
+                        // env var, which preflight rejects. Halt the
+                        // save so the user can fill it in.
+                        return;
+                    }
+                    config_writes.push((field.name.clone(), value));
+                }
+                ConfigKindDto::Enum { choices } => {
+                    if value.is_empty() {
+                        return;
+                    }
+                    // Defensive: the InputState is a free-text field
+                    // (the dropdown lands in Day 6), so the user
+                    // *can* type something outside `choices`. Reject
+                    // here rather than write a value that the
+                    // capsule will refuse anyway.
+                    if !choices.iter().any(|c| c == &value) {
+                        self.state.push_activity(
+                            ActivityTone::Warning,
+                            format!(
+                                "'{value}' is not a valid choice for {}. Allowed: {}",
+                                field.name,
+                                choices.join(", ")
+                            ),
+                        );
+                        return;
+                    }
+                    config_writes.push((field.name.clone(), value));
+                }
+            }
+        }
+
+        // Persist secrets and grant them to the capsule. The grant is
+        // mandatory: `secrets_for_capsule(handle)` filters by grant,
+        // so without it the retry would launch with an empty
+        // `ATO_SECRET_*` env and trip the same E103.
+        for (key, value) in secret_writes {
+            self.state.add_secret(key.clone(), value);
+            self.state.grant_secret_to_capsule(&handle, &key);
+        }
+
+        // Persist non-secret config under the same handle. There's
+        // no grant table here — the value is scoped to the capsule
+        // by being keyed under its handle in `CapsuleConfigStore`.
+        for (key, value) in config_writes {
+            self.state.add_capsule_config(&handle, key, value);
+        }
+
+        self.state.clear_pending_config();
+        self.state.push_activity(
+            ActivityTone::Info,
+            format!("Saved configuration; relaunching {handle}…"),
+        );
+        cx.notify();
+    }
+
+    /// Handler for `CancelConfigForm`. Drops the pending request and
+    /// marks the active web pane as `LaunchFailed` so
+    /// `ensure_pending_local_launch` won't immediately re-fire and
+    /// re-trip the same E103. The user reopens the launch by
+    /// re-entering the handle in the omnibar.
+    fn on_cancel_config_form(
+        &mut self,
+        _: &CancelConfigForm,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(modal) = self.config_modal.as_ref() else {
+            return;
+        };
+        let handle = modal.request.handle.clone();
+        self.state.clear_pending_config();
+        if let Some(active) = self.state.active_web_pane() {
+            let pane_id = active.pane_id;
+            self.state
+                .sync_web_session_state(pane_id, crate::state::WebSessionState::LaunchFailed);
+        }
+        self.state.push_activity(
+            ActivityTone::Info,
+            format!("Cancelled configuration for {handle}."),
+        );
+        cx.notify();
+    }
+
     fn sync_favicons(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let origins = self
             .state
@@ -798,6 +980,7 @@ impl Render for DesktopShell {
         }
         self.sync_favicons(window, cx);
         self.poll_capsule_search();
+        self.sync_config_modal(window, cx);
         let omnibar_value = self.omnibar.read(cx).value().to_string();
         self.maybe_trigger_capsule_search(&omnibar_value);
         let omnibar_suggestions = self.state.omnibar_suggestions(&omnibar_value);
@@ -830,6 +1013,21 @@ impl Render for DesktopShell {
                     })
                     .when(self.state.active_permission_prompt().is_some(), |this| {
                         this.child(render_permission_prompt_overlay(&self.state, &theme))
+                    })
+                    .when(self.config_modal.is_some(), |this| {
+                        // The modal renders only when AppState requested
+                        // it AND `sync_config_modal` has populated the
+                        // local entity — both must be true. The
+                        // `Option::as_ref().unwrap()` is safe because the
+                        // `is_some()` guard above runs before this child
+                        // call inside `.when`.
+                        let modal = self
+                            .config_modal
+                            .as_ref()
+                            .expect("config_modal checked above");
+                        this.child(modals::config_form::render_config_modal_overlay(
+                            modal, &theme,
+                        ))
                     }),
             );
 
@@ -877,6 +1075,8 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_allow_permission_once))
             .on_action(cx.listener(Self::on_allow_permission_for_session))
             .on_action(cx.listener(Self::on_deny_permission_prompt))
+            .on_action(cx.listener(Self::on_save_config_form))
+            .on_action(cx.listener(Self::on_cancel_config_form))
             .on_drop::<ExternalPaths>(cx.listener(|this, paths: &ExternalPaths, _window, _cx| {
                 let path_vec = paths.paths().to_vec();
                 this.state.launch_dropped_paths(path_vec);

@@ -11,6 +11,8 @@ use tracing::{debug, info};
 use url::{form_urlencoded, Url};
 
 use crate::bridge::ShellEvent;
+use crate::cli_envelope::ConfigFieldDto;
+use crate::config::SecretEntry;
 use crate::orchestrator::{register_pending_cli_command, CliLaunchSpec};
 
 pub type WorkspaceId = usize;
@@ -584,6 +586,43 @@ pub struct PermissionPrompt {
     pub command: Option<String>,
 }
 
+/// Surfaced when an `ato run`/`ato app session start` invocation aborts
+/// with E103 (`missing_required_env`). The orchestrator parses the CLI
+/// JSONL event, populates this struct, and stores it on `AppState`. The
+/// modal renderer (Day 4) reads it; on Save the modal writes new secrets
+/// via `AppState::add_secret` and clears `pending_config`, after which
+/// the launch is retried using the cloned launch args below.
+///
+/// # Why we clone launch args
+///
+/// The retry path must reconstruct the original `start_capsule(handle,
+/// secrets)` invocation exactly. `handle` is the canonical name the user
+/// asked to run; `original_secrets` is a snapshot of the secrets bound
+/// at click-Run time. Re-deriving secrets from the live `SecretStore`
+/// at retry-time is *also* correct (since the modal's Save mutates the
+/// store before the retry), but holding the snapshot makes the retry
+/// invariant local to this struct rather than depending on store
+/// ordering — see the user's "RunArgs lifeline" directive in the Day 3
+/// design notes.
+#[derive(Clone, Debug)]
+pub struct PendingConfigRequest {
+    /// The capsule handle the user asked to launch (e.g. a normalized
+    /// handle string or a share URL). Authoritative for the retry call.
+    pub handle: String,
+    /// Optional target name reported by the CLI in
+    /// `details.target` — used purely for UI labeling ("Configure
+    /// keys for `<target>`"); never feeds back into the retry.
+    pub target: Option<String>,
+    /// The schema array from `details.missing_schema` — drives the
+    /// dynamic form. Iterated as-is by the modal; never index-aligned
+    /// with `missing_keys` (each field carries its own `name`).
+    pub fields: Vec<ConfigFieldDto>,
+    /// Snapshot of the secrets passed to the original `start_capsule`
+    /// call. Cloned at request-construction time so a concurrent
+    /// secret-store mutation can't corrupt the retry.
+    pub original_secrets: Vec<SecretEntry>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActiveWebPane {
     pub workspace_id: WorkspaceId,
@@ -670,6 +709,10 @@ pub struct AppState {
     pub capsule_logs: HashMap<PaneId, Vec<CapsuleLogEntry>>,
     pub browser_commands: VecDeque<BrowserCommand>,
     pub pending_permission_prompt: Option<PermissionPrompt>,
+    /// Set when a guest launch fails with E103. Day 4 wires the modal
+    /// renderer that reads from this field and writes back via
+    /// `AppState::add_secret`. Cleared by `AppState::clear_pending_config`.
+    pub pending_config: Option<PendingConfigRequest>,
     pub theme_mode: ThemeMode,
     pub desktop_auth: DesktopAuthState,
     pub pending_post_login_target: Option<PendingPostLoginTarget>,
@@ -679,6 +722,13 @@ pub struct AppState {
     pub network_logs: Vec<NetworkLogEntry>,
     pub config: crate::config::DesktopConfig,
     pub secret_store: crate::config::SecretStore,
+    /// Per-capsule plaintext configuration (model name, port, etc.)
+    /// — anything that came in via a non-secret `ConfigField`. The
+    /// orchestrator merges this into the child process env at launch
+    /// time alongside `ATO_SECRET_*` from `secret_store`. See
+    /// `crate::config::CapsuleConfigStore` for the threat-model
+    /// reasoning behind the split.
+    pub capsule_config_store: crate::config::CapsuleConfigStore,
     pub capsule_search_results: Vec<CapsuleSearchResult>,
     pub capsule_search_query: String,
     next_task_id: TaskSetId,
@@ -834,6 +884,7 @@ impl AppState {
             capsule_logs: HashMap::new(),
             browser_commands: VecDeque::new(),
             pending_permission_prompt: None,
+            pending_config: None,
             theme_mode: ThemeMode::Light, // synced below from config
             desktop_auth: DesktopAuthState {
                 status: DesktopAuthStatus::SignedOut,
@@ -847,6 +898,7 @@ impl AppState {
             network_logs: Vec::new(),
             config: crate::config::load_config(),
             secret_store: crate::config::load_secrets(),
+            capsule_config_store: crate::config::load_capsule_configs(),
             capsule_search_results: Vec::new(),
             capsule_search_query: String::new(),
             next_task_id: 4,
@@ -887,6 +939,29 @@ impl AppState {
     pub fn add_secret(&mut self, key: String, value: String) {
         self.secret_store.add_secret(key, value);
         crate::config::save_secrets(&self.secret_store);
+    }
+
+    /// Set or overwrite a single non-secret config value for a
+    /// capsule and persist to disk. Used by the modal Save handler
+    /// for `String` / `Number` / `Enum` fields; secrets go through
+    /// `add_secret` + `grant_secret_to_capsule` instead.
+    pub fn add_capsule_config(&mut self, capsule_handle: &str, key: String, value: String) {
+        self.capsule_config_store
+            .set_config(capsule_handle, key, value);
+        crate::config::save_capsule_configs(&self.capsule_config_store);
+    }
+
+    /// Install a pending config request (overwriting any prior one).
+    /// Called by the orchestrator drain path when a launch fails with
+    /// E103. Day 4's modal observes this field and renders when `Some`.
+    pub fn set_pending_config(&mut self, request: PendingConfigRequest) {
+        self.pending_config = Some(request);
+    }
+
+    /// Clear the pending config request (called from the modal's Save
+    /// or Cancel handler).
+    pub fn clear_pending_config(&mut self) {
+        self.pending_config = None;
     }
 
     /// Remove a secret and persist to disk.
