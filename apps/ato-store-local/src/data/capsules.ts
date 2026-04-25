@@ -1,67 +1,7 @@
 import type { Capsule } from "../types";
 
-export const capsules: Capsule[] = [
-  {
-    id: "hello-web",
-    scopedId: "capsules/hello-web",
-    name: "hello-web",
-    publisher: "capsules",
-    iconKey: "globe",
-    description: "Lightweight web preview server for local demos.",
-    longDescription: "Simple web app capsule for quick local verification and sharing.",
-    type: "webapp",
-    version: "1.2.0",
-    size: "2.8 MB",
-    osArch: ["darwin/arm64", "linux/x64", "windows/x64"],
-    envHints: {
-      PORT: "3000",
-      LOG_LEVEL: "info",
-    },
-    readme: `# hello-web\n\nA tiny static web service capsule.\n\n## Usage\n\n- Run from Local Dock UI\n- Inspect logs from action panel\n\n\`\`\`bash\nato run capsules/hello-web\n\`\`\`\n`,
-    localPath: "~/.ato/cas/sha256/ab/cd/hello-web.capsule",
-    appUrl: "http://localhost:3000",
-    trustLevel: "verified",
-  },
-  {
-    id: "capsule-inspect",
-    scopedId: "capsules/capsule-inspect",
-    name: "capsule-inspect",
-    publisher: "capsules",
-    iconKey: "package",
-    description: "CLI for inspecting capsule manifest and lock details.",
-    longDescription: "Command line only capsule for metadata validation.",
-    type: "cli",
-    version: "0.8.4",
-    size: "1.1 MB",
-    osArch: ["darwin/arm64", "linux/x64"],
-    envHints: {
-      ATO_TRACE: "0",
-      OUTPUT_FORMAT: "json",
-    },
-    readme: `# capsule-inspect\n\nCLI capsule for verification workflows.\n\n## Example\n\n\`\`\`bash\nato run capsules/capsule-inspect -- --help\n\`\`\`\n`,
-    localPath: "~/.ato/cas/sha256/45/67/capsule-inspect.capsule",
-    appUrl: null,
-    trustLevel: "unverified",
-  },
-  {
-    id: "linux-agent",
-    scopedId: "labs/linux-agent",
-    name: "linux-agent",
-    publisher: "labs",
-    iconKey: "zap",
-    description: "Linux-first web diagnostics agent with dashboard.",
-    longDescription: "Targets linux/x64 only to demonstrate architecture mismatch.",
-    type: "webapp",
-    version: "0.3.2",
-    size: "4.2 MB",
-    osArch: ["linux/x64"],
-    envHints: {
-      DASHBOARD_PORT: "4070",
-      SAMPLE_RATE: "1.0",
-    },
-    readme: `# linux-agent\n\nAgent + dashboard bundle for Linux hosts.\n\n## Notes\n\n- Intended for linux/x64\n- Use with local mock dock\n\n\`\`\`bash\nato run labs/linux-agent\n\`\`\`\n`,
-    localPath: "~/.ato/cas/sha256/99/ef/linux-agent.capsule",
-    appUrl: "http://localhost:4070",
-    trustLevel: "verified",
-  },
-];
+// Mock catalog ejected (Day 6 of Feature 2 sprint).
+// The store now sources entries exclusively from the live registry at
+// `/v1/manifest/capsules`. Keep this array empty so any stale fallback
+// callers see "no capsules yet" instead of fake demo entries.
+export const capsules: Capsule[] = [];
