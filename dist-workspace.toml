@@ -7,8 +7,11 @@ members = ["cargo:."]
 cargo-dist-version = "0.31.0"
 # CI backends to support
 ci = "github"
-# The installers to generate for each app
-installers = ["homebrew"]
+# The installers to generate for each app.
+# - homebrew → Formula in ato-run/homebrew-ato (CLI-only, alongside Cask).
+# - msi      → CLI MSI for `--cli-only` Windows install (PR-7).
+#              Desktop MSI is built separately by xtask + WiX (PR-7).
+installers = ["homebrew", "msi"]
 # Homebrew tap repository
 tap = "ato-run/homebrew-ato"
 # Publish jobs to run on release
