@@ -11,10 +11,26 @@ name = "ato-cli"
 version = "0.4.83"
 edition = "2021"
 description = "ato CLI (meta-runtime)"
+authors = ["ato-run"]
 homepage = "https://ato.run"
 license = "Apache-2.0"
 repository = "https://github.com/ato-run/ato-cli"
 build = "build.rs"
+
+# WiX MSI identifiers — required by cargo-dist when `installers = ["msi"]`
+# is set in dist-workspace.toml. These GUIDs MUST remain stable across
+# releases so Windows Installer recognizes successive MSIs as upgrades
+# of the same product (and not as parallel installs).
+#
+# - upgrade-guid: identifies the product line (ato CLI). Never change.
+# - path-guid:    identifies the PATH-modification component. Never change.
+#
+# Generated 2026-04-26. Do not regenerate.
+[package.metadata.wix]
+upgrade-guid = "91E1EDBC-3923-4EB3-8AD9-02239A1537BA"
+path-guid    = "6DBB2927-20CD-429F-BAD0-687E62082ED6"
+license = false
+eula = false
 
 [[bin]]
 name = "ato"
