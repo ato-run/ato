@@ -931,7 +931,7 @@ mod tests {
     #[test]
     fn session_start_envelope_serializes_snapshot_and_frontend_entry() {
         let envelope = SessionStartEnvelope {
-            schema_version: "2026-02-01",
+            schema_version: super::super::SCHEMA_VERSION,
             package_id: "ato.desktop",
             action: SESSION_ACTION_START,
             session: SessionInfo {
@@ -994,6 +994,16 @@ mod tests {
             json["session"]["display_strategy"],
             serde_json::json!("guest_webview")
         );
+        // CCP v0.5 wire-contract regression: schema_version must be `ccp/v1`.
+        // See `docs/specs/CCP_SPEC.md` for the additive-only versioning rule.
+        assert_eq!(json["schema_version"], serde_json::json!("ccp/v1"));
+    }
+
+    #[test]
+    fn ccp_schema_version_is_canonical_v1() {
+        // Wire-contract pin: prevents accidental rename or version bump within v1.
+        // Bumping to ccp/v2 is a major-version event requiring desktop coordination.
+        assert_eq!(super::super::SCHEMA_VERSION, "ccp/v1");
     }
 
     #[test]
