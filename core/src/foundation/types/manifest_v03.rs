@@ -24,6 +24,12 @@ struct V03PackageSurface {
     port: Option<u16>,
     #[serde(default)]
     required_env: Vec<String>,
+    /// Rich config schema (Feature 2 — schema-driven dynamic config UI).
+    /// Carried through normalization unchanged so the desktop and CLI
+    /// preflight see the original `[[config_schema]]` entries on the
+    /// resulting `[targets.<label>]` table.
+    #[serde(default)]
+    config_schema: Vec<toml::Value>,
     #[serde(default)]
     runtime_version: Option<String>,
     #[serde(default)]
@@ -341,6 +347,7 @@ fn normalize_v03_target_table(package_name: &str, table: &Table) -> Result<Table
         run,
         port,
         required_env,
+        config_schema,
         runtime_version,
         runtime_tools,
         readiness_probe,
@@ -460,6 +467,12 @@ fn normalize_v03_target_table(package_name: &str, table: &Table) -> Result<Table
         target_table.insert(
             "required_env".to_string(),
             toml::Value::Array(required_env.into_iter().map(toml::Value::String).collect()),
+        );
+    }
+    if !config_schema.is_empty() {
+        target_table.insert(
+            "config_schema".to_string(),
+            toml::Value::Array(config_schema),
         );
     }
     if let Some(runtime_version) = runtime_version

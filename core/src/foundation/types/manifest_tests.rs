@@ -2093,3 +2093,54 @@ entrypoint = "server.js"
     let target = manifest.resolve_default_target().expect("default target");
     assert!(target.resolved_config_schema().is_empty());
 }
+
+#[test]
+fn v03_flat_manifest_passes_config_schema_through_to_target() {
+    // Feature 2 — the desktop renders its dynamic form from
+    // `target.resolved_config_schema()`. v0.3 flat manifests (no
+    // `[targets.main]` block) must still surface their `[[config_schema]]`
+    // entries on the implicit `main` target after normalization.
+    let toml = r#"
+schema_version = "0.3"
+name = "byok-demo"
+version = "0.1.0"
+type = "app"
+runtime = "web/node"
+runtime_version = "20"
+run = "npm run dev"
+port = 3000
+
+[[config_schema]]
+name = "OPENAI_API_KEY"
+kind = "secret"
+label = "OpenAI API Key"
+description = "BYOK"
+placeholder = "sk-..."
+
+[[config_schema]]
+name = "OPENAI_MODEL"
+kind = "enum"
+label = "Model"
+choices = ["gpt-4o-mini", "gpt-4o"]
+default = "gpt-4o-mini"
+"#;
+
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse v03 flat with config_schema");
+    let target = manifest.resolve_default_target().expect("default target");
+    let schema = target.resolved_config_schema();
+    assert_eq!(schema.len(), 2, "both rich entries propagate");
+    assert_eq!(schema[0].name, "OPENAI_API_KEY");
+    assert!(matches!(schema[0].kind, ConfigKind::Secret));
+    assert_eq!(schema[0].label.as_deref(), Some("OpenAI API Key"));
+    assert_eq!(schema[1].name, "OPENAI_MODEL");
+    match &schema[1].kind {
+        ConfigKind::Enum { choices } => {
+            assert_eq!(
+                choices,
+                &vec!["gpt-4o-mini".to_string(), "gpt-4o".to_string()]
+            );
+        }
+        other => panic!("expected enum kind, got {other:?}"),
+    }
+    assert_eq!(schema[1].default.as_deref(), Some("gpt-4o-mini"));
+}
