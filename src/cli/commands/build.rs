@@ -1530,7 +1530,7 @@ mod tests {
                 (
                     "build_command",
                     toml::Value::String(
-                        "mkdir -p .tmp dist && printf x >> .tmp/build-count.txt && printf cached > dist/out.txt"
+                        "mkdir -p build-scratch dist && printf x >> build-scratch/build-count.txt && printf cached > dist/out.txt"
                             .to_string(),
                     ),
                 ),
@@ -1555,7 +1555,8 @@ mod tests {
         std::env::set_var("ATO_BUILD_CACHE_TEST_ENV", "test");
         run_v03_build_lifecycle_steps(&plan, &reporter, true).expect("first build");
         assert_eq!(
-            std::fs::read_to_string(tmp.path().join(".tmp/build-count.txt")).expect("read count"),
+            std::fs::read_to_string(tmp.path().join("build-scratch/build-count.txt"))
+                .expect("read count"),
             "x"
         );
         assert_eq!(
@@ -1567,7 +1568,7 @@ mod tests {
         run_v03_build_lifecycle_steps(&plan, &reporter, true).expect("cache restore");
 
         assert_eq!(
-            std::fs::read_to_string(tmp.path().join(".tmp/build-count.txt"))
+            std::fs::read_to_string(tmp.path().join("build-scratch/build-count.txt"))
                 .expect("read count after restore"),
             "x"
         );

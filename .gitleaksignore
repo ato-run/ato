@@ -7,3 +7,10 @@
 305753559b41ee3d0b3389d52ac424f612782eae:core/src/types/profile.rs:generic-api-key:166
 305753559b41ee3d0b3389d52ac424f612782eae:core/src/types/profile.rs:generic-api-key:177
 305753559b41ee3d0b3389d52ac424f612782eae:core/src/types/identity.rs:generic-api-key:347
+3b534ec47adcae025763e8f1bc3496d3f163df6a:src/application/secrets/scanner.rs:generic-api-key:107
+32882dd4b3e0b1bd34137581ee71539ab0babc7d:tests/manual/05-group5-edge/test-group5-edge.sh:generic-api-key:28
+1d965b0006c037bda17c6d2bafb966e348b5c221:src/auth/tests.rs:generic-api-key:111
+5bfe924b43952a7ebdfbbbad10d3a8b22b93cb0f:core/src/types/profile.rs:generic-api-key:166
+5bfe924b43952a7ebdfbbbad10d3a8b22b93cb0f:core/src/types/profile.rs:generic-api-key:177
+5bfe924b43952a7ebdfbbbad10d3a8b22b93cb0f:core/src/types/identity.rs:generic-api-key:345
+5bfe924b43952a7ebdfbbbad10d3a8b22b93cb0f:src/auth.rs:generic-api-key:1401
