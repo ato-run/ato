@@ -1141,10 +1141,11 @@ pub struct CliExportSpec {
 /// kind = "enum"
 /// choices = ["gpt-4", "gpt-5"]
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ConfigKind {
     /// Write-only secret. Masked in UI and stored in the SecretStore.
+    #[default]
     Secret,
     /// Free-form string.
     String,
@@ -1152,12 +1153,6 @@ pub enum ConfigKind {
     Number,
     /// One-of selection.
     Enum { choices: Vec<String> },
-}
-
-impl Default for ConfigKind {
-    fn default() -> Self {
-        Self::Secret
-    }
 }
 
 /// Rich metadata for a single config input surfaced by the capsule. When a
