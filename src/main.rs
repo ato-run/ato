@@ -1,6 +1,7 @@
 mod app;
 mod automation;
 mod bridge;
+mod ccp_envelope;
 mod cli_envelope;
 mod config;
 mod egress_policy;
