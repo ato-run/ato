@@ -13,6 +13,9 @@ fn main() -> Result<()> {
     match args.next().as_deref() {
         Some("bundle") => {
             let mut target = DEFAULT_TARGET.to_string();
+            let mut sign = false;
+            let mut do_notarize = false;
+            let mut do_dmg = false;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--target" => {
@@ -20,10 +23,43 @@ fn main() -> Result<()> {
                             .next()
                             .context("--target requires a value such as darwin-arm64")?;
                     }
+                    "--sign" => sign = true,
+                    "--notarize" => do_notarize = true,
+                    "--dmg" => do_dmg = true,
                     other => bail!("unsupported xtask argument: {}", other),
                 }
             }
-            bundle_macos_app(&target)
+            let bundle = bundle_macos_app(&target)?;
+            if sign {
+                codesign_bundle(&bundle)?;
+            }
+            if do_notarize {
+                notarize_bundle(&bundle)?;
+            }
+            if do_dmg {
+                package_dmg(&bundle, &target)?;
+            }
+            Ok(())
+        }
+        Some("notarize") => {
+            let bundle = args
+                .next()
+                .context("notarize requires a path to the .app bundle")?;
+            notarize_bundle(Path::new(&bundle))
+        }
+        Some("dmg") => {
+            let bundle = args
+                .next()
+                .context("dmg requires a path to the .app bundle")?;
+            // Infer target dir from the parent of the .app — matches how
+            // `bundle` lays things out under dist/<target>/.
+            let target = Path::new(&bundle)
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|s| s.to_str())
+                .unwrap_or(DEFAULT_TARGET)
+                .to_string();
+            package_dmg(Path::new(&bundle), &target)
         }
         Some("help") | Some("--help") | Some("-h") | None => {
             print_help();
@@ -35,11 +71,279 @@ fn main() -> Result<()> {
 
 fn print_help() {
     println!(
-        "ato-desktop xtask\n\nCommands:\n  bundle [--target darwin-arm64|darwin-x86_64]  Build ato-desktop and emit a macOS .app bundle"
+        "ato-desktop xtask\n\n\
+         Commands:\n  \
+           bundle [--target darwin-arm64|darwin-x86_64] [--sign] [--notarize] [--dmg]\n  \
+           notarize <bundle>   Submit an .app to Apple notary (no-op without APPLE_* env)\n  \
+           dmg <bundle>        Wrap a signed .app in an .dmg via hdiutil\n\n\
+         Code-signing modes (resolved at runtime):\n  \
+           - if MAC_DEVELOPER_ID_NAME is set: real Developer ID (hardened runtime + entitlements)\n  \
+           - else:                            ad-hoc (`codesign --sign -`) — v0.5 default\n"
     );
 }
 
-fn bundle_macos_app(target: &str) -> Result<()> {
+/// Code-signing strategy resolved from environment.
+///
+/// The two modes share the same hardened-runtime entitlements file
+/// (installer/entitlements.plist) on purpose: switching to Developer
+/// ID later is a single env-var flip, not a runtime-profile change.
+enum CodesignMode {
+    /// Ad-hoc — `codesign --force --sign -` with hardened-runtime.
+    /// This is the v0.5 default per docs/v0.5-distribution-plan.md D-3.
+    AdHoc,
+    /// Developer ID Application identity. Triggered when
+    /// MAC_DEVELOPER_ID_NAME env is set (e.g.
+    /// "Developer ID Application: Acme, Inc. (ABCDE12345)").
+    DeveloperId(String),
+}
+
+fn resolved_codesign_mode() -> CodesignMode {
+    match std::env::var("MAC_DEVELOPER_ID_NAME") {
+        Ok(name) if !name.trim().is_empty() => CodesignMode::DeveloperId(name),
+        _ => CodesignMode::AdHoc,
+    }
+}
+
+/// Sign the bundle using the inside-out order required by Apple's
+/// hardened-runtime model: helper binaries first, then the outer
+/// `.app`. A flat sweep would produce a verifier error because the
+/// outer bundle's seal must include the (already-signed) inner
+/// helpers.
+fn codesign_bundle(bundle: &Path) -> Result<()> {
+    let mode = resolved_codesign_mode();
+    let entitlements = locate_entitlements()?;
+    let helper = bundle.join("Contents").join("Helpers").join("ato");
+    let main_binary = bundle.join("Contents").join("MacOS").join("ato-desktop");
+
+    if !helper.exists() {
+        bail!(
+            "expected helper binary at {} — did `bundle` complete successfully?",
+            helper.display()
+        );
+    }
+    if !main_binary.exists() {
+        bail!("expected main binary at {}", main_binary.display());
+    }
+
+    // Inside-out: Helpers/ato → MacOS/ato-desktop → outer .app
+    codesign_path(&helper, &mode, &entitlements)?;
+    codesign_path(&main_binary, &mode, &entitlements)?;
+    codesign_path(bundle, &mode, &entitlements)?;
+    println!(
+        "Signed {} with {}",
+        bundle.display(),
+        match &mode {
+            CodesignMode::AdHoc => "ad-hoc identity (-)".to_string(),
+            CodesignMode::DeveloperId(name) => format!("Developer ID '{name}'"),
+        }
+    );
+    Ok(())
+}
+
+fn codesign_path(path: &Path, mode: &CodesignMode, entitlements: &Path) -> Result<()> {
+    let identity = match mode {
+        CodesignMode::AdHoc => "-",
+        CodesignMode::DeveloperId(name) => name.as_str(),
+    };
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("path is not valid UTF-8"))?;
+    let entitlements_str = entitlements
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("entitlements path is not valid UTF-8"))?;
+    let status = Command::new("codesign")
+        .args([
+            "--force",
+            "--timestamp=none", // notarize step re-signs with timestamp
+            "--options=runtime",
+            "--entitlements",
+            entitlements_str,
+            "--sign",
+            identity,
+            path_str,
+        ])
+        .status()
+        .with_context(|| format!("failed to invoke codesign for {}", path.display()))?;
+
+    if !status.success() {
+        bail!("codesign failed for {} ({})", path.display(), status);
+    }
+    Ok(())
+}
+
+fn locate_entitlements() -> Result<PathBuf> {
+    let xtask_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let path = xtask_root
+        .parent()
+        .map(Path::to_path_buf)
+        .context("xtask must live under apps/ato-desktop/xtask")?
+        .join("installer")
+        .join("entitlements.plist");
+    if !path.exists() {
+        bail!(
+            "entitlements file missing at {} (expected from PR-3 scaffolding)",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+/// Submit the bundle to Apple's notary service. No-op when the three
+/// required env vars are not all set — this is the v0.5 default and
+/// matches docs/v0.5-distribution-plan.md PR-4 ("no Apple secrets
+/// required for v0.5").
+fn notarize_bundle(bundle: &Path) -> Result<()> {
+    let apple_id = std::env::var("APPLE_ID").ok();
+    let app_pwd = std::env::var("APPLE_APP_SPECIFIC_PASSWORD").ok();
+    let team_id = std::env::var("APPLE_TEAM_ID").ok();
+    let (Some(apple_id), Some(app_pwd), Some(team_id)) = (apple_id, app_pwd, team_id) else {
+        println!(
+            "notarize: skipped (no Apple credentials — set APPLE_ID, \
+             APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID to enable)"
+        );
+        return Ok(());
+    };
+
+    if !bundle.exists() {
+        bail!("bundle path does not exist: {}", bundle.display());
+    }
+
+    // notarytool expects a zipped .app — produce it next to the bundle.
+    let zip_path = bundle.with_extension("zip");
+    if zip_path.exists() {
+        fs::remove_file(&zip_path).ok();
+    }
+    let bundle_dir = bundle
+        .parent()
+        .context("cannot determine parent of bundle path")?;
+    let bundle_name = bundle
+        .file_name()
+        .and_then(|s| s.to_str())
+        .context("bundle path has no file name")?;
+    let zip_str = zip_path
+        .to_str()
+        .context("zip path is not valid UTF-8")?;
+
+    let status = Command::new("ditto")
+        .args(["-c", "-k", "--keepParent", bundle_name, zip_str])
+        .current_dir(bundle_dir)
+        .status()
+        .context("failed to invoke ditto to zip the bundle")?;
+    if !status.success() {
+        bail!("ditto failed with status {}", status);
+    }
+
+    let status = Command::new("xcrun")
+        .args([
+            "notarytool",
+            "submit",
+            zip_str,
+            "--apple-id",
+            &apple_id,
+            "--password",
+            &app_pwd,
+            "--team-id",
+            &team_id,
+            "--wait",
+        ])
+        .status()
+        .context("failed to invoke xcrun notarytool")?;
+    if !status.success() {
+        bail!("notarytool submit failed with status {}", status);
+    }
+
+    let status = Command::new("xcrun")
+        .args([
+            "stapler",
+            "staple",
+            bundle
+                .to_str()
+                .context("bundle path is not valid UTF-8")?,
+        ])
+        .status()
+        .context("failed to invoke xcrun stapler")?;
+    if !status.success() {
+        bail!("stapler staple failed with status {}", status);
+    }
+
+    println!("notarize: stapled ticket onto {}", bundle.display());
+    Ok(())
+}
+
+/// Wrap the bundle in a `.dmg` for distribution. Always runs (no
+/// dependence on Apple credentials) so ad-hoc-signed builds can still
+/// be released through the cargo-dist GitHub Release upload step.
+fn package_dmg(bundle: &Path, target: &str) -> Result<()> {
+    if !bundle.exists() {
+        bail!("bundle does not exist: {}", bundle.display());
+    }
+    let arch = match target {
+        "darwin-arm64" => "arm64",
+        "darwin-x86_64" => "x86_64",
+        other => bail!("unsupported dmg target: {}", other),
+    };
+    let version = env!("CARGO_PKG_VERSION");
+    let dmg_path = bundle
+        .parent()
+        .context("cannot determine parent of bundle path")?
+        .join(format!("Ato-Desktop-{version}-darwin-{arch}.dmg"));
+
+    if dmg_path.exists() {
+        fs::remove_file(&dmg_path).ok();
+    }
+
+    // hdiutil needs a *staging directory* that contains exactly the
+    // bundle (and any layout nicety like a /Applications symlink).
+    // We create one alongside the .app to avoid polluting unrelated
+    // dirs and to keep the operation idempotent.
+    let staging = bundle
+        .parent()
+        .unwrap()
+        .join(format!("dmg-staging-{arch}"));
+    if staging.exists() {
+        fs::remove_dir_all(&staging).ok();
+    }
+    fs::create_dir_all(&staging)?;
+    let dest = staging.join(
+        bundle
+            .file_name()
+            .context("bundle has no file name")?,
+    );
+    copy_dir_recursive(bundle, &dest)?;
+
+    // /Applications symlink so users can drag-and-drop on first open.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("/Applications", staging.join("Applications"))
+            .context("failed to create /Applications symlink in dmg staging")?;
+    }
+
+    let status = Command::new("hdiutil")
+        .args([
+            "create",
+            "-volname",
+            APP_NAME,
+            "-srcfolder",
+            staging.to_str().context("staging path is not UTF-8")?,
+            "-ov",
+            "-format",
+            "UDZO",
+            dmg_path
+                .to_str()
+                .context("dmg path is not UTF-8")?,
+        ])
+        .status()
+        .context("failed to invoke hdiutil")?;
+    if !status.success() {
+        bail!("hdiutil create failed with status {}", status);
+    }
+
+    fs::remove_dir_all(&staging).ok();
+    println!("Built {}", dmg_path.display());
+    Ok(())
+}
+
+fn bundle_macos_app(target: &str) -> Result<PathBuf> {
     let spec = MacTarget::parse(target)?;
     let paths = WorkspacePaths::discover()?;
 
@@ -97,7 +401,7 @@ fn bundle_macos_app(target: &str) -> Result<()> {
     println!("  helper: {}", helper_path.display());
     println!("  assets: {}", resources_dir.join("assets").display());
 
-    Ok(())
+    Ok(bundle_root)
 }
 
 fn run_cargo_build(manifest_path: &Path, bin: &str, rust_target: &str) -> Result<()> {
