@@ -7,11 +7,13 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
+use capsule_core::ato_lock;
 use capsule_core::handle::{
     normalize_capsule_handle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
     TrustState,
 };
 use capsule_core::launch_spec::derive_launch_spec;
+use capsule_core::routing::input_resolver::ATO_LOCK_FILE_NAME;
 use serde::{Deserialize, Serialize};
 
 use crate::application::pipeline::phases::run::DerivedBridgeManifest;
@@ -526,14 +528,39 @@ fn resolve_session_launch_plan(
     Ok((manifest_path, plan, launch, notes))
 }
 
+/// Try to load `ato.lock.json` from the workspace root.
+/// This is the authoritative lock that `ato run` generates via source-inference.
+/// Without it, `guard.rs` rejects Tier1 execution because
+/// `has_authoritative_lock = false` and no physical `capsule.lock.json` exists.
+fn try_load_authoritative_lock(
+    workspace_root: &Path,
+) -> (Option<ato_lock::AtoLock>, Option<PathBuf>) {
+    let lock_path = workspace_root.join(ATO_LOCK_FILE_NAME);
+    if !lock_path.exists() {
+        return (None, None);
+    }
+    match ato_lock::load_unvalidated_from_path(&lock_path) {
+        Ok(lock) => (Some(lock), Some(lock_path)),
+        Err(err) => {
+            tracing::warn!(
+                path = %lock_path.display(),
+                error = %err,
+                "failed to load ato.lock.json — session will proceed without authoritative lock"
+            );
+            (None, None)
+        }
+    }
+}
+
 fn prepare_session_execution(
     plan: &capsule_core::router::ManifestData,
     raw_manifest: &str,
 ) -> Result<crate::executors::target_runner::PreparedTargetExecution> {
     let reporter = Arc::new(CliReporter::new(false));
+    let (authoritative_lock, lock_path) = try_load_authoritative_lock(&plan.workspace_root);
     let prepared = PreparedRunContext {
-        authoritative_lock: None,
-        lock_path: None,
+        authoritative_lock,
+        lock_path,
         workspace_root: plan.workspace_root.clone(),
         effective_state: None,
         execution_override: None,
