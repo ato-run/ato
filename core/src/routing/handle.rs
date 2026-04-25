@@ -680,4 +680,95 @@ mod tests {
             other => panic!("expected capsule surface, got {other:?}"),
         }
     }
+
+    /// Day 6.5 — verify every URL form the desktop omnibar should accept
+    /// for the two demo capsules (byok-ai-chat, openclaw-local-llm).
+    #[test]
+    fn day6_all_omnibar_url_forms_resolve_correctly() {
+        struct Case {
+            input: &'static str,
+            expected_display: &'static str,
+        }
+
+        let cases = vec![
+            // 1. scoped_id shorthand → ato.run official registry
+            Case {
+                input: "ato/byok-ai-chat",
+                expected_display: "capsule://ato.run/ato/byok-ai-chat",
+            },
+            Case {
+                input: "ato/openclaw-local-llm",
+                expected_display: "capsule://ato.run/ato/openclaw-local-llm",
+            },
+            // 2. capsule:// with explicit ato.run authority
+            Case {
+                input: "capsule://ato.run/ato/byok-ai-chat",
+                expected_display: "capsule://ato.run/ato/byok-ai-chat",
+            },
+            // 3. capsule:// with localhost loopback
+            Case {
+                input: "capsule://127.0.0.1:8787/ato/byok-ai-chat",
+                expected_display: "capsule://127.0.0.1:8787/ato/byok-ai-chat",
+            },
+            Case {
+                input: "capsule://localhost:8787/ato/openclaw-local-llm",
+                expected_display: "capsule://localhost:8787/ato/openclaw-local-llm",
+            },
+            // 4. github.com shorthand
+            Case {
+                input: "github.com/user/repo",
+                expected_display: "capsule://github.com/user/repo",
+            },
+            Case {
+                input: "capsule://github.com/user/repo",
+                expected_display: "capsule://github.com/user/repo",
+            },
+        ];
+
+        for case in &cases {
+            let surface = classify_surface_input(HandleInput {
+                raw: case.input.to_string(),
+                surface: InputSurface::DesktopOmnibar,
+            })
+            .unwrap_or_else(|e| panic!("classify '{}' failed: {e}", case.input));
+            match surface {
+                SurfaceInput::Capsule { canonical } => {
+                    assert_eq!(
+                        canonical.display_string(),
+                        case.expected_display,
+                        "input: '{}'",
+                        case.input,
+                    );
+                }
+                other => panic!("input '{}': expected Capsule, got {other:?}", case.input,),
+            }
+        }
+
+        // Local path form — classify_surface_input routes these as
+        // LocalPath capsules (not SearchQuery), so verify they're accepted.
+        let local = classify_surface_input(HandleInput {
+            raw: "/Users/test/samples/byok-ai-chat".to_string(),
+            surface: InputSurface::DesktopOmnibar,
+        })
+        .expect("classify local path");
+        match local {
+            SurfaceInput::Capsule {
+                canonical: CanonicalHandle::LocalPath { .. },
+            } => {} // ok
+            other => panic!("expected LocalPath capsule, got {other:?}"),
+        }
+
+        // https:// URLs → WebUrl (external browser), not capsule
+        let web = classify_surface_input(HandleInput {
+            raw: "https://ato.run".to_string(),
+            surface: InputSurface::DesktopOmnibar,
+        })
+        .expect("classify web url");
+        match web {
+            SurfaceInput::WebUrl { url } => {
+                assert_eq!(url, "https://ato.run");
+            }
+            other => panic!("expected WebUrl, got {other:?}"),
+        }
+    }
 }

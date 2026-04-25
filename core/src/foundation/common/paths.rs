@@ -17,6 +17,7 @@ const WORKSPACE_STATE_DIR: &str = ".ato";
 const WORKSPACE_TMP_DIR: &str = ".ato/tmp";
 const WORKSPACE_ARTIFACTS_DIR: &str = ".ato/artifacts";
 const WORKSPACE_DERIVED_DIR: &str = ".ato/derived";
+const WORKSPACE_FALLBACK_HOME_DIR: &str = ".ato/fallback-home";
 const WORKSPACE_INTERNAL_SUBDIRS: &[&str] = &[
     "tmp",
     "artifacts",
@@ -27,11 +28,17 @@ const WORKSPACE_INTERNAL_SUBDIRS: &[&str] = &[
     "attestations",
     "run",
     "previews",
+    "fallback-home",
+    "publish",
 ];
 
-/// Returns the best-effort user home directory without falling back to `/tmp`.
+/// Returns the best-effort user home directory without ever falling back to `/tmp`.
+///
+/// When `dirs::home_dir()` cannot determine the real user home, use a
+/// workspace-local `.ato/fallback-home` path so any downstream state stays
+/// under the ato-managed `.ato/` tree instead of leaking a `.tmp/` sibling.
 pub fn home_dir_or_workspace_tmp() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".").join(".tmp"))
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".").join(WORKSPACE_FALLBACK_HOME_DIR))
 }
 
 /// Returns the root directory used by nacelle/capsule for per-user state.
@@ -53,7 +60,8 @@ pub fn nacelle_home_dir() -> Result<PathBuf> {
 /// Returns the best-effort ato home directory without ever falling back to `/tmp`.
 ///
 /// When the real home directory cannot be determined, use a workspace-local
-/// `.tmp/.ato` path so CLI and core fallbacks stay within the repository rules.
+/// `.ato/fallback-home/.ato` path so CLI and core fallbacks remain strictly
+/// inside the workspace `.ato/` tree.
 pub fn nacelle_home_dir_or_workspace_tmp() -> PathBuf {
     nacelle_home_dir().unwrap_or_else(|_| home_dir_or_workspace_tmp().join(".ato"))
 }
@@ -146,7 +154,10 @@ pub fn path_contains_workspace_internal_subtree(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{path_contains_workspace_internal_subtree, path_contains_workspace_state_dir};
+    use super::{
+        path_contains_workspace_internal_subtree, path_contains_workspace_state_dir,
+        WORKSPACE_FALLBACK_HOME_DIR,
+    };
     use std::path::Path;
 
     #[test]
@@ -175,6 +186,20 @@ mod tests {
         )));
         assert!(!path_contains_workspace_internal_subtree(Path::new(
             "/Users/test/.ato/store/pkg"
+        )));
+    }
+
+    #[test]
+    fn fallback_home_lives_under_workspace_ato_dir() {
+        // Regression guard: the home-dir fallback must never leak a `.tmp/`
+        // sibling in the workspace. Every fallback path must stay inside
+        // `.ato/fallback-home/...`.
+        assert_eq!(WORKSPACE_FALLBACK_HOME_DIR, ".ato/fallback-home");
+        assert!(path_contains_workspace_internal_subtree(Path::new(
+            "project/.ato/fallback-home"
+        )));
+        assert!(path_contains_workspace_internal_subtree(Path::new(
+            "project/.ato/fallback-home/.ato/cache"
         )));
     }
 }

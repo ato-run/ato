@@ -45,8 +45,7 @@ pub(crate) fn publish_test_sandbox_spec(
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
         .collect::<String>();
     let root_dir = base_dir
-        .join(".tmp")
-        .join("ato")
+        .join(".ato")
         .join("publish")
         .join("install")
         .join(scoped)

@@ -180,8 +180,8 @@ fn maps_security_policy_error_to_e301() {
 fn maps_manual_intervention_execution_error_to_e102() {
     let err = anyhow!(AtoExecutionError::manual_intervention_required(
         "manual intervention required: DATABASE_URL is required
-Generated capsule.toml: /repo/.tmp/capsule.toml",
-        Some("/repo/.tmp/capsule.toml"),
+Generated capsule.toml: /repo/.ato/capsule.toml",
+        Some("/repo/.ato/capsule.toml"),
         vec![
             "Set DATABASE_URL before rerunning.".to_string(),
             "Review the generated capsule.toml.".to_string(),
@@ -197,11 +197,101 @@ fn maps_missing_required_env_error_to_e103() {
     let err = anyhow!(AtoExecutionError::missing_required_env(
         "missing required environment variables for target 'default': DATABASE_URL",
         vec!["DATABASE_URL".to_string()],
+        Vec::new(),
         Some("default"),
     ));
     let diagnostic = from_anyhow(&err, CommandContext::Run);
     assert_eq!(diagnostic.code, CliDiagnosticCode::E103);
     assert!(diagnostic.interactive_resolution);
+}
+
+/// Wire-contract test for the E103 envelope consumed by `ato-desktop`. Pins
+/// the JSON shape so a future field rename (`missing_schema` → anything else)
+/// is caught in CI before the desktop loses its dynamic-config flow.
+///
+/// Invariants asserted here:
+/// 1. `details.missing_keys` and `details.missing_schema` are both present
+///    and **index-aligned** (`missing_schema[i].name == missing_keys[i]`).
+/// 2. `ConfigKind` flattens into the field object — `kind = "secret"` sits
+///    next to `placeholder`, `kind = "enum"` sits next to `choices`.
+/// 3. Optional fields (`label`, `description`, `default`, `placeholder`)
+///    are omitted when `None`, never serialized as `null`.
+#[test]
+fn maps_missing_required_env_error_to_e103_with_schema() {
+    use capsule_core::types::{ConfigField, ConfigKind};
+
+    let missing_schema = vec![
+        ConfigField {
+            name: "OPENAI_API_KEY".to_string(),
+            label: Some("OpenAI API Key".to_string()),
+            description: Some("Your OpenAI API key".to_string()),
+            kind: ConfigKind::Secret,
+            default: None,
+            placeholder: Some("sk-...".to_string()),
+        },
+        ConfigField {
+            name: "MODEL".to_string(),
+            label: None,
+            description: None,
+            kind: ConfigKind::Enum {
+                choices: vec!["gpt-4".to_string(), "gpt-5".to_string()],
+            },
+            default: Some("gpt-4".to_string()),
+            placeholder: None,
+        },
+    ];
+    let err = anyhow!(AtoExecutionError::missing_required_env(
+        "missing required environment variables for target 'main': OPENAI_API_KEY, MODEL",
+        vec!["OPENAI_API_KEY".to_string(), "MODEL".to_string()],
+        missing_schema,
+        Some("main"),
+    ));
+    let diagnostic = from_anyhow(&err, CommandContext::Run);
+    let envelope = diagnostic.to_json_envelope();
+    let actual =
+        serde_json::to_value(&envelope).expect("envelope must serialize to JSON value");
+
+    let expected = serde_json::json!({
+        "schema_version": "1",
+        "status": "error",
+        "error": {
+            "code": "E103",
+            "name": "missing_required_env",
+            "phase": "inference",
+            "classification": "manifest",
+            "message": "missing required environment variables for target 'main': OPENAI_API_KEY, MODEL",
+            "hint": "必要な環境変数を設定してから再実行してください。",
+            "retryable": false,
+            "interactive_resolution": true,
+            "causes": [],
+            "details": {
+                "missing_keys": ["OPENAI_API_KEY", "MODEL"],
+                "missing_schema": [
+                    {
+                        "name": "OPENAI_API_KEY",
+                        "label": "OpenAI API Key",
+                        "description": "Your OpenAI API key",
+                        "kind": "secret",
+                        "placeholder": "sk-..."
+                    },
+                    {
+                        "name": "MODEL",
+                        "kind": "enum",
+                        "choices": ["gpt-4", "gpt-5"],
+                        "default": "gpt-4"
+                    }
+                ],
+                "target": "main"
+            }
+        }
+    });
+
+    assert_eq!(
+        actual, expected,
+        "E103 envelope wire contract drifted — desktop dynamic-config UI depends on this exact shape.\nactual: {}\nexpected: {}",
+        serde_json::to_string_pretty(&actual).unwrap(),
+        serde_json::to_string_pretty(&expected).unwrap()
+    );
 }
 
 #[test]

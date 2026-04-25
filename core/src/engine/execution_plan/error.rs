@@ -335,12 +335,14 @@ impl AtoExecutionError {
     pub fn missing_required_env(
         message: impl Into<String>,
         missing_keys: Vec<String>,
+        missing_schema: Vec<crate::foundation::types::ConfigField>,
         target: Option<&str>,
     ) -> Self {
         Self::from_ato_error(AtoError::MissingRequiredEnv {
             message: message.into(),
             hint: Some("必要な環境変数を設定してから再実行してください。".to_string()),
             missing_keys,
+            missing_schema,
             target: target.map(ToString::to_string),
         })
     }
