@@ -331,6 +331,7 @@ pub(crate) fn build_github_manual_intervention_error(
                 required_env.join(", ")
             ),
             required_env,
+            Vec::new(),
             Some("github-inference"),
         )
         .into());
