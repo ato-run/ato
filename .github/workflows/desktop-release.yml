@@ -1,0 +1,126 @@
+# Desktop bundle release pipeline.
+#
+# v0.5 scope (this file): macOS .dmg only — see
+# docs/v0.5-distribution-plan.md PR-4. Linux .AppImage and Windows
+# .msi are added by PR-9.
+#
+# Build matrix:
+#   - macos-14   → aarch64-apple-darwin (Apple Silicon)
+#   - macos-13   → x86_64-apple-darwin  (Intel — covers v0.5 maturity matrix §6)
+#
+# Code-signing: ad-hoc by default (CodesignMode::AdHoc in xtask). To
+# upgrade to Developer ID, set MAC_DEVELOPER_ID_NAME in the repo's
+# Actions secrets — xtask picks it up at runtime, no workflow change
+# required. Notarization is similarly env-gated on APPLE_ID +
+# APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID. v0.5 ships without
+# either (D-3, D-4) so this workflow is a single-button green path
+# even on a fresh fork.
+name: desktop-release
+
+on:
+  push:
+    tags:
+      - "ato-desktop-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Override release tag (e.g. ato-desktop-v0.5.0)"
+        required: false
+
+permissions:
+  contents: write  # gh release upload needs write on contents
+
+jobs:
+  bundle-macos:
+    name: bundle macOS (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: darwin-arm64
+            rust_target: aarch64-apple-darwin
+          - runner: macos-13
+            target: darwin-x86_64
+            rust_target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache cargo registry / target
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Distinct cache per Rust target so the arm64 + x86_64 jobs
+          # don't trample each other's incremental artifacts.
+          key: desktop-release-${{ matrix.target }}
+
+      - name: Bundle, sign, and package .dmg
+        # xtask resolves CodesignMode at runtime: ad-hoc when
+        # MAC_DEVELOPER_ID_NAME is unset (v0.5 default), Developer ID
+        # when set. Notarization is similarly skipped when Apple env
+        # is missing.
+        env:
+          MAC_DEVELOPER_ID_NAME: ${{ secrets.MAC_DEVELOPER_ID_NAME }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cd xtask
+          cargo run --release -- bundle \
+            --target ${{ matrix.target }} \
+            --sign \
+            --notarize \
+            --dmg
+
+      - name: Upload .dmg artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ato-desktop-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/*.dmg
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: bundle-macos
+    if: startsWith(github.ref, 'refs/tags/ato-desktop-v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all bundle artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF##*/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create / update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag='${{ steps.tag.outputs.tag }}'
+          # `gh release create` errors if the release exists; use a
+          # create-or-edit pattern so re-runs of workflow_dispatch are
+          # idempotent.
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --title "Ato Desktop $tag" \
+              --notes "Automated build — see CHANGELOG.md for details." \
+              --draft
+          fi
+          # Upload every .dmg the matrix produced.
+          find artifacts -name "*.dmg" -print0 \
+            | xargs -0 -I {} gh release upload "$tag" {} --clobber
