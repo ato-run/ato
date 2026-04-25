@@ -225,6 +225,24 @@ impl TerminalSessionManagerInner {
     }
 }
 
+/// Result of non-blocking output polling from a terminal session.
+pub enum TryRecvOutput {
+    /// Base64-encoded output chunk.
+    Data(String),
+    /// No output available right now.
+    Empty,
+    /// Output channel is closed.
+    Disconnected,
+}
+
+/// Core terminal I/O contract independent from the UI surface.
+pub trait TerminalCore: Send {
+    fn session_id(&self) -> &str;
+    fn send_input(&self, data: Vec<u8>) -> bool;
+    fn send_resize(&self, cols: u16, rows: u16) -> bool;
+    fn try_recv_output(&self) -> TryRecvOutput;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
