@@ -1,5 +1,5 @@
 {
-  "schema_version": "desky-control-plane/v1",
+  "schema_version": "ccp/v1",
   "package_id": "ato/desky",
   "action": "bootstrap_finalize",
   "state_path": "/Users/test/.ato/apps/desky/bootstrap-state.json",
