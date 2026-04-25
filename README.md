@@ -21,7 +21,25 @@ Point `ato` at a Python script, a Node app, a Rust binary, or a GitHub repo — 
 curl -fsSL https://ato.run/install.sh | sh
 ```
 
-Or download a prebuilt binary from the [Releases page](https://github.com/ato-run/ato-cli/releases/latest) and place `ato` on your `PATH`.
+This installs the `ato` CLI plus the optional `ato-desktop` host (skip with `sh -s -- --cli-only`).
+
+Other channels:
+
+```bash
+# Homebrew — CLI only
+brew install ato-run/ato/ato
+
+# Homebrew — Desktop + CLI bundled
+brew install --cask ato-run/ato/ato
+
+# Build from source (Rust toolchain required)
+cargo install --locked --git https://github.com/ato-run/ato-cli ato-cli
+cargo install --locked --git https://github.com/ato-run/ato-desktop ato-desktop
+```
+
+Prebuilt binaries are available on the [Releases page](https://github.com/ato-run/ato-cli/releases/latest).
+
+> **macOS note (v0.5):** The Desktop `.app` is **ad-hoc signed**, not yet Apple-notarized. Homebrew Cask installs run cleanly. Direct downloads will trigger a one-time "developer cannot be verified" prompt — right-click the app and choose **Open** the first time, or run `xattr -dr com.apple.quarantine "/Applications/Ato Desktop.app"`. Apple Developer ID signing is targeted for v0.6+.
 
 ## Quick start
 
@@ -165,7 +183,19 @@ Ato is fail-closed by default.
 
 For normal local runs, Ato usually bootstraps a compatible Nacelle release automatically when Tier 2 execution requires it. In CI or offline environments, auto-bootstrap is intentionally restricted, so preinstall or register Nacelle ahead of time if needed.
 
-## From source
+## Build from source
+
+`cargo install` is a first-class install path in v0.5 — no signing, no Gatekeeper, no Apple Developer ID required.
+
+```bash
+# CLI only
+cargo install --locked --git https://github.com/ato-run/ato-cli ato-cli
+
+# Desktop host (requires GPUI build deps: Metal on macOS, Vulkan on Linux, DX11 on Windows)
+cargo install --locked --git https://github.com/ato-run/ato-desktop ato-desktop
+```
+
+For local development:
 
 ```bash
 cargo build -p ato-cli
