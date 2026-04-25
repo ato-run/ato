@@ -62,3 +62,37 @@ For `GuestRoute::LocalCapsule`, `webview.rs` calls `orchestrator::resolve_and_st
 ### Demo state
 
 `AppState::demo()` seeds the shell with three `LocalCapsule` routes pointing at `../../samples/desky-real-{tauri,electron,wails}`, a bundled welcome page (`capsule://welcome/index.html`), and two external URLs. This exercises every rendering path on boot.
+
+---
+
+## Architecture decisions
+
+### Terminal renderer: xterm.js (WebView) — alacritty 移行は見送り (2026-04-21)
+
+現在の端末表示は `assets/terminal/index.html` + `xterm.js` を Wry WebView に載せた構成。
+
+**採用理由 (xterm.js を継続)**
+
+- MCP / automation ツールが WebView 前提で設計されており、DOM 要素・IPC チャネルを統一的に扱える。WebView でない描画面を追加すると MCP アダプタを別途実装する必要が生じる。
+- 既存の `GuestRoute::Terminal` → bridge → orchestrator の PTY 経路が完成しており、置き換えコストが大きい。
+- xterm.js は Canvas アドオンにより WKWebView の WebGL 制約を回避でき、描画品質は許容範囲内。
+
+**alacritty 移行を見送った理由**
+
+- alacritty はネイティブ GPU 描画のため、現行の WebView 統一面から外れる。
+- MCP でターミナルを操作する場合、alacritty 専用のホスト側 MCP アダプタ（入力送信・リサイズ・出力取得・終了待ち）を新規実装する必要がある。
+- 現状の bottleneck（flow control / backpressure）は alacritty 移行なしに xterm.js 側で改善できる。
+
+**TODO: alacritty ネイティブ端末化（Phase N）**
+
+以下が揃ったタイミングで再評価する:
+
+1. MCP が WebView 非依存の「ターミナル操作 tool」を標準化、あるいは ato-mcp に専用ツールを追加できる見通しが立つ。
+2. xterm.js の flow control 改善後も描画性能・入力レイテンシが基準に満たない実測データが揃う。
+3. GPUI ネイティブテキスト描画が alacritty_terminal クレートとの統合を十分サポートする。
+
+移行する場合の実装要件:
+- `alacritty_terminal` crate で PTY parser + cell buffer を管理。
+- GPUI の `Canvas` / 独自レンダー層でセルを描画。
+- ato-mcp に `terminal_write`, `terminal_read`, `terminal_resize`, `terminal_wait` ツールを追加。
+- 既存の `GuestRoute::Terminal` / bridge / orchestrator の PTY 経路との統合を再設計。
