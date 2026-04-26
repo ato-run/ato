@@ -799,14 +799,29 @@ fn target_cmd_overrides_entrypoint(manifest: &toml::Value) -> bool {
 }
 
 fn read_entrypoint(manifest: &toml::Value) -> Result<String> {
-    let entrypoint = selected_target_table(manifest)
+    if let Some(entrypoint) = selected_target_table(manifest)
         .and_then(|t| t.get("entrypoint"))
         .and_then(|e| e.as_str())
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| CapsuleError::Config("No entrypoint defined in capsule.toml".to_string()))?;
+    {
+        return Ok(entrypoint.to_string());
+    }
 
-    Ok(entrypoint.to_string())
+    // v0.3 manifests carry the execution string in `run_command` and may
+    // omit `entrypoint` entirely. Treat run_command as the entrypoint when
+    // it is a single bare token (the build_config_json caller routes
+    // multi-token / shell-style values to resolve_shell_command first).
+    if let Some(run_command) = read_run_command(manifest) {
+        let trimmed = run_command.trim();
+        if !trimmed.is_empty() && !trimmed.contains(char::is_whitespace) {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    Err(CapsuleError::Config(
+        "No entrypoint defined in capsule.toml".to_string(),
+    ))
 }
 
 /// Decide whether a v0.3 `run_command` value should be treated as an
