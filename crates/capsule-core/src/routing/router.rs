@@ -1041,6 +1041,13 @@ impl ExecutionDescriptor {
         self.runtime_for_target(target_label)
             .and_then(|runtime| runtime.working_dir.clone())
             .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                // Workspace dependency targets aren't always wired into
+                // runtime_model.services; fall back to the compat manifest's
+                // \[targets.<label>.working_dir\] entry the v0.3 normalizer
+                // populates from \`capsule_path\`.
+                self.compat_str(&["targets", target_label, "working_dir"])
+            })
     }
 
     pub fn target_source_layout(&self, target_label: &str) -> Option<String> {
