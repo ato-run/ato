@@ -248,8 +248,7 @@ fn maps_missing_required_env_error_to_e103_with_schema() {
     ));
     let diagnostic = from_anyhow(&err, CommandContext::Run);
     let envelope = diagnostic.to_json_envelope();
-    let actual =
-        serde_json::to_value(&envelope).expect("envelope must serialize to JSON value");
+    let actual = serde_json::to_value(&envelope).expect("envelope must serialize to JSON value");
 
     let expected = serde_json::json!({
         "schema_version": "1",
