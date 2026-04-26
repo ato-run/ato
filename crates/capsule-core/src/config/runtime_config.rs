@@ -468,11 +468,12 @@ egress_allow = ["1.1.1.1"]
     version = "0.1.0"
     type = "app"
 
-    runtime = "source"
+    runtime = "source/python"
     runtime_version = "3.11.10"
-    PORT = "8080"
     run = "main.py"
-    [env]"#;
+    [env]
+    PORT = "8080"
+"#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
 
@@ -533,11 +534,12 @@ egress_allow = ["1.1.1.1"]
     version = "0.1.0"
     type = "app"
 
-    runtime = "source"
+    runtime = "source/python"
     runtime_version = "3.11.10"
-    PORT = "8080"
     run = "main.py"
-    [env]"#;
+    [env]
+    PORT = "8080"
+"#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
 
