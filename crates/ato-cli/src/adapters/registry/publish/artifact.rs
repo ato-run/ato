@@ -223,7 +223,7 @@ pub fn inspect_artifact_manifest(path: &Path) -> Result<ArtifactManifestInfo> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("Failed to read artifact: {}", path.display()))?;
     let manifest = extract_manifest_from_capsule(&bytes)?;
-    let parsed = capsule_core::types::CapsuleManifest::from_toml(&manifest)
+    let parsed = toml::from_str::<capsule_core::types::CapsuleManifest>(&manifest)
         .map_err(|err| anyhow::anyhow!("Failed to parse capsule.toml from artifact: {}", err))?;
 
     Ok(ArtifactManifestInfo {
@@ -249,7 +249,7 @@ pub fn verify_artifact(path: &Path) -> Result<VerifiedArtifactInfo> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("Failed to read artifact: {}", path.display()))?;
     let manifest = extract_manifest_from_capsule(&bytes)?;
-    let parsed = capsule_core::types::CapsuleManifest::from_toml(&manifest)
+    let parsed = toml::from_str::<capsule_core::types::CapsuleManifest>(&manifest)
         .map_err(|err| anyhow::anyhow!("Failed to parse capsule.toml from artifact: {}", err))?;
     let _ = extract_payload_payload_manifest_from_capsule(&bytes)?;
 
@@ -399,7 +399,7 @@ fn load_artifact_payload_from_bytes(bytes: &[u8], scoped_id: &str) -> Result<Art
     let scoped = crate::install::parse_capsule_ref(scoped_id)?;
     let manifest = extract_manifest_from_capsule(bytes)?;
     let payload_manifest = extract_payload_payload_manifest_from_capsule(bytes)?;
-    let parsed = capsule_core::types::CapsuleManifest::from_toml(&manifest)
+    let parsed = toml::from_str::<capsule_core::types::CapsuleManifest>(&manifest)
         .map_err(|err| anyhow::anyhow!("Failed to parse capsule.toml from artifact: {}", err))?;
 
     if parsed.name != scoped.slug {
