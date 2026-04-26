@@ -1338,6 +1338,7 @@ mod tests {
             runtime = "source"
             language = "python"
             driver = "python"
+            runtime_version = "3.11.10"
             entrypoint = "main.py"
             "#,
             "dev",
