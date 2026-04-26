@@ -1,0 +1,14 @@
+schema_version = "0.3"
+name = "ipc-provider"
+version = "0.1.0"
+type = "app"
+runtime = "source/native"
+run = "echo provider"
+
+[ipc.exports]
+name = "echo-service"
+protocol = "jsonrpc-2.0"
+transport = "unix-socket"
+
+[[ipc.exports.methods]]
+name = "ping"

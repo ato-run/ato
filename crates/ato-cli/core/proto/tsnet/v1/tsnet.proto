@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package tsnet.v1;
+
+service TsnetService {
+  rpc Start(StartRequest) returns (StartResponse);
+  rpc Stop(StopRequest) returns (StopResponse);
+  rpc Status(StatusRequest) returns (StatusResponse);
+  rpc StartServe(ServeRequest) returns (ServeResponse);
+  rpc StopServe(ServeStopRequest) returns (ServeStopResponse);
+  rpc ServeStatus(ServeStatusRequest) returns (ServeStatusResponse);
+}
+
+message StartRequest {
+  string control_url = 1;
+  string auth_key = 2;
+  string hostname = 3;
+  uint32 socks_port = 4;
+  repeated string allow_net = 5;  // Allowed egress destinations (domains/CIDR)
+}
+
+message StartResponse {
+  TsnetState state = 1;
+  uint32 socks_port = 2;
+  string message = 3;
+}
+
+message StopRequest {
+  bool force = 1;
+}
+
+message StopResponse {
+  TsnetState state = 1;
+  string message = 2;
+}
+
+message StatusRequest {}
+
+message StatusResponse {
+  TsnetState state = 1;
+  uint32 socks_port = 2;
+  bool connected = 3;
+  string last_error = 4;
+}
+
+message ServeRequest {
+  string target_addr = 1; // local address to forward, e.g. 127.0.0.1:3000
+  uint32 listen_port = 2; // tailnet port to listen (0 = auto)
+}
+
+message ServeResponse {
+  bool running = 1;
+  uint32 listen_port = 2;
+  string listen_addr = 3;
+  string message = 4;
+}
+
+message ServeStopRequest {
+  bool force = 1;
+}
+
+message ServeStopResponse {
+  bool running = 1;
+  string message = 2;
+}
+
+message ServeStatusRequest {}
+
+message ServeStatusResponse {
+  bool running = 1;
+  uint32 listen_port = 2;
+  string listen_addr = 3;
+  string last_error = 4;
+}
+
+enum TsnetState {
+  TSNET_STATE_UNSPECIFIED = 0;
+  TSNET_STATE_STOPPED = 1;
+  TSNET_STATE_STARTING = 2;
+  TSNET_STATE_RUNNING = 3;
+  TSNET_STATE_STOPPING = 4;
+  TSNET_STATE_FAILED = 5;
+}

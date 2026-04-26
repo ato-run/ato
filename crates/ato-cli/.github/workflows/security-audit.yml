@@ -1,0 +1,98 @@
+name: Security Audit
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".cargo/audit.toml"
+      - ".github/workflows/security-audit.yml"
+      - "deny.toml"
+  push:
+    branches:
+      - dev
+      - main
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".cargo/audit.toml"
+      - ".github/workflows/security-audit.yml"
+      - "deny.toml"
+  schedule:
+    - cron: "0 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2.68.26
+        with:
+          tool: cargo-audit
+      - name: Run cargo-audit
+        run: cargo audit
+
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2.68.26
+        with:
+          tool: cargo-deny
+      - name: Run cargo-deny
+        run: cargo deny check advisories licenses bans sources
+
+  semver:
+    name: cargo-semver-checks (capsule-core)
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Determine semver baseline
+        id: baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            base_ref="origin/${{ github.event.pull_request.base.ref }}"
+            git fetch origin "${{ github.event.pull_request.base.ref }}" --depth=1
+          elif [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            base_ref="${{ github.event.before }}"
+          else
+            default_branch="${{ github.event.repository.default_branch }}"
+            base_ref="origin/${default_branch}"
+            git fetch origin "${default_branch}" --depth=1
+          fi
+
+          echo "rev=${base_ref}" >> "$GITHUB_OUTPUT"
+      - name: Check capsule-core public API compatibility
+        uses: obi1kenobi/cargo-semver-checks-action@v2.8
+        with:
+          package: capsule-core
+          baseline-rev: ${{ steps.baseline.outputs.rev }}

@@ -1,0 +1,117 @@
+.logs-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.logs-head {
+  min-height: 44px;
+  border-bottom: 1px solid var(--border);
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.logs-title {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.logs-spacer {
+  flex: 1;
+}
+
+.logs-body {
+  flex: 1;
+  min-height: 0;
+  background: var(--term-bg);
+  border-bottom: 1px solid var(--term-bd);
+  overflow: auto;
+  padding: 10px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+}
+
+.log-row {
+  display: grid;
+  grid-template-columns: 34px 70px 70px 1fr;
+  gap: 8px;
+  align-items: start;
+  margin-bottom: 4px;
+}
+
+.log-ln {
+  color: var(--log-muted);
+  user-select: none;
+}
+
+.log-time {
+  color: var(--log-default);
+}
+
+.log-level {
+  color: var(--log-default);
+}
+
+.log-level.info {
+  color: var(--log-info);
+}
+
+.log-level.warn {
+  color: var(--log-warn);
+}
+
+.log-level.error,
+.log-level.sigterm {
+  color: var(--log-error);
+}
+
+.log-msg {
+  color: var(--log-default);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log-empty {
+  color: var(--log-muted);
+  text-align: center;
+  margin-top: 120px;
+}
+
+.logs-footer {
+  min-height: 42px;
+  padding: 8px 12px;
+  display: flex;
+}
+
+.logs-footer .logs-spacer {
+  flex: 1;
+}
+
+@media (max-width: 768px) {
+  .logs-head {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .logs-title {
+    width: 100%;
+  }
+
+  .logs-body {
+    padding: 8px;
+  }
+
+  .log-row {
+    grid-template-columns: 26px 56px 56px 1fr;
+    min-width: 420px;
+  }
+}

@@ -1,0 +1,6 @@
+schema_version = "0.3"
+name = "native-sandbox-unavailable-capsule"
+version = "0.1.0"
+type = "app"
+runtime = "source/native"
+run = "main.py"

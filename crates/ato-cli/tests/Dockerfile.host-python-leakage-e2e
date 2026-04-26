@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1
+# Docker E2E test: verifies ato uses its managed Python when the host already
+# has a different Python version installed (same-class bug as #294 for Node).
+#
+# This test is expected to FAIL until PythonProvisioner is implemented in v0.5.x.
+# It is kept as an executable specification / regression guard.
+# See: ignore = "until-pythonprovisioner-v0.5.x"
+#
+# Stage 1 (builder): compiles ato from source
+# Stage 2 (tester):  python:3.9-slim base (host has Python 3.9)
+
+# ─── Stage 1: Build ato binary ────────────────────────────────────────────────
+FROM rust:1.88-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    perl \
+    make \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+RUN cargo fetch && \
+    cargo build --release --bin ato
+
+# ─── Stage 2: Environment with wrong Python version on host ──────────────────
+# Using python:3.9-slim so there is a "wrong" host Python 3.9.
+# The ato runtime must still pick its own managed Python (3.12.x), not 3.9.
+FROM python:3.9-slim-bookworm AS tester
+
+# Confirm Python 3.9 is the host version.
+RUN python3 --version | grep -E '^Python 3\.9\.' || \
+    (echo "ERROR: expected Python 3.9 from base image" && exit 1)
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    xz-utils \
+    tar \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /src/target/release/ato /usr/local/bin/ato
+COPY tests/docker_host_python_leakage_runner.sh /run-tests.sh
+RUN chmod +x /run-tests.sh
+
+ENV HOME=/root
+CMD ["/run-tests.sh"]

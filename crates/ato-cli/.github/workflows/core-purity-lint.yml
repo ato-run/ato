@@ -1,0 +1,34 @@
+name: Core-Crate Purity Lint
+
+# Enforces PAS §6.1 — the capsule-core crate must remain free of
+# GUI / platform-specific imports so the desktop and headless CLI
+# reuse it without dragging in GPUI / Wry / win32.
+#
+# Failure means a platform-specific import has leaked into core. Move
+# it into a CLI-only adapter layer or expose an abstract trait.
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  core-purity:
+    name: core-purity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Forbid GUI / platform imports under core/src
+        run: |
+          set -euo pipefail
+          forbidden_pattern='^use (gpui|wry|objc2|windows)([:; ]|$)'
+          if grep -rnE "$forbidden_pattern" core/src ; then
+            echo "::error::forbidden GUI/platform import found in capsule-core (PAS §6.1)"
+            exit 1
+          fi
+          echo "core-purity check passed"

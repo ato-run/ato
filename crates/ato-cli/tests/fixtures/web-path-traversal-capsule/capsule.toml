@@ -1,0 +1,7 @@
+schema_version = "0.3"
+name = "web-path-traversal-capsule"
+version = "0.1.0"
+type = "app"
+runtime = "web/static"
+run = "../secret"
+port = 8080
