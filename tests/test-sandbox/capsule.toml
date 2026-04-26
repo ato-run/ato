@@ -1,0 +1,18 @@
+schema_version = "0.3"
+name = "test-sandbox"
+version = "0.1.0"
+type = "app"
+runtime = "source/python"
+run = "python3 main.py"
+
+[metadata]
+description = "Test sandbox isolation with restricted permissions"
+
+[isolation]
+sandbox = true
+
+[isolation.network]
+enabled = false
+
+[isolation.filesystem]
+read_write = ["./output"]
