@@ -11,25 +11,6 @@ pub(super) async fn handle_list_local_processes() -> impl IntoResponse {
             )
         }
     };
-    let cleaned = match pm.cleanup_dead_processes_with_details() {
-        Ok(cleaned) => cleaned,
-        Err(err) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "process_cleanup_failed",
-                &err.to_string(),
-            )
-        }
-    };
-    for process in &cleaned {
-        if let Err(err) = binding::cleanup_service_bindings_for_process_info(process) {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "service_binding_cleanup_failed",
-                &err.to_string(),
-            );
-        }
-    }
     let mut processes = match pm.list_processes() {
         Ok(processes) => processes,
         Err(err) => {

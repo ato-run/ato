@@ -73,7 +73,7 @@ pub fn execute(
 
     let Some(_) = launch_spec.required_lockfile.as_ref() else {
         return Err(AtoExecutionError::lock_incomplete(
-            "source/node Tier1 execution requires a Node lockfile",
+            "source/node Tier1 execution requires a Node lockfile (package-lock.json, pnpm-lock.yaml, yarn.lock, bun.lock, or bun.lockb)",
             Some("package-lock.json|yarn.lock|pnpm-lock.yaml|bun.lock|bun.lockb"),
         )
         .into());
@@ -174,7 +174,7 @@ pub fn spawn(
 
     let Some(_) = launch_spec.required_lockfile.as_ref() else {
         return Err(AtoExecutionError::lock_incomplete(
-            "source/node Tier1 execution requires a Node lockfile",
+            "source/node Tier1 execution requires a Node lockfile (package-lock.json, pnpm-lock.yaml, yarn.lock, bun.lock, or bun.lockb)",
             Some("package-lock.json|yarn.lock|pnpm-lock.yaml|bun.lock|bun.lockb"),
         )
         .into());
@@ -266,7 +266,7 @@ pub fn spawn_background(
     } else {
         let Some(_) = launch_spec.required_lockfile.as_ref() else {
             return Err(AtoExecutionError::lock_incomplete(
-                "source/node Tier1 execution requires a Node lockfile",
+                "source/node Tier1 execution requires a Node lockfile (package-lock.json, pnpm-lock.yaml, yarn.lock, bun.lock, or bun.lockb)",
                 Some("package-lock.json|yarn.lock|pnpm-lock.yaml|bun.lock|bun.lockb"),
             )
             .into());
