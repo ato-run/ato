@@ -65,6 +65,9 @@ jobs:
       #
       # Build ato + nacelle binaries first so share_interactive_e2e tests can
       # resolve them from PATH (they spawn child processes during tests).
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y bubblewrap
       - name: Build test binaries
         run: |
           cargo build -p ato-cli --bin ato
