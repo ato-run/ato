@@ -6,12 +6,12 @@ use capsule_core::handle::{
     classify_surface_input, normalize_capsule_handle, parse_host_route, HandleInput,
     InputSurface as CapsuleInputSurface, SurfaceInput as CapsuleSurfaceInput,
 };
+use capsule_core::types::ConfigField;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 use url::{form_urlencoded, Url};
 
 use crate::bridge::ShellEvent;
-use crate::cli_envelope::ConfigFieldDto;
 use crate::config::SecretEntry;
 use crate::orchestrator::{register_pending_cli_command, CliLaunchSpec};
 
@@ -616,7 +616,7 @@ pub struct PendingConfigRequest {
     /// The schema array from `details.missing_schema` — drives the
     /// dynamic form. Iterated as-is by the modal; never index-aligned
     /// with `missing_keys` (each field carries its own `name`).
-    pub fields: Vec<ConfigFieldDto>,
+    pub fields: Vec<ConfigField>,
     /// Snapshot of the secrets passed to the original `start_capsule`
     /// call. Cloned at request-construction time so a concurrent
     /// secret-store mutation can't corrupt the retry.
