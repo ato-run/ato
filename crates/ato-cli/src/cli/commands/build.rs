@@ -1536,7 +1536,14 @@ mod tests {
                 ),
                 (
                     "outputs",
-                    toml::Value::Array(vec![toml::Value::String("dist/**".to_string())]),
+                    toml::Value::Array(vec![
+                        toml::Value::String("dist/**".to_string()),
+                        // Exclude the build-script counter from cache key
+                        // inputs — otherwise the side-effect counter created
+                        // by the first build would alter the cache key the
+                        // second time around.
+                        toml::Value::String("build-scratch/**".to_string()),
+                    ]),
                 ),
                 (
                     "build_env",
