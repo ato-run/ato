@@ -48,8 +48,8 @@ pub fn copy_dir_recursive(src: &Path, dst: &Path) {
 pub fn write_capsule_lock(workspace_root: &Path, fixture_name: &str) {
     let manifest_path = workspace_root.join("capsule.toml");
     let manifest_text = fs::read_to_string(&manifest_path).expect("failed to read manifest");
-    let manifest = capsule_core::types::CapsuleManifest::from_toml(&manifest_text)
-        .expect("failed to parse manifest");
+    let manifest: capsule_core::types::CapsuleManifest =
+        toml::from_str(&manifest_text).expect("failed to parse manifest");
     let hash = capsule_core::packers::payload::compute_manifest_hash_without_signatures(&manifest)
         .expect("failed to compute manifest hash");
 
@@ -89,8 +89,8 @@ pub fn prepare_fixture_workspace(fixture_name: &str) -> (TempDir, PathBuf) {
     if lock_path.exists() {
         let manifest_text = fs::read_to_string(workspace_root.join("capsule.toml"))
             .expect("failed to read manifest");
-        let manifest = capsule_core::types::CapsuleManifest::from_toml(&manifest_text)
-            .expect("failed to parse manifest");
+        let manifest: capsule_core::types::CapsuleManifest =
+            toml::from_str(&manifest_text).expect("failed to parse manifest");
         let rendered = capsule_core::lockfile::render_lockfile_for_manifest(&lock_path, &manifest)
             .expect("failed to re-render existing capsule.lock.json");
         fs::write(&lock_path, rendered).expect("failed to update existing capsule.lock.json");
