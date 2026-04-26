@@ -522,6 +522,7 @@ fn resolve_language_command(
 fn merged_manifest_env(manifest: &toml::Value) -> HashMap<String, String> {
     let mut env = selected_target_table(manifest)
         .and_then(|t| t.get("env"))
+        .or_else(|| manifest.get("env"))
         .and_then(|e| e.as_table())
         .map(|tbl| {
             tbl.iter()
@@ -1179,6 +1180,7 @@ fn insert_uv_python_runtime_env(env: &mut HashMap<String, String>, runtime_versi
 fn read_target_runtime_version(manifest: &toml::Value) -> Option<String> {
     selected_target_table(manifest)
         .and_then(|target| target.get("runtime_version"))
+        .or_else(|| manifest.get("runtime_version"))
         .and_then(toml::Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
