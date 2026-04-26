@@ -564,29 +564,69 @@ fn execution_signals(manifest: &toml::Value) -> Option<SignalsConfig> {
         })
 }
 
+/// Same heuristic as `run_command_should_be_entrypoint` but for the
+/// `ResolvedTargetRuntime` carried by target-based services. We trust the
+/// resolved driver/runtime metadata rather than the un-normalized manifest
+/// tree, but apply the same shell-metadata / interpreter-prefix rules.
+fn target_run_command_should_be_entrypoint(
+    command: &str,
+    runtime: &ResolvedTargetRuntime,
+) -> bool {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.contains(['$', '|', '&', ';', '`', '(', ')', '<', '>']) {
+        return false;
+    }
+    if let Some(first_token) = trimmed.split_whitespace().next() {
+        if detect_language_from_program(first_token).is_some() {
+            return true;
+        }
+    }
+    if trimmed.contains(char::is_whitespace) {
+        return false;
+    }
+    if let Some(driver) = runtime.driver.as_deref() {
+        let driver = driver.trim().to_ascii_lowercase();
+        if matches!(driver.as_str(), "python" | "node" | "deno" | "bun") {
+            return true;
+        }
+    }
+    if detect_language_from_entrypoint(trimmed).is_some() {
+        return true;
+    }
+    trimmed.starts_with("./") || trimmed.starts_with('/') || trimmed.starts_with("runtime/")
+}
+
 fn resolve_target_command(
     runtime: &ResolvedTargetRuntime,
     standalone: bool,
     layout: SourceLayoutHint,
 ) -> (String, Vec<String>, Option<HashMap<String, String>>) {
-    if let Some(run_command) = runtime
+    let run_command = runtime
         .run_command
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return (
-            "sh".to_string(),
-            vec!["-c".to_string(), run_command.to_string()],
-            if runtime.env.is_empty() {
-                None
-            } else {
-                Some(runtime.env.clone())
-            },
-        );
+        .filter(|value| !value.is_empty());
+
+    if let Some(run_command) = run_command {
+        if !target_run_command_should_be_entrypoint(run_command, runtime) {
+            return (
+                "sh".to_string(),
+                vec!["-c".to_string(), run_command.to_string()],
+                if runtime.env.is_empty() {
+                    None
+                } else {
+                    Some(runtime.env.clone())
+                },
+            );
+        }
     }
 
-    let entrypoint = runtime.entrypoint.as_str();
+    // For target-based services we treat run_command as the synthetic
+    // entrypoint when the driver/file extension implies a known interpreter.
+    let entrypoint = run_command.unwrap_or_else(|| runtime.entrypoint.as_str());
     let (program, tokens) = command_tokens(entrypoint, None);
 
     let language = runtime
@@ -735,6 +775,7 @@ fn read_source_layout(manifest: &toml::Value) -> SourceLayoutHint {
     source_layout_hint(
         selected_target_table(manifest)
             .and_then(|target| target.get("source_layout"))
+            .or_else(|| manifest.get("source_layout"))
             .and_then(toml::Value::as_str),
     )
 }
@@ -769,21 +810,32 @@ fn read_entrypoint(manifest: &toml::Value) -> Result<String> {
 }
 
 /// Decide whether a v0.3 `run_command` value should be treated as an
-/// interpreter entrypoint (routed through `resolve_command`) instead of a
-/// shell-style command (routed through `sh -c`).
+/// interpreter entrypoint or local binary (routed through `resolve_command`)
+/// instead of a shell-style command (routed through `sh -c`).
 ///
-/// We treat it as an entrypoint when it is a single bare token without shell
-/// metacharacters and either the manifest declares a known interpreter
-/// language (python/node/deno/bun) or the token's extension implies one.
+/// We treat it as an entrypoint when:
+/// - it has no shell metacharacters AND one of:
+///   - the manifest declares a known interpreter language;
+///   - the (single) token's extension implies an interpreter;
+///   - the (single) token is a local binary path (`./...`, `/abs/...`,
+///     `runtime/...`);
+/// - OR its first whitespace-separated token is a known interpreter binary
+///   (python/python3/node/nodejs/deno/bun) — in which case the rest of the
+///   command line is passed through verbatim.
 fn run_command_should_be_entrypoint(command: &str, manifest: &toml::Value) -> bool {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return false;
     }
-    if trimmed.contains(char::is_whitespace) {
+    if trimmed.contains(['$', '|', '&', ';', '`', '(', ')', '<', '>']) {
         return false;
     }
-    if trimmed.contains(['$', '|', '&', ';', '`', '(', ')', '<', '>']) {
+    if let Some(first_token) = trimmed.split_whitespace().next() {
+        if detect_language_from_program(first_token).is_some() {
+            return true;
+        }
+    }
+    if trimmed.contains(char::is_whitespace) {
         return false;
     }
     if let Some(language) = read_language(manifest) {
@@ -791,7 +843,10 @@ fn run_command_should_be_entrypoint(command: &str, manifest: &toml::Value) -> bo
             return true;
         }
     }
-    detect_language_from_entrypoint(trimmed).is_some()
+    if detect_language_from_entrypoint(trimmed).is_some() {
+        return true;
+    }
+    trimmed.starts_with("./") || trimmed.starts_with('/') || trimmed.starts_with("runtime/")
 }
 
 fn resolve_shell_command(command: &str, manifest: &toml::Value) -> CommandResolution {
@@ -1117,10 +1172,31 @@ fn resolve_command(
 }
 
 fn read_language(manifest: &toml::Value) -> Option<String> {
-    selected_target_table(manifest)
+    if let Some(language) = selected_target_table(manifest)
         .and_then(|t| t.get("language"))
         .and_then(|l| l.as_str())
         .map(normalize_language)
+    {
+        return Some(language);
+    }
+    // Flat v0.3 manifests carry the driver inside `runtime = "source/<driver>"`.
+    // The bridge's manifest_value() exposes the un-normalized tree, so derive
+    // the language from the runtime selector when no targets table exists yet.
+    let driver = selected_target_table(manifest)
+        .and_then(|t| t.get("driver"))
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            manifest
+                .get("runtime")
+                .and_then(|v| v.as_str())
+                .and_then(|selector| selector.split_once('/').map(|(_, driver)| driver))
+        })?;
+    let driver = driver.trim().to_ascii_lowercase();
+    if matches!(driver.as_str(), "python" | "node" | "deno" | "bun") {
+        Some(driver)
+    } else {
+        None
+    }
 }
 
 fn detect_language_from_program(program: &str) -> Option<String> {
