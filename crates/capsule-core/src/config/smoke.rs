@@ -1207,6 +1207,7 @@ startup_timeout_ms = 0
     }
 
     #[test]
+    #[serial_test::serial]
     fn prepare_smoke_working_directory_installs_pnpm_dependencies_when_missing() {
         let temp = tempfile::tempdir().expect("tempdir");
         let source_dir = temp.path().join("source");

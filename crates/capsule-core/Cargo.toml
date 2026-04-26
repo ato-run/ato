@@ -66,6 +66,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 [dev-dependencies]
 dhat = "0.3"
 axum = { version = "0.7", features = ["multipart"] }
+serial_test = "3"
 
 [features]
 default = []
