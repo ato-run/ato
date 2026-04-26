@@ -1,0 +1,9 @@
+schema_version = "1.0"
+name = "test-concurrent-b"
+version = "0.1.0"
+description = "Test F: Concurrent deployment test - App B (Orange)"
+type = "app"
+
+[execution]
+runtime = "source"
+entrypoint = "python3 server.py"

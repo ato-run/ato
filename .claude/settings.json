@@ -1,0 +1,45 @@
+{
+  "_comment": "Shared Claude Code settings for ato-run/ato. Per-user overrides go in .claude/settings.local.json (gitignored).",
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(cat)",
+      "Bash(grep:*)",
+      "Bash(find *)",
+      "Bash(python3 -m json.tool)",
+
+      "Bash(cargo check:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo metadata:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo fmt:*)",
+
+      "Bash(npx tsc:*)",
+      "Bash(npx skills:*)",
+
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git fetch *)",
+      "Bash(git checkout *)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+
+      "Read(//tmp/**)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:ato.run)",
+      "WebFetch(domain:docs.ato.run)",
+
+      "mcp__serena__activate_project",
+      "mcp__serena__read_memory",
+      "mcp__serena__read_file",
+      "mcp__serena__create_text_file",
+      "mcp__serena__list_dir",
+      "mcp__serena__search_for_pattern",
+      "mcp__serena__find_symbol",
+      "mcp__serena__get_symbols_overview"
+    ]
+  }
+}
