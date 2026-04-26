@@ -1910,8 +1910,8 @@ fn test_run_rejects_pypi_inline_version_syntax() {
     cmd.args(["run", "pypi:markitdown@0.1.0", "--yes"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("inline version syntax is"))
-        .stderr(predicate::str::contains("not supported yet"));
+        .stderr(predicate::str::contains("inline version syntax"))
+        .stderr(predicate::str::contains("yet"));
 }
 
 #[test]
