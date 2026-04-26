@@ -1,0 +1,7 @@
+schema_version = "0.3"
+name = "deno-lock-missing-capsule"
+version = "0.1.0"
+type = "app"
+runtime = "source/deno"
+runtime_version = "1.46.3"
+run = "main.ts"

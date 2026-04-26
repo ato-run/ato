@@ -1,0 +1,18 @@
+{
+  "schema_version": "1",
+  "status": "error",
+  "error": {
+    "code": "E303",
+    "name": "runtime_not_resolved",
+    "phase": "execution",
+    "classification": "execution",
+    "message": "deno runtime is not resolved",
+    "hint": "runtime 解決を再試行するか、version 指定と toolchain 設定を確認してください。",
+    "retryable": false,
+    "interactive_resolution": false,
+    "details": {
+      "runtime": "deno"
+    },
+    "causes": []
+  }
+}

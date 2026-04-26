@@ -1,0 +1,64 @@
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+unmaintained = "workspace"
+ignore = [
+    # --- wasmtime 16.0.0 vulnerabilities (runtime pinned until planned upgrade) ---
+    { id = "RUSTSEC-2026-0085", reason = "Wasmtime 16 vulnerability; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0086", reason = "Wasmtime 16 vulnerability; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0087", reason = "Wasmtime 16 vulnerability; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0088", reason = "Wasmtime 16 vulnerability; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0089", reason = "Wasmtime 16 vulnerability; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0091", reason = "Wasmtime 16 vulnerability; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0092", reason = "Wasmtime 16 UTF-16 transcoding panic; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0093", reason = "Wasmtime 16 UTF-16 heap OOB; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0094", reason = "Wasmtime Winch table.grow return value vulnerability; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0095", reason = "Wasmtime Winch compiler sandbox escape; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0096", reason = "Wasmtime aarch64 Cranelift miscompile; pinned pending planned upgrade." },
+    { id = "RUSTSEC-2026-0097", reason = "rand 0.8.5 unsound with custom logger; transitive dep via wasmtime/opentelemetry stack, upgrade blocked until dependency refresh." },
+    { id = "RUSTSEC-2026-0020", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
+    { id = "RUSTSEC-2026-0021", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
+    { id = "RUSTSEC-2024-0438", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
+    { id = "RUSTSEC-2024-0445", reason = "cap-primitives is pulled in by the same pinned wasmtime 16 stack." },
+    { id = "RUSTSEC-2025-0046", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
+    { id = "RUSTSEC-2025-0118", reason = "Non-Windows runtime remains pinned to wasmtime 16 until the planned dependency refresh lands." },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "LGPL-2.1-or-later",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "OpenSSL",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[bans]
+# This workspace intentionally resolves multiple target-specific support crates
+# in the shared lockfile; keep duplicate-version noise out of the security gate
+# while still denying wildcard requirements.
+multiple-versions = "allow"
+allow-wildcard-paths = true
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

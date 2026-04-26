@@ -1,0 +1,25 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.31.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app.
+# - homebrew → Formula in ato-run/homebrew-ato (CLI-only, alongside Cask).
+# - msi      → CLI MSI for `--cli-only` Windows install (PR-7).
+#              Desktop MSI is built separately by xtask + WiX (PR-7).
+installers = ["homebrew", "msi"]
+# Homebrew tap repository
+tap = "ato-run/homebrew-ato"
+# Publish jobs to run on release
+publish-jobs = ["homebrew"]
+# Allow hand-edited CI customizations on top of generated workflow
+allow-dirty = ["ci"]
+# Target platforms to build apps for (Rust target-triple syntax)
+# Intel Mac added for v0.5 distribution coverage (CPDS §6 maturity matrix).
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Where to host releases
+hosting = "github"

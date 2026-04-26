@@ -1,0 +1,137 @@
+[workspace]
+members = [
+    ".",
+    "core",
+    "lock-draft-engine",
+]
+resolver = "2"
+
+[package]
+name = "ato-cli"
+version = "0.4.84"
+edition = "2021"
+description = "ato CLI (meta-runtime)"
+authors = ["ato-run"]
+homepage = "https://ato.run"
+license = "Apache-2.0"
+repository = "https://github.com/ato-run/ato-cli"
+build = "build.rs"
+
+# WiX MSI identifiers — required by cargo-dist when `installers = ["msi"]`
+# is set in dist-workspace.toml. These GUIDs MUST remain stable across
+# releases so Windows Installer recognizes successive MSIs as upgrades
+# of the same product (and not as parallel installs).
+#
+# - upgrade-guid: identifies the product line (ato CLI). Never change.
+# - path-guid:    identifies the PATH-modification component. Never change.
+#
+# Generated 2026-04-26. Do not regenerate.
+[package.metadata.wix]
+upgrade-guid = "91E1EDBC-3923-4EB3-8AD9-02239A1537BA"
+path-guid    = "6DBB2927-20CD-429F-BAD0-687E62082ED6"
+license = false
+eula = false
+
+[[bin]]
+name = "ato"
+path = "src/main.rs"
+
+[dependencies]
+capsule-core = { path = "core", version = "0.11.0" }
+anyhow = "1.0"
+blake3 = "1.5"
+clap = { version = "4.5", features = ["derive", "env"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_jcs = "0.1"
+adk-core = "0.4.0"
+adk-model = { version = "0.4.0", default-features = false, features = ["openai"] }
+serde_yaml = "0.9"
+toml = "0.8"
+toml_edit = "0.22"
+semver = "1.0"
+which = "6.0"
+ctrlc = "3.4"
+dirs = "5.0"
+miette = { version = "7", features = ["fancy"] }
+hex = "0.4"
+sha2 = "0.10"
+rand = "0.8"
+ed25519-dalek = { version = "2.0", features = ["rand_core"] }
+base64 = "0.22"
+regex = "1"
+walkdir = "2"
+tracing = "0.1"
+pathdiff = "0.2"
+axum = { version = "0.7", features = ["multipart"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+jsonschema = "0.17"
+shell-words = "1.1"
+async-trait = "0.1"
+futures = "0.3"
+notify = "7"
+fs2 = "0.4"
+tar = "0.4"
+flate2 = "1.0"
+zip = "2.1"
+zstd = { version = "0.13", features = ["zstdmt"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time", "net", "signal"] }
+tempfile = "3.8"
+rust-embed = { version = "8.5", optional = true }
+mime_guess = "2.0"
+chrono = { version = "0.4", default-features = true }
+thiserror = "2.0"
+subtle = "2.6"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
+rcgen = "0.13"
+urlencoding = "2.1"
+hickory-resolver = "0.24"
+libc = "0.2"
+goblin = "0.8"
+age = { version = "0.10", features = ["armor"] }
+rpassword = "7"
+globset = "0.4"
+colored = "2.1"
+cliclack = "0.4"
+console = "0.15"
+ratatui = "0.29"
+crossterm = "0.29"
+tui-input = "0.12"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+axoupdater = "0.10.0"
+
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
+wat = "1.0"
+serial_test = "3"
+
+[target.'cfg(unix)'.dev-dependencies]
+expectrl = "0.8"
+rexpect = "0.7"
+
+[target.'cfg(windows)'.dependencies]
+junction = "1.4.2"
+mslnk = "0.1.8"
+
+[target.'cfg(not(windows))'.dependencies]
+wasmtime = "16.0"
+wasmtime-wasi = "16.0"
+wasi-common = "16.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+openssl-sys = { version = "0.9.112", features = ["vendored"] }
+
+[features]
+default = []
+provisioning-tests = []
+webui = ["dep:rust-embed"]
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

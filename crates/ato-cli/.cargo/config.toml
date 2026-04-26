@@ -1,0 +1,9 @@
+[target.aarch64-unknown-linux-gnu]
+linker = "scripts/aarch64-linux-gnu-cc.sh"
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/STACK:8388608"]
+
+[env]
+CC_aarch64_unknown_linux_gnu = { value = "scripts/aarch64-linux-gnu-cc.sh", relative = true }
+"CC_aarch64-unknown-linux-gnu" = { value = "scripts/aarch64-linux-gnu-cc.sh", relative = true }

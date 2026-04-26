@@ -1,0 +1,26 @@
+# IPC error test: sharing + lifecycle conflict (IPC-001)
+schema_version = "1.0"
+name = "ipc-conflict-test"
+version = "0.1.0"
+type = "app"
+
+[execution]
+runtime = "source"
+entrypoint = "echo hello"
+
+# This should trigger IPC-001: sharing + lifecycle conflict
+[lifecycle]
+auto_restart = true
+
+[ipc.exports]
+name = "conflict-svc"
+protocol = "jsonrpc-2.0"
+transport = "unix-socket"
+
+[ipc.exports.sharing]
+mode = "per-consumer"
+idle_timeout = 60
+max_clients = 2
+
+[[ipc.exports.methods]]
+name = "test"

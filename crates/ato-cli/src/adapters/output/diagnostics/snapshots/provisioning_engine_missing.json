@@ -1,0 +1,18 @@
+{
+  "schema_version": "1",
+  "status": "error",
+  "error": {
+    "code": "E205",
+    "name": "engine_missing",
+    "phase": "provisioning",
+    "classification": "provisioning",
+    "message": "nacelle engine is not installed",
+    "hint": "必要な engine をインストールまたは bootstrap してから再試行してください。",
+    "retryable": false,
+    "interactive_resolution": false,
+    "details": {
+      "engine": "nacelle"
+    },
+    "causes": []
+  }
+}
