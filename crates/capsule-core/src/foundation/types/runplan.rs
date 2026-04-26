@@ -118,7 +118,21 @@ impl CapsuleManifest {
         state_source_overrides: &HashMap<String, String>,
     ) -> Result<RunPlan, CapsuleError> {
         let target = self.resolve_default_target()?;
-        if target.entrypoint.trim().is_empty() {
+        // v0.3 manifests carry their execution string in `run_command`; treat
+        // it as the effective entrypoint for downstream consumers when the
+        // explicit `entrypoint` field is empty.
+        let effective_entrypoint = if target.entrypoint.trim().is_empty() {
+            target
+                .run_command
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            target.entrypoint.clone()
+        };
+        if effective_entrypoint.is_empty() {
             return Err(CapsuleError::ValidationError(format!(
                 "targets.{}.entrypoint is required",
                 self.default_target
@@ -127,7 +141,12 @@ impl CapsuleManifest {
 
         let resolved_runtime = self.resolve_default_runtime()?;
         let merged_env = merged_target_env(self, target);
-        let ports = port_list(self.targets.as_ref().and_then(|targets| targets.port));
+        // Prefer the per-target `port` (v0.3 normalized form) and fall back to
+        // the legacy top-level `targets.port` that older flat manifests used.
+        let port = target
+            .port
+            .or_else(|| self.targets.as_ref().and_then(|targets| targets.port));
+        let ports = port_list(port);
         let env = ordered_env(&merged_env);
 
         #[allow(deprecated)]
@@ -166,7 +185,7 @@ impl CapsuleManifest {
                 mounts.extend(state_mounts(self, state_source_overrides)?);
 
                 RunPlanRuntime::Docker(DockerRuntime {
-                    image: target.entrypoint.clone(),
+                    image: effective_entrypoint.clone(),
                     digest: None,
                     command: target.cmd.clone(),
                     env: env.clone(),
@@ -179,7 +198,7 @@ impl CapsuleManifest {
             // UARC V1.1.0: Native is deprecated, map to Source runtime
             RuntimeType::Native => RunPlanRuntime::Source(SourceRuntime {
                 language: None,
-                entrypoint: target.entrypoint.clone(),
+                entrypoint: effective_entrypoint.clone(),
                 cmd: target.cmd.clone(),
                 args: Vec::new(),
                 env: env.clone(),
@@ -189,7 +208,7 @@ impl CapsuleManifest {
             }),
             RuntimeType::Source => RunPlanRuntime::Source(SourceRuntime {
                 language: None, // Will be set by caller if needed
-                entrypoint: target.entrypoint.clone(),
+                entrypoint: effective_entrypoint.clone(),
                 cmd: target.cmd.clone(),
                 args: Vec::new(),
                 env: env.clone(),
@@ -199,7 +218,7 @@ impl CapsuleManifest {
             }),
             RuntimeType::Wasm => RunPlanRuntime::Native(NativeRuntime {
                 // Wasm components are routed by ato-cli; nacelle does not execute them
-                binary_path: target.entrypoint.clone(),
+                binary_path: effective_entrypoint.clone(),
                 args: target.cmd.clone(),
                 env: env.clone(),
                 working_dir: target.working_dir.clone(),
@@ -207,7 +226,7 @@ impl CapsuleManifest {
             RuntimeType::Web => RunPlanRuntime::Source(SourceRuntime {
                 // Web targets are served by ato-cli open_web executor.
                 language: Some("web".to_string()),
-                entrypoint: target.entrypoint.clone(),
+                entrypoint: effective_entrypoint.clone(),
                 cmd: target.cmd.clone(),
                 args: Vec::new(),
                 env: env.clone(),
@@ -321,9 +340,9 @@ type = "inference"
 
 runtime = "source"
 port = 8081
-GUMBALL_MODEL = "qwen3-8b"
 run = "server.py"
 [env]
+GUMBALL_MODEL = "qwen3-8b"
 [capabilities]
 chat = true
 function_calling = true
