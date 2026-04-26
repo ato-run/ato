@@ -1349,6 +1349,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn build_capsule_artifact_for_publish_does_not_materialize_capsule_toml() {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
@@ -1374,6 +1375,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn resolve_publish_source_authoritative_input_does_not_materialize_capsule_toml() {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
@@ -1413,6 +1415,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn discover_manifest_publish_registry_does_not_materialize_capsule_toml() {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
