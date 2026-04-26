@@ -37,6 +37,9 @@ fn detect_missing_lockfile(plan: &ManifestData) -> Option<ProvisioningIssue> {
                 .as_ref()
                 .map(|spec| spec.working_dir.clone())
                 .unwrap_or_else(|| plan.execution_working_directory());
+            if !working_dir.join("package.json").exists() {
+                return None;
+            }
             let candidates = vec![
                 working_dir.join("package-lock.json"),
                 working_dir.join("yarn.lock"),
@@ -52,6 +55,9 @@ fn detect_missing_lockfile(plan: &ManifestData) -> Option<ProvisioningIssue> {
                 .map(|spec| spec.working_dir.clone())
                 .unwrap_or_else(|| plan.execution_working_directory());
             if resolve_python_requirements_path(&working_dir).is_some() {
+                return None;
+            }
+            if !working_dir.join("pyproject.toml").exists() {
                 return None;
             }
             let candidates = vec![working_dir.join("uv.lock")];
@@ -232,6 +238,8 @@ mod tests {
 
     #[test]
     fn detects_missing_node_lockfile_and_runtime_selection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("package.json"), "{}\n").expect("write package.json");
         let mut target = toml::map::Map::new();
         target.insert(
             "runtime".to_string(),
@@ -246,8 +254,12 @@ mod tests {
             toml::Value::String("node server.js".to_string()),
         );
 
-        let issues = collect_issues(&manifest_data(target), &RuntimeLaunchContext::empty())
-            .expect("issues must resolve");
+        let mut manifest = manifest_data(target);
+        manifest.manifest_dir = temp.path().to_path_buf();
+        manifest.manifest_path = temp.path().join("capsule.toml");
+
+        let issues =
+            collect_issues(&manifest, &RuntimeLaunchContext::empty()).expect("issues must resolve");
         assert!(issues.iter().any(|issue| matches!(
             issue,
             ProvisioningIssue::MissingLockfile { driver, .. } if driver == "node"

@@ -165,14 +165,15 @@ impl CapsuleManifest {
                     continue;
                 };
 
-                if !target.runtime.trim().eq_ignore_ascii_case("source") {
+                let (runtime, runtime_driver) = split_runtime_driver(&target.runtime);
+                if runtime.as_deref() != Some("source") {
                     errors.push(ValidationError::InvalidTarget(format!(
                         "exports.cli.{} must reference a runtime=source target",
                         export_name
                     )));
                 }
 
-                let driver = infer_source_driver(target, target.entrypoint.trim());
+                let driver = runtime_driver.or_else(|| infer_source_driver(target));
                 if driver.as_deref() != Some("python") {
                     errors.push(ValidationError::InvalidTarget(format!(
                         "exports.cli.{} must reference a source/python target",
@@ -290,9 +291,8 @@ impl CapsuleManifest {
                     .as_deref()
                     .map(str::trim)
                     .map(str::to_ascii_lowercase);
-                let is_web_services_mode_v03 = driver_str.as_deref() == Some("deno")
-                    && has_services
-                    && target.port.is_some();
+                let is_web_services_mode_v03 =
+                    driver_str.as_deref() == Some("deno") && has_services && target.port.is_some();
                 if entrypoint.is_empty() && !has_run_command && !is_web_services_mode_v03 {
                     errors.push(ValidationError::InvalidTarget(label.clone()));
                     continue;
@@ -300,7 +300,9 @@ impl CapsuleManifest {
                 if is_web_services_mode_v03 {
                     requires_web_services_validation = true;
                 }
-                let effective_driver = infer_source_driver(target, entrypoint);
+                let effective_driver = split_runtime_driver(&target.runtime)
+                    .1
+                    .or_else(|| infer_source_driver(target));
                 if !schema_is_v03
                     && matches!(
                         effective_driver.as_deref(),
@@ -1203,15 +1205,33 @@ pub(crate) fn is_valid_mount_path(path: &str) -> bool {
         })
 }
 
-fn infer_source_driver(target: &NamedTarget, entrypoint: &str) -> Option<String> {
-    let _ = entrypoint;
+fn infer_source_driver(target: &NamedTarget) -> Option<String> {
     if let Some(driver) = target.driver.as_ref() {
         let normalized = driver.trim().to_ascii_lowercase();
         if !normalized.is_empty() {
             return Some(normalized);
         }
     }
+    if let Some(language) = target.language.as_ref() {
+        let normalized = language.trim().to_ascii_lowercase();
+        if !normalized.is_empty() {
+            return Some(normalized);
+        }
+    }
     None
+}
+
+fn split_runtime_driver(runtime: &str) -> (Option<String>, Option<String>) {
+    let normalized = runtime.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return (None, None);
+    }
+    if let Some((base, driver)) = normalized.split_once('/') {
+        let base = (!base.trim().is_empty()).then(|| base.trim().to_string());
+        let driver = (!driver.trim().is_empty()).then(|| driver.trim().to_string());
+        return (base, driver);
+    }
+    (Some(normalized), None)
 }
 
 fn detect_service_cycle(services: &HashMap<String, ServiceSpec>) -> Result<(), String> {

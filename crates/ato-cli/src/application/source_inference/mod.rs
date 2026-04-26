@@ -1022,7 +1022,7 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
             .unwrap_or(input.project_root.as_path()),
         input.single_script_language,
     );
-    let runtime_kind = desktop_execution
+    let inferred_runtime_kind = desktop_execution
         .as_ref()
         .and_then(|override_contract| {
             override_contract
@@ -1035,6 +1035,11 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         Vec::new()
     } else {
         process_candidates_for_source(&detected, &info)
+    };
+    let runtime_kind = if inferred_runtime_kind == "source" {
+        runtime_kind_from_process_candidates(&process_candidates).unwrap_or(inferred_runtime_kind)
+    } else {
+        inferred_runtime_kind
     };
     let mut lock = AtoLock::default();
     let mut provenance = vec![SourceInferenceProvenance {
@@ -3067,6 +3072,43 @@ fn runtime_kind_from_project(detected: &DetectedProject) -> &'static str {
     }
 }
 
+fn runtime_kind_from_process_candidates(candidates: &[RankedCandidate]) -> Option<&'static str> {
+    let first = candidates
+        .first()?
+        .entrypoint
+        .first()?
+        .trim()
+        .to_ascii_lowercase();
+    if matches!(first.as_str(), "node" | "nodejs" | "npm" | "pnpm" | "yarn") {
+        return Some("node");
+    }
+    if matches!(first.as_str(), "deno") {
+        return Some("deno");
+    }
+    if matches!(first.as_str(), "python" | "python3" | "uv") {
+        return Some("python");
+    }
+    if first.ends_with(".js")
+        || first.ends_with(".cjs")
+        || first.ends_with(".mjs")
+        || first.ends_with(".jsx")
+    {
+        return Some("node");
+    }
+    if first.ends_with(".ts")
+        || first.ends_with(".tsx")
+        || first.ends_with(".astro")
+        || first.ends_with(".svelte")
+        || first.ends_with(".vue")
+    {
+        return Some("node");
+    }
+    if first.ends_with(".py") {
+        return Some("python");
+    }
+    None
+}
+
 fn inferred_runtime_resolution(detected: &DetectedProject, project_root: &Path) -> Value {
     let runtime_kind = runtime_kind_from_project(detected);
     let mut runtime = serde_json::Map::new();
@@ -4502,7 +4544,7 @@ mod tests {
     }
 
     #[test]
-    fn run_materialization_omits_invalid_source_driver_for_generic_source_only_project() {
+    fn run_materialization_infers_node_driver_for_generic_js_source_only_project() {
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("index.js"), "console.log('ok')").expect("write index");
 
@@ -4526,7 +4568,7 @@ mod tests {
             routed.plan.execution_entrypoint().as_deref(),
             Some("index.js")
         );
-        assert!(routed.plan.execution_driver().is_none());
+        assert_eq!(routed.plan.execution_driver().as_deref(), Some("node"));
         assert!(materialized.raw_manifest.is_none());
         assert!(!dir.path().join(".ato.run.generated.capsule.toml").exists());
     }

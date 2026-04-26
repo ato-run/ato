@@ -354,9 +354,19 @@ fn extract_capsule(capsule_path: &Path, out_dir: &Path) -> Result<(), CapsuleErr
     let mut outer = tar::Archive::new(&mut archive);
     outer.unpack(out_dir).map_err(CapsuleError::Io)?;
 
-    crate::capsule::unpack_payload_from_capsule_root(out_dir, out_dir)?;
+    if !crate::capsule::unpack_payload_from_manifest(out_dir, out_dir)? {
+        unpack_legacy_payload_tar_zst(out_dir)?;
+    }
 
     Ok(())
+}
+
+fn unpack_legacy_payload_tar_zst(capsule_root: &Path) -> Result<(), CapsuleError> {
+    let payload_path = capsule_root.join("payload.tar.zst");
+    let payload = std::fs::File::open(&payload_path).map_err(CapsuleError::Io)?;
+    let decoder = zstd::stream::Decoder::new(payload).map_err(CapsuleError::Io)?;
+    let mut archive = tar::Archive::new(decoder);
+    archive.unpack(capsule_root).map_err(CapsuleError::Io)
 }
 
 pub(crate) fn parse_smoke_options(
@@ -1121,33 +1131,6 @@ mod tests {
     use super::*;
     use std::fs;
 
-    struct PathGuard {
-        original: Option<std::ffi::OsString>,
-    }
-
-    impl PathGuard {
-        fn prepend(path: &Path) -> Self {
-            let original = std::env::var_os("PATH");
-            let mut parts = vec![path.to_path_buf()];
-            if let Some(existing) = &original {
-                parts.extend(std::env::split_paths(existing));
-            }
-            let joined = std::env::join_paths(parts).expect("join PATH");
-            std::env::set_var("PATH", &joined);
-            Self { original }
-        }
-    }
-
-    impl Drop for PathGuard {
-        fn drop(&mut self) {
-            if let Some(original) = &self.original {
-                std::env::set_var("PATH", original);
-            } else {
-                std::env::remove_var("PATH");
-            }
-        }
-    }
-
     #[test]
     fn parse_smoke_defaults() {
         let manifest: toml::Value = toml::from_str(
@@ -1239,12 +1222,19 @@ startup_timeout_ms = 0
             fs::set_permissions(&pnpm_path, perms).expect("chmod pnpm");
         }
 
-        let _path_guard = PathGuard::prepend(&bin_dir);
+        let mut path_parts = vec![bin_dir.clone()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            path_parts.extend(std::env::split_paths(&existing));
+        }
+        let test_path = std::env::join_paths(path_parts)
+            .expect("join PATH")
+            .to_string_lossy()
+            .to_string();
         let service = MainService {
             executable: "sh".to_string(),
             args: vec!["-c".to_string(), "echo ok".to_string()],
             cwd: "source".to_string(),
-            env: HashMap::new(),
+            env: HashMap::from([("PATH".to_string(), test_path)]),
             ports: HashMap::new(),
             health_port: None,
         };

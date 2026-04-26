@@ -31,11 +31,7 @@ pub fn unpack_payload_from_capsule_root_with_provider(
     let manifest_path = capsule_root.join(PAYLOAD_MANIFEST_PATH);
 
     if !manifest_path.exists() {
-        return Err(CapsuleError::Pack(format!(
-            "payload restore failed: {} not found in capsule root {}",
-            PAYLOAD_MANIFEST_PATH,
-            capsule_root.display()
-        )));
+        return unpack_legacy_payload_tar_zst(capsule_root, out_dir);
     }
 
     match cas_provider {
@@ -51,6 +47,21 @@ pub fn unpack_payload_from_capsule_root_with_provider(
             )))
         }
     }
+}
+
+fn unpack_legacy_payload_tar_zst(capsule_root: &Path, out_dir: &Path) -> Result<()> {
+    let payload_path = capsule_root.join("payload.tar.zst");
+    if !payload_path.exists() {
+        return Err(CapsuleError::Pack(format!(
+            "payload restore failed: {} not found in capsule root {}",
+            PAYLOAD_MANIFEST_PATH,
+            capsule_root.display()
+        )));
+    }
+    let payload = fs::File::open(&payload_path).map_err(CapsuleError::Io)?;
+    let decoder = zstd::stream::Decoder::new(payload).map_err(CapsuleError::Io)?;
+    let mut archive = tar::Archive::new(decoder);
+    archive.unpack(out_dir).map_err(CapsuleError::Io)
 }
 
 fn unpack_payload_from_manifest_file_with_cas(

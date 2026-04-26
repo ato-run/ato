@@ -1,15 +1,10 @@
 //! E2E interactive tests for `ato encap` primary entry selection via PTY.
 //!
-//! These tests drive `ato --json encap --save-only .` through a PTY session and verify
+//! These tests drive `ato --json encap --save-config .` through a PTY session and verify
 //! that primary-entry changes are persisted in the saved `share.spec.json`.
 //!
 //! Prompt patterns used:
-//!  - Source/tool/env confirms: `"[Y/n] "` (from `confirm_with_fallback`)
-//!  - Install step / entry / service: `"[Y/e/n] "` (from `prompt_editable_entry`)
-//!  - Entry-edit sub-prompts: `"blank keeps current): "`
-//!  - Primary confirm (inside edit): `"as primary? ["` → always `"[y/N] "`
-//!  - Zero-primary chooser: `"Primary entry ["`
-//!  - Workspace name: `"Workspace name ["`
+//!  - Bulk capture prompt: `"Accept all? [Enter]  or  skip <ids>:  "`
 //!
 //! Fixture: two sub-repos (`api/`, `web/`) each with a `package.json` + `dev` script.
 //! Initial primary determined by `derive_entries`: `api-dev` (alphabetically first).
@@ -104,84 +99,27 @@ fn read_spec(workspace: &Path) -> serde_json::Value {
     serde_json::from_str(&contents).expect("parse share.spec.json")
 }
 
-/// Answer "y" to all `[Y/n]` and `[Y/e/n]` prompts until `before()` contains
-/// the string `target_label`. When found, send `final_answer` and return.
-///
-/// This drains source, tool, (optional env), and install-step prompts before
-/// reaching the target entry prompt.
-#[cfg(unix)]
-fn answer_yes_until(session: &mut impl Expect, target_label: &str, final_answer: &str) {
-    loop {
-        // All source/tool/env prompts end with "[Y/n] "; install/entry/service with "[Y/e/n] ".
-        let caps = session
-            .expect(expectrl::Any(["[Y/n] ", "[Y/e/n] "]))
-            .unwrap_or_else(|e| panic!("waiting for prompt before '{}': {}", target_label, e));
-        let before = String::from_utf8_lossy(caps.before()).to_string();
-        if before.contains(target_label) {
-            session.send_line(final_answer).expect("send final answer");
-            return;
-        }
-        session.send_line("y").expect("answer yes");
-    }
-}
-
-/// E2E-7: Edit `web-dev` and mark it as primary; verify saved spec has
-/// `web-dev.primary=true`, `api-dev.primary=false`, and exactly one primary entry.
+/// E2E-7: Accept all detected items; verify saved spec keeps exactly one primary entry.
 #[cfg(unix)]
 #[test]
 #[serial]
-fn test_e2e_7_primary_entry_switch_persists() {
+fn test_e2e_7_bulk_accept_persists_single_primary() {
     let tmp = workspace_tempdir("e2e7-primary-switch-");
     let tmp_home = workspace_tempdir("e2e7-home-");
     setup_encap_workspace(tmp.path());
 
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_ato"));
-    cmd.args(["--json", "encap", "--save-only", "."])
+    cmd.args(["--json", "encap", "--save-config", "."])
         .current_dir(tmp.path())
         .env("HOME", tmp_home.path());
 
     let mut session = Session::spawn(cmd).expect("spawn encap PTY");
     session.set_expect_timeout(Some(Duration::from_secs(60)));
 
-    // Phase 1: Keep api-dev (answer "y"), draining all earlier prompts.
-    answer_yes_until(&mut session, "Run entry api-dev", "y");
-
-    // Phase 2: web-dev prompt → edit.
-    {
-        let caps = session.expect("[Y/e/n] ").expect("web-dev entry prompt");
-        let before = String::from_utf8_lossy(caps.before()).to_string();
-        assert!(
-            before.contains("Run entry web-dev"),
-            "expected 'Run entry web-dev', got: {}",
-            before
-        );
-        session.send_line("e").expect("edit web-dev");
-    }
-
-    // Phase 3: Sub-prompts — keep defaults (label, cwd, command).
-    for _ in 0..3 {
-        session
-            .expect("blank keeps current): ")
-            .expect("edit sub-prompt");
-        session.send_line("").expect("keep default");
-    }
-
-    // Phase 4: Mark web-dev as primary → "y".
-    session.expect("as primary? [").expect("primary prompt");
-    session.send_line("y").expect("mark primary");
-
-    // Phase 5: Service prompts ("y") then workspace name (keep default "").
-    loop {
-        let caps = session
-            .expect(expectrl::Any(["Workspace name [", "[Y/e/n] "]))
-            .expect("service or name prompt");
-        let matched = String::from_utf8_lossy(caps.as_bytes()).to_string();
-        if matched.contains("Workspace name") {
-            session.send_line("").expect("keep workspace name");
-            break;
-        }
-        session.send_line("y").expect("answer service prompt");
-    }
+    session
+        .expect("Accept all? [Enter]  or  skip <ids>:  ")
+        .expect("bulk accept prompt");
+    session.send_line("").expect("accept all");
 
     session.expect(Eof).ok();
 
@@ -189,95 +127,37 @@ fn test_e2e_7_primary_entry_switch_persists() {
     let spec = read_spec(tmp.path());
     let entries = spec["entries"].as_array().expect("entries array");
 
-    let api = entries
-        .iter()
-        .find(|e| e["id"].as_str() == Some("api-dev"))
-        .expect("api-dev entry");
-    let web = entries
-        .iter()
-        .find(|e| e["id"].as_str() == Some("web-dev"))
-        .expect("web-dev entry");
-
-    assert_eq!(
-        web["primary"].as_bool(),
-        Some(true),
-        "web-dev should be primary after explicit switch"
-    );
-    assert_eq!(
-        api["primary"].as_bool(),
-        Some(false),
-        "api-dev should no longer be primary"
-    );
-
     let primary_count = entries.iter().filter(|e| e["primary"] == true).count();
     assert_eq!(primary_count, 1, "exactly one entry should be primary");
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["id"].as_str() == Some("api-dev") && e["primary"] == true),
+        "api-dev should remain the default primary after accepting all"
+    );
 }
 
-/// E2E-8: Edit `api-dev` and unset its primary, then use the zero-primary chooser
-/// to pick `web-dev`. Verify saved spec has `web-dev.primary=true`, `api-dev.primary=false`.
+/// E2E-8: Skip the default primary entry and verify the remaining entry becomes primary.
 #[cfg(unix)]
 #[test]
 #[serial]
-fn test_e2e_8_zero_primary_choice_persists() {
+fn test_e2e_8_skip_default_primary_promotes_remaining_entry() {
     let tmp = workspace_tempdir("e2e8-zero-primary-");
     let tmp_home = workspace_tempdir("e2e8-home-");
     setup_encap_workspace(tmp.path());
 
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_ato"));
-    cmd.args(["--json", "encap", "--save-only", "."])
+    cmd.args(["--json", "encap", "--save-config", "."])
         .current_dir(tmp.path())
         .env("HOME", tmp_home.path());
 
     let mut session = Session::spawn(cmd).expect("spawn encap PTY");
     session.set_expect_timeout(Some(Duration::from_secs(60)));
 
-    // Phase 1: Drain pre-entry prompts with "y", then send "e" for api-dev.
-    answer_yes_until(&mut session, "Run entry api-dev", "e");
-
-    // Phase 2: api-dev edit sub-prompts — keep defaults.
-    for _ in 0..3 {
-        session
-            .expect("blank keeps current): ")
-            .expect("api-dev edit sub-prompt");
-        session.send_line("").expect("keep default");
-    }
-
-    // Phase 3: Mark api-dev as primary? → "n" to unset.
     session
-        .expect("as primary? [")
-        .expect("api-dev primary prompt");
-    session.send_line("n").expect("unset primary");
-
-    // Phase 4: web-dev entry prompt → "y" (keep, stays primary=false).
-    {
-        let caps = session.expect("[Y/e/n] ").expect("web-dev entry prompt");
-        let before = String::from_utf8_lossy(caps.before()).to_string();
-        assert!(
-            before.contains("Run entry web-dev"),
-            "expected 'Run entry web-dev', got: {}",
-            before
-        );
-        session.send_line("y").expect("keep web-dev");
-    }
-
-    // Phase 5: Zero-primary chooser fires. Choose option 2 (web-dev).
-    session
-        .expect("Primary entry [")
-        .expect("zero-primary chooser");
-    session.send_line("2").expect("choose web-dev");
-
-    // Phase 6: Service prompts ("y") then workspace name (keep default "").
-    loop {
-        let caps = session
-            .expect(expectrl::Any(["Workspace name [", "[Y/e/n] "]))
-            .expect("service or name prompt");
-        let matched = String::from_utf8_lossy(caps.as_bytes()).to_string();
-        if matched.contains("Workspace name") {
-            session.send_line("").expect("keep workspace name");
-            break;
-        }
-        session.send_line("y").expect("answer service prompt");
-    }
+        .expect("Accept all? [Enter]  or  skip <ids>:  ")
+        .expect("bulk accept prompt");
+    session.send_line("skip api-dev").expect("skip api-dev");
 
     session.expect(Eof).ok();
 
@@ -285,10 +165,6 @@ fn test_e2e_8_zero_primary_choice_persists() {
     let spec = read_spec(tmp.path());
     let entries = spec["entries"].as_array().expect("entries array");
 
-    let api = entries
-        .iter()
-        .find(|e| e["id"].as_str() == Some("api-dev"))
-        .expect("api-dev entry");
     let web = entries
         .iter()
         .find(|e| e["id"].as_str() == Some("web-dev"))
@@ -297,12 +173,11 @@ fn test_e2e_8_zero_primary_choice_persists() {
     assert_eq!(
         web["primary"].as_bool(),
         Some(true),
-        "web-dev should be primary (chosen via zero-primary prompt)"
+        "web-dev should be primary after api-dev is skipped"
     );
-    assert_eq!(
-        api["primary"].as_bool(),
-        Some(false),
-        "api-dev should not be primary (user explicitly unset it)"
+    assert!(
+        entries.iter().all(|e| e["id"].as_str() != Some("api-dev")),
+        "api-dev should be removed by the skip filter"
     );
 
     let primary_count = entries.iter().filter(|e| e["primary"] == true).count();
