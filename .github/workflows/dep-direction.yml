@@ -105,3 +105,40 @@ jobs:
             exit 1
           fi
           echo "OK: ato-cli stays Desktop-free."
+
+      - name: nacelle is a sibling binary, not linked from ato-cli (process-spawn boundary)
+        run: |
+          set -euo pipefail
+          # ato-cli invokes nacelle via subprocess (--nacelle <path>),
+          # never as a Cargo dep. Same shape as ato-desktop → ato-cli.
+          # If anyone tries to link nacelle into the CLI to "share types",
+          # they should hoist those types into capsule-wire instead — see
+          # docs/monorepo-consolidation-plan.md §P3 for the rationale.
+          tree=$(cargo tree -p ato-cli --prefix=none --edges=normal,build,dev)
+          if echo "$tree" | awk '{print $1}' | sort -u | grep -E '^nacelle$' > /dev/null; then
+            echo "::error::ato-cli linked nacelle as a Cargo dep — that violates the process-spawn boundary."
+            echo "ato-cli must spawn the nacelle binary, not link its library."
+            exit 1
+          fi
+          echo "OK: ato-cli does not link nacelle."
+
+      - name: nacelle does not depend on ato-* / capsule-* crates (sandbox stays independent)
+        run: |
+          set -euo pipefail
+          # nacelle is the sandbox runtime; it must not pull in any
+          # workspace crate. A reverse arrow (nacelle → ato-cli or
+          # nacelle → capsule-core) would create a dependency cycle the
+          # moment ato-cli starts wanting types from nacelle. Keep the
+          # sandbox a clean DAG leaf so the CLI can spawn it from any
+          # version pin (release matrix, vendored cache, system PATH).
+          tree=$(cargo tree -p nacelle --prefix=none --edges=normal,build,dev)
+          violations=$(echo "$tree" | awk '{print $1}' | sort -u | \
+            grep -E '^(ato-cli|ato-desktop|ato-desktop-xtask|capsule-core|capsule-wire|lock-draft-engine)$' || true)
+          if [ -n "$violations" ]; then
+            echo "::error::nacelle pulled in a forbidden workspace dep:"
+            echo "$violations"
+            echo "---"
+            echo "If you genuinely need a shared type, hoist it into capsule-wire."
+            exit 1
+          fi
+          echo "OK: nacelle stays a clean sandbox leaf."
