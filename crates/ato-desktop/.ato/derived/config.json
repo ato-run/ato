@@ -1,0 +1,23 @@
+{
+  "metadata": {
+    "generated_by": "ato-cli v0.9.2",
+    "name": "ato-desktop",
+    "source_manifest": "sha256:4ded5bfd453698c6d1ec334d22b5d91af55147a98e42c248db8723926a73f8ec",
+    "version": "0.1.0"
+  },
+  "sandbox": {
+    "enabled": true,
+    "network": {
+      "enabled": true,
+      "enforcement": "strict"
+    }
+  },
+  "services": {
+    "main": {
+      "args": [],
+      "cwd": "source",
+      "executable": "ato-desktop"
+    }
+  },
+  "version": "1.0.0"
+}
