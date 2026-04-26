@@ -2,7 +2,7 @@
 <!--
   Ato Desktop — Windows MSI installer (WiX 3.x).
 
-  Used by `cargo xtask bundle --target windows-x86_64 --msi`.
+  Used by xtask bundle for the windows-x86_64 msi target.
   See package_msi() for the candle/light invocation; the
   `$(var.StagingDir)` and `$(var.ProductVersion)` placeholders are
   injected from xtask.
