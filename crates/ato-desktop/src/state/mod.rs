@@ -1717,7 +1717,10 @@ impl AppState {
                 let label = label.clone();
                 self.navigate_to_url(&label);
             }
-            GuestRoute::Capsule { session, entry_path } => {
+            GuestRoute::Capsule {
+                session,
+                entry_path,
+            } => {
                 let url = format!("capsule://{session}{entry_path}");
                 self.navigate_to_url(&url);
             }
@@ -2620,11 +2623,7 @@ impl AppState {
     /// `title_suffix` is provided it is appended to the base title (e.g.
     /// `"ato CLI · share:abcd1234"`), otherwise the default title derived from
     /// the spec is used.
-    pub fn open_cli_panel_with_spec(
-        &mut self,
-        spec: CliLaunchSpec,
-        title_suffix: Option<String>,
-    ) {
+    pub fn open_cli_panel_with_spec(&mut self, spec: CliLaunchSpec, title_suffix: Option<String>) {
         let base_title = match &spec {
             CliLaunchSpec::AtoRunRepl { .. } => "ato CLI".to_string(),
             CliLaunchSpec::RawShell(shell) => format!("CLI ({shell})"),

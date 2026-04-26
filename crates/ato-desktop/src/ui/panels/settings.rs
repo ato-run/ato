@@ -82,11 +82,7 @@ fn render_terminal_card(state: &AppState, theme: &Theme) -> Div {
     let max_sessions = state.config.terminal_max_sessions;
 
     settings_card("Terminal", theme)
-        .child(settings_row(
-            "Font size",
-            &format!("{font_size}px"),
-            theme,
-        ))
+        .child(settings_row("Font size", &format!("{font_size}px"), theme))
         .child(settings_row(
             "Max sessions",
             &format!("{max_sessions}"),

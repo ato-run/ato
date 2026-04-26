@@ -59,8 +59,7 @@ pub fn record_first_launch_prompt_shown() -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    fs::write(&marker, b"")
-        .with_context(|| format!("failed to write {}", marker.display()))?;
+    fs::write(&marker, b"").with_context(|| format!("failed to write {}", marker.display()))?;
     Ok(())
 }
 
@@ -150,8 +149,9 @@ fn install_helper(helper: &Path, target: &Path) -> Result<()> {
     // automatically; fall back to a copy if symlinks fail (e.g. cross-
     // filesystem).
     if std::os::unix::fs::symlink(helper, target).is_err() {
-        fs::copy(helper, target)
-            .with_context(|| format!("failed to copy {} → {}", helper.display(), target.display()))?;
+        fs::copy(helper, target).with_context(|| {
+            format!("failed to copy {} → {}", helper.display(), target.display())
+        })?;
     }
     Ok(())
 }
@@ -161,9 +161,8 @@ fn install_helper(helper: &Path, target: &Path) -> Result<()> {
     // Windows symlink creation requires Developer Mode or admin; copy
     // is universally writable. The MSI install path already covers
     // most users so this fallback is for direct-download zip flows.
-    fs::copy(helper, target).with_context(|| {
-        format!("failed to copy {} → {}", helper.display(), target.display())
-    })?;
+    fs::copy(helper, target)
+        .with_context(|| format!("failed to copy {} → {}", helper.display(), target.display()))?;
     Ok(())
 }
 
