@@ -1,0 +1,120 @@
+name: samples-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # L0 — static gate (cheap; fail-fast before spinning up matrix).
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed for min_ato_version git-history lint
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm ci --ignore-scripts
+      - name: Validate all health.toml
+        run: npm run validate
+      - name: Lint min_ato_version immutability
+        if: github.event_name == 'pull_request'
+        run: npm run lint:compat -- --base origin/${{ github.base_ref }}
+
+  # Build the per-sample × os × layer × ato_version matrix.
+  plan:
+    needs: static
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+      count: ${{ steps.build.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm ci --ignore-scripts
+      - id: build
+        name: Build matrix
+        env:
+          ATO_VERSIONS: ${{ github.event_name == 'pull_request' && 'stable' || 'stable,main' }}
+        run: node tools/build-sample-matrix.mjs --ato-versions "$ATO_VERSIONS"
+
+  # Each matrix cell runs one sample at one layer on one OS.
+  check:
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.sample }} · ${{ matrix.layer }} · ${{ matrix.os }} · ato@${{ matrix.ato_version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Install tools deps
+        run: npm ci --ignore-scripts
+      # Install ato (the version tested against this matrix cell).
+      - name: Install ato
+        uses: ./.github/actions/setup-ato
+        with:
+          version: ${{ matrix.ato_version }}
+      # Runtime-specific setup only when the sample needs it (best-effort: set up everything; cheap enough).
+      - name: Setup Python (uv)
+        if: startsWith(matrix.runtime, 'source/python') || startsWith(matrix.runtime, 'web/python')
+        uses: astral-sh/setup-uv@v3
+        with: { enable-cache: true }
+      - name: Setup Deno
+        if: contains(matrix.runtime, 'deno')
+        uses: denoland/setup-deno@v1
+        with: { deno-version: v1.x }
+      - name: Setup pnpm
+        if: contains(matrix.runtime, 'node')
+        uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      # Run the health check for this cell.
+      - name: Run ${{ matrix.layer }}
+        id: run
+        run: node tools/run-sample-checks.mjs ${{ matrix.path }} --layer ${{ matrix.layer }}
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.sample }}-${{ matrix.os }}-${{ matrix.layer }}
+          path: |
+            ${{ matrix.path }}/.ato/logs/
+            ${{ matrix.path }}/**/*.log
+          if-no-files-found: ignore
+
+  # Summarize — sticky PR comment with sample × os × layer status.
+  summary:
+    needs: check
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: TODO — sticky status comment
+        run: echo "P1: implement sticky PR comment summarizing matrix results."
+
+  # Regenerate the capability matrix in README.md on main.
+  catalog:
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { token: ${{ secrets.GITHUB_TOKEN }} }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm ci --ignore-scripts
+      - name: TODO — regenerate README capability matrix
+        run: echo "P1: implement tools/regenerate-readme.mjs to populate the table and verified_on badges."

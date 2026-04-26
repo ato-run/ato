@@ -1,0 +1,21 @@
+[meta]
+title = "persistent-workspace: workspace state survives across runs"
+runtime = "source/python"
+difficulty = "beginner"
+tier = "01-capabilities"
+tags = ["workspace", "state", "persistence"]
+
+[run]
+cmd = "ato run ."
+timeout_s = 60
+
+[expect]
+exit_nonzero = true
+stderr_regex = "E301"
+
+[platforms]
+linux = "full"
+macos = "full"
+
+[compat]
+min_ato_version = "0.4.69"

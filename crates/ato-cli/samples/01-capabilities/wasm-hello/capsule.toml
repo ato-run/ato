@@ -1,0 +1,11 @@
+schema_version = "0.3"
+name = "wasm-hello"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "wasm"
+driver = "wasmtime"
+run_command = "hello.wasm"
+component = "hello.wasm"

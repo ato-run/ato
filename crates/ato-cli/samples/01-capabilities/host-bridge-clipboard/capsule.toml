@@ -1,0 +1,10 @@
+schema_version = "0.3"
+name = "host-bridge-clipboard"
+version = "0.1.0"
+type = "app"
+runtime = "source/python"
+runtime_version = "3.11.10"
+run = "python main.py"
+
+[capabilities]
+host_bridge = ["clipboard.read", "clipboard.write"]

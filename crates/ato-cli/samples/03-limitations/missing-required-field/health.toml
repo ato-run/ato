@@ -1,0 +1,21 @@
+[meta]
+title = "missing-required-field: manifest missing name field"
+runtime = "source/node"
+difficulty = "beginner"
+tier = "03-limitations"
+tags = ["error", "manifest", "validation", "anti-sample"]
+
+[run]
+cmd = "ato run ."
+timeout_s = 30
+
+[expect]
+exit_nonzero = true
+stderr_regex = "missing field `name`|missing field"
+
+[platforms]
+linux = "full"
+macos = "full"
+
+[compat]
+min_ato_version = "0.4.69"

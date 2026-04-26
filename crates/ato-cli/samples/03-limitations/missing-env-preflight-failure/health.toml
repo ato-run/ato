@@ -1,0 +1,28 @@
+[meta]
+title = "missing-env-preflight-failure: required_env advisory gap (pending fix)"
+runtime = "source/node"
+difficulty = "intermediate"
+tier = "03-limitations"
+tags = ["error", "env", "required-env", "anti-sample", "known-gap"]
+
+[run]
+cmd = "ato run ."
+timeout_s = 60
+
+[expect]
+# NOTE: In ato v0.4.69, required_env is advisory-only.
+# auto-provisioner synthesizes a dummy value so the script runs (exit 0).
+# After the planned enforcement fix this sample should flip to exit_nonzero = true.
+# See EXPECTED.md for issue tracking details.
+exit_code = 0
+
+[platforms]
+linux = "full"
+macos = "full"
+
+[compat]
+min_ato_version = "0.4.69"
+
+[expected_behavior]
+outcome = "advisory-gap"
+upstream_issue = "docs/upstream-issues/001-required-env-advisory.md"

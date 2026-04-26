@@ -1,0 +1,68 @@
+# Example health.toml — annotated reference.
+# Validate with: node tools/validate-health.js <path-to-health.toml>
+
+[meta]
+title = "byok-chat-openrouter"
+runtime = "source/node"
+difficulty = "intermediate"
+tier = "02-apps"
+tags = ["byok", "ai-chat", "network-policy"]
+time_estimate = "~5min"
+
+[run]
+cmd = "ato run ."
+cwd = "."
+background = true
+timeout_s = 60
+
+  [run.ready_probe]
+  http_url = "http://127.0.0.1:3000/api/health"
+  timeout_s = 15
+
+[env]
+required = ["OPENROUTER_API_KEY"]
+optional = ["OPENROUTER_MODEL"]
+
+  [env.ci_secrets]
+  OPENROUTER_API_KEY = "mock"
+
+[requires]
+network_mode = "allowlist"
+allow_domains = ["openrouter.ai"]
+fs_read = ["."]
+fs_write = [".ato/"]
+processes = 1
+
+[expect]
+exit_code = 0
+stdout_regex = "Listening on http://127\\.0\\.0\\.1:\\d+"
+
+  [[expect.http]]
+  url = "http://127.0.0.1:3000/api/health"
+  status = 200
+  body_regex = "\"ok\":true"
+
+  [[expect.files]]
+  path = ".ato/logs/run.log"
+  min_bytes = 1
+
+[[mocks.http]]
+upstream_env = "OPENROUTER_API_URL"
+cassette = "cassettes/openrouter.yaml"
+
+[platforms]
+linux = "full"
+macos = "full"
+windows = "smoke"
+
+[budget]
+p95_ms = 3000
+max_rss_mb = 256
+
+[compat]
+min_ato_version = "0.5.0"
+tested_against = ["0.5.0", "stable", "main"]
+
+[flaky]
+quarantined = false
+retries = 0

@@ -1,0 +1,29 @@
+{
+  "version": "1.0.0",
+  "services": {
+    "main": {
+      "executable": "runtime/python/bin/python3",
+      "args": [
+        "source/server.py"
+      ],
+      "cwd": "source",
+      "env": {
+        "PYTHONHOME": "runtime/python",
+        "PYTHONPATH": "source"
+      }
+    }
+  },
+  "sandbox": {
+    "enabled": true,
+    "network": {
+      "enabled": true,
+      "enforcement": "best_effort"
+    }
+  },
+  "metadata": {
+    "name": "python-backend-html",
+    "version": "0.1.0",
+    "generated_by": "ato-cli v0.1.0",
+    "source_manifest": "sha256:40c211f0df670418aca45108e667dcce88c459bd2c1442f6ac80113cce29e510"
+  }
+}

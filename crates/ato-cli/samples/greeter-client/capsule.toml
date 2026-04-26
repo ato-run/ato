@@ -1,0 +1,13 @@
+# NOTE: This sample uses the legacy IPC format which is not supported by the current ato-cli.
+# The [ipc.imports] / [ipc.exports] feature has been removed from the manifest spec.
+# This sample is preserved for historical reference only.
+schema_version = "0.3"
+name = "greeter-client"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node client.js"
+
+[metadata]
+description = "Client that uses the greeter-service via IPC"
+author = "Capsule Examples"
