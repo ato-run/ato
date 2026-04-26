@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ato-cli",
+    "crates/ato-cli/core",
+    "crates/ato-cli/lock-draft-engine",
+    "crates/ato-desktop",
+    "crates/ato-desktop/xtask",
+]
+
+# Vendored path deps that must NOT be inherited as workspace members.
+# (Reserved for M3 — when gpui-component vendor checkout lands.)
+exclude = [
+    "crates/ato-desktop/.tmp",
+    "crates/ato-desktop/vendor",
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/ato-run/ato"
+homepage = "https://ato.run"
+authors = ["ato-run"]
+
+# Keep crate versions independent during M2 — package versions stay in each
+# crate's Cargo.toml. The workspace-wide bump to 0.5.0 happens AFTER CI/CD
+# is verified in the new monorepo (per the reordered M2→verify→bump plan).
+
+# The `dist` profile drives cargo-dist's CLI release builds. Mirrors what
+# `crates/ato-cli/Cargo.toml` declared as a single-crate workspace before
+# the merge. Lifted to the root so cargo-dist sees one canonical profile.
+[profile.dist]
+inherits = "release"
+lto = "thin"
