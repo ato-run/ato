@@ -72,6 +72,18 @@ pub struct SessionInfo {
     manifest_path: String,
     target_label: String,
     notes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adapter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frontend_entry: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transport: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    healthcheck_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    invoke_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capabilities: Option<Vec<String>>,
     guest: Option<GuestSessionDisplay>,
     web: Option<WebSessionDisplay>,
     terminal: Option<TerminalSessionDisplay>,
@@ -450,6 +462,39 @@ fn start_runtime_session(
 }
 
 fn session_info_from_record(session: StoredSessionInfo) -> SessionInfo {
+    let guest_compat = session.guest.as_ref().map(|guest| {
+        (
+            guest.adapter.clone(),
+            guest.frontend_entry.clone(),
+            guest.transport.clone(),
+            guest.healthcheck_url.clone(),
+            guest.invoke_url.clone(),
+            guest.capabilities.clone(),
+        )
+    });
+    let (adapter, frontend_entry, transport, healthcheck_url, invoke_url, capabilities) =
+        guest_compat
+            .map(
+                |(
+                    adapter,
+                    frontend_entry,
+                    transport,
+                    healthcheck_url,
+                    invoke_url,
+                    capabilities,
+                )| {
+                    (
+                        Some(adapter),
+                        Some(frontend_entry),
+                        Some(transport),
+                        Some(healthcheck_url),
+                        Some(invoke_url),
+                        Some(capabilities),
+                    )
+                },
+            )
+            .unwrap_or((None, None, None, None, None, None));
+
     SessionInfo {
         session_id: session.session_id,
         handle: session.handle,
@@ -467,6 +512,12 @@ fn session_info_from_record(session: StoredSessionInfo) -> SessionInfo {
         manifest_path: session.manifest_path,
         target_label: session.target_label,
         notes: session.notes,
+        adapter,
+        frontend_entry,
+        transport,
+        healthcheck_url,
+        invoke_url,
+        capabilities,
         guest: session.guest,
         web: session.web,
         terminal: session.terminal,
@@ -962,6 +1013,12 @@ mod tests {
                 manifest_path: "/tmp/capsule.toml".to_string(),
                 target_label: "web".to_string(),
                 notes: vec!["materialized".to_string()],
+                adapter: Some("tauri".to_string()),
+                frontend_entry: Some("dist/index.html".to_string()),
+                transport: Some("http".to_string()),
+                healthcheck_url: Some("http://127.0.0.1:9000/health".to_string()),
+                invoke_url: Some("http://127.0.0.1:9000/rpc".to_string()),
+                capabilities: Some(vec!["read-file".to_string()]),
                 guest: Some(GuestSessionDisplay {
                     adapter: "tauri".to_string(),
                     frontend_entry: "dist/index.html".to_string(),

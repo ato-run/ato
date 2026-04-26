@@ -1184,7 +1184,8 @@ fn resolve_cli_export_request(
             )
         })?;
 
-    if !target.runtime.eq_ignore_ascii_case("source") {
+    let (runtime, runtime_driver) = split_runtime_driver(&target.runtime);
+    if runtime.as_deref() != Some("source") {
         anyhow::bail!(
             "Export '{}.{}' must reference a runtime=source target.",
             scoped_ref.scoped_id,
@@ -1192,11 +1193,12 @@ fn resolve_cli_export_request(
         );
     }
 
-    if !target
-        .driver
-        .as_deref()
-        .map(|driver| driver.eq_ignore_ascii_case("python"))
-        .unwrap_or(false)
+    if runtime_driver.as_deref() != Some("python")
+        && !target
+            .driver
+            .as_deref()
+            .map(|driver| driver.eq_ignore_ascii_case("python"))
+            .unwrap_or(false)
     {
         anyhow::bail!(
             "Export '{}.{}' must reference a source/python target.",
@@ -1212,6 +1214,19 @@ fn resolve_cli_export_request(
         target_label: target_label.to_string(),
         prefix_args: export.args.clone(),
     }))
+}
+
+fn split_runtime_driver(runtime: &str) -> (Option<String>, Option<String>) {
+    let normalized = runtime.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return (None, None);
+    }
+    if let Some((base, driver)) = normalized.split_once('/') {
+        let base = (!base.trim().is_empty()).then(|| base.trim().to_string());
+        let driver = (!driver.trim().is_empty()).then(|| driver.trim().to_string());
+        return (base, driver);
+    }
+    (Some(normalized), None)
 }
 
 fn load_export_manifest(capsule_path: &Path) -> Result<capsule_core::types::CapsuleManifest> {

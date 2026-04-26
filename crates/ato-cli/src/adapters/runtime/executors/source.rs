@@ -650,16 +650,21 @@ fn runtime_cwd_payload(effective_cwd: Option<&PathBuf>) -> Option<String> {
 }
 
 fn write_normalized_manifest(plan: &ManifestData, explicit_args: &[String]) -> Result<PathBuf> {
+    let launch_spec = derive_launch_spec(plan)?;
     let entrypoint = plan
         .execution_entrypoint()
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            capsule_core::execution_plan::error::AtoExecutionError::policy_violation(
-                "source/native target requires entrypoint",
-            )
-        })?;
+        .unwrap_or_else(|| launch_spec.command.clone());
     let sandbox_entrypoint = sandbox_source_entrypoint(plan, &entrypoint);
-    let mut cmd_args = plan.targets_oci_cmd();
+    let mut cmd_args = if plan
+        .execution_entrypoint()
+        .filter(|value| !value.trim().is_empty())
+        .is_some()
+    {
+        plan.targets_oci_cmd()
+    } else {
+        launch_spec.args
+    };
     cmd_args.extend(explicit_args.iter().cloned());
     let language_name = plan
         .execution_language()
@@ -788,6 +793,10 @@ fn sandbox_source_entrypoint_relative(plan: &ManifestData, entrypoint: &str) -> 
         return entrypoint_path.to_path_buf();
     }
 
+    if plan.manifest_dir.join(entrypoint_path).exists() {
+        return entrypoint_path.to_path_buf();
+    }
+
     match plan.execution_working_dir() {
         Some(raw_working_dir) => {
             let trimmed = raw_working_dir.trim();
@@ -888,16 +897,27 @@ fn spawn_internal_exec(
         .take()
         .context("Failed to capture nacelle stdout")?;
     let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    let read = reader
-        .read_line(&mut line)
-        .context("Failed to read nacelle exec response")?;
-    if read == 0 || line.trim().is_empty() {
-        anyhow::bail!("nacelle exec returned an empty initial response");
-    }
-
-    let response: NacelleExecResponse = serde_json::from_str(line.trim())
-        .with_context(|| format!("Failed to parse nacelle exec response: {}", line.trim()))?;
+    let mut initial_events = Vec::new();
+    let response = loop {
+        let mut line = String::new();
+        let read = reader
+            .read_line(&mut line)
+            .context("Failed to read nacelle exec response")?;
+        if read == 0 {
+            anyhow::bail!("nacelle exec returned no response");
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(trimmed)
+            .with_context(|| format!("Failed to parse nacelle exec response: {trimmed}"))?;
+        if value.get("ok").is_some() {
+            break serde_json::from_value::<NacelleExecResponse>(value)
+                .with_context(|| format!("Failed to parse nacelle exec response: {trimmed}"))?;
+        }
+        initial_events.push(trimmed.to_string());
+    };
     if !response.ok {
         let message = response
             .error
@@ -912,6 +932,9 @@ fn spawn_internal_exec(
     };
 
     let (event_tx, event_rx) = mpsc::channel();
+    for event in initial_events {
+        forward_nacelle_lifecycle_event(&event_tx, &event);
+    }
     thread::spawn(move || {
         for maybe_line in reader.lines() {
             let Ok(line) = maybe_line else {
@@ -921,18 +944,22 @@ fn spawn_internal_exec(
             if trimmed.is_empty() {
                 continue;
             }
-            match serde_json::from_str::<LifecycleEvent>(trimmed) {
-                Ok(event) => {
-                    let _ = event_tx.send(event);
-                }
-                Err(_) => {
-                    debug!(event = trimmed, "nacelle exec event");
-                }
-            }
+            forward_nacelle_lifecycle_event(&event_tx, trimmed);
         }
     });
 
     Ok((child, event_rx, exec_meta))
+}
+
+fn forward_nacelle_lifecycle_event(event_tx: &mpsc::Sender<LifecycleEvent>, event: &str) {
+    match serde_json::from_str::<LifecycleEvent>(event) {
+        Ok(event) => {
+            let _ = event_tx.send(event);
+        }
+        Err(_) => {
+            debug!(event, "nacelle exec event");
+        }
+    }
 }
 
 pub(crate) fn spawn_host_lifecycle_events(

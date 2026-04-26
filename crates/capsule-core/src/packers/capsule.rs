@@ -831,11 +831,18 @@ fn has_project_marker(dir: &Path) -> bool {
 /// the driver is unknown / not gated; the publish proceeds without this check.
 fn required_markers_for_driver(driver: &str) -> Option<&'static [&'static str]> {
     match driver.trim().to_ascii_lowercase().as_str() {
-        "node" => Some(&["package.json"]),
-        "python" => Some(&["pyproject.toml", "requirements.txt", "setup.py"]),
+        "node" => Some(&[
+            "package.json",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "bun.lock",
+            "bun.lockb",
+        ]),
+        "python" => Some(&["pyproject.toml", "requirements.txt", "setup.py", "uv.lock"]),
         "rust" => Some(&["Cargo.toml"]),
         "go" => Some(&["go.mod"]),
-        "deno" => Some(&["deno.json", "deno.jsonc"]),
+        "deno" => Some(&["deno.json", "deno.jsonc", "deno.lock"]),
         _ => None,
     }
 }
