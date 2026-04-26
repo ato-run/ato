@@ -68,9 +68,21 @@ pub fn validate_manifest_for_build_with_mode(
         .and_then(|v| v.as_table())
         .map(|services| !services.is_empty())
         .unwrap_or(false);
-    let web_services_mode = runtime == "web" && driver.as_deref() == Some("deno") && has_services;
+    // v0.3 collapses `runtime = "web/deno"` to `runtime = source` + `driver = deno`,
+    // so detect the web-services validation context from the original
+    // (un-normalized) runtime selector or the structured marker as well.
+    let original_runtime = original_raw
+        .get("runtime")
+        .and_then(|v| v.as_str())
+        .map(|v| v.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let originally_web_runtime =
+        original_runtime == "web" || original_runtime.starts_with("web/");
+    let web_services_mode = (runtime == "web" || originally_web_runtime)
+        && driver.as_deref() == Some("deno")
+        && has_services;
 
-    if runtime == "web" {
+    if runtime == "web" || (originally_web_runtime && runtime == "source") {
         let driver = driver.ok_or_else(|| {
             manifest_err(
                 manifest_path,
@@ -139,8 +151,30 @@ pub fn validate_manifest_for_build_with_mode(
 
             validate_web_services_mode(manifest_path, target_label, &raw, &runtime_tools)?;
         } else {
-            if run_command.is_some() && matches!(driver.as_str(), "node" | "deno" | "python") {
-                return Ok(());
+            if let Some(rc) = run_command {
+                if matches!(driver.as_str(), "node" | "deno" | "python") {
+                    // Apply the same diagnostic checks that the entrypoint
+                    // path uses, but on the run_command shorthand. Multi-token
+                    // shell commands are rejected because the build pipeline
+                    // expects a script file path it can introspect.
+                    if rc.split_whitespace().count() > 1 {
+                        return Err(manifest_err(
+                            manifest_path,
+                            format!(
+                                "targets.{target_label}.entrypoint must be a script file path (shell command strings are not allowed)"
+                            ),
+                        ));
+                    }
+                    if driver == "deno" && is_deprecated_ato_entrypoint(rc) {
+                        return Err(manifest_err(
+                            manifest_path,
+                            format!(
+                                "targets.{target_label}.entrypoint='ato-entry.ts' is deprecated. Use top-level [services] mode instead."
+                            ),
+                        ));
+                    }
+                    return Ok(());
+                }
             }
             let entrypoint = entrypoint.ok_or_else(|| {
                 manifest_err(
