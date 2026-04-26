@@ -368,6 +368,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial]
     fn discover_nacelle_falls_back_to_registered_engine_for_directory_manifest_path() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -406,6 +407,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial]
     fn discover_nacelle_ignores_generated_shadow_manifest_for_engine_lookup() {
         use std::os::unix::fs::PermissionsExt;
 
