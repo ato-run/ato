@@ -128,9 +128,7 @@ fn render_app_icon(
                 render_globe_icon(active, theme)
             }
         },
-        SidebarTaskIconSpec::SystemIcon(page_type) => {
-            render_system_icon(page_type, active, theme)
-        }
+        SidebarTaskIconSpec::SystemIcon(page_type) => render_system_icon(page_type, active, theme),
     }
 }
 
@@ -227,15 +225,20 @@ fn render_globe_icon(active: bool, theme: &Theme) -> Div {
 fn render_system_icon(page_type: SystemPageIcon, active: bool, theme: &Theme) -> Div {
     let (label, hue) = match page_type {
         SystemPageIcon::Console => (">_", 270.0),    // purple
-        SystemPageIcon::Terminal => ("$", 160.0),     // green
+        SystemPageIcon::Terminal => ("$", 160.0),    // green
         SystemPageIcon::Launcher => ("◆", 217.0),    // blue
-        SystemPageIcon::Inspector => ("i", 45.0),     // yellow
+        SystemPageIcon::Inspector => ("i", 45.0),    // yellow
         SystemPageIcon::CapsuleStatus => ("⊙", 0.0), // red
     };
 
     let saturation = if active { 0.55 } else { 0.40 };
     let lightness = if active { 0.50 } else { 0.38 };
-    let bg = gpui::hsla(hue / 360.0, saturation, lightness, if active { 0.25 } else { 0.15 });
+    let bg = gpui::hsla(
+        hue / 360.0,
+        saturation,
+        lightness,
+        if active { 0.25 } else { 0.15 },
+    );
     let text_color = gpui::hsla(hue / 360.0, saturation + 0.1, lightness + 0.2, 1.0);
     let border_color = theme.border_default;
 

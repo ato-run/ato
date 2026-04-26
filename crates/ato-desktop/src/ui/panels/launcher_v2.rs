@@ -5,7 +5,9 @@ use gpui::{
 };
 
 use super::super::theme::Theme;
-use crate::app::{FocusCommandBar, NavigateToUrl, OpenCloudDock, OpenLocalRegistry, SignInToAtoRun};
+use crate::app::{
+    FocusCommandBar, NavigateToUrl, OpenCloudDock, OpenLocalRegistry, SignInToAtoRun,
+};
 use crate::state::{AppState, DesktopAuthStatus, LauncherAction, ThemeMode};
 
 pub(in crate::ui) fn render_launcher_panel_v2(state: &AppState, theme: &Theme) -> impl IntoElement {
@@ -411,11 +413,7 @@ fn demo_capsule_chip(capsule: DemoCapsule) -> AnyElement {
                 cx,
             );
         })
-        .child(
-            div()
-                .text_size(px(12.0))
-                .child(capsule.emoji),
-        )
+        .child(div().text_size(px(12.0)).child(capsule.emoji))
         .child(
             div()
                 .text_size(px(12.0))

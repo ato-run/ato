@@ -68,9 +68,8 @@ pub(crate) fn ensure_identity_interactive() -> Result<BootstrapOutcome> {
         return Ok(BootstrapOutcome::Declined);
     }
 
-    let pp =
-        rpassword::prompt_password("   Passphrase for identity.key (leave empty to skip): ")
-            .context("failed to read passphrase")?;
+    let pp = rpassword::prompt_password("   Passphrase for identity.key (leave empty to skip): ")
+        .context("failed to read passphrase")?;
     let passphrase = if pp.is_empty() { None } else { Some(pp) };
 
     let identity = age.init_identity(passphrase.as_deref())?;

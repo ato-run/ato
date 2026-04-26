@@ -880,10 +880,7 @@ fn validate_payload_contains_project_marker(
 
     let has_marker = payload_entries.iter().any(|entry| {
         let archive_path = entry.archive_path();
-        let Some(file_name) = Path::new(archive_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-        else {
+        let Some(file_name) = Path::new(archive_path).file_name().and_then(|n| n.to_str()) else {
             return false;
         };
         required.contains(&file_name)
@@ -1702,7 +1699,10 @@ run = "node server.js"
 
     #[test]
     fn driver_token_extracts_language_from_runtime_string() {
-        assert_eq!(driver_token_from_runtime("web/node").as_deref(), Some("node"));
+        assert_eq!(
+            driver_token_from_runtime("web/node").as_deref(),
+            Some("node")
+        );
         assert_eq!(
             driver_token_from_runtime("source/python").as_deref(),
             Some("python")

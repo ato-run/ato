@@ -114,9 +114,17 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
                 false
             };
 
+            let raw_manifest: toml::Value =
+                toml::from_str(&project.manifest.raw_text).map_err(|err| {
+                    AtoExecutionError::execution_contract_invalid(
+                        format!("Failed to parse manifest TOML for IPC validation: {err}"),
+                        None,
+                        None,
+                    )
+                })?;
             let ipc_diagnostics = crate::ipc::validate::validate_manifest(
-                &decision.plan.manifest,
-                &decision.plan.manifest_dir,
+                &raw_manifest,
+                &project.project_root,
             )
             .map_err(|err| {
                 AtoExecutionError::execution_contract_invalid(
