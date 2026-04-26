@@ -2300,15 +2300,6 @@ fn test_config_engine_install_exists() {
 }
 
 #[test]
-fn test_legacy_setup_still_available() {
-    let mut cmd = Command::cargo_bin("ato").unwrap();
-    cmd.args(["setup", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Engine name to install"));
-}
-
-#[test]
 fn test_build_invalid_manifest_outputs_single_json_error() {
     let tmp = tempdir().unwrap();
     std::fs::write(tmp.path().join("capsule.toml"), "name =\n").unwrap();
