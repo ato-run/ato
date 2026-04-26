@@ -80,7 +80,11 @@ pub(super) fn build_config_json(
         let layout = read_source_layout(manifest);
         let (executable, args, env, signals) = if let Some(run_command) = read_run_command(manifest)
         {
-            resolve_shell_command(&run_command, manifest)
+            if run_command_should_be_entrypoint(&run_command, manifest) {
+                resolve_command(&run_command, None, manifest, standalone, layout)
+            } else {
+                resolve_shell_command(&run_command, manifest)
+            }
         } else {
             let entrypoint = read_entrypoint(manifest)?;
             let command = read_command(manifest);
@@ -761,6 +765,32 @@ fn read_entrypoint(manifest: &toml::Value) -> Result<String> {
         .ok_or_else(|| CapsuleError::Config("No entrypoint defined in capsule.toml".to_string()))?;
 
     Ok(entrypoint.to_string())
+}
+
+/// Decide whether a v0.3 `run_command` value should be treated as an
+/// interpreter entrypoint (routed through `resolve_command`) instead of a
+/// shell-style command (routed through `sh -c`).
+///
+/// We treat it as an entrypoint when it is a single bare token without shell
+/// metacharacters and either the manifest declares a known interpreter
+/// language (python/node/deno/bun) or the token's extension implies one.
+fn run_command_should_be_entrypoint(command: &str, manifest: &toml::Value) -> bool {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.contains(char::is_whitespace) {
+        return false;
+    }
+    if trimmed.contains(['$', '|', '&', ';', '`', '(', ')', '<', '>']) {
+        return false;
+    }
+    if let Some(language) = read_language(manifest) {
+        if matches!(language.as_str(), "python" | "node" | "deno" | "bun") {
+            return true;
+        }
+    }
+    detect_language_from_entrypoint(trimmed).is_some()
 }
 
 fn resolve_shell_command(command: &str, manifest: &toml::Value) -> CommandResolution {
