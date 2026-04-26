@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::process::{Command, Stdio};
 
+use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::router::ManifestData;
 
 use crate::common::proxy;
@@ -19,11 +20,10 @@ pub fn execute(
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("shell executor requires targets.<label>.run_command"))?;
 
+    let launch_spec = derive_launch_spec(plan)?;
+    let working_dir = launch_spec.working_dir;
+    let run_command = normalize_local_shell_command(&run_command, &working_dir);
     let mut cmd = shell_command(&run_command);
-    let working_dir = plan
-        .execution_working_dir()
-        .map(|value| plan.manifest_dir.join(value))
-        .unwrap_or_else(|| plan.manifest_dir.clone());
     cmd.current_dir(working_dir);
 
     if let Some(proxy_env) = proxy::proxy_env_from_env(&[])? {
@@ -83,4 +83,18 @@ fn shell_command(command: &str) -> Command {
         cmd.args(["-lc", command]);
         cmd
     }
+}
+
+fn normalize_local_shell_command(command: &str, working_dir: &std::path::Path) -> String {
+    let Ok(mut tokens) = shell_words::split(command) else {
+        return command.to_string();
+    };
+    let Some(first) = tokens.first_mut() else {
+        return command.to_string();
+    };
+    if !first.contains('/') && working_dir.join(first.as_str()).is_file() {
+        *first = format!("./{first}");
+        return shell_words::join(tokens.iter().map(String::as_str));
+    }
+    command.to_string()
 }

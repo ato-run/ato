@@ -29,7 +29,24 @@ fn strict_ci() -> bool {
 }
 
 fn docker_output(args: &[&str]) -> Option<std::process::Output> {
-    Command::new("docker").args(args).output().ok()
+    let mut child = Command::new("docker")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if child.try_wait().ok()?.is_some() {
+            return child.wait_with_output().ok();
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn docker_ready() -> bool {

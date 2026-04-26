@@ -816,6 +816,7 @@ fn resolved_target_from_value(
             .map(|value| value.to_string()),
         run_command: target
             .get("run")
+            .or_else(|| target.get("run_command"))
             .and_then(toml::Value::as_str)
             .map(|value| value.to_string()),
         cmd,
@@ -1017,8 +1018,9 @@ fn node_project_present(input: &LockDraftInput, target: &ResolvedTarget) -> bool
         || target
             .entrypoint
             .as_deref()
-            .map(|entrypoint| {
-                let lower = entrypoint.to_ascii_lowercase();
+            .or(target.run_command.as_deref())
+            .map(|command| {
+                let lower = command.to_ascii_lowercase();
                 lower.ends_with(".js")
                     || lower.ends_with(".mjs")
                     || lower.ends_with(".cjs")

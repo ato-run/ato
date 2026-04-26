@@ -59,7 +59,9 @@ fn runtime_kind_from_plan(plan: &ExecutionDescriptor) -> Result<RuntimeKind> {
         .execution_runtime()
         .unwrap_or_default()
         .to_ascii_lowercase()
-        .as_str()
+        .split('/')
+        .next()
+        .unwrap_or_default()
     {
         "source" | "native" => Ok(RuntimeKind::Source),
         "web" => Ok(RuntimeKind::Web),
@@ -926,6 +928,9 @@ fn plan_v03_build_provision_command(
             lockfile_check_paths = ?lockfile_check_paths,
             "Provision command path diagnostics"
         );
+        if !execution_working_directory.join("package.json").exists() {
+            return Ok(None);
+        }
         let mut matches = Vec::new();
         if package_lock.exists() {
             matches.push(if strict_lockfile {
@@ -967,10 +972,7 @@ fn plan_v03_build_provision_command(
             ["pnpm install", "npm install", "yarn install", "bun install"]
         };
         return match matches.as_slice() {
-            [] => {
-                // No lockfile yet; generate one via npm install (best-effort for source mode)
-                Ok(Some("npm install".to_string()))
-            }
+            [] => Ok(None),
             [command] => Ok(Some((*command).to_string())),
             _ => {
                 // Multiple lockfiles: pick the highest-priority one
@@ -1473,6 +1475,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let app_dir = tmp.path().join("apps").join("web");
         std::fs::create_dir_all(&app_dir).expect("create app dir");
+        std::fs::write(app_dir.join("package.json"), "{}\n").expect("write package.json");
         std::fs::write(app_dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
             .expect("write pnpm lock");
 
@@ -1497,6 +1500,7 @@ mod tests {
     #[test]
     fn v03_build_provision_supports_yarn_lockfile() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("package.json"), "{}\n").expect("write package.json");
         std::fs::write(tmp.path().join("yarn.lock"), "# yarn lockfile v1\n")
             .expect("write yarn lock");
 
@@ -1667,7 +1671,7 @@ run = "main.js""#;
         std::fs::write(tmp.path().join("index.js"), "console.log('demo');\n").expect("index.js");
 
         let reporter = std::sync::Arc::new(crate::reporters::CliReporter::new(true));
-        let _error = execute_pack_command(
+        let result = execute_pack_command(
             tmp.path().to_path_buf(),
             false,
             None,
@@ -1682,7 +1686,8 @@ run = "main.js""#;
             true,
             None,
         )
-        .expect_err("source-only build should still avoid manifest materialization on failure");
+        .expect("source-only build should avoid manifest materialization");
+        assert!(result.ok, "build result should succeed: {result:?}");
         assert!(!tmp.path().join("capsule.toml").exists());
     }
 

@@ -103,9 +103,10 @@ pub fn compile_execution_plan_with_validation_mode(
         ));
     }
 
+    let runtime_driver = runtime_driver_from_manifest(&named_target.runtime);
     let driver = resolve_driver(
         runtime,
-        named_target.driver.as_deref(),
+        named_target.driver.as_deref().or(runtime_driver.as_deref()),
         named_target.language.as_deref(),
         &named_target.cmd,
     )?;
@@ -437,6 +438,14 @@ fn resolve_driver(
             runtime.as_str()
         ))),
     }
+}
+
+fn runtime_driver_from_manifest(runtime: &str) -> Option<String> {
+    runtime
+        .trim()
+        .to_ascii_lowercase()
+        .split_once('/')
+        .and_then(|(_, driver)| (!driver.trim().is_empty()).then(|| driver.trim().to_string()))
 }
 
 pub fn derive_tier(

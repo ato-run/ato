@@ -4,7 +4,7 @@
 //! Supports both TOML (human-authored) and JSON (machine-generated) formats.
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 // `ConfigField` / `ConfigKind` were extracted to `capsule-wire` in N2 so
@@ -243,6 +243,25 @@ pub struct BuildConfig {
     pub policy: Option<BuildPolicyConfig>,
 }
 
+fn deserialize_build_config_option<'de, D>(deserializer: D) -> Result<Option<BuildConfig>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<toml::Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    match value {
+        toml::Value::String(command) => Ok(Some(BuildConfig {
+            lifecycle: Some(BuildLifecycleConfig {
+                build: Some(command),
+                ..BuildLifecycleConfig::default()
+            }),
+            ..BuildConfig::default()
+        })),
+        other => other.try_into().map(Some).map_err(serde::de::Error::custom),
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BuildLifecycleConfig {
     #[serde(default)]
@@ -477,7 +496,7 @@ pub struct CapsuleManifest {
     pub pool: Option<PoolConfig>,
 
     /// Build configuration (packaging-time)
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_build_config_option")]
     pub build: Option<BuildConfig>,
 
     /// Packaging filter configuration
@@ -1157,7 +1176,7 @@ pub struct NamedTarget {
     pub runtime_tools: HashMap<String, String>,
 
     /// Entrypoint path for the target.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub entrypoint: String,
 
     /// OCI image reference (preferred for runtime=oci).
@@ -1165,7 +1184,7 @@ pub struct NamedTarget {
     pub image: Option<String>,
 
     /// Optional command arguments.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cmd: Vec<String>,
 
     /// Optional environment variables.

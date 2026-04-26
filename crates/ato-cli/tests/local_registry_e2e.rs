@@ -1740,10 +1740,12 @@ run = "dist""#
         }))
         .send()
         .context("run endpoint call")?;
+    let run_status = run_response.status();
+    let run_body = run_response.text().context("run endpoint body")?;
     assert_eq!(
-        run_response.status(),
+        run_status,
         reqwest::StatusCode::ACCEPTED,
-        "run endpoint should accept confirmed local launch"
+        "run endpoint should accept confirmed local launch: {run_body}"
     );
 
     // Best-effort cleanup in case background process was started.
@@ -1897,6 +1899,8 @@ run = "main.py""#,
     let python_no_lock_build_stderr = String::from_utf8_lossy(&python_no_lock_build.stderr);
     assert!(
         python_no_lock_build_stderr.contains("E102")
+            || python_no_lock_build_stderr.contains("E104")
+            || python_no_lock_build_stderr.contains("ATO_ERR_PROVISIONING_LOCK_INCOMPLETE")
             || python_no_lock_build_stderr.contains("LockDraft is not ready to finalize locally"),
         "expected python no lock build to report lockdraft failure; stderr={}",
         python_no_lock_build_stderr

@@ -621,7 +621,15 @@ fn bundled_ato_binary() -> Result<Option<PathBuf>> {
 
 fn which_in_path(binary: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
-    std::env::split_paths(&path_var)
+    which_in_path_entries(binary, std::env::split_paths(&path_var))
+}
+
+fn which_in_path_entries(
+    binary: &str,
+    entries: impl IntoIterator<Item = PathBuf>,
+) -> Option<PathBuf> {
+    entries
+        .into_iter()
         .map(|entry| entry.join(binary))
         .find(|candidate| candidate.is_file())
 }
@@ -1403,12 +1411,15 @@ fn process_is_alive(pid: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use capsule_wire::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor};
 
     use super::{
         allows_registry_guest_recovery, build_launch_session, collect_dev_script_dirs,
         detect_package_manager, extract_localhost_url, find_capsule_root, find_dev_script_dir,
-        pop_last_codepoint_width, url_port, which_in_path, ResolvePayload, SessionStartInfo,
+        pop_last_codepoint_width, url_port, which_in_path_entries, ResolvePayload,
+        SessionStartInfo,
     };
 
     fn resolved_payload(
@@ -1469,8 +1480,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn which_in_path_resolves_existing_binary() {
-        let sh = which_in_path("sh").expect("sh should exist on PATH in tests");
+        let sh = which_in_path_entries("sh", [PathBuf::from("/bin"), PathBuf::from("/usr/bin")])
+            .expect("sh should exist in standard Unix system paths");
         assert!(sh.is_file());
     }
 

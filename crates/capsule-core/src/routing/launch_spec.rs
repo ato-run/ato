@@ -110,6 +110,11 @@ fn derive_run_command_launch_spec(
                     tokens[0].clone(),
                     tokens.into_iter().skip(1).collect::<Vec<_>>(),
                 )
+            } else if command_has_extension(first, &["js", "mjs", "cjs", "ts", "tsx"]) {
+                (
+                    tokens[0].clone(),
+                    tokens.into_iter().skip(1).collect::<Vec<_>>(),
+                )
             } else {
                 return Err(CapsuleError::Config(format!(
                     "source/node run_command must start with 'node', 'npm:<package>', or a package manager (npm/pnpm/yarn/bun), got '{}'",
@@ -118,44 +123,51 @@ fn derive_run_command_launch_spec(
             }
         }
         value if value.eq_ignore_ascii_case("python") => {
-            if !matches!(first, "python" | "python3" | "uv") {
-                return Err(CapsuleError::Config(format!(
-                    "source/python run_command must start with 'python', 'python3', or 'uv', got '{}'",
-                    first
-                )));
-            }
-            let command = if first == "uv" {
-                let Some(index) = tokens
-                    .iter()
-                    .position(|token| matches!(token.as_str(), "python" | "python3"))
-                else {
-                    return Err(CapsuleError::Config(
-                        "source/python uv run_command must include python or python3".into(),
-                    ));
-                };
-                tokens.get(index + 1).cloned().ok_or_else(|| {
-                    CapsuleError::Config(
-                        "source/python run_command must include a script entrypoint".into(),
-                    )
-                })?
+            if command_has_extension(first, &["py"]) {
+                (
+                    tokens[0].clone(),
+                    tokens.into_iter().skip(1).collect::<Vec<_>>(),
+                )
             } else {
-                tokens.get(1).cloned().ok_or_else(|| {
-                    CapsuleError::Config(
-                        "source/python run_command must include a script entrypoint".into(),
-                    )
-                })?
-            };
-            let command_index = tokens
-                .iter()
-                .position(|token| token == &command)
-                .unwrap_or(1);
-            (
-                command,
-                tokens
-                    .into_iter()
-                    .skip(command_index + 1)
-                    .collect::<Vec<_>>(),
-            )
+                if !matches!(first, "python" | "python3" | "uv") {
+                    return Err(CapsuleError::Config(format!(
+                        "source/python run_command must start with 'python', 'python3', or 'uv', got '{}'",
+                        first
+                    )));
+                }
+                let command = if first == "uv" {
+                    let Some(index) = tokens
+                        .iter()
+                        .position(|token| matches!(token.as_str(), "python" | "python3"))
+                    else {
+                        return Err(CapsuleError::Config(
+                            "source/python uv run_command must include python or python3".into(),
+                        ));
+                    };
+                    tokens.get(index + 1).cloned().ok_or_else(|| {
+                        CapsuleError::Config(
+                            "source/python run_command must include a script entrypoint".into(),
+                        )
+                    })?
+                } else {
+                    tokens.get(1).cloned().ok_or_else(|| {
+                        CapsuleError::Config(
+                            "source/python run_command must include a script entrypoint".into(),
+                        )
+                    })?
+                };
+                let command_index = tokens
+                    .iter()
+                    .position(|token| token == &command)
+                    .unwrap_or(1);
+                (
+                    command,
+                    tokens
+                        .into_iter()
+                        .skip(command_index + 1)
+                        .collect::<Vec<_>>(),
+                )
+            }
         }
         _ => (
             tokens[0].clone(),
@@ -181,7 +193,7 @@ fn derive_run_command_launch_spec(
     })
 }
 
-fn resolve_launch_working_dir(plan: &ManifestData, _command: &str) -> PathBuf {
+fn resolve_launch_working_dir(plan: &ManifestData, command: &str) -> PathBuf {
     if let Some(working_dir) = plan
         .execution_working_dir()
         .filter(|value| !value.trim().is_empty())
@@ -200,6 +212,9 @@ fn resolve_launch_working_dir(plan: &ManifestData, _command: &str) -> PathBuf {
         if source_dir.join("package.json").exists() {
             return source_dir;
         }
+        if source_dir.join(command).is_file() {
+            return source_dir;
+        }
     }
 
     plan.manifest_dir.clone()
@@ -213,12 +228,24 @@ fn resolve_launch_language(plan: &ManifestData, driver: Option<&str>) -> Option<
         return Some(language);
     }
 
-    if let Some(driver) = driver.filter(|value| !value.trim().is_empty()) {
+    if let Some(driver) =
+        driver.filter(|value| !value.trim().is_empty() && !value.eq_ignore_ascii_case("native"))
+    {
         return Some(driver.to_string());
     }
 
-    let entrypoint = plan.execution_entrypoint()?;
-    let lowered = entrypoint.trim().to_ascii_lowercase();
+    let command = plan
+        .execution_entrypoint()
+        .or_else(|| plan.execution_run_command())?;
+    infer_language_from_command(&command)
+}
+
+fn infer_language_from_command(command: &str) -> Option<String> {
+    let first = shell_words::split(command)
+        .ok()
+        .and_then(|tokens| tokens.into_iter().next())
+        .unwrap_or_else(|| command.trim().to_string());
+    let lowered = first.trim().to_ascii_lowercase();
     if lowered.ends_with(".py") {
         return Some("python".to_string());
     }
@@ -232,13 +259,23 @@ fn resolve_launch_language(plan: &ManifestData, driver: Option<&str>) -> Option<
     None
 }
 
+fn command_has_extension(command: &str, extensions: &[&str]) -> bool {
+    let lowered = command.trim().to_ascii_lowercase();
+    extensions
+        .iter()
+        .any(|extension| lowered.ends_with(&format!(".{extension}")))
+}
+
 fn resolve_required_lockfile(
     plan: &ManifestData,
     working_dir: &Path,
     language: Option<&str>,
     driver: Option<&str>,
 ) -> Option<PathBuf> {
-    let resolved = driver.or(language).unwrap_or_default();
+    let resolved = driver
+        .filter(|value| !value.eq_ignore_ascii_case("native"))
+        .or(language)
+        .unwrap_or_default();
     if resolved.eq_ignore_ascii_case("node") {
         return first_existing_path([
             working_dir.join("package-lock.json"),
@@ -334,7 +371,7 @@ entrypoint = "main.js"
 
         let spec = derive_launch_spec(&plan).expect("derive launch spec");
 
-        assert_eq!(spec.working_dir, tmp.path());
+        assert_eq!(spec.working_dir, tmp.path().join("source"));
         assert_eq!(spec.command, "main.js");
         assert_eq!(spec.source, LaunchSpecSource::Entrypoint);
     }
@@ -365,7 +402,7 @@ run_command = "node lib.js fixtures/db.json --port 3000"
 
         let spec = derive_launch_spec(&plan).expect("derive launch spec");
 
-        assert_eq!(spec.working_dir, tmp.path());
+        assert_eq!(spec.working_dir, tmp.path().join("source"));
         assert_eq!(spec.command, "lib.js");
         assert_eq!(spec.args, vec!["fixtures/db.json", "--port", "3000"]);
         assert_eq!(
@@ -458,5 +495,27 @@ entrypoint = "server.py"
             spec.required_lockfile,
             Some(tmp.path().join("app").join("uv.lock"))
         );
+    }
+
+    #[test]
+    fn derive_launch_spec_infers_python_from_source_native_run_extension() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("main.py"), "print('ok')").expect("write script");
+        std::fs::write(tmp.path().join("uv.lock"), "version = 1").expect("write lock");
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+[targets.app]
+runtime = "source"
+driver = "native"
+run_command = "main.py"
+"#,
+        );
+
+        let spec = derive_launch_spec(&plan).expect("derive launch spec");
+
+        assert_eq!(spec.language.as_deref(), Some("python"));
+        assert_eq!(spec.command, "main.py");
+        assert_eq!(spec.required_lockfile, Some(tmp.path().join("uv.lock")));
     }
 }

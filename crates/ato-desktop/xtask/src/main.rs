@@ -163,16 +163,8 @@ fn bundle_windows_app(target: &str) -> Result<PathBuf> {
     fs::create_dir_all(&assets_dir)?;
 
     let profile_dir = format!("{rust_target}/release");
-    let desktop_exe = paths
-        .desktop_root
-        .join("target")
-        .join(&profile_dir)
-        .join("ato-desktop.exe");
-    let helper_exe = paths
-        .ato_root
-        .join("target")
-        .join(&profile_dir)
-        .join("ato.exe");
+    let desktop_exe = paths.target_root.join(&profile_dir).join("ato-desktop.exe");
+    let helper_exe = paths.target_root.join(&profile_dir).join("ato.exe");
     fs::copy(&desktop_exe, staging.join("ato-desktop.exe")).with_context(|| {
         format!(
             "failed to copy {} to staging — was the cross-build successful?",
@@ -216,16 +208,12 @@ fn bundle_linux_app(target: &str) -> Result<PathBuf> {
 
     let profile_dir = format!("{rust_target}/release");
     fs::copy(
-        paths
-            .desktop_root
-            .join("target")
-            .join(&profile_dir)
-            .join("ato-desktop"),
+        paths.target_root.join(&profile_dir).join("ato-desktop"),
         bin_dir.join("ato-desktop"),
     )
     .context("failed to stage ato-desktop binary")?;
     fs::copy(
-        paths.ato_root.join("target").join(&profile_dir).join("ato"),
+        paths.target_root.join(&profile_dir).join("ato"),
         bin_dir.join("ato"),
     )
     .context("failed to stage ato helper binary")?;
@@ -718,12 +706,8 @@ fn bundle_macos_app(target: &str) -> Result<PathBuf> {
 
     let profile_dir = PathBuf::from(&spec.profile_dir);
 
-    let desktop_binary = paths
-        .desktop_root
-        .join("target")
-        .join(&profile_dir)
-        .join("ato-desktop");
-    let helper_binary = paths.ato_root.join("target").join(&profile_dir).join("ato");
+    let desktop_binary = paths.target_root.join(&profile_dir).join("ato-desktop");
+    let helper_binary = paths.target_root.join(&profile_dir).join("ato");
 
     let app_binary_path = macos_dir.join("ato-desktop");
     let helper_path = helpers_dir.join("ato");
@@ -893,8 +877,8 @@ fn render_info_plist(version: &str) -> String {
 struct WorkspacePaths {
     desktop_root: PathBuf,
     desktop_manifest: PathBuf,
-    ato_root: PathBuf,
     ato_manifest: PathBuf,
+    target_root: PathBuf,
 }
 
 impl WorkspacePaths {
@@ -934,12 +918,13 @@ impl WorkspacePaths {
         };
         let desktop_manifest = desktop_root.join("Cargo.toml");
         let ato_manifest = ato_root.join("Cargo.toml");
+        let target_root = repo_root.join("target");
 
         Ok(Self {
             desktop_root,
             desktop_manifest,
-            ato_root,
             ato_manifest,
+            target_root,
         })
     }
 }

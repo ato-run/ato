@@ -207,22 +207,28 @@ pub(super) async fn handle_run_local_capsule(
         capsule_core::router::ExecutionProfile::Dev,
         effective_target.as_deref(),
     ) {
-        Ok(compiled) => compiled,
+        Ok(compiled) => Some(compiled),
         Err(err) => {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                "run_plan_invalid",
-                &format!("failed to prepare execution plan: {}", err),
-            );
+            let manifest_text = std::fs::read_to_string(&consent_manifest_path).unwrap_or_default();
+            if !manifest_is_web_static(&manifest_text) {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "run_plan_invalid",
+                    &format!("failed to prepare execution plan: {}", err),
+                );
+            }
+            None
         }
     };
     let _ = consent_manifest_tmpdir.as_ref();
-    if let Err(err) = crate::consent_store::seed_consent(&compiled.execution_plan) {
-        return json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "run_consent_seed_failed",
-            &format!("failed to seed execution consent: {}", err),
-        );
+    if let Some(compiled) = compiled {
+        if let Err(err) = crate::consent_store::seed_consent(&compiled.execution_plan) {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "run_consent_seed_failed",
+                &format!("failed to seed execution consent: {}", err),
+            );
+        }
     }
     let mut cmd = std::process::Command::new(ato_path);
     cmd.arg("run")
@@ -395,6 +401,51 @@ pub(super) async fn handle_run_local_capsule(
         }),
     )
         .into_response()
+}
+
+fn manifest_is_web_static(manifest_text: &str) -> bool {
+    let Ok(value) = toml::from_str::<toml::Value>(manifest_text) else {
+        return false;
+    };
+    let runtime = value
+        .get("runtime")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase);
+    let driver = value
+        .get("driver")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase);
+    if runtime.as_deref() == Some("web/static")
+        || (runtime.as_deref() == Some("web") && driver.as_deref() == Some("static"))
+    {
+        return true;
+    }
+    let target_label = value
+        .get("default_target")
+        .and_then(toml::Value::as_str)
+        .unwrap_or("app");
+    let Some(target) = value
+        .get("targets")
+        .and_then(toml::Value::as_table)
+        .and_then(|targets| targets.get(target_label))
+        .and_then(toml::Value::as_table)
+    else {
+        return false;
+    };
+    let runtime = target
+        .get("runtime")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase);
+    let driver = target
+        .get("driver")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase);
+    runtime.as_deref() == Some("web/static")
+        || (runtime.as_deref() == Some("web") && driver.as_deref() == Some("static"))
 }
 
 pub(super) async fn handle_delete_local_capsule(

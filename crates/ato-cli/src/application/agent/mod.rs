@@ -1415,12 +1415,17 @@ fn sanitize_relative_path(path: &Path) -> Result<PathBuf> {
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf> {
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
     } else {
-        Ok(std::env::current_dir()
+        std::env::current_dir()
             .with_context(|| "failed to read current directory")?
-            .join(path))
+            .join(path)
+    };
+
+    match absolute.canonicalize() {
+        Ok(canonical) => Ok(canonical),
+        Err(_) => Ok(absolute),
     }
 }
 

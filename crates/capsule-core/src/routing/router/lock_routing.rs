@@ -59,16 +59,23 @@ pub(super) fn synthesize_manifest_from_lock(
         if let Some(image) = runtime.image.as_ref() {
             target.insert("image".to_string(), toml::Value::String(image.clone()));
         }
-        // schema_version "0.3" rejects legacy `entrypoint`/`cmd` fields.
-        // Execution entrypoint is read from the lock runtime model directly, not
-        // from this synthesized manifest, so these fields can be omitted here.
-        if let Some(run_command) = runtime.run_command.as_ref() {
-            if !run_command.trim().is_empty() {
-                target.insert(
-                    "run_command".to_string(),
-                    toml::Value::String(run_command.clone()),
-                );
-            }
+        // schema_version "0.3" rejects legacy `entrypoint`/`cmd` fields, but
+        // the compatibility bridge still needs an execution string for config
+        // generation and source packaging.
+        let execution = runtime
+            .run_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                let entrypoint = runtime.entrypoint.trim();
+                (!entrypoint.is_empty()).then_some(entrypoint)
+            });
+        if let Some(execution) = execution {
+            target.insert(
+                "run_command".to_string(),
+                toml::Value::String(execution.to_string()),
+            );
         }
         if !runtime.env.is_empty() {
             let env = runtime

@@ -254,6 +254,9 @@ fn setup_single_file_workspace() -> (TempDir, PathBuf, PathBuf, PathBuf) {
 
     let script_path = tool_dir.join("convert.py");
     write_single_file_script(&script_path);
+    fs::write(temp.path().join("requirements.txt"), "").expect("write root requirements");
+    fs::write(tool_dir.join("requirements.txt"), "").expect("write requirements");
+    fs::write(caller_dir.join("requirements.txt"), "").expect("write caller requirements");
     (temp, tool_dir, caller_dir, script_path)
 }
 
@@ -549,6 +552,7 @@ fn single_file_python_host_execution_honors_effective_cwd_for_relative_output() 
     let (temp, _tool_dir, caller_dir, _script_path) = setup_single_file_workspace();
     let override_dir = temp.path().join("override-cwd");
     fs::create_dir_all(&override_dir).expect("create override dir");
+    fs::write(override_dir.join("requirements.txt"), "").expect("write override requirements");
     fs::write(caller_dir.join("input.txt"), "hello from caller cwd\n").expect("write caller input");
     fs::write(override_dir.join("input.txt"), "hello from effective cwd\n")
         .expect("write override input");

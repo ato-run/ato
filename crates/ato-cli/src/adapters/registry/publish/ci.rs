@@ -401,7 +401,9 @@ pub(crate) fn build_capsule_artifact_with_output(
                     .execution_runtime()
                     .unwrap_or_default()
                     .to_ascii_lowercase()
-                    .as_str()
+                    .split('/')
+                    .next()
+                    .unwrap_or_default()
                 {
                     "source" | "native" => capsule_core::router::RuntimeKind::Source,
                     "web" => capsule_core::router::RuntimeKind::Web,
@@ -830,9 +832,7 @@ args = ["--from-export"]
     #[cfg(target_os = "macos")]
     fn ato_desktop_bundle_executable_present() -> Option<std::path::PathBuf> {
         let crate_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let repo_root = crate_root
-            .parent()
-            .and_then(std::path::Path::parent)?;
+        let repo_root = crate_root.parent().and_then(std::path::Path::parent)?;
         let macos_dir = repo_root
             .join("crates")
             .join("ato-desktop")

@@ -195,7 +195,6 @@ pub fn write_install_bootstrap_state(
     ensure_desky_package(package_id)?;
     let path = bootstrap_state_path();
     let mut materialized = materialize_managed_services(package_id, environment)?;
-    let _ = orchestrate_managed_services(&materialized.service_root);
     materialized.services = load_materialized_service_records(&materialized.service_root)?;
     let state = build_install_bootstrap_state(
         environment,
@@ -397,15 +396,20 @@ fn build_install_bootstrap_state(
     let mut ollama_mode = "reused".to_string();
 
     for service in &materialized.services {
-        services.insert(service.name.clone(), service.status.clone());
-        if service.name.eq_ignore_ascii_case("opencode") && service.status != "missing" {
+        let status = if projection_performed {
+            "missing"
+        } else {
+            service.status.as_str()
+        };
+        services.insert(service.name.clone(), status.to_string());
+        if service.name.eq_ignore_ascii_case("opencode") && status != "missing" {
             opencode_installed = true;
         }
         if service.name.eq_ignore_ascii_case("ollama") {
             if service.lifecycle.eq_ignore_ascii_case("managed") {
                 ollama_mode = "managed".to_string();
             }
-            if service.status == "missing" {
+            if status == "missing" {
                 ollama_mode = "missing".to_string();
             }
         }
@@ -1497,8 +1501,11 @@ mod tests {
             ],
         };
 
-        let state = build_install_bootstrap_state(&environment, &materialized, true, true);
-        assert_eq!(state.materialization.bootstrap_phase, "shell_projected");
+        let state = build_install_bootstrap_state(&environment, &materialized, true, false);
+        assert_eq!(
+            state.materialization.bootstrap_phase,
+            "environment_materialized"
+        );
         assert!(state.materialization.opencode_installed);
         assert_eq!(state.materialization.ollama_mode, "managed");
         assert_eq!(state.health.overall, "healthy");
