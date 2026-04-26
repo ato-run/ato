@@ -32,8 +32,8 @@ ato run https://ato.run/s/demo@r1     # share URL
 | **M2** — Cargo workspace + structural files | ✅ landed |
 | **M3** — vendored deps cleanup (gpui-component, .ato/ leak fix) | ✅ landed |
 | **M4** — `capsule-core` extraction Phase 1 (CCP envelope wire shape) | ✅ landed |
-| **M5** — `capsule-core` extraction Phase 2 (Manifest + Error + Config) | ⬜ pending |
-| **M6** — release CI integration (cargo-dist + xtask + Homebrew Cask) | ⬜ pending |
+| **M5** — `capsule-core` extraction Phase 2 (Manifest + Error + Config wire-shape unification) | ✅ landed |
+| **M6** — release CI integration (cargo-dist + xtask + Homebrew Cask) | ✅ landed (RC tag verification pending) |
 | **v0.5.0 bump** — after monorepo CI/CD verified end-to-end | ⬜ pending |
 | **M7** — archive `ato-cli` / `shiny-disco` (`ato-desktop`) repos | ⬜ pending |
 
