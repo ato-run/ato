@@ -81,6 +81,13 @@ pub use adapters::tsnet;
 
 // ── Layer 8: Config ───────────────────────────────────────────────────────
 pub mod config;
+
+// ── Layer 9: Wire protocols (cross-crate) ─────────────────────────────────
+//
+// Schema/tolerance for the Capsule Control Protocol. Lives in capsule-core
+// so the CLI (producer) and the Desktop (consumer) share one source of
+// truth for the wire shape. See `docs/monorepo-consolidation-plan.md` §M4.
+pub mod ccp;
 pub use config::bootstrap;
 pub use config::diagnostics;
 pub use config::python_runtime;

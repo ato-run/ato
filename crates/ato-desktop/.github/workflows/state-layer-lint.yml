@@ -36,7 +36,6 @@ jobs:
             src/bridge.rs
             src/config.rs
             src/cli_envelope.rs
-            src/ccp_envelope.rs
           )
           forbidden_pattern='^use (gpui|wry|objc2|windows)([:; ]|$)'
           violations=0

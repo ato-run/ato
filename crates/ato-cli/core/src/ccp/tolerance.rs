@@ -1,8 +1,8 @@
 //! Capsule Control Protocol (CCP) envelope tolerance.
 //!
 //! Every JSON object emitted by `ato app {resolve,session start,session stop}`
-//! is a CCP envelope (see PAS §4.1, CPDS §4.4.1, and ato-cli's
-//! `docs/specs/CCP_SPEC.md`). The wire shape pins three fields:
+//! is a CCP envelope (see PAS §4.1, CPDS §4.4.1, and `docs/specs/CCP_SPEC.md`).
+//! The wire shape pins three fields:
 //!
 //! ```text
 //! {
@@ -13,10 +13,9 @@
 //! }
 //! ```
 //!
-//! This module owns the desktop-side rules for **how strict to be** about
-//! `schema_version`. The contract is intentionally permissive so the
-//! desktop and CLI can ship on independent release trains within the v1.x
-//! lifetime.
+//! This module owns the **consumer-side** rules for how strict to be about
+//! `schema_version`. The contract is intentionally permissive so the desktop
+//! and CLI can ship on independent release trains within the v1.x lifetime.
 //!
 //! # Tolerance rules (CCP_SPEC.md §3)
 //!
@@ -32,7 +31,6 @@
 //! `schema_version` entirely — that would break the legacy compatibility
 //! row of the CCP_SPEC.md §5 matrix.
 
-use serde::Deserialize;
 use tracing::warn;
 
 /// Compatibility verdict for a CCP envelope's `schema_version` field.
@@ -137,15 +135,6 @@ impl std::fmt::Display for MalformedSchemaVersion {
 
 impl std::error::Error for MalformedSchemaVersion {}
 
-/// Generic helper for deserializing the top-level `schema_version` from
-/// any CCP envelope without committing to a specific payload shape — used
-/// by tests that want to verify the wire field is plumbed through.
-#[derive(Debug, Deserialize)]
-pub struct CcpHeader {
-    #[serde(default)]
-    pub schema_version: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,15 +210,5 @@ mod tests {
             .expect_err("must reject");
         assert_eq!(err.action, "test");
         assert_eq!(err.raw, "garbage");
-    }
-
-    #[test]
-    fn ccp_header_deserializes_optional_field() {
-        let with: CcpHeader =
-            serde_json::from_str(r#"{"schema_version":"ccp/v1","other":42}"#).unwrap();
-        assert_eq!(with.schema_version.as_deref(), Some("ccp/v1"));
-
-        let without: CcpHeader = serde_json::from_str(r#"{"other":42}"#).unwrap();
-        assert!(without.schema_version.is_none());
     }
 }
