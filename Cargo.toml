@@ -24,7 +24,7 @@ capsule-core = { path = "../ato-cli/core" }
 dirs = "5.0"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "15d86607" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "15d86607", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-gpui-component = { path = ".tmp/vendor/gpui-component-local/crates/ui" }
+gpui-component = { git = "https://github.com/ato-run/gpui-component", rev = "00ea23fbf0d15e229c9ec3034b2c3c16846908f9" }
 http = "1.4.0"
 portable-pty = "0.9"
 serde = { version = "1.0", features = ["derive"] }

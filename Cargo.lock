@@ -3177,6 +3177,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.5.1"
+source = "git+https://github.com/ato-run/gpui-component?rev=00ea23fbf0d15e229c9ec3034b2c3c16846908f9#00ea23fbf0d15e229c9ec3034b2c3c16846908f9"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3219,6 +3220,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.5.1"
+source = "git+https://github.com/ato-run/gpui-component?rev=00ea23fbf0d15e229c9ec3034b2c3c16846908f9#00ea23fbf0d15e229c9ec3034b2c3c16846908f9"
 dependencies = [
  "proc-macro2",
  "quote",
