@@ -1024,12 +1024,12 @@ sandbox = false
             .injected_mounts
             .iter()
             .any(|mount| mount.source == overlay_file
-                && mount.target == PathBuf::from("/app/config/settings.json")));
+                && mount.target == Path::new("/app/config/settings.json")));
         assert!(workspace
             .injected_mounts
             .iter()
             .any(|mount| mount.source == derived_root
-                && mount.target == PathBuf::from("/app/.derived")
+                && mount.target == Path::new("/app/.derived")
                 && !mount.readonly));
         assert_eq!(workspace.requested_cwd, Some(PathBuf::from("/app/src")));
         workspace.cleanup();
