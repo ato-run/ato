@@ -1,6 +1,6 @@
-# Desktop bundle release pipeline.
+# Desktop bundle release pipeline (monorepo edition).
 #
-# Multi-platform Desktop bundle pipeline (post-PR-9).
+# Multi-platform Desktop bundle pipeline (post-PR-9, post-monorepo M6).
 #
 # Build matrix:
 #   - macos-14    → aarch64-apple-darwin (Apple Silicon)
@@ -12,6 +12,10 @@
 # Linux/Windows ship beta per CPDS §6 (L8/L10/L11) — they're built by
 # the same xtask scaffolding so platform parity is structural rather
 # than aspirational.
+#
+# Tag-prefix routing: only `ato-desktop-v*` tags trigger this workflow.
+# `ato-cli-v*` tags are owned by cargo-dist (see root `dist-workspace.toml`).
+# This is how we share the monorepo without crossing the streams.
 #
 # Code-signing: ad-hoc by default (CodesignMode::AdHoc in xtask). To
 # upgrade to Developer ID, set MAC_DEVELOPER_ID_NAME in the repo's
@@ -49,12 +53,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout ato-cli sibling for capsule-core path dep
-        # Cargo.toml has `capsule-core = { path = "../ato-cli/core" }`,
-        # so the ato-cli repo must live next to this checkout.
-        shell: bash
-        run: git clone --depth 1 https://github.com/ato-run/ato-cli.git ../ato-cli
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -77,8 +75,8 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        working-directory: crates/ato-desktop/xtask
         run: |
-          cd xtask
           cargo run --release -- bundle \
             --target ${{ matrix.target }} \
             --sign \
@@ -89,7 +87,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ato-desktop-${{ matrix.target }}
-          path: dist/${{ matrix.target }}/*.dmg
+          path: crates/ato-desktop/dist/${{ matrix.target }}/*.dmg
           if-no-files-found: error
 
   bundle-windows:
@@ -104,10 +102,6 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Checkout ato-cli sibling for capsule-core path dep
-        shell: bash
-        run: git clone --depth 1 https://github.com/ato-run/ato-cli.git ../ato-cli
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -132,15 +126,14 @@ jobs:
         env:
           WINDOWS_CODESIGN_PFX: ${{ secrets.WINDOWS_CODESIGN_PFX }}
           WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
-        run: |
-          cd xtask
-          cargo run --release -- bundle --target ${{ matrix.target }} --msi
+        working-directory: crates/ato-desktop/xtask
+        run: cargo run --release -- bundle --target ${{ matrix.target }} --msi
 
       - name: Upload .msi artifact
         uses: actions/upload-artifact@v4
         with:
           name: ato-desktop-${{ matrix.target }}
-          path: dist/${{ matrix.target }}/*.msi
+          path: crates/ato-desktop/dist/${{ matrix.target }}/*.msi
           if-no-files-found: error
 
   bundle-linux:
@@ -155,10 +148,6 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Checkout ato-cli sibling for capsule-core path dep
-        shell: bash
-        run: git clone --depth 1 https://github.com/ato-run/ato-cli.git ../ato-cli
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -198,15 +187,14 @@ jobs:
           sudo mv /tmp/appimagetool /usr/local/bin/appimagetool
 
       - name: Bundle and package .AppImage
-        run: |
-          cd xtask
-          cargo run --release -- bundle --target ${{ matrix.target }} --appimage
+        working-directory: crates/ato-desktop/xtask
+        run: cargo run --release -- bundle --target ${{ matrix.target }} --appimage
 
       - name: Upload .AppImage artifact
         uses: actions/upload-artifact@v4
         with:
           name: ato-desktop-${{ matrix.target }}
-          path: dist/${{ matrix.target }}/*.AppImage
+          path: crates/ato-desktop/dist/${{ matrix.target }}/*.AppImage
           if-no-files-found: error
 
   publish-release:

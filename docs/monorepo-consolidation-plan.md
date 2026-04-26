@@ -284,19 +284,37 @@ crates/ato-cli/core/src/ccp/        # capsule-core crate (relocation deferred to
   パッケージ名 (`capsule-core`) が既に一致しているため import パスに影響せず、後段で
   まとめて実施可能。M4 ではディレクトリ移動は見送り。
 
-### M5 — `capsule-core` 抽出 (Phase 2: Manifest + Error + Config)
+### M5 — `capsule-core` 抽出 (Phase 2: Manifest + Error + Config) ✅ landed
 
-- `crates/ato-cli/core/src/foundation/types/manifest_v03.rs` → `crates/capsule-core/src/manifest/`
-- E-code envelopes (E103 含む) → `crates/capsule-core/src/error/`
-- `ConfigField` / `ConfigKind` → `crates/capsule-core/src/config/`
+**事前調査の結果**: `manifest_v03`, E-code envelopes (E103 含む), `ConfigField`/`ConfigKind` は **既に** `crates/ato-cli/core/` (= `capsule-core` パッケージ) 内に存在。M5 のリテラルなスコープ (「manifest を移動」「error を移動」「config を移動」) は M2 の workspace 化時点で完了済み。
 
-各々独立 PR に分けてレビュー。manifest は WASM 連携 (`lock-draft-wasm`) があるので、必要に応じて `capsule-core` を `no_std` 互換にする道も検討（ただし v0.6 までは `std` 前提で OK）。
+**M5 で残っていた本質的な作業** = **wire shape の二重定義の解消** (M4 の `ccp_envelope` パターンを config/error layer に適用):
 
-### M6 — リリース統合
+- `crates/ato-desktop/src/cli_envelope.rs` の `ConfigFieldDto` / `ConfigKindDto` を **削除**し、`capsule_core::types::{ConfigField, ConfigKind}` を直接 import する形に統一。
+- `MissingEnvDetailsDto.missing_schema` の型を `Vec<ConfigFieldDto>` → `Vec<ConfigField>` に変更。
+- 呼び出し側 (`state/mod.rs`, `orchestrator.rs`, `ui/mod.rs`, `ui/modals/config_form.rs`) を canonical 型名に追従。
+- 既存の 7 個のパーサテストは canonical 型に対しても全て pass — wire JSON が一切変わっていないことの証左。
 
-- 旧 `apps/ato-cli/dist-workspace.toml` → 新 root の `dist-workspace.toml` (cargo-dist は **`packages = ["ato-cli"]` で CLI のみ対象**、Desktop はノータッチ)
-- 旧 `apps/ato-desktop/.github/workflows/desktop-release.yml` → 新 `.github/workflows/desktop-release.yml`
-- タグ運用は維持: `ato-cli-v*` で CLI リリース、`ato-desktop-v*` で Desktop リリース。タグ prefix で workflow を出し分け。
+**Day 2 contract test との関係**: CLI 側の `apps/ato-cli/src/adapters/output/diagnostics/tests.rs::maps_missing_required_env_error_to_e103_with_schema` が JSON 出力形を pin している。Desktop 側の 7 テストも同じ JSON を canonical 型でデコードする。両者が同じ型を共有することで、シリアライズ⇄デシリアライズ間の drift が物理的に発生し得なくなった (M4 と同パターン)。
+
+**ディレクトリ移動について**: `capsule-core` は package 名としては既に正しい (`crates/ato-cli/core/Cargo.toml` の `name = "capsule-core"`)。物理的な top-level `crates/capsule-core/` への移動は M5 のスコープ外 — import path (`capsule_core::...`) は不変であり、移動は cosmetic な再配置に過ぎないため M6 以降または専用 PR で扱う。
+
+### M6 — リリース統合 ✅ landed
+
+実施内容:
+
+- `crates/ato-cli/dist-workspace.toml` → root `dist-workspace.toml` に移動。`packages = ["ato-cli"]` を追加して cargo-dist のスコープを CLI 単一バイナリに固定 (これが無いと workspace 全 member = ato-desktop / xtask / lock-draft-engine も巻き込んでパッケージング失敗する)。
+- `crates/ato-desktop/.github/workflows/desktop-release.yml` → root `.github/workflows/desktop-release.yml` に移動。同時に下記を修正:
+  - 旧: `git clone --depth 1 https://github.com/ato-run/ato-cli.git ../ato-cli` を 3 ジョブから削除 (monorepo では `crates/ato-cli/` が同 checkout 内にいるので不要)。
+  - 旧: `cd xtask && cargo run ...` → `working-directory: crates/ato-desktop/xtask` (workflow の起点が repo root に変わったため)。
+  - 旧: artifact `path: dist/${{ matrix.target }}/...` → `path: crates/ato-desktop/dist/${{ matrix.target }}/...`。
+- `crates/ato-desktop/.github/workflows/state-layer-lint.yml` → root `.github/workflows/state-layer-lint.yml` に移動。lint 対象パスに `crates/ato-desktop/` プレフィックスを追加。
+- `crates/ato-desktop/.github/` ディレクトリは削除 (GitHub Actions は repo root 直下の `.github/workflows/` のみ参照する)。
+- `crates/ato-desktop/xtask/src/main.rs::WorkspacePaths::discover` を monorepo 対応に更新: `<repo>/crates/ato-cli` を最優先で探索し、`apps/ato-cli` (旧 split-repo) と sibling clone は fallback として残す (M7 archive 完了まで legacy mirror checkout でもビルド可能)。
+
+タグ運用は維持: `ato-cli-v*` で CLI リリース (cargo-dist 経由)、`ato-desktop-v*` で Desktop リリース (xtask 経由)。タグ prefix で workflow を出し分けるため両者が同じタグで競合することは無い。
+
+`cargo check -p ato-desktop-xtask` でパス discovery の更新は型レベルで pass。実際の release green-run 検証は `ato-desktop-v0.5.0-rc1` のような RC タグ push まで保留 (deferred から CI verification gate へ移管)。
 
 ### M7 — 旧 repo の archive
 

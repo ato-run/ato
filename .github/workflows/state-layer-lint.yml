@@ -8,6 +8,8 @@ name: State-Layer Purity Lint
 # is required to compile cleanly without GUI dependencies. Move the
 # offending code into the UI / webview layer and abstract through a
 # trait if shared logic is required.
+#
+# (Monorepo M6: paths now carry the `crates/ato-desktop/` prefix.)
 
 on:
   push:
@@ -31,11 +33,11 @@ jobs:
         run: |
           set -euo pipefail
           paths=(
-            src/state/mod.rs
-            src/orchestrator.rs
-            src/bridge.rs
-            src/config.rs
-            src/cli_envelope.rs
+            crates/ato-desktop/src/state/mod.rs
+            crates/ato-desktop/src/orchestrator.rs
+            crates/ato-desktop/src/bridge.rs
+            crates/ato-desktop/src/config.rs
+            crates/ato-desktop/src/cli_envelope.rs
           )
           forbidden_pattern='^use (gpui|wry|objc2|windows)([:; ]|$)'
           violations=0

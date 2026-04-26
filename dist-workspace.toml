@@ -1,12 +1,31 @@
+# cargo-dist configuration for the `ato-run/ato` monorepo.
+#
+# **Scope**: this file is intentionally CLI-only. The Desktop bundle
+# is built by the `xtask` crate driven by `desktop-release.yml`, NOT
+# by cargo-dist. Mixing both would force cargo-dist to crawl the GPUI
+# / WebKit native deps, which it isn't designed to package.
+#
+# The `packages = ["ato-cli"]` line is the load-bearing scope filter:
+# without it, cargo-dist would pick up every workspace member and try
+# to publish artifacts for `ato-desktop`, `xtask`, `lock-draft-engine`,
+# etc. With it, only the `ato-cli` binary feeds the Homebrew Formula
+# and CLI MSI installer.
+#
+# Tag prefix routing:
+#   - `ato-cli-v*`     → triggers cargo-dist's release.yml (this file)
+#   - `ato-desktop-v*` → triggers .github/workflows/desktop-release.yml
+# The two workflows are never invoked by the same tag.
+
 [workspace]
 members = ["cargo:."]
 
-# Config for 'dist'
 [dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.31.0"
 # CI backends to support
 ci = "github"
+# Restrict cargo-dist to the CLI binary; Desktop is owned by xtask.
+packages = ["ato-cli"]
 # The installers to generate for each app.
 # - homebrew → Formula in ato-run/homebrew-ato (CLI-only, alongside Cask).
 # - msi      → CLI MSI for `--cli-only` Windows install (PR-7).
