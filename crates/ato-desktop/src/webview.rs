@@ -46,7 +46,7 @@ use crate::state::{
     WebSessionState,
 };
 use crate::terminal::{TerminalCore, TryRecvOutput};
-use capsule_core::handle::CapsuleDisplayStrategy;
+use capsule_wire::handle::CapsuleDisplayStrategy;
 use tracing::{debug, error, info, warn};
 
 const DEVTOOLS_DEBUG_ENV: &str = "ATO_DESKTOP_DEVTOOLS_DEBUG";

@@ -21,16 +21,16 @@
 //!
 //! # Wire-shape source of truth
 //!
-//! As of M5, `ConfigField` / `ConfigKind` live in
-//! [`capsule_core::types`] and serve as the canonical wire shape for
-//! both the CLI emitter and the Desktop consumer. This module no
-//! longer mirrors the schema — it imports it. The Day 2 contract
-//! test in `apps/ato-cli/src/adapters/output/diagnostics/
+//! As of M5, `ConfigField` / `ConfigKind` are the canonical wire shape
+//! for both the CLI emitter and the Desktop consumer. As of N3 they
+//! live in the dedicated [`capsule_wire`] crate so the Desktop links
+//! only the IPC surface and not capsule-core's runtime stack. The
+//! contract test in `crates/ato-cli/src/adapters/output/diagnostics/
 //! tests.rs::maps_missing_required_env_error_to_e103_with_schema`
-//! still pins the JSON shape on the CLI side; the Desktop test
-//! suite below exercises the same shape against the same types.
+//! pins the JSON shape on the CLI side; the Desktop test suite below
+//! exercises the same shape against the same types.
 
-use capsule_core::types::ConfigField;
+use capsule_wire::config::ConfigField;
 use serde::Deserialize;
 
 /// `details` payload for E103 (`missing_required_env`). The desktop
@@ -118,7 +118,7 @@ pub fn parse_cli_error_event(stderr: &str) -> Option<AtoCliErrorEventDto> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::types::ConfigKind;
+    use capsule_wire::config::ConfigKind;
 
     fn fatal_e103_line() -> &'static str {
         r#"{"level":"fatal","code":"E103","name":"missing_required_env","phase":"inference","classification":"manifest","message":"missing required environment variables for target 'main': OPENAI_API_KEY","retryable":false,"interactive_resolution":true,"resource":"environment","target":"main","hint":"set the variable before retrying.","details":{"missing_keys":["OPENAI_API_KEY"],"missing_schema":[{"name":"OPENAI_API_KEY","label":"OpenAI API Key","kind":"secret","placeholder":"sk-..."}],"target":"main"}}"#
