@@ -123,7 +123,7 @@ cargo test -p capsule-core
 - [Capsule Protocol RFCs](docs/rfcs/) — `accepted/` is normative, `draft/` is in flight
 - [Core architecture](docs/core-architecture.md)
 - [Glossary](docs/GLOSSARY.md)
-- [Release process](RELEASE.md)
+- [Release process](docs/ops/RELEASE.md)
 - [Agent guidelines](AGENTS.md)
 - [Known limitations](crates/ato-cli/docs/known-limitations.md)
 - [Monorepo consolidation plan](docs/monorepo-consolidation-plan.md)

@@ -85,6 +85,8 @@ fn seed_minimal_deno_lockfiles(workspace_root: &Path) -> Result<()> {
     let manifest_hash = compute_manifest_hash_without_signatures(&manifest)
         .context("compute manifest hash for lockfile")?;
 
+    std::fs::write(workspace_root.join("deno.json"), "{}")?;
+
     std::fs::write(
         workspace_root.join("deno.lock"),
         r#"{"version":"3","remote":{}}"#,
@@ -1260,7 +1262,9 @@ type = "app"
 runtime = "source/deno"
 runtime_version = "1.46.3"
 run = "main.ts"
-build = "echo prepare"
+
+[build.lifecycle]
+prepare = "echo prepare"
 "#,
     )?;
     std::fs::write(
@@ -1354,10 +1358,12 @@ type = "app"
 runtime = "source/deno"
 runtime_version = "1.46.3"
 run = "main.ts"
+
 [metadata]
 repository = "Koh0920/file2api-monorepo"
 
-build = "echo prepare"
+[build.lifecycle]
+prepare = "echo prepare"
 "#,
     )?;
     std::fs::write(
@@ -1446,7 +1452,8 @@ run = "ato-entry.ts"
 include = [
   "ato-entry.ts",
   "capsule.toml",
-    "capsule.lock.json",
+  "capsule.lock.json",
+  "deno.json",
   "deno.lock",
   "package.json"
 ]
