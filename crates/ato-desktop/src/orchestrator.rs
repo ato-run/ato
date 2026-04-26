@@ -230,13 +230,13 @@ pub fn stop_guest_session(session_id: &str) -> Result<bool> {
 #[derive(Clone, Debug, Deserialize)]
 struct ResolveEnvelope {
     /// CCP wire-contract field. `None` for legacy CLIs that predate v0.5.
-    /// See `ccp_envelope::enforce_ccp_compat` for the tolerance rules.
+    /// See `capsule_core::ccp::enforce_ccp_compat` for the tolerance rules.
     #[serde(default)]
     schema_version: Option<String>,
     resolution: ResolvePayload,
 }
 
-impl crate::ccp_envelope::HasSchemaVersion for ResolveEnvelope {
+impl capsule_core::ccp::HasSchemaVersion for ResolveEnvelope {
     fn schema_version(&self) -> Option<&str> {
         self.schema_version.as_deref()
     }
@@ -274,7 +274,7 @@ struct SessionStartEnvelope {
     session: SessionStartInfo,
 }
 
-impl crate::ccp_envelope::HasSchemaVersion for SessionStartEnvelope {
+impl capsule_core::ccp::HasSchemaVersion for SessionStartEnvelope {
     fn schema_version(&self) -> Option<&str> {
         self.schema_version.as_deref()
     }
@@ -335,7 +335,7 @@ struct SessionStopEnvelope {
     stopped: bool,
 }
 
-impl crate::ccp_envelope::HasSchemaVersion for SessionStopEnvelope {
+impl capsule_core::ccp::HasSchemaVersion for SessionStopEnvelope {
     fn schema_version(&self) -> Option<&str> {
         self.schema_version.as_deref()
     }
@@ -397,7 +397,7 @@ pub fn resolve_and_start_capsule(
 pub fn stop_capsule_session(session_id: &str) -> Result<bool> {
     let stopped: SessionStopEnvelope =
         run_ato_json(&["app", "session", "stop", session_id, "--json"])?;
-    crate::ccp_envelope::enforce_ccp_compat(&stopped, "session_stop")?;
+    capsule_core::ccp::enforce_ccp_compat(&stopped, "session_stop")?;
     Ok(stopped.stopped)
 }
 
@@ -452,7 +452,7 @@ pub fn cleanup_stale_capsule_sessions() -> Result<Vec<String>> {
 
 fn resolve_capsule(handle: &str) -> Result<ResolvePayload> {
     let envelope: ResolveEnvelope = run_ato_json(&["app", "resolve", handle, "--json"])?;
-    crate::ccp_envelope::enforce_ccp_compat(&envelope, "resolve_handle")?;
+    capsule_core::ccp::enforce_ccp_compat(&envelope, "resolve_handle")?;
     Ok(envelope.resolution)
 }
 
@@ -537,7 +537,7 @@ fn start_capsule(
 
     let envelope: SessionStartEnvelope = serde_json::from_slice(&output.stdout)
         .map_err(|err| LaunchError::Other(format!("failed to parse session start response: {err}")))?;
-    crate::ccp_envelope::enforce_ccp_compat(&envelope, "session_start")
+    capsule_core::ccp::enforce_ccp_compat(&envelope, "session_start")
         .map_err(|err| LaunchError::Other(err.to_string()))?;
     Ok(envelope.session)
 }

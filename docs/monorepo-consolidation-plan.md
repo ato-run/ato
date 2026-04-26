@@ -260,16 +260,29 @@ tracing = "0.1"
 最初に切るのは **CCP envelope の wire shape** だけ。一番依存関係が浅く、両側から型として参照される。
 
 ```
-crates/capsule-core/src/ccp/
-├── mod.rs
-├── schema.rs       # ResolveEnvelope, SessionStartEnvelope, ...
-├── tolerance.rs    # classify_schema_version, enforce_ccp_compat
-└── version.rs      # SCHEMA_VERSION = "ccp/v1" 定数
+crates/ato-cli/core/src/ccp/        # capsule-core crate (relocation deferred to M5+)
+├── mod.rs                          # re-exports, module-level docs
+├── schema.rs                       # CcpHeader (payload-agnostic deserializer)
+├── tolerance.rs                    # classify_schema_version, enforce_ccp_compat,
+│                                   # CcpCompat, HasSchemaVersion, MalformedSchemaVersion
+└── version.rs                      # SCHEMA_VERSION = "ccp/v1" 定数
 ```
 
-- ato-desktop/src/ccp_envelope.rs → 削除、`use capsule_core::ccp::*;` に置換
-- ato-cli/src/app_control/ → `schema_version` 定数を `capsule_core::ccp::SCHEMA_VERSION` から参照
-- 既存スナップショット fixture (`bootstrap.json`/`status.json`/`repair.json`) は `capsule-core/tests/fixtures/` に移動し、producer/consumer の **両方** から golden test として読まれるようにする。これで wire shape の二重管理が物理的に不可能になる。
+- ato-desktop/src/ccp_envelope.rs → ✅ 削除済み、`use capsule_core::ccp::*;` に置換 (orchestrator.rs)
+- ato-cli/src/app_control.rs → ✅ ローカル `const SCHEMA_VERSION` を削除し
+  `use capsule_core::ccp::SCHEMA_VERSION;` 経由で参照。子モジュール (resolve / session) は
+  `super::SCHEMA_VERSION` 経由で同じ name resolution を継承
+- 既存スナップショット fixture (`bootstrap.json`/`status.json`/`repair.json`) を
+  `crates/ato-cli/core/tests/fixtures/ccp/` に移動し、producer (ato-cli の `assert_snapshot`) と
+  consumer (`capsule-core/tests/ccp_fixtures.rs` の golden test 3 本) の **両方** が同一バイト列を
+  読む構造にした。これで wire shape の二重管理が物理的に不可能になる。
+- 完了範囲外: producer 側の envelope 構造体 (`StatusEnvelope` / `BootstrapEnvelope` /
+  `RepairEnvelope` など) と consumer 側の `ResolveEnvelope` / `SessionStartEnvelope` /
+  `SessionStopEnvelope` は **まだ各 crate に閉じている**。これらの統合は payload type
+  (manifest / config / E-code) が capsule-core に来る M5 以降に実施。
+- crate ディレクトリそのものの `crates/ato-cli/core/` → `crates/capsule-core/` への移設は
+  パッケージ名 (`capsule-core`) が既に一致しているため import パスに影響せず、後段で
+  まとめて実施可能。M4 ではディレクトリ移動は見送り。
 
 ### M5 — `capsule-core` 抽出 (Phase 2: Manifest + Error + Config)
 

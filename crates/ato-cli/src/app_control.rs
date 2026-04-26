@@ -8,6 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use capsule_core::ato_lock::DeliveryEnvironment;
+use capsule_core::ccp::SCHEMA_VERSION;
 use capsule_core::types::ServiceSpec;
 use chrono::Utc;
 use dirs::home_dir;
@@ -26,15 +27,9 @@ pub use resolve::resolve_handle;
 pub use session::{start_session, stop_session};
 
 const DESKY_PACKAGE_ID: &str = "ato/desky";
-/// CCP (Capsule Control Protocol) schema version.
-///
-/// Stamped on every `ato app {resolve,session start,session stop}` JSON envelope.
-/// See `docs/specs/CCP_SPEC.md` for the additive-only versioning contract.
-///
-/// History:
-///   - `desky-control-plane/v1` (pre-v0.5): legacy name, retired in v0.5.0
-///   - `ccp/v1` (v0.5.0+): canonical name aligned with PAS §4.1
-const SCHEMA_VERSION: &str = "ccp/v1";
+// CCP wire version is owned by `capsule_core::ccp::SCHEMA_VERSION` so the
+// Desktop consumer and the CLI producer share one source of truth. See
+// `docs/monorepo-consolidation-plan.md` §M4.
 const STATE_VERSION: u32 = 1;
 const MANAGED_ENVIRONMENT_NOT_MATERIALIZED_ERROR: &str = "managed_environment_not_materialized";
 const UNMATERIALIZED_SERVICE_STATUS: &str = "unmaterialized";
@@ -1287,8 +1282,11 @@ mod tests {
     }
 
     fn assert_snapshot(name: &str, actual: String) {
+        // CCP envelope fixtures live in `capsule-core` so the consumer
+        // (`ato-desktop`) can run the same golden checks against the same
+        // bytes. See `docs/monorepo-consolidation-plan.md` §M4.
         let snapshot_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/app_control/snapshots")
+            .join("core/tests/fixtures/ccp")
             .join(format!("{name}.json"));
         let expected =
             fs::read_to_string(&snapshot_path).expect("snapshot fixture should be readable");
