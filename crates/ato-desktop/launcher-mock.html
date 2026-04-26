@@ -1,0 +1,1378 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Desky — New Tab</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <script src="https://code.iconify.design/3/3.1.0/iconify.min.js"></script>
+    <style>
+      *,
+      *::before,
+      *::after {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      :root {
+        --bg-base: #1a1a1e;
+        --bg-elevated: #232328;
+        --bg-surface: #2a2a30;
+        --bg-glass: rgba(40, 40, 48, 0.72);
+        --bg-glass-heavy: rgba(30, 30, 36, 0.85);
+        --border-subtle: rgba(255, 255, 255, 0.06);
+        --border-medium: rgba(255, 255, 255, 0.1);
+        --border-active: rgba(59, 130, 246, 0.4);
+        --text-primary: #f0f0f2;
+        --text-secondary: rgba(240, 240, 242, 0.55);
+        --text-tertiary: rgba(240, 240, 242, 0.32);
+        --text-quaternary: rgba(240, 240, 242, 0.18);
+        --accent-blue: #3b82f6;
+        --accent-blue-glow: rgba(59, 130, 246, 0.25);
+        --accent-green: #34d399;
+        --accent-green-glow: rgba(52, 211, 153, 0.2);
+        --accent-amber: #fbbf24;
+        --accent-purple: #a78bfa;
+        --accent-rose: #f87171;
+        --accent-orange: #fb923c;
+        --radius-sm: 6px;
+        --radius-md: 10px;
+        --radius-lg: 14px;
+        --radius-xl: 18px;
+        --radius-2xl: 22px;
+        --shadow-elevated:
+          0 8px 40px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3);
+        --shadow-card: 0 4px 20px rgba(0, 0, 0, 0.35);
+        --shadow-glow-blue: 0 0 20px rgba(59, 130, 246, 0.15);
+        --transition-smooth: cubic-bezier(0.4, 0, 0.2, 1);
+        --transition-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+      }
+
+      html,
+      body {
+        height: 100%;
+        overflow: hidden;
+        font-family:
+          "Inter",
+          -apple-system,
+          BlinkMacSystemFont,
+          sans-serif;
+        background: var(--bg-base);
+        color: var(--text-primary);
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .desky-shell {
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        width: 100vw;
+        position: relative;
+      }
+
+      /* ═══ COMMAND BAR ═══ */
+      .command-bar {
+        display: flex;
+        align-items: center;
+        height: 48px;
+        min-height: 48px;
+        padding: 0 14px;
+        background: var(--bg-glass-heavy);
+        backdrop-filter: blur(40px) saturate(180%);
+        -webkit-backdrop-filter: blur(40px) saturate(180%);
+        border-bottom: 1px solid var(--border-subtle);
+        z-index: 100;
+        gap: 12px;
+        user-select: none;
+      }
+      .traffic-lights {
+        display: flex;
+        gap: 7px;
+        padding-right: 10px;
+      }
+      .traffic-light {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        cursor: pointer;
+        transition: filter 0.15s;
+      }
+      .traffic-light:hover {
+        filter: brightness(1.2);
+      }
+      .tl-close {
+        background: #ff5f57;
+      }
+      .tl-minimize {
+        background: #febc2e;
+      }
+      .tl-maximize {
+        background: #28c840;
+      }
+      .user-avatar {
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        cursor: pointer;
+        transition: all 0.2s;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: linear-gradient(135deg, #6366f1, #a78bfa);
+        border: 1.5px solid rgba(255, 255, 255, 0.1);
+      }
+      .user-avatar:hover {
+        border-color: rgba(255, 255, 255, 0.25);
+        transform: scale(1.08);
+      }
+      .user-avatar svg {
+        width: 14px;
+        height: 14px;
+        fill: #fff;
+      }
+      .omnibar-container {
+        flex: 1;
+        display: flex;
+        justify-content: center;
+        max-width: 560px;
+        margin: 0 auto;
+      }
+      .omnibar {
+        display: flex;
+        align-items: center;
+        width: 100%;
+        height: 30px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border-subtle);
+        border-radius: 8px;
+        padding: 0 12px;
+        gap: 8px;
+        cursor: text;
+        transition: all 0.2s var(--transition-smooth);
+      }
+      .omnibar:hover {
+        background: rgba(255, 255, 255, 0.08);
+        border-color: var(--border-medium);
+      }
+      .omnibar .ob-icon {
+        color: var(--text-tertiary);
+        font-size: 13px;
+        flex-shrink: 0;
+      }
+      .omnibar .ob-text {
+        flex: 1;
+        font-size: 12.5px;
+        color: var(--text-secondary);
+        border: none;
+        background: none;
+        outline: none;
+        font-family: inherit;
+      }
+      .omnibar .ob-text::placeholder {
+        color: var(--text-tertiary);
+      }
+      .omnibar .ob-shortcut {
+        font-size: 10px;
+        color: var(--text-tertiary);
+        background: rgba(255, 255, 255, 0.06);
+        padding: 1px 5px;
+        border-radius: 4px;
+        flex-shrink: 0;
+      }
+
+      .command-bar-right {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-shrink: 0;
+      }
+      .overview-toggle {
+        width: 30px;
+        height: 30px;
+        border-radius: var(--radius-sm);
+        border: 1px solid transparent;
+        background: none;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.2s;
+        padding: 0;
+      }
+      .overview-toggle:hover {
+        background: rgba(255, 255, 255, 0.06);
+      }
+      .tabs-icon {
+        position: relative;
+        width: 20px;
+        height: 16px;
+      }
+      .tabs-icon .win {
+        position: absolute;
+        border: 1.5px solid var(--text-tertiary);
+        border-radius: 2.5px;
+        background: transparent;
+        transition: all 0.2s;
+      }
+      .tabs-icon .win-back {
+        top: 0;
+        left: 0;
+        width: 14px;
+        height: 11px;
+      }
+      .tabs-icon .win-front {
+        top: 4px;
+        left: 5px;
+        width: 14px;
+        height: 11px;
+      }
+      .tabs-icon .win .dots {
+        position: absolute;
+        top: 2px;
+        left: 3px;
+        display: flex;
+        gap: 1.5px;
+      }
+      .tabs-icon .win .dot {
+        width: 2.5px;
+        height: 2.5px;
+        border-radius: 50%;
+        background: var(--text-tertiary);
+        transition: background 0.2s;
+      }
+      .overview-toggle:hover .tabs-icon .win {
+        border-color: var(--text-secondary);
+      }
+      .overview-toggle:hover .tabs-icon .win .dot {
+        background: var(--text-secondary);
+      }
+
+      /* ═══ MAIN AREA ═══ */
+      .main-area {
+        flex: 1;
+        display: flex;
+        overflow: hidden;
+        position: relative;
+      }
+      .workspace-navigator {
+        width: 52px;
+        min-width: 52px;
+        background: var(--bg-glass-heavy);
+        backdrop-filter: blur(30px);
+        -webkit-backdrop-filter: blur(30px);
+        border-right: 1px solid var(--border-subtle);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 12px 0;
+        gap: 4px;
+        z-index: 50;
+      }
+      .nav-item {
+        width: 36px;
+        height: 36px;
+        border-radius: var(--radius-sm);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: all 0.2s;
+        position: relative;
+        flex-shrink: 0;
+      }
+      .nav-item:hover {
+        background: rgba(255, 255, 255, 0.06);
+      }
+      .nav-item.active {
+        background: rgba(59, 130, 246, 0.15);
+      }
+      .nav-item.active::before {
+        content: "";
+        position: absolute;
+        left: -8px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 3px;
+        height: 18px;
+        border-radius: 0 3px 3px 0;
+        background: var(--accent-blue);
+      }
+      .app-icon {
+        width: 22px;
+        height: 22px;
+        border-radius: 5px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 11px;
+        font-weight: 700;
+        color: #fff;
+        flex-shrink: 0;
+        overflow: hidden;
+      }
+      .nav-separator {
+        width: 24px;
+        height: 1px;
+        background: var(--border-subtle);
+        margin: 6px 0;
+        flex-shrink: 0;
+      }
+      .nav-branch {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 3px;
+        flex-shrink: 0;
+      }
+      .branch-line {
+        width: 1px;
+        height: 12px;
+        background: var(--border-medium);
+      }
+      .branch-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        border: 1.5px solid var(--accent-purple);
+        background: transparent;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+      .branch-dot:hover {
+        background: var(--accent-purple);
+      }
+      .branch-dot.filled {
+        background: var(--accent-purple);
+      }
+      .nav-spacer {
+        flex: 1;
+      }
+
+      /* ═══════════════ NEW TAB PAGE ═══════════════ */
+      .new-tab-page {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 40px 48px;
+        position: relative;
+        overflow: hidden;
+      }
+
+      /* Ambient glow */
+      .new-tab-page::before {
+        content: "";
+        position: absolute;
+        top: -120px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 600px;
+        height: 400px;
+        background: radial-gradient(
+          ellipse,
+          rgba(59, 130, 246, 0.06) 0%,
+          transparent 70%
+        );
+        pointer-events: none;
+      }
+
+      .nt-greeting {
+        text-align: center;
+        margin-bottom: 8px;
+        position: relative;
+      }
+      .nt-time {
+        font-size: 64px;
+        font-weight: 300;
+        color: var(--text-primary);
+        letter-spacing: -3px;
+        line-height: 1;
+        margin-bottom: 6px;
+      }
+      .nt-time .nt-colon {
+        opacity: 0.4;
+        animation: colonBlink 2s ease-in-out infinite;
+      }
+      @keyframes colonBlink {
+        0%,
+        100% {
+          opacity: 0.4;
+        }
+        50% {
+          opacity: 0.15;
+        }
+      }
+      .nt-date {
+        font-size: 14px;
+        font-weight: 400;
+        color: var(--text-tertiary);
+        letter-spacing: 0.01em;
+      }
+
+      /* Command input — large centered */
+      .nt-command {
+        width: 100%;
+        max-width: 540px;
+        margin-top: 36px;
+        position: relative;
+      }
+      .nt-command-input-wrap {
+        display: flex;
+        align-items: center;
+        height: 46px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-xl);
+        padding: 0 18px;
+        gap: 12px;
+        cursor: text;
+        transition: all 0.25s var(--transition-smooth);
+      }
+      .nt-command-input-wrap:hover {
+        background: rgba(255, 255, 255, 0.06);
+        border-color: var(--border-medium);
+      }
+      .nt-command-input-wrap.focused {
+        background: rgba(255, 255, 255, 0.07);
+        border-color: var(--accent-blue);
+        box-shadow:
+          0 0 0 3px var(--accent-blue-glow),
+          0 8px 32px rgba(0, 0, 0, 0.25);
+      }
+      .nt-command-input-wrap .nc-icon {
+        color: var(--text-tertiary);
+        font-size: 18px;
+        flex-shrink: 0;
+        transition: color 0.2s;
+      }
+      .nt-command-input-wrap.focused .nc-icon {
+        color: var(--accent-blue);
+      }
+      .nt-command-input-wrap input {
+        flex: 1;
+        font-size: 15px;
+        font-weight: 400;
+        color: var(--text-primary);
+        background: none;
+        border: none;
+        outline: none;
+        font-family: inherit;
+      }
+      .nt-command-input-wrap input::placeholder {
+        color: var(--text-tertiary);
+        font-weight: 400;
+      }
+      .nt-command-input-wrap .nc-shortcut {
+        font-size: 10px;
+        color: var(--text-tertiary);
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border-subtle);
+        padding: 3px 8px;
+        border-radius: 6px;
+        font-family: "Inter", sans-serif;
+        flex-shrink: 0;
+        transition: opacity 0.15s;
+      }
+      .nt-command-input-wrap.focused .nc-shortcut {
+        opacity: 0;
+      }
+
+      .nt-hint {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        margin-top: 12px;
+      }
+      .nt-hint-item {
+        font-size: 11px;
+        color: var(--text-quaternary);
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        transition: color 0.2s;
+      }
+      .nt-hint-item:hover {
+        color: var(--text-tertiary);
+      }
+      .nt-hint-item kbd {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 18px;
+        height: 16px;
+        padding: 0 4px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid var(--border-subtle);
+        border-radius: 3px;
+        font-family: "Inter", sans-serif;
+        font-size: 9px;
+        font-weight: 500;
+        color: var(--text-tertiary);
+      }
+
+      /* Quick access grid */
+      .nt-section {
+        width: 100%;
+        max-width: 540px;
+        margin-top: 44px;
+      }
+      .nt-section-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 14px;
+        padding: 0 2px;
+      }
+      .nt-section-title {
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--text-tertiary);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .nt-section-title .iconify {
+        font-size: 12px;
+      }
+      .nt-section-action {
+        font-size: 11px;
+        color: var(--text-quaternary);
+        cursor: pointer;
+        transition: color 0.2s;
+        background: none;
+        border: none;
+        font-family: inherit;
+        padding: 2px 6px;
+        border-radius: 4px;
+      }
+      .nt-section-action:hover {
+        color: var(--text-secondary);
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .nt-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 10px;
+      }
+
+      .nt-grid-card {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+        padding: 18px 8px 14px;
+        border-radius: var(--radius-lg);
+        border: 1px solid transparent;
+        cursor: pointer;
+        transition: all 0.2s var(--transition-smooth);
+        position: relative;
+      }
+      .nt-grid-card:hover {
+        background: rgba(255, 255, 255, 0.03);
+        border-color: var(--border-subtle);
+      }
+      .nt-grid-card:active {
+        transform: scale(0.97);
+      }
+
+      .nt-grid-icon {
+        width: 42px;
+        height: 42px;
+        border-radius: var(--radius-md);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 20px;
+        transition: transform 0.2s var(--transition-spring);
+      }
+      .nt-grid-card:hover .nt-grid-icon {
+        transform: scale(1.08);
+      }
+
+      .nt-grid-name {
+        font-size: 11px;
+        font-weight: 500;
+        color: var(--text-secondary);
+        text-align: center;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 100%;
+        transition: color 0.2s;
+      }
+      .nt-grid-card:hover .nt-grid-name {
+        color: var(--text-primary);
+      }
+
+      .nt-grid-badge {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--accent-green);
+        box-shadow: 0 0 6px var(--accent-green-glow);
+      }
+
+      /* Recent items */
+      .nt-recent {
+        width: 100%;
+        max-width: 540px;
+        margin-top: 32px;
+      }
+      .nt-recent-list {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .nt-recent-item {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 12px;
+        border-radius: var(--radius-md);
+        cursor: pointer;
+        transition: all 0.15s;
+      }
+      .nt-recent-item:hover {
+        background: rgba(255, 255, 255, 0.04);
+      }
+      .nt-recent-icon {
+        width: 28px;
+        height: 28px;
+        border-radius: var(--radius-sm);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        font-size: 13px;
+      }
+      .nt-recent-text {
+        flex: 1;
+        min-width: 0;
+      }
+      .nt-recent-title {
+        font-size: 12.5px;
+        font-weight: 500;
+        color: var(--text-secondary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        transition: color 0.15s;
+      }
+      .nt-recent-item:hover .nt-recent-title {
+        color: var(--text-primary);
+      }
+      .nt-recent-desc {
+        font-size: 10.5px;
+        color: var(--text-tertiary);
+        margin-top: 1px;
+      }
+      .nt-recent-time {
+        font-size: 10px;
+        color: var(--text-quaternary);
+        flex-shrink: 0;
+      }
+
+      /* Bottom shortcuts bar */
+      .nt-bottom {
+        position: absolute;
+        bottom: 24px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        align-items: center;
+        gap: 20px;
+      }
+      .nt-bottom-item {
+        font-size: 10.5px;
+        color: var(--text-quaternary);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        transition: color 0.2s;
+        background: none;
+        border: none;
+        font-family: inherit;
+        padding: 4px 8px;
+        border-radius: 6px;
+      }
+      .nt-bottom-item:hover {
+        color: var(--text-tertiary);
+        background: rgba(255, 255, 255, 0.03);
+      }
+      .nt-bottom-item .iconify {
+        font-size: 13px;
+      }
+
+      /* ═══ TOAST ═══ */
+      .toast-container {
+        position: fixed;
+        top: 60px;
+        right: 16px;
+        z-index: 200;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .toast {
+        padding: 10px 16px;
+        background: var(--bg-glass-heavy);
+        backdrop-filter: blur(20px);
+        border: 1px solid var(--border-medium);
+        border-radius: var(--radius-md);
+        font-size: 12px;
+        color: var(--text-primary);
+        box-shadow: var(--shadow-elevated);
+        animation:
+          toastIn 0.3s var(--transition-spring),
+          toastOut 0.3s 2.5s var(--transition-smooth) forwards;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      @keyframes toastIn {
+        from {
+          opacity: 0;
+          transform: translateX(20px);
+        }
+        to {
+          opacity: 1;
+          transform: translateX(0);
+        }
+      }
+      @keyframes toastOut {
+        to {
+          opacity: 0;
+          transform: translateX(20px);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="desky-shell">
+      <!-- ═══ COMMAND BAR ═══ -->
+      <div class="command-bar">
+        <div class="traffic-lights">
+          <div class="traffic-light tl-close"></div>
+          <div class="traffic-light tl-minimize"></div>
+          <div class="traffic-light tl-maximize"></div>
+        </div>
+        <div class="user-avatar" title="User Profile">
+          <svg viewBox="0 0 24 24">
+            <path
+              d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"
+            />
+          </svg>
+        </div>
+        <div class="omnibar-container">
+          <div class="omnibar" id="omnibar">
+            <span class="iconify ob-icon" data-icon="lucide:search"></span>
+            <input
+              class="ob-text"
+              type="text"
+              placeholder="Search files, run commands, or ask AI…"
+              autocomplete="off"
+            />
+            <span class="ob-shortcut">⌘ K</span>
+          </div>
+        </div>
+        <div class="command-bar-right">
+          <button
+            class="overview-toggle"
+            id="overviewToggle"
+            onclick="showToast('Workspace overview')"
+            title="Overview"
+          >
+            <div class="tabs-icon">
+              <div class="win win-back">
+                <div class="dots">
+                  <div class="dot"></div>
+                  <div class="dot"></div>
+                  <div class="dot"></div>
+                </div>
+              </div>
+              <div class="win win-front">
+                <div class="dots">
+                  <div class="dot"></div>
+                  <div class="dot"></div>
+                  <div class="dot"></div>
+                </div>
+              </div>
+            </div>
+          </button>
+        </div>
+      </div>
+
+      <!-- ═══ MAIN AREA ═══ -->
+      <div class="main-area">
+        <div class="workspace-navigator">
+          <div class="nav-item" title="Figma">
+            <div
+              class="app-icon"
+              style="
+                background: linear-gradient(
+                  135deg,
+                  #a259ff,
+                  #f24e1e,
+                  #ff7262,
+                  #1abcfe,
+                  #0acf83
+                );
+              "
+            >
+              <svg width="14" height="14" viewBox="0 0 38 57" fill="none">
+                <path
+                  d="M19 28.5a9.5 9.5 0 1 1 19 0 9.5 9.5 0 0 1-19 0z"
+                  fill="#1ABCFE"
+                />
+                <path
+                  d="M0 47.5a9.5 9.5 0 0 1 9.5-9.5H19v9.5a9.5 9.5 0 1 1-19 0z"
+                  fill="#0ACF83"
+                />
+                <path d="M19 0v19h9.5a9.5 9.5 0 1 0 0-19H19z" fill="#FF7262" />
+                <path
+                  d="M0 9.5A9.5 9.5 0 0 1 9.5 0H19v19H9.5A9.5 9.5 0 0 1 0 9.5z"
+                  fill="#F24E1E"
+                />
+                <path
+                  d="M0 28.5a9.5 9.5 0 0 1 9.5-9.5H19v19H9.5A9.5 9.5 0 0 1 0 28.5z"
+                  fill="#A259FF"
+                />
+              </svg>
+            </div>
+          </div>
+          <div class="nav-item" title="GitHub">
+            <div
+              class="app-icon"
+              style="
+                background: #161b22;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+              "
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="#fff">
+                <path
+                  d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"
+                />
+              </svg>
+            </div>
+          </div>
+          <div class="nav-item" title="Linear">
+            <div
+              class="app-icon"
+              style="background: linear-gradient(135deg, #5e6ad2, #8b5cf6)"
+            >
+              <svg width="14" height="14" viewBox="0 0 100 100" fill="none">
+                <path
+                  d="M2.4 61.4L38 97c3.2 3.2 8.4 3.2 11.6 0l7.2-7.2c3.2-3.2 3.2-8.4 0-11.6L38 59.4l-20 2c-3.6.4-10.4-.6-15.6 0z"
+                  fill="#fff"
+                />
+                <path
+                  d="M97.6 38.6L62 3C58.8-.2 53.6-.2 50.4 3l-7.2 7.2c-3.2 3.2-3.2 8.4 0 11.6L62 40.6l20-2c3.6-.4 10.4.6 15.6 0z"
+                  fill="#fff"
+                  opacity="0.6"
+                />
+              </svg>
+            </div>
+          </div>
+          <div class="nav-item" title="Notion">
+            <div class="app-icon" style="background: #fff">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M4.459 4.208c.746.606 1.026.56 2.428.466l13.215-.793c.28 0 .047-.28-.046-.326L17.86 1.968c-.42-.326-.98-.7-2.055-.607L2.58 2.583c-.466.046-.56.28-.374.466l2.253 1.16zm.793 3.08v13.904c0 .747.373 1.027 1.213.98l14.523-.84c.84-.046.933-.56.933-1.166V6.354c0-.606-.233-.933-.747-.886L6.4 6.308c-.56.046-.747.326-.747.98zm14.337.42c.093.42 0 .84-.42.886l-.7.14v10.264c-.607.327-1.167.514-1.634.514-.746 0-.933-.234-1.493-.933l-4.573-7.186v6.952l1.44.327s0 .84-1.167.84l-3.22.187c-.093-.187 0-.653.327-.746l.84-.233V9.854L7.822 9.76c-.093-.42.14-1.026.793-1.073l3.454-.233 4.76 7.28v-6.44l-1.213-.14c-.093-.513.28-.886.747-.933l3.127-.187z"
+                  fill="#191919"
+                />
+              </svg>
+            </div>
+          </div>
+          <div class="nav-item" title="Slack">
+            <div
+              class="app-icon"
+              style="
+                background: linear-gradient(
+                  135deg,
+                  #36c5f0,
+                  #2eb67d,
+                  #ecb22e,
+                  #e01e5a
+                );
+              "
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="#fff">
+                <path
+                  d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zm1.271 0a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313z"
+                />
+                <path
+                  d="M8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zm0 1.271a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312z"
+                />
+                <path
+                  d="M18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zm-1.27 0a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.163 0a2.528 2.528 0 0 1 2.523 2.522v6.312z"
+                />
+                <path
+                  d="M15.163 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.163 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zm0-1.27a2.527 2.527 0 0 1-2.52-2.523 2.527 2.527 0 0 1 2.52-2.52h6.315A2.528 2.528 0 0 1 24 15.163a2.528 2.528 0 0 1-2.522 2.523h-6.315z"
+                />
+              </svg>
+            </div>
+          </div>
+          <div class="nav-separator"></div>
+          <div class="nav-branch">
+            <span
+              class="iconify"
+              style="font-size: 14px; color: var(--accent-purple)"
+              data-icon="lucide:git-branch"
+            ></span>
+            <div class="branch-line"></div>
+            <div class="branch-dot filled"></div>
+            <div class="branch-line"></div>
+            <div class="branch-dot"></div>
+          </div>
+          <div class="nav-spacer"></div>
+          <div class="nav-item" title="Settings">
+            <div class="app-icon" style="background: rgba(255, 255, 255, 0.06)">
+              <span
+                class="iconify"
+                data-icon="lucide:settings"
+                style="font-size: 16px; color: var(--text-tertiary)"
+              ></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ═══ NEW TAB PAGE ═══ -->
+        <div class="new-tab-page">
+          <!-- Time & Date -->
+          <div class="nt-greeting">
+            <div class="nt-time" id="ntTime">
+              <span id="ntHour">14</span><span class="nt-colon">:</span
+              ><span id="ntMin">35</span>
+            </div>
+            <div class="nt-date" id="ntDate"></div>
+          </div>
+
+          <!-- Command Input -->
+          <div class="nt-command">
+            <div class="nt-command-input-wrap" id="ntInputWrap">
+              <span class="iconify nc-icon" data-icon="lucide:search"></span>
+              <input
+                type="text"
+                placeholder="Search, command, or ask AI…"
+                autocomplete="off"
+                id="ntInput"
+              />
+              <span class="nc-shortcut">⌘ K</span>
+            </div>
+            <div class="nt-hint">
+              <span class="nt-hint-item"><kbd>⌘</kbd><kbd>K</kbd> Search</span>
+              <span class="nt-hint-item"><kbd>⌘</kbd><kbd>N</kbd> New</span>
+              <span class="nt-hint-item"
+                ><kbd>⌘</kbd><kbd>O</kbd> Overview</span
+              >
+            </div>
+          </div>
+
+          <!-- Pinned Workspaces -->
+          <div class="nt-section">
+            <div class="nt-section-header">
+              <div class="nt-section-title">
+                <span class="iconify" data-icon="lucide:pin"></span>
+                Pinned
+              </div>
+              <button class="nt-section-action">Edit</button>
+            </div>
+            <div class="nt-grid">
+              <div
+                class="nt-grid-card"
+                onclick="showToast('Opening: Design System')"
+              >
+                <div
+                  class="nt-grid-icon"
+                  style="
+                    background: linear-gradient(
+                      135deg,
+                      rgba(59, 130, 246, 0.18),
+                      rgba(59, 130, 246, 0.06)
+                    );
+                    color: var(--accent-blue);
+                  "
+                >
+                  <span class="iconify" data-icon="lucide:palette"></span>
+                </div>
+                <div class="nt-grid-name">Design System</div>
+              </div>
+              <div
+                class="nt-grid-card"
+                onclick="showToast('Opening: Strategy')"
+              >
+                <div
+                  class="nt-grid-icon"
+                  style="
+                    background: linear-gradient(
+                      135deg,
+                      rgba(167, 139, 250, 0.18),
+                      rgba(167, 139, 250, 0.06)
+                    );
+                    color: var(--accent-purple);
+                  "
+                >
+                  <span class="iconify" data-icon="lucide:target"></span>
+                </div>
+                <div class="nt-grid-name">Strategy</div>
+              </div>
+              <div
+                class="nt-grid-card"
+                onclick="showToast('Opening: Dev + Specs')"
+              >
+                <div
+                  class="nt-grid-icon"
+                  style="
+                    background: linear-gradient(
+                      135deg,
+                      rgba(52, 211, 153, 0.18),
+                      rgba(52, 211, 153, 0.06)
+                    );
+                    color: var(--accent-green);
+                  "
+                >
+                  <span class="iconify" data-icon="lucide:code-2"></span>
+                </div>
+                <div class="nt-grid-name">Dev + Specs</div>
+              </div>
+              <div
+                class="nt-grid-card"
+                onclick="showToast('Opening: QA Testing')"
+              >
+                <div
+                  class="nt-grid-icon"
+                  style="
+                    background: linear-gradient(
+                      135deg,
+                      rgba(248, 113, 113, 0.18),
+                      rgba(248, 113, 113, 0.06)
+                    );
+                    color: var(--accent-rose);
+                  "
+                >
+                  <span class="iconify" data-icon="lucide:flask-conical"></span>
+                </div>
+                <div class="nt-grid-name">QA Testing</div>
+              </div>
+              <div
+                class="nt-grid-card"
+                onclick="showToast('Opening: Research Notes')"
+              >
+                <div
+                  class="nt-grid-icon"
+                  style="
+                    background: linear-gradient(
+                      135deg,
+                      rgba(251, 191, 36, 0.18),
+                      rgba(251, 191, 36, 0.06)
+                    );
+                    color: var(--accent-amber);
+                  "
+                >
+                  <span class="iconify" data-icon="lucide:book-open"></span>
+                </div>
+                <div class="nt-grid-name">Research</div>
+              </div>
+              <div
+                class="nt-grid-card"
+                onclick="showToast('Opening: Sprint Review')"
+              >
+                <div
+                  class="nt-grid-icon"
+                  style="
+                    background: linear-gradient(
+                      135deg,
+                      rgba(251, 146, 60, 0.18),
+                      rgba(251, 146, 60, 0.06)
+                    );
+                    color: var(--accent-orange);
+                  "
+                >
+                  <span class="iconify" data-icon="lucide:kanban"></span>
+                </div>
+                <div class="nt-grid-name">Sprint Review</div>
+              </div>
+              <div
+                class="nt-grid-card"
+                onclick="showToast('Opening: API Docs')"
+              >
+                <div
+                  class="nt-grid-icon"
+                  style="
+                    background: linear-gradient(
+                      135deg,
+                      rgba(236, 72, 153, 0.18),
+                      rgba(236, 72, 153, 0.06)
+                    );
+                    color: #ec4899;
+                  "
+                >
+                  <span class="iconify" data-icon="lucide:braces"></span>
+                </div>
+                <div class="nt-grid-name">API Docs</div>
+              </div>
+              <div
+                class="nt-grid-card"
+                onclick="showToast('Opening: Agent Branch')"
+              >
+                <div
+                  class="nt-grid-icon"
+                  style="
+                    background: linear-gradient(
+                      135deg,
+                      rgba(167, 139, 250, 0.18),
+                      rgba(167, 139, 250, 0.06)
+                    );
+                    color: var(--accent-purple);
+                  "
+                >
+                  <span class="iconify" data-icon="lucide:sparkles"></span>
+                </div>
+                <div class="nt-grid-name">Agent Branch</div>
+                <div class="nt-grid-badge"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Recent Files -->
+          <div class="nt-recent">
+            <div class="nt-section-header">
+              <div class="nt-section-title">
+                <span class="iconify" data-icon="lucide:clock"></span>
+                Recent
+              </div>
+              <button class="nt-section-action">View all</button>
+            </div>
+            <div class="nt-recent-list">
+              <div
+                class="nt-recent-item"
+                onclick="showToast('Open: design-tokens.json')"
+              >
+                <div
+                  class="nt-recent-icon"
+                  style="
+                    background: rgba(59, 130, 246, 0.1);
+                    color: var(--accent-blue);
+                  "
+                >
+                  <span class="iconify" data-icon="lucide:braces"></span>
+                </div>
+                <div class="nt-recent-text">
+                  <div class="nt-recent-title">design-tokens.json</div>
+                  <div class="nt-recent-desc">Design System / Tokens</div>
+                </div>
+                <div class="nt-recent-time">3 min ago</div>
+              </div>
+              <div
+                class="nt-recent-item"
+                onclick="showToast('Open: component-specs.tsx')"
+              >
+                <div
+                  class="nt-recent-icon"
+                  style="
+                    background: rgba(52, 211, 153, 0.1);
+                    color: var(--accent-green);
+                  "
+                >
+                  <span class="iconify" data-icon="lucide:file-code-2"></span>
+                </div>
+                <div class="nt-recent-text">
+                  <div class="nt-recent-title">component-specs.tsx</div>
+                  <div class="nt-recent-desc">Design System / Components</div>
+                </div>
+                <div class="nt-recent-time">18 min ago</div>
+              </div>
+              <div
+                class="nt-recent-item"
+                onclick="showToast('Open: spacing-scale.css')"
+              >
+                <div
+                  class="nt-recent-icon"
+                  style="
+                    background: rgba(251, 191, 36, 0.1);
+                    color: var(--accent-amber);
+                  "
+                >
+                  <span class="iconify" data-icon="lucide:file-code"></span>
+                </div>
+                <div class="nt-recent-text">
+                  <div class="nt-recent-title">spacing-scale.css</div>
+                  <div class="nt-recent-desc">Design System / Styles</div>
+                </div>
+                <div class="nt-recent-time">1h ago</div>
+              </div>
+              <div
+                class="nt-recent-item"
+                onclick="showToast('Open: sprint-planning.md')"
+              >
+                <div
+                  class="nt-recent-icon"
+                  style="
+                    background: rgba(167, 139, 250, 0.1);
+                    color: var(--accent-purple);
+                  "
+                >
+                  <span class="iconify" data-icon="lucide:file-text"></span>
+                </div>
+                <div class="nt-recent-text">
+                  <div class="nt-recent-title">sprint-planning.md</div>
+                  <div class="nt-recent-desc">Strategy / Meetings</div>
+                </div>
+                <div class="nt-recent-time">3h ago</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Bottom bar -->
+          <div class="nt-bottom">
+            <button
+              class="nt-bottom-item"
+              onclick="showToast('New workspace created')"
+            >
+              <span class="iconify" data-icon="lucide:plus"></span>
+              New Workspace
+            </button>
+            <button
+              class="nt-bottom-item"
+              onclick="showToast('Import dialog opened')"
+            >
+              <span class="iconify" data-icon="lucide:download"></span>
+              Import
+            </button>
+            <button
+              class="nt-bottom-item"
+              onclick="showToast('Templates opened')"
+            >
+              <span class="iconify" data-icon="lucide:layout-template"></span>
+              Templates
+            </button>
+            <button
+              class="nt-bottom-item"
+              onclick="showToast('Keyboard shortcuts')"
+            >
+              <span class="iconify" data-icon="lucide:keyboard"></span>
+              Shortcuts
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script>
+      // ═══ LIVE CLOCK ═══
+      function updateClock() {
+        const now = new Date();
+        const h = String(now.getHours()).padStart(2, "0");
+        const m = String(now.getMinutes()).padStart(2, "0");
+        document.getElementById("ntHour").textContent = h;
+        document.getElementById("ntMin").textContent = m;
+
+        const days = [
+          "Sunday",
+          "Monday",
+          "Tuesday",
+          "Wednesday",
+          "Thursday",
+          "Friday",
+          "Saturday",
+        ];
+        const months = [
+          "January",
+          "February",
+          "March",
+          "April",
+          "May",
+          "June",
+          "July",
+          "August",
+          "September",
+          "October",
+          "November",
+          "December",
+        ];
+        document.getElementById("ntDate").textContent =
+          `${days[now.getDay()]}, ${months[now.getMonth()]} ${now.getDate()}`;
+      }
+      updateClock();
+      setInterval(updateClock, 1000);
+
+      // ═══ COMMAND INPUT FOCUS ═══
+      const ntInput = document.getElementById("ntInput");
+      const ntInputWrap = document.getElementById("ntInputWrap");
+
+      ntInput.addEventListener("focus", () =>
+        ntInputWrap.classList.add("focused"),
+      );
+      ntInput.addEventListener("blur", () =>
+        ntInputWrap.classList.remove("focused"),
+      );
+      ntInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && ntInput.value.trim()) {
+          showToast("Search: " + ntInput.value.trim());
+          ntInput.value = "";
+          ntInput.blur();
+        }
+      });
+
+      // Click wrap to focus
+      ntInputWrap.addEventListener("click", () => ntInput.focus());
+
+      // ═══ TOAST ═══
+      function showToast(message) {
+        const container = document.getElementById("toastContainer");
+        const toast = document.createElement("div");
+        toast.className = "toast";
+        toast.innerHTML = `<span class="iconify" data-icon="lucide:info" style="font-size:14px;color:var(--accent-blue);flex-shrink:0"></span>${message}`;
+        container.appendChild(toast);
+        setTimeout(() => toast.remove(), 3000);
+      }
+
+      // ═══ KEYBOARD ═══
+      document.addEventListener("keydown", (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+          e.preventDefault();
+          ntInput.focus();
+        }
+        if ((e.metaKey || e.ctrlKey) && e.key === "n") {
+          e.preventDefault();
+          showToast("New workspace created");
+        }
+        if ((e.metaKey || e.ctrlKey) && e.key === "o") {
+          e.preventDefault();
+          showToast("Workspace overview");
+        }
+      });
+
+      // ═══ TRAFFIC LIGHTS ═══
+      document
+        .querySelector(".tl-close")
+        .addEventListener("click", () => showToast("Window close — simulated"));
+      document
+        .querySelector(".tl-minimize")
+        .addEventListener("click", () =>
+          showToast("Window minimize — simulated"),
+        );
+      document.querySelector(".tl-maximize").addEventListener("click", () => {
+        if (!document.fullscreenElement)
+          document.documentElement.requestFullscreen?.();
+        else document.exitFullscreen?.();
+      });
+    </script>
+  </body>
+</html>

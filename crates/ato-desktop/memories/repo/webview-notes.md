@@ -1,0 +1,3 @@
+- ato-desktop builds Wry child webviews in src/webview.rs and currently wires preload, IPC, custom protocol, page-load, and title handlers only.
+- ExternalUrl routes explicitly set inject_bridge=false in build_flags_for_route, so regular websites do not get the host preload bridge.
+- No with_new_window_req_handler is configured in src/webview.rs, so popup/new-window OAuth flows rely on unsupported default behavior.

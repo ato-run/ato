@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Ato Desktop
+GenericName=Capsule Runner
+Comment=Run sandboxed app capsules locally
+Exec=ato-desktop %U
+Icon=ato-desktop
+Terminal=false
+Categories=Development;Utility;
+StartupWMClass=ato-desktop
+# Register handlers for the ato:// and capsule:// URL schemes so that
+# `xdg-mime default ato-desktop.desktop x-scheme-handler/ato` (run as
+# part of post-install) routes external links into the desktop app.
+MimeType=x-scheme-handler/ato;x-scheme-handler/capsule;
