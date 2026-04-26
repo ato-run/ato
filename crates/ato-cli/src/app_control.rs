@@ -1286,7 +1286,7 @@ mod tests {
         // (`ato-desktop`) can run the same golden checks against the same
         // bytes. See `docs/monorepo-consolidation-plan.md` §M4.
         let snapshot_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("core/tests/fixtures/ccp")
+            .join("../capsule-core/tests/fixtures/ccp")
             .join(format!("{name}.json"));
         let expected =
             fs::read_to_string(&snapshot_path).expect("snapshot fixture should be readable");

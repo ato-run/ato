@@ -20,7 +20,7 @@ gpui-inspector = ["gpui-component/inspector"]
 [dependencies]
 anyhow = "1.0"
 base64 = "0.22"
-capsule-core = { path = "../ato-cli/core" }
+capsule-core = { path = "../capsule-core" }
 dirs = "5.0"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "15d86607" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "15d86607", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
