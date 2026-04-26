@@ -1092,6 +1092,14 @@ run = "node main.js"
             "console.log('ok');",
         )
         .expect("write source script");
+        // resolve_launch_working_dir promotes source/ to working_dir only
+        // when source/package.json exists (Node project marker). Drop a
+        // marker so the test exercises the source-layout path.
+        std::fs::write(
+            tmp.path().join("source").join("package.json"),
+            "{\"name\":\"app\"}",
+        )
+        .expect("write package.json");
 
         let plan = plan_from_manifest(
             &tmp,
