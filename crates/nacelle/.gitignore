@@ -1,0 +1,47 @@
+# Rust build artifacts
+/target/
+*.rlib
+*.rmeta
+
+# IDE and editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.local
+*.pem
+*.key
+samples/keys/*.json
+!samples/keys/*.sample.json
+
+# Local development
+/local-docs/
+/test-data/
+*.log
+
+# Build outputs
+build/
+dist/
+/release/
+
+# Docker
+.dockerignore
+
+# Archives
+.archives/
+
+# Test capsule .gitignore
+*.pyc
+__pycache__/
+.DS_Store
+*.capsule
+*.sig
+
+# Ignore self-extracting bundles
+samples/*-bundle
+*.bundle
