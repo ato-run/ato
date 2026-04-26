@@ -449,6 +449,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn with_retry_returns_first_success() {
         let calls = RefCell::new(0);
         let out = with_retry(fast_policy(3), "test", || {
@@ -461,6 +462,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn with_retry_eventually_succeeds_after_5xx() {
         let calls = RefCell::new(0);
         let out = with_retry(fast_policy(3), "test", || {
@@ -481,6 +483,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn with_retry_gives_up_after_max_attempts_and_returns_last_response() {
         let calls = RefCell::new(0);
         let out = with_retry(fast_policy(2), "test", || {
@@ -494,6 +497,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn with_retry_returns_immediately_on_4xx() {
         let calls = RefCell::new(0);
         let out = with_retry(fast_policy(3), "test", || {
@@ -506,6 +510,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn with_retry_retries_transport_errors() {
         let calls = RefCell::new(0);
         let out = with_retry(fast_policy(2), "test", || {
@@ -526,6 +531,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn with_retry_retries_on_cloudflare_1102_body() {
         let calls = RefCell::new(0);
         let out = with_retry(fast_policy(2), "test", || {

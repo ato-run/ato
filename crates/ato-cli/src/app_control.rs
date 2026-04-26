@@ -1505,6 +1505,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn load_state_marks_missing_service_root_as_unmaterialized() {
         let _guard = test_env_lock().lock().expect("lock env");
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1533,6 +1534,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn bootstrap_finalize_materializes_missing_service_root() {
         let _guard = test_env_lock().lock().expect("lock env");
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1574,6 +1576,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn repair_restart_services_recreates_missing_service_root() {
         let _guard = test_env_lock().lock().expect("lock env");
         let temp = tempfile::tempdir().expect("tempdir");

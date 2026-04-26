@@ -794,6 +794,7 @@ fn native_install_documented_json_contract_fields_are_present() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn native_install_materializes_ato_managed_environment_bootstrap_state() {
     let _env_lock = acquire_test_env_lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1896,6 +1897,7 @@ async fn download_github_repository_at_ref_maps_private_repo_404_to_auth_message
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
 async fn download_github_repository_at_ref_uses_github_token_for_public_archive_fetch() {
     use axum::http::{HeaderMap, StatusCode};
     use axum::response::IntoResponse;

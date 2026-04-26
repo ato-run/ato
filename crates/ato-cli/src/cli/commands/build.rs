@@ -1515,6 +1515,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn v03_build_cache_restores_outputs_and_skips_rebuild() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cache_home = tmp.path().join("ato-home");
@@ -1735,6 +1736,7 @@ run = "main.js""#;
     }
 
     #[test]
+    #[serial_test::serial]
     fn injected_native_delivery_build_does_not_materialize_capsule_toml() {
         if !cfg!(target_os = "macos") {
             return;

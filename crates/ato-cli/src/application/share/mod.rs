@@ -3155,6 +3155,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn capture_workspace_detects_sources_steps_services_and_env() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path();
@@ -3223,6 +3224,7 @@ mod tests {
     // Regression test for: npm ENOENT on `ato run` because cwd was "." while the
     // repo was cloned into `<temp>/<folder>/`.
     #[test]
+    #[serial_test::serial]
     fn capture_workspace_single_repo_cwds_match_source_path() {
         let temp = tempfile::tempdir().expect("tempdir");
         // The workspace root is itself the git repo (single-repo encap scenario).
