@@ -2322,9 +2322,13 @@ fn test_build_invalid_manifest_outputs_single_json_error() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_publish_json_invalid_artifact_prepare_range_uses_diagnostic_envelope() {
+    let tmp = tempdir().unwrap();
+    fs::write(tmp.path().join("demo.capsule"), b"not a real capsule").unwrap();
     let output = Command::cargo_bin("ato")
         .unwrap()
+        .current_dir(tmp.path())
         .args([
             "publish",
             "--json",
@@ -2348,6 +2352,7 @@ fn test_publish_json_invalid_artifact_prepare_range_uses_diagnostic_envelope() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_publish_json_artifact_build_reports_six_phase_matrix() {
     let tmp = tempdir().unwrap();
     let build_dir = tmp.path().join("build-project");
@@ -2372,7 +2377,8 @@ fn test_publish_json_artifact_build_reports_six_phase_matrix() {
 
     assert!(
         output.status.success(),
-        "publish failed: {}",
+        "publish failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
