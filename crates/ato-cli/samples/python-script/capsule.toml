@@ -1,0 +1,10 @@
+schema_version = "0.3"
+name = "python-script"
+version = "0.1.0"
+type = "app"
+runtime = "source/python"
+run = "source/main.py"
+runtime_version = "3.11"
+
+[metadata]
+description = "Python script sample"

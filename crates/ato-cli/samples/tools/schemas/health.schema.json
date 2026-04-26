@@ -1,0 +1,297 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ato.run/schemas/health.schema.json",
+  "title": "ato sample health.toml",
+  "description": "Declarative CI health-check spec for a single ato sample. One file describes every layer of verification: static, smoke, functional, contract, cross-platform, regression, performance, compat.",
+  "type": "object",
+  "required": ["meta", "run", "expect", "platforms", "compat"],
+  "additionalProperties": false,
+  "properties": {
+    "meta": {
+      "type": "object",
+      "required": ["title", "runtime", "difficulty", "tier"],
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "runtime": {
+          "type": "string",
+          "enum": [
+            "web/static",
+            "web/deno",
+            "web/node",
+            "web/python",
+            "source/deno",
+            "source/node",
+            "source/python",
+            "source/native",
+            "wasm/wasmtime",
+            "oci/runc"
+          ]
+        },
+        "difficulty": {
+          "type": "string",
+          "enum": ["beginner", "intermediate", "advanced"]
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["00-quickstart", "01-capabilities", "02-apps", "03-limitations"]
+        },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+          "maxItems": 8
+        },
+        "time_estimate": {
+          "type": "string",
+          "pattern": "^~(1|5|15|30|60)min$"
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "required": ["cmd"],
+      "additionalProperties": false,
+      "properties": {
+        "cmd": { "type": "string", "minLength": 1 },
+        "cwd": { "type": "string", "default": "." },
+        "background": { "type": "boolean", "default": false },
+        "timeout_s": { "type": "integer", "minimum": 1, "maximum": 600, "default": 60 },
+        "ready_probe": {
+          "description": "For background runs — how to know the process is ready.",
+          "type": "object",
+          "oneOf": [
+            { "required": ["http_url"] },
+            { "required": ["stdout_regex"] },
+            { "required": ["file_exists"] }
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "http_url": { "type": "string", "format": "uri" },
+            "stdout_regex": { "type": "string" },
+            "file_exists": { "type": "string" },
+            "timeout_s": { "type": "integer", "minimum": 1, "maximum": 120, "default": 30 }
+          }
+        }
+      }
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "required": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" }
+        },
+        "optional": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" }
+        },
+        "ci_secrets": {
+          "description": "Mock values CI injects for required env vars. Use 'mock' literal for non-sensitive placeholders.",
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "requires": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "network_mode": {
+          "type": "string",
+          "enum": ["none", "allowlist", "offline-ok"]
+        },
+        "allow_domains": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "fs_read": { "type": "array", "items": { "type": "string" } },
+        "fs_write": { "type": "array", "items": { "type": "string" } },
+        "processes": { "type": "integer", "minimum": 1, "maximum": 8, "default": 1 },
+        "requires_desktop": {
+          "description": "Requires ato-desktop GUI to be running (skipped in headless CI).",
+          "type": "boolean",
+          "default": false
+        },
+        "requires_gpu": {
+          "description": "Requires GPU hardware (Metal, CUDA, or WebGPU).",
+          "type": "boolean",
+          "default": false
+        },
+        "requires_network": {
+          "description": "Requires outbound internet access.",
+          "type": "boolean",
+          "default": false
+        },
+        "requires_tty": {
+          "description": "Requires an interactive TTY (consent UI, prompts).",
+          "type": "boolean",
+          "default": false
+        },
+        "requires_docker": {
+          "description": "Requires Docker Engine or Docker Desktop to be running.",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "expect": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "exit_code": { "type": "integer", "default": 0 },
+        "exit_nonzero": {
+          "description": "For Tier 03 limitation samples. When true, any non-zero exit is a pass; use stderr_regex to assert the specific error.",
+          "type": "boolean",
+          "default": false
+        },
+        "stdout_regex": { "type": "string" },
+        "stderr_regex": { "type": "string" },
+        "stderr_silent": { "type": "boolean", "default": false },
+        "http": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["url", "status"],
+            "additionalProperties": false,
+            "properties": {
+              "url": { "type": "string", "format": "uri" },
+              "status": { "type": "integer" },
+              "body_regex": { "type": "string" },
+              "timeout_s": { "type": "integer", "default": 10 }
+            }
+          }
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path"],
+            "additionalProperties": false,
+            "properties": {
+              "path": { "type": "string" },
+              "exists": { "type": "boolean", "default": true },
+              "content_regex": { "type": "string" },
+              "min_bytes": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    "mocks": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "http": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["upstream_env"],
+            "additionalProperties": false,
+            "properties": {
+              "upstream_env": {
+                "description": "Env var to rewrite so the sample hits the mock instead of the real upstream.",
+                "type": "string"
+              },
+              "cassette": { "type": "string" },
+              "wiremock_mapping": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "regression": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "golden_path": { "type": "string" },
+        "normalizers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["pattern", "replacement"],
+            "additionalProperties": false,
+            "properties": {
+              "pattern": { "type": "string" },
+              "replacement": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "platforms": {
+      "type": "object",
+      "required": ["linux"],
+      "additionalProperties": false,
+      "properties": {
+        "linux": { "$ref": "#/$defs/platformMode" },
+        "macos": { "$ref": "#/$defs/platformMode" },
+        "windows": { "$ref": "#/$defs/platformMode" }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "p95_ms": { "type": "integer", "minimum": 1 },
+        "max_rss_mb": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "compat": {
+      "type": "object",
+      "required": ["min_ato_version"],
+      "additionalProperties": false,
+      "properties": {
+        "min_ato_version": {
+          "description": "Immutable once set. Enforced by git-history lint.",
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "tested_against": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["stable", "main"]
+        },
+        "breaks_after_version": {
+          "description": "Set to the last known good ato version when this sample stops working. Empty string means still working.",
+          "type": "string",
+          "pattern": "^([0-9]+\\.[0-9]+\\.[0-9]+)?$"
+        }
+      }
+    },
+    "expected_behavior": {
+      "description": "Captures the conformance status when spec and implementation diverge.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "enum": ["pass", "fail", "fail-after-version", "advisory-gap"],
+          "description": "advisory-gap = spec says fail but implementation passes (e.g. required_env not enforced)"
+        },
+        "upstream_issue": {
+          "type": "string",
+          "description": "URL or file path to the upstream issue tracking this gap"
+        }
+      }
+    },
+    "flaky": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "quarantined": { "type": "boolean", "default": false },
+        "issue": { "type": "string", "format": "uri" },
+        "retries": { "type": "integer", "minimum": 0, "maximum": 3, "default": 0 }
+      },
+      "if": { "properties": { "quarantined": { "const": true } } },
+      "then": { "required": ["issue"] },
+      "else": true
+    }
+  },
+  "$defs": {
+    "platformMode": {
+      "type": "string",
+      "enum": ["full", "smoke", "skip"]
+    }
+  }
+}

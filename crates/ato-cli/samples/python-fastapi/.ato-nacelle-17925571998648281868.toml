@@ -1,0 +1,10 @@
+name = "python-fastapi"
+version = "0.1.0"
+
+[execution]
+command = "run --offline python3 main.py"
+entrypoint = "uv"
+
+[language]
+language = "python"
+version = "3.11.10"
