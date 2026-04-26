@@ -1,0 +1,10 @@
+schema_version = "0.3"
+name = "python-backend-html"
+version = "0.1.0"
+type = "app"
+runtime = "source/python"
+run = "server.py"
+port = 8080
+
+[metadata]
+description = "Python backend + HTML sample"

@@ -1,0 +1,26 @@
+{
+  "version": "1.0.0",
+  "services": {
+    "main": {
+      "executable": "npm",
+      "args": [
+        "run",
+        "dev"
+      ],
+      "cwd": "source"
+    }
+  },
+  "sandbox": {
+    "enabled": true,
+    "network": {
+      "enabled": true,
+      "enforcement": "best_effort"
+    }
+  },
+  "metadata": {
+    "name": "react-vite",
+    "version": "0.1.0",
+    "generated_by": "ato-cli v0.1.0",
+    "source_manifest": "sha256:7be97c1078dcae3a6fdf8e6476ea703464a9b374612b9a8e315d8defd23960cd"
+  }
+}

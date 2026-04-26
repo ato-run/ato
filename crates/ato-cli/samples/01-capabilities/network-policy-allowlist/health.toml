@@ -1,0 +1,25 @@
+[meta]
+title = "network-policy-allowlist: egress allow positive case"
+runtime = "source/node"
+difficulty = "beginner"
+tier = "01-capabilities"
+tags = ["network", "egress", "allowlist"]
+
+[run]
+cmd = "ato run ."
+timeout_s = 60
+
+[requires]
+network_mode = "allowlist"
+allow_domains = ["httpbin.org"]
+
+[expect]
+exit_code = 0
+stdout_regex = "origin"
+
+[platforms]
+linux = "full"
+macos = "full"
+
+[compat]
+min_ato_version = "0.4.69"

@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Desky Mock Wails</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "Space Grotesk", sans-serif;
+        background: linear-gradient(180deg, #06111b, #081522 55%, #09111f 100%);
+        color: #f7fafc;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+      }
+
+      main {
+        min-height: 100vh;
+        display: grid;
+        grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr);
+        gap: 18px;
+        padding: 22px;
+      }
+
+      .panel {
+        border-radius: 24px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(10, 18, 31, 0.78);
+        backdrop-filter: blur(18px);
+      }
+
+      .hero,
+      .sidebar {
+        padding: 24px;
+      }
+
+      .eyebrow,
+      .label {
+        font-size: 11px;
+        letter-spacing: 0.2em;
+        text-transform: uppercase;
+        color: #8cbcc4;
+      }
+
+      h1 {
+        margin: 12px 0 0;
+        font-size: clamp(2rem, 4vw, 3.2rem);
+        line-height: 0.95;
+      }
+
+      p {
+        color: #b8c4d3;
+        line-height: 1.6;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .card {
+        margin-top: 18px;
+        padding: 16px;
+        border-radius: 18px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      button {
+        border: 0;
+        border-radius: 14px;
+        padding: 12px 14px;
+        font: inherit;
+        font-weight: 600;
+        color: #021018;
+        background: linear-gradient(90deg, #8de5ff, #7df2bf);
+        cursor: pointer;
+      }
+
+      button.secondary {
+        color: #f7fafc;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: rgba(255, 255, 255, 0.06);
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 16px;
+      }
+
+      pre {
+        margin: 0;
+        font-size: 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        color: #dce5ee;
+        line-height: 1.6;
+      }
+
+      @media (max-width: 920px) {
+        main {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="panel hero">
+        <div class="eyebrow">Wails Guest</div>
+        <h1>Wails adapter projected through the Desky preload registry.</h1>
+        <p>
+          This mock guest expects both <code>window.runtime</code> and
+          <code>window.go.*</code>. It validates that Desky can normalize Wails
+          APIs into the same guest contract used by Tauri.
+        </p>
+        <div class="grid">
+          <div class="card">
+            <div class="label">Runtime invoke</div>
+            <div id="runtime-status">probing</div>
+          </div>
+          <div class="card">
+            <div class="label">Go binding</div>
+            <div id="go-status">probing</div>
+          </div>
+          <div class="card">
+            <div class="label">Mode</div>
+            <div id="mode-status">probing</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="label">Actions</div>
+          <div class="actions">
+            <button id="ping">runtime.Invoke("ping")</button>
+            <button id="go-ping">window.go.main.App.Ping</button>
+            <button id="set-title">Set title</button>
+            <button id="read-file">Read backend file</button>
+            <button id="forbidden-read" class="secondary">
+              Try forbidden read
+            </button>
+          </div>
+        </div>
+      </section>
+      <aside class="panel sidebar">
+        <div class="card">
+          <div class="label">Results</div>
+          <pre id="output">idle</pre>
+        </div>
+      </aside>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
