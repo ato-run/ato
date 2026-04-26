@@ -245,11 +245,15 @@ tracing = "0.1"
 
 ### M3 — Vendored deps の整理
 
-| 対象 | 対応 |
-|---|---|
-| `apps/ato-desktop/.tmp/vendor/gpui-component-local/` | `crates/ato-desktop/vendor/gpui-component/` に正式昇格 (`.tmp/` という名前は誤解の元) |
-| `gpui` Zed fork | git submodule として `vendor/gpui` に固定 |
-| `apps/ato-cli/.tmp/scratch` | 既に `.ato/` に統合済み (commit `e68234b`)、引き続き `.gitignore` |
+| 対象 | 当初の計画 | 実際の対応 (2026-04-26) |
+|---|---|---|
+| `apps/ato-desktop/.tmp/vendor/gpui-component-local/` | `crates/ato-desktop/vendor/gpui-component/` に正式昇格 | ✅ **不要だった** — 元 repo で gitignore されており subtree merge で持ち込まれなかった。Cargo.toml は既に `git = "https://github.com/ato-run/gpui-component"` で fork を参照済み（rev pinning あり）。 |
+| `gpui` Zed fork | git submodule として `vendor/gpui` に固定 | ⏸ **保留** — git dep + rev pinning で実用上 deterministic。submodule 化は (a) `gpui-component` を patch する用途が出たとき、(b) Zed 上流の breaking 変更を local で当てたいときに再検討。それまでは Cargo.toml の `rev` 文字列 1 行で pin する現状を維持。 |
+| `apps/ato-cli/.tmp/scratch` | `.ato/` に統合済み、引き続き `.gitignore` | ✅ 完了 (commit `e68234b`)。monorepo 側は root `.gitignore` に `.ato/`/`**/.ato/`、`crates/ato-cli/.gitignore` と `crates/ato-desktop/.gitignore` にも `.ato/` を追加して二重防御。 |
+| **追加発見**: `crates/ato-desktop/.ato/` に runtime cache が 25MB tracked | — | ✅ **修正済み** — subtree merge 経由で `crates/ato-desktop/.ato/` に CI artifact (25MB) や lockfile snapshot が混入していた。`git rm -r --cached` で untrack、ローカルからも削除。`.gitignore` に `.ato/` を追加して再発防止。元 repo の `.gitignore` には `.ato/` がなく、`.tmp/` だけだったのが原因。 |
+| **追加**: `tests/.git` (embedded repository) | — | ✅ 削除 — capsuled-dev 側で `tests/` 配下に独立 git repo があり、subtree merge ではなく単純コピーで持ち込んだ際に `.git` ディレクトリも同梱されていた。M2 commit 直前に削除。 |
+
+**Vendor 戦略決定 (確定):** 当面は Cargo の `git = "..." rev = "..."` による pinning を採用。submodule 移行は「fork で patch を当てたい」要件が具体化した時点で別 PR として実施する（GPUI 周りで上流 breaking が来た場合など）。
 
 ### M4 — `capsule-core` 抽出 (Phase 1: CCP)
 
