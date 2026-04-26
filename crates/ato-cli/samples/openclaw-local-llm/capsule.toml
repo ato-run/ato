@@ -1,0 +1,34 @@
+# Capsule Manifest - OpenClaw with Local LLM (Ollama)
+schema_version = "0.3"
+name = "openclaw-local-llm"
+version = "0.1.0"
+type = "app"
+runtime = "source/native"
+run = "python3 main.py"
+
+[metadata]
+display_name = "OpenClaw + Ollama (Local LLM)"
+description = "OpenClaw AI agent powered by local Ollama - no API keys required"
+category = "ai-agent"
+tags = ["ai", "agent", "assistant", "openclaw", "ollama", "local-llm"]
+
+[network]
+egress_allow = [
+    "localhost",
+]
+
+[env]
+# Active model. Empty = interactive TUI selection on first run.
+OPENCLAW_MODEL = ""
+# Comma-separated list of models to pull; first entry is active.
+# Example: OPENCLAW_MODELS = "qwen3:14b,qwen3:8b"
+OPENCLAW_MODELS = ""
+# Set to "false" to skip model selection TUI (useful for CI / --yes runs).
+OPENCLAW_INTERACTIVE = "true"
+# Set to "1" to force model re-selection even when a saved choice exists.
+OPENCLAW_RESET_MODEL = ""
+# Service mode: "oneshot" (default) | "service" | "autostart"
+# "service"   → register with launchd (macOS) or systemd --user (Linux/WSL2)
+# "autostart" → same as service but labeled autostart intent
+OPENCLAW_SERVICE_MODE = "oneshot"
+

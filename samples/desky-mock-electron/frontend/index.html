@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Desky Mock Electron</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "IBM Plex Sans", sans-serif;
+        background: linear-gradient(180deg, #07121d, #0b1624 55%, #09111f 100%);
+        color: #eef2f7;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+      }
+
+      main {
+        min-height: 100vh;
+        display: grid;
+        gap: 18px;
+        grid-template-columns: minmax(0, 1.2fr) minmax(300px, 0.8fr);
+        padding: 22px;
+      }
+
+      .panel {
+        border-radius: 24px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(9, 18, 30, 0.78);
+        backdrop-filter: blur(18px);
+        padding: 24px;
+      }
+
+      .eyebrow {
+        font-size: 11px;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: #8ec9ff;
+      }
+
+      h1 {
+        margin: 14px 0 0;
+        font-size: clamp(2rem, 4vw, 3.1rem);
+        line-height: 0.95;
+      }
+
+      p {
+        color: #b8c5d4;
+        line-height: 1.6;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 16px;
+      }
+
+      button {
+        border: 0;
+        border-radius: 14px;
+        padding: 12px 14px;
+        font: inherit;
+        font-weight: 600;
+        color: #021018;
+        background: linear-gradient(90deg, #9ed8ff, #88f0cc);
+        cursor: pointer;
+      }
+
+      button.secondary {
+        color: #eef2f7;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: rgba(255, 255, 255, 0.06);
+      }
+
+      pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        line-height: 1.6;
+        font-size: 12px;
+        color: #dce7f0;
+      }
+
+      @media (max-width: 920px) {
+        main {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="panel">
+        <div class="eyebrow">Electron Guest</div>
+        <h1>Limited ipcRenderer.invoke compatibility inside Desky.</h1>
+        <p>
+          This mock guest exercises the allowlisted Electron-style channels that
+          the Desky preload projects into guest content.
+        </p>
+        <div class="actions">
+          <button id="ping">ipcRenderer.invoke("desky:ping")</button>
+          <button id="set-title">
+            ipcRenderer.invoke("desky:window:setTitle")
+          </button>
+          <button id="read-file">
+            ipcRenderer.invoke("desky:fs:readFile")
+          </button>
+          <button id="forbidden-read" class="secondary">
+            Try forbidden read
+          </button>
+        </div>
+        <div style="margin-top: 16px; color: #b8c5d4">
+          Mode: <span id="mode-status">probing</span>
+        </div>
+      </section>
+      <aside class="panel">
+        <pre id="output">idle</pre>
+      </aside>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,27 @@
+[meta]
+title = "env-preflight: required_env positive case"
+runtime = "source/node"
+difficulty = "beginner"
+tier = "01-capabilities"
+tags = ["env", "required-env", "preflight"]
+
+[run]
+cmd = "ato run ."
+timeout_s = 60
+
+[env]
+required = ["APP_MESSAGE"]
+
+[env.ci_secrets]
+APP_MESSAGE = "hello-capsule"
+
+[expect]
+exit_code = 0
+stdout_regex = "APP_MESSAGE"
+
+[platforms]
+linux = "full"
+macos = "full"
+
+[compat]
+min_ato_version = "0.4.69"

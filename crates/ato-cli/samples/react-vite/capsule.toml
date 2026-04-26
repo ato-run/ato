@@ -1,0 +1,12 @@
+schema_version = "0.3"
+name = "react-vite"
+version = "0.1.0"
+type = "app"
+runtime = "web/static"
+run = "dist"
+port = 5173
+
+[metadata]
+description = "React Vite sample"
+
+build = "npm install && npm run build"

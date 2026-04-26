@@ -1,0 +1,30 @@
+[meta]
+title = "host-bridge-clipboard: IPC bridge + capability gate demo"
+runtime = "source/python"
+difficulty = "advanced"
+tier = "01-capabilities"
+tags = ["ipc", "bridge", "capability", "clipboard", "ato-desktop"]
+
+[run]
+cmd = "ato run ."
+timeout_s = 30
+
+[expect]
+exit_nonzero = true
+stderr_regex = "ATO_IPC_SOCKET not set"
+
+[platforms]
+linux = "full"
+macos = "full"
+
+[compat]
+min_ato_version = "0.4.69"
+tested_against = ["0.4.69"]
+breaks_after_version = ""
+
+[requires]
+requires_desktop = true
+requires_tty = false
+
+[expected_behavior]
+outcome = "pass"

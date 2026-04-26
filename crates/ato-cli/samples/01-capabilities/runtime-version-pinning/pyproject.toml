@@ -1,0 +1,6 @@
+[project]
+name = "runtime-version-pinning"
+version = "0.1.0"
+description = "Demonstrates Python runtime version pinning in capsule.toml"
+requires-python = ">=3.11"
+dependencies = []

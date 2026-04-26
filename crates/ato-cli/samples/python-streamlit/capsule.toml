@@ -1,0 +1,11 @@
+schema_version = "0.3"
+name = "python-streamlit"
+version = "0.1.0"
+type = "app"
+runtime = "source/python"
+runtime_version = "3.12"
+run = "uv run streamlit run app.py --server.headless true"
+port = 8501
+
+[metadata]
+description = "Streamlit sample (uv)"
