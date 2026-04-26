@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for Ato Desktop.
+
+  Used by both ad-hoc and Developer ID code-signing modes (see
+  apps/ato-desktop/xtask/src/main.rs::resolved_codesign_mode). The
+  ad-hoc path needs them so that switching to a real Developer ID
+  later does not change the bundle's runtime profile — only the
+  signing identity.
+
+  Why each entitlement is granted:
+
+  - allow-jit / allow-unsigned-executable-memory:
+      Wry's WKWebView dynamically allocates JIT pages for the embedded
+      JS engine. Without these the WebView crashes immediately under
+      hardened-runtime.
+
+  - allow-dyld-environment-variables:
+      Required so the bundled `Helpers/ato` subprocess can be launched
+      with DYLD-style env tweaks during development; harmless in
+      production because the launcher does not set them.
+
+  - disable-library-validation:
+      Allows loading the gpui-component dylib that lives outside
+      `/System` and is signed with a different identity (or ad-hoc
+      signed in v0.5).
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
