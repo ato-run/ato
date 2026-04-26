@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ato Capsule Welcome</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">capsule://welcome</p>
+        <h1>GPUI shell, Wry child, fail-closed bridge.</h1>
+        <p class="lede">
+          This page is loaded from the capsule custom protocol and receives its host bridge through a preload script.
+        </p>
+      </section>
+
+      <section class="panel">
+        <div>
+          <h2>Allowed capabilities</h2>
+          <p id="allowlist">Loading allowlist…</p>
+        </div>
+        <div class="actions">
+          <button id="probe">Probe workspace-info</button>
+          <button id="deny">Attempt open-external</button>
+        </div>
+      </section>
+
+      <section class="panel output">
+        <h2>Guest result</h2>
+        <pre id="result">Waiting for guest action…</pre>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

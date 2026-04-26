@@ -1,0 +1,28 @@
+schema_version = "0.3"
+name = "ato-desktop"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+runtime = "source/native"
+build = "cargo run --manifest-path xtask/Cargo.toml -- bundle --target darwin-arm64"
+run = "dist/darwin-arm64/Ato Desktop.app"
+working_dir = "."
+
+[artifact]
+framework = "gpui-wry"
+stage = "unsigned"
+target = "darwin/arm64"
+input = "dist/darwin-arm64/Ato Desktop.app"
+
+[store]
+registry = "http://127.0.0.1:8787"
+
+[finalize]
+tool = "codesign"
+args = [
+  "--deep",
+  "--force",
+  "--sign",
+  "-",
+  "dist/darwin-arm64/Ato Desktop.app",
+]

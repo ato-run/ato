@@ -1,0 +1,251 @@
+# Desktop bundle release pipeline.
+#
+# Multi-platform Desktop bundle pipeline (post-PR-9).
+#
+# Build matrix:
+#   - macos-14    → aarch64-apple-darwin (Apple Silicon)
+#   - macos-13    → x86_64-apple-darwin  (Intel — covers v0.5 maturity matrix §6)
+#   - windows-2022 → x86_64-pc-windows-msvc (.msi via WiX 3.x)
+#   - ubuntu-22.04 → x86_64-unknown-linux-gnu (.AppImage)
+#   - ubuntu-22.04-arm → aarch64-unknown-linux-gnu (.AppImage)
+#
+# Linux/Windows ship beta per CPDS §6 (L8/L10/L11) — they're built by
+# the same xtask scaffolding so platform parity is structural rather
+# than aspirational.
+#
+# Code-signing: ad-hoc by default (CodesignMode::AdHoc in xtask). To
+# upgrade to Developer ID, set MAC_DEVELOPER_ID_NAME in the repo's
+# Actions secrets — xtask picks it up at runtime, no workflow change
+# required. Notarization is similarly env-gated on APPLE_ID +
+# APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID. v0.5 ships without
+# either (D-3, D-4) so this workflow is a single-button green path
+# even on a fresh fork.
+name: desktop-release
+
+on:
+  push:
+    tags:
+      - "ato-desktop-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Override release tag (e.g. ato-desktop-v0.5.0)"
+        required: false
+
+permissions:
+  contents: write  # gh release upload needs write on contents
+
+jobs:
+  bundle-macos:
+    name: bundle macOS (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: darwin-arm64
+            rust_target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout ato-cli sibling for capsule-core path dep
+        # Cargo.toml has `capsule-core = { path = "../ato-cli/core" }`,
+        # so the ato-cli repo must live next to this checkout.
+        shell: bash
+        run: git clone --depth 1 https://github.com/ato-run/ato-cli.git ../ato-cli
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache cargo registry / target
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Distinct cache per Rust target so the arm64 + x86_64 jobs
+          # don't trample each other's incremental artifacts.
+          key: desktop-release-${{ matrix.target }}
+
+      - name: Bundle, sign, and package .dmg
+        # xtask resolves CodesignMode at runtime: ad-hoc when
+        # MAC_DEVELOPER_ID_NAME is unset (v0.5 default), Developer ID
+        # when set. Notarization is similarly skipped when Apple env
+        # is missing.
+        env:
+          MAC_DEVELOPER_ID_NAME: ${{ secrets.MAC_DEVELOPER_ID_NAME }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cd xtask
+          cargo run --release -- bundle \
+            --target ${{ matrix.target }} \
+            --sign \
+            --notarize \
+            --dmg
+
+      - name: Upload .dmg artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ato-desktop-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/*.dmg
+          if-no-files-found: error
+
+  bundle-windows:
+    name: bundle Windows (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            target: windows-x86_64
+            rust_target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout ato-cli sibling for capsule-core path dep
+        shell: bash
+        run: git clone --depth 1 https://github.com/ato-run/ato-cli.git ../ato-cli
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache cargo registry / target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-release-${{ matrix.target }}
+
+      - name: Install WiX Toolset 3.x
+        # candle/light are required by xtask::package_msi. WiX 3.14 is
+        # the v0.5 baseline. windows-2022 runners ship WiX 3.14.x
+        # preinstalled; --allow-downgrade lets choco no-op gracefully
+        # when the preinstalled version is newer than 3.14.0.
+        run: choco install wixtoolset --version=3.14.0 --no-progress --allow-downgrade --force
+
+      - name: Bundle and package .msi
+        # signtool gating: WINDOWS_CODESIGN_PFX/PASSWORD are unset by
+        # default for v0.5 (D-4) — xtask emits an unsigned MSI.
+        env:
+          WINDOWS_CODESIGN_PFX: ${{ secrets.WINDOWS_CODESIGN_PFX }}
+          WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
+        run: |
+          cd xtask
+          cargo run --release -- bundle --target ${{ matrix.target }} --msi
+
+      - name: Upload .msi artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ato-desktop-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/*.msi
+          if-no-files-found: error
+
+  bundle-linux:
+    name: bundle Linux (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: linux-x86_64
+            rust_target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout ato-cli sibling for capsule-core path dep
+        shell: bash
+        run: git clone --depth 1 https://github.com/ato-run/ato-cli.git ../ato-cli
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache cargo registry / target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-release-${{ matrix.target }}
+
+      - name: Install AppImage build deps
+        # appimagetool is shipped as a single AppImage; we drop it on
+        # PATH so xtask::package_appimage's Command::new("appimagetool")
+        # resolves it. libfuse2 is required by AppImage runtime. GTK/
+        # WebKit -dev packages are required by wry's webkit2gtk-sys and
+        # gpui-component's gdk-sys/gtk-sys build scripts.
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfuse2 file \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libwebkit2gtk-4.1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libssl-dev \
+            libasound2-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev
+          arch_suffix=x86_64
+          curl -L -o /tmp/appimagetool \
+            "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${arch_suffix}.AppImage"
+          chmod +x /tmp/appimagetool
+          sudo mv /tmp/appimagetool /usr/local/bin/appimagetool
+
+      - name: Bundle and package .AppImage
+        run: |
+          cd xtask
+          cargo run --release -- bundle --target ${{ matrix.target }} --appimage
+
+      - name: Upload .AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ato-desktop-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/*.AppImage
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [bundle-macos, bundle-windows, bundle-linux]
+    if: startsWith(github.ref, 'refs/tags/ato-desktop-v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all bundle artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF##*/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create / update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag='${{ steps.tag.outputs.tag }}'
+          # `gh release create` errors if the release exists; use a
+          # create-or-edit pattern so re-runs of workflow_dispatch are
+          # idempotent.
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --title "Ato Desktop $tag" \
+              --notes "Automated build — see CHANGELOG.md for details." \
+              --draft
+          fi
+          # Upload every bundle artifact the matrix produced.
+          find artifacts \( -name "*.dmg" -o -name "*.msi" -o -name "*.AppImage" \) -print0 \
+            | xargs -0 -I {} gh release upload "$tag" {} --clobber
