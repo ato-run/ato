@@ -393,7 +393,10 @@ impl CapsuleManifest {
 
             if runtime == "oci" {
                 let image = target.image.as_deref().map(str::trim).unwrap_or("");
-                if entrypoint.is_empty() && image.is_empty() {
+                // v0.3 stores the OCI image reference under `run_command`
+                // (from `run = "ghcr.io/..."`). Treat that as equivalent to
+                // an explicit `image` for validation purposes.
+                if entrypoint.is_empty() && image.is_empty() && !has_run_command {
                     errors.push(ValidationError::InvalidTarget(label.clone()));
                     continue;
                 }
