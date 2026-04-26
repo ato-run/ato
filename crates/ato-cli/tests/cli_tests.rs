@@ -1464,9 +1464,9 @@ version = "0.1.0"
 type = "app"
 
 runtime = "source/native"
-cmd = ["build-app.sh"]
+build = "sh build-app.sh"
 working_dir = "."
-run = "sh"
+run = "dist/MyApp.app"
 [artifact]
 framework = "tauri"
 stage = "unsigned"
@@ -1507,9 +1507,9 @@ description = "Tauri desktop app for time management"
 type = "app"
 
 runtime = "source/native"
-cmd = ["build-app.sh"]
+build = "sh build-app.sh"
 working_dir = "."
-run = "sh"
+run = "src-tauri/target/release/bundle/macos/time-management-desktop.app"
 [artifact]
 framework = "tauri"
 stage = "unsigned"
