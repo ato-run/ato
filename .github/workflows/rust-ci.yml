@@ -1,0 +1,66 @@
+name: Rust CI
+
+# Workspace-wide CI for the ato monorepo. Runs cargo check / fmt / clippy /
+# test against every workspace member. Crate-specific release workflows
+# (ato-cli release.yml, ato-desktop desktop-release.yml) are intentionally
+# kept separate and live in their own files.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: cargo check (workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets
+
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: cargo test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # `ato-desktop` requires GPUI's heavy native deps (X11/Wayland on Linux,
+      # Cocoa on macOS) which are not yet wired into CI. Limit the matrix to
+      # `ato-cli` + shared core crates until M3 lands the desktop CI bringup.
+      - run: |
+          cargo test -p ato-cli --no-fail-fast
+          cargo test -p capsule-core --no-fail-fast
+          cargo test -p lock-draft-engine --no-fail-fast

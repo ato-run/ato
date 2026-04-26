@@ -16,7 +16,12 @@ serde_json = "1.0"
 sha2 = "0.10"
 thiserror = "2.0"
 toml = "0.8"
-wasm-bindgen = { version = "=0.2.100", optional = true }
+# wasm-bindgen is only pulled in when the `wasm` feature is enabled. Range
+# (rather than the original `=0.2.100` exact pin) so cargo can unify with
+# `gpui_web`, which transitively requires `^0.2.113` from the `ato-desktop`
+# crate in the same workspace. The pinned wasm-bindgen-cli version used
+# during WASM artifact builds remains controlled outside Cargo.toml.
+wasm-bindgen = { version = "0.2", optional = true }
 
 [features]
 default = []
