@@ -12,6 +12,7 @@ target/
 *~
 tmp/
 .tmp/
+.ato/
 
 # macOS
 .DS_Store

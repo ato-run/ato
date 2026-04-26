@@ -30,7 +30,7 @@ ato run https://ato.run/s/demo@r1     # share URL
 |-----------|--------|
 | **M1** — subtree merge of `ato-cli` + `ato-desktop` (history preserved) | ✅ landed |
 | **M2** — Cargo workspace + structural files | ✅ landed |
-| **M3** — vendored deps cleanup (gpui-component, .tmp/ → vendor/) | ⬜ pending |
+| **M3** — vendored deps cleanup (gpui-component, .ato/ leak fix) | ✅ landed |
 | **M4–M5** — `capsule-core` extraction (CCP, manifest, error, config) | ⬜ pending |
 | **M6** — release CI integration (cargo-dist + xtask + Homebrew Cask) | ⬜ pending |
 | **v0.5.0 bump** — after monorepo CI/CD verified end-to-end | ⬜ pending |
