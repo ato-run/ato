@@ -500,6 +500,24 @@ mod tests {
     #[test]
     fn structural_validation_accepts_native_delivery_contract() {
         let mut lock = sample_lock();
+        // source-derivation delivery requires the resolution.closure block
+        // (kind=build_closure, status=complete) plus inputs and a fully
+        // populated build_environment to be present.
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            json!({
+                "kind": "build_closure",
+                "status": "complete",
+                "inputs": [],
+                "build_environment": {
+                    "host_target": "darwin/arm64",
+                    "toolchains": [],
+                    "package_managers": [],
+                    "sdks": [],
+                    "helper_tools": []
+                }
+            }),
+        );
         lock.contract.entries.insert(
             "delivery".to_string(),
             json!({
