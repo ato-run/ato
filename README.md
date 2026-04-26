@@ -38,8 +38,13 @@ ato run https://ato.run/s/demo@r1     # share URL
 | **N2** — extract `crates/capsule-wire/` (the IPC surface, DAG root) | ✅ landed |
 | **N3** — switch `ato-desktop`'s wire imports onto `capsule-wire` | ✅ landed |
 | **N4** — dependency-direction CI lint enforcing the DAG | ✅ landed |
+| **P1** — backfill legacy mirror commits into monorepo (4× ato-desktop fixes) | ✅ landed |
+| **P2** — subtree merge `nacelle.git` → `crates/nacelle/` (history preserved) | ✅ landed |
+| **P3** — extend dep-direction CI lint with R5/R6 (nacelle sibling boundary) | ✅ landed |
+| **P6a** — remove dead workflow copies under `crates/nacelle/.github/` | ✅ landed |
 | **v0.5.0 bump** — after monorepo CI/CD verified end-to-end | ⬜ pending |
-| **M7** — archive `ato-cli` / `shiny-disco` (`ato-desktop`) repos | ⬜ pending |
+| **P6b** — release-CI consolidation with per-crate tag prefixes (round 2) | ⬜ pending |
+| **M7 / P7** — archive `ato-cli` / `shiny-disco` / `nacelle` repos (round 2) | ⬜ pending |
 
 ## Workspace layout
 
@@ -55,8 +60,9 @@ ato/
 │   ├── capsule-core/                    # runtime/orchestration library (N1)
 │   ├── ato-cli/                         # the meta-runtime CLI
 │   │   └── lock-draft-engine/           #   lock generation, exposed as WASM
-│   └── ato-desktop/                     # GPUI-based desktop bundle
-│       └── xtask/                       #   bundle build / packaging
+│   ├── ato-desktop/                     # GPUI-based desktop bundle
+│   │   └── xtask/                       #   bundle build / packaging
+│   └── nacelle/                         # source-runtime sandbox (Landlock/eBPF), spawned by ato-cli
 ├── docs/
 │   ├── rfcs/                            # accepted / draft architectural RFCs
 │   ├── core-architecture.md
@@ -121,6 +127,7 @@ cargo test -p capsule-core
 - [Agent guidelines](AGENTS.md)
 - [Known limitations](crates/ato-cli/docs/known-limitations.md)
 - [Monorepo consolidation plan](docs/monorepo-consolidation-plan.md)
+- [Capsuled-dev → ato migration plan](docs/capsuled-dev-migration-plan.md)
 
 ## License
 
