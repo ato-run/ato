@@ -17,9 +17,9 @@
 //! `Entity<InputState>` per field, and is dispatched via the
 //! desktop's `actions!()` registry (`SaveConfigForm` /
 //! `CancelConfigForm`). All of that is desktop-shell-private — we
-//! deliberately keep the wire DTO (`ConfigFieldDto` in
-//! `crate::cli_envelope`) decoupled from the GPUI layer so a future
-//! UI rewrite doesn't ripple into the wire contract.
+//! consume the canonical wire types (`capsule_core::types::ConfigField`
+//! / `ConfigKind`) directly here, but keep all GPUI rendering in this
+//! module so a future UI rewrite doesn't ripple into the wire contract.
 //!
 //! ## Day-4 MVP scope
 //!
@@ -40,8 +40,9 @@ use gpui::{
 };
 use gpui_component::input::{Input, InputState};
 
+use capsule_core::types::{ConfigField, ConfigKind};
+
 use crate::app::{CancelConfigForm, SaveConfigForm};
-use crate::cli_envelope::{ConfigFieldDto, ConfigKindDto};
 use crate::state::PendingConfigRequest;
 use crate::ui::theme::Theme;
 use crate::ui::DesktopShell;
@@ -61,7 +62,7 @@ pub(in crate::ui) struct ConfigModal {
     /// `handle` and `original_secrets` are needed at Save time to
     /// grant the new secrets to the right capsule.
     pub(in crate::ui) request: PendingConfigRequest,
-    /// One `InputState` entity per `ConfigFieldDto.name`. Indexed by
+    /// One `InputState` entity per `ConfigField.name`. Indexed by
     /// the schema-supplied env-var name; never index-aligned with
     /// `request.fields` so a future schema reorder can't desync.
     pub(in crate::ui) inputs: HashMap<String, Entity<InputState>>,
@@ -85,7 +86,7 @@ impl ConfigModal {
         for field in &request.fields {
             let placeholder = field.placeholder.clone().unwrap_or_default();
             let default = field.default.clone().unwrap_or_default();
-            let masked = matches!(field.kind, ConfigKindDto::Secret);
+            let masked = matches!(field.kind, ConfigKind::Secret);
             let entity = cx.new(|cx| {
                 let mut state = InputState::new(window, cx)
                     .placeholder(placeholder)
@@ -228,7 +229,7 @@ pub(in crate::ui) fn render_config_modal_overlay(
 }
 
 fn render_field_row(
-    field: &ConfigFieldDto,
+    field: &ConfigField,
     input: Option<&Entity<InputState>>,
     theme: &Theme,
 ) -> impl IntoElement {
@@ -237,10 +238,10 @@ fn render_field_row(
         .clone()
         .unwrap_or_else(|| field.name.clone());
     let kind_hint = match &field.kind {
-        ConfigKindDto::Secret => "secret · stored locally, masked",
-        ConfigKindDto::String => "text",
-        ConfigKindDto::Number => "number",
-        ConfigKindDto::Enum { .. } => "choice",
+        ConfigKind::Secret => "secret · stored locally, masked",
+        ConfigKind::String => "text",
+        ConfigKind::Number => "number",
+        ConfigKind::Enum { .. } => "choice",
     };
 
     let mut row = div()
@@ -280,7 +281,7 @@ fn render_field_row(
 
     let input_box = match input {
         Some(entity) => match &field.kind {
-            ConfigKindDto::Enum { choices } => {
+            ConfigKind::Enum { choices } => {
                 // MVP: render the dropdown's choices inline as a hint
                 // and fall back to a plain text input. The native
                 // dropdown component is wired up in Day 5 — keeping
