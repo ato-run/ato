@@ -52,7 +52,18 @@ fn parse_v03_package_surface(
     package_name: &str,
     table: &Table,
 ) -> Result<V03PackageSurface, CapsuleError> {
-    let normalized = normalize_v03_legacy_env_required(package_name, table)?;
+    let mut normalized = normalize_v03_legacy_env_required(package_name, table)?;
+
+    // The package surface treats `build` as an inline build_command string.
+    // The top-level `[build]` section (lifecycle/inputs/outputs/policy) is
+    // owned by CapsuleManifest and must not bleed into the surface parse.
+    if normalized
+        .get("build")
+        .map(|value| !value.is_str())
+        .unwrap_or(false)
+    {
+        normalized.remove("build");
+    }
 
     toml::Value::Table(normalized).try_into().map_err(|error| {
         CapsuleError::ParseError(format!(
