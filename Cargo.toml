@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ato-cli",
     "crates/capsule-core",
+    "crates/capsule-wire",
     "crates/ato-cli/lock-draft-engine",
     "crates/ato-desktop",
     "crates/ato-desktop/xtask",

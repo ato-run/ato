@@ -660,3 +660,16 @@ impl std::fmt::Display for AtoError {
 impl std::error::Error for AtoError {}
 
 pub type Result<T> = std::result::Result<T, CapsuleError>;
+
+/// Bridge `capsule_wire::WireError` into the richer `CapsuleError` so
+/// `?` at internal call sites that consume the handle parser keeps
+/// working unchanged. `WireError::Config(s)` is the only variant today;
+/// it maps onto `CapsuleError::Config(s)` since the parser semantics are
+/// "configuration / input was malformed".
+impl From<capsule_wire::WireError> for CapsuleError {
+    fn from(err: capsule_wire::WireError) -> Self {
+        match err {
+            capsule_wire::WireError::Config(msg) => CapsuleError::Config(msg),
+        }
+    }
+}
