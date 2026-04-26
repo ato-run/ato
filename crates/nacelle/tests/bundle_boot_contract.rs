@@ -148,7 +148,7 @@ mod unix_tests {
             .lines()
             .find_map(|line| line.strip_prefix("Preserving extracted bundle contents at "))
             .map(PathBuf::from)
-            .expect(&format!("stderr: {}", stderr));
+            .unwrap_or_else(|| panic!("stderr: {}", stderr));
 
         assert!(preserved_path.join("config.json").exists());
         fs::remove_dir_all(preserved_path).unwrap();

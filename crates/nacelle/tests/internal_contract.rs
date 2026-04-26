@@ -317,8 +317,7 @@ except FileNotFoundError:
 
     fs::write(
         &manifest_path,
-        format!(
-            r#"name = "stream-contract"
+        r#"name = "stream-contract"
 version = "0.1.0"
 
 [execution]
@@ -332,7 +331,6 @@ port = "0"
 timeout_ms = 5000
 interval_ms = 100
 "#,
-        ),
     )
     .unwrap();
 
@@ -396,8 +394,7 @@ fn internal_exec_emits_service_exit_when_workload_fails_before_ready() {
 
     fs::write(
         &manifest_path,
-        format!(
-            r#"name = "fail-fast-contract"
+        r#"name = "fail-fast-contract"
 version = "0.1.0"
 
 [execution]
@@ -411,7 +408,6 @@ port = "0"
 timeout_ms = 5000
 interval_ms = 100
 "#,
-        ),
     )
     .unwrap();
 
