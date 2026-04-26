@@ -1543,7 +1543,6 @@ type = "app"
 
 runtime = "source/python"
 runtime_version = "3.11.10"
-dependencies = "requirements.txt"
 run = "main.py""#,
         )
         .unwrap();

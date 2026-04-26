@@ -280,25 +280,42 @@ fn validate_entrypoint_compat(
 
     let default_target = plan.selected_target_label();
 
-    let target = manifest
+    // The bridge exposes the un-normalized manifest tree, so a flat v0.3
+    // manifest has the per-target fields at the top level rather than under
+    // \[targets.<label>\]. Fall back to the top-level table in that case.
+    let target_owned: toml::value::Table;
+    let target: &toml::value::Table = match manifest
         .get("targets")
         .and_then(|t| t.as_table())
         .and_then(|t| t.get(default_target))
         .and_then(|t| t.as_table())
-        .ok_or_else(|| {
-            CapsuleError::Pack(format!(
-                "default_target '{}' is missing from targets",
-                default_target
-            ))
-        })?;
+    {
+        Some(t) => t,
+        None => match manifest.as_table() {
+            Some(t) => {
+                target_owned = t.clone();
+                &target_owned
+            }
+            None => {
+                return Err(CapsuleError::Pack(format!(
+                    "default_target '{}' is missing from targets",
+                    default_target
+                )));
+            }
+        },
+    };
 
     let runtime = target
         .get("runtime")
         .and_then(|value| value.as_str())
         .map(|value| value.trim().to_ascii_lowercase())
         .unwrap_or_default();
+    // v0.3 normalization may keep the compound selector ("source/deno"); strip
+    // the driver suffix so the equality check below still recognizes "source".
+    let runtime = runtime.split('/').next().unwrap_or(&runtime).to_string();
     let run_command = target
         .get("run_command")
+        .or_else(|| target.get("run"))
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty());
