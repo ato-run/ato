@@ -805,6 +805,10 @@ args = ["--from-export"]
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "darwin native command publish build requires a macOS host"
+    )]
     fn authoritative_ci_build_supports_gpui_wry_native_command_projects() {
         let tmp = tempfile::tempdir().expect("tempdir");
         write_gpui_wry_native_command_fixture(tmp.path());

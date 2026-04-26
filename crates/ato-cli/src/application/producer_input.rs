@@ -562,6 +562,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "darwin native command publish readiness requires a macOS host"
+    )]
     fn gpui_wry_native_command_project_is_publish_ready() {
         let dir = tempdir().expect("tempdir");
         std::fs::write(
