@@ -15,7 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1.0"
-lock-draft-engine = { path = "../lock-draft-engine", version = "0.1.0" }
+lock-draft-engine = { path = "../ato-cli/lock-draft-engine", version = "0.1.0" }
 libc = "0.2"
 prost = "0.13"
 tokio = { version = "1", features = ["full"] }
