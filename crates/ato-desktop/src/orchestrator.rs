@@ -535,8 +535,9 @@ fn start_capsule(
         )));
     }
 
-    let envelope: SessionStartEnvelope = serde_json::from_slice(&output.stdout)
-        .map_err(|err| LaunchError::Other(format!("failed to parse session start response: {err}")))?;
+    let envelope: SessionStartEnvelope = serde_json::from_slice(&output.stdout).map_err(|err| {
+        LaunchError::Other(format!("failed to parse session start response: {err}"))
+    })?;
     capsule_wire::ccp::enforce_ccp_compat(&envelope, "session_start")
         .map_err(|err| LaunchError::Other(err.to_string()))?;
     Ok(envelope.session)
@@ -1945,8 +1946,7 @@ mod tests {
 
     #[test]
     fn find_executable_named_in_bin_subdir() {
-        let base = std::env::temp_dir()
-            .join(format!("ato-desktop-test-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("ato-desktop-test-{}", std::process::id()));
         let bin = base.join("x").join("bin");
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&bin).expect("mkdir");
@@ -1996,7 +1996,10 @@ mod tests {
     #[test]
     fn pending_cli_command_registry_roundtrip() {
         let session_id = format!("test-cli-{}", std::process::id());
-        super::register_pending_cli_command(session_id.clone(), super::CliLaunchSpec::ato_run_repl());
+        super::register_pending_cli_command(
+            session_id.clone(),
+            super::CliLaunchSpec::ato_run_repl(),
+        );
         let spec = super::take_pending_cli_command(&session_id).expect("spec");
         assert!(matches!(spec, super::CliLaunchSpec::AtoRunRepl { .. }));
         // taking again must return None (consumed).
@@ -2441,7 +2444,12 @@ pub fn spawn_terminal(spec: SpawnSpec) -> Result<TerminalProcess> {
         SpawnKind::RawAto => {
             let ato_bin =
                 resolve_ato_binary().context("cannot resolve ato binary for SpawnKind::RawAto")?;
-            spawn_terminal_session(spec.session_id, &ato_bin.to_string_lossy(), spec.cols, spec.rows)
+            spawn_terminal_session(
+                spec.session_id,
+                &ato_bin.to_string_lossy(),
+                spec.cols,
+                spec.rows,
+            )
         }
         SpawnKind::LogTail { log_path } => spawn_log_tail_session(spec.session_id, log_path),
     }
@@ -2511,8 +2519,7 @@ pub fn spawn_ato_run_repl(
     // (which needs an initial PtySize) see the latest dims.
     let initial_cols = if cols == 0 { 120 } else { cols };
     let initial_rows = if rows == 0 { 40 } else { rows };
-    let pty_dims: Arc<StdMutex<(u16, u16)>> =
-        Arc::new(StdMutex::new((initial_cols, initial_rows)));
+    let pty_dims: Arc<StdMutex<(u16, u16)>> = Arc::new(StdMutex::new((initial_cols, initial_rows)));
 
     let sid = session_id.clone();
 
@@ -2572,17 +2579,19 @@ pub fn spawn_ato_run_repl(
     // HTTP(S)_PROXY / ALL_PROXY pointed here. Deny events surface via
     // `deny_rx` and are injected into the REPL output stream.
     let (deny_tx, deny_rx) = std_channel::<DenyEvent>();
-    let egress_proxy: Option<EgressProxyHandle> =
-        match EgressProxy::spawn(egress_policy.clone(), Some(deny_tx)) {
-            Ok(h) => {
-                info!(session_id = %sid, addr=%h.addr(), "ato-run REPL: egress proxy listening");
-                Some(h)
-            }
-            Err(e) => {
-                warn!(session_id = %sid, error=%e, "ato-run REPL: egress proxy failed to start — egress will not be gated");
-                None
-            }
-        };
+    let egress_proxy: Option<EgressProxyHandle> = match EgressProxy::spawn(
+        egress_policy.clone(),
+        Some(deny_tx),
+    ) {
+        Ok(h) => {
+            info!(session_id = %sid, addr=%h.addr(), "ato-run REPL: egress proxy listening");
+            Some(h)
+        }
+        Err(e) => {
+            warn!(session_id = %sid, error=%e, "ato-run REPL: egress proxy failed to start — egress will not be gated");
+            None
+        }
+    };
     let socks5_url = egress_proxy.as_ref().map(|h| h.http_url());
 
     // Send helper: base64-encode and push to xterm.js.
@@ -2907,7 +2916,9 @@ pub fn spawn_ato_run_repl(
                         // Inherit HOME/USER/LANG from the parent so shells
                         // behave naturally (CommandBuilder does NOT inherit
                         // env by default — explicit inheritance below).
-                        for key in &["HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "SHELL", "TMPDIR"] {
+                        for key in &[
+                            "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "SHELL", "TMPDIR",
+                        ] {
                             if let Ok(v) = std::env::var(key) {
                                 cmd_builder.env(key, v);
                             }
@@ -2942,9 +2953,7 @@ pub fn spawn_ato_run_repl(
                         }) {
                             Ok(p) => p,
                             Err(e) => {
-                                let msg = format!(
-                                    "\x1b[31mfailed to open PTY: {e}\x1b[0m\r\n"
-                                );
+                                let msg = format!("\x1b[31mfailed to open PTY: {e}\x1b[0m\r\n");
                                 let _ = send(&output_tx, msg.as_bytes());
                                 let _ = send(&output_tx, b"\x1b[32mato>\x1b[0m ");
                                 continue;
@@ -2972,9 +2981,8 @@ pub fn spawn_ato_run_repl(
                         let mut master_reader = match pty_pair.master.try_clone_reader() {
                             Ok(r) => r,
                             Err(e) => {
-                                let msg = format!(
-                                    "\x1b[31mpty clone_reader failed: {e}\x1b[0m\r\n"
-                                );
+                                let msg =
+                                    format!("\x1b[31mpty clone_reader failed: {e}\x1b[0m\r\n");
                                 let _ = send(&output_tx, msg.as_bytes());
                                 let _ = pty_child.kill();
                                 let _ = send(&output_tx, b"\x1b[32mato>\x1b[0m ");
@@ -2990,9 +2998,7 @@ pub fn spawn_ato_run_repl(
                         let mut master_writer = match pty_pair.master.take_writer() {
                             Ok(w) => w,
                             Err(e) => {
-                                let msg = format!(
-                                    "\x1b[31mpty take_writer failed: {e}\x1b[0m\r\n"
-                                );
+                                let msg = format!("\x1b[31mpty take_writer failed: {e}\x1b[0m\r\n");
                                 let _ = send(&output_tx, msg.as_bytes());
                                 let _ = pty_child.kill();
                                 let _ = send(&output_tx, b"\x1b[32mato>\x1b[0m ");
@@ -3237,7 +3243,11 @@ fn find_ato_toolchain_binary(name: &str) -> Option<PathBuf> {
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let path = e.path();
-            if path.is_dir() { Some(path) } else { None }
+            if path.is_dir() {
+                Some(path)
+            } else {
+                None
+            }
         })
         .collect();
 
@@ -3400,4 +3410,3 @@ fn pop_last_codepoint_width(line: &mut Vec<u8>) -> Option<usize> {
         .unwrap_or(1);
     Some(width)
 }
-

@@ -34,7 +34,6 @@ use crate::app::{
     SaveConfigForm, SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SplitPane,
     ToggleAutoDevtools, ToggleDevConsole, ToggleOverview, ToggleTheme,
 };
-use capsule_wire::config::ConfigKind;
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
     ActivityTone, AppState, AuthSessionStatus, PaneBounds, PaneId, PaneSurface, ShellMode,
@@ -42,6 +41,7 @@ use crate::state::{
 };
 use crate::terminal::TerminalSessionManager;
 use crate::webview::WebViewManager;
+use capsule_wire::config::ConfigKind;
 
 pub(super) const CHROME_HEIGHT: f32 = 48.0;
 pub(super) const RAIL_WIDTH: f32 = 52.0;
@@ -106,7 +106,10 @@ fn search_local_registry(query: &str) -> Vec<crate::state::CapsuleSearchResult> 
         Err(_) => return Vec::new(),
     };
 
-    let Some(items) = body.as_array().or_else(|| body.get("capsules").and_then(|v| v.as_array())) else {
+    let Some(items) = body
+        .as_array()
+        .or_else(|| body.get("capsules").and_then(|v| v.as_array()))
+    else {
         return Vec::new();
     };
 
@@ -304,7 +307,8 @@ impl DesktopShell {
         cx: &mut Context<Self>,
     ) {
         let current = self.state.config.auto_open_devtools;
-        self.state.update_config(|c| c.auto_open_devtools = !current);
+        self.state
+            .update_config(|c| c.auto_open_devtools = !current);
         cx.notify();
     }
 

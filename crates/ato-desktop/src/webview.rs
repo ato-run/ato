@@ -36,9 +36,9 @@ use crate::automation::AutomationHost;
 use crate::bridge::{BridgeProxy, GuestBridgeResponse, GuestSessionContext, ShellEvent};
 use crate::config::SecretEntry;
 use crate::orchestrator::{
-    resolve_and_start_guest, spawn_cli_session, spawn_log_tail_session,
+    resolve_and_start_guest, spawn_cli_session, spawn_log_tail_session, spawn_terminal,
     stop_guest_session, take_pending_cli_command, take_pending_share_terminal, GuestLaunchSession,
-    LaunchError, SpawnKind, SpawnSpec, spawn_terminal,
+    LaunchError, SpawnKind, SpawnSpec,
 };
 use crate::state::{
     ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry, AuthSessionStatus,
@@ -87,7 +87,6 @@ const TERMINAL_BRIDGE_PRELOAD: &str = r#"(function () {
   };
 })();
 "#;
-
 
 fn devtools_debug_enabled() -> bool {
     std::env::var_os(DEVTOOLS_DEBUG_ENV)
@@ -839,7 +838,10 @@ impl WebViewManager {
                         debug!(session_id = %session_id, cols, rows, "terminal resize: no PTY session found");
                     }
                 }
-                ShellEvent::GetSecrets { request_id, pane_id } => {
+                ShellEvent::GetSecrets {
+                    request_id,
+                    pane_id,
+                } => {
                     if let Some(pid) = pane_id {
                         let handle = self
                             .views
@@ -852,8 +854,8 @@ impl WebViewManager {
                             .iter()
                             .map(|s| (s.key.as_str(), s.value.as_str()))
                             .collect();
-                        let payload_json = serde_json::to_string(&payload)
-                            .unwrap_or_else(|_| "{}".to_string());
+                        let payload_json =
+                            serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
                         let script = format!(
                             "window.__ATO_HOST__ && window.__ATO_HOST__.resolveSecrets({}, {});",
                             request_id, payload_json
@@ -951,8 +953,10 @@ impl WebViewManager {
                                     match spawn_log_tail_session(terminal_session_id.clone(), lp) {
                                         Ok(proc) => {
                                             info!(pane_id, session_id = %terminal_session_id, "log-tail session spawned for terminal_stream");
-                                            self.terminal_sessions
-                                                .insert(terminal_session_id.clone(), Box::new(proc));
+                                            self.terminal_sessions.insert(
+                                                terminal_session_id.clone(),
+                                                Box::new(proc),
+                                            );
                                             true
                                         }
                                         Err(e) => {
