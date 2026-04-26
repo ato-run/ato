@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'none'; img-src 'none';">
+  <title>Terminal</title>
+  <link rel="stylesheet" href="xterm.css">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; background: #1a1a2e; overflow: hidden; }
+    #terminal { width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <div id="terminal"></div>
+  <script src="xterm.js"></script>
+  <script src="addon-canvas.js"></script>
+  <script>
+    // ─── Extract session_id from URL: terminal://{session_id}/ ──────────────
+    var sessionId = location.hostname || location.host;
+
+    // ─── Bridge: window.__ato_terminal_bridge injected by WebView ─────────
+    // Falls back to postMessage if bridge is not available (dev mode).
+    function sendToBridge(type, payload) {
+      if (window.__ato_terminal_bridge) {
+        window.__ato_terminal_bridge(JSON.stringify(Object.assign({ type: type, session_id: sessionId }, payload)));
+      }
+    }
+
+    // ─── Initialise xterm.js with Canvas renderer ─────────────────────────
+    var term = new Terminal({
+      allowTransparency: false,
+      cursorBlink: true,
+      cursorStyle: 'block',
+      fontFamily: '"JetBrains Mono", "Cascadia Code", "Fira Code", "Menlo", monospace',
+      fontSize: 14,
+      lineHeight: 1.2,
+      theme: {
+        background: '#1a1a2e',
+        foreground: '#e0e0e0',
+        cursor: '#e0e0e0',
+        black:   '#1a1a2e', red:     '#ff5555', green:  '#50fa7b', yellow: '#f1fa8c',
+        blue:    '#bd93f9', magenta: '#ff79c6', cyan:   '#8be9fd', white:  '#f8f8f2',
+        brightBlack:   '#44475a', brightRed:   '#ff6e6e', brightGreen:  '#69ff94',
+        brightYellow:  '#ffffa5', brightBlue:  '#d6acff', brightMagenta:'#ff92df',
+        brightCyan:    '#a4ffff', brightWhite: '#ffffff'
+      }
+    });
+
+    // Attach Canvas addon (stable in WKWebView; avoids WebGL context loss)
+    if (typeof CanvasAddon !== 'undefined') {
+      term.loadAddon(new CanvasAddon.CanvasAddon());
+    }
+
+    term.open(document.getElementById('terminal'));
+    term.focus();
+
+    // ─── Forward keystrokes to nacelle via bridge ─────────────────────────
+    term.onData(function(data) {
+      // Multi-line paste confirmation
+      if (data.indexOf('\n') !== -1 || data.indexOf('\r') !== -1) {
+        var lines = data.split(/\r?\n/);
+        if (lines.length > 1) {
+          var ok = window.confirm(
+            'Paste ' + lines.length + ' lines into the terminal?\n\n' +
+            lines.slice(0, 5).join('\n') + (lines.length > 5 ? '\n…' : '')
+          );
+          if (!ok) return;
+        }
+      }
+      sendToBridge('TerminalInput', {
+        data_b64: btoa(unescape(encodeURIComponent(data)))
+      });
+    });
+
+    // ─── Fit xterm.js to fill the container ──────────────────────────────
+    // Derives cell size from the canvas CSS dimensions (avoids private APIs).
+    // Called on open and whenever the WebView is resized.
+    function fitTerminal() {
+      var container = document.getElementById('terminal');
+      var canvas = container.querySelector('.xterm-screen canvas');
+      if (!canvas || canvas.clientWidth <= 0 || canvas.clientHeight <= 0) return false;
+      var cellW = canvas.clientWidth / term.cols;
+      var cellH = canvas.clientHeight / term.rows;
+      if (cellW <= 0 || cellH <= 0) return false;
+      var newCols = Math.max(2, Math.floor(container.clientWidth / cellW));
+      var newRows = Math.max(1, Math.floor(container.clientHeight / cellH));
+      if (newCols !== term.cols || newRows !== term.rows) {
+        term.resize(newCols, newRows);
+        sendToBridge('TerminalResize', { cols: newCols, rows: newRows });
+      }
+      return true;
+    }
+
+    // ─── Initial fit + TerminalReady ──────────────────────────────────────
+    // The CanvasAddon initializes its canvas in the next animation frame after
+    // term.open(), so we retry until the canvas is available.
+    var fitAttempts = 0;
+    function tryInitialFit() {
+      if (fitTerminal()) {
+        sendToBridge('TerminalReady', { cols: term.cols, rows: term.rows });
+      } else if (fitAttempts++ < 10) {
+        requestAnimationFrame(tryInitialFit);
+      } else {
+        // Canvas never appeared — send ready with default dimensions
+        sendToBridge('TerminalReady', { cols: term.cols, rows: term.rows });
+      }
+    }
+    requestAnimationFrame(tryInitialFit);
+
+    // ─── Handle resize ────────────────────────────────────────────────────
+    var resizeObserver = new ResizeObserver(fitTerminal);
+    resizeObserver.observe(document.getElementById('terminal'));
+
+    // ─── Receive terminal output from WebView host ────────────────────────
+    // The host calls `window.__ato_write_terminal(base64Data)` to push output.
+    window.__ato_write_terminal = function(data_b64) {
+      try {
+        var bytes = atob(data_b64);
+        var arr = new Uint8Array(bytes.length);
+        for (var i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+        term.write(arr);
+      } catch (e) {
+        console.error('ato-terminal: write error', e);
+      }
+    };
+
+    // ─── Session exit ─────────────────────────────────────────────────────
+    window.__ato_terminal_exit = function(exitCode) {
+      term.writeln('\r\n\x1b[33m[Terminal session ended' +
+        (exitCode !== null && exitCode !== undefined ? ' (exit ' + exitCode + ')' : '') +
+        ']\x1b[0m');
+      term.options.disableStdin = true;
+    };
+
+    // ─── Error notification ──────────────────────────────────────────────
+    window.__ato_terminal_error = function(message) {
+      term.writeln('\r\n\x1b[31m[Error: ' + message + ']\x1b[0m');
+    };
+  </script>
+</body>
+</html>

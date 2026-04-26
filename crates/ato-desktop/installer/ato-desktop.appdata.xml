@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metainfo for Ato Desktop.
+
+  Picked up by software centers (GNOME Software, KDE Discover) and by
+  the AppImage build via `usr/share/metainfo/ato-desktop.appdata.xml`.
+  The id MUST match the .desktop file's basename per AppStream spec.
+-->
+<component type="desktop-application">
+  <id>run.ato.desktop</id>
+  <name>Ato Desktop</name>
+  <summary>Run sandboxed app capsules locally</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+
+  <description>
+    <p>
+      Ato Desktop is the host shell for ato.run capsules — sandboxed,
+      portable apps with a stable URL scheme. It launches the headless
+      ato CLI as a subprocess, mediates secret access, and renders
+      capsule UIs through an embedded WebView.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">ato-desktop.desktop</launchable>
+  <url type="homepage">https://ato.run</url>
+  <developer_name>ato-run</developer_name>
+
+  <provides>
+    <binary>ato-desktop</binary>
+    <binary>ato</binary>
+  </provides>
+
+  <content_rating type="oars-1.1" />
+</component>
