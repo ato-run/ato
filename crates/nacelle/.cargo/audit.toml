@@ -1,0 +1,19 @@
+# Security audit configuration for cargo-audit
+# https://rustsec.org/advisories/
+
+[advisories]
+# Ignore advisories for dependencies we cannot easily update
+# These are tracked and will be addressed in future dependency upgrades
+
+# wasmtime 16.0.0 - Windows device filename sandboxing (not applicable on Linux/macOS)
+ignore = [
+    "RUSTSEC-2024-0438",  # wasmtime Windows device filenames
+    "RUSTSEC-2025-0046",  # wasmtime fd_renumber panic
+    "RUSTSEC-2025-0118",  # wasmtime shared memory unsound
+    "RUSTSEC-2024-0445",  # cap-primitives Windows device filenames
+    "RUSTSEC-2024-0421",  # idna Punycode labels
+    "RUSTSEC-2024-0437",  # protobuf recursion crash
+    "RUSTSEC-2026-0001",  # rkyv undefined behavior
+    "RUSTSEC-2024-0442",  # wasmtime-jit-debug unsound
+]
+informational_warnings = ["unmaintained", "unsound"]

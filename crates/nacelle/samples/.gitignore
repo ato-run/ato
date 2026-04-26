@@ -1,0 +1,45 @@
+# Generated test keys (dynamic, not committed)
+e2e-test.json
+
+# Node.js / npm
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dist/
+build/
+.next/
+*.tgz
+
+# Python / venv
+venv/
+env/
+__pycache__/
+*.pyc
+*.egg-info/
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Bun
+.bun/
+
+# TypeScript
+*.tsbuildinfo
+
+# Lock files (optional; decide per-project basis)
+# For test samples, we typically commit lock files for reproducibility
+# bun.lockb  # Uncomment if preferring not to commit
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS
+Thumbs.db
+.env.local
+.env.*.local
