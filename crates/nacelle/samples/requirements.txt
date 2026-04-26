@@ -1,0 +1,2 @@
+# Test capsule dependencies
+# Empty for now
