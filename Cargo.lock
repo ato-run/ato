@@ -1616,6 +1616,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "bollard",
+ "capsule-wire",
  "chrono",
  "ctrlc",
  "dhat",
@@ -1659,6 +1660,17 @@ dependencies = [
  "which",
  "zip",
  "zstd 0.13.3",
+]
+
+[[package]]
+name = "capsule-wire"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
