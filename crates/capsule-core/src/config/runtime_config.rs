@@ -611,8 +611,8 @@ egress_allow = ["1.1.1.1"]
     version = "0.1.0"
     type = "app"
 
-    runtime = "source"
-    version = "20"
+    runtime = "source/node"
+    runtime_version = "20"
     run = "index.js""#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
@@ -637,8 +637,8 @@ egress_allow = ["1.1.1.1"]
     version = "0.1.0"
     type = "app"
 
-    runtime = "source"
-    version = "20"
+    runtime = "source/node"
+    runtime_version = "20"
     run = "index.js""#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
@@ -770,8 +770,8 @@ port = 3000
     version = "0.1.0"
     type = "app"
 
-    runtime = "source"
-    version = "1.40"
+    runtime = "source/deno"
+    runtime_version = "1.40"
     run = "server.ts""#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
@@ -798,8 +798,8 @@ port = 3000
     version = "0.1.0"
     type = "app"
 
-    runtime = "source"
-    version = "1.40"
+    runtime = "source/deno"
+    runtime_version = "1.40"
     run = "server.ts""#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
@@ -817,6 +817,9 @@ port = 3000
         let tmp = tempdir().unwrap();
         let manifest_path = tmp.path().join("capsule.toml");
 
+        // Bun is detected from the .ts entrypoint rather than from a driver
+        // suffix, since `bun` is not part of the v0.3 driver allowlist
+        // (static|deno|node|python|wasmtime|native).
         let manifest = r#"
     schema_version = "0.3"
     name = "bun-demo"
@@ -824,7 +827,7 @@ port = 3000
     type = "app"
 
     runtime = "source"
-    version = "1.1"
+    runtime_version = "1.1"
     run = "main.ts""#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
@@ -849,7 +852,7 @@ port = 3000
     type = "app"
 
     runtime = "source"
-    version = "1.1"
+    runtime_version = "1.1"
     run = "main.ts""#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
@@ -890,6 +893,9 @@ port = 3000
         let tmp = tempdir().unwrap();
         let manifest_path = tmp.path().join("capsule.toml");
 
+        // v0.3 expresses an explicit interpreter command via `run = "<interp> <args>"`
+        // — the first token is the interpreter (deno here), which short-circuits
+        // the .ts → bun inference.
         let manifest = r#"
     schema_version = "0.3"
     name = "fresh-demo"
@@ -897,8 +903,7 @@ port = 3000
     type = "app"
 
     runtime = "source"
-    cmd = ["deno", "run", "-A", "--no-lock", "--unstable-kv", "main.ts"]
-    run = "main.ts""#;
+    run = "deno run -A --no-lock --unstable-kv main.ts""#;
 
         std::fs::write(&manifest_path, manifest).unwrap();
 
