@@ -41,11 +41,6 @@ This project adheres to the Rust Code of Conduct. By participating, you are expe
    cargo audit --deny warnings
    ```
 
-3. **Install pre-commit hooks (recommended):**
-   ```bash
-   ./scripts/setup-hooks.sh
-   ```
-
 ---
 
 ## Development Workflow
