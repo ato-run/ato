@@ -7,6 +7,7 @@ members = [
     "crates/ato-cli/lock-draft-engine",
     "crates/ato-desktop",
     "crates/ato-desktop/xtask",
+    "crates/nacelle",
 ]
 
 # Vendored path deps that must NOT be inherited as workspace members.
