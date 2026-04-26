@@ -316,6 +316,55 @@ crates/ato-cli/core/src/ccp/        # capsule-core crate (relocation deferred to
 
 `cargo check -p ato-desktop-xtask` でパス discovery の更新は型レベルで pass。実際の release green-run 検証は `ato-desktop-v0.5.0-rc1` のような RC タグ push まで保留 (deferred から CI verification gate へ移管)。
 
+### N1–N4 — `crates/` 再構成 (5-crate モデル) ✅ landed
+
+M6 後の workspace は (1) `capsule-core` がまだ `crates/ato-cli/core/` の入れ子、(2) `ato-desktop` が CCP / handle / ConfigField の **3 モジュールしか使っていないのに** `capsule-core` 全体 (bollard / tonic / rusqlite-bundled / reqwest / axum / prost / tokio-`full`) をリンクしている、という 2 つの構造的歪みを抱えていた。N1–N4 はこの 2 点を最小コストで解消する。
+
+提案された 9-crate split (capsule-spec / capsule-ipc / capsule-error / capsule-resolve / capsule-runtime / capsule-nacelle / ato-cli / ato-desktop / lock-draft-engine) は将来の方向としては妥当だが、resolve / runtime / nacelle 境界はまだ実コードで自明ではないため、**今回は確定している境界 (wire vs runtime) のみ切り出す保守的な 5-crate モデル**を採用:
+
+```
+capsule-wire    ← IPC surface (DAG root, no ato-* deps)
+capsule-core    ← runtime / orchestration / packers / engine / contract
+ato-cli         ← CLI バイナリ (`ato`)
+ato-desktop     ← GPUI バイナリ
+lock-draft-engine ← lock-draft WASM (現状のまま、ato-cli 配下に nest)
+```
+
+#### N1 — `crates/capsule-core/` への昇格
+
+`crates/ato-cli/core/` を `crates/capsule-core/` に物理移動。package 名は M2 時点で既に `capsule-core` だったため import path は不変。ato-cli / ato-desktop / capsule-core 自身の Cargo.toml の path dep と `app_control.rs` の CCP fixture path のみ更新。
+
+#### N2 — `crates/capsule-wire/` 抽出
+
+CCP envelope (`ccp/`)、handle 分類 (`routing/handle.rs`)、`ConfigField` / `ConfigKind` を新クレート `capsule-wire` に移し、capsule-core 側は re-export で公開パスを維持 (`capsule_core::ccp::*`、`capsule_core::routing::handle::*`、`capsule_core::types::ConfigField`)。
+
+`capsule-wire` の deps は `serde` / `dirs` / `thiserror` / `tracing` のみ。handle.rs が必要としていた `CapsuleError::Config` は slim な `WireError::Config` として local に再定義し、capsule-core 側に `impl From<WireError> for CapsuleError` を置くことで CLI の `?` 連鎖は無改変で通る。
+
+ATO_DESKTOP の link 表面が劇的に縮む下地が整う。
+
+#### N3 — `ato-desktop` の wire 移行
+
+`capsule_core::{handle, types::{ConfigField, ConfigKind}, ccp}` への参照を `capsule_wire::{handle, config::*, ccp}` に置換 (cli_envelope / state / orchestrator / ui / ui/modals/config_form / webview の 6 ファイル)。
+
+**意図的に残したもの**: `crates/ato-desktop/src/orchestrator.rs` が `capsule_core::share::execute_share` を library 呼び出ししている部分 (4 箇所)。これは share タブから `ato share` を spawn するランタイム経路であり、wire 型ではない。capsule-wire に share executor を入れると "純粋な IPC 表面" のセマンティクスが崩れるため、 ato-desktop が capsule-core に持つ依存はこの経路のためだけに保持する。完全な解消は (a) execute_share 呼び出しを `Command::new("ato share")` に置き換えるか、(b) share executor を第 3 のクレートに切り出すかの follow-up となる。
+
+#### N4 — dep-direction CI lint
+
+`.github/workflows/dep-direction.yml` で `cargo tree` ベースの 4 つのアサーションを CI 化:
+
+1. `capsule-wire` is a DAG root: `ato-cli` / `capsule-core` / `ato-desktop` / `ato-desktop-xtask` / `lock-draft-engine` のいずれも依存に出てこない。
+2. `capsule-wire` は GUI / runtime / clap / heavy-network deps を引き込まない (`tokio` / `hyper` / `reqwest` / `axum` / `tonic` / `bollard` / `gpui*` / `wry` / `rusqlite` / `wasmtime` / `clap` / `jsonschema` / `toml` ほか)。
+3. `ato-desktop` は `ato-cli` クレートを Cargo dep として linkしない (process-spawn 境界; `ato` バイナリは subprocess としてのみ起動する)。
+4. `ato-cli` は `ato-desktop` / `gpui*` / `wry` を引き込まない (一方向の矢印を保つ)。
+
+ローカル検証では 4 clauses すべて PASS。Workflow trigger は `Cargo.toml` / `Cargo.lock` / `.github/workflows/dep-direction.yml` のいずれかが変わった PR / push のみで、グラフ変更を伴わない通常 PR には負荷をかけない。
+
+#### N1–N4 後の到達点
+
+- `cargo tree -p capsule-wire` の transitive set には `serde` / `dirs` / `thiserror` / `tracing` 系のみ残り、 ato-desktop が wire 経路で取り込むコードベースが激減。
+- ato-desktop が `capsule-core` に残している依存はもはや `share::*` の 4 行のみ。次の自然な step は share executor の subprocess spawn 化 (M7 までに着地できれば理想だが必須ではない)。
+- proposal にあった resolve / runtime / nacelle の更なる split は引き続き open。実コードの境界が固まり次第 (e.g. nacelle が独立バイナリ化する瞬間)、N5+ として再評価。
+
 ### M7 — 旧 repo の archive
 
 - `ato-run/ato-cli` と `ato-run/ato-desktop` を **archive (read-only)** に。

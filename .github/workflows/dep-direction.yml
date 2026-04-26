@@ -1,0 +1,107 @@
+name: dep-direction
+
+# Enforces the workspace dependency DAG so the wire / runtime / shell
+# layering can't silently regress. The single biggest invariant is that
+# `capsule-wire` stays a DAG root (consumed by both `ato-cli` and
+# `ato-desktop`, depends on neither), since that's what lets the Desktop
+# link the IPC surface without dragging in capsule-core's runtime stack
+# (bollard / tonic / rusqlite / reqwest / axum / prost / tokio-`full`).
+#
+# See `docs/monorepo-consolidation-plan.md` §N4 for the full rationale.
+# Run locally with: `bash scripts/check-dep-direction.sh` (or just
+# `cargo tree -p <crate>` and eyeball it).
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**/Cargo.toml"
+      - ".github/workflows/dep-direction.yml"
+  push:
+    branches: [main, dev]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**/Cargo.toml"
+      - ".github/workflows/dep-direction.yml"
+
+jobs:
+  check:
+    name: Dependency direction
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: capsule-wire is a DAG root (no ato-* / capsule-core deps)
+        run: |
+          set -euo pipefail
+          # `cargo tree --prefix=none` flattens the tree and de-dups
+          # transitive entries with `(*)`, so a simple grep against the
+          # crate-name column catches both direct and transitive
+          # violations.
+          tree=$(cargo tree -p capsule-wire --prefix=none --edges=normal,build,dev)
+          violations=$(echo "$tree" | awk '{print $1}' | sort -u | \
+            grep -E '^(ato-cli|capsule-core|ato-desktop|ato-desktop-xtask|lock-draft-engine)$' || true)
+          if [ -n "$violations" ]; then
+            echo "::error::capsule-wire pulled in a forbidden ato-/capsule-core/lock-draft dep:"
+            echo "$violations"
+            echo "---"
+            echo "Full tree:"
+            echo "$tree"
+            exit 1
+          fi
+          echo "OK: capsule-wire is a clean DAG root."
+
+      - name: capsule-wire avoids GUI / runtime / clap / heavy-network deps
+        run: |
+          set -euo pipefail
+          tree=$(cargo tree -p capsule-wire --prefix=none --edges=normal,build,dev)
+          # Anything in this list would defeat the whole point of the
+          # split (the Desktop wanting a small wire surface). Add new
+          # entries here when a new heavy dep tries to sneak in via a
+          # type that "happens to need" it.
+          forbidden_re='^(tokio|hyper|reqwest|axum|tower|tonic|prost|bollard|gpui|gpui-component|gpui_platform|wry|portable-pty|clap|rusqlite|wasmtime|wasi-common|jsonschema|toml|toml_edit|globset|walkdir|notify|reqwest|rustls)$'
+          violations=$(echo "$tree" | awk '{print $1}' | sort -u | \
+            grep -E "$forbidden_re" || true)
+          if [ -n "$violations" ]; then
+            echo "::error::capsule-wire pulled in a forbidden runtime/GUI dep:"
+            echo "$violations"
+            echo "---"
+            echo "If this is intentional (a wire shape genuinely needs the dep), update"
+            echo ".github/workflows/dep-direction.yml — but think hard first: the whole"
+            echo "point of capsule-wire is a small surface."
+            exit 1
+          fi
+          echo "OK: capsule-wire stays free of GUI / runtime deps."
+
+      - name: ato-desktop does not depend on the ato-cli crate (process-spawn boundary)
+        run: |
+          set -euo pipefail
+          # ato-desktop spawns the `ato` binary as a subprocess; it must
+          # never link the ato-cli library. Catching this at Cargo-dep
+          # level keeps the boundary honest even if the spawn site looks
+          # innocuous.
+          tree=$(cargo tree -p ato-desktop --prefix=none --edges=normal,build,dev)
+          if echo "$tree" | awk '{print $1}' | sort -u | grep -E '^ato-cli$' > /dev/null; then
+            echo "::error::ato-desktop linked ato-cli as a Cargo dep — that violates the process-spawn boundary."
+            echo "ato-desktop must spawn the ato binary, not link its library."
+            exit 1
+          fi
+          echo "OK: ato-desktop does not depend on the ato-cli crate."
+
+      - name: ato-cli does not depend on ato-desktop (one-way arrow)
+        run: |
+          set -euo pipefail
+          # The arrow is ato-desktop → ato-cli (process spawn). The
+          # reverse direction would let CLI builds drag in GPUI, which
+          # is exactly what we don't want.
+          tree=$(cargo tree -p ato-cli --prefix=none --edges=normal,build,dev)
+          if echo "$tree" | awk '{print $1}' | sort -u | grep -E '^(ato-desktop|ato-desktop-xtask|gpui|gpui-component|gpui_platform|wry)$' > /dev/null; then
+            echo "::error::ato-cli pulled in a Desktop-only dep (above)."
+            exit 1
+          fi
+          echo "OK: ato-cli stays Desktop-free."
