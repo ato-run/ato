@@ -1,0 +1,29 @@
+[package]
+name = "capsule-wire"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Capsule wire types — the IPC surface shared by ato-cli (producer) and ato-desktop (consumer)."
+homepage = "https://ato.run"
+repository = "https://github.com/ato-run/ato"
+
+# The wire crate is the DAG root of the workspace's type system. It must
+# stay free of GUI / CLI / runtime / network dependencies so that pulling
+# it in costs only `serde` and the DTO definitions. See
+# `docs/monorepo-consolidation-plan.md` §N2 for the rationale.
+
+[package.metadata.dist]
+dist = false
+
+[lib]
+name = "capsule_wire"
+path = "src/lib.rs"
+
+[dependencies]
+dirs = "5.0"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+tracing = "0.1"
+
+[dev-dependencies]
+serde_json = "1.0"

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{CapsuleError, Result};
+use crate::error::{Result, WireError};
 
 const OFFICIAL_REGISTRY_DISPLAY_AUTHORITY: &str = "ato.run";
 const OFFICIAL_REGISTRY_IDENTITY: &str = "ato-official";
@@ -377,7 +377,7 @@ pub fn classify_surface_input(input: HandleInput) -> Result<SurfaceInput> {
 pub fn normalize_capsule_handle(raw: &str) -> Result<CanonicalHandle> {
     let input = raw.trim();
     if input.is_empty() {
-        return Err(CapsuleError::Config("handle must not be empty".to_string()));
+        return Err(WireError::Config("handle must not be empty".to_string()));
     }
 
     if let Some(rest) = input.strip_prefix("capsule://github.com/") {
@@ -399,7 +399,7 @@ pub fn normalize_capsule_handle(raw: &str) -> Result<CanonicalHandle> {
         if let Some(registry) = registry_identity_for_display_authority(authority) {
             return parse_registry_rest(registry_rest, registry);
         }
-        return Err(CapsuleError::Config(format!(
+        return Err(WireError::Config(format!(
             "unsupported capsule handle '{}': use capsule://ato.run/publisher/slug, capsule://github.com/owner/repo, or capsule://localhost:<port>/publisher/slug",
             input
         )));
@@ -413,7 +413,7 @@ pub fn normalize_capsule_handle(raw: &str) -> Result<CanonicalHandle> {
         return parse_registry_rest(input, RegistryIdentity::ato_official());
     }
 
-    Err(CapsuleError::Config(format!(
+    Err(WireError::Config(format!(
         "unsupported handle '{}'",
         input
     )))
@@ -430,14 +430,14 @@ pub fn parse_host_route(raw: &str) -> Result<HostRoute> {
     let rest = raw
         .trim()
         .strip_prefix("ato://")
-        .ok_or_else(|| CapsuleError::Config("invalid ato:// host route".to_string()))?;
+        .ok_or_else(|| WireError::Config("invalid ato:// host route".to_string()))?;
     let segments = rest
         .split('/')
         .filter(|segment| !segment.trim().is_empty())
         .map(|segment| segment.trim().to_string())
         .collect::<Vec<_>>();
     let Some((namespace, tail)) = segments.split_first() else {
-        return Err(CapsuleError::Config(
+        return Err(WireError::Config(
             "ato:// host route requires a namespace".to_string(),
         ));
     };
@@ -455,12 +455,12 @@ fn parse_github_rest(rest: &str) -> Result<CanonicalHandle> {
         .map(|segment| segment.trim().trim_end_matches(".git").to_string());
     let owner = segments
         .next()
-        .ok_or_else(|| CapsuleError::Config("github handle requires owner/repo".to_string()))?;
+        .ok_or_else(|| WireError::Config("github handle requires owner/repo".to_string()))?;
     let repo = segments
         .next()
-        .ok_or_else(|| CapsuleError::Config("github handle requires owner/repo".to_string()))?;
+        .ok_or_else(|| WireError::Config("github handle requires owner/repo".to_string()))?;
     if segments.next().is_some() {
-        return Err(CapsuleError::Config(
+        return Err(WireError::Config(
             "github handle must use github.com/owner/repo".to_string(),
         ));
     }
@@ -478,13 +478,13 @@ fn parse_registry_rest(rest: &str, registry: RegistryIdentity) -> Result<Canonic
         .filter(|segment| !segment.trim().is_empty())
         .map(|segment| segment.trim().to_string());
     let publisher = segments.next().ok_or_else(|| {
-        CapsuleError::Config("registry handle requires publisher/slug".to_string())
+        WireError::Config("registry handle requires publisher/slug".to_string())
     })?;
     let slug = segments.next().ok_or_else(|| {
-        CapsuleError::Config("registry handle requires publisher/slug".to_string())
+        WireError::Config("registry handle requires publisher/slug".to_string())
     })?;
     if segments.next().is_some() {
-        return Err(CapsuleError::Config(
+        return Err(WireError::Config(
             "registry handle must use publisher/slug".to_string(),
         ));
     }
@@ -499,7 +499,7 @@ fn parse_registry_rest(rest: &str, registry: RegistryIdentity) -> Result<Canonic
 
 fn split_capsule_authority(rest: &str) -> Result<(&str, &str)> {
     rest.split_once('/').ok_or_else(|| {
-        CapsuleError::Config(
+        WireError::Config(
             "capsule handle requires an authority and publisher/slug path".to_string(),
         )
     })

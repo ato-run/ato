@@ -84,10 +84,12 @@ pub mod config;
 
 // ── Layer 9: Wire protocols (cross-crate) ─────────────────────────────────
 //
-// Schema/tolerance for the Capsule Control Protocol. Lives in capsule-core
-// so the CLI (producer) and the Desktop (consumer) share one source of
-// truth for the wire shape. See `docs/monorepo-consolidation-plan.md` §M4.
-pub mod ccp;
+// Schema/tolerance for the Capsule Control Protocol. Originally lived in
+// capsule-core (M4); extracted to `capsule-wire` (N2) so `ato-desktop` can
+// link the wire surface without pulling in capsule-core's runtime deps.
+// Re-exported here so existing `capsule_core::ccp::*` paths in the CLI
+// keep working unchanged. See `docs/monorepo-consolidation-plan.md` §N2.
+pub use capsule_wire::ccp;
 pub use config::bootstrap;
 pub use config::diagnostics;
 pub use config::python_runtime;
