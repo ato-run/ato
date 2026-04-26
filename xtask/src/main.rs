@@ -239,6 +239,22 @@ fn bundle_linux_app(target: &str) -> Result<PathBuf> {
     if appdata_file.exists() {
         fs::copy(&appdata_file, metainfo_dir.join("ato-desktop.appdata.xml"))?;
     }
+    // appimagetool requires the icon referenced by `Icon=` in the .desktop
+    // file to live at the AppDir root. Stage the placeholder PNG from
+    // installer/ for v0.1.0.
+    let icon_file = installer_dir.join("ato-desktop.png");
+    if icon_file.exists() {
+        fs::copy(&icon_file, staging.join("ato-desktop.png"))?;
+        let icon_share_dir = staging
+            .join("usr")
+            .join("share")
+            .join("icons")
+            .join("hicolor")
+            .join("256x256")
+            .join("apps");
+        fs::create_dir_all(&icon_share_dir)?;
+        fs::copy(&icon_file, icon_share_dir.join("ato-desktop.png"))?;
+    }
     copy_dir_recursive(&paths.desktop_root.join("assets"), &assets_dir)?;
 
     println!("Staged Linux AppDir at {}", staging.display());
