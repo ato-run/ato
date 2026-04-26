@@ -1,0 +1,9 @@
+schema_version = "0.3"
+name = "tier2-fs-isolation-capsule"
+version = "0.1.0"
+type = "app"
+runtime = "source/native"
+run = "main.py"
+
+[sandbox.filesystem]
+read_write = ["./output"]

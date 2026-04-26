@@ -1,0 +1,10 @@
+schema_version = "0.3"
+name = "network-exfil-capsule"
+version = "0.1.0"
+type = "app"
+runtime = "source/deno"
+runtime_version = "1.46.3"
+run = "main.ts"
+
+[network]
+egress_allow = ["api.github.com"]

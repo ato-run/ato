@@ -1,0 +1,11 @@
+name = "r3-test"
+version = "0.1.0"
+
+type = "app"
+
+[execution]
+command = "python3 app.py"
+
+[sandbox]
+egress_allow = ["httpbin.org"]
+egress_deny = []

@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1
+# Multi-stage Docker E2E test: verifies ato uses managed Node/Python
+# when host has NO node, npm, or python installed.
+#
+# Stage 1 (builder): compiles ato from source
+# Stage 2 (tester):  Debian slim with no runtimes, runs tests
+
+# ─── Stage 1: Build ato binary ────────────────────────────────────────────────
+FROM rust:1.88-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    perl \
+    make \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# Copy the entire workspace. .dockerignore excludes target/, .ato/, .git/.
+COPY . .
+
+# Fetch dependencies first (cached layer unless Cargo.lock changes),
+# then build the release binary.
+RUN cargo fetch && \
+    cargo build --release --bin ato
+
+# ─── Stage 2: Minimal test environment (NO Node.js, NO Python) ────────────────
+FROM debian:bookworm-slim AS tester
+
+# ato needs curl + ca-certificates to download its managed Node runtime,
+# xz-utils + tar to extract the .tar.xz Node bundle.
+# Nothing else — specifically NO node, npm, python3, pip.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    xz-utils \
+    tar \
+    && rm -rf /var/lib/apt/lists/* \
+    && ! which node 2>/dev/null \
+    && ! which python3 2>/dev/null \
+    && ! which npm 2>/dev/null \
+    && echo "confirmed: no host runtimes installed"
+
+COPY --from=builder /src/target/release/ato /usr/local/bin/ato
+COPY tests/docker_no_runtime_runner.sh /run-tests.sh
+RUN chmod +x /run-tests.sh
+
+# ato writes its managed runtimes and workspaces to $HOME/.ato
+ENV HOME=/root
+ENV ATO_NO_INTERACTIVE=1
+
+CMD ["/run-tests.sh"]

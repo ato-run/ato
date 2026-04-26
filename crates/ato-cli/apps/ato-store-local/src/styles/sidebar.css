@@ -1,0 +1,138 @@
+/* Desktop: sidebar is replaced by AppHeader — hidden by default */
+.sidebar {
+  display: none;
+}
+
+/* Mobile-only slide-in drawer */
+.sidebar.mobile {
+  display: none; /* shown only when open, via media query below */
+  width: 220px;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--sidebar-bd);
+  color: var(--sidebar-tx);
+  flex-direction: column;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.sidebar-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--overlay);
+  backdrop-filter: blur(2px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease;
+  z-index: 15;
+}
+
+.sidebar-overlay.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.sidebar-header {
+  padding: 16px 14px;
+  border-bottom: 1px solid var(--sidebar-bd);
+}
+
+.sidebar-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sidebar-close-btn {
+  border-color: var(--border);
+  background: var(--bg);
+  color: var(--text-2);
+}
+
+.sidebar-logo {
+  color: var(--sidebar-ax);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.sidebar-subtitle {
+  font-size: 11px;
+}
+
+.sidebar-group {
+  padding: 12px;
+  border-bottom: 1px solid var(--sidebar-bd);
+}
+
+.sidebar-process-button {
+  margin-top: 8px;
+  width: 100%;
+}
+
+.sidebar-label {
+  font-size: 11px;
+  margin-bottom: 8px;
+  color: var(--sidebar-tx);
+}
+
+.sidebar-item {
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--sidebar-tx);
+  padding: 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.sidebar-item + .sidebar-item {
+  margin-top: 6px;
+}
+
+.sidebar-item.active {
+  border-color: var(--accent-md);
+  background: var(--accent-lt);
+  color: var(--accent);
+}
+
+.sidebar-item.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.running-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  padding: 4px 0;
+}
+
+.running-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 99px;
+  background: var(--green);
+}
+
+@media (max-width: 768px) {
+  .sidebar.mobile {
+    display: flex;
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 16;
+    height: 100dvh;
+    transform: translateX(-100%);
+    transition: transform 180ms ease;
+    width: min(220px, 86vw);
+  }
+
+  .sidebar.mobile.open {
+    transform: translateX(0);
+  }
+}

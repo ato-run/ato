@@ -1,0 +1,18 @@
+# IPC error test: reserved prefix collision (IPC-002)
+schema_version = "1.0"
+name = "ipc-reserved-test"
+version = "0.1.0"
+type = "app"
+
+[execution]
+runtime = "source"
+entrypoint = "echo hello"
+
+[ipc.exports]
+name = "reserved-svc"
+protocol = "jsonrpc-2.0"
+transport = "unix-socket"
+
+[[ipc.exports.methods]]
+name = "_ipc_internal"
+description = "Uses reserved prefix — should trigger IPC-002"

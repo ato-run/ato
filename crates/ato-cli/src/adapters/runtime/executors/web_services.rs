@@ -1,0 +1,804 @@
+use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+
+use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::router::ManifestData;
+use capsule_core::types::ServiceSpec;
+
+use crate::application::pipeline::cleanup::{CleanupScope, PipelineAttemptContext};
+use crate::application::services::{
+    ServiceGraphPlan, ServicePhaseCoordinator, ServicePhaseRuntime,
+};
+use crate::runtime::manager as runtime_manager;
+use crate::runtime::overrides as runtime_overrides;
+
+use super::launch_context::RuntimeLaunchContext;
+
+const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
+const READINESS_INTERVAL: Duration = Duration::from_millis(250);
+const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Default, Clone)]
+struct RuntimeBins {
+    deno: Option<PathBuf>,
+    node: Option<PathBuf>,
+    python: Option<PathBuf>,
+    uv: Option<PathBuf>,
+}
+
+struct RunningService {
+    spec: ServiceSpec,
+    env: HashMap<String, String>,
+    child: Child,
+    stdout_thread: Option<JoinHandle<std::io::Result<()>>>,
+    stderr_thread: Option<JoinHandle<std::io::Result<()>>>,
+}
+
+#[derive(Default)]
+struct ServiceStartupState {
+    running: HashMap<String, RunningService>,
+    ready: HashSet<String>,
+}
+
+#[derive(Clone)]
+struct ServiceStartupRuntime {
+    plan: ManifestData,
+    launch_ctx: RuntimeLaunchContext,
+    services: HashMap<String, ServiceSpec>,
+    runtime_dir: PathBuf,
+    runtime_bins: RuntimeBins,
+    state: Arc<Mutex<ServiceStartupState>>,
+    startup_cleanup: Arc<Mutex<Option<CleanupScope>>>,
+}
+
+impl ServiceStartupRuntime {
+    fn new(
+        plan: ManifestData,
+        launch_ctx: RuntimeLaunchContext,
+        services: &HashMap<String, ServiceSpec>,
+        runtime_dir: PathBuf,
+        runtime_bins: RuntimeBins,
+        startup_cleanup: Option<CleanupScope>,
+    ) -> Self {
+        Self {
+            plan,
+            launch_ctx,
+            services: services.clone(),
+            runtime_dir,
+            runtime_bins,
+            state: Arc::new(Mutex::new(ServiceStartupState::default())),
+            startup_cleanup: Arc::new(Mutex::new(startup_cleanup)),
+        }
+    }
+
+    fn commit_startup_cleanup(&self) {
+        let scope = self
+            .startup_cleanup
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take();
+        if let Some(scope) = scope {
+            scope.commit_all();
+        }
+    }
+
+    fn into_running(self) -> HashMap<String, RunningService> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        std::mem::take(&mut state.running)
+    }
+}
+
+#[async_trait]
+impl ServicePhaseRuntime for ServiceStartupRuntime {
+    async fn start_service(&self, service_name: &str) -> Result<()> {
+        let spec = self.services.get(service_name).ok_or_else(|| {
+            AtoExecutionError::policy_violation(format!(
+                "services.{} is missing from parsed manifest",
+                service_name
+            ))
+        })?;
+
+        let env = build_service_env(&self.plan, service_name, spec, &self.launch_ctx)?;
+        let mut cmd = build_service_command(&self.runtime_dir, spec, &self.runtime_bins)?;
+        cmd.current_dir(&self.runtime_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .envs(&env);
+
+        let mut child = cmd.spawn().with_context(|| {
+            format!(
+                "failed to spawn service '{}' with command '{}'",
+                service_name, spec.entrypoint
+            )
+        })?;
+
+        let pid = child.id();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let stdout_thread = spawn_prefixed_stream(stdout, service_name, false);
+        let stderr_thread = spawn_prefixed_stream(stderr, service_name, true);
+
+        if let Some(scope) = self
+            .startup_cleanup
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_mut()
+        {
+            scope.register_kill_child_process(pid, service_name.to_string());
+        }
+
+        self.state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .running
+            .insert(
+                service_name.to_string(),
+                RunningService {
+                    spec: spec.clone(),
+                    env,
+                    child,
+                    stdout_thread: Some(stdout_thread),
+                    stderr_thread: Some(stderr_thread),
+                },
+            );
+
+        Ok(())
+    }
+
+    async fn await_readiness(&self, service_name: String) -> Result<()> {
+        let state = Arc::clone(&self.state);
+        tokio::task::spawn_blocking(move || wait_until_ready_in_state(&service_name, &state))
+            .await
+            .map_err(anyhow::Error::new)?
+    }
+}
+
+pub fn execute(
+    plan: &ManifestData,
+    launch_ctx: &RuntimeLaunchContext,
+    attempt: Option<&mut PipelineAttemptContext>,
+) -> Result<i32> {
+    if !plan.is_web_services_mode() {
+        return Err(AtoExecutionError::policy_violation(
+            "web services executor requires runtime=web driver=deno with top-level [services]",
+        )
+        .into());
+    }
+
+    let graph = ServiceGraphPlan::from_manifest(plan)?;
+    let runtime_bins = resolve_runtime_bins(plan, graph.services())?;
+    let runtime_dir = resolve_runtime_dir(&plan.manifest_dir);
+    let runtime = ServiceStartupRuntime::new(
+        plan.clone(),
+        launch_ctx.clone(),
+        graph.services(),
+        runtime_dir,
+        runtime_bins,
+        attempt.map(|attempt| attempt.cleanup_scope()),
+    );
+
+    run_startup_coordinator(&graph, runtime.clone())?;
+    runtime.commit_startup_cleanup();
+
+    monitor_and_shutdown(runtime.into_running())
+}
+
+fn run_startup_coordinator(graph: &ServiceGraphPlan, runtime: ServiceStartupRuntime) -> Result<()> {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| {
+            handle.block_on(ServicePhaseCoordinator::new(graph).run(runtime))
+        })
+    } else {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(ServicePhaseCoordinator::new(graph).run(runtime))
+    }
+}
+
+fn resolve_runtime_dir(manifest_dir: &Path) -> PathBuf {
+    let source_dir = manifest_dir.join("source");
+    if source_dir.is_dir() {
+        source_dir
+    } else {
+        manifest_dir.to_path_buf()
+    }
+}
+
+fn resolve_runtime_bins(
+    plan: &ManifestData,
+    services: &HashMap<String, ServiceSpec>,
+) -> Result<RuntimeBins> {
+    let mut bins = RuntimeBins {
+        deno: Some(runtime_manager::ensure_deno_binary(plan)?),
+        ..RuntimeBins::default()
+    };
+
+    let mut required_tools: HashSet<String> = HashSet::new();
+    for service in services.values() {
+        if let Some(head) = command_head(&service.entrypoint)? {
+            if matches!(head.as_str(), "node" | "python" | "uv" | "deno") {
+                required_tools.insert(head);
+            }
+        }
+    }
+
+    if required_tools.contains("node") {
+        ensure_runtime_tool_version(plan, "node")?;
+        bins.node = Some(runtime_manager::ensure_node_binary(plan)?);
+    }
+    if required_tools.contains("python") {
+        ensure_runtime_tool_version(plan, "python")?;
+        bins.python = Some(runtime_manager::ensure_python_binary(plan)?);
+    }
+    if required_tools.contains("uv") {
+        ensure_runtime_tool_version(plan, "uv")?;
+        bins.uv = Some(runtime_manager::ensure_uv_binary(plan)?);
+    }
+
+    Ok(bins)
+}
+
+fn ensure_runtime_tool_version(plan: &ManifestData, tool: &str) -> Result<()> {
+    let exists = plan
+        .execution_runtime_tool_version(tool)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    if exists {
+        return Ok(());
+    }
+    Err(AtoExecutionError::policy_violation(format!(
+        "targets.{}.runtime_tools.{} is required when services command references '{}'",
+        plan.selected_target_label(),
+        tool,
+        tool
+    ))
+    .into())
+}
+
+fn command_head(command: &str) -> Result<Option<String>> {
+    let tokens = shell_words::split(command).map_err(|err| {
+        AtoExecutionError::policy_violation(format!(
+            "failed to parse services entrypoint '{}': {}",
+            command, err
+        ))
+    })?;
+    Ok(tokens
+        .first()
+        .map(|token| token.trim().to_ascii_lowercase())
+        .filter(|token| !token.is_empty()))
+}
+
+fn build_service_env(
+    plan: &ManifestData,
+    service_name: &str,
+    service: &ServiceSpec,
+    launch_ctx: &RuntimeLaunchContext,
+) -> Result<HashMap<String, String>> {
+    let mut env = runtime_overrides::merged_env(plan.execution_env());
+    if let Some(extra) = service.env.as_ref() {
+        env.extend(extra.clone());
+    }
+    if service_name == "main" {
+        if let Some(port) = runtime_overrides::override_port(plan.execution_port()) {
+            env.insert("PORT".to_string(), port.to_string());
+        }
+    }
+
+    if let Some(ipc_env) = launch_ctx.ipc_env_vars() {
+        for (key, value) in ipc_env {
+            if key.starts_with("CAPSULE_IPC_") || key == "ATO_BRIDGE_TOKEN" {
+                env.insert(key.clone(), value.clone());
+                continue;
+            }
+            return Err(AtoExecutionError::policy_violation(format!(
+                "session_token env '{}' is not allowlisted",
+                key
+            ))
+            .into());
+        }
+    }
+
+    env.extend(launch_ctx.injected_env().clone());
+
+    Ok(env)
+}
+
+fn build_service_command(
+    runtime_dir: &Path,
+    service: &ServiceSpec,
+    bins: &RuntimeBins,
+) -> Result<Command> {
+    let tokens = shell_words::split(service.entrypoint.as_str()).map_err(|err| {
+        AtoExecutionError::policy_violation(format!(
+            "failed to parse services entrypoint '{}': {}",
+            service.entrypoint, err
+        ))
+    })?;
+    if tokens.is_empty() {
+        return Err(AtoExecutionError::policy_violation(
+            "service entrypoint must include an executable",
+        )
+        .into());
+    }
+
+    let executable = resolve_executable(runtime_dir, &tokens[0], bins)?;
+    let mut cmd = Command::new(executable);
+    if tokens.len() > 1 {
+        cmd.args(&tokens[1..]);
+    }
+    Ok(cmd)
+}
+
+fn resolve_executable(runtime_dir: &Path, token: &str, bins: &RuntimeBins) -> Result<PathBuf> {
+    let normalized = token.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "deno" => bins
+            .deno
+            .clone()
+            .ok_or_else(|| {
+                AtoExecutionError::runtime_not_resolved(
+                    "deno runtime is not resolved",
+                    Some("deno"),
+                )
+            })
+            .map_err(Into::into),
+        "node" => bins
+            .node
+            .clone()
+            .ok_or_else(|| {
+                AtoExecutionError::runtime_not_resolved(
+                    "node runtime is not resolved",
+                    Some("node"),
+                )
+            })
+            .map_err(Into::into),
+        "python" | "python3" => bins
+            .python
+            .clone()
+            .ok_or_else(|| {
+                AtoExecutionError::runtime_not_resolved(
+                    "python runtime is not resolved",
+                    Some("python"),
+                )
+            })
+            .map_err(Into::into),
+        "uv" => bins
+            .uv
+            .clone()
+            .ok_or_else(|| {
+                AtoExecutionError::runtime_not_resolved("uv runtime is not resolved", Some("uv"))
+            })
+            .map_err(Into::into),
+        _ => {
+            let raw = PathBuf::from(token);
+            if raw.is_absolute() {
+                Ok(raw)
+            } else if token.contains('/') || token.contains('\\') {
+                Ok(runtime_dir.join(raw))
+            } else {
+                Ok(PathBuf::from(token))
+            }
+        }
+    }
+}
+
+fn spawn_prefixed_stream(
+    stream: Option<impl Read + Send + 'static>,
+    service_name: &str,
+    stderr: bool,
+) -> JoinHandle<std::io::Result<()>> {
+    let name = service_name.to_string();
+    thread::spawn(move || -> std::io::Result<()> {
+        let Some(stream) = stream else {
+            return Ok(());
+        };
+        let mut reader = BufReader::new(stream);
+        let mut buf = Vec::new();
+        let prefix = format!("[{}] ", name);
+        loop {
+            buf.clear();
+            let read = reader.read_until(b'\n', &mut buf)?;
+            if read == 0 {
+                break;
+            }
+            if stderr {
+                let mut writer = std::io::stderr();
+                writer.write_all(prefix.as_bytes())?;
+                writer.write_all(&buf)?;
+                writer.flush()?;
+            } else {
+                let mut writer = std::io::stdout();
+                writer.write_all(prefix.as_bytes())?;
+                writer.write_all(&buf)?;
+                writer.flush()?;
+            }
+        }
+        Ok(())
+    })
+}
+
+fn wait_until_ready_in_state(
+    service_name: &str,
+    state: &Arc<Mutex<ServiceStartupState>>,
+) -> Result<()> {
+    let deadline = Instant::now() + READINESS_TIMEOUT;
+    loop {
+        let readiness = {
+            let mut state_guard = state.lock().unwrap_or_else(|poison| poison.into_inner());
+            if state_guard.ready.contains(service_name) {
+                return Ok(());
+            }
+
+            let service = state_guard.running.get_mut(service_name).ok_or_else(|| {
+                AtoExecutionError::execution_contract_invalid(
+                    format!(
+                        "service '{}' was not started before readiness check",
+                        service_name
+                    ),
+                    None,
+                    Some(service_name),
+                )
+            })?;
+
+            let Some(probe) = service.spec.readiness_probe.clone() else {
+                state_guard.ready.insert(service_name.to_string());
+                return Ok(());
+            };
+
+            let port = resolve_probe_port(&service.env, &probe, service_name)?;
+            if let Some(status) = service.child.try_wait()? {
+                let code = status.code().unwrap_or(1);
+                return Err(AtoExecutionError::execution_contract_invalid(
+                    format!(
+                        "service '{}' exited before readiness check passed (exit code: {})",
+                        service_name, code
+                    ),
+                    None,
+                    Some(service_name),
+                )
+                .into());
+            }
+
+            (probe, port)
+        };
+
+        if readiness_probe_ok(&readiness.0, readiness.1)? {
+            state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .ready
+                .insert(service_name.to_string());
+            return Ok(());
+        }
+
+        if Instant::now() >= deadline {
+            return Err(AtoExecutionError::execution_contract_invalid(
+                format!(
+                    "service '{}' readiness check timed out after {}s",
+                    service_name,
+                    READINESS_TIMEOUT.as_secs()
+                ),
+                Some("readiness_probe"),
+                Some(service_name),
+            )
+            .into());
+        }
+
+        thread::sleep(READINESS_INTERVAL);
+    }
+}
+
+fn resolve_probe_port(
+    env: &HashMap<String, String>,
+    probe: &capsule_core::types::ReadinessProbe,
+    service_name: &str,
+) -> Result<u16> {
+    let key = probe.port.trim();
+    if key.is_empty() {
+        return Err(AtoExecutionError::execution_contract_invalid(
+            format!(
+                "services.{}.readiness_probe.port must be a non-empty env placeholder",
+                service_name
+            ),
+            Some("services.<name>.readiness_probe.port"),
+            Some(service_name),
+        )
+        .into());
+    }
+    let value = env.get(key).ok_or_else(|| {
+        AtoExecutionError::execution_contract_invalid(
+            format!(
+                "services.{}.readiness_probe.port '{}' is not defined in service env",
+                service_name, key
+            ),
+            Some("services.<name>.readiness_probe.port"),
+            Some(service_name),
+        )
+    })?;
+    value.parse::<u16>().map_err(|_| {
+        AtoExecutionError::execution_contract_invalid(
+            format!(
+                "services.{}.readiness_probe.port '{}' resolved to non-numeric value '{}'",
+                service_name, key, value
+            ),
+            Some("services.<name>.readiness_probe.port"),
+            Some(service_name),
+        )
+        .into()
+    })
+}
+
+fn readiness_probe_ok(probe: &capsule_core::types::ReadinessProbe, port: u16) -> Result<bool> {
+    if let Some(path) = probe
+        .http_get
+        .as_ref()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    {
+        return Ok(http_probe(path, port));
+    }
+    if let Some(target) = probe
+        .tcp_connect
+        .as_ref()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    {
+        return Ok(tcp_probe(target, port));
+    }
+    Err(AtoExecutionError::execution_contract_invalid(
+        "readiness_probe must define http_get or tcp_connect",
+        Some("readiness_probe"),
+        None,
+    )
+    .into())
+}
+
+fn http_probe(path: &str, port: u16) -> bool {
+    if path.starts_with("http://") || path.starts_with("https://") {
+        return false;
+    }
+
+    let normalized_path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{}", path)
+    };
+    let address = format!("127.0.0.1:{}", port);
+    let Ok(mut stream) = connect_with_timeout(&address) else {
+        return false;
+    };
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        normalized_path
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+
+    let mut response = [0u8; 128];
+    let Ok(read) = stream.read(&mut response) else {
+        return false;
+    };
+    if read == 0 {
+        return false;
+    }
+    let head = String::from_utf8_lossy(&response[..read]);
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok());
+    status
+        .map(|code| (200..500).contains(&code))
+        .unwrap_or(false)
+}
+
+fn tcp_probe(target: &str, port: u16) -> bool {
+    let address = if target.contains(':') {
+        target.to_string()
+    } else {
+        format!("{}:{}", target, port)
+    };
+    connect_with_timeout(&address).is_ok()
+}
+
+fn connect_with_timeout(address: &str) -> std::io::Result<TcpStream> {
+    let mut addrs = address.to_socket_addrs()?;
+    let Some(addr) = addrs.next() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            "no address resolved",
+        ));
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_secs(1))
+}
+
+fn monitor_and_shutdown(mut running: HashMap<String, RunningService>) -> Result<i32> {
+    loop {
+        let mut exited: Option<(String, i32)> = None;
+        for (name, service) in &mut running {
+            if let Some(status) = service.child.try_wait()? {
+                exited = Some((name.clone(), status.code().unwrap_or(1)));
+                break;
+            }
+        }
+
+        if let Some((exited_name, exit_code)) = exited {
+            shutdown_remaining(&mut running, &exited_name)?;
+            drain_output_threads(&mut running);
+            return Ok(exit_code);
+        }
+
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn shutdown_remaining(
+    running: &mut HashMap<String, RunningService>,
+    exited_service: &str,
+) -> Result<()> {
+    for (name, service) in running.iter_mut() {
+        if name == exited_service {
+            continue;
+        }
+        let _ = send_sigterm(&mut service.child);
+    }
+
+    let deadline = Instant::now() + GRACEFUL_STOP_TIMEOUT;
+    loop {
+        let mut all_stopped = true;
+        for (name, service) in running.iter_mut() {
+            if name == exited_service {
+                continue;
+            }
+            if service.child.try_wait()?.is_none() {
+                all_stopped = false;
+            }
+        }
+        if all_stopped || Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    for (name, service) in running.iter_mut() {
+        if name == exited_service {
+            continue;
+        }
+        if service.child.try_wait()?.is_none() {
+            let _ = service.child.kill();
+            let _ = service.child.wait();
+        }
+    }
+
+    Ok(())
+}
+
+fn drain_output_threads(running: &mut HashMap<String, RunningService>) {
+    for service in running.values_mut() {
+        if let Some(handle) = service.stdout_thread.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = service.stderr_thread.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn send_sigterm(child: &mut Child) -> Result<()> {
+    let ret = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    if ret == 0 {
+        return Ok(());
+    }
+
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(err.into())
+    }
+}
+
+#[cfg(not(unix))]
+fn send_sigterm(child: &mut Child) -> Result<()> {
+    child.kill().map_err(Into::into)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn service_startup_order(services: &HashMap<String, ServiceSpec>) -> Result<Vec<String>> {
+    Ok(ServiceGraphPlan::from_services(services)?
+        .startup_order()
+        .to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::service_startup_order;
+    use capsule_core::types::ServiceSpec;
+    use std::collections::HashMap;
+
+    #[test]
+    fn startup_order_respects_dependencies() {
+        let mut services = HashMap::new();
+        services.insert(
+            "main".to_string(),
+            ServiceSpec {
+                entrypoint: "node server.js".to_string(),
+                target: None,
+                depends_on: Some(vec!["api".to_string()]),
+                expose: None,
+                env: None,
+                state_bindings: Vec::new(),
+                readiness_probe: None,
+                network: None,
+            },
+        );
+        services.insert(
+            "api".to_string(),
+            ServiceSpec {
+                entrypoint: "python api.py".to_string(),
+                target: None,
+                depends_on: None,
+                expose: None,
+                env: None,
+                state_bindings: Vec::new(),
+                readiness_probe: None,
+                network: None,
+            },
+        );
+
+        let order = service_startup_order(&services).unwrap();
+        let main_idx = order.iter().position(|v| v == "main").unwrap();
+        let api_idx = order.iter().position(|v| v == "api").unwrap();
+        assert!(api_idx < main_idx);
+    }
+
+    #[test]
+    fn startup_order_rejects_cycle() {
+        let mut services = HashMap::new();
+        services.insert(
+            "main".to_string(),
+            ServiceSpec {
+                entrypoint: "node server.js".to_string(),
+                target: None,
+                depends_on: Some(vec!["api".to_string()]),
+                expose: None,
+                env: None,
+                state_bindings: Vec::new(),
+                readiness_probe: None,
+                network: None,
+            },
+        );
+        services.insert(
+            "api".to_string(),
+            ServiceSpec {
+                entrypoint: "python api.py".to_string(),
+                target: None,
+                depends_on: Some(vec!["main".to_string()]),
+                expose: None,
+                env: None,
+                state_bindings: Vec::new(),
+                readiness_probe: None,
+                network: None,
+            },
+        );
+
+        let err = service_startup_order(&services).unwrap_err();
+        assert!(err.to_string().contains("circular dependency"));
+    }
+}

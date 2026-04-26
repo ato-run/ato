@@ -1,0 +1,6 @@
+schema_version = "0.3"
+name = "native-python-no-uv-lock-capsule"
+version = "0.1.0"
+type = "app"
+runtime = "source/native"
+run = "main.py"

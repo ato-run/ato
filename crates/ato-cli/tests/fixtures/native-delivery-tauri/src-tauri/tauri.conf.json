@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "sample-native-capsule",
+  "version": "0.1.1",
+  "identifier": "dev.ato.sample-native-capsule",
+  "build": {
+    "frontendDist": "../web"
+  },
+  "bundle": {
+    "active": false,
+    "icon": []
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "sample-native-capsule",
+        "width": 640,
+        "height": 480
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}

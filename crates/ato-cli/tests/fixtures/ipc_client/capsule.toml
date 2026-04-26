@@ -1,0 +1,21 @@
+schema_version = "1.0"
+name = "ipc-test-client"
+version = "0.1.0"
+type = "app"
+
+[metadata]
+description = "Test IPC client for E2E tests"
+
+[execution]
+runtime = "source"
+entrypoint = "echo client"
+
+[ipc.imports]
+
+[ipc.imports.test-svc]
+from = "ipc-test-service"
+activation = "eager"
+required = true
+
+[[ipc.imports.test-svc.capabilities]]
+method = "ping"

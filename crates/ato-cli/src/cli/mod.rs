@@ -1,0 +1,55 @@
+mod app;
+mod binding;
+pub(crate) mod commands;
+mod config;
+pub(crate) mod dispatch;
+mod inspect;
+mod ipc;
+mod key;
+mod package;
+mod profile;
+mod project;
+mod registry;
+mod root;
+pub(crate) mod scoped_id_prompt;
+mod secrets;
+mod session;
+mod shared;
+mod source;
+mod state;
+
+#[allow(unused_imports)]
+pub(crate) use app::{AppCommands, ModelTierArg, PrivacyModeArg, RepairActionArg, SessionCommands};
+#[allow(unused_imports)]
+pub(crate) use binding::BindingCommands;
+#[allow(unused_imports)]
+pub(crate) use config::{
+    ConfigCommands, ConfigEngineCommands, ConfigRegistryCommands, EngineCommands,
+};
+#[allow(unused_imports)]
+pub(crate) use inspect::InspectCommands;
+#[allow(unused_imports)]
+pub(crate) use ipc::IpcCommands;
+#[allow(unused_imports)]
+pub(crate) use key::KeyCommands;
+#[allow(unused_imports)]
+pub(crate) use package::PackageCommands;
+#[allow(unused_imports)]
+pub(crate) use profile::ProfileCommands;
+#[allow(unused_imports)]
+pub(crate) use project::{ProjectCommands, ScaffoldCommands};
+#[allow(unused_imports)]
+pub(crate) use registry::RegistryCommands;
+pub(crate) use root::{Cli, Commands};
+#[allow(unused_imports)]
+pub(crate) use secrets::SecretsCommands;
+pub(crate) use session::IdentitySessionCommands;
+#[allow(unused_imports)]
+pub(crate) use shared::{
+    CompatibilityFallbackBackend, EncapVisibility, EnforcementMode, GitHubAutoFixMode, GitMode,
+    ProviderToolchain, RunAgentMode, ShareToolRuntime, DEFAULT_RUN_REGISTRY_URL,
+};
+#[allow(unused_imports)]
+pub(crate) use source::SourceCommands;
+#[allow(unused_imports)]
+pub(crate) use state::StateCommands;
