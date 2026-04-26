@@ -441,9 +441,14 @@ fn detect_languages(
 }
 
 fn read_allowlist(manifest: &toml::Value) -> Option<Vec<String>> {
-    let list = manifest
-        .get("runtime")
+    // Look in the v0.3 \[network\] table first (compatible with
+    // top-level \`runtime = "source"\` strings); fall back to the legacy
+    // \[runtime.allowlist\] location used by older v0.2 manifests.
+    let list_value = manifest
+        .get("network")
         .and_then(|v| v.get("allowlist"))
+        .or_else(|| manifest.get("runtime").and_then(|v| v.get("allowlist")));
+    let list = list_value
         .and_then(|v| v.as_array())?
         .iter()
         .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -560,8 +565,8 @@ version = "0.1.0"
 type = "app"
 
 runtime = "source"
-run = "python"
-[runtime]
+run = "main.py"
+[network]
 allowlist = ["nodejs.org", "github.com"]
 "#,
         )

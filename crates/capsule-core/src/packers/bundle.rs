@@ -962,7 +962,6 @@ type = "app"
 
 runtime = "source/python"
 runtime_version = "3.11.10"
-dependencies = "requirements.txt"
 run = "main.py""#;
         let manifest_path = root.join("capsule.toml");
         std::fs::write(&manifest_path, manifest).unwrap();
