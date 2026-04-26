@@ -46,7 +46,8 @@ fn write_file(path: &std::path::Path, contents: &str) {
 fn seed_minimal_deno_lockfiles(workspace_root: &std::path::Path) {
     let manifest_text = fs::read_to_string(workspace_root.join("capsule.toml"))
         .expect("read manifest for lockfile");
-    let manifest = CapsuleManifest::from_toml(&manifest_text).expect("parse manifest for lockfile");
+    let manifest: CapsuleManifest =
+        toml::from_str(&manifest_text).expect("parse manifest for lockfile");
     let manifest_hash = compute_manifest_hash_without_signatures(&manifest)
         .expect("compute manifest hash for lockfile");
 
