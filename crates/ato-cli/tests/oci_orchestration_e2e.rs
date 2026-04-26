@@ -28,6 +28,13 @@ fn strict_ci() -> bool {
         .unwrap_or(false)
 }
 
+fn oci_e2e_enabled() -> bool {
+    strict_ci()
+        || std::env::var("ATO_RUN_OCI_E2E")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+}
+
 fn docker_output(args: &[&str]) -> Option<std::process::Output> {
     let mut child = Command::new("docker")
         .args(args)
@@ -171,6 +178,10 @@ fn http_get(port: u16) -> String {
 
 #[test]
 fn oci_orchestration_connects_native_to_redis_and_reaps_containers_on_sigterm() {
+    if !oci_e2e_enabled() {
+        eprintln!("skipping OCI orchestration e2e: set ATO_RUN_OCI_E2E=1 to opt in");
+        return;
+    }
     if !docker_ready() {
         eprintln!("skipping OCI orchestration e2e: docker is unavailable");
         return;

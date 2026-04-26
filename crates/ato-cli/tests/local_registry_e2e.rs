@@ -578,17 +578,15 @@ name = "test-artifact-cwdless"
 version = "1.0.0"
 type = "app"
 
-runtime = "source/deno"
-runtime_version = "1.46.3"
-run = "main.ts"
-build = "echo prepare"
-"#,
+runtime = "web/static"
+port = 4173
+run = "dist""#,
     )?;
+    std::fs::create_dir_all(build_dir.join("dist"))?;
     std::fs::write(
-        build_dir.join("main.ts"),
-        r#"console.log("cwdless publish")"#,
+        build_dir.join("dist").join("index.html"),
+        "<!doctype html><title>cwdless publish</title>",
     )?;
-    seed_minimal_deno_lockfiles(&build_dir)?;
 
     let build = run_ato_with_home(&ato, &["build", "."], &build_dir, &home_dir)?;
     assert!(
@@ -2280,15 +2278,15 @@ name = "release-ops"
 version = "{version}"
 type = "app"
 
-runtime = "source/deno"
-runtime_version = "1.46.3"
-run = "main.ts""#
+runtime = "web/static"
+port = 4173
+run = "dist""#
             ),
         )?;
-        std::fs::write(dir.join("main.ts"), body)?;
+        std::fs::create_dir_all(dir.join("dist"))?;
         std::fs::write(
-            dir.join("deno.lock"),
-            r#"{"version":"5","specifiers":{},"packages":{}}"#,
+            dir.join("dist").join("index.html"),
+            format!("<!doctype html><title>{body}</title>"),
         )?;
     }
 
