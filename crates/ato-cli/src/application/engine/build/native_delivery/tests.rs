@@ -1514,6 +1514,10 @@ fn build_native_artifact_preserves_source_and_payload_executable_mode() -> Resul
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "darwin .app executable-bit enforcement is macOS-specific"
+)]
 fn test_build_rejects_non_executable_without_mutation() -> Result<()> {
     let tmp = tempdir()?;
     let plan = sample_native_build_plan(tmp.path(), 0o755)?;
@@ -1581,6 +1585,10 @@ fn finalize_creates_derived_copy_without_mutating_parent() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "darwin .app executable-bit enforcement is macOS-specific"
+)]
 fn finalize_rejects_missing_executable_bit() -> Result<()> {
     let tmp = tempdir()?;
     let fetched_dir = sample_fetch_dir_with_mode(tmp.path(), 0o644)?;

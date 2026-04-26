@@ -107,6 +107,10 @@ fn write_no_env_fixture(dir: &std::path::Path) {
 /// E2E-1: Save env values via prompt, then verify reuse on non-TTY re-run.
 #[cfg(unix)]
 #[test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "hosted Linux runner lacks native sandbox support for share execution"
+)]
 #[serial]
 fn test_e2e_1_prompt_env_save_then_reuse() {
     let tmp = workspace_tempdir("e2e1-save-reuse-");
@@ -195,6 +199,10 @@ fn test_e2e_1_prompt_env_save_then_reuse() {
 /// E2E-2: Save=no means no persisted file; second run fails missing-env on non-TTY.
 #[cfg(unix)]
 #[test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "hosted Linux runner lacks native sandbox support for share execution"
+)]
 #[serial]
 fn test_e2e_2_prompt_env_use_once() {
     let tmp = workspace_tempdir("e2e2-use-once-");
@@ -321,6 +329,10 @@ fn test_e2e_3_prompt_env_cancel() {
 /// E2E-9: Trailing args after `--` reach the entry command without corruption.
 #[cfg(unix)]
 #[test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "hosted Linux runner lacks native sandbox support for share execution"
+)]
 fn test_e2e_9_trailing_args() {
     let tmp = workspace_tempdir("e2e9-trailing-");
     let tmp_home = workspace_tempdir("e2e9-home-");
@@ -418,6 +430,10 @@ fn write_multi_entry_fixture(dir: &std::path::Path) {
 /// must show a numbered chooser and run whichever entry the user picks.
 #[cfg(unix)]
 #[test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "hosted Linux runner lacks native sandbox support for share execution"
+)]
 #[serial]
 fn test_e2e_6_multi_entry_chooser() {
     let tmp = workspace_tempdir("e2e6-chooser-");
