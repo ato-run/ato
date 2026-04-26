@@ -267,10 +267,15 @@ pub fn validate_manifest_for_build_with_mode(
         .and_then(|t| t.get(target_label))
         .and_then(|v| v.as_table());
 
-    if original_target
+    // Flat v0.3 manifests carry the smoke block at the top level (it gets
+    // migrated into `targets.<default_target>` during normalization). Detect
+    // either form so the smoke validator runs in both layouts.
+    let has_smoke_block = original_target
         .and_then(|target| target.get("smoke"))
         .is_some()
-    {
+        || original_raw.get("smoke").is_some();
+
+    if has_smoke_block {
         crate::smoke::parse_smoke_options(&original_raw, target_label)
             .map_err(|err| manifest_err(manifest_path, err.to_string()))?;
     }
@@ -629,7 +634,7 @@ run = "main.py"
         .unwrap();
         std::fs::write(dir.path().join("main.py"), "print('ok')").unwrap();
 
-        assert!(validate_manifest_for_build(&manifest_path, "cli").is_err());
+        assert!(validate_manifest_for_build(&manifest_path, "app").is_err());
     }
 
     #[test]
@@ -654,7 +659,7 @@ run = "main.py"
         .unwrap();
         std::fs::write(dir.path().join("main.py"), "print('ok')").unwrap();
 
-        assert!(validate_manifest_for_build(&manifest_path, "cli").is_ok());
+        assert!(validate_manifest_for_build(&manifest_path, "app").is_ok());
     }
 
     #[test]
@@ -675,13 +680,13 @@ run = "dist""#,
         )
         .unwrap();
 
-        let err = validate_manifest_for_build(&manifest_path, "static").unwrap_err();
+        let err = validate_manifest_for_build(&manifest_path, "app").unwrap_err();
         assert!(err
             .to_string()
             .contains("must be an existing directory under project root"));
 
         std::fs::create_dir_all(dir.path().join("dist")).unwrap();
-        assert!(validate_manifest_for_build(&manifest_path, "static").is_ok());
+        assert!(validate_manifest_for_build(&manifest_path, "app").is_ok());
     }
 
     #[test]
@@ -702,7 +707,7 @@ run = "~/dist""#,
         )
         .unwrap();
 
-        let err = validate_manifest_for_build(&manifest_path, "static").unwrap_err();
+        let err = validate_manifest_for_build(&manifest_path, "app").unwrap_err();
         assert!(err.to_string().contains("must be a safe relative path"));
     }
 
@@ -726,7 +731,7 @@ run = "dist""#,
         std::fs::create_dir_all(dir.path().join("dist")).unwrap();
         let result = validate_manifest_for_build_with_mode(
             &manifest_path,
-            "static",
+            "app",
             ValidationMode::Preview,
         );
         assert!(result.is_ok(), "{:?}", result.err());
@@ -750,7 +755,7 @@ run = "npm run start""#,
         )
         .unwrap();
 
-        let err = validate_manifest_for_build(&manifest_path, "web").unwrap_err();
+        let err = validate_manifest_for_build(&manifest_path, "app").unwrap_err();
         assert!(err
             .to_string()
             .contains("entrypoint must be a script file path"));
@@ -777,7 +782,7 @@ entrypoint = "node apps/dashboard/server.js"
         )
         .unwrap();
 
-        assert!(validate_manifest_for_build(&manifest_path, "web").is_ok());
+        assert!(validate_manifest_for_build(&manifest_path, "app").is_ok());
     }
 
     #[test]
@@ -800,7 +805,7 @@ entrypoint = "python apps/api/main.py"
         )
         .unwrap();
 
-        let err = validate_manifest_for_build(&manifest_path, "web").unwrap_err();
+        let err = validate_manifest_for_build(&manifest_path, "app").unwrap_err();
         assert!(err.to_string().contains("services.main is required"));
     }
 
@@ -824,7 +829,7 @@ entrypoint = "node apps/dashboard/server.js"
         )
         .unwrap();
 
-        let err = validate_manifest_for_build(&manifest_path, "web").unwrap_err();
+        let err = validate_manifest_for_build(&manifest_path, "app").unwrap_err();
         assert!(err.to_string().contains("runtime_tools.node is required"));
     }
 
@@ -847,7 +852,7 @@ run = "ato-entry.ts""#,
         .unwrap();
         std::fs::write(dir.path().join("ato-entry.ts"), "console.log('ok');").unwrap();
 
-        let err = validate_manifest_for_build(&manifest_path, "web").unwrap_err();
+        let err = validate_manifest_for_build(&manifest_path, "app").unwrap_err();
         assert!(err.to_string().contains("deprecated"));
     }
 
@@ -873,7 +878,7 @@ include = ["", "apps/**"]
         .unwrap();
         std::fs::write(dir.path().join("ato-entry.ts"), "console.log('ok');").unwrap();
 
-        let err = validate_manifest_for_build(&manifest_path, "web").unwrap_err();
+        let err = validate_manifest_for_build(&manifest_path, "app").unwrap_err();
         assert!(err.to_string().contains("pack.include"));
     }
 }
