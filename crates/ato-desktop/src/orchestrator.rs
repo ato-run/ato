@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
-use capsule_core::handle::{
+use capsule_wire::handle::{
     normalize_capsule_handle, CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor,
 };
 use serde::Deserialize;
@@ -176,7 +176,7 @@ pub enum LaunchError {
         /// `details.missing_schema` verbatim — drives the dynamic
         /// form. Iterated as-is by the modal; never index-aligned
         /// with `details.missing_keys`.
-        fields: Vec<capsule_core::types::ConfigField>,
+        fields: Vec<capsule_wire::config::ConfigField>,
         /// Snapshot of secrets passed to the original
         /// `start_capsule` call. Cloned at error-construction time so
         /// a concurrent SecretStore mutation can't corrupt the retry.
@@ -230,13 +230,13 @@ pub fn stop_guest_session(session_id: &str) -> Result<bool> {
 #[derive(Clone, Debug, Deserialize)]
 struct ResolveEnvelope {
     /// CCP wire-contract field. `None` for legacy CLIs that predate v0.5.
-    /// See `capsule_core::ccp::enforce_ccp_compat` for the tolerance rules.
+    /// See `capsule_wire::ccp::enforce_ccp_compat` for the tolerance rules.
     #[serde(default)]
     schema_version: Option<String>,
     resolution: ResolvePayload,
 }
 
-impl capsule_core::ccp::HasSchemaVersion for ResolveEnvelope {
+impl capsule_wire::ccp::HasSchemaVersion for ResolveEnvelope {
     fn schema_version(&self) -> Option<&str> {
         self.schema_version.as_deref()
     }
@@ -274,7 +274,7 @@ struct SessionStartEnvelope {
     session: SessionStartInfo,
 }
 
-impl capsule_core::ccp::HasSchemaVersion for SessionStartEnvelope {
+impl capsule_wire::ccp::HasSchemaVersion for SessionStartEnvelope {
     fn schema_version(&self) -> Option<&str> {
         self.schema_version.as_deref()
     }
@@ -335,7 +335,7 @@ struct SessionStopEnvelope {
     stopped: bool,
 }
 
-impl capsule_core::ccp::HasSchemaVersion for SessionStopEnvelope {
+impl capsule_wire::ccp::HasSchemaVersion for SessionStopEnvelope {
     fn schema_version(&self) -> Option<&str> {
         self.schema_version.as_deref()
     }
@@ -397,7 +397,7 @@ pub fn resolve_and_start_capsule(
 pub fn stop_capsule_session(session_id: &str) -> Result<bool> {
     let stopped: SessionStopEnvelope =
         run_ato_json(&["app", "session", "stop", session_id, "--json"])?;
-    capsule_core::ccp::enforce_ccp_compat(&stopped, "session_stop")?;
+    capsule_wire::ccp::enforce_ccp_compat(&stopped, "session_stop")?;
     Ok(stopped.stopped)
 }
 
@@ -452,7 +452,7 @@ pub fn cleanup_stale_capsule_sessions() -> Result<Vec<String>> {
 
 fn resolve_capsule(handle: &str) -> Result<ResolvePayload> {
     let envelope: ResolveEnvelope = run_ato_json(&["app", "resolve", handle, "--json"])?;
-    capsule_core::ccp::enforce_ccp_compat(&envelope, "resolve_handle")?;
+    capsule_wire::ccp::enforce_ccp_compat(&envelope, "resolve_handle")?;
     Ok(envelope.resolution)
 }
 
@@ -537,7 +537,7 @@ fn start_capsule(
 
     let envelope: SessionStartEnvelope = serde_json::from_slice(&output.stdout)
         .map_err(|err| LaunchError::Other(format!("failed to parse session start response: {err}")))?;
-    capsule_core::ccp::enforce_ccp_compat(&envelope, "session_start")
+    capsule_wire::ccp::enforce_ccp_compat(&envelope, "session_start")
         .map_err(|err| LaunchError::Other(err.to_string()))?;
     Ok(envelope.session)
 }
@@ -1402,7 +1402,7 @@ fn process_is_alive(pid: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use capsule_core::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor};
+    use capsule_wire::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor};
 
     use super::{
         allows_registry_guest_recovery, build_launch_session, collect_dev_script_dirs,
