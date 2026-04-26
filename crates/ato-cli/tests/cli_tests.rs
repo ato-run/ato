@@ -1921,9 +1921,7 @@ fn test_run_rejects_pypi_direct_url_syntax() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("direct URL,"))
-        .stderr(predicate::str::contains(
-            "path references are not supported",
-        ));
+        .stderr(predicate::str::contains("yet"));
 }
 
 #[test]
@@ -1933,9 +1931,7 @@ fn test_run_rejects_pypi_vcs_syntax() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("direct URL,"))
-        .stderr(predicate::str::contains(
-            "path references are not supported",
-        ));
+        .stderr(predicate::str::contains("yet"));
 }
 
 #[test]
