@@ -19,13 +19,8 @@ fn top_level_help_hides_internal_surface() {
     cmd.arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "  search   Search the registry for agent skills and packages",
-        ))
-        .stdout(predicate::str::contains("Troubleshooting:"))
-        .stdout(predicate::str::contains(
-            "  inspect  Inspect lock-first metadata",
-        ))
+        .stdout(predicate::str::contains("Primary Commands:"))
+        .stdout(predicate::str::contains("Management:"))
         .stdout(predicate::str::contains("  fetch ").not())
         .stdout(predicate::str::contains("  finalize ").not())
         .stdout(predicate::str::contains("  project ").not())
@@ -33,7 +28,12 @@ fn top_level_help_hides_internal_surface() {
         .stdout(predicate::str::contains("  key ").not())
         .stdout(predicate::str::contains("  config ").not())
         .stdout(predicate::str::contains("  gen-ci ").not())
-        .stdout(predicate::str::contains("  registry ").not());
+        .stdout(predicate::str::contains("  registry ").not())
+        .stdout(predicate::str::contains("  search ").not())
+        .stdout(predicate::str::contains("  inspect ").not())
+        .stdout(predicate::str::contains("  install ").not())
+        .stdout(predicate::str::contains("  init ").not())
+        .stdout(predicate::str::contains("  build ").not());
 }
 
 #[test]
