@@ -1,0 +1,14 @@
+{
+  "fixture_id": "provider-backed-pypi-demo-provider",
+  "provider": "pypi",
+  "package": "demo-provider",
+  "version": "0.1.0",
+  "intended_commands": [
+    "ato run pypi:demo-provider -- <input> -o <output>",
+    "ato run pypi:demo-provider[pdf] -- <input> -o <output>"
+  ],
+  "expected_behavior": "success-with-optional-extra",
+  "notes": [
+    "PyPI CLI fixture with an optional pdf extra backed by a helper package."
+  ]
+}

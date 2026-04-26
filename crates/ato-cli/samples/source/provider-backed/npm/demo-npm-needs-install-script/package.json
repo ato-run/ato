@@ -1,0 +1,8 @@
+{
+  "name": "demo-npm-needs-install-script",
+  "version": "1.0.0",
+  "bin": "bin/cli.mjs",
+  "scripts": {
+    "install": "node build.mjs"
+  }
+}

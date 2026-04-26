@@ -1,0 +1,8 @@
+{
+  "name": "greeter-service",
+  "version": "0.1.0",
+  "description": "Minimal IPC shared service",
+  "main": "server.js",
+  "private": true,
+  "type": "module"
+}

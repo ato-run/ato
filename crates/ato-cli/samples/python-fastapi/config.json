@@ -1,0 +1,31 @@
+{
+  "metadata": {
+    "generated_by": "ato-cli v0.5.5",
+    "name": "python-fastapi",
+    "source_manifest": "sha256:9bbd69bcbeb6c68dffde4c77ed6ef664cc38a8ca09e72f15b2e83dd3203b6435",
+    "version": "0.1.0"
+  },
+  "sandbox": {
+    "enabled": true,
+    "network": {
+      "enabled": true,
+      "enforcement": "strict"
+    }
+  },
+  "services": {
+    "main": {
+      "args": [
+        "run",
+        "--offline",
+        "python3",
+        "main.py"
+      ],
+      "cwd": "source",
+      "env": {
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "executable": "uv"
+    }
+  },
+  "version": "1.0.0"
+}

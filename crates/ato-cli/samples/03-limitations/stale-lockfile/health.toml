@@ -1,0 +1,21 @@
+[meta]
+title = "stale-lockfile: lock_id mismatch triggers E999"
+runtime = "source/node"
+difficulty = "beginner"
+tier = "03-limitations"
+tags = ["error", "lockfile", "anti-sample"]
+
+[run]
+cmd = "ato run ."
+timeout_s = 30
+
+[expect]
+exit_nonzero = true
+stderr_regex = "lock_id mismatch|lock_id"
+
+[platforms]
+linux = "full"
+macos = "full"
+
+[compat]
+min_ato_version = "0.4.69"

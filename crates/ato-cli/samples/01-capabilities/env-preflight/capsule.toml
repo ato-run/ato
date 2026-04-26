@@ -1,0 +1,8 @@
+schema_version = "0.3"
+name = "env-preflight"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node hello.js"
+
+required_env = ["APP_MESSAGE"]

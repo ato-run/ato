@@ -1,0 +1,29 @@
+name: "Setup ato"
+description: "Install the ato CLI at a specific version (stable | main | x.y.z)"
+inputs:
+  version:
+    description: "Version to install: 'stable', 'main', or a semver like '0.5.0'"
+    required: true
+    default: "stable"
+runs:
+  using: "composite"
+  steps:
+    - name: Install ato
+      shell: bash
+      run: |
+        case "${{ inputs.version }}" in
+          stable)
+            curl -fsSL https://ato.run/install.sh | sh
+            ;;
+          main)
+            # TODO (P1): install nightly build from ato-cli main branch
+            echo "::warning::ato@main install not yet wired; falling back to stable"
+            curl -fsSL https://ato.run/install.sh | sh
+            ;;
+          *)
+            # TODO (P1): pinned-version install
+            echo "::warning::pinned version ${{ inputs.version }} not yet wired; falling back to stable"
+            curl -fsSL https://ato.run/install.sh | sh
+            ;;
+        esac
+        ato --version

@@ -1,0 +1,12 @@
+# Capsule Manifest - target-based Python sample
+schema_version = "0.3"
+name = "python-fastapi"
+version = "0.1.0"
+type = "app"
+runtime = "source/python"
+runtime_version = "3.11.10"
+run = "main.py"
+port = 8000
+
+[metadata]
+description = "FastAPI sample"

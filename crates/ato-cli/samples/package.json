@@ -1,0 +1,21 @@
+{
+  "name": "ato-samples-tools",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Tooling for the ato-samples repository — CI matrix builder, per-layer health-check runner, schema validator.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "validate": "node tools/validate-health.mjs",
+    "matrix": "node tools/build-sample-matrix.mjs",
+    "check": "node tools/run-sample-checks.mjs",
+    "lint:compat": "node tools/lint-min-ato-version.mjs"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "smol-toml": "^1.3.1"
+  }
+}

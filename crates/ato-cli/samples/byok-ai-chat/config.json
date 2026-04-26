@@ -1,0 +1,91 @@
+{
+  "version": "1.0.0",
+  "services": {
+    "main": {
+      "executable": "npm",
+      "args": [
+        "run",
+        "dev"
+      ],
+      "cwd": "source",
+      "health_check": {
+        "http_get": "/api/config",
+        "port": "3000"
+      }
+    }
+  },
+  "sandbox": {
+    "enabled": true,
+    "network": {
+      "enabled": true,
+      "enforcement": "best_effort",
+      "egress": {
+        "mode": "allowlist",
+        "rules": [
+          {
+            "type": "ip",
+            "value": "160.79.104.10"
+          },
+          {
+            "type": "ip",
+            "value": "2607:6bc0::10"
+          },
+          {
+            "type": "ip",
+            "value": "104.18.38.236"
+          },
+          {
+            "type": "ip",
+            "value": "172.64.149.20"
+          },
+          {
+            "type": "ip",
+            "value": "2606:4700:4405::6812:26ec"
+          },
+          {
+            "type": "ip",
+            "value": "2606:4700:4409::ac40:9514"
+          },
+          {
+            "type": "ip",
+            "value": "162.159.140.245"
+          },
+          {
+            "type": "ip",
+            "value": "172.66.0.243"
+          },
+          {
+            "type": "ip",
+            "value": "64:ff9b::a29f:8cf5"
+          },
+          {
+            "type": "ip",
+            "value": "64:ff9b::ac42:f3"
+          },
+          {
+            "type": "ip",
+            "value": "104.18.2.115"
+          },
+          {
+            "type": "ip",
+            "value": "104.18.3.115"
+          },
+          {
+            "type": "ip",
+            "value": "2606:4700::6812:273"
+          },
+          {
+            "type": "ip",
+            "value": "2606:4700::6812:373"
+          }
+        ]
+      }
+    }
+  },
+  "metadata": {
+    "name": "byok-ai-chat",
+    "version": "0.1.0",
+    "generated_by": "ato-cli v0.1.0",
+    "source_manifest": "sha256:0d67798b2454623b6b879c8d485786144de7839567b4a105088b86d42fc76f63"
+  }
+}

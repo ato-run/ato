@@ -1,0 +1,21 @@
+[meta]
+title = "bad-toml-syntax: TOML parse error at manifest load"
+runtime = "source/node"
+difficulty = "beginner"
+tier = "03-limitations"
+tags = ["error", "manifest", "toml", "anti-sample"]
+
+[run]
+cmd = "ato run ."
+timeout_s = 30
+
+[expect]
+exit_nonzero = true
+stderr_regex = "TOML parse error|parse error"
+
+[platforms]
+linux = "full"
+macos = "full"
+
+[compat]
+min_ato_version = "0.4.69"

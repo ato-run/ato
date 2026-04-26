@@ -39,8 +39,6 @@ target/
 # Generated specs / lockfiles that should be reproducible from sources
 # (Cargo.lock IS committed in this workspace — application repo, not library.)
 
-# Local sample fixtures (use external `ato-run/ato-samples` repo instead)
-samples/
 
 # OS-specific
 Thumbs.db

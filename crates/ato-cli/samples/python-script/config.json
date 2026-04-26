@@ -1,0 +1,26 @@
+{
+  "version": "1.0.0",
+  "services": {
+    "main": {
+      "executable": "python3",
+      "args": [
+        "-c",
+        "print(\"hello from python script\")"
+      ],
+      "cwd": "source"
+    }
+  },
+  "sandbox": {
+    "enabled": true,
+    "network": {
+      "enabled": true,
+      "enforcement": "best_effort"
+    }
+  },
+  "metadata": {
+    "name": "python-script",
+    "version": "0.1.0",
+    "generated_by": "ato-cli v0.1.0",
+    "source_manifest": "sha256:0cc6a397172f878662266e7d6cc1d18312167575dfffbf97eb8d2be44bd678af"
+  }
+}

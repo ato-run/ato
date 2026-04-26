@@ -1,0 +1,21 @@
+[meta]
+title = "no-raw-gpu-handle: direct libcuda dlopen always blocked"
+runtime = "source/python"
+difficulty = "intermediate"
+tier = "03-limitations"
+tags = ["gpu", "sandbox", "capability", "anti-sample"]
+
+[run]
+cmd = "ato run ."
+timeout_s = 60
+
+[expect]
+exit_code = 0
+stdout_regex = "no raw GPU handle could be acquired"
+
+[platforms]
+linux = "full"
+macos = "full"
+
+[compat]
+min_ato_version = "0.4.69"

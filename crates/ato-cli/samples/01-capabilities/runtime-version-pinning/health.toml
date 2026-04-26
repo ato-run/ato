@@ -1,0 +1,21 @@
+[meta]
+title = "runtime-version-pinning: exact Python patch version is resolved"
+runtime = "source/python"
+difficulty = "beginner"
+tier = "01-capabilities"
+tags = ["runtime", "version-pinning", "python"]
+
+[run]
+cmd = "ato run ."
+timeout_s = 60
+
+[expect]
+exit_nonzero = true
+stderr_regex = "E301"
+
+[platforms]
+linux = "full"
+macos = "full"
+
+[compat]
+min_ato_version = "0.4.69"

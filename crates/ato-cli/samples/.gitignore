@@ -1,0 +1,59 @@
+# Build artifacts
+dist/
+build/
+target/
+artifacts/
+*-extracted/
+*.capsule
+*.sync
+.ato.run.generated.capsule.toml
+.capsule.lock.inputs.json
+nacelle-bundle/
+
+# Local state / runtime
+.ato/
+.tmp/
+.cache/
+.venv/
+__pycache__/
+*.pyc
+
+# Dependencies (committed lockfiles remain tracked)
+node_modules/
+.pnpm-store/
+pnpm-store/
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Independent nested repos (not yet formalized as submodules — see CONTRIBUTING)
+# Each has its own git remote; excluded from parent repo tracking.
+/hello-capsule
+/ato-onboarding
+# byok-suite apps were imported with their own .git; treat identically for now.
+/playground/byok-suite/byok-dynamic-http
+/playground/byok-suite/byok-dynamic-ws
+/playground/byok-suite/byok-encrypted-r2-drop
+/playground/byok-suite/byok-icon-generator
+/playground/byok-suite/byok-mermaid-editor
+/playground/byok-suite/byok-mini-rpg
+/playground/byok-suite/byok-prompt-helper
+/playground/byok-suite/byok-quiz-app
+/playground/byok-suite/byok-task-board
+
+# Large test artifacts
+test_sync_update/
+
+# ato encap artifacts (leak past build/ filter)
+*.sync
+*.capsule
