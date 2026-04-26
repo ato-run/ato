@@ -903,7 +903,20 @@ impl WorkspacePaths {
             .and_then(Path::parent)
             .map(Path::to_path_buf)
             .context("failed to resolve repository root from apps/ato-desktop")?;
-        let ato_root = repo_root.join("apps").join("ato-cli");
+        let ato_root = {
+            let primary = repo_root.join("apps").join("ato-cli");
+            if primary.exists() {
+                primary
+            } else {
+                // Fallback for layouts where ato-desktop is the repo root
+                // (e.g. mirrored release repository). The CI workflow clones
+                // ato-cli as a sibling to the desktop checkout.
+                desktop_root
+                    .parent()
+                    .map(|p| p.join("ato-cli"))
+                    .unwrap_or_else(|| repo_root.join("ato-cli"))
+            }
+        };
         let desktop_manifest = desktop_root.join("Cargo.toml");
         let ato_manifest = ato_root.join("Cargo.toml");
 
