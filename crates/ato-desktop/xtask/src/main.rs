@@ -281,13 +281,7 @@ fn package_msi(staging: &Path, target: &str) -> Result<()> {
 
     // candle = compile .wxs → .wixobj
     let status = Command::new("candle")
-        .args([
-            "-arch",
-            arch,
-            "-dStagingDir=",
-            // candle's preprocessor lets us inject the staging dir as
-            // a variable the .wxs references via $(var.StagingDir).
-        ])
+        .args(["-arch", arch])
         .arg(format!(
             "-dStagingDir={}",
             staging.to_str().context("staging path is not UTF-8")?
