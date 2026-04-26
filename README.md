@@ -34,6 +34,10 @@ ato run https://ato.run/s/demo@r1     # share URL
 | **M4** — `capsule-core` extraction Phase 1 (CCP envelope wire shape) | ✅ landed |
 | **M5** — `capsule-core` extraction Phase 2 (Manifest + Error + Config wire-shape unification) | ✅ landed |
 | **M6** — release CI integration (cargo-dist + xtask + Homebrew Cask) | ✅ landed (RC tag verification pending) |
+| **N1** — relocate `capsule-core` to `crates/capsule-core/` (top-level) | ✅ landed |
+| **N2** — extract `crates/capsule-wire/` (the IPC surface, DAG root) | ✅ landed |
+| **N3** — switch `ato-desktop`'s wire imports onto `capsule-wire` | ✅ landed |
+| **N4** — dependency-direction CI lint enforcing the DAG | ✅ landed |
 | **v0.5.0 bump** — after monorepo CI/CD verified end-to-end | ⬜ pending |
 | **M7** — archive `ato-cli` / `shiny-disco` (`ato-desktop`) repos | ⬜ pending |
 
@@ -43,8 +47,13 @@ ato run https://ato.run/s/demo@r1     # share URL
 ato/
 ├── Cargo.toml                           # workspace root
 ├── crates/
+│   ├── capsule-wire/                    # IPC surface (DAG root, N2)
+│   │   ├── ccp/                         #   CCP envelope schema + tolerance
+│   │   ├── handle.rs                    #   URL/handle classifier
+│   │   ├── config.rs                    #   ConfigField / ConfigKind
+│   │   └── error.rs                     #   slim WireError
+│   ├── capsule-core/                    # runtime/orchestration library (N1)
 │   ├── ato-cli/                         # the meta-runtime CLI
-│   │   ├── core/                        #   capsule-core (will extract in M4)
 │   │   └── lock-draft-engine/           #   lock generation, exposed as WASM
 │   └── ato-desktop/                     # GPUI-based desktop bundle
 │       └── xtask/                       #   bundle build / packaging
