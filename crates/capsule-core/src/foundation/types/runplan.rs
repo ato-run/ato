@@ -369,6 +369,7 @@ name = "hello-docker"
 version = "0.1.0"
 type = "app"
 
+default_target = "container"
 runtime = "oci"
 run = "ghcr.io/example/hello:latest"
 [state.data]
@@ -390,6 +391,7 @@ name = "hello-docker"
 version = "0.1.0"
 type = "app"
 
+default_target = "container"
 runtime = "oci"
 run = "ghcr.io/example/hello:latest"
 [state.data]
