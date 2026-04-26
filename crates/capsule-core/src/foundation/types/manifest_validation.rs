@@ -281,9 +281,24 @@ impl CapsuleManifest {
             }
 
             if runtime == "source" {
-                if entrypoint.is_empty() && !has_run_command {
+                // v0.3 collapses `runtime = "web/deno"` to `runtime = source`
+                // + `driver = deno`. When that target also wires up
+                // \[services\] (web-services mode), the per-target entrypoint
+                // is optional — each service supplies its own.
+                let driver_str = target
+                    .driver
+                    .as_deref()
+                    .map(str::trim)
+                    .map(str::to_ascii_lowercase);
+                let is_web_services_mode_v03 = driver_str.as_deref() == Some("deno")
+                    && has_services
+                    && target.port.is_some();
+                if entrypoint.is_empty() && !has_run_command && !is_web_services_mode_v03 {
                     errors.push(ValidationError::InvalidTarget(label.clone()));
                     continue;
+                }
+                if is_web_services_mode_v03 {
+                    requires_web_services_validation = true;
                 }
                 let effective_driver = infer_source_driver(target, entrypoint);
                 if !schema_is_v03
@@ -400,7 +415,8 @@ impl CapsuleManifest {
                     errors.push(ValidationError::InvalidTarget(label.clone()));
                     continue;
                 }
-            } else if entrypoint.is_empty() && !has_run_command {
+            } else if entrypoint.is_empty() && !has_run_command && !requires_web_services_validation
+            {
                 errors.push(ValidationError::InvalidTarget(label.clone()));
                 continue;
             }
