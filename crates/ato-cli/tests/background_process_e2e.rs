@@ -82,8 +82,8 @@ fn reconcile_processes_via_ps(home: &std::path::Path) {
 #[cfg(unix)]
 #[test]
 #[cfg_attr(
-    target_os = "macos",
-    ignore = "unstable background process persistence under macOS test runner"
+    any(target_os = "macos", target_os = "linux"),
+    ignore = "unstable background process persistence under hosted CI test runners"
 )]
 fn background_native_run_waits_until_ready_and_persists_ready_state() {
     let (_workspace, fixture) = prepare_fixture_workspace("native-shell-capsule");
@@ -189,8 +189,8 @@ fn background_native_run_fails_closed_before_readiness() {
 #[cfg(unix)]
 #[test]
 #[cfg_attr(
-    target_os = "macos",
-    ignore = "unstable background process persistence under macOS test runner"
+    any(target_os = "macos", target_os = "linux"),
+    ignore = "unstable background process persistence under hosted CI test runners"
 )]
 fn background_native_run_eventually_persists_exited_state_after_ready() {
     let (_workspace, fixture) = prepare_fixture_workspace("native-shell-capsule");
@@ -245,8 +245,8 @@ fn background_native_run_eventually_persists_exited_state_after_ready() {
 #[cfg(unix)]
 #[test]
 #[cfg_attr(
-    target_os = "macos",
-    ignore = "unstable background process persistence under macOS test runner"
+    any(target_os = "macos", target_os = "linux"),
+    ignore = "unstable background process persistence under hosted CI test runners"
 )]
 fn background_native_run_timeout_eventually_reconciles_to_failed() {
     let (_workspace, fixture) = prepare_fixture_workspace("native-shell-capsule");

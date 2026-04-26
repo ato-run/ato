@@ -119,6 +119,7 @@ fn test_e2e_1_prompt_env_save_then_reuse() {
     cmd.arg("run")
         .arg(spec_path.to_str().unwrap())
         .env("HOME", tmp_home.path())
+        .env("NACELLE_DEV_MODE", "1")
         .current_dir(tmp.path());
 
     let mut session = Session::spawn(cmd).expect("spawn PTY session for setup run");
@@ -165,6 +166,7 @@ fn test_e2e_1_prompt_env_save_then_reuse() {
         .arg("run")
         .arg(spec_path.to_str().unwrap())
         .env("HOME", tmp_home.path())
+        .env("NACELLE_DEV_MODE", "1")
         .current_dir(tmp.path())
         .output()
         .expect("reuse run");
@@ -204,6 +206,7 @@ fn test_e2e_2_prompt_env_use_once() {
     cmd.arg("run")
         .arg(spec_path.to_str().unwrap())
         .env("HOME", tmp_home.path())
+        .env("NACELLE_DEV_MODE", "1")
         .current_dir(tmp.path());
 
     let mut session = Session::spawn(cmd).expect("spawn PTY session");
@@ -247,6 +250,7 @@ fn test_e2e_2_prompt_env_use_once() {
         .arg("run")
         .arg(spec_path.to_str().unwrap())
         .env("HOME", tmp_home.path())
+        .env("NACELLE_DEV_MODE", "1")
         .current_dir(tmp.path())
         .output()
         .expect("second run");
@@ -276,6 +280,7 @@ fn test_e2e_3_prompt_env_cancel() {
     cmd.arg("run")
         .arg(spec_path.to_str().unwrap())
         .env("HOME", tmp_home.path())
+        .env("NACELLE_DEV_MODE", "1")
         .current_dir(tmp.path());
 
     let mut session = Session::spawn(cmd).expect("spawn PTY session");
@@ -329,6 +334,7 @@ fn test_e2e_9_trailing_args() {
         .arg("firstarg")
         .arg("arg with spaces")
         .env("HOME", tmp_home.path())
+        .env("NACELLE_DEV_MODE", "1")
         .current_dir(tmp.path())
         .output()
         .expect("run with trailing args");
@@ -423,6 +429,7 @@ fn test_e2e_6_multi_entry_chooser() {
     cmd.arg("run")
         .arg(spec_path.to_str().unwrap())
         .env("HOME", tmp_home.path())
+        .env("NACELLE_DEV_MODE", "1")
         .current_dir(tmp.path());
 
     let mut session = Session::spawn(cmd).expect("spawn PTY session for chooser");
