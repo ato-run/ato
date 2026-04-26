@@ -1,0 +1,45 @@
+[package]
+name = "ato-desktop"
+version = "0.1.0"
+edition = "2021"
+authors = ["ato-run"]
+description = "The universal user plane for executing and orchestrating sandboxed app capsules."
+build = "build.rs"
+
+[[bin]]
+name = "ato-desktop"
+path = "src/main.rs"
+
+[[bin]]
+name = "ato-desktop-mcp"
+path = "src/bin/ato_desktop_mcp.rs"
+
+[features]
+gpui-inspector = ["gpui-component/inspector"]
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+capsule-core = { path = "../ato-cli/core" }
+dirs = "5.0"
+gpui = { git = "https://github.com/zed-industries/zed", rev = "15d86607" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "15d86607", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui-component = { git = "https://github.com/ato-run/gpui-component", rev = "00ea23fbf0d15e229c9ec3034b2c3c16846908f9" }
+http = "1.4.0"
+portable-pty = "0.9"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-width = "0.2"
+ureq = "2.12.1"
+url = "2.5.4"
+wry = { version = "0.55.0", features = ["protocol", "devtools"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6.4"
+objc2-app-kit = "0.3.2"
+objc2-foundation = "0.3.2"
+objc2-quartz-core = "0.3.2"
+objc2-web-kit = "0.3.2"

@@ -1,0 +1,15 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "run ato-desktop",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"run"
+			],
+			"isBackground": true,
+			"group": "build"
+		}
+	]
+}
