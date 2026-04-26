@@ -2301,6 +2301,28 @@ async fn repository_ato_desktop_capsule_installs_via_native_local_derivation() {
         .expect("repo root");
     let desktop_root = repo_root.join("crates").join("ato-desktop");
 
+    let macos_dir = desktop_root
+        .join("dist")
+        .join("darwin-arm64")
+        .join("Ato Desktop.app")
+        .join("Contents")
+        .join("MacOS");
+    let has_executable = std::fs::read_dir(&macos_dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_type().map(|ty| ty.is_file()).unwrap_or(false))
+        })
+        .unwrap_or(false);
+    if !has_executable {
+        eprintln!(
+            "skipping repository_ato_desktop_capsule_installs_via_native_local_derivation: \
+             Ato Desktop.app/Contents/MacOS/ has no executable; \
+             build the desktop bundle first to exercise this test"
+        );
+        return;
+    }
+
     let authoritative_input = resolve_producer_authoritative_input(
         &desktop_root,
         std::sync::Arc::new(CliReporter::new(false)),
