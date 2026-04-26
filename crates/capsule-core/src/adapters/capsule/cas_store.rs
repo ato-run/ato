@@ -685,6 +685,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn from_env_uses_ato_cas_root() {
         let dir = tempfile::tempdir().unwrap();
         let old = std::env::var_os("ATO_CAS_ROOT");
