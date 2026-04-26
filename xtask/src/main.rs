@@ -531,9 +531,11 @@ fn locate_entitlements() -> Result<PathBuf> {
 /// matches docs/v0.5-distribution-plan.md PR-4 ("no Apple secrets
 /// required for v0.5").
 fn notarize_bundle(bundle: &Path) -> Result<()> {
-    let apple_id = std::env::var("APPLE_ID").ok();
-    let app_pwd = std::env::var("APPLE_APP_SPECIFIC_PASSWORD").ok();
-    let team_id = std::env::var("APPLE_TEAM_ID").ok();
+    let apple_id = std::env::var("APPLE_ID").ok().filter(|s| !s.is_empty());
+    let app_pwd = std::env::var("APPLE_APP_SPECIFIC_PASSWORD")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let team_id = std::env::var("APPLE_TEAM_ID").ok().filter(|s| !s.is_empty());
     let (Some(apple_id), Some(app_pwd), Some(team_id)) = (apple_id, app_pwd, team_id) else {
         println!(
             "notarize: skipped (no Apple credentials — set APPLE_ID, \
