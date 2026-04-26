@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WYSIWYG Markdown Editor Capsule</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="app-header">
+        <div class="title-group">
+          <h1>WYSIWYG Markdown Editor</h1>
+          <p>Playground-ready web capsule (zero-build)</p>
+        </div>
+        <div class="status-group">
+          <span class="status-label">State</span>
+          <span id="save-state" class="status-badge saved">Saved</span>
+        </div>
+      </header>
+
+      <section class="toolbar" aria-label="Editor toolbar">
+        <button type="button" data-command="h1">H1</button>
+        <button type="button" data-command="h2">H2</button>
+        <button type="button" data-command="bold">Bold</button>
+        <button type="button" data-command="italic">Italic</button>
+        <button type="button" data-command="link">Link</button>
+        <button type="button" data-command="ul">UL</button>
+        <button type="button" data-command="ol">OL</button>
+        <button type="button" data-command="code">Code</button>
+        <button type="button" data-command="quote">Quote</button>
+        <button type="button" data-command="undo">Undo</button>
+        <button type="button" data-command="redo">Redo</button>
+      </section>
+
+      <main class="main-grid">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Editor</h2>
+            <p>contenteditable WYSIWYG surface</p>
+          </div>
+          <div
+            id="editor"
+            class="editor-surface"
+            contenteditable="true"
+            role="textbox"
+            aria-label="Markdown editor"
+            spellcheck="true"
+          ></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Preview</h2>
+            <p>Rendered from generated markdown</p>
+          </div>
+          <div id="preview-output" class="preview-surface"></div>
+        </section>
+      </main>
+
+      <section class="markdown-panel">
+        <div class="panel-header markdown-header">
+          <div>
+            <h2>Markdown Source</h2>
+            <p>Read-only generated markdown</p>
+          </div>
+          <button id="copy-markdown" type="button" class="copy-btn">Copy</button>
+        </div>
+        <textarea
+          id="markdown-source"
+          class="markdown-source"
+          readonly
+          aria-label="Markdown source"
+        ></textarea>
+      </section>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

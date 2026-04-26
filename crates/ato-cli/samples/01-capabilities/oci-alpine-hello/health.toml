@@ -1,0 +1,27 @@
+[meta]
+title = "oci-alpine-hello: minimal OCI container runtime"
+runtime = "oci/runc"
+difficulty = "beginner"
+tier = "01-capabilities"
+tags = ["oci", "container", "docker"]
+
+[run]
+cmd = "ato run ."
+timeout_s = 60
+
+[expect]
+exit_code = 0
+stdout_regex = "hello from alpine OCI runtime"
+
+[platforms]
+linux = "full"
+macos = "full"
+
+[compat]
+min_ato_version = "0.4.69"
+tested_against = ["0.4.69"]
+breaks_after_version = ""
+
+[requires]
+requires_docker = true
+requires_network = true

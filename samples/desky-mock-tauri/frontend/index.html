@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Desky Mock Tauri</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "Inter", "SF Pro Text", sans-serif;
+        background:
+          radial-gradient(
+            circle at top left,
+            rgba(16, 185, 129, 0.18),
+            transparent 28%
+          ),
+          linear-gradient(180deg, #06111e, #081420 55%, #0a1321 100%);
+        color: #f4f7fb;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+      }
+
+      main {
+        min-height: 100vh;
+        display: grid;
+        grid-template-columns: minmax(0, 1.3fr) minmax(280px, 0.7fr);
+        gap: 18px;
+        padding: 22px;
+      }
+
+      .panel {
+        border: 1px solid rgba(255, 255, 255, 0.09);
+        border-radius: 24px;
+        background: rgba(8, 15, 28, 0.72);
+        backdrop-filter: blur(22px);
+        box-shadow: 0 20px 80px rgba(0, 0, 0, 0.28);
+      }
+
+      .hero {
+        padding: 28px;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+
+      .eyebrow {
+        color: #7dd3b0;
+        font-size: 11px;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(2.1rem, 4vw, 3.7rem);
+        line-height: 0.94;
+      }
+
+      p {
+        margin: 0;
+        color: #b6c3d1;
+        line-height: 1.6;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .metric,
+      .log,
+      .controls {
+        padding: 16px;
+        border-radius: 18px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .metric-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.18em;
+        color: #7d8ca0;
+      }
+
+      .metric-value {
+        margin-top: 10px;
+        font-size: 1.1rem;
+        font-weight: 600;
+      }
+
+      .sidebar {
+        padding: 22px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .status-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: rgba(16, 185, 129, 0.14);
+        color: #b8f2d8;
+        font-size: 12px;
+      }
+
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: currentColor;
+      }
+
+      button {
+        border: 0;
+        border-radius: 16px;
+        padding: 13px 16px;
+        font: inherit;
+        font-weight: 600;
+        color: #04111b;
+        background: linear-gradient(90deg, #79f2c6, #8ae7ff);
+        cursor: pointer;
+      }
+
+      button.secondary {
+        background: rgba(255, 255, 255, 0.06);
+        color: #f4f7fb;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-size: 12px;
+        line-height: 1.65;
+        color: #d7e0ea;
+      }
+
+      @media (max-width: 960px) {
+        main {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="panel hero">
+        <div>
+          <div class="eyebrow">Guest Webview</div>
+          <h1>Tauri frontend rendered inside Electron.</h1>
+        </div>
+        <p>
+          This mock guest expects a Tauri-compatible bridge. It auto-detects the
+          injected API, listens for shell events, and invokes the backend
+          through Desky.
+        </p>
+
+        <div class="grid">
+          <div class="metric">
+            <div class="metric-label">Bridge</div>
+            <div class="metric-value" id="bridge-status">probing</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Session</div>
+            <div class="metric-value" id="session-status">booting</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Mode</div>
+            <div class="metric-value" id="mode-status">probing</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Last Echo</div>
+            <div class="metric-value" id="last-echo">-</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Shell Events</div>
+            <div class="metric-value" id="event-count">0</div>
+          </div>
+        </div>
+
+        <div class="controls">
+          <div class="metric-label">Controls</div>
+          <div
+            style="display: flex; gap: 12px; margin-top: 14px; flex-wrap: wrap"
+          >
+            <button id="ping">Invoke ping</button>
+            <button id="set-title">Set host title</button>
+            <button id="read-file">Read backend file</button>
+            <button id="forbidden-read" class="secondary">
+              Try forbidden read
+            </button>
+            <button id="external" class="secondary">Request shell.open</button>
+          </div>
+        </div>
+      </section>
+
+      <aside class="panel sidebar">
+        <div class="status-chip">
+          <span class="dot"></span
+          ><span id="badge-label">Waiting for injected bridge</span>
+        </div>
+        <div class="log">
+          <div class="metric-label">Frontend State</div>
+          <pre id="output">idle</pre>
+        </div>
+        <div class="log">
+          <div class="metric-label">Last Shell Event</div>
+          <pre id="event-log">none</pre>
+        </div>
+        <div class="log">
+          <div class="metric-label">Capability Results</div>
+          <pre id="capability-log">none</pre>
+        </div>
+      </aside>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

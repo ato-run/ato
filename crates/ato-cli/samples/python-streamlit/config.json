@@ -1,0 +1,34 @@
+{
+  "version": "1.0.0",
+  "services": {
+    "main": {
+      "executable": "source/.venv/bin/python",
+      "args": [
+        "-m",
+        "streamlit",
+        "run",
+        "source/app.py",
+        "--server.address",
+        "127.0.0.1",
+        "--server.port",
+        "8501",
+        "--server.headless",
+        "true"
+      ],
+      "cwd": "source"
+    }
+  },
+  "sandbox": {
+    "enabled": true,
+    "network": {
+      "enabled": true,
+      "enforcement": "best_effort"
+    }
+  },
+  "metadata": {
+    "name": "python-streamlit",
+    "version": "0.1.0",
+    "generated_by": "ato-cli v0.1.0",
+    "source_manifest": "sha256:3b4fd0326853e38a8dfdea70c83caf7a1c0bd75de3d4e76a3f5d585025e3a788"
+  }
+}

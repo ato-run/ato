@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "lock_id": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+  "features": {},
+  "resolution": {
+    "unresolved": [],
+    "closure": {
+      "kind": "metadata_only",
+      "observed_lockfiles": [
+        "npm"
+      ],
+      "status": "incomplete"
+    },
+    "resolved_targets": [
+      {
+        "cmd": [],
+        "driver": "node",
+        "entrypoint": "",
+        "label": "app",
+        "language": "node",
+        "port": null,
+        "required_env": [],
+        "run_command": "node hello.js",
+        "runtime": "source",
+        "runtime_tools": {},
+        "runtime_version": null,
+        "working_dir": null
+      }
+    ],
+    "runtime": {
+      "kind": "node",
+      "resolved_by": "compatibility_target_selection",
+      "selected_target": "app"
+    },
+    "target_selection": {
+      "default_target": "app",
+      "source": "manifest"
+    }
+  },
+  "contract": {
+    "metadata": {
+      "capsule_type": "app",
+      "default_target": "app",
+      "name": "stale-lockfile",
+      "version": "0.1.0"
+    },
+    "process": {
+      "entrypoint": "",
+      "env": {},
+      "required_env": [],
+      "run_command": "node hello.js"
+    },
+    "workloads": [
+      {
+        "depends_on": [],
+        "name": "app",
+        "process": {
+          "entrypoint": "",
+          "env": {},
+          "required_env": [],
+          "run_command": "node hello.js"
+        },
+        "target": "app"
+      }
+    ]
+  },
+  "binding": {},
+  "policy": {},
+  "attestations": {}
+}

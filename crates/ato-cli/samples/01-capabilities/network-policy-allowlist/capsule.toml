@@ -1,0 +1,9 @@
+schema_version = "0.3"
+name = "network-policy-allowlist"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node hello.js"
+
+[network]
+egress_allow = ["httpbin.org"]

@@ -1,0 +1,6 @@
+[meta
+name = "bad-toml-syntax"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node hello.js"

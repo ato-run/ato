@@ -1,0 +1,33 @@
+# Capsule Manifest - BYOK AI Chat Application
+# Supports Vault integration (env vars) and UI input (localStorage)
+
+schema_version = "0.3"
+name = "byok-ai-chat"
+version = "0.1.0"
+type = "app"
+runtime = "web/node"
+runtime_version = "20"
+run = "server.js"
+port = 3000
+
+[metadata]
+display_name = "BYOK AI Chat"
+description = "Minimal AI chat app with Bring Your Own Key support"
+author = "ato"
+tags = ["ai", "chat", "byok", "next.js"]
+
+[network]
+egress_allow = [
+  "api.openai.com",
+  "api.anthropic.com",
+  "api.groq.com",
+  "openrouter.ai",
+]
+
+[isolation]
+allow_env = [
+  "OPENAI_API_KEY",
+  "OPENAI_BASE_URL",
+]
+
+build = "npm install && npm run build"

@@ -1,0 +1,8 @@
+{
+  "name": "greeter-client",
+  "version": "0.1.0",
+  "description": "Client for the greeter-service IPC service",
+  "main": "client.js",
+  "private": true,
+  "type": "module"
+}
