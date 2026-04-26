@@ -146,10 +146,7 @@ mod tests {
 
     #[test]
     fn classifies_v1_as_native() {
-        assert_eq!(
-            classify_schema_version(Some("ccp/v1")),
-            CcpCompat::NativeV1
-        );
+        assert_eq!(classify_schema_version(Some("ccp/v1")), CcpCompat::NativeV1);
     }
 
     #[test]
@@ -171,7 +168,7 @@ mod tests {
             "ccp",
             "ccp/",
             "ccp/v",
-            "ccp/v0",       // never released
+            "ccp/v0", // never released
             "ccp/vabc",
             "desky-control-plane/v1", // legacy name retired in v0.5
             "v1",
@@ -196,12 +193,8 @@ mod tests {
     #[test]
     fn enforce_returns_ok_for_legacy_native_and_future() {
         assert!(enforce_ccp_compat(&StubEnvelope(None), "test").is_ok());
-        assert!(
-            enforce_ccp_compat(&StubEnvelope(Some("ccp/v1".into())), "test").is_ok()
-        );
-        assert!(
-            enforce_ccp_compat(&StubEnvelope(Some("ccp/v2".into())), "test").is_ok()
-        );
+        assert!(enforce_ccp_compat(&StubEnvelope(Some("ccp/v1".into())), "test").is_ok());
+        assert!(enforce_ccp_compat(&StubEnvelope(Some("ccp/v2".into())), "test").is_ok());
     }
 
     #[test]

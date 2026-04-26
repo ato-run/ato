@@ -305,21 +305,23 @@ mod tests {
         );
         assert!(install_verb_allowlist(&["claude".into(), "--help".into()]).is_empty());
         // `python -m pip list` is a query, not install.
-        assert!(
-            install_verb_allowlist(&[
-                "python".into(),
-                "-m".into(),
-                "pip".into(),
-                "list".into()
-            ])
-            .is_empty()
-        );
+        assert!(install_verb_allowlist(&[
+            "python".into(),
+            "-m".into(),
+            "pip".into(),
+            "list".into()
+        ])
+        .is_empty());
     }
 
     #[test]
     fn family_root_ends_with_family_name() {
         let root = family_root(Family::Node).expect("home dir available");
-        assert!(root.ends_with(".ato/userland/node"), "got {}", root.display());
+        assert!(
+            root.ends_with(".ato/userland/node"),
+            "got {}",
+            root.display()
+        );
     }
 
     #[test]

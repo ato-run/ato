@@ -66,7 +66,7 @@ input_schema = "schemas/ping-input.json"
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("\"target_label\": \"cli\"")
+            predicate::str::contains("\"target_label\": \"app\"")
                 .and(predicate::str::contains("\"warnings\": []")),
         );
 }
