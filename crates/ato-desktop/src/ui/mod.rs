@@ -34,7 +34,7 @@ use crate::app::{
     SaveConfigForm, SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SplitPane,
     ToggleAutoDevtools, ToggleDevConsole, ToggleOverview, ToggleTheme,
 };
-use capsule_core::types::ConfigKind;
+use capsule_wire::config::ConfigKind;
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
     ActivityTone, AppState, AuthSessionStatus, PaneBounds, PaneId, PaneSurface, ShellMode,
