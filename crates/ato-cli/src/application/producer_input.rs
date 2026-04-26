@@ -221,20 +221,15 @@ impl ProducerAuthoritativeInput {
                 selected_runtime.driver
             );
         }
-        // In v0.3 manifests, the entrypoint field is empty and the command
-        // is stored in run_command. The lock may still carry the v0.2-style
-        // entrypoint. Allow the comparison to pass when the run_command
-        // contains the lock entrypoint (e.g. run_command="node index.js" vs
-        // entrypoint="index.js").
+        // schema_version 0.3 manifests reject legacy `entrypoint`/`cmd` fields:
+        // execution metadata lives in `run_command`, and lock-synthesized
+        // bridges may legitimately omit both when the lock only carries the
+        // v0.2-style entrypoint. Skip the per-field strict comparison for v0.3
+        // bridges entirely — the lock runtime model is the authority.
         let manifest_ep = manifest_target.entrypoint.trim();
         let lock_ep = selected_runtime.entrypoint.trim();
-        let manifest_rc = manifest_target.run_command.as_deref().unwrap_or("").trim();
-        // v0.3 manifests store the command in run_command while v0.2 used
-        // entrypoint+cmd. When the manifest uses run_command (v0.3 style) and
-        // the lock carries a legacy entrypoint, the per-field comparison is
-        // expected to diverge. Skip the strict entrypoint check in that case.
-        let uses_v03_run_command = manifest_ep.is_empty() && !manifest_rc.is_empty();
-        if !uses_v03_run_command && manifest_ep != lock_ep {
+        let skip_v03_entrypoint_check = bridge.is_schema_v03();
+        if !skip_v03_entrypoint_check && manifest_ep != lock_ep {
             anyhow::bail!(
                 "generated manifest bridge diverged from authoritative lock entrypoint: target '{}' entrypoint '{}' != '{}'",
                 bridge.manifest_model().default_target,
@@ -242,7 +237,7 @@ impl ProducerAuthoritativeInput {
                 lock_ep
             );
         }
-        if !uses_v03_run_command
+        if !skip_v03_entrypoint_check
             && manifest_target.run_command.as_deref() != selected_runtime.run_command.as_deref()
         {
             anyhow::bail!(
