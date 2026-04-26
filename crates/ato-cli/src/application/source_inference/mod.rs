@@ -5242,6 +5242,10 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "macOS Electron packaging script inference is host-specific"
+    )]
     fn infer_source_native_build_command_prefers_electron_packaged_script_over_generic_build() {
         let dir = tempdir().expect("tempdir");
         fs::write(
@@ -5269,6 +5273,10 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "macOS Electron .app path inference is host-specific"
+    )]
     fn durable_init_source_only_electron_uses_builder_product_name_for_expected_app_path() {
         let dir = tempdir().expect("tempdir");
         fs::write(
