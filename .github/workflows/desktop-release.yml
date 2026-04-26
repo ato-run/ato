@@ -124,9 +124,10 @@ jobs:
 
       - name: Install WiX Toolset 3.x
         # candle/light are required by xtask::package_msi. WiX 3.14 is
-        # the v0.5 baseline; the chocolatey package ships those exact
-        # binaries on PATH.
-        run: choco install wixtoolset --version=3.14.0 --no-progress
+        # the v0.5 baseline. windows-2022 runners ship WiX 3.14.x
+        # preinstalled; --allow-downgrade lets choco no-op gracefully
+        # when the preinstalled version is newer than 3.14.0.
+        run: choco install wixtoolset --version=3.14.0 --no-progress --allow-downgrade --force
 
       - name: Bundle and package .msi
         # signtool gating: WINDOWS_CODESIGN_PFX/PASSWORD are unset by
@@ -154,9 +155,6 @@ jobs:
           - runner: ubuntu-22.04
             target: linux-x86_64
             rust_target: x86_64-unknown-linux-gnu
-          - runner: ubuntu-22.04-arm
-            target: linux-arm64
-            rust_target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -178,12 +176,24 @@ jobs:
       - name: Install AppImage build deps
         # appimagetool is shipped as a single AppImage; we drop it on
         # PATH so xtask::package_appimage's Command::new("appimagetool")
-        # resolves it. libfuse2 is required by AppImage runtime.
+        # resolves it. libfuse2 is required by AppImage runtime. GTK/
+        # WebKit -dev packages are required by wry's webkit2gtk-sys and
+        # gpui-component's gdk-sys/gtk-sys build scripts.
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libfuse2 file
-          arch_suffix=$([ "${{ matrix.target }}" = "linux-arm64" ] && echo "aarch64" || echo "x86_64")
+          sudo apt-get install -y --no-install-recommends \
+            libfuse2 file \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libwebkit2gtk-4.1-dev \
+            libxkbcommon-dev \
+            libssl-dev \
+            libasound2-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev
+          arch_suffix=x86_64
           curl -L -o /tmp/appimagetool \
             "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${arch_suffix}.AppImage"
           chmod +x /tmp/appimagetool
