@@ -915,24 +915,33 @@ impl WorkspacePaths {
         let desktop_root = xtask_root
             .parent()
             .map(Path::to_path_buf)
-            .context("xtask crate must live under apps/ato-desktop/xtask")?;
+            .context("xtask crate must live under <repo>/crates/ato-desktop/xtask")?;
         let repo_root = desktop_root
             .parent()
             .and_then(Path::parent)
             .map(Path::to_path_buf)
-            .context("failed to resolve repository root from apps/ato-desktop")?;
+            .context("failed to resolve repository root from crates/ato-desktop")?;
+        // Layouts probed in priority order:
+        //   1. monorepo:           <repo>/crates/ato-cli (current canonical)
+        //   2. legacy split-repo:  <repo>/apps/ato-cli (pre-M1)
+        //   3. CI sibling clone:   <repo>/../ato-cli (legacy release workflow)
+        // The fallback chain lets a single xtask binary build correctly
+        // in both the monorepo and any leftover mirror checkout while M7
+        // archives the old repos.
         let ato_root = {
-            let primary = repo_root.join("apps").join("ato-cli");
-            if primary.exists() {
-                primary
+            let monorepo = repo_root.join("crates").join("ato-cli");
+            if monorepo.exists() {
+                monorepo
             } else {
-                // Fallback for layouts where ato-desktop is the repo root
-                // (e.g. mirrored release repository). The CI workflow clones
-                // ato-cli as a sibling to the desktop checkout.
-                desktop_root
-                    .parent()
-                    .map(|p| p.join("ato-cli"))
-                    .unwrap_or_else(|| repo_root.join("ato-cli"))
+                let legacy_apps = repo_root.join("apps").join("ato-cli");
+                if legacy_apps.exists() {
+                    legacy_apps
+                } else {
+                    desktop_root
+                        .parent()
+                        .map(|p| p.join("ato-cli"))
+                        .unwrap_or_else(|| repo_root.join("ato-cli"))
+                }
             }
         };
         let desktop_manifest = desktop_root.join("Cargo.toml");
