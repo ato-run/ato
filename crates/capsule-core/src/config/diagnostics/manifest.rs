@@ -76,8 +76,7 @@ pub fn validate_manifest_for_build_with_mode(
         .and_then(|v| v.as_str())
         .map(|v| v.trim().to_ascii_lowercase())
         .unwrap_or_default();
-    let originally_web_runtime =
-        original_runtime == "web" || original_runtime.starts_with("web/");
+    let originally_web_runtime = original_runtime == "web" || original_runtime.starts_with("web/");
     let web_services_mode = (runtime == "web" || originally_web_runtime)
         && driver.as_deref() == Some("deno")
         && has_services;
@@ -763,11 +762,8 @@ run = "dist""#,
         .unwrap();
 
         std::fs::create_dir_all(dir.path().join("dist")).unwrap();
-        let result = validate_manifest_for_build_with_mode(
-            &manifest_path,
-            "app",
-            ValidationMode::Preview,
-        );
+        let result =
+            validate_manifest_for_build_with_mode(&manifest_path, "app", ValidationMode::Preview);
         assert!(result.is_ok(), "{:?}", result.err());
     }
 

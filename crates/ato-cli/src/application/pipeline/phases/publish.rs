@@ -499,6 +499,12 @@ fn enforce_direct_publish_preflight(
     request: &DirectPublishRequest,
     artifact_size_bytes: u64,
 ) -> Result<()> {
+    crate::publish_artifact::enforce_managed_store_direct_upload_policy(
+        &request.registry_url,
+        artifact_size_bytes,
+        request.force_large_payload,
+        request.paid_large_payload,
+    )?;
     crate::publish::upload_strategy::enforce_upload_preflight(
         &crate::publish::upload_strategy::UploadPreflightRequest {
             registry_url: request.registry_url.clone(),

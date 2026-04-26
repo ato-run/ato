@@ -117,6 +117,22 @@ fn resolve_nacelle_for_tier2(
     prepared: &PreparedRunContext,
     reporter: &Arc<CliReporter>,
 ) -> Result<PathBuf> {
+    if should_attempt_nacelle_auto_bootstrap(nacelle_override.as_deref(), prepared)?
+        && nacelle_auto_bootstrap_forced()
+    {
+        return crate::engine_manager::auto_bootstrap_nacelle(&**reporter)
+            .map(|installed| installed.path)
+            .map_err(|bootstrap_err| {
+                AtoExecutionError::engine_missing(
+                    format!(
+                        "Tier 2 execution requires 'nacelle', and auto-bootstrap failed: {bootstrap_err}"
+                    ),
+                    Some("nacelle"),
+                )
+                .into()
+            });
+    }
+
     let request = capsule_core::engine::EngineRequest {
         explicit_path: nacelle_override.clone(),
         manifest_path: Some(plan.manifest_path.clone()),
@@ -170,6 +186,18 @@ fn should_attempt_nacelle_auto_bootstrap(
     }
 
     Ok(true)
+}
+
+fn nacelle_auto_bootstrap_forced() -> bool {
+    std::env::var("ATO_NACELLE_AUTO_BOOTSTRAP")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "always" | "force" | "enabled"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn manifest_declares_engine_override(prepared: &PreparedRunContext) -> bool {
@@ -314,13 +342,12 @@ pub(super) fn plan_v03_provision_command(
 fn provision_command_from_node_importer(
     execution_working_directory: &Path,
 ) -> Result<Option<String>> {
+    if !execution_working_directory.join("package.json").exists() {
+        return Ok(None);
+    }
     match probe_required_node_lockfile(execution_working_directory)? {
         ProbeResult::Found(values) => Ok(Some(node_install_command_from_evidence(&values[0])?)),
-        ProbeResult::Missing(_) => {
-            // No lockfile present; npm install will create package-lock.json on the fly.
-            // Acceptable for source/preview runs (best-effort, not reproducibility-critical).
-            Ok(Some("npm install --legacy-peer-deps".to_string()))
-        }
+        ProbeResult::Missing(_) => Ok(None),
         ProbeResult::Ambiguous(ambiguity) => {
             // Multiple lockfiles present; prefer pnpm > npm > yarn > bun.
             let priority_order = [
@@ -349,6 +376,17 @@ fn provision_command_from_node_importer(
 fn provision_command_from_python_importer(
     execution_working_directory: &Path,
 ) -> Result<Option<String>> {
+    if let Some(requirements_path) = resolve_python_requirements_path(execution_working_directory) {
+        let requirements_arg = requirements_path
+            .strip_prefix(execution_working_directory)
+            .unwrap_or(requirements_path.as_path())
+            .to_string_lossy()
+            .replace('\\', "/");
+        return Ok(Some(format!(
+            "uv venv && uv pip install -r {requirements_arg}"
+        )));
+    }
+
     match probe_required_python_lockfile(execution_working_directory)? {
         ProbeResult::Found(_) => Ok(Some("uv sync --frozen".to_string())),
         ProbeResult::Missing(missing) => {
@@ -606,6 +644,7 @@ fn is_python_source_target(plan: &capsule_core::router::ManifestData) -> bool {
     }
 
     plan.execution_entrypoint()
+        .or_else(|| plan.execution_run_command())
         .map(|entry| entry.trim().to_ascii_lowercase().ends_with(".py"))
         .unwrap_or(false)
 }
@@ -738,6 +777,10 @@ fn detect_required_glibc_from_entrypoint(
 ) -> Result<Option<String>> {
     let entrypoint = match plan
         .execution_entrypoint()
+        .or_else(|| {
+            plan.execution_run_command()
+                .and_then(|command| first_command_token(&command))
+        })
         .filter(|value| !value.trim().is_empty())
     {
         Some(value) => value,
@@ -804,6 +847,16 @@ fn detect_required_glibc_from_entrypoint(
     }
 
     Ok(best_raw)
+}
+
+fn first_command_token(command: &str) -> Option<String> {
+    shell_words::split(command)
+        .ok()
+        .and_then(|tokens| tokens.into_iter().next())
+        .or_else(|| {
+            let trimmed = command.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
 }
 
 fn detect_required_macos_from_entrypoint(
