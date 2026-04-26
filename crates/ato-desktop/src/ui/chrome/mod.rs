@@ -4,7 +4,10 @@ use gpui::prelude::*;
 use gpui::{div, hsla, point, px, BoxShadow, Entity, FontWeight, IntoElement, MouseButton, Window};
 use gpui_component::input::{Input, InputState};
 
-use crate::app::{BrowserBack, BrowserForward, BrowserReload, FocusCommandBar, NavigateToUrl, SelectTask, ShowSettings};
+use crate::app::{
+    BrowserBack, BrowserForward, BrowserReload, FocusCommandBar, NavigateToUrl, SelectTask,
+    ShowSettings,
+};
 use crate::state::{AppState, GuestRoute, OmnibarSuggestion, OmnibarSuggestionAction, ShellMode};
 
 use self::window_controls::{default_window_control_buttons, render_window_controls};
@@ -48,8 +51,8 @@ fn render_nav_buttons(state: &AppState, theme: &Theme) -> impl IntoElement {
         .map(|p| matches!(p.route, GuestRoute::ExternalUrl(_)))
         .unwrap_or(false);
     // Reload works on any web pane (capsule reload restarts the session)
-    let has_any_web_pane = state.active_web_pane().is_some()
-        || state.active_capsule_pane().is_some();
+    let has_any_web_pane =
+        state.active_web_pane().is_some() || state.active_capsule_pane().is_some();
     let enabled_color = theme.text_secondary;
     let disabled_color = theme.text_tertiary;
     let nav_color = if is_external_url {

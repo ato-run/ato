@@ -167,7 +167,9 @@ fn handle_client(
         raw_headers.extend_from_slice(line.as_bytes());
         if raw_headers.len() > MAX_HEADER_BYTES {
             let mut cw = client;
-            let _ = cw.write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\n\r\n");
+            let _ = cw.write_all(
+                b"HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\n\r\n",
+            );
             return Ok(());
         }
         if line == "\r\n" || line == "\n" {
@@ -178,7 +180,16 @@ fn handle_client(
     if method == "CONNECT" {
         handle_connect(client, target, policy, deny_sink)?;
     } else {
-        handle_absolute(client, reader, &method, target, version, raw_headers, policy, deny_sink)?;
+        handle_absolute(
+            client,
+            reader,
+            &method,
+            target,
+            version,
+            raw_headers,
+            policy,
+            deny_sink,
+        )?;
     }
     Ok(())
 }

@@ -148,10 +148,7 @@ impl SecretStore {
     }
 
     pub fn grant_secret(&mut self, capsule_handle: &str, key: &str) {
-        let keys = self
-            .grants
-            .entry(capsule_handle.to_string())
-            .or_default();
+        let keys = self.grants.entry(capsule_handle.to_string()).or_default();
         if !keys.contains(&key.to_string()) {
             keys.push(key.to_string());
         }
@@ -257,10 +254,7 @@ impl CapsuleConfigStore {
     /// error.
     pub fn configs_for_capsule(&self, handle: &str) -> Vec<(String, String)> {
         match self.configs.get(handle) {
-            Some(map) => map
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
+            Some(map) => map.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             None => Vec::new(),
         }
     }
@@ -370,7 +364,11 @@ mod tests {
         let parsed: CapsuleConfigStore = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.configs.len(), 2);
         assert_eq!(
-            parsed.configs.get("capsule.byok-ai-chat").unwrap().get("MODEL"),
+            parsed
+                .configs
+                .get("capsule.byok-ai-chat")
+                .unwrap()
+                .get("MODEL"),
             Some(&"gpt-4".to_string())
         );
     }

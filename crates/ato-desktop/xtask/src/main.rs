@@ -179,9 +179,8 @@ fn bundle_windows_app(target: &str) -> Result<PathBuf> {
             desktop_exe.display()
         )
     })?;
-    fs::copy(&helper_exe, bin_dir.join("ato.exe")).with_context(|| {
-        format!("failed to copy {} to staging", helper_exe.display())
-    })?;
+    fs::copy(&helper_exe, bin_dir.join("ato.exe"))
+        .with_context(|| format!("failed to copy {} to staging", helper_exe.display()))?;
     copy_dir_recursive(&paths.desktop_root.join("assets"), &assets_dir)?;
 
     println!("Staged Windows install tree at {}", staging.display());
@@ -205,7 +204,11 @@ fn bundle_linux_app(target: &str) -> Result<PathBuf> {
     let bin_dir = staging.join("usr").join("bin");
     let app_dir = staging.join("usr").join("share").join("applications");
     let metainfo_dir = staging.join("usr").join("share").join("metainfo");
-    let assets_dir = staging.join("usr").join("share").join("ato-desktop").join("assets");
+    let assets_dir = staging
+        .join("usr")
+        .join("share")
+        .join("ato-desktop")
+        .join("assets");
     fs::create_dir_all(&bin_dir)?;
     fs::create_dir_all(&app_dir)?;
     fs::create_dir_all(&metainfo_dir)?;
@@ -273,9 +276,7 @@ fn package_msi(staging: &Path, target: &str) -> Result<()> {
         other => bail!("unsupported msi target: {}", other),
     };
     let version = env!("CARGO_PKG_VERSION");
-    let dist_dir = staging
-        .parent()
-        .context("staging path has no parent")?;
+    let dist_dir = staging.parent().context("staging path has no parent")?;
     let obj_path = dist_dir.join("ato.wixobj");
     let msi_path = dist_dir.join(format!("Ato-Desktop-{version}-{target}.msi"));
 
@@ -549,7 +550,9 @@ fn notarize_bundle(bundle: &Path) -> Result<()> {
     let app_pwd = std::env::var("APPLE_APP_SPECIFIC_PASSWORD")
         .ok()
         .filter(|s| !s.is_empty());
-    let team_id = std::env::var("APPLE_TEAM_ID").ok().filter(|s| !s.is_empty());
+    let team_id = std::env::var("APPLE_TEAM_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
     let (Some(apple_id), Some(app_pwd), Some(team_id)) = (apple_id, app_pwd, team_id) else {
         println!(
             "notarize: skipped (no Apple credentials — set APPLE_ID, \
@@ -574,9 +577,7 @@ fn notarize_bundle(bundle: &Path) -> Result<()> {
         .file_name()
         .and_then(|s| s.to_str())
         .context("bundle path has no file name")?;
-    let zip_str = zip_path
-        .to_str()
-        .context("zip path is not valid UTF-8")?;
+    let zip_str = zip_path.to_str().context("zip path is not valid UTF-8")?;
 
     let status = Command::new("ditto")
         .args(["-c", "-k", "--keepParent", bundle_name, zip_str])
@@ -610,9 +611,7 @@ fn notarize_bundle(bundle: &Path) -> Result<()> {
         .args([
             "stapler",
             "staple",
-            bundle
-                .to_str()
-                .context("bundle path is not valid UTF-8")?,
+            bundle.to_str().context("bundle path is not valid UTF-8")?,
         ])
         .status()
         .context("failed to invoke xcrun stapler")?;
@@ -650,19 +649,12 @@ fn package_dmg(bundle: &Path, target: &str) -> Result<()> {
     // bundle (and any layout nicety like a /Applications symlink).
     // We create one alongside the .app to avoid polluting unrelated
     // dirs and to keep the operation idempotent.
-    let staging = bundle
-        .parent()
-        .unwrap()
-        .join(format!("dmg-staging-{arch}"));
+    let staging = bundle.parent().unwrap().join(format!("dmg-staging-{arch}"));
     if staging.exists() {
         fs::remove_dir_all(&staging).ok();
     }
     fs::create_dir_all(&staging)?;
-    let dest = staging.join(
-        bundle
-            .file_name()
-            .context("bundle has no file name")?,
-    );
+    let dest = staging.join(bundle.file_name().context("bundle has no file name")?);
     copy_dir_recursive(bundle, &dest)?;
 
     // /Applications symlink so users can drag-and-drop on first open.
@@ -682,9 +674,7 @@ fn package_dmg(bundle: &Path, target: &str) -> Result<()> {
             "-ov",
             "-format",
             "UDZO",
-            dmg_path
-                .to_str()
-                .context("dmg path is not UTF-8")?,
+            dmg_path.to_str().context("dmg path is not UTF-8")?,
         ])
         .status()
         .context("failed to invoke hdiutil")?;

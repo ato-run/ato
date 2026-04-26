@@ -129,10 +129,7 @@ impl ConfigModal {
 /// Stateless overlay renderer. The parent (`DesktopShell`) owns the
 /// `ConfigModal` instance and feeds it in alongside the active
 /// `Theme`; this function is pure projection.
-pub(in crate::ui) fn render_config_modal_overlay(
-    modal: &ConfigModal,
-    theme: &Theme,
-) -> AnyElement {
+pub(in crate::ui) fn render_config_modal_overlay(modal: &ConfigModal, theme: &Theme) -> AnyElement {
     let request = &modal.request;
     let target_label = request
         .target
@@ -233,10 +230,7 @@ fn render_field_row(
     input: Option<&Entity<InputState>>,
     theme: &Theme,
 ) -> impl IntoElement {
-    let label = field
-        .label
-        .clone()
-        .unwrap_or_else(|| field.name.clone());
+    let label = field.label.clone().unwrap_or_else(|| field.name.clone());
     let kind_hint = match &field.kind {
         ConfigKind::Secret => "secret · stored locally, masked",
         ConfigKind::String => "text",
@@ -244,29 +238,25 @@ fn render_field_row(
         ConfigKind::Enum { .. } => "choice",
     };
 
-    let mut row = div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(
-            div()
-                .flex()
-                .items_baseline()
-                .justify_between()
-                .child(
-                    div()
-                        .text_size(px(12.5))
-                        .font_weight(FontWeight(600.0))
-                        .text_color(theme.text_primary)
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.5))
-                        .text_color(theme.text_tertiary)
-                        .child(kind_hint),
-                ),
-        );
+    let mut row = div().flex().flex_col().gap_1().child(
+        div()
+            .flex()
+            .items_baseline()
+            .justify_between()
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight(600.0))
+                    .text_color(theme.text_primary)
+                    .child(label),
+            )
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .text_color(theme.text_tertiary)
+                    .child(kind_hint),
+            ),
+    );
 
     if let Some(description) = &field.description {
         if !description.is_empty() {

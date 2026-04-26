@@ -58,8 +58,7 @@ impl HostPattern {
         if s.is_empty() {
             return Err("empty pattern".to_string());
         }
-        if s.eq_ignore_ascii_case("localhost") || s.eq_ignore_ascii_case("localhost.localdomain")
-        {
+        if s.eq_ignore_ascii_case("localhost") || s.eq_ignore_ascii_case("localhost.localdomain") {
             return Ok(HostPattern::Localhost);
         }
         if let Ok(ip) = IpAddr::from_str(s) {
@@ -69,13 +68,19 @@ impl HostPattern {
             if rest.is_empty() {
                 return Err("bare '*.' is not a valid pattern".to_string());
             }
-            return Ok(HostPattern::Suffix(format!(".{}", rest.to_ascii_lowercase())));
+            return Ok(HostPattern::Suffix(format!(
+                ".{}",
+                rest.to_ascii_lowercase()
+            )));
         }
         if let Some(rest) = s.strip_prefix('.') {
             if rest.is_empty() {
                 return Err("bare '.' is not a valid pattern".to_string());
             }
-            return Ok(HostPattern::Suffix(format!(".{}", rest.to_ascii_lowercase())));
+            return Ok(HostPattern::Suffix(format!(
+                ".{}",
+                rest.to_ascii_lowercase()
+            )));
         }
         // Reject obvious garbage (whitespace, slashes, protocol).
         if s.contains(|c: char| c.is_whitespace() || c == '/' || c == ':' && !s.contains("::")) {
@@ -97,9 +102,7 @@ impl HostPattern {
             HostPattern::Localhost => match IpAddr::from_str(host) {
                 Ok(IpAddr::V4(v4)) => v4.is_loopback(),
                 Ok(IpAddr::V6(v6)) => v6.is_loopback(),
-                Err(_) => {
-                    host_lc == "localhost" || host_lc == "localhost.localdomain"
-                }
+                Err(_) => host_lc == "localhost" || host_lc == "localhost.localdomain",
             },
         }
     }
@@ -229,14 +232,14 @@ impl EgressSnapshot {
 /// Used by `detect_ai_agent_hint` to map detected SDK names to the egress
 /// hosts that should be added to `egress_allow` when the SDK is found.
 pub const KNOWN_LLM_API_HOSTS: &[(&str, &str)] = &[
-    ("anthropic",   "api.anthropic.com"),
-    ("openai",      "api.openai.com"),
-    ("google",      "generativelanguage.googleapis.com"),
-    ("mistral",     "api.mistral.ai"),
-    ("groq",        "api.groq.com"),
-    ("cohere",      "api.cohere.ai"),
-    ("together",    "api.together.xyz"),
-    ("replicate",   "api.replicate.com"),
+    ("anthropic", "api.anthropic.com"),
+    ("openai", "api.openai.com"),
+    ("google", "generativelanguage.googleapis.com"),
+    ("mistral", "api.mistral.ai"),
+    ("groq", "api.groq.com"),
+    ("cohere", "api.cohere.ai"),
+    ("together", "api.together.xyz"),
+    ("replicate", "api.replicate.com"),
 ];
 
 #[cfg(test)]
@@ -285,7 +288,10 @@ mod tests {
 
     #[test]
     fn parse_localhost_ci() {
-        assert_eq!(HostPattern::parse("LOCALHOST").unwrap(), HostPattern::Localhost);
+        assert_eq!(
+            HostPattern::parse("LOCALHOST").unwrap(),
+            HostPattern::Localhost
+        );
     }
 
     #[test]

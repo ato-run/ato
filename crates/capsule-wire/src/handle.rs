@@ -413,10 +413,7 @@ pub fn normalize_capsule_handle(raw: &str) -> Result<CanonicalHandle> {
         return parse_registry_rest(input, RegistryIdentity::ato_official());
     }
 
-    Err(WireError::Config(format!(
-        "unsupported handle '{}'",
-        input
-    )))
+    Err(WireError::Config(format!("unsupported handle '{}'", input)))
 }
 
 pub fn registry_identity_for_display_authority(authority: &str) -> Option<RegistryIdentity> {
@@ -477,12 +474,12 @@ fn parse_registry_rest(rest: &str, registry: RegistryIdentity) -> Result<Canonic
         .split('/')
         .filter(|segment| !segment.trim().is_empty())
         .map(|segment| segment.trim().to_string());
-    let publisher = segments.next().ok_or_else(|| {
-        WireError::Config("registry handle requires publisher/slug".to_string())
-    })?;
-    let slug = segments.next().ok_or_else(|| {
-        WireError::Config("registry handle requires publisher/slug".to_string())
-    })?;
+    let publisher = segments
+        .next()
+        .ok_or_else(|| WireError::Config("registry handle requires publisher/slug".to_string()))?;
+    let slug = segments
+        .next()
+        .ok_or_else(|| WireError::Config("registry handle requires publisher/slug".to_string()))?;
     if segments.next().is_some() {
         return Err(WireError::Config(
             "registry handle must use publisher/slug".to_string(),
