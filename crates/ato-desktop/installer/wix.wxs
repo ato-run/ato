@@ -39,6 +39,7 @@
 
     <Feature Id="Complete" Title="Ato Desktop" Level="1">
       <ComponentGroupRef Id="AtoFiles" />
+      <ComponentGroupRef Id="AtoBinFiles" />
       <ComponentRef Id="UrlSchemeAto" />
       <ComponentRef Id="UrlSchemeCapsule" />
       <ComponentRef Id="PathEntry" />
@@ -63,7 +64,10 @@
               Source="$(var.StagingDir)\ato-desktop.exe"
               KeyPath="yes" />
       </Component>
-      <Component Id="HelperExe" Guid="*" Directory="BinFolder">
+    </ComponentGroup>
+
+    <ComponentGroup Id="AtoBinFiles" Directory="BinFolder">
+      <Component Id="HelperExe" Guid="*">
         <File Id="AtoExe"
               Source="$(var.StagingDir)\bin\ato.exe"
               KeyPath="yes" />
