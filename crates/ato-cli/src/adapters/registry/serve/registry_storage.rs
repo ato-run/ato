@@ -272,7 +272,7 @@ pub(super) fn registry_cas_store(data_dir: &Path) -> Result<CasStore> {
 
 pub(super) fn parse_artifact_manifest(bytes: &[u8]) -> Result<ArtifactMeta> {
     let manifest = extract_manifest_from_capsule(bytes)?;
-    let parsed = capsule_core::types::CapsuleManifest::from_toml(&manifest)
+    let parsed = toml::from_str::<capsule_core::types::CapsuleManifest>(&manifest)
         .map_err(|err| anyhow::anyhow!("{}", err))?;
     Ok(ArtifactMeta {
         name: parsed.name,

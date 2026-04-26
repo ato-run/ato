@@ -62,7 +62,16 @@ jobs:
       # `ato-desktop` requires GPUI's heavy native deps (X11/Wayland on Linux,
       # Cocoa on macOS) which are not yet wired into CI. Limit the matrix to
       # `ato-cli` + shared core crates until M3 lands the desktop CI bringup.
-      - run: |
+      #
+      # Build ato + nacelle binaries first so share_interactive_e2e tests can
+      # resolve them from PATH (they spawn child processes during tests).
+      - name: Build test binaries
+        run: |
+          cargo build -p ato-cli --bin ato
+          cargo build -p nacelle --bin nacelle
+          echo "$(pwd)/target/debug" >> $GITHUB_PATH
+      - name: Run tests
+        run: |
           cargo test -p ato-cli --no-fail-fast
           cargo test -p capsule-core --no-fail-fast
           cargo test -p lock-draft-engine --no-fail-fast
