@@ -19,65 +19,30 @@
 //!    "target":"main"}}
 //! ```
 //!
-//! # Why a desktop-local DTO
+//! # Wire-shape source of truth
 //!
-//! `ato-desktop` already pulls `capsule-core` as a dep, so we *could*
-//! re-use `ConfigField` directly. We don't, on purpose: the wire
-//! contract (this JSON) is the boundary. Mirroring the shape here
-//! decouples desktop from any future CLI-internal type refactor — as
-//! long as the JSON keys hold, the desktop keeps working. The Day 2
-//! contract test in `apps/ato-cli/src/adapters/output/diagnostics/
+//! As of M5, `ConfigField` / `ConfigKind` live in
+//! [`capsule_core::types`] and serve as the canonical wire shape for
+//! both the CLI emitter and the Desktop consumer. This module no
+//! longer mirrors the schema — it imports it. The Day 2 contract
+//! test in `apps/ato-cli/src/adapters/output/diagnostics/
 //! tests.rs::maps_missing_required_env_error_to_e103_with_schema`
-//! pins the schema on the CLI side; this module pins it on the
-//! desktop side.
+//! still pins the JSON shape on the CLI side; the Desktop test
+//! suite below exercises the same shape against the same types.
 
+use capsule_core::types::ConfigField;
 use serde::Deserialize;
-
-/// Mirrors `capsule_core::types::ConfigField`. The discriminator
-/// `kind` is flattened in by `ConfigKindDto`, so a serialized field
-/// looks like `{"name":"MODEL","kind":"enum","choices":["a","b"]}`
-/// — `kind` and `choices` sit at the same level as `name`.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct ConfigFieldDto {
-    /// Environment variable name (e.g. `OPENAI_API_KEY`). Acts as the
-    /// stable identifier — the desktop iterates `missing_schema` only
-    /// and never index-aligns with `missing_keys`, so this name is
-    /// authoritative when the modal saves back into the SecretStore.
-    pub name: String,
-    #[serde(default)]
-    pub label: Option<String>,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(flatten)]
-    pub kind: ConfigKindDto,
-    #[serde(default)]
-    pub default: Option<String>,
-    #[serde(default)]
-    pub placeholder: Option<String>,
-}
-
-/// `ConfigKind` projection. The CLI uses an internally-tagged enum
-/// (`tag = "kind"`) flattened into the field, so the JSON sits at
-/// the parent level: `kind = "enum"` next to `choices = [...]`.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ConfigKindDto {
-    Secret,
-    String,
-    Number,
-    Enum { choices: Vec<String> },
-}
 
 /// `details` payload for E103 (`missing_required_env`). The desktop
 /// reads `missing_schema` only — `missing_keys` is preserved here
 /// for diagnostics/logging but must not be index-aligned with the
-/// schema array (each `ConfigFieldDto` is self-describing via `name`).
+/// schema array (each `ConfigField` is self-describing via `name`).
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
 pub struct MissingEnvDetailsDto {
     #[serde(default)]
     pub missing_keys: Vec<String>,
     #[serde(default)]
-    pub missing_schema: Vec<ConfigFieldDto>,
+    pub missing_schema: Vec<ConfigField>,
     #[serde(default)]
     pub target: Option<String>,
 }
@@ -153,6 +118,7 @@ pub fn parse_cli_error_event(stderr: &str) -> Option<AtoCliErrorEventDto> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use capsule_core::types::ConfigKind;
 
     fn fatal_e103_line() -> &'static str {
         r#"{"level":"fatal","code":"E103","name":"missing_required_env","phase":"inference","classification":"manifest","message":"missing required environment variables for target 'main': OPENAI_API_KEY","retryable":false,"interactive_resolution":true,"resource":"environment","target":"main","hint":"set the variable before retrying.","details":{"missing_keys":["OPENAI_API_KEY"],"missing_schema":[{"name":"OPENAI_API_KEY","label":"OpenAI API Key","kind":"secret","placeholder":"sk-..."}],"target":"main"}}"#
@@ -169,7 +135,7 @@ mod tests {
         let field = &details.missing_schema[0];
         assert_eq!(field.name, "OPENAI_API_KEY");
         assert_eq!(field.label.as_deref(), Some("OpenAI API Key"));
-        assert!(matches!(field.kind, ConfigKindDto::Secret));
+        assert!(matches!(field.kind, ConfigKind::Secret));
         assert_eq!(field.placeholder.as_deref(), Some("sk-..."));
     }
 
@@ -223,7 +189,7 @@ mod tests {
         assert_eq!(details.missing_schema.len(), 1);
         let field = &details.missing_schema[0];
         match &field.kind {
-            ConfigKindDto::Enum { choices } => {
+            ConfigKind::Enum { choices } => {
                 assert_eq!(choices, &vec!["gpt-4".to_string(), "gpt-5".to_string()]);
             }
             other => panic!("expected Enum, got {other:?}"),
