@@ -245,9 +245,15 @@ fn infer_v03_language_from_driver(driver: Option<&str>) -> Option<String> {
 fn normalize_v03_web_static_entrypoint(run: &str) -> String {
     let trimmed = run.trim();
     let raw = Path::new(trimmed);
-    let entrypoint = match raw.file_name() {
-        Some(_) => raw.parent().unwrap_or_else(|| Path::new(".")),
-        None => raw,
+    // Treat path-with-extension as a file (serve its containing directory) and
+    // path-without-extension as a directory (serve as-is). Without this
+    // heuristic, plain `run = "dist"` would strip `dist` as a "filename" and
+    // collapse to `.`, hiding genuine missing-directory errors.
+    let looks_like_file = raw.extension().is_some();
+    let entrypoint = if looks_like_file {
+        raw.parent().unwrap_or_else(|| Path::new("."))
+    } else {
+        raw
     };
 
     let normalized = entrypoint
