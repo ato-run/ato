@@ -147,6 +147,7 @@ external_dependencies = [
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn resolve_external_capsule_dependencies_reads_store_distribution() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

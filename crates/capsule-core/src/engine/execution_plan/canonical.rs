@@ -263,6 +263,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn canonicalize_path_allows_relative_input_with_relative_project_root() {
         let _guard = cwd_lock().lock().unwrap();
         let previous_cwd = std::env::current_dir().unwrap();
