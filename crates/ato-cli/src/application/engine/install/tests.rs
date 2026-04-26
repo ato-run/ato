@@ -2299,7 +2299,7 @@ async fn repository_ato_desktop_capsule_installs_via_native_local_derivation() {
         .parent()
         .and_then(std::path::Path::parent)
         .expect("repo root");
-    let desktop_root = repo_root.join("apps").join("ato-desktop");
+    let desktop_root = repo_root.join("crates").join("ato-desktop");
 
     let authoritative_input = resolve_producer_authoritative_input(
         &desktop_root,

@@ -579,8 +579,7 @@ type = "app"
 runtime = "source/deno"
 runtime_version = "1.46.3"
 run = "main.ts"
-[build.lifecycle]
-prepare = "echo prepare"
+build = "echo prepare"
 "#,
     )?;
     std::fs::write(
@@ -809,8 +808,7 @@ type = "app"
 runtime = "web/static"
 port = 4173
 run = "dist"
-[build.lifecycle]
-prepare = "echo prepare"
+build = "echo prepare"
 "#,
     )?;
     std::fs::create_dir_all(project_dir.join("dist"))?;
@@ -1262,8 +1260,7 @@ type = "app"
 runtime = "source/deno"
 runtime_version = "1.46.3"
 run = "main.ts"
-[build.lifecycle]
-prepare = "echo prepare"
+build = "echo prepare"
 "#,
     )?;
     std::fs::write(
@@ -1360,8 +1357,7 @@ run = "main.ts"
 [metadata]
 repository = "Koh0920/file2api-monorepo"
 
-[build.lifecycle]
-prepare = "echo prepare"
+build = "echo prepare"
 "#,
     )?;
     std::fs::write(
