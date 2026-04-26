@@ -1351,6 +1351,7 @@ mod tests {
     #[test]
     fn v03_node_provision_prefers_single_detected_lockfile() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("package.json"), "{}\n").expect("write package.json");
         std::fs::write(tmp.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
             .expect("write pnpm lock");
 
@@ -1374,6 +1375,7 @@ mod tests {
     #[test]
     fn v03_node_provision_supports_yarn_lockfile() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("package.json"), "{}\n").expect("write package.json");
         std::fs::write(tmp.path().join("yarn.lock"), "# yarn lockfile v1\n")
             .expect("write yarn lock");
 
@@ -1397,6 +1399,7 @@ mod tests {
     #[test]
     fn v03_node_provision_prefers_pnpm_on_ambiguous_lockfiles() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("package.json"), "{}\n").expect("write package.json");
         std::fs::write(tmp.path().join("package-lock.json"), "{}").expect("write package lock");
         std::fs::write(tmp.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
             .expect("write pnpm lock");
@@ -1424,6 +1427,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let app_dir = tmp.path().join("apps").join("web");
         std::fs::create_dir_all(&app_dir).expect("create app dir");
+        std::fs::write(app_dir.join("package.json"), "{}\n").expect("write package.json");
         std::fs::write(app_dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
             .expect("write pnpm lock");
 

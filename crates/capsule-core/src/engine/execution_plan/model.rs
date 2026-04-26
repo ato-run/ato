@@ -24,7 +24,9 @@ impl ExecutionRuntime {
     }
 
     pub fn from_manifest(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
+        let normalized = value.trim().to_ascii_lowercase();
+        let runtime = normalized.split('/').next().unwrap_or_default();
+        match runtime {
             "web" => Some(Self::Web),
             "source" => Some(Self::Source),
             "wasm" => Some(Self::Wasm),

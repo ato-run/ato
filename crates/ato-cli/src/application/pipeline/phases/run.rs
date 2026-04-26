@@ -1766,7 +1766,10 @@ where
         })
         .unwrap_or(false);
 
-    if decision.plan.execution_run_command().is_some() && !run_command_uses_specialized_executor {
+    if decision.plan.execution_run_command().is_some()
+        && !run_command_uses_specialized_executor
+        && !matches!(guard_result.executor_kind, ExecutorKind::Native)
+    {
         let mut process = crate::executors::shell::execute(&decision.plan, mode, &launch_ctx)?;
         if request.background {
             let pid = process.child.id();
@@ -2295,6 +2298,28 @@ pub(crate) async fn maybe_run_agent_setup(
     if force_reroute && !matches!(request.agent_mode, RunAgentMode::Force) {
         return Ok(None);
     }
+    if !force_reroute
+        && failure.as_ref().is_some_and(|failure| {
+            matches!(
+                failure.kind,
+                crate::application::agent::SetupFailureKind::MissingLockfile
+            )
+        })
+    {
+        return Ok(None);
+    }
+
+    if !manifest_path_is_inside_source_root(
+        &decision.plan.manifest_path,
+        &decision.plan.manifest_dir,
+    ) {
+        debug!(
+            manifest_path = %decision.plan.manifest_path.display(),
+            source_root = %decision.plan.manifest_dir.display(),
+            "Skipping agent setup for lock-derived source inference plan"
+        );
+        return Ok(None);
+    }
 
     *agent_attempted = true;
     let agent_request = crate::application::agent::AgentRunRequest {
@@ -2343,6 +2368,23 @@ pub(crate) async fn maybe_run_agent_setup(
     )
     .await?;
     Ok(Some(rerouted))
+}
+
+fn manifest_path_is_inside_source_root(manifest_path: &Path, source_root: &Path) -> bool {
+    let manifest_path = canonical_or_absolute(manifest_path);
+    let source_root = canonical_or_absolute(source_root);
+    manifest_path.starts_with(source_root)
+}
+
+fn canonical_or_absolute(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    absolute.canonicalize().unwrap_or(absolute)
 }
 
 pub(crate) fn resolve_state_source_overrides(

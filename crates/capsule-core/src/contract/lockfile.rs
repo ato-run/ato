@@ -883,8 +883,8 @@ fn build_lock_draft_input(
     let mut repo_file_index = Vec::new();
     let mut file_text_map = std::collections::BTreeMap::new();
 
-    if let (Some(manifest_dir), Some(manifest_path)) = (manifest_dir, manifest_path) {
-        for path in collect_lockfile_input_paths(Some(manifest_path), manifest_dir, manifest_raw) {
+    if let Some(manifest_dir) = manifest_dir {
+        for path in collect_lockfile_input_paths(manifest_path, manifest_dir, manifest_raw) {
             if !path.exists() || !path.is_file() {
                 continue;
             }

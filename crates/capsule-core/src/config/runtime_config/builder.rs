@@ -568,10 +568,7 @@ fn execution_signals(manifest: &toml::Value) -> Option<SignalsConfig> {
 /// `ResolvedTargetRuntime` carried by target-based services. We trust the
 /// resolved driver/runtime metadata rather than the un-normalized manifest
 /// tree, but apply the same shell-metadata / interpreter-prefix rules.
-fn target_run_command_should_be_entrypoint(
-    command: &str,
-    runtime: &ResolvedTargetRuntime,
-) -> bool {
+fn target_run_command_should_be_entrypoint(command: &str, runtime: &ResolvedTargetRuntime) -> bool {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return false;
@@ -626,7 +623,7 @@ fn resolve_target_command(
 
     // For target-based services we treat run_command as the synthetic
     // entrypoint when the driver/file extension implies a known interpreter.
-    let entrypoint = run_command.unwrap_or_else(|| runtime.entrypoint.as_str());
+    let entrypoint = run_command.unwrap_or(runtime.entrypoint.as_str());
     let (program, tokens) = command_tokens(entrypoint, None);
 
     let language = runtime
@@ -783,6 +780,7 @@ fn read_source_layout(manifest: &toml::Value) -> SourceLayoutHint {
 fn read_run_command(manifest: &toml::Value) -> Option<String> {
     selected_target_table(manifest)
         .and_then(|target| target.get("run_command"))
+        .or_else(|| selected_target_table(manifest).and_then(|target| target.get("run")))
         .and_then(|value| value.as_str())
         .or_else(|| manifest.get("run").and_then(|value| value.as_str()))
         .map(str::trim)
@@ -921,16 +919,25 @@ fn read_health_check(manifest: &toml::Value) -> Option<HealthCheck> {
 }
 
 fn selected_target_table(manifest: &toml::Value) -> Option<&toml::value::Table> {
-    let default_target = manifest
+    if let Some(default_target) = manifest
         .get("default_target")
         .and_then(|v| v.as_str())
         .map(|s| s.trim())
-        .filter(|s| !s.is_empty())?;
-    manifest
-        .get("targets")
-        .and_then(|v| v.as_table())
-        .and_then(|targets| targets.get(default_target))
-        .and_then(|v| v.as_table())
+        .filter(|s| !s.is_empty())
+    {
+        return manifest
+            .get("targets")
+            .and_then(|v| v.as_table())
+            .and_then(|targets| targets.get(default_target))
+            .and_then(|v| v.as_table());
+    }
+
+    let targets = manifest.get("targets").and_then(|v| v.as_table())?;
+    if targets.len() == 1 {
+        return targets.values().next().and_then(|v| v.as_table());
+    }
+
+    None
 }
 
 fn read_filesystem(manifest: &toml::Value) -> Option<FilesystemConfig> {

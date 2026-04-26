@@ -102,6 +102,15 @@ pub fn build_distribution_manifest(
 
     let mut manifest = base_manifest.clone();
     manifest.schema_version = "0.3".to_string();
+    if let Some(targets) = manifest.targets.as_mut() {
+        for target in targets.named.values_mut() {
+            if target.run_command.is_none() && !target.entrypoint.trim().is_empty() {
+                target.run_command = Some(target.entrypoint.trim().to_string());
+            }
+            target.entrypoint.clear();
+            target.cmd.clear();
+        }
+    }
     manifest.distribution = Some(DistributionInfo {
         manifest_hash: String::new(),
         merkle_root,
