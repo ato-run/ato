@@ -1937,11 +1937,12 @@ fn test_run_rejects_pypi_vcs_syntax() {
 #[test]
 fn test_run_rejects_via_for_local_path_targets() {
     let mut cmd = Command::cargo_bin("ato").unwrap();
-    cmd.args(["run", ".", "--via", "auto", "--yes"])
+    cmd.args(["run", ".", "--via", "uv", "--yes"])
         .assert()
         .failure()
+        .stderr(predicate::str::contains("--via uv"))
         .stderr(predicate::str::contains(
-            "`--via` is only supported for provider-backed run targets",
+            "only supported for provider-backed targets",
         ));
 }
 
