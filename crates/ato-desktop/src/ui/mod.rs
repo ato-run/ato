@@ -34,7 +34,7 @@ use crate::app::{
     SaveConfigForm, SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SplitPane,
     ToggleAutoDevtools, ToggleDevConsole, ToggleOverview, ToggleTheme,
 };
-use crate::cli_envelope::ConfigKindDto;
+use capsule_core::types::ConfigKind;
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
     ActivityTone, AppState, AuthSessionStatus, PaneBounds, PaneId, PaneSurface, ShellMode,
@@ -793,7 +793,7 @@ impl DesktopShell {
             };
             let value = input.read(cx).value().to_string();
             match &field.kind {
-                ConfigKindDto::Secret => {
+                ConfigKind::Secret => {
                     if value.is_empty() {
                         // Empty secret = the user left it blank. Save
                         // would just store an empty value and the
@@ -804,7 +804,7 @@ impl DesktopShell {
                     }
                     secret_writes.push((field.name.clone(), value));
                 }
-                ConfigKindDto::String | ConfigKindDto::Number => {
+                ConfigKind::String | ConfigKind::Number => {
                     if value.is_empty() {
                         // Same logic as secrets: storing an empty
                         // string would just round-trip into an empty
@@ -814,7 +814,7 @@ impl DesktopShell {
                     }
                     config_writes.push((field.name.clone(), value));
                 }
-                ConfigKindDto::Enum { choices } => {
+                ConfigKind::Enum { choices } => {
                     if value.is_empty() {
                         return;
                     }
