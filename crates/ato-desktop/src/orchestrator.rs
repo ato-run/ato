@@ -176,7 +176,7 @@ pub enum LaunchError {
         /// `details.missing_schema` verbatim — drives the dynamic
         /// form. Iterated as-is by the modal; never index-aligned
         /// with `details.missing_keys`.
-        fields: Vec<crate::cli_envelope::ConfigFieldDto>,
+        fields: Vec<capsule_core::types::ConfigField>,
         /// Snapshot of secrets passed to the original
         /// `start_capsule` call. Cloned at error-construction time so
         /// a concurrent SecretStore mutation can't corrupt the retry.
