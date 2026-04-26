@@ -17,7 +17,7 @@
 //! `Entity<InputState>` per field, and is dispatched via the
 //! desktop's `actions!()` registry (`SaveConfigForm` /
 //! `CancelConfigForm`). All of that is desktop-shell-private — we
-//! consume the canonical wire types (`capsule_core::types::ConfigField`
+//! consume the canonical wire types (`capsule_wire::config::ConfigField`
 //! / `ConfigKind`) directly here, but keep all GPUI rendering in this
 //! module so a future UI rewrite doesn't ripple into the wire contract.
 //!
@@ -40,7 +40,7 @@ use gpui::{
 };
 use gpui_component::input::{Input, InputState};
 
-use capsule_core::types::{ConfigField, ConfigKind};
+use capsule_wire::config::{ConfigField, ConfigKind};
 
 use crate::app::{CancelConfigForm, SaveConfigForm};
 use crate::state::PendingConfigRequest;

@@ -2,11 +2,11 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::path::PathBuf;
 
-use capsule_core::handle::{
+use capsule_wire::config::ConfigField;
+use capsule_wire::handle::{
     classify_surface_input, normalize_capsule_handle, parse_host_route, HandleInput,
     InputSurface as CapsuleInputSurface, SurfaceInput as CapsuleSurfaceInput,
 };
-use capsule_core::types::ConfigField;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 use url::{form_urlencoded, Url};
