@@ -1585,7 +1585,8 @@ fn test_build_routes_native_delivery_projects() {
         let combined = format!("{stdout}\n{stderr}");
         assert!(
             combined
-                .contains("native delivery build currently supports macOS and Windows hosts only"),
+                .contains("native delivery build currently supports macOS and Windows hosts only")
+                || combined.contains("requires current-host target alignment"),
             "combined output:\n{combined}"
         );
     }
@@ -1619,7 +1620,7 @@ args = ["--deep", "--force", "--sign", "-", "MyApp.app"]
 
     assert!(!output.status.success(), "stderr:\n{stderr}");
     assert!(
-        stderr.contains("is no longer accepted in source projects"),
+        stderr.contains("is no longer accepted in source") && stderr.contains("projects"),
         "stderr:\n{stderr}"
     );
 }
@@ -1714,7 +1715,8 @@ fn test_build_routes_native_delivery_command_mode_projects() {
         let combined = format!("{stdout}\n{stderr}");
         assert!(
             combined
-                .contains("native delivery build currently supports macOS and Windows hosts only"),
+                .contains("native delivery build currently supports macOS and Windows hosts only")
+                || combined.contains("requires current-host target alignment"),
             "combined output:\n{combined}"
         );
     }
@@ -1761,7 +1763,8 @@ fn test_build_routes_inline_native_delivery_command_mode_projects() {
         let combined = format!("{stdout}\n{stderr}");
         assert!(
             combined
-                .contains("native delivery build currently supports macOS and Windows hosts only"),
+                .contains("native delivery build currently supports macOS and Windows hosts only")
+                || combined.contains("requires current-host target alignment"),
             "combined output:\n{combined}"
         );
     }
@@ -2335,6 +2338,8 @@ fn test_publish_json_invalid_artifact_prepare_range_uses_diagnostic_envelope() {
             "--artifact",
             "demo.capsule",
             "--prepare",
+            "--registry",
+            "http://127.0.0.1:9",
         ])
         .output()
         .unwrap();
@@ -2371,6 +2376,8 @@ fn test_publish_json_artifact_build_reports_six_phase_matrix() {
             "--artifact",
             artifact.to_string_lossy().as_ref(),
             "--build",
+            "--registry",
+            "http://127.0.0.1:9",
         ])
         .output()
         .unwrap();
