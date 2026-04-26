@@ -311,9 +311,13 @@ fn package_msi(staging: &Path, target: &str) -> Result<()> {
     // intentionally leaves these unset (D-4) so CI builds an unsigned
     // MSI; v0.5.x will populate WINDOWS_CODESIGN_PFX after EV cert
     // procurement.
-    if let (Ok(pfx), Ok(pwd)) = (
-        std::env::var("WINDOWS_CODESIGN_PFX"),
-        std::env::var("WINDOWS_CODESIGN_PASSWORD"),
+    if let (Some(pfx), Some(pwd)) = (
+        std::env::var("WINDOWS_CODESIGN_PFX")
+            .ok()
+            .filter(|s| !s.is_empty()),
+        std::env::var("WINDOWS_CODESIGN_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty()),
     ) {
         let status = Command::new("signtool")
             .args([
