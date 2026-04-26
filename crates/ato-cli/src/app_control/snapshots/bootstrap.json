@@ -1,0 +1,38 @@
+{
+  "schema_version": "ccp/v1",
+  "package_id": "ato/desky",
+  "action": "bootstrap_finalize",
+  "state_path": "/Users/test/.ato/apps/desky/bootstrap-state.json",
+  "state": {
+    "state_version": 1,
+    "materialization": {
+      "shell_installed": true,
+      "opencode_installed": false,
+      "ollama_mode": "reused",
+      "bootstrap_phase": "personalization_finalized"
+    },
+    "personalization": {
+      "workspace_path": "/Users/test/Workspace",
+      "model_tier": "balanced",
+      "privacy_mode": "strict",
+      "submitted_at": "2026-04-02T00:00:00+00:00"
+    },
+    "health": {
+      "overall": "degraded",
+      "services": {
+        "ollama": "unmaterialized",
+        "opencode": "unmaterialized"
+      },
+      "last_error": "managed_environment_not_materialized",
+      "checked_at": "2026-04-02T00:00:01+00:00"
+    },
+    "repair_history": [
+      {
+        "action": "restart-services",
+        "status": "applied",
+        "detail": "Re-ran stub service health checks for Desky control-plane state.",
+        "recorded_at": "2026-04-02T00:00:02+00:00"
+      }
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+schema_version = "0.3"
+name = "airgap-npm-fallback-capsule"
+version = "0.1.0"
+type = "app"
+runtime = "source/deno"
+runtime_version = "1.46.3"
+run = "main.ts"
+
+[network]
+egress_allow = [
+  "registry.npmjs.org",
+  "npmjs.org",
+  "jsr.io",
+  "deno.land",
+  "esm.sh",
+  "cdn.jsdelivr.net",
+  "raw.githubusercontent.com",
+  "gist.githubusercontent.com"
+]

@@ -1,0 +1,10 @@
+{"version": 2, "width": 84, "height": 22, "timestamp": 1776614400, "env": {"SHELL": "zsh", "TERM": "xterm-256color"}}
+[0.0, "o", "$ curl -fsSL https://ato.run/install.sh | sh\r\n"]
+[0.4, "o", "Installed: ~/.local/bin/ato\r\nTry: ato --version\r\n\r\n"]
+[1.0, "o", "$ mkdir hello-ato && cd hello-ato\r\n"]
+[1.3, "o", "$ printf 'print(\"hello from ato\")\\n' > hello.py\r\n"]
+[1.7, "o", "$ ato run hello.py\r\n"]
+[2.2, "o", "hello from ato\r\n"]
+[2.8, "o", "$ ato encap . --share\r\n"]
+[3.2, "o", "Wrote share files:\r\n  .ato/share/share.spec.json\r\n  .ato/share/share.lock.json\r\n  .ato/share/guide.md\r\n"]
+[3.8, "o", "Share URL: https://ato.run/s/hello-ato@r1\r\n"]

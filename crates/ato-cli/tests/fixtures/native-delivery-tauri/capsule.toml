@@ -1,0 +1,24 @@
+schema_version = "0.3"
+name = "sample-native-capsule"
+version = "0.1.1"
+type = "app"
+runtime = "source/native"
+run = "cargo build --manifest-path src-tauri/Cargo.toml --release"
+working_dir = "."
+
+[artifact]
+framework = "tauri"
+stage = "unsigned"
+target = "windows/x86_64"
+input = "src-tauri/target/release/sample-native-capsule.exe"
+
+[finalize]
+tool = "powershell.exe"
+args = [
+  "-NoProfile",
+  "-NonInteractive",
+  "-ExecutionPolicy",
+  "Bypass",
+  "-Command",
+  "$cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=ato sample native capsule' -CertStoreLocation 'Cert:\\CurrentUser\\My'; $signature = Set-AuthenticodeSignature -FilePath 'sample-native-capsule.exe' -Certificate $cert; if (-not $signature.SignerCertificate) { throw 'Authenticode signing failed: signer certificate missing' }",
+]

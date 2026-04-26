@@ -1,0 +1,10 @@
+schema_version = "0.3"
+name = "ipc-socket-passthrough"
+version = "0.1.0"
+type = "app"
+runtime = "source/native"
+run = "./run.sh"
+
+[ipc.imports.echo]
+from = "./ipc-provider"
+activation = "eager"

@@ -1,0 +1,6 @@
+schema_version = "0.3"
+name = "native-shell-capsule"
+version = "0.1.0"
+type = "app"
+runtime = "source/native"
+run = "run.sh"
