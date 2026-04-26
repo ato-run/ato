@@ -152,6 +152,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn metadata_cache_and_trust_store_are_separate() {
         let _guard = env_lock().lock().expect("env lock");
         let temp = tempfile::tempdir().expect("tempdir");
