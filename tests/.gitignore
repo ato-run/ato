@@ -1,0 +1,12 @@
+# OS
+.DS_Store
+
+# Temporary files
+.tmp/
+
+# Python
+__pycache__/
+*.pyc
+
+# Node
+node_modules/

@@ -1,0 +1,383 @@
+// Dock-centered store model proposal
+//
+// Intent:
+// - Replace the mental model of "Publisher owns everything"
+//   with "User has access to a Dock"
+// - Model signing as a device capability attached to a Dock
+// - Keep capsule / release / submission flows scoped by Dock
+
+Project ato_store_dock_centered_model {
+  database_type: "SQLite"
+  Note: '''
+  Proposed future model for ato-store.
+  Public UX centers on Dock.
+  Auth centers on User.
+  Publish capability centers on Dock Signer (device).
+  '''
+}
+
+Enum dock_member_role {
+  owner
+  admin
+  writer
+  viewer
+}
+
+Enum dock_signer_status {
+  pending
+  active
+  revoked
+}
+
+Enum dock_installation_status {
+  active
+  suspended
+  revoked
+}
+
+Enum capsule_visibility {
+  unlisted
+  limited
+  public
+  blocked
+}
+
+Enum trust_badge {
+  none
+  verified
+  verified_plus_domain
+}
+
+Enum release_status {
+  published
+  yanked
+}
+
+Enum publish_event_status {
+  received
+  processing
+  published
+  failed
+}
+
+Enum submission_status {
+  none
+  queue
+  changes_requested
+  verified
+}
+
+Table users {
+  id text [pk]
+  name text [not null]
+  email text [not null, unique]
+  stripe_customer_id text [unique]
+  email_verified boolean [not null, default: false]
+  image text
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  Note: 'Better Auth user table. Human identity lives here.'
+}
+
+Table accounts {
+  id text [pk]
+  user_id text [not null]
+  provider_id text [not null]
+  account_id text [not null]
+  access_token text
+  refresh_token text
+  id_token text
+  scope text
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  Note: 'External auth identities such as GitHub are attached to a user, not to a dock.'
+
+  indexes {
+    (provider_id, account_id) [unique]
+    user_id
+  }
+}
+
+Table docks {
+  id text [pk]
+  handle text [not null, unique]
+  owner_user_id text [not null]
+  display_name text
+  description text
+  website_url text
+  verified boolean [not null, default: false]
+  status text [not null, default: 'active']
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  Note: 'Public namespace and management boundary. This replaces publisher as the primary product term.'
+
+  indexes {
+    owner_user_id
+  }
+}
+
+Table dock_memberships {
+  id text [pk]
+  dock_id text [not null]
+  user_id text [not null]
+  role dock_member_role [not null, default: 'viewer']
+  invited_by_user_id text
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  Note: 'Authorization is modeled as user access to a dock.'
+
+  indexes {
+    (dock_id, user_id) [unique]
+    dock_id
+    user_id
+  }
+}
+
+Table dock_signers {
+  id text [pk]
+  dock_id text [not null]
+  added_by_user_id text [not null]
+  signer_did text [not null, unique]
+  public_key text [not null]
+  device_label text
+  status dock_signer_status [not null, default: 'pending']
+  last_used_at timestamp
+  attested_at timestamp
+  revoked_at timestamp
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  Note: 'A signer is a device-scoped publish capability. Multiple signers may exist per dock.'
+
+  indexes {
+    dock_id
+    added_by_user_id
+    status
+  }
+}
+
+Table dock_github_installations {
+  id text [pk]
+  dock_id text [not null]
+  github_installation_id bigint [not null, unique]
+  github_account_login text [not null]
+  github_account_type text
+  status dock_installation_status [not null, default: 'active']
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  Note: 'Source import capability is separate from signing capability.'
+
+  indexes {
+    dock_id
+    status
+  }
+}
+
+Table capsules {
+  id text [pk]
+  dock_id text [not null]
+  slug text [not null]
+  name text [not null]
+  description text [not null, default: '']
+  category text [not null, default: 'other']
+  type text [not null, default: 'app']
+  homepage text
+  repository text
+  bug_tracker text
+  license_spdx text
+  price integer [not null, default: 0]
+  currency text [not null, default: 'usd']
+  downloads integer [not null, default: 0]
+  vouches_count integer [not null, default: 0]
+  origin text [not null, default: 'manual']
+  visibility capsule_visibility [not null, default: 'unlisted']
+  trust_badge trust_badge [not null, default: 'none']
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  Note: 'Capsules are owned by a dock. Scoped ID becomes dock.handle + slug.'
+
+  indexes {
+    (dock_id, slug) [unique]
+    dock_id
+    visibility
+    downloads
+  }
+}
+
+Table capsule_access_grants {
+  id text [pk]
+  capsule_id text [not null]
+  user_id text [not null]
+  granted_by_user_id text [not null]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  Note: 'Per-capsule ACL for limited visibility items.'
+
+  indexes {
+    (capsule_id, user_id) [unique]
+    capsule_id
+    user_id
+  }
+}
+
+Table releases {
+  id text [pk]
+  capsule_id text [not null]
+  version text [not null]
+  artifact_key text [not null]
+  content_hash text [not null]
+  size_bytes integer [not null]
+  release_notes text [not null, default: '']
+  source_commit text
+  builder_identity text
+  manifest_json text [not null]
+  capabilities_json text [not null, default: '[]']
+  signature_json text [not null]
+  signature_status text [not null, default: 'verified']
+  signer_id text
+  signed_by_did text
+  status release_status [not null, default: 'published']
+  created_at timestamp [not null]
+
+  Note: 'Release provenance points to the dock signer used for publication.'
+
+  indexes {
+    (capsule_id, version) [unique]
+    signer_id
+    status
+  }
+}
+
+Table release_artifacts {
+  id text [pk]
+  release_id text [not null]
+  platform_os text [not null, default: 'any']
+  platform_arch text [not null, default: 'any']
+  file_name text [not null]
+  artifact_key text [not null]
+  sha256 text
+  blake3 text
+  size_bytes integer [not null]
+  created_at timestamp [not null]
+
+  indexes {
+    release_id
+    (release_id, platform_os, platform_arch, file_name) [unique]
+  }
+}
+
+Table publish_events {
+  id text [pk]
+  dock_id text [not null]
+  capsule_id text
+  release_id text
+  signer_id text
+  trigger text [not null]
+  status publish_event_status [not null, default: 'received']
+  source_repo text
+  source_commit text
+  workflow_run_id text
+  rejection_reason text
+  idempotency_key text
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  Note: 'Operational publish log, scoped by dock.'
+
+  indexes {
+    dock_id
+    capsule_id
+    release_id
+    signer_id
+    status
+  }
+}
+
+Table official_submission_requests {
+  id text [pk]
+  dock_id text [not null]
+  capsule_id text
+  release_id text
+  submitted_by_user_id text [not null]
+  status submission_status [not null, default: 'queue']
+  checklist_json text [not null, default: '{}']
+  notes text
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  Note: 'Marketplace / official review queue is framed around the dock, not the publisher.'
+
+  indexes {
+    dock_id
+    capsule_id
+    release_id
+    status
+  }
+}
+
+Table dock_api_providers {
+  id text [pk]
+  dock_id text [not null]
+  provider text [not null]
+  is_active boolean [not null, default: true]
+  encrypted_api_key text [not null]
+  allowed_scopes_json text [not null, default: '["chat.completions"]']
+  rate_limit_per_minute integer [not null, default: 60]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  indexes {
+    (dock_id, provider) [unique]
+    dock_id
+  }
+}
+
+Table dock_budgets {
+  id text [pk]
+  dock_id text [not null, unique]
+  balance_cents integer [not null, default: 100]
+  currency text [not null, default: 'usd']
+  monthly_limit_cents integer [not null, default: 100]
+  alert_threshold_cents integer [not null, default: 20]
+  reset_day integer [not null, default: 1]
+  last_reset_at timestamp [not null]
+  created_at timestamp [not null]
+  updated_at timestamp [not null]
+
+  indexes {
+    dock_id
+  }
+}
+
+Ref: accounts.user_id > users.id
+Ref: docks.owner_user_id > users.id
+Ref: dock_memberships.dock_id > docks.id
+Ref: dock_memberships.user_id > users.id
+Ref: dock_memberships.invited_by_user_id > users.id
+Ref: dock_signers.dock_id > docks.id
+Ref: dock_signers.added_by_user_id > users.id
+Ref: dock_github_installations.dock_id > docks.id
+Ref: capsules.dock_id > docks.id
+Ref: capsule_access_grants.capsule_id > capsules.id
+Ref: capsule_access_grants.user_id > users.id
+Ref: capsule_access_grants.granted_by_user_id > users.id
+Ref: releases.capsule_id > capsules.id
+Ref: releases.signer_id > dock_signers.id
+Ref: release_artifacts.release_id > releases.id
+Ref: publish_events.dock_id > docks.id
+Ref: publish_events.capsule_id > capsules.id
+Ref: publish_events.release_id > releases.id
+Ref: publish_events.signer_id > dock_signers.id
+Ref: official_submission_requests.dock_id > docks.id
+Ref: official_submission_requests.capsule_id > capsules.id
+Ref: official_submission_requests.release_id > releases.id
+Ref: official_submission_requests.submitted_by_user_id > users.id
+Ref: dock_api_providers.dock_id > docks.id
+Ref: dock_budgets.dock_id > docks.id
