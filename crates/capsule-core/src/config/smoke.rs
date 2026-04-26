@@ -363,24 +363,39 @@ pub(crate) fn parse_smoke_options(
     manifest: &toml::Value,
     target_label: &str,
 ) -> Result<SmokeOptions, CapsuleError> {
+    // Prefer the normalized `targets.<label>.smoke` location, but fall back to
+    // a top-level `[smoke]` block — that's where flat v0.3 manifests carry the
+    // values before normalization migrates them under the synthesized target.
     let target = manifest
         .get("targets")
         .and_then(|v| v.as_table())
         .and_then(|t| t.get(target_label))
-        .and_then(|v| v.as_table())
-        .ok_or_else(|| {
-            CapsuleError::Pack(format!("targets.{target_label} is missing in manifest"))
-        })?;
+        .and_then(|v| v.as_table());
 
     let mut startup_timeout_ms = DEFAULT_STARTUP_TIMEOUT_MS;
     let mut check_commands = Vec::new();
 
-    if let Some(smoke) = target.get("smoke") {
-        let smoke = smoke.as_table().ok_or_else(|| {
+    let smoke_value = target
+        .and_then(|t| t.get("smoke"))
+        .or_else(|| manifest.get("smoke"));
+
+    if let Some(smoke) = smoke_value {
+        let _smoke = smoke.as_table().ok_or_else(|| {
             CapsuleError::Pack(format!("targets.{target_label}.smoke must be a table"))
         })?;
 
-        if let Some(timeout) = smoke.get("startup_timeout_ms") {
+        // For flat v0.3 manifests, `startup_timeout_ms` / `check_commands` sit
+        // alongside `[smoke]` at the top level. Fall back to those positions
+        // when the inline keys aren't present under `[smoke]` itself.
+        let timeout_value = smoke
+            .as_table()
+            .and_then(|s| s.get("startup_timeout_ms"))
+            .or_else(|| {
+                target
+                    .and_then(|t| t.get("startup_timeout_ms"))
+                    .or_else(|| manifest.get("startup_timeout_ms"))
+            });
+        if let Some(timeout) = timeout_value {
             let timeout = timeout.as_integer().ok_or_else(|| {
                 CapsuleError::Pack(format!(
                     "targets.{target_label}.smoke.startup_timeout_ms must be an integer"
@@ -394,7 +409,15 @@ pub(crate) fn parse_smoke_options(
             startup_timeout_ms = timeout as u64;
         }
 
-        if let Some(commands) = smoke.get("check_commands") {
+        let commands_value = smoke
+            .as_table()
+            .and_then(|s| s.get("check_commands"))
+            .or_else(|| {
+                target
+                    .and_then(|t| t.get("check_commands"))
+                    .or_else(|| manifest.get("check_commands"))
+            });
+        if let Some(commands) = commands_value {
             let commands = commands.as_array().ok_or_else(|| {
                 CapsuleError::Pack(format!(
                     "targets.{target_label}.smoke.check_commands must be an array"
