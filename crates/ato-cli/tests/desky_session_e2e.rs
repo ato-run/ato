@@ -4,6 +4,7 @@
 mod tests {
     use assert_cmd::Command;
     use serde_json::{json, Value};
+    use serial_test::serial;
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpStream;
@@ -216,6 +217,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn desky_session_roundtrip_for_tauri_mock() {
         let home = TempDir::new().expect("temp home");
         let session_root = home.path().join("desky-sessions");
@@ -275,21 +277,25 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn desky_session_injects_ato_guest_mode_env() {
         assert_guest_mode_env("desky-mock-tauri", "tauri");
     }
 
     #[test]
+    #[serial]
     fn desky_session_injects_ato_guest_mode_env_for_wails_mock() {
         assert_guest_mode_env("desky-mock-wails", "wails");
     }
 
     #[test]
+    #[serial]
     fn desky_session_injects_ato_guest_mode_env_for_electron_mock() {
         assert_guest_mode_env("desky-mock-electron", "electron");
     }
 
     #[test]
+    #[serial]
     fn desky_session_start_smoke_for_wails_mock() {
         let home = TempDir::new().expect("temp home");
         let session_root = home.path().join("desky-sessions");
@@ -323,6 +329,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn desky_session_stop_reaps_backend_process() {
         let home = TempDir::new().expect("temp home");
         let session_root = home.path().join("desky-sessions");
