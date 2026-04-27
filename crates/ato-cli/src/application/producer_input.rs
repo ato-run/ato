@@ -66,13 +66,15 @@ pub(crate) fn resolve_producer_authoritative_input(
     assume_yes: bool,
 ) -> Result<ProducerAuthoritativeInput> {
     let resolved = resolve_authoritative_input(project_root, ResolveInputOptions::default())?;
-    producer_authoritative_input_from_resolved(resolved, reporter, assume_yes)
+    producer_authoritative_input_from_resolved(project_root, resolved, reporter, assume_yes, false)
 }
 
 fn producer_authoritative_input_from_resolved(
+    project_root: &Path,
     resolved: ResolvedInput,
     reporter: Arc<CliReporter>,
     assume_yes: bool,
+    already_regenerated: bool,
 ) -> Result<ProducerAuthoritativeInput> {
     match resolved {
         ResolvedInput::CanonicalLock {
@@ -80,10 +82,41 @@ fn producer_authoritative_input_from_resolved(
             provenance,
             advisories,
         } => {
-            ensure_canonical_lock_matches_manifest_identity(
+            let manifest_path = provenance.discovered.compatibility_manifest_path.clone();
+            let identity_check = ensure_canonical_lock_matches_manifest_identity(
                 &canonical,
-                provenance.discovered.compatibility_manifest_path.as_deref(),
-            )?;
+                manifest_path.as_deref(),
+            );
+            if let Err(stale_err) = identity_check {
+                // Auto-regen path: when the user passed -y / --yes (or
+                // is on a TTY and approves the prompt), regenerate
+                // ato.lock.json to match the manifest, then re-resolve
+                // and retry once. We refuse to recurse twice so a
+                // genuinely broken regen surfaces the original error
+                // instead of looping.
+                if already_regenerated {
+                    return Err(stale_err);
+                }
+                let manifest_path = manifest_path
+                    .as_deref()
+                    .ok_or(stale_err)
+                    .map_err(|err| anyhow::anyhow!("{err}"))?;
+                if !assume_yes && !prompt_regenerate_lock(manifest_path)? {
+                    anyhow::bail!(
+                        "ato.lock.json regeneration declined. Re-run with -y / --yes to regenerate automatically, or run `ato lock --refresh`."
+                    );
+                }
+                regenerate_lockfile_blocking(manifest_path, reporter.clone())?;
+                let resolved =
+                    resolve_authoritative_input(project_root, ResolveInputOptions::default())?;
+                return producer_authoritative_input_from_resolved(
+                    project_root,
+                    resolved,
+                    reporter,
+                    assume_yes,
+                    true,
+                );
+            }
             let materialized =
                 materialize_run_from_canonical_lock(&canonical, None, reporter, assume_yes)?;
             ProducerAuthoritativeInput::from_materialized(
@@ -109,6 +142,46 @@ fn producer_authoritative_input_from_resolved(
             ProducerAuthoritativeInput::from_materialized(materialized, Vec::new())
         }
     }
+}
+
+fn prompt_regenerate_lock(manifest_path: &Path) -> Result<bool> {
+    use std::io::{self, BufRead, Write};
+    eprintln!(
+        "ato.lock.json is stale relative to {}. Regenerate now? [y/N]",
+        manifest_path.display()
+    );
+    io::stderr().flush().ok();
+    let stdin = io::stdin();
+    let mut line = String::new();
+    if stdin.lock().read_line(&mut line).is_err() {
+        return Ok(false);
+    }
+    let answer = line.trim().to_lowercase();
+    Ok(matches!(answer.as_str(), "y" | "yes"))
+}
+
+fn regenerate_lockfile_blocking(
+    manifest_path: &Path,
+    reporter: Arc<CliReporter>,
+) -> Result<()> {
+    let manifest_text = fs::read_to_string(manifest_path)
+        .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
+    let manifest_raw: toml::Value = toml::from_str(&manifest_text)
+        .with_context(|| format!("Failed to parse {} as TOML", manifest_path.display()))?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime for lockfile regeneration")?;
+    rt.block_on(capsule_core::lockfile::ensure_lockfile(
+        manifest_path,
+        &manifest_raw,
+        &manifest_text,
+        reporter,
+        false,
+    ))
+    .map_err(|err| anyhow::anyhow!("Failed to regenerate ato.lock.json: {err}"))?;
+    eprintln!("ato.lock.json regenerated.");
+    Ok(())
 }
 
 fn ensure_canonical_lock_matches_manifest_identity(
