@@ -11,7 +11,8 @@ use std::thread;
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use gpui::{AnyWindowHandle, AppContext, AsyncApp, Window};
-use http::header::CONTENT_TYPE;
+use http::header::{CONTENT_TYPE, COOKIE};
+use http::{HeaderMap, HeaderValue};
 #[cfg(target_os = "macos")]
 use objc2::rc::Retained;
 #[cfg(target_os = "macos")]
@@ -22,6 +23,7 @@ use objc2::{msg_send, sel, ClassType};
 use objc2_app_kit::NSView;
 #[cfg(target_os = "macos")]
 use objc2_foundation::MainThreadMarker;
+use serde::Deserialize;
 use serde_json::Value;
 use wry::http::{Request, Response};
 #[cfg(target_os = "macos")]
@@ -172,6 +174,13 @@ struct ManagedWebView {
     // _context removed: WebContext is now shared on WebViewManager
     // (persistent on-disk store) so it outlives every ManagedWebView
     // by definition.
+}
+
+#[derive(Debug, Deserialize)]
+struct DesktopAuthHandoff {
+    session_token: String,
+    site_base_url: String,
+    api_base_url: String,
 }
 
 impl ManagedWebView {
@@ -1429,6 +1438,28 @@ impl WebViewManager {
         let mut builder = WebViewBuilder::new_with_web_context(&mut self.web_context)
             .with_bounds(bounds_to_rect(webview_bounds));
 
+        // Layer 1: tag every Desktop WebView with a custom UA suffix
+        // so ato.run server can render Desktop-specific UX (Launch
+        // buttons, no "Download Desktop" promo, etc.) without
+        // round-tripping through JS detection.
+        builder = builder.with_user_agent(&format!(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
+             (KHTML, like Gecko) Version/17.0 Safari/605.1.15 AtoDesktop/{}",
+            env!("CARGO_PKG_VERSION")
+        ));
+
+        // Layer 1 (client side): inject a JS marker before page
+        // scripts load so ato.run client code can feature-gate on
+        // window.__ATO_DESKTOP__ without parsing User-Agent.
+        builder = builder.with_initialization_script_for_main_only(
+            format!(
+                "window.__ATO_DESKTOP__ = {{ version: \"{}\", platform: \"{}\" }};",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS,
+            ),
+            true,
+        );
+
         if build_flags.inject_bridge {
             let preload_script = self.preload_registry.script_for(
                 &pane.profile,
@@ -1607,10 +1638,29 @@ impl WebViewManager {
 
         builder = builder.with_new_window_req_handler(|_, _| NewWindowResponse::Allow);
 
+        let desktop_auth_handoff = if should_install_ato_auth_cookies(&url) {
+            Some(
+                load_desktop_auth_handoff()
+                    .with_context(|| format!("unable to prepare ato.run auth cookies for {url}"))?,
+            )
+        } else {
+            None
+        };
+
+        let builder = if let Some(handoff) = &desktop_auth_handoff {
+            builder.with_url_and_headers(&url, auth_initial_request_headers(handoff)?)
+        } else {
+            builder.with_url(&url)
+        };
+
         let webview = builder
-            .with_url(&url)
             .build_as_child(window)
             .with_context(|| format!("unable to create Wry child webview for {url}"))?;
+
+        if let Some(handoff) = &desktop_auth_handoff {
+            install_ato_auth_cookies(&webview, handoff)
+                .with_context(|| format!("unable to install ato.run auth cookies for {url}"))?;
+        }
 
         #[cfg(target_os = "macos")]
         let frame_host = Some(install_macos_frame_host(&webview)?);
@@ -1782,6 +1832,96 @@ impl Drop for WebViewManager {
             drop(pending.receiver);
         }
     }
+}
+
+fn should_install_ato_auth_cookies(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    parsed.host_str() == Some("ato.run") && parsed.path().starts_with("/dock")
+}
+
+fn load_desktop_auth_handoff() -> Result<DesktopAuthHandoff> {
+    let ato_bin = crate::orchestrator::resolve_ato_binary()
+        .context("failed to locate ato binary for desktop auth handoff")?;
+    let output = Command::new(&ato_bin)
+        .arg("desktop-auth-handoff")
+        .output()
+        .context("failed to run `ato desktop-auth-handoff`")?;
+
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "`ato desktop-auth-handoff` exited non-zero: {}",
+            detail.trim()
+        );
+    }
+
+    serde_json::from_slice(&output.stdout)
+        .context("failed to parse `ato desktop-auth-handoff` JSON")
+}
+
+fn auth_initial_request_headers(handoff: &DesktopAuthHandoff) -> Result<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        COOKIE,
+        HeaderValue::from_str(&store_session_cookie_header(&handoff.session_token))
+            .context("failed to build ato.run Cookie header")?,
+    );
+    Ok(headers)
+}
+
+fn install_ato_auth_cookies(webview: &WebView, handoff: &DesktopAuthHandoff) -> Result<()> {
+    for (domain, secure) in ato_auth_cookie_targets(handoff) {
+        let session_cookie =
+            cookie::Cookie::build(("better-auth.session_token", handoff.session_token.clone()))
+                .domain(domain.clone())
+                .path("/")
+                .secure(secure)
+                .http_only(true)
+                .same_site(cookie::SameSite::Lax)
+                .build();
+        webview.set_cookie(&session_cookie)?;
+
+        if secure {
+            let secure_cookie = cookie::Cookie::build((
+                "__Secure-better-auth.session_token",
+                handoff.session_token.clone(),
+            ))
+            .domain(domain)
+            .path("/")
+            .secure(true)
+            .http_only(true)
+            .same_site(cookie::SameSite::Lax)
+            .build();
+            webview.set_cookie(&secure_cookie)?;
+        }
+    }
+    Ok(())
+}
+
+fn ato_auth_cookie_targets(handoff: &DesktopAuthHandoff) -> Vec<(String, bool)> {
+    let mut seen = HashSet::new();
+    [&handoff.site_base_url, &handoff.api_base_url]
+        .into_iter()
+        .filter_map(|base| {
+            let parsed = url::Url::parse(base).ok()?;
+            let host = parsed.host_str()?.to_string();
+            let secure = parsed.scheme() == "https";
+            if seen.insert((host.clone(), secure)) {
+                Some((host, secure))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn store_session_cookie_header(session_token: &str) -> String {
+    format!(
+        "better-auth.session_token={}; __Secure-better-auth.session_token={}",
+        session_token, session_token
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2808,6 +2948,31 @@ mod tests {
                     auth_flow: false,
             bounds: PaneBounds::empty(),
         }
+    }
+
+    #[test]
+    fn dock_urls_install_ato_auth_cookies_only_for_ato_run_dock() {
+        assert!(should_install_ato_auth_cookies("https://ato.run/dock"));
+        assert!(should_install_ato_auth_cookies("https://ato.run/dock/koh0920"));
+        assert!(!should_install_ato_auth_cookies("https://ato.run/auth"));
+        assert!(!should_install_ato_auth_cookies("https://example.com/dock"));
+    }
+
+    #[test]
+    fn ato_auth_cookie_targets_include_site_and_api_hosts() {
+        let handoff = DesktopAuthHandoff {
+            session_token: "secret".to_string(),
+            site_base_url: "https://ato.run".to_string(),
+            api_base_url: "https://api.ato.run".to_string(),
+        };
+
+        assert_eq!(
+            ato_auth_cookie_targets(&handoff),
+            vec![
+                ("ato.run".to_string(), true),
+                ("api.ato.run".to_string(), true),
+            ]
+        );
     }
 
     #[test]
