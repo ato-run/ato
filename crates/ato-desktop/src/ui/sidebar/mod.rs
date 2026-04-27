@@ -4,12 +4,23 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::{
     div, img, linear_color_stop, linear_gradient, point, px, BoxShadow, Div, FontWeight, Image,
-    InteractiveElement, IntoElement, MouseButton,
+    InteractiveElement, IntoElement, MouseButton, Stateful,
 };
 use gpui_component::{Icon, IconName};
 
 use super::theme::Theme;
-use crate::app::{NewTab, SelectTask, ShowSettings};
+use crate::app::{CloseTask, MoveTask, NewTab, SelectTask, ShowSettings};
+
+/// Drag-and-drop payload for reordering sidebar task tabs. The drop
+/// handler reads `task_id` to dispatch `MoveTask { task_id, to_index }`
+/// where `to_index` is the position of the tab the payload was dropped
+/// onto. `from_index` is unused by the handler (we look up the source
+/// position in state) but kept for diagnostics.
+#[derive(Clone, Debug)]
+pub(super) struct DraggedTaskTab {
+    pub task_id: usize,
+    pub from_index: usize,
+}
 use crate::state::{AppState, SidebarTaskIconSpec, SidebarTaskItem, SystemPageIcon};
 
 const NAV_ITEM_SIZE: f32 = 36.0;
@@ -68,12 +79,14 @@ fn render_nav_item(
     index: usize,
     favicon_cache: &HashMap<String, FaviconState>,
     theme: &Theme,
-) -> Div {
+) -> Stateful<Div> {
     let task_id = task.id;
     let accent_subtle = theme.accent_subtle;
     let accent = theme.accent;
+    let drag_id = (task_id, index);
 
     let item = div()
+        .id(("task-tab", task_id))
         .w(px(NAV_ITEM_SIZE))
         .h(px(NAV_ITEM_SIZE))
         .rounded(px(6.0))
@@ -84,6 +97,27 @@ fn render_nav_item(
         .relative()
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             window.dispatch_action(Box::new(SelectTask { task_id }), cx);
+        })
+        .on_drag(
+            DraggedTaskTab {
+                task_id: drag_id.0,
+                from_index: drag_id.1,
+            },
+            |_dragged, _offset, _window, cx| {
+                // Minimal ghost — GPUI requires a non-empty entity.
+                // The default outline is enough for the v0.4 trial; a
+                // proper preview can come with a styling pass.
+                cx.new(|_| EmptyDragGhost)
+            },
+        )
+        .on_drop::<DraggedTaskTab>(move |dragged, _window, cx| {
+            if dragged.task_id == task_id {
+                return;
+            }
+            cx.dispatch_action(&MoveTask {
+                task_id: dragged.task_id,
+                to_index: index,
+            });
         });
 
     let item = if task.is_active {
@@ -109,6 +143,45 @@ fn render_nav_item(
         favicon_cache,
         theme,
     ))
+    .child(render_close_button(task_id, theme))
+}
+
+fn render_close_button(task_id: usize, theme: &Theme) -> Stateful<Div> {
+    div()
+        .id(("task-close", task_id))
+        .absolute()
+        .top(px(-4.0))
+        .right(px(-4.0))
+        .w(px(14.0))
+        .h(px(14.0))
+        .rounded_full()
+        .bg(theme.panel_bg)
+        .border_1()
+        .border_color(theme.border_default)
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .child(
+            Icon::new(IconName::Close)
+                .size(px(8.0))
+                .text_color(theme.text_secondary),
+        )
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            window.dispatch_action(Box::new(CloseTask { task_id }), cx);
+        })
+}
+
+/// Empty placeholder used as the drag ghost. GPUI's `on_drag` API
+/// requires a valid entity, but we don't render anything special
+/// during the drag — the OS / window manager already shows a cursor.
+struct EmptyDragGhost;
+
+impl gpui::Render for EmptyDragGhost {
+    fn render(&mut self, _window: &mut gpui::Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        div().w(px(0.0)).h(px(0.0))
+    }
 }
 
 fn render_app_icon(
