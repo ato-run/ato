@@ -37,6 +37,10 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of Ato Desktop is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
+    <!-- App icon shown in Add/Remove Programs and as the MSI's product icon. -->
+    <Icon Id="AppIcon.ico" SourceFile="$(var.StagingDir)\assets\AppIcon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.ico" />
+
     <Feature Id="Complete" Title="Ato Desktop" Level="1">
       <ComponentGroupRef Id="AtoFiles" />
       <ComponentGroupRef Id="AtoBinFiles" />
