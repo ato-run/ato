@@ -27,7 +27,15 @@ name: desktop-release
 on:
   push:
     tags:
+      # Two routings:
+      #   - `ato-desktop-v*`: legacy desktop-only release, lands in
+      #     a separate draft release named after the tag.
+      #   - `v*`: unified release (cargo-dist creates the v* release
+      #     for the CLI; desktop-release appends .dmg/.msi/.AppImage
+      #     to the same release tag — see publish-release for the
+      #     idempotent create-or-upload pattern).
       - "ato-desktop-v*"
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -198,7 +206,7 @@ jobs:
   publish-release:
     name: Publish GitHub Release
     needs: [bundle-macos, bundle-windows, bundle-linux]
-    if: startsWith(github.ref, 'refs/tags/ato-desktop-v') || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/ato-desktop-v') || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -223,9 +231,19 @@ jobs:
         run: |
           set -euo pipefail
           tag='${{ steps.tag.outputs.tag }}'
-          # `gh release create` errors if the release exists; use a
-          # create-or-edit pattern so re-runs of workflow_dispatch are
-          # idempotent.
+          # On unified `v*` tags the release is created by cargo-dist's
+          # host job (release.yml). Desktop bundles take longer than
+          # cargo-dist's CLI build, so by the time we get here the v*
+          # release should exist — but if cargo-dist failed or this is
+          # an `ato-desktop-v*` tag, fall back to creating a draft so
+          # the upload below has somewhere to land.
+          for attempt in 1 2 3 4 5 6; do
+            if gh release view "$tag" >/dev/null 2>&1; then
+              break
+            fi
+            echo "release $tag not visible yet (attempt $attempt); sleeping 30s"
+            sleep 30
+          done
           if ! gh release view "$tag" >/dev/null 2>&1; then
             gh release create "$tag" \
               --title "Ato Desktop $tag" \
