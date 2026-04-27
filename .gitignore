@@ -33,6 +33,10 @@ target/
 **/.next/
 **/dist/
 
+# Test artifacts (generated on every run)
+tests/manual/results/
+tests/test-sandbox/output/
+
 # Logs
 *.log
 
