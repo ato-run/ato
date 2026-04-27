@@ -1116,12 +1116,18 @@ impl Render for DesktopShell {
         let omnibar_suggestions = self.state.omnibar_suggestions(&omnibar_value);
         let active_pane_count = self.state.active_panes().len();
         let command_bar = matches!(self.state.shell_mode, ShellMode::CommandBar);
-        // Hide the active WebView while the omnibar is open with
-        // suggestions so the dropdown can paint above the WKWebView
-        // NSView (which always sits on top of GPUI's CALayer tree).
-        let hide_for_omnibar = command_bar && !omnibar_suggestions.is_empty();
+        // Hide the active WebView whenever a GPUI overlay needs to
+        // paint above it. WKWebView is a native NSView and always
+        // renders on top of GPUI's CALayer tree, so any in-app
+        // modal (omnibar suggestions, the missing-env config form,
+        // the permission prompt, the quit confirmation, the config
+        // modal) is invisible until we toggle the WebView off.
+        let hide_for_overlay = (command_bar && !omnibar_suggestions.is_empty())
+            || self.state.pending_config.is_some()
+            || self.state.active_permission_prompt().is_some()
+            || self.state.pending_quit_confirmation;
         self.webviews
-            .set_overlay_hides_webview(hide_for_omnibar, &mut self.state);
+            .set_overlay_hides_webview(hide_for_overlay, &mut self.state);
         let theme = Theme::from_mode(self.state.theme_mode);
 
         let body = div()
