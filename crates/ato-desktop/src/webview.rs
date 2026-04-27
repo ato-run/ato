@@ -1615,6 +1615,22 @@ impl WebViewManager {
         }
     }
 
+    /// Hide / unhide the active pane's WebView so an in-app GPUI
+    /// overlay (omnibar autocomplete dropdown, etc.) can paint over
+    /// it. The WKWebView is a native NSView and renders above every
+    /// CALayer-backed GPUI element, so the only reliable way to make
+    /// a GPUI overlay visible on top of it is to hide the WebView
+    /// for the duration of the overlay.
+    ///
+    /// `hide=true` toggles the active pane invisible; `hide=false`
+    /// restores it. No-op when there is no active pane.
+    pub fn set_overlay_hides_webview(&mut self, hide: bool, state: &mut AppState) {
+        let Some(active_pane_id) = self.active_pane_id else {
+            return;
+        };
+        self.set_cached_visibility(active_pane_id, !hide, state);
+    }
+
     fn set_cached_visibility(&mut self, pane_id: usize, visible: bool, state: &mut AppState) {
         let cached = self
             .visibility_cache
