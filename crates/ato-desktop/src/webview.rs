@@ -1084,6 +1084,7 @@ impl WebViewManager {
                                 healthcheck_url: None,
                                 invoke_url: None,
                                 served_by: None,
+                                auth_flow: false,
                                 bounds: active.bounds.clone(),
                             };
                             match self.build_webview(
@@ -1574,6 +1575,7 @@ impl WebViewManager {
             let pane_id = pane.pane_id;
             let signals = self.pending_auth_handoffs.clone();
             let callback_queue = self.pending_callback_urls.clone();
+            let auth_flow = pane.auth_flow;
             builder = builder.with_navigation_handler(move |uri: String| {
                 // ato:// deep links arrive here when ato.run finishes
                 // an in-app OAuth flow and redirects to the desktop
@@ -1585,7 +1587,12 @@ impl WebViewManager {
                     }
                     return false;
                 }
-                if auth_policy.classify(&uri) == AuthMode::BrowserRequired {
+                // Sign-in panes deliberately allow Google / GitHub /
+                // Microsoft OAuth redirects to load in-WebView so
+                // the resulting auth cookies persist in the shared
+                // WebContext. Untrusted capsule WebViews still hand
+                // those URLs off to the system browser.
+                if auth_policy.classify(&uri) == AuthMode::BrowserRequired && !auth_flow {
                     if let Ok(mut q) = signals.lock() {
                         if !q.iter().any(|s: &AuthHandoffSignal| s.pane_id == pane_id) {
                             q.push(AuthHandoffSignal { pane_id, url: uri });
@@ -2798,6 +2805,7 @@ mod tests {
             healthcheck_url: None,
             invoke_url: None,
             served_by: None,
+                    auth_flow: false,
             bounds: PaneBounds::empty(),
         }
     }

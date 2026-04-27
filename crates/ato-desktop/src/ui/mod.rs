@@ -664,8 +664,18 @@ impl DesktopShell {
         }
         // Swap the AuthHandoff pane for a Web pane navigated to the
         // auth URL. navigate_to_url replaces the active pane's
-        // surface in-place.
+        // surface in-place; we then flip auth_flow on the new
+        // WebPane so the navigation handler stops handing OAuth
+        // provider redirects (Google/GitHub/Microsoft) to the
+        // system browser.
         self.state.navigate_to_url(&url);
+        if let Some(task) = self.state.active_task_mut() {
+            if let Some(pane) = task.focused_pane_mut() {
+                if let PaneSurface::Web(web) = &mut pane.surface {
+                    web.auth_flow = true;
+                }
+            }
+        }
         self.webviews.sync_from_state(window, &mut self.state);
         self.sync_omnibar_with_state(window, cx, true);
         self.sync_focus_target(window, cx);
