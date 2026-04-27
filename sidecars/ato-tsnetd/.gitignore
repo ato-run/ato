@@ -1,0 +1,7 @@
+# Compiled Go binary
+/ato-tsnetd
+/ato-tsnetd.exe
+
+# Go build artifacts
+*.test
+*.out
