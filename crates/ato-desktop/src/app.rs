@@ -73,6 +73,19 @@ pub struct SelectTask {
     pub task_id: usize,
 }
 
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = ato_desktop, no_json)]
+pub struct CloseTask {
+    pub task_id: usize,
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = ato_desktop, no_json)]
+pub struct MoveTask {
+    pub task_id: usize,
+    pub to_index: usize,
+}
+
 struct LocalAssetSource(std::path::PathBuf);
 
 #[derive(Default)]
