@@ -2158,10 +2158,27 @@ fn active_web_session(state: &AppState, pane_id: usize) -> Option<WebSessionStat
     })
 }
 
-fn notify_window(mut async_app: AsyncApp, window_handle: AnyWindowHandle) {
-    let _ = async_app.update_window(window_handle, |_, window, _| {
-        window.refresh();
-    });
+fn notify_window(async_app: AsyncApp, window_handle: AnyWindowHandle) {
+    // Defer the update_window borrow to a future tick. notify_window
+    // is called from Wry callbacks (page-load, IPC, title-changed)
+    // and async-task continuations. When several panes load near the
+    // app launch — which happens whenever ~/.ato/desktop-tabs.json
+    // restores more than one tab — the synchronous update_window can
+    // re-enter the GPUI App RefCell while it is already mut-borrowed
+    // by application.run() / an AppKit selector and panic with
+    // "RefCell already borrowed" at gpui async_context.rs.
+    //
+    // 16 ms ≈ one frame is enough to release the original borrow.
+    let bg = async_app.background_executor().clone();
+    let fe = async_app.foreground_executor().clone();
+    fe.spawn(async move {
+        bg.timer(std::time::Duration::from_millis(16)).await;
+        let mut async_app = async_app;
+        let _ = async_app.update_window(window_handle, |_, window, _| {
+            window.refresh();
+        });
+    })
+    .detach();
 }
 
 #[derive(Clone)]
