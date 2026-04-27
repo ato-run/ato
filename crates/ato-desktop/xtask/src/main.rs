@@ -151,6 +151,7 @@ fn bundle_windows_app(target: &str) -> Result<PathBuf> {
     let paths = WorkspacePaths::discover()?;
     run_cargo_build(&paths.desktop_manifest, "ato-desktop", rust_target)?;
     run_cargo_build(&paths.ato_manifest, "ato", rust_target)?;
+    run_cargo_build(&paths.nacelle_manifest, "nacelle", rust_target)?;
 
     let staging = paths.desktop_root.join("dist").join(target).join("Ato");
     if staging.exists() {
@@ -165,6 +166,7 @@ fn bundle_windows_app(target: &str) -> Result<PathBuf> {
     let profile_dir = format!("{rust_target}/release");
     let desktop_exe = paths.target_root.join(&profile_dir).join("ato-desktop.exe");
     let helper_exe = paths.target_root.join(&profile_dir).join("ato.exe");
+    let nacelle_exe = paths.target_root.join(&profile_dir).join("nacelle.exe");
     fs::copy(&desktop_exe, staging.join("ato-desktop.exe")).with_context(|| {
         format!(
             "failed to copy {} to staging — was the cross-build successful?",
@@ -173,6 +175,8 @@ fn bundle_windows_app(target: &str) -> Result<PathBuf> {
     })?;
     fs::copy(&helper_exe, bin_dir.join("ato.exe"))
         .with_context(|| format!("failed to copy {} to staging", helper_exe.display()))?;
+    fs::copy(&nacelle_exe, bin_dir.join("nacelle.exe"))
+        .with_context(|| format!("failed to copy {} to staging", nacelle_exe.display()))?;
     copy_dir_recursive(&paths.desktop_root.join("assets"), &assets_dir)?;
 
     println!("Staged Windows install tree at {}", staging.display());
@@ -188,6 +192,7 @@ fn bundle_linux_app(target: &str) -> Result<PathBuf> {
     let paths = WorkspacePaths::discover()?;
     run_cargo_build(&paths.desktop_manifest, "ato-desktop", rust_target)?;
     run_cargo_build(&paths.ato_manifest, "ato", rust_target)?;
+    run_cargo_build(&paths.nacelle_manifest, "nacelle", rust_target)?;
 
     let staging = paths.desktop_root.join("dist").join(target).join("AppDir");
     if staging.exists() {
@@ -217,6 +222,11 @@ fn bundle_linux_app(target: &str) -> Result<PathBuf> {
         bin_dir.join("ato"),
     )
     .context("failed to stage ato helper binary")?;
+    fs::copy(
+        paths.target_root.join(&profile_dir).join("nacelle"),
+        bin_dir.join("nacelle"),
+    )
+    .context("failed to stage nacelle binary")?;
 
     // Copy declarative installer metadata if present. These ship from
     // PR-8's installer/ folder and let `xdg-mime` pick up our URL
@@ -454,6 +464,7 @@ fn codesign_bundle(bundle: &Path) -> Result<()> {
     let mode = resolved_codesign_mode();
     let entitlements = locate_entitlements()?;
     let helper = bundle.join("Contents").join("Helpers").join("ato");
+    let nacelle = bundle.join("Contents").join("Helpers").join("nacelle");
     let main_binary = bundle.join("Contents").join("MacOS").join("ato-desktop");
 
     if !helper.exists() {
@@ -462,12 +473,19 @@ fn codesign_bundle(bundle: &Path) -> Result<()> {
             helper.display()
         );
     }
+    if !nacelle.exists() {
+        bail!(
+            "expected nacelle binary at {} — did `bundle` complete successfully?",
+            nacelle.display()
+        );
+    }
     if !main_binary.exists() {
         bail!("expected main binary at {}", main_binary.display());
     }
 
-    // Inside-out: Helpers/ato → MacOS/ato-desktop → outer .app
+    // Inside-out: Helpers/{ato,nacelle} → MacOS/ato-desktop → outer .app
     codesign_path(&helper, &mode, &entitlements)?;
+    codesign_path(&nacelle, &mode, &entitlements)?;
     codesign_path(&main_binary, &mode, &entitlements)?;
     codesign_path(bundle, &mode, &entitlements)?;
     println!(
@@ -681,6 +699,7 @@ fn bundle_macos_app(target: &str) -> Result<PathBuf> {
 
     run_cargo_build(&paths.desktop_manifest, "ato-desktop", &spec.rust_target)?;
     run_cargo_build(&paths.ato_manifest, "ato", &spec.rust_target)?;
+    run_cargo_build(&paths.nacelle_manifest, "nacelle", &spec.rust_target)?;
 
     let bundle_root = paths
         .desktop_root
@@ -708,13 +727,17 @@ fn bundle_macos_app(target: &str) -> Result<PathBuf> {
 
     let desktop_binary = paths.target_root.join(&profile_dir).join("ato-desktop");
     let helper_binary = paths.target_root.join(&profile_dir).join("ato");
+    let nacelle_binary = paths.target_root.join(&profile_dir).join("nacelle");
 
     let app_binary_path = macos_dir.join("ato-desktop");
     let helper_path = helpers_dir.join("ato");
+    let nacelle_path = helpers_dir.join("nacelle");
     copy_executable(&desktop_binary, &app_binary_path)?;
     strip_macos_binary(&app_binary_path)?;
     copy_executable(&helper_binary, &helper_path)?;
     strip_macos_binary(&helper_path)?;
+    copy_executable(&nacelle_binary, &nacelle_path)?;
+    strip_macos_binary(&nacelle_path)?;
 
     copy_dir_recursive(
         &paths.desktop_root.join("assets"),
@@ -727,6 +750,7 @@ fn bundle_macos_app(target: &str) -> Result<PathBuf> {
     println!("Bundled {}", bundle_root.display());
     println!("  app binary: {}", app_binary_path.display());
     println!("  helper: {}", helper_path.display());
+    println!("  nacelle: {}", nacelle_path.display());
     println!("  assets: {}", resources_dir.join("assets").display());
 
     Ok(bundle_root)
@@ -878,6 +902,7 @@ struct WorkspacePaths {
     desktop_root: PathBuf,
     desktop_manifest: PathBuf,
     ato_manifest: PathBuf,
+    nacelle_manifest: PathBuf,
     target_root: PathBuf,
 }
 
@@ -918,12 +943,15 @@ impl WorkspacePaths {
         };
         let desktop_manifest = desktop_root.join("Cargo.toml");
         let ato_manifest = ato_root.join("Cargo.toml");
+        // nacelle lives at <repo>/crates/nacelle in the monorepo.
+        let nacelle_manifest = repo_root.join("crates").join("nacelle").join("Cargo.toml");
         let target_root = repo_root.join("target");
 
         Ok(Self {
             desktop_root,
             desktop_manifest,
             ato_manifest,
+            nacelle_manifest,
             target_root,
         })
     }

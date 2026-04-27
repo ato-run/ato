@@ -18,7 +18,7 @@
 # without manual `xattr -dr com.apple.quarantine` chasing. v0.6 will
 # flip to Developer ID and may relax this.
 cask "ato" do
-  version "0.4.86"
+  version "0.4.87"
   # NOTE: sha256 is replaced by the publish script after the .dmg is
   # uploaded. Keeping it as `:no_check` here so this template lints
   # cleanly outside of a real release; the synced tap copy MUST have
@@ -62,6 +62,9 @@ cask "ato" do
   # both install paths through the same Helpers/ato keeps version
   # skew impossible (CCP guarantee from PR-1).
   binary "#{appdir}/Ato Desktop.app/Contents/Helpers/ato"
+  # Expose the bundled nacelle (Source Runtime). With this on PATH
+  # `ato run` does not need the legacy install.sh nacelle download.
+  binary "#{appdir}/Ato Desktop.app/Contents/Helpers/nacelle"
 
   zap trash: [
     "~/Library/Application Support/Ato",
