@@ -166,17 +166,29 @@ impl OpenUrlBridge {
 
 impl AssetSource for LocalAssetSource {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        // Local override first — lets us ship our own bg images,
+        // automation/, preload/, etc. under crates/ato-desktop/assets/.
         let full_path = self.0.join(path);
         if let Ok(data) = std::fs::read(&full_path) {
-            Ok(Some(Cow::Owned(data)))
-        } else {
-            println!("Debug: Failed to load asset: {}", full_path.display());
-            Ok(None)
+            return Ok(Some(Cow::Owned(data)));
+        }
+        // Fall back to the gpui-component bundle for icons/*.svg etc.
+        // gpui_component widgets (Icon, Close button) reference paths
+        // like "icons/close.svg" that live inside gpui-component's
+        // RustEmbed bundle, not under our local assets/ tree.
+        match gpui_component_assets::Assets.load(path) {
+            Ok(Some(data)) => Ok(Some(data)),
+            _ => {
+                println!("Debug: Failed to load asset: {}", full_path.display());
+                Ok(None)
+            }
         }
     }
 
-    fn list(&self, _path: &str) -> gpui::Result<Vec<SharedString>> {
-        Ok(vec![])
+    fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
+        // Delegate to gpui-component-assets so widgets that enumerate
+        // (e.g. icon pickers) see the bundled SVGs.
+        gpui_component_assets::Assets.list(path)
     }
 }
 
