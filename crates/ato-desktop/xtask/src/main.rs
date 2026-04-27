@@ -787,6 +787,16 @@ fn bundle_macos_app(target: &str) -> Result<PathBuf> {
         &resources_dir.join("assets"),
     )?;
 
+    // Place AppIcon.icns at Contents/Resources/ root (referenced from
+    // CFBundleIconFile in Info.plist). The same .icns also lives under
+    // Resources/assets/ via the copy above; keeping both is harmless and
+    // avoids a special-case skip in copy_dir_recursive.
+    let icns_src = paths.desktop_root.join("assets").join("AppIcon.icns");
+    if icns_src.exists() {
+        fs::copy(&icns_src, resources_dir.join("AppIcon.icns"))
+            .context("failed to copy AppIcon.icns to Contents/Resources")?;
+    }
+
     let plist = render_info_plist(&spec.bundle_version);
     fs::write(contents_dir.join("Info.plist"), plist).context("failed to write Info.plist")?;
 
@@ -904,6 +914,8 @@ fn render_info_plist(version: &str) -> String {
     <string>{APP_IDENTIFIER}</string>
     <key>CFBundleExecutable</key>
     <string>ato-desktop</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleVersion</key>
