@@ -42,8 +42,17 @@ pub(super) fn render_command_chrome(
             theme,
         )))
         .child(render_active_route_status(state, theme))
-        .child(render_overview_toggle(state, theme))
+        // Overview toggle is hidden — it has no working click handler
+        // (Cmd-B is the only way to enter overview mode) and the user
+        // requested top-right buttons stay off until they are wired.
+        // Keep `render_overview_toggle` defined; ShellMode::Overview
+        // is still reachable via the keybind.
+        .when(SHOW_OVERVIEW_TOGGLE, |row| {
+            row.child(render_overview_toggle(state, theme))
+        })
 }
+
+const SHOW_OVERVIEW_TOGGLE: bool = false;
 
 fn render_nav_buttons(state: &AppState, theme: &Theme) -> impl IntoElement {
     let is_external_url = state
