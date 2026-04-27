@@ -787,6 +787,16 @@ fn display_strategy_for_runtime(
         return CapsuleDisplayStrategy::WebUrl;
     }
 
+    // Any target that publishes an HTTP port is a web app — the host
+    // should open a WebView pointed at it instead of a log-tail
+    // terminal. Without this, capsules like `runtime=source,
+    // driver=node, port=3000` (a typical Node web app) fall through
+    // to TerminalStream and the user sees process logs instead of
+    // the served UI.
+    if plan.execution_port().is_some() {
+        return CapsuleDisplayStrategy::WebUrl;
+    }
+
     CapsuleDisplayStrategy::TerminalStream
 }
 
