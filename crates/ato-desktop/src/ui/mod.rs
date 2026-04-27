@@ -22,7 +22,6 @@ use gpui_component::input::{InputEvent, InputState};
 
 use self::chrome::render_command_chrome;
 use self::panels::render_stage;
-use self::share::render_preview_card;
 use self::sidebar::{favicon_request_url, render_task_rail, FaviconState};
 
 use crate::app::{
@@ -33,7 +32,7 @@ use crate::app::{
     NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, OpenCloudDock, OpenLocalRegistry,
     OpenUrlBridge, PreviousTask, PreviousWorkspace, Quit, ResumeAfterAuth, SaveConfigForm,
     SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SplitPane, ToggleAutoDevtools,
-    ToggleDevConsole, ToggleOverview, ToggleTheme,
+    ToggleDevConsole, ToggleTheme,
 };
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
@@ -47,7 +46,6 @@ use capsule_wire::config::ConfigKind;
 pub(super) const CHROME_HEIGHT: f32 = 48.0;
 pub(super) const RAIL_WIDTH: f32 = 52.0;
 pub(super) const STAGE_PADDING: f32 = 0.0;
-pub(super) const OVERVIEW_HEIGHT: f32 = 210.0;
 
 const DEVTOOLS_DEBUG_ENV: &str = "ATO_DESKTOP_DEVTOOLS_DEBUG";
 const DEVTOOLS_RESYNC_DELAYS_MS: &[u64] = &[32, 96, 192];
@@ -330,17 +328,6 @@ impl DesktopShell {
     ) {
         self.state.focus_command_bar();
         self.sync_omnibar_with_state(window, cx, true);
-        self.sync_focus_target(window, cx);
-        cx.notify();
-    }
-
-    fn on_toggle_overview(
-        &mut self,
-        _: &ToggleOverview,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.state.toggle_overview();
         self.sync_focus_target(window, cx);
         cx.notify();
     }
@@ -1035,7 +1022,6 @@ impl Render for DesktopShell {
         self.maybe_trigger_capsule_search(&omnibar_value);
         let omnibar_suggestions = self.state.omnibar_suggestions(&omnibar_value);
         let active_pane_count = self.state.active_panes().len();
-        let overview = matches!(self.state.shell_mode, ShellMode::Overview);
         let command_bar = matches!(self.state.shell_mode, ShellMode::CommandBar);
         let theme = Theme::from_mode(self.state.theme_mode);
 
@@ -1058,9 +1044,6 @@ impl Render for DesktopShell {
                         active_pane_count,
                         &theme,
                     ))
-                    .when(overview, |this| {
-                        this.child(render_overview_overlay(&self.state, &theme))
-                    })
                     .when(self.state.active_permission_prompt().is_some(), |this| {
                         this.child(render_permission_prompt_overlay(&self.state, &theme))
                     })
@@ -1092,7 +1075,6 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_toggle_theme))
             .on_action(cx.listener(Self::on_toggle_auto_devtools))
             .on_action(cx.listener(Self::on_focus_command_bar))
-            .on_action(cx.listener(Self::on_toggle_overview))
             .on_action(cx.listener(Self::on_show_settings))
             .on_action(cx.listener(Self::on_toggle_dev_console))
             .on_action(cx.listener(Self::on_new_tab))
@@ -1356,133 +1338,15 @@ fn sniff_image_format(bytes: &[u8]) -> Option<ImageFormat> {
     None
 }
 
-fn compute_stage_bounds(state: &AppState, width: f32, height: f32) -> PaneBounds {
-    let overview_height = if matches!(state.shell_mode, ShellMode::Overview) {
-        OVERVIEW_HEIGHT
-    } else {
-        0.0
-    };
-
+fn compute_stage_bounds(_state: &AppState, width: f32, height: f32) -> PaneBounds {
     PaneBounds {
         x: RAIL_WIDTH + STAGE_PADDING,
         y: CHROME_HEIGHT + STAGE_PADDING,
         width: (width - RAIL_WIDTH - STAGE_PADDING * 2.0).max(240.0),
-        height: (height - CHROME_HEIGHT - STAGE_PADDING * 2.0 - overview_height).max(180.0),
+        height: (height - CHROME_HEIGHT - STAGE_PADDING * 2.0).max(180.0),
     }
 }
 
-/// Overview overlay matching the mock's workspace-overlay with centered
-/// focus card and horizontal task rail.
-fn render_overview_overlay(state: &AppState, theme: &Theme) -> impl IntoElement {
-    let tasks = state
-        .active_workspace()
-        .map(|workspace| workspace.tasks.clone())
-        .unwrap_or_default();
-    let active_id = state.active_task().map(|task| task.id).unwrap_or_default();
-    let accent = theme.accent;
-    let accent_subtle = theme.accent_subtle;
-    let card_active = theme.overview_card_bg_active;
-    let card_inactive = theme.overview_card_bg_inactive;
-    let card_border_inactive = theme.overview_card_border_inactive;
-    let overlay_header = theme.overlay_header_text;
-
-    div()
-        .absolute()
-        .inset_0()
-        .bg(theme.overlay_bg)
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            div()
-                .w(px(980.0))
-                .max_w_full()
-                .flex()
-                .flex_col()
-                .gap_5()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.0))
-                        .child(
-                            div()
-                                .text_size(px(15.0))
-                                .text_color(theme.overlay_header_text)
-                                .child("⧉"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .font_weight(gpui::FontWeight(500.0))
-                                .text_color(overlay_header)
-                                .child("Workspaces"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(theme.text_tertiary)
-                                .bg(theme.surface_hover)
-                                .px_2()
-                                .py(px(2.0))
-                                .rounded(px(10.0))
-                                .child(format!("{}", tasks.len())),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap_4()
-                        .children(tasks.into_iter().map(move |task| {
-                            let is_active = task.id == active_id;
-                            div()
-                                .flex_1()
-                                .rounded(px(18.0))
-                                .bg(if is_active {
-                                    card_active
-                                } else {
-                                    card_inactive
-                                })
-                                .border_1()
-                                .when(is_active, |this| {
-                                    this.border_2().border_color(accent).shadow(vec![
-                                        BoxShadow {
-                                            color: accent_subtle,
-                                            offset: point(px(0.), px(0.)),
-                                            blur_radius: px(20.),
-                                            spread_radius: px(0.),
-                                        },
-                                        BoxShadow {
-                                            color: hsla(0.0, 0.0, 0.0, 0.25),
-                                            offset: point(px(0.), px(20.)),
-                                            blur_radius: px(60.),
-                                            spread_radius: px(0.),
-                                        },
-                                    ])
-                                })
-                                .when(!is_active, |this| {
-                                    this.border_color(card_border_inactive).shadow(vec![
-                                        BoxShadow {
-                                            color: hsla(0.0, 0.0, 0.0, 0.08),
-                                            offset: point(px(0.), px(12.)),
-                                            blur_radius: px(32.),
-                                            spread_radius: px(0.),
-                                        },
-                                    ])
-                                })
-                                .overflow_hidden()
-                                .cursor_pointer()
-                                .p_4()
-                                .child(render_preview_card(
-                                    is_active,
-                                    &task.title,
-                                    &task.preview,
-                                    theme,
-                                ))
-                        })),
-                ),
-        )
-}
 
 fn render_permission_prompt_overlay(state: &AppState, theme: &Theme) -> impl IntoElement {
     let Some(prompt) = state.active_permission_prompt() else {
