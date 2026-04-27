@@ -27,12 +27,13 @@ use self::sidebar::{favicon_request_url, render_task_rail, FaviconState};
 
 use crate::app::{
     AllowPermissionForSession, AllowPermissionOnce, BrowserBack, BrowserForward, BrowserReload,
-    CancelAuthHandoff, CancelConfigForm, CloseTask, CycleHandle, DenyPermissionPrompt,
-    DismissTransient, ExpandSplit, FocusCommandBar, MoveTask, NativeCopy, NativeCut, NativePaste,
-    NativeRedo, NativeSelectAll, NativeUndo, NavigateToUrl, NewTab, NextTask, NextWorkspace,
-    OpenAuthInBrowser, OpenCloudDock, OpenLocalRegistry, OpenUrlBridge, PreviousTask,
-    PreviousWorkspace, ResumeAfterAuth, SaveConfigForm, SelectTask, ShowSettings, ShrinkSplit,
-    SignInToAtoRun, SplitPane, ToggleAutoDevtools, ToggleDevConsole, ToggleOverview, ToggleTheme,
+    CancelAuthHandoff, CancelConfigForm, CancelQuit, CloseTask, ConfirmQuitClear, ConfirmQuitKeep,
+    CycleHandle, DenyPermissionPrompt, DismissTransient, ExpandSplit, FocusCommandBar, MoveTask,
+    NativeCopy, NativeCut, NativePaste, NativeRedo, NativeSelectAll, NativeUndo, NavigateToUrl,
+    NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, OpenCloudDock, OpenLocalRegistry,
+    OpenUrlBridge, PreviousTask, PreviousWorkspace, Quit, ResumeAfterAuth, SaveConfigForm,
+    SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SplitPane, ToggleAutoDevtools,
+    ToggleDevConsole, ToggleOverview, ToggleTheme,
 };
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
@@ -518,6 +519,19 @@ impl DesktopShell {
     ) {
         self.state.dismiss_transient();
         self.sync_focus_target(window, cx);
+        cx.notify();
+    }
+
+    fn on_quit(&mut self, _: &Quit, _window: &mut Window, cx: &mut Context<Self>) {
+        // Surface the keep-or-clear dialog instead of quitting
+        // straight away; ConfirmQuitKeep / ConfirmQuitClear /
+        // CancelQuit resolve the prompt.
+        self.state.pending_quit_confirmation = true;
+        cx.notify();
+    }
+
+    fn on_cancel_quit(&mut self, _: &CancelQuit, _window: &mut Window, cx: &mut Context<Self>) {
+        self.state.pending_quit_confirmation = false;
         cx.notify();
     }
 
@@ -1085,6 +1099,8 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_expand_split))
             .on_action(cx.listener(Self::on_shrink_split))
             .on_action(cx.listener(Self::on_dismiss_transient))
+            .on_action(cx.listener(Self::on_quit))
+            .on_action(cx.listener(Self::on_cancel_quit))
             .on_action(cx.listener(Self::on_cycle_handle))
             .on_action(cx.listener(Self::on_browser_back))
             .on_action(cx.listener(Self::on_browser_forward))
@@ -1130,7 +1146,135 @@ impl Render for DesktopShell {
                 &theme,
             ))
             .child(body)
+            .when(self.state.pending_quit_confirmation, |this| {
+                this.child(render_quit_dialog(&theme))
+            })
     }
+}
+
+fn render_quit_dialog(theme: &theme::Theme) -> impl IntoElement {
+    let backdrop = hsla(0.0, 0.0, 0.0, 0.45);
+    let panel_bg = theme.settings_panel_bg;
+    let panel_border = theme.panel_border;
+    let text_primary = theme.text_primary;
+    let text_secondary = theme.text_secondary;
+
+    div()
+        .id("quit-confirm-overlay")
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(backdrop)
+        // Click on the backdrop = cancel.
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.dispatch_action(Box::new(CancelQuit), cx);
+        })
+        .child(
+            div()
+                .id("quit-confirm-dialog")
+                .w(px(420.0))
+                .p(px(24.0))
+                .rounded(px(12.0))
+                .bg(panel_bg)
+                .border_1()
+                .border_color(panel_border)
+                .shadow_lg()
+                .flex()
+                .flex_col()
+                .gap(px(14.0))
+                // Eat clicks so they don't bubble to the backdrop.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                })
+                .child(
+                    div()
+                        .text_size(px(16.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(text_primary)
+                        .child("Quit Ato Desktop"),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(text_secondary)
+                        .child(
+                            "Keep your current tabs for the next launch, or clear them and start fresh?",
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap(px(8.0))
+                        .child(quit_dialog_button(
+                            "Cancel",
+                            theme,
+                            QuitDialogButtonKind::Neutral,
+                            |window, cx| {
+                                window.dispatch_action(Box::new(CancelQuit), cx);
+                            },
+                        ))
+                        .child(quit_dialog_button(
+                            "Clear & Quit",
+                            theme,
+                            QuitDialogButtonKind::Danger,
+                            |window, cx| {
+                                window.dispatch_action(Box::new(ConfirmQuitClear), cx);
+                            },
+                        ))
+                        .child(quit_dialog_button(
+                            "Keep & Quit",
+                            theme,
+                            QuitDialogButtonKind::Primary,
+                            |window, cx| {
+                                window.dispatch_action(Box::new(ConfirmQuitKeep), cx);
+                            },
+                        )),
+                ),
+        )
+}
+
+#[derive(Clone, Copy)]
+enum QuitDialogButtonKind {
+    Primary,
+    Neutral,
+    Danger,
+}
+
+fn quit_dialog_button(
+    label: &'static str,
+    theme: &theme::Theme,
+    kind: QuitDialogButtonKind,
+    on_click: impl Fn(&mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    let (bg, fg, border) = match kind {
+        QuitDialogButtonKind::Primary => (theme.accent, gpui::white(), theme.accent),
+        QuitDialogButtonKind::Neutral => {
+            (theme.surface_hover, theme.text_primary, theme.border_default)
+        }
+        QuitDialogButtonKind::Danger => {
+            (theme.surface_hover, hsla(0.0, 0.7, 0.5, 1.0), theme.border_default)
+        }
+    };
+    div()
+        .id(label)
+        .px(px(14.0))
+        .py(px(8.0))
+        .rounded(px(6.0))
+        .bg(bg)
+        .border_1()
+        .border_color(border)
+        .text_color(fg)
+        .text_size(px(13.0))
+        .font_weight(FontWeight::MEDIUM)
+        .cursor_pointer()
+        .child(label)
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            on_click(window, cx);
+        })
 }
 
 impl Focusable for DesktopShell {
