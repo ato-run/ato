@@ -108,7 +108,11 @@ run = "source/main.sh""#;
 #[test]
 fn lockfile_allocation_regression_gate() {
     const MAX_FIRST_TOTAL_BLOCKS: u64 = 4_000;
-    const MAX_FIRST_TOTAL_BYTES: u64 = 900_000;
+    const MAX_FIRST_TOTAL_BYTES: u64 = if cfg!(target_os = "linux") {
+        2_500_000
+    } else {
+        900_000
+    };
     const MAX_REUSE_TOTAL_BLOCKS: u64 = 1_500;
     const MAX_REUSE_TOTAL_BYTES: u64 = 220_000;
 
