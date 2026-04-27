@@ -8,7 +8,7 @@ use crate::app::{
     BrowserBack, BrowserForward, BrowserReload, FocusCommandBar, NavigateToUrl, SelectTask,
     ShowSettings,
 };
-use crate::state::{AppState, GuestRoute, OmnibarSuggestion, OmnibarSuggestionAction, ShellMode};
+use crate::state::{AppState, GuestRoute, OmnibarSuggestion, OmnibarSuggestionAction};
 
 use self::window_controls::{default_window_control_buttons, render_window_controls};
 use super::theme::Theme;
@@ -42,17 +42,7 @@ pub(super) fn render_command_chrome(
             theme,
         )))
         .child(render_active_route_status(state, theme))
-        // Overview toggle is hidden — it has no working click handler
-        // (Cmd-B is the only way to enter overview mode) and the user
-        // requested top-right buttons stay off until they are wired.
-        // Keep `render_overview_toggle` defined; ShellMode::Overview
-        // is still reachable via the keybind.
-        .when(SHOW_OVERVIEW_TOGGLE, |row| {
-            row.child(render_overview_toggle(state, theme))
-        })
 }
-
-const SHOW_OVERVIEW_TOGGLE: bool = false;
 
 fn render_nav_buttons(state: &AppState, theme: &Theme) -> impl IntoElement {
     let is_external_url = state
@@ -340,32 +330,6 @@ fn render_omnibar_suggestion(
         )
 }
 
-fn render_overview_toggle(state: &AppState, theme: &Theme) -> impl IntoElement {
-    let active = matches!(state.shell_mode, ShellMode::Overview);
-    let accent_border = theme.accent_border;
-    let accent_subtle = theme.accent_subtle;
-
-    div()
-        .w(px(30.0))
-        .h(px(30.0))
-        .rounded(px(6.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .border_1()
-        .border_color(if active {
-            accent_border
-        } else {
-            hsla(0.0, 0.0, 0.0, 0.0)
-        })
-        .bg(if active {
-            accent_subtle
-        } else {
-            hsla(0.0, 0.0, 0.0, 0.0)
-        })
-        .child(render_overview_icon(active, theme))
-}
 
 fn render_active_route_status(state: &AppState, theme: &Theme) -> impl IntoElement {
     let Some(active) = state.active_capsule_pane().or_else(|| {
@@ -466,63 +430,3 @@ fn render_status_chip(label: &str, emphasized: bool, theme: &Theme) -> impl Into
         .child(label.to_string())
 }
 
-/// Two stacked mini-window rectangles with traffic-light dots,
-/// matching the mock's overview toggle icon.
-fn render_overview_icon(active: bool, theme: &Theme) -> impl IntoElement {
-    let icon_color = if active {
-        theme.accent
-    } else {
-        theme.text_tertiary
-    };
-
-    div()
-        .w(px(20.0))
-        .h(px(16.0))
-        .relative()
-        // Back window
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .w(px(14.0))
-                .h(px(11.0))
-                .rounded(px(2.5))
-                .border_1()
-                .border_color(icon_color)
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(2.0))
-                        .left(px(3.0))
-                        .flex()
-                        .gap(px(1.5))
-                        .child(div().size(px(2.5)).rounded_full().bg(icon_color))
-                        .child(div().size(px(2.5)).rounded_full().bg(icon_color))
-                        .child(div().size(px(2.5)).rounded_full().bg(icon_color)),
-                ),
-        )
-        // Front window
-        .child(
-            div()
-                .absolute()
-                .top(px(5.0))
-                .left(px(5.0))
-                .w(px(14.0))
-                .h(px(11.0))
-                .rounded(px(2.5))
-                .border_1()
-                .border_color(icon_color)
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(2.0))
-                        .left(px(3.0))
-                        .flex()
-                        .gap(px(1.5))
-                        .child(div().size(px(2.5)).rounded_full().bg(icon_color))
-                        .child(div().size(px(2.5)).rounded_full().bg(icon_color))
-                        .child(div().size(px(2.5)).rounded_full().bg(icon_color)),
-                ),
-        )
-}
