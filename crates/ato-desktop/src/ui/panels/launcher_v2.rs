@@ -1,16 +1,19 @@
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, img, point, px, AnyElement, BoxShadow, FontWeight, IntoElement, MouseButton,
+    div, hsla, img, point, px, AnyElement, BoxShadow, Entity, FontWeight, IntoElement, MouseButton,
     ObjectFit,
 };
+use gpui_component::input::{Input, InputState};
 
 use super::super::theme::Theme;
-use crate::app::{
-    FocusCommandBar, NavigateToUrl, OpenCloudDock, OpenLocalRegistry, SignInToAtoRun,
-};
+use crate::app::{NavigateToUrl, OpenCloudDock, OpenLocalRegistry, SignInToAtoRun};
 use crate::state::{AppState, DesktopAuthStatus, LauncherAction, ThemeMode};
 
-pub(in crate::ui) fn render_launcher_panel_v2(state: &AppState, theme: &Theme) -> impl IntoElement {
+pub(in crate::ui) fn render_launcher_panel_v2(
+    state: &AppState,
+    theme: &Theme,
+    launcher_search: &Entity<InputState>,
+) -> impl IntoElement {
     div()
         .relative()
         .size_full()
@@ -45,7 +48,7 @@ pub(in crate::ui) fn render_launcher_panel_v2(state: &AppState, theme: &Theme) -
                         .gap(px(18.0))
                         .py(px(36.0))
                         .child(render_date_chip())
-                        .child(render_search_bar())
+                        .child(render_search_bar(launcher_search))
                         .child(render_primary_actions(state))
                         .child(render_status_card(state))
                         .child(render_pinned_chips()),
@@ -97,7 +100,10 @@ fn render_date_chip() -> impl IntoElement {
         )
 }
 
-fn render_search_bar() -> impl IntoElement {
+fn render_search_bar(launcher_search: &Entity<InputState>) -> impl IntoElement {
+    // Self-contained input — clicking does NOT defer to the
+    // omnibar. Subscribe in DesktopShell to PressEnter to dispatch
+    // NavigateToUrl with the current value.
     div()
         .w(px(560.0))
         .flex()
@@ -123,10 +129,6 @@ fn render_search_bar() -> impl IntoElement {
                 spread_radius: px(0.0),
             },
         ])
-        .cursor_pointer()
-        .on_mouse_down(MouseButton::Left, |_, window, cx| {
-            window.dispatch_action(Box::new(FocusCommandBar), cx);
-        })
         .child(
             div()
                 .text_size(px(15.0))
@@ -134,29 +136,23 @@ fn render_search_bar() -> impl IntoElement {
                 .child("⌘"),
         )
         .child(
-            div()
-                .flex_1()
-                .text_size(px(14.0))
-                .text_color(hsla(0.0, 0.0, 0.478, 1.0))
-                .child("Search, command, or ask AI…"),
+            div().flex_1().h_full().flex().items_center().child(
+                Input::new(launcher_search)
+                    .flex_1()
+                    .appearance(false)
+                    .bordered(false)
+                    .focus_bordered(false)
+                    .bg(hsla(0.0, 0.0, 0.0, 0.0))
+                    .text_size(px(14.0))
+                    .font_weight(FontWeight(400.0))
+                    .text_color(hsla(0.0, 0.0, 0.0, 1.0)),
+            ),
         )
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(8.0))
-                .child(
-                    div()
-                        .px(px(7.0))
-                        .py(px(3.0))
-                        .bg(hsla(60.0 / 360.0, 0.06, 0.933, 1.0))
-                        .border_1()
-                        .border_color(hsla(60.0 / 360.0, 0.05, 0.847, 1.0))
-                        .rounded(px(6.0))
-                        .text_size(px(10.0))
-                        .text_color(hsla(0.0, 0.0, 0.478, 1.0))
-                        .child("⌘ K"),
-                )
                 .child(
                     div()
                         .text_size(px(14.0))

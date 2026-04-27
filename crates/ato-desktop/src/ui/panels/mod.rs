@@ -8,9 +8,10 @@ mod settings;
 
 use gpui::prelude::*;
 use gpui::{
-    div, linear_color_stop, linear_gradient, point, px, AnyElement, BoxShadow, FontWeight,
+    div, linear_color_stop, linear_gradient, point, px, AnyElement, BoxShadow, Entity, FontWeight,
     IntoElement,
 };
+use gpui_component::input::InputState;
 use gpui_component::resizable::h_resizable;
 use gpui_component::skeleton::Skeleton;
 
@@ -32,6 +33,7 @@ pub(super) fn render_stage(
     _stage_bounds: PaneBounds,
     active_pane_count: usize,
     theme: &Theme,
+    launcher_search: &Entity<InputState>,
 ) -> impl IntoElement {
     let panes = state.active_panes();
     let has_split = active_pane_count > 1;
@@ -40,7 +42,7 @@ pub(super) fn render_stage(
         panes
             .iter()
             .fold(h_resizable("stage-panes"), |group, pane| {
-                group.child(render_stage_pane(pane, state, theme))
+                group.child(render_stage_pane(pane, state, theme, launcher_search))
             })
             .into_any_element()
     } else {
@@ -52,7 +54,7 @@ pub(super) fn render_stage(
                 div().flex().flex_1().size_full().relative().child(
                     panes
                         .first()
-                        .map(|pane| render_stage_pane(pane, state, theme))
+                        .map(|pane| render_stage_pane(pane, state, theme, launcher_search))
                         .unwrap_or_else(|| div().flex_1().into_any_element()),
                 ),
             )
@@ -91,7 +93,12 @@ pub(super) fn render_stage(
         .child(content)
 }
 
-fn render_stage_pane(pane: &crate::state::Pane, state: &AppState, theme: &Theme) -> AnyElement {
+fn render_stage_pane(
+    pane: &crate::state::Pane,
+    state: &AppState,
+    theme: &Theme,
+    launcher_search: &Entity<InputState>,
+) -> AnyElement {
     match &pane.surface {
         PaneSurface::Web(web) => render_web_pane(web, state, theme).into_any_element(),
         PaneSurface::Native { body } => {
@@ -129,7 +136,7 @@ fn render_stage_pane(pane: &crate::state::Pane, state: &AppState, theme: &Theme)
                     .flex_1()
                     .relative()
                     .size_full()
-                    .child(render_launcher_panel_v2(state, theme)),
+                    .child(render_launcher_panel_v2(state, theme, launcher_search)),
             )
             .into_any_element(),
         PaneSurface::Terminal(_terminal) => div()
