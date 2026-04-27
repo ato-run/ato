@@ -145,6 +145,11 @@ fn search_local_registry(query: &str) -> Vec<crate::state::CapsuleSearchResult> 
 pub struct DesktopShell {
     state: AppState,
     omnibar: Entity<InputState>,
+    /// Independent input owned by the new-tab Launcher panel — kept
+    /// separate from the chrome omnibar so clicking the launcher
+    /// search bar does NOT punt focus back up to the top of the
+    /// window.
+    launcher_search: Entity<InputState>,
     focus_handle: FocusHandle,
     favicon_cache: HashMap<String, FaviconState>,
     webviews: WebViewManager,
@@ -171,6 +176,9 @@ impl DesktopShell {
             InputState::new(window, cx)
                 .placeholder("")
                 .default_value(state.command_bar_text.clone())
+        });
+        let launcher_search = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Search, command, or ask AI…")
         });
         match cleanup_stale_capsule_sessions() {
             Ok(notes) => {
@@ -228,6 +236,20 @@ impl DesktopShell {
         )
         .detach();
 
+        cx.subscribe_in(
+            &launcher_search,
+            window,
+            |_this: &mut Self, search, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    let url = search.read(cx).value().to_string();
+                    if !url.is_empty() {
+                        window.dispatch_action(Box::new(NavigateToUrl { url }), cx);
+                    }
+                }
+            },
+        )
+        .detach();
+
         cx.observe_window_bounds(window, |this, window, cx| {
             let size = window.bounds().size;
             let stage =
@@ -249,6 +271,7 @@ impl DesktopShell {
         Self {
             state,
             omnibar,
+            launcher_search,
             focus_handle,
             favicon_cache: HashMap::new(),
             webviews,
@@ -1043,6 +1066,7 @@ impl Render for DesktopShell {
                         stage_bounds,
                         active_pane_count,
                         &theme,
+                        &self.launcher_search,
                     ))
                     .when(self.state.active_permission_prompt().is_some(), |this| {
                         this.child(render_permission_prompt_overlay(&self.state, &theme))
