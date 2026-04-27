@@ -1,6 +1,6 @@
 [package]
 name = "ato-desktop"
-version = "0.4.90"
+version = "0.4.91"
 edition = "2021"
 authors = ["ato-run"]
 description = "The universal user plane for executing and orchestrating sandboxed app capsules."

@@ -248,6 +248,7 @@ fn rebuild_state(shell: PersistedShell) -> AppState {
                                 healthcheck_url: None,
                                 invoke_url: None,
                                 served_by: None,
+                    auth_flow: false,
                             }),
                         }],
                         split_ratio: 0.68,
