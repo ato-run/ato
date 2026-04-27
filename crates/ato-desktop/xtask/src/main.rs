@@ -15,7 +15,7 @@ fn main() -> Result<()> {
             let mut target = DEFAULT_TARGET.to_string();
             let mut sign = false;
             let mut do_notarize = false;
-            let mut do_dmg = false;
+            let mut do_zip = false;
             let mut do_msi = false;
             let mut do_appimage = false;
             while let Some(arg) = args.next() {
@@ -27,7 +27,7 @@ fn main() -> Result<()> {
                     }
                     "--sign" => sign = true,
                     "--notarize" => do_notarize = true,
-                    "--dmg" => do_dmg = true,
+                    "--zip" => do_zip = true,
                     "--msi" => do_msi = true,
                     "--appimage" => do_appimage = true,
                     other => bail!("unsupported xtask argument: {}", other),
@@ -37,6 +37,11 @@ fn main() -> Result<()> {
             // staging layout — keeping them in distinct functions
             // makes the per-platform invariants (Helpers/ato vs
             // bin\ato.exe vs usr/bin/ato) easy to verify.
+            //
+            // macOS .zip via `ditto -c -k --keepParent` preserves the
+            // codesign xattrs that hdiutil/.dmg lose; .dmg is also
+            // quarantine-tainted when downloaded via Safari, so the
+            // zip path is now the canonical install.sh delivery.
             match target.as_str() {
                 "darwin-arm64" | "darwin-x86_64" => {
                     let bundle = bundle_macos_app(&target)?;
@@ -46,8 +51,8 @@ fn main() -> Result<()> {
                     if do_notarize {
                         notarize_bundle(&bundle)?;
                     }
-                    if do_dmg {
-                        package_dmg(&bundle, &target)?;
+                    if do_zip {
+                        package_macos_zip(&bundle, &target)?;
                     }
                     Ok(())
                 }
@@ -55,6 +60,9 @@ fn main() -> Result<()> {
                     let staging = bundle_windows_app(&target)?;
                     if do_msi {
                         package_msi(&staging, &target)?;
+                    }
+                    if do_zip {
+                        package_windows_zip(&staging, &target)?;
                     }
                     Ok(())
                 }
@@ -74,19 +82,23 @@ fn main() -> Result<()> {
                 .context("notarize requires a path to the .app bundle")?;
             notarize_bundle(Path::new(&bundle))
         }
-        Some("dmg") => {
-            let bundle = args
+        Some("zip") => {
+            let path = args
                 .next()
-                .context("dmg requires a path to the .app bundle")?;
-            // Infer target dir from the parent of the .app — matches how
-            // `bundle` lays things out under dist/<target>/.
-            let target = Path::new(&bundle)
+                .context("zip requires a path to a .app bundle (macOS) or staging dir (Windows)")?;
+            let target = Path::new(&path)
                 .parent()
                 .and_then(Path::file_name)
                 .and_then(|s| s.to_str())
                 .unwrap_or(DEFAULT_TARGET)
                 .to_string();
-            package_dmg(Path::new(&bundle), &target)
+            match target.as_str() {
+                "darwin-arm64" | "darwin-x86_64" => {
+                    package_macos_zip(Path::new(&path), &target)
+                }
+                "windows-x86_64" => package_windows_zip(Path::new(&path), &target),
+                other => bail!("unsupported zip target: {}", other),
+            }
         }
         Some("msi") => {
             let staging = args
@@ -124,9 +136,9 @@ fn print_help() {
     println!(
         "ato-desktop xtask\n\n\
          Commands:\n  \
-           bundle [--target TARGET] [--sign] [--notarize] [--dmg] [--msi] [--appimage]\n  \
+           bundle [--target TARGET] [--sign] [--notarize] [--zip] [--msi] [--appimage]\n  \
            notarize <bundle>     Submit an .app to Apple notary (no-op without APPLE_* env)\n  \
-           dmg      <bundle>     Wrap a signed .app in an .dmg via hdiutil\n  \
+           zip      <path>       Wrap a .app bundle (macOS) or staging dir (Windows) in a .zip\n  \
            msi      <staging>    Wrap a Windows staging tree in an .msi via WiX (candle/light)\n  \
            appimage <staging>    Wrap a Linux staging tree in an .AppImage via appimagetool\n\n\
          Targets:\n  \
@@ -629,67 +641,98 @@ fn notarize_bundle(bundle: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Wrap the bundle in a `.dmg` for distribution. Always runs (no
-/// dependence on Apple credentials) so ad-hoc-signed builds can still
-/// be released through the cargo-dist GitHub Release upload step.
-fn package_dmg(bundle: &Path, target: &str) -> Result<()> {
+/// Wrap the .app in a curl-friendly `.zip` using `ditto -c -k --keepParent`.
+///
+/// `ditto` is the Apple-recommended way to archive a code-signed bundle
+/// because it preserves extended attributes (notably the codesign xattrs
+/// `com.apple.cs.CodeDirectory` etc.) and HFS+ metadata. `tar -cz` strips
+/// some of those on extraction; `zip(1)` does too. We also avoid `.dmg`
+/// here because Safari taints downloaded `.dmg` files with the
+/// `com.apple.quarantine` attribute, which forces every user through
+/// the Gatekeeper warning. `curl` of a `.zip` followed by `unzip` does
+/// not get tagged.
+fn package_macos_zip(bundle: &Path, target: &str) -> Result<()> {
     if !bundle.exists() {
         bail!("bundle does not exist: {}", bundle.display());
     }
     let arch = match target {
         "darwin-arm64" => "arm64",
         "darwin-x86_64" => "x86_64",
-        other => bail!("unsupported dmg target: {}", other),
+        other => bail!("unsupported macOS zip target: {}", other),
     };
     let version = env!("CARGO_PKG_VERSION");
-    let dmg_path = bundle
+    let zip_path = bundle
         .parent()
         .context("cannot determine parent of bundle path")?
-        .join(format!("Ato-Desktop-{version}-darwin-{arch}.dmg"));
+        .join(format!("Ato-Desktop-{version}-darwin-{arch}.zip"));
 
-    if dmg_path.exists() {
-        fs::remove_file(&dmg_path).ok();
+    if zip_path.exists() {
+        fs::remove_file(&zip_path).ok();
     }
 
-    // hdiutil needs a *staging directory* that contains exactly the
-    // bundle (and any layout nicety like a /Applications symlink).
-    // We create one alongside the .app to avoid polluting unrelated
-    // dirs and to keep the operation idempotent.
-    let staging = bundle.parent().unwrap().join(format!("dmg-staging-{arch}"));
-    if staging.exists() {
-        fs::remove_dir_all(&staging).ok();
-    }
-    fs::create_dir_all(&staging)?;
-    let dest = staging.join(bundle.file_name().context("bundle has no file name")?);
-    copy_dir_recursive(bundle, &dest)?;
-
-    // /Applications symlink so users can drag-and-drop on first open.
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink("/Applications", staging.join("Applications"))
-            .context("failed to create /Applications symlink in dmg staging")?;
-    }
-
-    let status = Command::new("hdiutil")
+    let status = Command::new("ditto")
         .args([
-            "create",
-            "-volname",
-            APP_NAME,
-            "-srcfolder",
-            staging.to_str().context("staging path is not UTF-8")?,
-            "-ov",
-            "-format",
-            "UDZO",
-            dmg_path.to_str().context("dmg path is not UTF-8")?,
+            "-c",
+            "-k",
+            "--keepParent",
+            bundle.to_str().context("bundle path is not UTF-8")?,
+            zip_path.to_str().context("zip path is not UTF-8")?,
         ])
         .status()
-        .context("failed to invoke hdiutil")?;
+        .context("failed to invoke ditto")?;
     if !status.success() {
-        bail!("hdiutil create failed with status {}", status);
+        bail!("ditto failed with status {}", status);
     }
 
-    fs::remove_dir_all(&staging).ok();
-    println!("Built {}", dmg_path.display());
+    println!("Built {}", zip_path.display());
+    Ok(())
+}
+
+/// Wrap the Windows staging tree (`Ato/`) in a curl-friendly `.zip`.
+///
+/// install.sh on Windows can `Expand-Archive` the result; the `.msi`
+/// remains available for users who prefer system-wide MSI install.
+fn package_windows_zip(staging: &Path, target: &str) -> Result<()> {
+    if !staging.exists() {
+        bail!("staging dir does not exist: {}", staging.display());
+    }
+    if target != "windows-x86_64" {
+        bail!("unsupported windows zip target: {}", target);
+    }
+    let version = env!("CARGO_PKG_VERSION");
+    let zip_path = staging
+        .parent()
+        .context("cannot determine parent of staging path")?
+        .join(format!("Ato-Desktop-{version}-windows-x86_64.zip"));
+
+    if zip_path.exists() {
+        fs::remove_file(&zip_path).ok();
+    }
+
+    // Use `tar -a -c -f out.zip <dir>` — the modern bsdtar that ships
+    // with Windows 10+ recognises `.zip` from the extension and emits
+    // a real zip archive. ditto is macOS-only so we cannot reuse it
+    // here. Tar runs the cwd at staging's parent so the archive's
+    // top-level entry is `Ato/`, matching the .app drag-drop UX.
+    let parent = staging.parent().context("staging has no parent")?;
+    let leaf = staging
+        .file_name()
+        .context("staging path has no file name")?;
+    let status = Command::new("tar")
+        .arg("-a")
+        .arg("-c")
+        .arg("-f")
+        .arg(&zip_path)
+        .arg("-C")
+        .arg(parent)
+        .arg(leaf)
+        .status()
+        .context("failed to invoke tar (expected bsdtar with -a flag on windows-2022)")?;
+    if !status.success() {
+        bail!("tar zip failed with status {}", status);
+    }
+
+    println!("Built {}", zip_path.display());
     Ok(())
 }
 
