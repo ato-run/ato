@@ -27,11 +27,14 @@ cask "ato" do
 
   # Apple Silicon and Intel share the same Cask but different DMGs.
   # Homebrew's `on_arm` / `on_intel` blocks resolve at install time.
+  # Unified `v*` release tag: cargo-dist publishes the CLI artifacts
+  # there and desktop-release.yml appends the Desktop bundles to the
+  # same tag, so the Cask URL drops the legacy `ato-desktop-v*` prefix.
   on_arm do
-    url "https://github.com/ato-run/ato/releases/download/ato-desktop-v#{version}/Ato-Desktop-#{version}-darwin-arm64.dmg"
+    url "https://github.com/ato-run/ato/releases/download/v#{version}/Ato-Desktop-#{version}-darwin-arm64.dmg"
   end
   on_intel do
-    url "https://github.com/ato-run/ato/releases/download/ato-desktop-v#{version}/Ato-Desktop-#{version}-darwin-x86_64.dmg"
+    url "https://github.com/ato-run/ato/releases/download/v#{version}/Ato-Desktop-#{version}-darwin-x86_64.dmg"
   end
 
   name "Ato Desktop"
