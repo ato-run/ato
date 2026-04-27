@@ -24,7 +24,6 @@ pub type PaneId = usize;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShellMode {
     Focus,
-    Overview,
     CommandBar,
 }
 
@@ -1150,18 +1149,10 @@ impl AppState {
         actions
     }
 
-    pub fn toggle_overview(&mut self) {
-        self.shell_mode = match self.shell_mode {
-            ShellMode::Overview => ShellMode::Focus,
-            _ => ShellMode::Overview,
-        };
-    }
-
     pub fn dismiss_transient(&mut self) {
         self.pending_permission_prompt = None;
-        match self.shell_mode {
-            ShellMode::CommandBar | ShellMode::Overview => self.shell_mode = ShellMode::Focus,
-            ShellMode::Focus => {}
+        if matches!(self.shell_mode, ShellMode::CommandBar) {
+            self.shell_mode = ShellMode::Focus;
         }
     }
 
