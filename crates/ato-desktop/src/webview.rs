@@ -133,6 +133,12 @@ pub struct WebViewManager {
     bridge: BridgeProxy,
     visibility_cache: HashMap<usize, bool>,
     pending_auth_handoffs: Arc<Mutex<Vec<AuthHandoffSignal>>>,
+    /// `ato://` deep links observed by a WebView navigation handler.
+    /// These never load inside the WebView; they are forwarded to
+    /// AppState::handle_host_route on the next sync_from_state pass
+    /// so OAuth callbacks delivered via the in-app sign-in flow
+    /// reach the same code path as macOS Launch Services callbacks.
+    pending_callback_urls: Arc<Mutex<Vec<String>>>,
     /// Live PTY sessions keyed by session_id.
     terminal_sessions: HashMap<String, Box<dyn TerminalCore>>,
     /// Session IDs that have already exited — prevents re-spawning a shell after a share terminal ends.
@@ -271,6 +277,7 @@ impl WebViewManager {
             bridge: BridgeProxy::new(),
             visibility_cache: HashMap::new(),
             pending_auth_handoffs: Arc::new(Mutex::new(Vec::new())),
+            pending_callback_urls: Arc::new(Mutex::new(Vec::new())),
             terminal_sessions: HashMap::new(),
             completed_terminal_sessions: HashSet::new(),
             pending_terminal_errors: HashMap::new(),
@@ -317,6 +324,22 @@ impl WebViewManager {
         // first real tab is built. After the first sync_from_state
         // call this is a no-op.
         self.prewarm(window);
+
+        // Drain ato:// / capsule:// deep links seen by the WebView
+        // navigation handler so OAuth callbacks delivered through
+        // the in-app sign-in WebView reach handle_host_route. This
+        // is the same code path the macOS Launch Services route
+        // (open_url_bridge) uses for browser-delivered callbacks.
+        let callback_urls: Vec<String> = {
+            let mut q = self
+                .pending_callback_urls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            q.drain(..).collect()
+        };
+        for url in callback_urls {
+            state.handle_host_route(&url);
+        }
 
         // Drain auth handoff signals from navigation handlers before any other reconciliation.
         let auth_signals: Vec<AuthHandoffSignal> = {
@@ -1550,7 +1573,18 @@ impl WebViewManager {
         if let GuestRoute::ExternalUrl(_) = &pane.route {
             let pane_id = pane.pane_id;
             let signals = self.pending_auth_handoffs.clone();
+            let callback_queue = self.pending_callback_urls.clone();
             builder = builder.with_navigation_handler(move |uri: String| {
+                // ato:// deep links arrive here when ato.run finishes
+                // an in-app OAuth flow and redirects to the desktop
+                // callback. WKWebView cannot load custom schemes, so
+                // we capture them and route via handle_host_route.
+                if uri.starts_with("ato://") || uri.starts_with("capsule://") {
+                    if let Ok(mut q) = callback_queue.lock() {
+                        q.push(uri);
+                    }
+                    return false;
+                }
                 if auth_policy.classify(&uri) == AuthMode::BrowserRequired {
                     if let Ok(mut q) = signals.lock() {
                         if !q.iter().any(|s: &AuthHandoffSignal| s.pane_id == pane_id) {
