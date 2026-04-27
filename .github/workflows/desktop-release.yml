@@ -2,19 +2,17 @@
 #
 # Multi-platform Desktop bundle pipeline (post-PR-9, post-monorepo M6).
 #
-# Build matrix:
-#   - macos-14    → aarch64-apple-darwin (Apple Silicon)
-#   - macos-13    → x86_64-apple-darwin  (Intel — covers v0.5 maturity matrix §6)
+# Active build matrix:
+#   - macos-14     → aarch64-apple-darwin (.dmg)
 #   - windows-2022 → x86_64-pc-windows-msvc (.msi via WiX 3.x)
 #   - ubuntu-22.04 → x86_64-unknown-linux-gnu (.AppImage)
-#   - ubuntu-22.04-arm → aarch64-unknown-linux-gnu (.AppImage)
 #
 # Linux/Windows ship beta per CPDS §6 (L8/L10/L11) — they're built by
 # the same xtask scaffolding so platform parity is structural rather
 # than aspirational.
 #
 # Tag-prefix routing: only `ato-desktop-v*` tags trigger this workflow.
-# `ato-cli-v*` tags are owned by cargo-dist (see root `dist-workspace.toml`).
+# Plain `v*` tags are owned by cargo-dist (see root `dist-workspace.toml`).
 # This is how we share the monorepo without crossing the streams.
 #
 # Code-signing: ad-hoc by default (CodesignMode::AdHoc in xtask). To
@@ -181,10 +179,10 @@ jobs:
             libfontconfig1-dev \
             libfreetype6-dev
           arch_suffix=x86_64
-          curl -L -o /tmp/appimagetool \
+          curl -L -o "$RUNNER_TEMP/appimagetool" \
             "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${arch_suffix}.AppImage"
-          chmod +x /tmp/appimagetool
-          sudo mv /tmp/appimagetool /usr/local/bin/appimagetool
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          sudo mv "$RUNNER_TEMP/appimagetool" /usr/local/bin/appimagetool
 
       - name: Bundle and package .AppImage
         working-directory: crates/ato-desktop/xtask
