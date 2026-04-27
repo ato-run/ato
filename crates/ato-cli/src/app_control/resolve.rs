@@ -667,6 +667,15 @@ fn render_strategy(plan: &ManifestData, guest: Option<&GuestContract>) -> Render
         return RenderStrategy::GuestWebview;
     }
 
+    // Any target that declares a port is serving HTTP — render it as
+    // a web app, not a terminal stream. Without this, capsules like
+    // `runtime=source, driver=node, port=3000` (a typical Node web
+    // app) fall through to Terminal mode and the host shows the
+    // process log instead of the served UI.
+    if plan.execution_port().is_some() {
+        return RenderStrategy::Web;
+    }
+
     RenderStrategy::Terminal
 }
 
