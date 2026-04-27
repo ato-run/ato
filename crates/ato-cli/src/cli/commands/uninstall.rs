@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 /// metadata it tracks, and deleting under it makes `brew doctor`
 /// unhappy. We detect that case and redirect the user.
 pub fn uninstall(keep_data: bool, yes: bool) -> Result<()> {
-    let current_exe = std::env::current_exe()
-        .context("could not resolve the current ato executable path")?;
+    let current_exe =
+        std::env::current_exe().context("could not resolve the current ato executable path")?;
 
     if let Some(reason) = detect_homebrew_install(&current_exe) {
         eprintln!("ℹ️  Detected Homebrew install at {}", current_exe.display());
@@ -43,7 +43,10 @@ pub fn uninstall(keep_data: bool, yes: bool) -> Result<()> {
 
     println!();
     println!("✅ ato uninstalled.");
-    println!("   To finish: remove {} from your PATH (in .zshrc/.bashrc).", install_dir.display());
+    println!(
+        "   To finish: remove {} from your PATH (in .zshrc/.bashrc).",
+        install_dir.display()
+    );
     Ok(())
 }
 
@@ -52,10 +55,7 @@ struct RemovalPlan {
 }
 
 fn build_removal_plan(install_dir: &Path, keep_data: bool) -> RemovalPlan {
-    let mut paths = vec![
-        install_dir.join("ato"),
-        install_dir.join("nacelle"),
-    ];
+    let mut paths = vec![install_dir.join("ato"), install_dir.join("nacelle")];
 
     #[cfg(target_os = "macos")]
     {
@@ -149,7 +149,10 @@ mod tests {
 
     #[test]
     fn detects_intel_brew_cellar() {
-        assert!(detect_homebrew_install(Path::new("/usr/local/Cellar/ato-cli/0.4.87/bin/ato")).is_some());
+        assert!(
+            detect_homebrew_install(Path::new("/usr/local/Cellar/ato-cli/0.4.87/bin/ato"))
+                .is_some()
+        );
     }
 
     #[test]
