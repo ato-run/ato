@@ -85,8 +85,8 @@ impl gpui::Render for DraggedTaskTab {
         _window: &mut gpui::Window,
         _cx: &mut gpui::Context<Self>,
     ) -> impl IntoElement {
-        // 36×36 chip that mirrors the rail icon. Slightly translucent
-        // so the user can still see the rail beneath the cursor.
+        // 36×36 chip that mirrors the rail icon — fully opaque so
+        // the user can see exactly which tab they grabbed.
         div()
             .w(px(NAV_ITEM_SIZE))
             .h(px(NAV_ITEM_SIZE))
@@ -94,7 +94,6 @@ impl gpui::Render for DraggedTaskTab {
             .flex()
             .items_center()
             .justify_center()
-            .opacity(0.9)
             .child(render_ghost_icon(&self.ghost))
     }
 }
