@@ -1447,6 +1447,16 @@ mod tests {
     use std::ffi::OsString;
     use std::path::PathBuf;
 
+    const ZERO_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+    const RUNTIME_METADATA_TRIPLES: &[&str] = &[
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+    ];
+
     struct EnvVarGuard {
         key: &'static str,
         previous: Option<OsString>,
@@ -1467,6 +1477,20 @@ mod tests {
             } else {
                 std::env::remove_var(self.key);
             }
+        }
+    }
+
+    fn seed_runtime_metadata_cache(ato_home: &std::path::Path, name: &str, version: &str) {
+        for target_triple in RUNTIME_METADATA_TRIPLES {
+            let cache_path = ato_home
+                .join("metadata-cache")
+                .join("runtime")
+                .join(name)
+                .join(version)
+                .join(format!("{target_triple}.sha256"));
+            std::fs::create_dir_all(cache_path.parent().expect("cache parent"))
+                .expect("create metadata cache");
+            std::fs::write(cache_path, ZERO_SHA256).expect("write metadata cache");
         }
     }
 
@@ -1656,8 +1680,13 @@ run = "main.js""#;
     }
 
     #[test]
+    #[serial_test::serial]
     fn source_only_authoritative_build_does_not_materialize_capsule_toml() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let cache_home = tmp.path().join("ato-home");
+        seed_runtime_metadata_cache(&cache_home, "node", "20.12.0");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &cache_home);
+
         std::fs::write(
             tmp.path().join("package.json"),
             r#"{"name":"demo","scripts":{"start":"node index.js"}}"#,
@@ -1668,6 +1697,7 @@ run = "main.js""#;
             r#"{"name":"demo","lockfileVersion":3,"packages":{}}"#,
         )
         .expect("package-lock.json");
+        std::fs::write(tmp.path().join(".node-version"), "20.12.0\n").expect(".node-version");
         std::fs::write(tmp.path().join("index.js"), "console.log('demo');\n").expect("index.js");
 
         let reporter = std::sync::Arc::new(crate::reporters::CliReporter::new(true));

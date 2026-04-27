@@ -590,8 +590,10 @@ Deploy latest ato-store (OIDC multipart CI publish), or point ATO_STORE_API_URL 
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::fs;
     use std::io::Read;
+    use std::path::Path;
     use std::sync::Arc;
 
     #[cfg(target_os = "macos")]
@@ -599,6 +601,53 @@ mod tests {
     use super::{build_capsule_artifact, normalize_tag_version, semantic_publish_identity};
     use crate::application::producer_input::resolve_producer_authoritative_input;
     use crate::reporters::CliReporter;
+
+    const ZERO_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+    const RUNTIME_METADATA_TRIPLES: &[&str] = &[
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+    ];
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn seed_metadata_cache(ato_home: &Path, scope: &str, name: &str, version: &str) {
+        for target_triple in RUNTIME_METADATA_TRIPLES {
+            let cache_path = ato_home
+                .join("metadata-cache")
+                .join(scope)
+                .join(name)
+                .join(version)
+                .join(format!("{target_triple}.sha256"));
+            std::fs::create_dir_all(cache_path.parent().expect("cache parent"))
+                .expect("create metadata cache");
+            std::fs::write(cache_path, ZERO_SHA256).expect("write metadata cache");
+        }
+    }
 
     fn write_gpui_wry_native_command_fixture(root: &std::path::Path) {
         fs::create_dir_all(root).expect("fixture dir");
@@ -737,8 +786,14 @@ args = ["--deep", "--force", "--sign", "-", "dist/Desktop Demo.app"]
     }
 
     #[test]
+    #[serial_test::serial]
     fn authoritative_ci_build_preserves_exports_in_packaged_manifest() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let ato_home = tmp.path().join("ato-home");
+        seed_metadata_cache(&ato_home, "runtime", "python", "3.12");
+        seed_metadata_cache(&ato_home, "tool", "uv", "0.4.19");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+
         std::fs::write(
             tmp.path().join("capsule.toml"),
             r#"
