@@ -166,7 +166,7 @@ impl DesktopShell {
         cx: &mut Context<Self>,
         open_url_bridge: Arc<OpenUrlBridge>,
     ) -> Self {
-        let mut state = AppState::initial();
+        let mut state = crate::state::persistence::load_tabs().unwrap_or_else(AppState::initial);
         let focus_handle = cx.focus_handle();
         let omnibar = cx.new(|cx| {
             InputState::new(window, cx)
@@ -359,6 +359,7 @@ impl DesktopShell {
 
     fn on_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
         self.state.create_new_tab();
+        crate::state::persistence::save_tabs(&self.state);
         self.sync_omnibar_with_state(window, cx, false);
         self.sync_focus_target(window, cx);
         cx.notify();
@@ -441,6 +442,7 @@ impl DesktopShell {
 
     fn on_select_task(&mut self, action: &SelectTask, window: &mut Window, cx: &mut Context<Self>) {
         self.state.select_task(action.task_id);
+        crate::state::persistence::save_tabs(&self.state);
         self.sync_focus_target(window, cx);
         cx.notify();
     }
@@ -453,6 +455,7 @@ impl DesktopShell {
         // sync_from_state needs to run so the active webview matches
         // the new active_task (or detaches when the workspace is empty).
         self.webviews.sync_from_state(window, &mut self.state);
+        crate::state::persistence::save_tabs(&self.state);
         self.sync_omnibar_with_state(window, cx, false);
         self.sync_focus_target(window, cx);
         cx.notify();
@@ -460,6 +463,7 @@ impl DesktopShell {
 
     fn on_move_task(&mut self, action: &MoveTask, _window: &mut Window, cx: &mut Context<Self>) {
         self.state.move_task(action.task_id, action.to_index);
+        crate::state::persistence::save_tabs(&self.state);
         cx.notify();
     }
 
@@ -470,6 +474,7 @@ impl DesktopShell {
         cx: &mut Context<Self>,
     ) {
         self.state.navigate_to_url(&action.url);
+        crate::state::persistence::save_tabs(&self.state);
         self.sync_omnibar_with_state(window, cx, true);
         self.sync_focus_target(window, cx);
         cx.notify();
