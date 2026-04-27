@@ -5,5 +5,9 @@ name = "ato-desktop-xtask"
 version = "0.4.86"
 edition = "2021"
 
+# Internal build helper — never shipped via cargo-dist.
+[package.metadata.dist]
+dist = false
+
 [dependencies]
 anyhow = "1.0"
