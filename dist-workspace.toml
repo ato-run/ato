@@ -26,6 +26,9 @@ cargo-dist-version = "0.31.0"
 ci = "github"
 # Restrict cargo-dist to the CLI binary; Desktop is owned by xtask.
 packages = ["ato-cli"]
+# Force per-package builds so workspace-wide `cargo build` doesn't pull in
+# ato-desktop's GTK/GPUI native deps on Linux runners.
+precise-builds = true
 # The installers to generate for each app.
 # - homebrew → Formula in ato-run/homebrew-ato (CLI-only, alongside Cask).
 # - msi      → CLI MSI for `--cli-only` Windows install (PR-7).
