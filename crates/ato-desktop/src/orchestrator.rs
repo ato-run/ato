@@ -562,8 +562,13 @@ where
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        error!(args = %args.join(" "), stderr = %stderr, "ato helper command failed");
-        bail!("ato helper command failed: {stderr}");
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        error!(args = %args.join(" "), stderr = %stderr, stdout = %stdout, "ato helper command failed");
+        let detail = extract_json_error_message(&stdout)
+            .or_else(|| (!stderr.is_empty()).then(|| stderr.clone()))
+            .or_else(|| (!stdout.is_empty()).then(|| stdout.clone()))
+            .unwrap_or_else(|| format!("exit status {}", output.status));
+        bail!("ato helper command failed: {detail}");
     }
 
     serde_json::from_slice(&output.stdout).with_context(|| {
@@ -572,6 +577,24 @@ where
             args.join(" ")
         )
     })
+}
+
+fn extract_json_error_message(stdout: &str) -> Option<String> {
+    let trimmed = stdout.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let error = value.get("error")?;
+    let message = error.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    let code = error.get("code").and_then(|v| v.as_str()).unwrap_or("");
+    let combined = match (code.is_empty(), message.is_empty()) {
+        (false, false) => format!("{code}: {message}"),
+        (false, true) => code.to_string(),
+        (true, false) => message.to_string(),
+        (true, true) => return None,
+    };
+    Some(combined)
 }
 
 pub fn resolve_ato_binary() -> Result<PathBuf> {
