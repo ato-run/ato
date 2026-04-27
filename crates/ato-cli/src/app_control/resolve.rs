@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -308,6 +308,40 @@ pub(super) fn resolve_local_plan(
     }
 }
 
+/// Try to resolve a full execution plan from the locally-installed capsule archive when the
+/// registry returns only a short lock reference (no `[targets]` table).
+///
+/// Returns `Some((plan, guest, notes))` if a locally installed copy exists, `None` otherwise.
+fn resolve_local_plan_from_store(
+    registry_manifest: &toml::Value,
+    target_label: Option<&str>,
+) -> Option<(ManifestData, Option<GuestContract>, Vec<String>)> {
+    let publisher = registry_manifest.get("publisher")?.as_str()?;
+    let slug = registry_manifest.get("name")?.as_str()?;
+    let version = registry_manifest.get("version").and_then(|v| v.as_str());
+
+    let store_root = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ato")
+        .join("store");
+
+    let capsule_path =
+        crate::install::support::resolve_installed_capsule_archive_in_store(
+            &store_root.join(publisher),
+            slug,
+            version,
+        )
+        .ok()
+        .flatten()?;
+
+    let manifest_path =
+        crate::runtime::tree::prepare_store_runtime_for_capsule(&capsule_path)
+            .ok()
+            .flatten()?;
+
+    resolve_local_plan(&manifest_path, target_label).ok()
+}
+
 fn build_store_resolution(
     input: String,
     normalized_handle: String,
@@ -330,16 +364,35 @@ fn build_store_resolution(
     ))?;
     let manifest_value: toml::Value = toml::from_str(&manifest_toml)
         .with_context(|| format!("failed to parse remote manifest for {normalized_handle}"))?;
-    let guest = parse_guest_contract(&manifest_value, std::path::Path::new("."));
-    let plan = execution_descriptor_from_manifest_parts(
-        manifest_value,
-        PathBuf::from("capsule.toml"),
-        PathBuf::from("."),
-        ExecutionProfile::Release,
-        target_label,
-        HashMap::new(),
-    )
-    .with_context(|| format!("failed to build execution descriptor for {normalized_handle}"))?;
+
+    // The registry returns a short lock reference (no `[targets]`) for presigned-upload
+    // releases. Attempt to read the full manifest from the locally-installed copy instead.
+    let (plan_opt, guest, extra_notes): (Option<ManifestData>, Option<GuestContract>, Vec<String>) =
+        if manifest_value.get("targets").is_none() {
+            match resolve_local_plan_from_store(&manifest_value, target_label) {
+                Some((plan, guest, notes)) => (Some(plan), guest, notes),
+                None => (
+                    None,
+                    None,
+                    vec!["Target metadata not yet available; launch details will become concrete after installation.".to_string()],
+                ),
+            }
+        } else {
+            let guest = parse_guest_contract(&manifest_value, Path::new("."));
+            let plan = execution_descriptor_from_manifest_parts(
+                manifest_value,
+                PathBuf::from("capsule.toml"),
+                PathBuf::from("."),
+                ExecutionProfile::Release,
+                target_label,
+                HashMap::new(),
+            )
+            .with_context(|| {
+                format!("failed to build execution descriptor for {normalized_handle}")
+            })?;
+            (Some(plan), guest, vec![])
+        };
+
     let detail = rt
         .block_on(fetch_capsule_detail(&cli_ref, registry_override.as_deref()))
         .ok();
@@ -357,10 +410,13 @@ fn build_store_resolution(
     } else {
         None
     };
-    persist_metadata_cache(&canonical, &normalized_handle, &plan, snapshot.clone())?;
+    if let Some(plan) = plan_opt.as_ref() {
+        persist_metadata_cache(&canonical, &normalized_handle, plan, snapshot.clone())?;
+    }
     let mut notes = vec![
         "Remote store handles currently resolve target metadata only. Launch details become concrete after local materialization.".to_string(),
     ];
+    notes.extend(extra_notes);
     if let Some(registry) = canonical
         .registry()
         .filter(|registry| registry.is_loopback())
@@ -388,7 +444,10 @@ fn build_store_resolution(
         input,
         normalized_handle,
         kind: HandleKind::StoreCapsule,
-        render_strategy: render_strategy(&plan, guest.as_ref()),
+        render_strategy: plan_opt
+            .as_ref()
+            .map(|p| render_strategy(p, guest.as_ref()))
+            .unwrap_or(RenderStrategy::Terminal),
         canonical_handle: Some(canonical.display_string()),
         source: Some("registry".to_string()),
         trust_state: trust_state.clone(),
@@ -400,7 +459,7 @@ fn build_store_resolution(
         )),
         snapshot,
         guest: guest.as_ref().map(preview_guest_contract),
-        target: Some(build_target_summary(&plan, None, None)),
+        target: plan_opt.as_ref().map(|p| build_target_summary(p, None, None)),
         launch: None,
         notes,
     })
