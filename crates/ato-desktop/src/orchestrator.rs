@@ -574,7 +574,7 @@ where
     })
 }
 
-fn resolve_ato_binary() -> Result<PathBuf> {
+pub fn resolve_ato_binary() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os(ATO_BIN_ENV) {
         let path = PathBuf::from(path);
         if path.is_file() {
