@@ -1200,6 +1200,65 @@ impl AppState {
         }
     }
 
+    /// Close a task. Returns the pane ids that were owned by the
+    /// removed task so the caller (DesktopShell) can prune the
+    /// matching WebViewManager entries and stop any guest sessions
+    /// they spawned. If the active task is the one being closed,
+    /// focus moves to the neighbor (next, then previous, then none).
+    pub fn close_task(&mut self, task_id: TaskSetId) -> Vec<PaneId> {
+        let mut pane_ids = Vec::new();
+        let mut closed_title = None;
+        let mut workspace_now_empty = false;
+
+        if let Some(workspace) = self.active_workspace_mut() {
+            let Some(index) = workspace.tasks.iter().position(|t| t.id == task_id) else {
+                return Vec::new();
+            };
+            let removed = workspace.tasks.remove(index);
+            for pane in &removed.panes {
+                pane_ids.push(pane.id);
+            }
+            closed_title = Some(removed.title);
+
+            if workspace.tasks.is_empty() {
+                workspace.active_task = 0;
+                workspace_now_empty = true;
+            } else if workspace.active_task == task_id {
+                let next_idx = index.min(workspace.tasks.len() - 1);
+                workspace.active_task = workspace.tasks[next_idx].id;
+            }
+        }
+
+        if let Some(title) = closed_title {
+            self.sync_command_bar_with_active_route();
+            self.push_activity(ActivityTone::Info, format!("Closed {title}"));
+        }
+        if workspace_now_empty {
+            self.command_bar_text.clear();
+        }
+        pane_ids
+    }
+
+    /// Reorder a task within the active workspace by id. `to_index`
+    /// is clamped into range; pane ids are preserved so the
+    /// WebViewManager does not have to rebuild any view.
+    pub fn move_task(&mut self, task_id: TaskSetId, to_index: usize) {
+        if let Some(workspace) = self.active_workspace_mut() {
+            let Some(from) = workspace.tasks.iter().position(|t| t.id == task_id) else {
+                return;
+            };
+            if workspace.tasks.is_empty() {
+                return;
+            }
+            let to = to_index.min(workspace.tasks.len() - 1);
+            if from == to {
+                return;
+            }
+            let task = workspace.tasks.remove(from);
+            workspace.tasks.insert(to, task);
+        }
+    }
+
     pub fn next_workspace(&mut self) {
         self.advance_workspace(1);
     }
