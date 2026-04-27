@@ -132,8 +132,7 @@ fn render_command_input() -> impl IntoElement {
                 .justify_center()
                 .gap(px(16.0))
                 .child(hint_item("⌘K", "Search"))
-                .child(hint_item("⌘N", "New"))
-                .child(hint_item("⌘O", "Overview")),
+                .child(hint_item("⌘N", "New")),
         )
 }
 
