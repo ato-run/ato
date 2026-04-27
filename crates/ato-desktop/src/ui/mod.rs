@@ -621,44 +621,54 @@ impl DesktopShell {
     fn on_open_auth_in_browser(
         &mut self,
         _: &OpenAuthInBrowser,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(pane_id) = self.find_active_auth_handoff_pane_id() {
-            // Look up session_id from the pane surface
-            let start_url = self.state.active_panes().iter().find_map(|p| {
-                if p.id == pane_id {
-                    if let PaneSurface::AuthHandoff { session_id, .. } = &p.surface {
-                        self.state
-                            .auth_sessions
-                            .iter()
-                            .find(|s| &s.session_id == session_id)
-                            .map(|s| s.start_url.clone())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
+        // Renamed-in-spirit: this no longer spawns the external
+        // browser. We sign in inside the WebView so the cookies that
+        // ato.run sets land in the shared persistent WebContext —
+        // same store the Dock tab will read after callback. The
+        // OAuth completion redirects to ato://auth/callback/..., and
+        // the WebView's navigation handler captures that URL into
+        // pending_callback_urls (drained in sync_from_state) so the
+        // existing handle_host_route path runs unchanged.
+        let Some(pane_id) = self.find_active_auth_handoff_pane_id() else {
+            cx.notify();
+            return;
+        };
+        let session_id_and_url: Option<(String, String)> =
+            self.state.active_panes().iter().find_map(|p| {
+                if p.id != pane_id {
+                    return None;
                 }
+                let PaneSurface::AuthHandoff { session_id, .. } = &p.surface else {
+                    return None;
+                };
+                self.state
+                    .auth_sessions
+                    .iter()
+                    .find(|s| &s.session_id == session_id)
+                    .map(|s| (session_id.clone(), s.start_url.clone()))
             });
-            if let Some(url) = start_url {
-                let _ = std::process::Command::new("open").arg(&url).status();
-                // Update session status
-                if let Some(pane) = self.state.active_panes().iter().find(|p| p.id == pane_id) {
-                    if let PaneSurface::AuthHandoff { session_id, .. } = &pane.surface {
-                        let sid = session_id.clone();
-                        if let Some(s) = self
-                            .state
-                            .auth_sessions
-                            .iter_mut()
-                            .find(|s| s.session_id == sid)
-                        {
-                            s.status = AuthSessionStatus::OpenedInBrowser;
-                        }
-                    }
-                }
-            }
+        let Some((sid, url)) = session_id_and_url else {
+            cx.notify();
+            return;
+        };
+        if let Some(s) = self
+            .state
+            .auth_sessions
+            .iter_mut()
+            .find(|s| s.session_id == sid)
+        {
+            s.status = AuthSessionStatus::OpenedInBrowser;
         }
+        // Swap the AuthHandoff pane for a Web pane navigated to the
+        // auth URL. navigate_to_url replaces the active pane's
+        // surface in-place.
+        self.state.navigate_to_url(&url);
+        self.webviews.sync_from_state(window, &mut self.state);
+        self.sync_omnibar_with_state(window, cx, true);
+        self.sync_focus_target(window, cx);
         cx.notify();
     }
 
