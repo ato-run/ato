@@ -471,6 +471,20 @@ pub(crate) enum Commands {
 
     #[command(
         hide = true,
+        about = "Uninstall ato (install.sh deployments only — Homebrew users should run `brew uninstall ato-cli`)"
+    )]
+    Uninstall {
+        /// Keep user data under ~/.ato/desktop and macOS Library paths
+        #[arg(long = "keep-data")]
+        keep_data: bool,
+
+        /// Skip the confirmation prompt
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+    },
+
+    #[command(
+        hide = true,
         about = "Inspect lock-first metadata, preview write-back, diagnostics, remediation, and runtime requirements"
     )]
     Inspect {
