@@ -1,3 +1,5 @@
+pub(crate) mod persistence;
+
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::path::PathBuf;
