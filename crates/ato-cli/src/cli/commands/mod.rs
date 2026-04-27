@@ -16,6 +16,7 @@ pub mod run;
 pub mod search;
 pub mod sign;
 pub mod source;
+pub mod uninstall;
 pub mod update;
 pub mod validate;
 pub mod verify;
