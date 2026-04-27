@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use capsule_core::ato_lock::{compute_closure_digest, compute_lock_id};
 use capsule_core::input_resolver::{
-    resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
+    resolve_authoritative_input, ResolveInputOptions, ResolvedCanonicalLock, ResolvedInput,
 };
 use capsule_core::lock_runtime::resolve_lock_runtime_model;
 use capsule_core::router::{CompatManifestBridge, CompatProjectInput, ExecutionDescriptor};
@@ -75,10 +75,21 @@ fn producer_authoritative_input_from_resolved(
     assume_yes: bool,
 ) -> Result<ProducerAuthoritativeInput> {
     match resolved {
-        ResolvedInput::CanonicalLock { canonical, .. } => {
+        ResolvedInput::CanonicalLock {
+            canonical,
+            provenance,
+            advisories,
+        } => {
+            ensure_canonical_lock_matches_manifest_identity(
+                &canonical,
+                provenance.discovered.compatibility_manifest_path.as_deref(),
+            )?;
             let materialized =
                 materialize_run_from_canonical_lock(&canonical, None, reporter, assume_yes)?;
-            ProducerAuthoritativeInput::from_materialized(materialized, Vec::new())
+            ProducerAuthoritativeInput::from_materialized(
+                materialized,
+                advisories.into_iter().map(|entry| entry.message).collect(),
+            )
         }
         ResolvedInput::CompatibilityProject {
             project,
@@ -98,6 +109,59 @@ fn producer_authoritative_input_from_resolved(
             ProducerAuthoritativeInput::from_materialized(materialized, Vec::new())
         }
     }
+}
+
+fn ensure_canonical_lock_matches_manifest_identity(
+    canonical: &ResolvedCanonicalLock,
+    manifest_path: Option<&Path>,
+) -> Result<()> {
+    let Some(manifest_path) = manifest_path else {
+        return Ok(());
+    };
+
+    let manifest_raw = fs::read_to_string(manifest_path)
+        .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
+    let manifest = capsule_core::types::CapsuleManifest::from_toml(&manifest_raw)
+        .map_err(|err| anyhow::anyhow!("Failed to parse {}: {}", manifest_path.display(), err))?;
+    let lock_metadata = canonical.lock.contract.entries.get("metadata");
+    let lock_name = lock_metadata
+        .and_then(|value| value.get("name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let lock_version = lock_metadata
+        .and_then(|value| value.get("version"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let manifest_name = manifest.name.trim();
+    let manifest_version = manifest.version.trim();
+    let mut mismatches = Vec::new();
+    if lock_name != Some(manifest_name) {
+        mismatches.push(format!(
+            "name: ato.lock.json={}, capsule.toml={}",
+            lock_name.unwrap_or("<missing>"),
+            manifest_name
+        ));
+    }
+    if lock_version != Some(manifest_version) {
+        mismatches.push(format!(
+            "version: ato.lock.json={}, capsule.toml={}",
+            lock_version.unwrap_or("<missing>"),
+            manifest_version
+        ));
+    }
+
+    if mismatches.is_empty() {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "ato.lock.json is stale for {} ({}). Refresh or regenerate ato.lock.json before build/publish so the lock matches the regenerated capsule.toml.",
+        manifest_path.display(),
+        mismatches.join(", ")
+    );
 }
 
 impl ProducerAuthoritativeInput {
@@ -559,6 +623,56 @@ mod tests {
         assert!(desktop_source_publish_framework_supported("gpui-wry"));
         assert!(desktop_source_publish_framework_supported("tauri"));
         assert!(!desktop_source_publish_framework_supported("custom-native"));
+    }
+
+    #[test]
+    fn regenerated_capsule_toml_version_requires_lock_refresh() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("capsule.toml"),
+            r#"schema_version = "0.3"
+name = "demo"
+version = "0.2.0"
+type = "app"
+
+runtime = "source/deno"
+run = "main.ts"
+"#,
+        )
+        .expect("capsule.toml");
+
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "metadata".to_string(),
+            json!({"name": "demo", "version": "0.1.0", "default_target": "default"}),
+        );
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "main.ts", "driver": "deno"}),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "deno", "selected_target": "default"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([{"label": "default", "runtime": "source", "driver": "deno", "entrypoint": "main.ts"}]),
+        );
+        lock.resolution
+            .entries
+            .insert("closure".to_string(), json!({"kind": "metadata_only"}));
+        capsule_core::ato_lock::write_pretty_to_path(&lock, &dir.path().join("ato.lock.json"))
+            .expect("write canonical lock");
+
+        let error = resolve_producer_authoritative_input(
+            dir.path(),
+            Arc::new(crate::reporters::CliReporter::new(false)),
+            true,
+        )
+        .expect_err("stale canonical lock must require refresh");
+        let message = error.to_string();
+        assert!(message.contains("ato.lock.json is stale"));
+        assert!(message.contains("version: ato.lock.json=0.1.0, capsule.toml=0.2.0"));
     }
 
     #[test]
