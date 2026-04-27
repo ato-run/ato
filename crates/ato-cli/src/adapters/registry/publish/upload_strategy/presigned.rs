@@ -4,6 +4,7 @@ use ed25519_dalek::Signer;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use capsule_core::common::paths::nacelle_home_dir;
 use capsule_core::types::signing::StoredKey;
 
 use super::{
@@ -273,9 +274,8 @@ fn fetch_publisher_identity(registry_url: &str) -> Result<PublisherIdentityRespo
 }
 
 fn load_publisher_signing_key() -> Result<StoredKey> {
-    let key_path = dirs::home_dir()
-        .context("Cannot determine home directory for publisher signing key")?
-        .join(".ato")
+    let key_path = nacelle_home_dir()
+        .context("Cannot determine Ato home directory for publisher signing key")?
         .join("keys")
         .join("publisher-signing-key.json");
 
@@ -648,9 +648,12 @@ mod tests {
     #[serial]
     fn presigned_strategy_round_trip_uses_unsigned_put_and_finalize() {
         let home = tempdir().expect("tempdir");
+        let ato_home = home.path().join(".ato");
         let previous_home = std::env::var("HOME").ok();
+        let previous_ato_home = std::env::var("ATO_HOME").ok();
         let previous_token = std::env::var("ATO_TOKEN").ok();
         std::env::set_var("HOME", home.path());
+        std::env::set_var("ATO_HOME", &ato_home);
         std::env::set_var("ATO_TOKEN", "test-session-token");
 
         let key = write_test_signing_key(home.path());
@@ -725,15 +728,23 @@ mod tests {
         } else {
             std::env::remove_var("ATO_TOKEN");
         }
+        if let Some(value) = previous_ato_home {
+            std::env::set_var("ATO_HOME", value);
+        } else {
+            std::env::remove_var("ATO_HOME");
+        }
     }
 
     #[test]
     #[serial]
     fn presigned_strategy_preserves_allow_existing_and_already_existed() {
         let home = tempdir().expect("tempdir");
+        let ato_home = home.path().join(".ato");
         let previous_home = std::env::var("HOME").ok();
+        let previous_ato_home = std::env::var("ATO_HOME").ok();
         let previous_token = std::env::var("ATO_TOKEN").ok();
         std::env::set_var("HOME", home.path());
+        std::env::set_var("ATO_HOME", &ato_home);
         std::env::set_var("ATO_TOKEN", "test-session-token");
 
         let key = write_test_signing_key(home.path());
@@ -803,6 +814,11 @@ mod tests {
             std::env::set_var("ATO_TOKEN", value);
         } else {
             std::env::remove_var("ATO_TOKEN");
+        }
+        if let Some(value) = previous_ato_home {
+            std::env::set_var("ATO_HOME", value);
+        } else {
+            std::env::remove_var("ATO_HOME");
         }
     }
 }
