@@ -23,7 +23,6 @@ actions!(
     [
         FocusCommandBar,
         ShowSettings,
-        ToggleOverview,
         NextWorkspace,
         PreviousWorkspace,
         NextTask,
@@ -185,7 +184,6 @@ pub fn run() {
         // Scope the shell shortcuts so guest webviews do not inherit host commands.
         cx.bind_keys([
             KeyBinding::new("cmd-k", FocusCommandBar, Some("DeskyShell")),
-            KeyBinding::new("cmd-b", ToggleOverview, Some("DeskyShell")),
             KeyBinding::new("cmd-,", ShowSettings, Some("DeskyShell")),
             KeyBinding::new("ctrl-tab", NextWorkspace, Some("DeskyShell")),
             KeyBinding::new("ctrl-shift-tab", PreviousWorkspace, Some("DeskyShell")),
