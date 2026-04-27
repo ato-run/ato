@@ -19,8 +19,10 @@ use serde::{Deserialize, Serialize};
 use crate::application::pipeline::phases::run::DerivedBridgeManifest;
 use crate::application::pipeline::phases::run::PreparedRunContext;
 use crate::executors::source::{CapsuleProcess, ExecuteMode};
+use crate::executors::launch_context::RuntimeLaunchContext;
 use crate::executors::target_runner::{
-    prepare_target_execution, resolve_launch_context, TargetLaunchOptions,
+    preflight_required_environment_variables, prepare_target_execution, resolve_launch_context,
+    TargetLaunchOptions,
 };
 use crate::install::support::resolve_run_target_or_install;
 use crate::reporters;
@@ -149,6 +151,16 @@ pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Re
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
     let manifest_value: toml::Value = toml::from_str(&raw_manifest)
         .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    // Env preflight before any subprocess spawn — the same check
+    // `ato run` relies on. Without this, missing required env (e.g.
+    // OPENAI_API_KEY) only surfaces as a process-failure stderr,
+    // which the Desktop orchestrator cannot route to its
+    // PendingConfig modal (it expects an E103 envelope on stderr).
+    // RuntimeLaunchContext::empty() matches what an interactive
+    // session start sees: no IPC bindings, no extra injected env,
+    // so the check falls back to OS env / manifest env entries —
+    // which is what the spawned child will actually receive.
+    preflight_required_environment_variables(&plan, &RuntimeLaunchContext::empty())?;
     let guest = parse_guest_contract(
         &manifest_value,
         manifest_path.parent().unwrap_or_else(|| Path::new(".")),
