@@ -104,20 +104,24 @@ fn render_nav_item(
                 from_index: drag_id.1,
             },
             |_dragged, _offset, _window, cx| {
-                // Minimal ghost — GPUI requires a non-empty entity.
-                // The default outline is enough for the v0.4 trial; a
-                // proper preview can come with a styling pass.
+                // Stop propagation so the parent on_mouse_down does
+                // not steal the gesture (canonical gpui-component
+                // tab_panel.rs pattern).
+                cx.stop_propagation();
                 cx.new(|_| EmptyDragGhost)
             },
         )
-        .on_drop::<DraggedTaskTab>(move |dragged, _window, cx| {
+        .on_drop(move |dragged: &DraggedTaskTab, window, cx| {
             if dragged.task_id == task_id {
                 return;
             }
-            cx.dispatch_action(&MoveTask {
-                task_id: dragged.task_id,
-                to_index: index,
-            });
+            window.dispatch_action(
+                Box::new(MoveTask {
+                    task_id: dragged.task_id,
+                    to_index: index,
+                }),
+                cx,
+            );
         });
 
     let item = if task.is_active {
