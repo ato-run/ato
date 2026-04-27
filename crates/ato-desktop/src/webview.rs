@@ -145,6 +145,13 @@ pub struct WebViewManager {
     /// only needs to happen once per process; subsequent real tabs
     /// reuse the warm XPC services.
     prewarmed: bool,
+    /// Shared `WebContext` so every pane uses the same on-disk
+    /// `WKWebsiteDataStore`. This makes cookies and localStorage
+    /// persist across tab open/close and across restarts (data
+    /// directory: `~/.ato/desktop/webcontext/`). Without it each
+    /// `WebContext::new(None)` was ephemeral and ato.run sign-in
+    /// state was lost the moment the pane was rebuilt.
+    web_context: WebContext,
 }
 
 struct ManagedWebView {
@@ -156,7 +163,9 @@ struct ManagedWebView {
     webview: WebView,
     #[cfg(target_os = "macos")]
     frame_host: Option<Retained<NSView>>,
-    _context: WebContext,
+    // _context removed: WebContext is now shared on WebViewManager
+    // (persistent on-disk store) so it outlives every ManagedWebView
+    // by definition.
 }
 
 impl ManagedWebView {
@@ -243,6 +252,13 @@ impl WebViewManager {
             .detach();
         }
 
+        let web_context_dir = dirs::home_dir()
+            .map(|home| home.join(".ato").join("desktop").join("webcontext"));
+        if let Some(dir) = &web_context_dir {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let web_context = WebContext::new(web_context_dir);
+
         Self {
             views: HashMap::new(),
             pending_launches: HashMap::new(),
@@ -260,6 +276,7 @@ impl WebViewManager {
             pending_terminal_errors: HashMap::new(),
             automation,
             prewarmed: false,
+            web_context,
         }
     }
 
@@ -278,11 +295,11 @@ impl WebViewManager {
         self.prewarmed = true;
 
         use wry::dpi::{LogicalPosition, LogicalSize};
-        let mut context = WebContext::new(None);
         // Position off-screen and 1×1 so the prewarm view is invisible
         // even briefly. Errors here are silently ignored — prewarm is
-        // best-effort optimisation.
-        let result = WebViewBuilder::new_with_web_context(&mut context)
+        // best-effort optimisation. Use the shared web_context so the
+        // prewarm and the real tabs share one on-disk data store.
+        let result = WebViewBuilder::new_with_web_context(&mut self.web_context)
             .with_url("about:blank")
             .with_visible(false)
             .with_bounds(Rect {
@@ -1382,8 +1399,10 @@ impl WebViewManager {
         };
 
         let webview_bounds = content_bounds(pane.bounds);
-        let mut context = WebContext::new(None);
-        let mut builder = WebViewBuilder::new_with_web_context(&mut context)
+        // Shared persistent WebContext — see WebViewManager.web_context
+        // for rationale (cookie persistence + cross-pane sharing for
+        // ato.run sign-in state).
+        let mut builder = WebViewBuilder::new_with_web_context(&mut self.web_context)
             .with_bounds(bounds_to_rect(webview_bounds));
 
         if build_flags.inject_bridge {
@@ -1564,7 +1583,6 @@ impl WebViewManager {
             webview,
             #[cfg(target_os = "macos")]
             frame_host,
-            _context: context,
         })
     }
 
