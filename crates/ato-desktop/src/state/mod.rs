@@ -3,6 +3,7 @@ pub(crate) mod persistence;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::path::PathBuf;
+use std::process::Command;
 
 use capsule_wire::config::ConfigField;
 use capsule_wire::handle::{
@@ -1595,6 +1596,13 @@ impl AppState {
     }
 
     pub fn handle_host_route(&mut self, raw_route: &str) {
+        self.handle_host_route_with(raw_route, verify_cli_ato_session);
+    }
+
+    fn handle_host_route_with<F>(&mut self, raw_route: &str, verify_session: F)
+    where
+        F: FnOnce() -> Result<VerifiedAtoSession, String>,
+    {
         // capsule://<host>/<publisher>/<slug>
         // Deep link from browser: opens the capsule directly in the desktop.
         // Examples:
@@ -1674,11 +1682,11 @@ impl AppState {
         let callback_kind = route.path_segments.get(1).map(String::as_str);
         match callback_kind {
             Some("cloud-dock") | Some("authenticated") => {
-                self.complete_ato_login(None);
+                self.complete_ato_login(None, verify_session);
             }
             Some("dock") => {
                 let handle = route.path_segments.get(2).cloned();
-                self.complete_ato_login(handle);
+                self.complete_ato_login(handle, verify_session);
             }
             Some("error") => {
                 self.fail_ato_login();
@@ -2997,7 +3005,11 @@ impl AppState {
         if first_party {
             self.pending_post_login_target = None;
             if matches!(self.desktop_auth.status, DesktopAuthStatus::AwaitingBrowser) {
-                self.desktop_auth.status = DesktopAuthStatus::SignedIn;
+                self.desktop_auth.status = DesktopAuthStatus::Failed;
+                self.push_activity(
+                    ActivityTone::Warning,
+                    "ato.run sign-in was not verified. Run `ato login`, then open Cloud Dock again.",
+                );
             }
         }
     }
@@ -3012,30 +3024,51 @@ impl AppState {
         if was_signed_in {
             self.push_activity(ActivityTone::Info, "Signed out from ato.run");
         }
-        // Best-effort: shell out to `ato auth logout` so the CLI's
-        // credential store is purged too. Failure is logged into
-        // activity but does not block the UI-side state reset.
-        match std::process::Command::new("ato").args(["auth", "logout"]).output() {
+        // Best-effort: shell out to `ato logout` so the CLI's
+        // credential store is purged too. resolve_ato_binary() prefers
+        // the bundled Helpers/ato so this works even when the CLI is
+        // not separately on PATH.
+        let ato_bin = match crate::orchestrator::resolve_ato_binary() {
+            Ok(path) => path,
+            Err(error) => {
+                self.push_activity(
+                    ActivityTone::Warning,
+                    format!("Could not locate ato binary for logout: {error}"),
+                );
+                return;
+            }
+        };
+        match Command::new(&ato_bin).arg("logout").output() {
             Ok(output) if output.status.success() => {}
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 self.push_activity(
                     ActivityTone::Warning,
-                    format!("ato auth logout exited non-zero: {}", stderr.trim()),
+                    format!("ato logout exited non-zero: {}", stderr.trim()),
                 );
             }
             Err(error) => {
                 self.push_activity(
                     ActivityTone::Warning,
-                    format!("Failed to run ato auth logout: {error}"),
+                    format!("Failed to run ato logout: {error}"),
                 );
             }
         }
     }
 
-    fn complete_ato_login(&mut self, publisher_handle: Option<String>) {
+    fn complete_ato_login<F>(&mut self, publisher_handle: Option<String>, verify_session: F)
+    where
+        F: FnOnce() -> Result<VerifiedAtoSession, String>,
+    {
+        let verified = match verify_session() {
+            Ok(session) => session,
+            Err(message) => {
+                self.fail_ato_login_with_message(message);
+                return;
+            }
+        };
         let pending_target = self.pending_post_login_target.take();
-        if let Some(handle) = publisher_handle {
+        if let Some(handle) = publisher_handle.or(verified.publisher_handle) {
             self.desktop_auth.publisher_handle = Some(handle);
         }
         self.desktop_auth.status = DesktopAuthStatus::SignedIn;
@@ -3059,6 +3092,13 @@ impl AppState {
     }
 
     fn fail_ato_login(&mut self) {
+        self.fail_ato_login_with_message(
+            "ato.run sign-in did not complete. Finish in the browser or return manually."
+                .to_string(),
+        );
+    }
+
+    fn fail_ato_login_with_message(&mut self, message: String) {
         self.desktop_auth.status = DesktopAuthStatus::Failed;
         self.desktop_auth.last_login_origin = Some("ato.run".to_string());
         self.pending_post_login_target = None;
@@ -3072,10 +3112,7 @@ impl AppState {
             session.status = AuthSessionStatus::Failed;
         }
 
-        self.push_activity(
-            ActivityTone::Warning,
-            "ato.run sign-in did not complete. Finish in the browser or return manually.",
-        );
+        self.push_activity(ActivityTone::Warning, message);
     }
 
     fn sync_command_bar_with_active_route(&mut self) {
@@ -3125,6 +3162,44 @@ fn uuid_v4_simple() -> String {
         .unwrap_or_default()
         .subsec_nanos();
     format!("{t:08x}")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VerifiedAtoSession {
+    publisher_handle: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DesktopAuthHandoff {
+    #[serde(default)]
+    publisher_handle: Option<String>,
+}
+
+fn verify_cli_ato_session() -> Result<VerifiedAtoSession, String> {
+    let ato_bin = crate::orchestrator::resolve_ato_binary()
+        .map_err(|error| format!("Could not locate ato binary for sign-in verification: {error}"))?;
+    let output = Command::new(&ato_bin)
+        .arg("desktop-auth-handoff")
+        .output()
+        .map_err(|error| {
+            format!("Failed to verify ato CLI session with `ato desktop-auth-handoff`: {error}")
+        })?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        let detail = stderr.trim();
+        return Err(if detail.is_empty() {
+            "`ato desktop-auth-handoff` exited non-zero while verifying sign-in".to_string()
+        } else {
+            format!("`ato desktop-auth-handoff` exited non-zero while verifying sign-in: {detail}")
+        });
+    }
+
+    serde_json::from_slice::<DesktopAuthHandoff>(&output.stdout)
+        .map(|handoff| VerifiedAtoSession {
+            publisher_handle: handoff.publisher_handle,
+        })
+        .map_err(|error| format!("Invalid `ato desktop-auth-handoff` response: {error}"))
 }
 
 fn local_registry_url() -> &'static str {
@@ -3627,7 +3702,11 @@ mod tests {
         let mut state = AppState::demo();
         state.open_cloud_dock();
 
-        state.handle_host_route("ato://auth/callback/dock/koh0920");
+        state.handle_host_route_with("ato://auth/callback/dock/koh0920", || {
+            Ok(VerifiedAtoSession {
+                publisher_handle: Some("koh0920".to_string()),
+            })
+        });
 
         let pane = state.active_web_pane().expect("pane");
         assert_eq!(pane.route.to_string(), "https://ato.run/dock/koh0920");
@@ -3648,11 +3727,34 @@ mod tests {
         let mut state = AppState::demo();
         state.open_cloud_dock();
 
-        state.handle_host_route("ato://auth/callback/authenticated");
+        state.handle_host_route_with("ato://auth/callback/authenticated", || {
+            Ok(VerifiedAtoSession {
+                publisher_handle: None,
+            })
+        });
 
         let pane = state.active_web_pane().expect("pane");
         assert_eq!(pane.route.to_string(), "https://ato.run/dock");
         assert_eq!(state.desktop_auth.status, DesktopAuthStatus::SignedIn);
+        assert!(state.desktop_auth.publisher_handle.is_none());
+    }
+
+    #[test]
+    fn host_route_auth_callback_without_verified_session_stays_failed() {
+        let mut state = AppState::demo();
+        state.open_cloud_dock();
+
+        state.handle_host_route_with("ato://auth/callback/authenticated", || {
+            Err("not verified".to_string())
+        });
+
+        let pane = state
+            .active_task()
+            .and_then(|task| task.focused_pane())
+            .expect("pane");
+        assert!(matches!(pane.surface, PaneSurface::AuthHandoff { .. }));
+        assert_eq!(state.desktop_auth.status, DesktopAuthStatus::Failed);
+        assert!(state.pending_post_login_target.is_none());
         assert!(state.desktop_auth.publisher_handle.is_none());
     }
 
