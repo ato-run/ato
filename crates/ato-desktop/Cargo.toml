@@ -6,6 +6,15 @@ authors = ["ato-run"]
 description = "The universal user plane for executing and orchestrating sandboxed app capsules."
 build = "build.rs"
 
+# Opt out of cargo-dist (the CLI release pipeline). Desktop bundles
+# are produced by `crates/ato-desktop/xtask` and shipped via
+# `.github/workflows/desktop-release.yml`. Without this gate cargo-dist
+# scans the [[bin]] targets, demands MSI metadata (WiX upgrade-guid /
+# path-guid), and would publish a redundant Windows MSI alongside the
+# xtask-built one.
+[package.metadata.dist]
+dist = false
+
 [[bin]]
 name = "ato-desktop"
 path = "src/main.rs"
