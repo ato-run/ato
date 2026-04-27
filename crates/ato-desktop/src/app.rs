@@ -57,7 +57,10 @@ actions!(
         CancelConfigForm,
         ToggleDevConsole,
         ToggleAutoDevtools,
-        Quit
+        Quit,
+        ConfirmQuitKeep,
+        ConfirmQuitClear,
+        CancelQuit
     ]
 );
 
@@ -216,7 +219,17 @@ pub fn run() {
         cx.on_action(|_: &NativeCopy, _: &mut App| {});
         cx.on_action(|_: &NativePaste, _: &mut App| {});
         cx.on_action(|_: &NativeSelectAll, _: &mut App| {});
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        // Quit is intercepted by DesktopShell so it can prompt the
+        // user to keep or clear persisted tabs. ConfirmQuitKeep /
+        // ConfirmQuitClear / CancelQuit are the resolution actions.
+        cx.on_action(|_: &ConfirmQuitKeep, cx| cx.quit());
+        cx.on_action(|_: &ConfirmQuitClear, cx| {
+            if let Some(home) = dirs::home_dir() {
+                let path = home.join(".ato").join("desktop-tabs.json");
+                let _ = std::fs::remove_file(&path);
+            }
+            cx.quit();
+        });
         cx.on_window_closed(|cx, _window_id| {
             if cx.windows().is_empty() {
                 cx.quit();
