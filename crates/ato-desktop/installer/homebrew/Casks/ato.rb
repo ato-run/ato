@@ -18,7 +18,7 @@
 # without manual `xattr -dr com.apple.quarantine` chasing. v0.6 will
 # flip to Developer ID and may relax this.
 cask "ato" do
-  version "0.5.0"
+  version "0.4.86"
   # NOTE: sha256 is replaced by the publish script after the .dmg is
   # uploaded. Keeping it as `:no_check` here so this template lints
   # cleanly outside of a real release; the synced tap copy MUST have
@@ -28,10 +28,10 @@ cask "ato" do
   # Apple Silicon and Intel share the same Cask but different DMGs.
   # Homebrew's `on_arm` / `on_intel` blocks resolve at install time.
   on_arm do
-    url "https://github.com/ato-run/ato-cli/releases/download/ato-desktop-v#{version}/Ato-Desktop-#{version}-darwin-arm64.dmg"
+    url "https://github.com/ato-run/ato/releases/download/ato-desktop-v#{version}/Ato-Desktop-#{version}-darwin-arm64.dmg"
   end
   on_intel do
-    url "https://github.com/ato-run/ato-cli/releases/download/ato-desktop-v#{version}/Ato-Desktop-#{version}-darwin-x86_64.dmg"
+    url "https://github.com/ato-run/ato/releases/download/ato-desktop-v#{version}/Ato-Desktop-#{version}-darwin-x86_64.dmg"
   end
 
   name "Ato Desktop"
