@@ -42,7 +42,7 @@ publish-jobs = ["homebrew"]
 # `v*` CLI tags and never races the desktop `ato-desktop-v*` workflow.
 allow-dirty = ["ci"]
 # Target platforms to build apps for (Rust target-triple syntax)
-# Intel Mac added for v0.5 distribution coverage (CPDS §6 maturity matrix).
-targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Intel Mac (x86_64-apple-darwin) is unsupported.
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # Where to host releases
 hosting = "github"
