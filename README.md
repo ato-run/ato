@@ -83,22 +83,33 @@ contract.
 ## Install
 
 ```bash
-# Shell installer (auto-detects display; installs Desktop+CLI on graphical
-# sessions, CLI-only on headless/SSH; pass --cli-only or --with-desktop
-# to override)
+# Recommended — installs CLI + Desktop + nacelle. The shell installer
+# uses curl + unzip and never produces a quarantined .dmg, so macOS
+# Gatekeeper does not interrupt first launch.
 curl -fsSL https://ato.run/install.sh | sh
 
-# Homebrew (CLI only)
-brew tap ato-run/ato && brew install ato
+# Homebrew (CLI only). The Cask is gone — use install.sh above for
+# the Desktop bundle.
+brew install ato-run/ato/ato-cli
 
-# Homebrew (Desktop + bundled CLI, ad-hoc signed)
-brew install --cask ato
-
-# Windows (PowerShell — Desktop MSI + CLI by default)
-iwr https://ato.run/install-win.ps1 | iex
+# Windows .zip (Desktop) — extract manually for now; an install.ps1
+# will land alongside the next release.
+# https://github.com/ato-run/ato/releases/latest
 
 # From source (this monorepo)
 cargo build -p ato-cli --release
+```
+
+### Uninstall
+
+```bash
+# install.sh deployments
+ato uninstall          # interactive; --keep-data to retain ~/.ato/desktop
+# or: curl -fsSL https://raw.githubusercontent.com/ato-run/ato/main/scripts/uninstall.sh | sh
+
+# Homebrew deployments
+brew uninstall ato-cli
+brew uninstall --cask ato 2>/dev/null || true   # legacy Cask, removed in v0.4.88
 ```
 
 ## Develop
