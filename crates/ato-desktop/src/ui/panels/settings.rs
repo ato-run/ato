@@ -3,8 +3,8 @@ use gpui::{div, hsla, px, Div, FontWeight, MouseButton};
 use gpui_component::scroll::ScrollableElement;
 
 use super::super::theme::Theme;
-use crate::app::{ToggleAutoDevtools, ToggleTheme};
-use crate::state::{AppState, ThemeMode};
+use crate::app::{SignInToAtoRun, SignOut, ToggleAutoDevtools, ToggleTheme};
+use crate::state::{AppState, DesktopAuthStatus, ThemeMode};
 
 pub(super) fn render_settings_panel(body: &str, state: &AppState, theme: &Theme) -> Div {
     let body_text = body.to_string();
@@ -24,6 +24,8 @@ pub(super) fn render_settings_panel(body: &str, state: &AppState, theme: &Theme)
                 .flex()
                 .flex_col()
                 .gap_4()
+                // Account section — sign-in / sign-out + identity
+                .child(render_account_card(state, theme))
                 // Appearance section
                 .child(render_appearance_card(state, theme))
                 // Terminal section
@@ -75,6 +77,90 @@ fn render_appearance_card(state: &AppState, theme: &Theme) -> Div {
                     theme,
                 )),
         )
+}
+
+fn render_account_card(state: &AppState, theme: &Theme) -> Div {
+    let auth = &state.desktop_auth;
+    let (status_label, status_color) = match auth.status {
+        DesktopAuthStatus::SignedOut => ("Signed out", theme.text_secondary),
+        DesktopAuthStatus::AwaitingBrowser => {
+            ("Waiting for browser…", theme.text_secondary)
+        }
+        DesktopAuthStatus::SignedIn => ("Signed in", theme.accent),
+        DesktopAuthStatus::Failed => ("Sign-in failed", hsla(0.0, 0.7, 0.5, 1.0)),
+    };
+    let handle = auth
+        .publisher_handle
+        .as_deref()
+        .filter(|h| !h.is_empty())
+        .map(|h| format!("@{h}"))
+        .unwrap_or_else(|| "—".to_string());
+    let origin = auth.last_login_origin.as_deref().unwrap_or("—");
+
+    let action_button: gpui::Stateful<Div> = match auth.status {
+        DesktopAuthStatus::SignedIn => account_action_button(
+            "Sign out",
+            theme,
+            true,
+            move |window, cx| {
+                window.dispatch_action(Box::new(SignOut), cx);
+            },
+        ),
+        DesktopAuthStatus::AwaitingBrowser => account_action_button(
+            "Cancel",
+            theme,
+            false,
+            move |window, cx| {
+                // Re-using SignOut as the cancel path keeps the
+                // logic single-source.
+                window.dispatch_action(Box::new(SignOut), cx);
+            },
+        ),
+        DesktopAuthStatus::Failed | DesktopAuthStatus::SignedOut => account_action_button(
+            "Sign in",
+            theme,
+            false,
+            move |window, cx| {
+                window.dispatch_action(Box::new(SignInToAtoRun), cx);
+            },
+        ),
+    };
+
+    settings_card("Account", theme)
+        .child(settings_row("Status", status_label, theme).text_color(status_color))
+        .child(settings_row("Handle", &handle, theme))
+        .child(settings_row("Origin", origin, theme))
+        .child(div().flex().justify_end().pt_2().child(action_button))
+}
+
+fn account_action_button(
+    label: &'static str,
+    theme: &Theme,
+    danger: bool,
+    on_click: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+) -> gpui::Stateful<Div> {
+    let (bg, fg, border) = if danger {
+        (theme.surface_hover, hsla(0.0, 0.7, 0.5, 1.0), theme.border_default)
+    } else {
+        (theme.accent, gpui::white(), theme.accent)
+    };
+    div()
+        .id(label)
+        .px(px(14.0))
+        .py(px(7.0))
+        .rounded(px(6.0))
+        .bg(bg)
+        .border_1()
+        .border_color(border)
+        .text_color(fg)
+        .text_size(px(12.0))
+        .font_weight(FontWeight(500.0))
+        .cursor_pointer()
+        .child(label)
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            on_click(window, cx);
+        })
 }
 
 fn render_terminal_card(state: &AppState, theme: &Theme) -> Div {

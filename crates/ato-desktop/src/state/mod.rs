@@ -2989,6 +2989,37 @@ impl AppState {
         }
     }
 
+    pub fn sign_out(&mut self) {
+        let was_signed_in = matches!(self.desktop_auth.status, DesktopAuthStatus::SignedIn);
+        self.desktop_auth.status = DesktopAuthStatus::SignedOut;
+        self.desktop_auth.publisher_handle = None;
+        self.desktop_auth.last_login_origin = None;
+        self.pending_post_login_target = None;
+        self.auth_sessions.clear();
+        if was_signed_in {
+            self.push_activity(ActivityTone::Info, "Signed out from ato.run");
+        }
+        // Best-effort: shell out to `ato auth logout` so the CLI's
+        // credential store is purged too. Failure is logged into
+        // activity but does not block the UI-side state reset.
+        match std::process::Command::new("ato").args(["auth", "logout"]).output() {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                self.push_activity(
+                    ActivityTone::Warning,
+                    format!("ato auth logout exited non-zero: {}", stderr.trim()),
+                );
+            }
+            Err(error) => {
+                self.push_activity(
+                    ActivityTone::Warning,
+                    format!("Failed to run ato auth logout: {error}"),
+                );
+            }
+        }
+    }
+
     fn complete_ato_login(&mut self, publisher_handle: Option<String>) {
         let pending_target = self.pending_post_login_target.take();
         if let Some(handle) = publisher_handle {
