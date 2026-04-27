@@ -12,7 +12,7 @@
 # and CLI MSI installer.
 #
 # Tag prefix routing:
-#   - `ato-cli-v*`     → triggers cargo-dist's release.yml (this file)
+#   - `v*`             → triggers cargo-dist's CLI release.yml
 #   - `ato-desktop-v*` → triggers .github/workflows/desktop-release.yml
 # The two workflows are never invoked by the same tag.
 
@@ -35,7 +35,8 @@ installers = ["homebrew", "msi"]
 tap = "ato-run/homebrew-ato"
 # Publish jobs to run on release
 publish-jobs = ["homebrew"]
-# Allow hand-edited CI customizations on top of generated workflow
+# Keep the generated workflow hand-edited so cargo-dist only responds to
+# `v*` CLI tags and never races the desktop `ato-desktop-v*` workflow.
 allow-dirty = ["ci"]
 # Target platforms to build apps for (Rust target-triple syntax)
 # Intel Mac added for v0.5 distribution coverage (CPDS §6 maturity matrix).

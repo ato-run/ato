@@ -1,0 +1,41 @@
+changelog:
+  exclude:
+    authors:
+      - dependabot
+      - github-actions
+  categories:
+    - title: "Features"
+      labels:
+        - feature
+        - enhancement
+    - title: "Bug Fixes"
+      labels:
+        - bug
+        - bugfix
+        - fix
+    - title: "Security"
+      labels:
+        - security
+    - title: "Documentation"
+      labels:
+        - docs
+        - documentation
+    - title: "Maintenance"
+      labels:
+        - chore
+        - ci
+        - refactor
+change-template: "- $TITLE @$AUTHOR (#$NUMBER)"
+template: |
+  ## What's Changed
+
+  $CHANGES
+
+  ## Release Integrity
+
+  - CLI releases are built by cargo-dist from the `Release` workflow.
+  - Desktop releases are built by `.github/workflows/desktop-release.yml`.
+
+  ## Contributors
+
+  $CONTRIBUTORS
