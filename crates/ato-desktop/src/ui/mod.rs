@@ -27,12 +27,12 @@ use self::sidebar::{favicon_request_url, render_task_rail, FaviconState};
 
 use crate::app::{
     AllowPermissionForSession, AllowPermissionOnce, BrowserBack, BrowserForward, BrowserReload,
-    CancelAuthHandoff, CancelConfigForm, CycleHandle, DenyPermissionPrompt, DismissTransient,
-    ExpandSplit, FocusCommandBar, NativeCopy, NativeCut, NativePaste, NativeRedo, NativeSelectAll,
-    NativeUndo, NavigateToUrl, NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, OpenCloudDock,
-    OpenLocalRegistry, OpenUrlBridge, PreviousTask, PreviousWorkspace, ResumeAfterAuth,
-    SaveConfigForm, SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SplitPane,
-    ToggleAutoDevtools, ToggleDevConsole, ToggleOverview, ToggleTheme,
+    CancelAuthHandoff, CancelConfigForm, CloseTask, CycleHandle, DenyPermissionPrompt,
+    DismissTransient, ExpandSplit, FocusCommandBar, MoveTask, NativeCopy, NativeCut, NativePaste,
+    NativeRedo, NativeSelectAll, NativeUndo, NavigateToUrl, NewTab, NextTask, NextWorkspace,
+    OpenAuthInBrowser, OpenCloudDock, OpenLocalRegistry, OpenUrlBridge, PreviousTask,
+    PreviousWorkspace, ResumeAfterAuth, SaveConfigForm, SelectTask, ShowSettings, ShrinkSplit,
+    SignInToAtoRun, SplitPane, ToggleAutoDevtools, ToggleDevConsole, ToggleOverview, ToggleTheme,
 };
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
@@ -442,6 +442,24 @@ impl DesktopShell {
     fn on_select_task(&mut self, action: &SelectTask, window: &mut Window, cx: &mut Context<Self>) {
         self.state.select_task(action.task_id);
         self.sync_focus_target(window, cx);
+        cx.notify();
+    }
+
+    fn on_close_task(&mut self, action: &CloseTask, window: &mut Window, cx: &mut Context<Self>) {
+        let pruned = self.state.close_task(action.task_id);
+        if !pruned.is_empty() {
+            self.webviews.prune_panes(&pruned, &mut self.state);
+        }
+        // sync_from_state needs to run so the active webview matches
+        // the new active_task (or detaches when the workspace is empty).
+        self.webviews.sync_from_state(window, &mut self.state);
+        self.sync_omnibar_with_state(window, cx, false);
+        self.sync_focus_target(window, cx);
+        cx.notify();
+    }
+
+    fn on_move_task(&mut self, action: &MoveTask, _window: &mut Window, cx: &mut Context<Self>) {
+        self.state.move_task(action.task_id, action.to_index);
         cx.notify();
     }
 
@@ -1051,6 +1069,8 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_toggle_dev_console))
             .on_action(cx.listener(Self::on_new_tab))
             .on_action(cx.listener(Self::on_select_task))
+            .on_action(cx.listener(Self::on_close_task))
+            .on_action(cx.listener(Self::on_move_task))
             .on_action(cx.listener(Self::on_navigate_to_url))
             .on_action(cx.listener(Self::on_next_workspace))
             .on_action(cx.listener(Self::on_previous_workspace))

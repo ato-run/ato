@@ -1526,6 +1526,25 @@ impl WebViewManager {
         })
     }
 
+    /// Drop cached webviews / terminals / launched sessions for a
+    /// list of pane ids. Called by DesktopShell after AppState::close_task
+    /// so closing a tab actually tears down the underlying Wry views
+    /// instead of leaking them on the heap and leaving guest sessions
+    /// running under ~/.ato/apps/.../sessions/.
+    pub fn prune_panes(&mut self, pane_ids: &[usize], state: &mut AppState) {
+        for &pane_id in pane_ids {
+            if Some(pane_id) == self.active_pane_id {
+                self.active_pane_id = None;
+            }
+            self.automation.fail_requests_for_pane(pane_id);
+            self.automation.mark_page_unloaded(pane_id);
+            if let Some(view) = self.views.remove(&pane_id) {
+                self.stop_launched_session(&view, state);
+            }
+            self.visibility_cache.remove(&pane_id);
+        }
+    }
+
     fn stop_launched_session(&self, webview: &ManagedWebView, state: &mut AppState) {
         let Some(session) = &webview.launched_session else {
             return;
