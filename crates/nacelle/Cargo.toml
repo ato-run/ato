@@ -1,15 +1,23 @@
 [package]
 name = "nacelle"
-version = "0.2.13"
+version = "0.4.87"
 edition = "2021"
 rust-version = "1.82"
 license = "Apache-2.0"
 description = "The Source Runtime for Capsules"
 repository = "https://github.com/ato-run/ato"
+homepage = "https://ato.run"
 authors = ["Koh0920"]
 readme = "README.md"
 keywords = ["runtime", "container", "wasm", "orchestration"]
 categories = ["command-line-utilities", "development-tools"]
+
+# Stable Windows installer GUIDs (cargo-dist demands these when MSI is
+# in the global installers list). Generated once for nacelle 0.4.87 —
+# DO NOT change them or Windows upgrade flow breaks.
+[package.metadata.wix]
+upgrade-guid = "6B473FEA-A38B-483C-B49C-B4519E67D5DB"
+path-guid    = "1542D7C5-8FF8-445B-BB8F-53DD7BFF4CF9"
 
 [lib]
 name = "nacelle"
