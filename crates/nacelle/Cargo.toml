@@ -18,6 +18,8 @@ categories = ["command-line-utilities", "development-tools"]
 [package.metadata.wix]
 upgrade-guid = "6B473FEA-A38B-483C-B49C-B4519E67D5DB"
 path-guid    = "1542D7C5-8FF8-445B-BB8F-53DD7BFF4CF9"
+license = false
+eula = false
 
 [lib]
 name = "nacelle"
