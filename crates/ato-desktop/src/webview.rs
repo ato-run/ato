@@ -141,6 +141,10 @@ pub struct WebViewManager {
     pending_terminal_errors: HashMap<String, String>,
     /// Automation host — handles AI-agent socket requests.
     automation: AutomationHost,
+    /// Whether `prewarm` has been invoked. WKWebView framework load
+    /// only needs to happen once per process; subsequent real tabs
+    /// reuse the warm XPC services.
+    prewarmed: bool,
 }
 
 struct ManagedWebView {
@@ -255,10 +259,48 @@ impl WebViewManager {
             completed_terminal_sessions: HashSet::new(),
             pending_terminal_errors: HashMap::new(),
             automation,
+            prewarmed: false,
         }
     }
 
+    /// Build a 1×1 throwaway WebView pointed at about:blank so the
+    /// macOS WebKit framework + WKWebView XPC services
+    /// (com.apple.WebKit.WebContent / .Networking / .GPU) load early
+    /// in the app lifecycle. Without this, the very first real tab
+    /// pays the framework + 3-process spawn cost on the UI thread,
+    /// which the user sees as a multi-second hang on app launch.
+    /// Subsequent tabs are fast because the XPC services and dyld
+    /// caches are already warm. Idempotent — runs once.
+    pub fn prewarm(&mut self, window: &Window) {
+        if self.prewarmed {
+            return;
+        }
+        self.prewarmed = true;
+
+        use wry::dpi::{LogicalPosition, LogicalSize};
+        let mut context = WebContext::new(None);
+        // Position off-screen and 1×1 so the prewarm view is invisible
+        // even briefly. Errors here are silently ignored — prewarm is
+        // best-effort optimisation.
+        let result = WebViewBuilder::new_with_web_context(&mut context)
+            .with_url("about:blank")
+            .with_visible(false)
+            .with_bounds(Rect {
+                position: LogicalPosition::new(-100, -100).into(),
+                size: LogicalSize::new(1u32, 1u32).into(),
+            })
+            .build_as_child(window);
+        // Drop the WebView on this scope exit. The XPC services
+        // remain alive in the OS, ready for the next real WebView.
+        drop(result);
+    }
+
     pub fn sync_from_state(&mut self, window: &Window, state: &mut AppState) {
+        // Prewarm the WKWebView framework + XPC services before the
+        // first real tab is built. After the first sync_from_state
+        // call this is a no-op.
+        self.prewarm(window);
+
         // Drain auth handoff signals from navigation handlers before any other reconciliation.
         let auth_signals: Vec<AuthHandoffSignal> = {
             let mut q = self
