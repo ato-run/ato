@@ -71,11 +71,13 @@ jobs:
           # don't trample each other's incremental artifacts.
           key: desktop-release-${{ matrix.target }}
 
-      - name: Bundle, sign, and package .dmg
+      - name: Bundle, sign, and package .zip
         # xtask resolves CodesignMode at runtime: ad-hoc when
         # MAC_DEVELOPER_ID_NAME is unset (v0.5 default), Developer ID
         # when set. Notarization is similarly skipped when Apple env
-        # is missing.
+        # is missing. We emit a `ditto`-built .zip instead of .dmg so
+        # the Safari/curl quarantine attribute does not get attached
+        # on download (.dmg gets tainted, .zip from curl does not).
         env:
           MAC_DEVELOPER_ID_NAME: ${{ secrets.MAC_DEVELOPER_ID_NAME }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -87,13 +89,13 @@ jobs:
             --target ${{ matrix.target }} \
             --sign \
             --notarize \
-            --dmg
+            --zip
 
-      - name: Upload .dmg artifact
+      - name: Upload .zip artifact
         uses: actions/upload-artifact@v4
         with:
           name: ato-desktop-${{ matrix.target }}
-          path: crates/ato-desktop/dist/${{ matrix.target }}/*.dmg
+          path: crates/ato-desktop/dist/${{ matrix.target }}/*.zip
           if-no-files-found: error
 
   bundle-windows:
@@ -126,20 +128,24 @@ jobs:
         # when the preinstalled version is newer than 3.14.0.
         run: choco install wixtoolset --version=3.14.0 --no-progress --allow-downgrade --force
 
-      - name: Bundle and package .msi
+      - name: Bundle and package .msi + .zip
         # signtool gating: WINDOWS_CODESIGN_PFX/PASSWORD are unset by
         # default for v0.5 (D-4) — xtask emits an unsigned MSI.
+        # We also emit a .zip alongside so install.sh can curl + extract
+        # without invoking the MSI installer.
         env:
           WINDOWS_CODESIGN_PFX: ${{ secrets.WINDOWS_CODESIGN_PFX }}
           WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
         working-directory: crates/ato-desktop/xtask
-        run: cargo run --release -- bundle --target ${{ matrix.target }} --msi
+        run: cargo run --release -- bundle --target ${{ matrix.target }} --msi --zip
 
-      - name: Upload .msi artifact
+      - name: Upload .msi + .zip artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ato-desktop-${{ matrix.target }}
-          path: crates/ato-desktop/dist/${{ matrix.target }}/*.msi
+          path: |
+            crates/ato-desktop/dist/${{ matrix.target }}/*.msi
+            crates/ato-desktop/dist/${{ matrix.target }}/*.zip
           if-no-files-found: error
 
   bundle-linux:
@@ -251,5 +257,5 @@ jobs:
               --draft
           fi
           # Upload every bundle artifact the matrix produced.
-          find artifacts \( -name "*.dmg" -o -name "*.msi" -o -name "*.AppImage" \) -print0 \
+          find artifacts \( -name "*.zip" -o -name "*.msi" -o -name "*.AppImage" \) -print0 \
             | xargs -0 -I {} gh release upload "$tag" {} --clobber
