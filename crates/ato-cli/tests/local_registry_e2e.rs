@@ -12,6 +12,16 @@ use capsule_core::packers::payload::compute_manifest_hash_without_signatures;
 use capsule_core::types::CapsuleManifest;
 use tempfile::TempDir;
 
+const ZERO_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const RUNTIME_METADATA_TRIPLES: &[&str] = &[
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+];
+
 struct ServerGuard {
     child: std::process::Child,
 }
@@ -162,6 +172,24 @@ fn write_canonical_static_publish_lock(
         to_pretty_json(&lock).context("serialize canonical lock")?,
     )?;
     Ok((lock_id, closure_digest))
+}
+
+fn seed_metadata_cache(ato_home: &Path, scope: &str, name: &str, version: &str) -> Result<()> {
+    for target_triple in RUNTIME_METADATA_TRIPLES {
+        let cache_path = ato_home
+            .join("metadata-cache")
+            .join(scope)
+            .join(name)
+            .join(version)
+            .join(format!("{target_triple}.sha256"));
+        std::fs::create_dir_all(
+            cache_path
+                .parent()
+                .context("metadata cache path missing parent")?,
+        )?;
+        std::fs::write(cache_path, ZERO_SHA256)?;
+    }
+    Ok(())
 }
 
 fn ensure_fake_runtime_shims(home_dir: &Path) -> Result<std::ffi::OsString> {
@@ -1759,6 +1787,11 @@ fn e2e_local_registry_node_python_run_fail_closed() -> Result<()> {
     let tmp = TempDir::new().context("create temp dir")?;
     let home_dir = tmp.path().join("home");
     std::fs::create_dir_all(&home_dir)?;
+    let ato_home = home_dir.join(".ato");
+    seed_metadata_cache(&ato_home, "runtime", "node", "20.12.0")?;
+    seed_metadata_cache(&ato_home, "runtime", "python", "3.11.9")?;
+    seed_metadata_cache(&ato_home, "tool", "uv", "0.4.19")?;
+
     let data_dir = tmp.path().join("registry-data");
     let node_no_lock = tmp.path().join("node-no-lock");
     let node_with_lock = tmp.path().join("node-with-lock");
