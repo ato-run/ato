@@ -508,15 +508,24 @@ fn start_capsule(
         // Try to lift the trailing JSONL fatal envelope out of the
         // stderr stream — the CLI emits exactly one such line right
         // before exit (see `apps/ato-cli/src/utils/error.rs::
-        // emit_ato_error_jsonl`). If the envelope is E103 with a
-        // non-empty `missing_schema`, surface a typed
+        // emit_ato_error_jsonl`). If the envelope is the missing-env
+        // event with a non-empty `missing_schema`, surface a typed
         // `MissingConfig` so `webview.rs` can drive the UI modal
         // instead of a generic toast. Anything else (parse failure,
-        // non-E103 fatal, empty schema) falls back to the opaque
+        // unrelated fatal, empty schema) falls back to the opaque
         // string variant — the user still sees the error, just
         // without the "fix it inline" affordance.
+        //
+        // Match on `name == "missing_required_env"` rather than
+        // `code`: the wire code was renamed from `E103` to
+        // `ATO_ERR_MISSING_REQUIRED_ENV` (capsule-core's
+        // `AtoErrorCode`), so binding to the stable `name` field
+        // avoids re-breaking on future renumbering.
         if let Some(event) = crate::cli_envelope::parse_cli_error_event(&stderr) {
-            if event.code == "E103" {
+            let is_missing_env = event.name.as_deref() == Some("missing_required_env")
+                || event.code == "ATO_ERR_MISSING_REQUIRED_ENV"
+                || event.code == "E103";
+            if is_missing_env {
                 if let Some(details) = event.missing_env_details() {
                     if !details.missing_schema.is_empty() {
                         return Err(LaunchError::MissingConfig {
