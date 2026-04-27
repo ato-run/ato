@@ -506,25 +506,29 @@ fn start_capsule(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        error!(handle, stderr = %stderr, "ato session start failed");
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        error!(handle, stderr = %stderr, stdout = %stdout, "ato session start failed");
 
         // Try to lift the trailing JSONL fatal envelope out of the
-        // stderr stream — the CLI emits exactly one such line right
-        // before exit (see `apps/ato-cli/src/utils/error.rs::
-        // emit_ato_error_jsonl`). If the envelope is the missing-env
-        // event with a non-empty `missing_schema`, surface a typed
-        // `MissingConfig` so `webview.rs` can drive the UI modal
-        // instead of a generic toast. Anything else (parse failure,
-        // unrelated fatal, empty schema) falls back to the opaque
-        // string variant — the user still sees the error, just
-        // without the "fix it inline" affordance.
+        // CLI output — `emit_ato_error_jsonl` writes to stderr in
+        // text mode, but `--json` mode routes the diagnostic envelope
+        // through `lib.rs::main_entry` which `println!`s it on stdout
+        // via `to_json_envelope`. Scan both streams so the desktop
+        // can lift the typed event in either case. If the envelope is
+        // the missing-env event with a non-empty `missing_schema`,
+        // surface a typed `MissingConfig` so `webview.rs` can drive
+        // the UI modal instead of a generic toast. Anything else
+        // (parse failure, unrelated fatal, empty schema) falls back
+        // to the opaque string variant.
         //
         // Match on `name == "missing_required_env"` rather than
         // `code`: the wire code was renamed from `E103` to
         // `ATO_ERR_MISSING_REQUIRED_ENV` (capsule-core's
         // `AtoErrorCode`), so binding to the stable `name` field
         // avoids re-breaking on future renumbering.
-        if let Some(event) = crate::cli_envelope::parse_cli_error_event(&stderr) {
+        let event = crate::cli_envelope::parse_cli_error_event(&stderr)
+            .or_else(|| crate::cli_envelope::parse_cli_error_event(&stdout));
+        if let Some(event) = event {
             let is_missing_env = event.name.as_deref() == Some("missing_required_env")
                 || event.code == "ATO_ERR_MISSING_REQUIRED_ENV"
                 || event.code == "E103";
@@ -542,8 +546,15 @@ fn start_capsule(
             }
         }
 
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            extract_json_error_message(&stdout).unwrap_or(stdout)
+        } else {
+            format!("exit status {}", output.status)
+        };
         return Err(LaunchError::Other(format!(
-            "ato session start failed: {stderr}"
+            "ato session start failed: {detail}"
         )));
     }
 
