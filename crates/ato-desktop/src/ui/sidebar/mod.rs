@@ -15,14 +15,68 @@ use crate::app::{CloseTask, MoveTask, NewTab, SelectTask, ShowSettings};
 /// handler reads `task_id` to dispatch `MoveTask { task_id, to_index }`
 /// where `to_index` is the position of the tab the payload was dropped
 /// onto. `from_index` is unused by the handler (we look up the source
-/// position in state) but kept for diagnostics. `title` lets the
-/// dragged ghost render a monogram following the cursor so the gesture
-/// has a visible affordance.
+/// position in state) but kept for diagnostics. `ghost` carries a
+/// fully resolved snapshot of the tab's icon (favicon image, monogram
+/// label, etc.) so the drag preview renders the same glyph as the
+/// rail icon without needing access to the live Theme / favicon cache
+/// inside the GPUI Render impl.
 #[derive(Clone, Debug)]
 pub(super) struct DraggedTaskTab {
     pub task_id: usize,
     pub from_index: usize,
-    pub title: String,
+    pub ghost: GhostIcon,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct GhostIcon {
+    pub kind: GhostIconKind,
+    pub colors: GhostIconColors,
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum GhostIconKind {
+    Monogram { label: String, hue: f32 },
+    Favicon(Arc<Image>),
+    Globe,
+    SystemIcon(SystemPageIcon),
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct GhostIconColors {
+    pub border: gpui::Hsla,
+    pub surface: gpui::Hsla,
+    pub text_tertiary: gpui::Hsla,
+}
+
+impl GhostIcon {
+    fn from_spec(
+        spec: &SidebarTaskIconSpec,
+        index: usize,
+        favicon_cache: &HashMap<String, FaviconState>,
+        theme: &Theme,
+    ) -> Self {
+        let kind = match spec {
+            SidebarTaskIconSpec::Monogram(label) => GhostIconKind::Monogram {
+                label: label.clone(),
+                hue: workspace_hue(index),
+            },
+            SidebarTaskIconSpec::ExternalUrl { origin } => match favicon_cache.get(origin) {
+                Some(FaviconState::Ready(image)) => GhostIconKind::Favicon(image.clone()),
+                _ => GhostIconKind::Globe,
+            },
+            SidebarTaskIconSpec::SystemIcon(page_type) => {
+                GhostIconKind::SystemIcon(page_type.clone())
+            }
+        };
+        Self {
+            kind,
+            colors: GhostIconColors {
+                border: theme.border_default,
+                surface: theme.surface_hover,
+                text_tertiary: theme.text_tertiary,
+            },
+        }
+    }
 }
 
 impl gpui::Render for DraggedTaskTab {
@@ -31,17 +85,8 @@ impl gpui::Render for DraggedTaskTab {
         _window: &mut gpui::Window,
         _cx: &mut gpui::Context<Self>,
     ) -> impl IntoElement {
-        let initial = self
-            .title
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_default();
-        // 36×36 semi-transparent ghost matching the rail icon size.
-        // Colors are intentionally theme-independent so the ghost
-        // does not need access to the live Theme — sidebar render is
-        // not a method on DesktopShell, so plumbing the theme into a
-        // dragged payload entity is more trouble than it is worth.
+        // 36×36 chip that mirrors the rail icon. Slightly translucent
+        // so the user can still see the rail beneath the cursor.
         div()
             .w(px(NAV_ITEM_SIZE))
             .h(px(NAV_ITEM_SIZE))
@@ -49,11 +94,111 @@ impl gpui::Render for DraggedTaskTab {
             .flex()
             .items_center()
             .justify_center()
-            .bg(gpui::hsla(220.0 / 360.0, 0.18, 0.30, 0.85))
-            .text_color(gpui::white())
-            .text_size(px(13.0))
-            .child(initial)
+            .opacity(0.9)
+            .child(render_ghost_icon(&self.ghost))
     }
+}
+
+fn render_ghost_icon(ghost: &GhostIcon) -> Div {
+    match &ghost.kind {
+        GhostIconKind::Monogram { label, hue } => {
+            // Inactive monogram colors — same gradient logic as
+            // render_monogram_icon, just inlined so we do not need to
+            // pass &Theme through the Render impl.
+            let saturation = 0.50;
+            let lightness = 0.42;
+            div()
+                .w(px(APP_ICON_SIZE))
+                .h(px(APP_ICON_SIZE))
+                .rounded(px(5.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(linear_gradient(
+                    135.,
+                    linear_color_stop(
+                        gpui::hsla(hue / 360.0, saturation, lightness, 1.0),
+                        0.,
+                    ),
+                    linear_color_stop(
+                        gpui::hsla(
+                            ((hue + 30.0) % 360.0) / 360.0,
+                            saturation * 0.9,
+                            lightness * 0.85,
+                            1.0,
+                        ),
+                        1.,
+                    ),
+                ))
+                .border_1()
+                .border_color(ghost.colors.border)
+                .text_color(gpui::white())
+                .text_size(px(11.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(monogram_label(label))
+        }
+        GhostIconKind::Favicon(image) => div()
+            .w(px(APP_ICON_SIZE))
+            .h(px(APP_ICON_SIZE))
+            .rounded(px(5.0))
+            .overflow_hidden()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(ghost.colors.surface)
+            .border_1()
+            .border_color(ghost.colors.border)
+            .child(img(image.clone()).size_full()),
+        GhostIconKind::Globe => div()
+            .w(px(APP_ICON_SIZE))
+            .h(px(APP_ICON_SIZE))
+            .rounded(px(5.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(ghost.colors.surface)
+            .border_1()
+            .border_color(ghost.colors.border)
+            .text_color(ghost.colors.text_tertiary)
+            .child(Icon::new(IconName::Globe).size(px(14.0))),
+        GhostIconKind::SystemIcon(page_type) => {
+            let (label, hue) = match page_type {
+                SystemPageIcon::Console => (">_", 270.0),
+                SystemPageIcon::Terminal => ("$", 160.0),
+                SystemPageIcon::Launcher => ("◆", 217.0),
+                SystemPageIcon::Inspector => ("i", 45.0),
+                SystemPageIcon::CapsuleStatus => ("⊙", 0.0),
+            };
+            let saturation = 0.40_f32;
+            let lightness = 0.38_f32;
+            div()
+                .w(px(APP_ICON_SIZE))
+                .h(px(APP_ICON_SIZE))
+                .rounded(px(5.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::hsla(hue / 360.0, saturation, lightness, 0.15))
+                .border_1()
+                .border_color(ghost.colors.border)
+                .text_color(gpui::hsla(
+                    hue / 360.0,
+                    saturation + 0.1,
+                    lightness + 0.2,
+                    1.0,
+                ))
+                .text_size(px(11.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(label.to_string())
+        }
+    }
+}
+
+fn monogram_label(raw: &str) -> String {
+    raw.chars()
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_default()
 }
 use crate::state::{AppState, SidebarTaskIconSpec, SidebarTaskItem, SystemPageIcon};
 
@@ -136,14 +281,14 @@ fn render_nav_item(
             DraggedTaskTab {
                 task_id: drag_id.0,
                 from_index: drag_id.1,
-                title: task.title.clone(),
+                ghost: GhostIcon::from_spec(&task.icon, index, favicon_cache, theme),
             },
             |dragged, _offset, _window, cx| {
                 // Stop propagation so the parent on_mouse_down does
                 // not steal the gesture (canonical gpui-component
                 // tab_panel.rs pattern). Render the payload itself —
-                // its Render impl produces a monogram chip that
-                // follows the cursor.
+                // its Render impl produces a chip mirroring the rail
+                // icon that follows the cursor.
                 cx.stop_propagation();
                 cx.new(|_| dragged.clone())
             },
