@@ -614,6 +614,10 @@ pub fn resolve_ato_binary() -> Result<PathBuf> {
         return Ok(path);
     }
 
+    if let Some(path) = sibling_ato_binary()? {
+        return Ok(path);
+    }
+
     if let Some(path) = which_in_path("ato") {
         return Ok(path);
     }
@@ -639,6 +643,20 @@ fn bundled_ato_binary() -> Result<Option<PathBuf>> {
         }
     }
 
+    Ok(None)
+}
+
+fn sibling_ato_binary() -> Result<Option<PathBuf>> {
+    let exe = std::env::current_exe().context("failed to resolve ato-desktop executable path")?;
+    let Some(parent) = exe.parent() else {
+        return Ok(None);
+    };
+
+    let bin_name = if cfg!(windows) { "ato.exe" } else { "ato" };
+    let candidate = parent.join(bin_name);
+    if candidate.is_file() {
+        return Ok(Some(candidate));
+    }
     Ok(None)
 }
 
