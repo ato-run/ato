@@ -1,14 +1,14 @@
 name: Release / Release PR
 
-# release-pr: Opens a version-bump PR (weekly or on demand).
-# release:    Pushes the version tag after main CI is green, triggering release.yml.
+# release-pr: opens or updates the ato-cli version-bump PR.
+# release: tags the merged release commit after main CI is green.
 on:
   schedule:
-    - cron: '0 0 * * 1'  # Weekly Monday 00:00 UTC — creates Release PR
+    - cron: '0 0 * * 1'
   workflow_dispatch:
     inputs:
       command:
-        description: 'release-pr: Create/update Release PR  |  release: Tag after main CI passes'
+        description: 'release-pr: Create/update Release PR | release: Tag after main CI passes'
         required: false
         default: 'release-pr'
         type: choice
@@ -36,6 +36,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -43,8 +44,6 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # PAT is required so the pushed tag triggers release.yml.
-      # GITHUB_TOKEN-pushed tags do not trigger downstream workflows.
       - name: Validate PAT for release
         if: ${{ github.event.inputs.command == 'release' }}
         shell: bash
@@ -71,6 +70,7 @@ jobs:
         uses: release-plz/action@v0.5.128
         with:
           command: release
+          config: release-plz.toml
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
@@ -79,5 +79,6 @@ jobs:
         uses: release-plz/action@v0.5.128
         with:
           command: release-pr
+          config: release-plz.toml
         env:
           GITHUB_TOKEN: ${{ steps.release_plz_token.outputs.token }}
