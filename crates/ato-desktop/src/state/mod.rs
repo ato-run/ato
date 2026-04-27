@@ -717,6 +717,9 @@ pub struct AppState {
     pub pending_config: Option<PendingConfigRequest>,
     pub theme_mode: ThemeMode,
     pub desktop_auth: DesktopAuthState,
+    /// Set when the user requests Quit so the shell can render a
+    /// confirm dialog asking whether to keep or clear persisted tabs.
+    pub pending_quit_confirmation: bool,
     pub pending_post_login_target: Option<PendingPostLoginTarget>,
     pub auth_sessions: Vec<AuthSession>,
     pub auth_policy_registry: AuthPolicyRegistry,
@@ -809,6 +812,7 @@ impl AppState {
                 publisher_handle: None,
                 last_login_origin: None,
             },
+            pending_quit_confirmation: false,
             pending_post_login_target: None,
             auth_sessions: Vec::new(),
             auth_policy_registry: AuthPolicyRegistry::default_third_party(),
@@ -981,6 +985,7 @@ impl AppState {
                 publisher_handle: None,
                 last_login_origin: None,
             },
+            pending_quit_confirmation: false,
             pending_post_login_target: None,
             auth_sessions: Vec::new(),
             auth_policy_registry: AuthPolicyRegistry::default_third_party(),
