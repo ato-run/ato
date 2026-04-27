@@ -4,7 +4,7 @@ status: accepted
 date: "2026-02-17"
 author: "@egamikohsuke"
 ssot:
-  - "apps/ato-tsnetd/"
+  - "apps/ato/sidecars/ato-tsnetd/"
   - "apps/ato-cli/core/src/tsnet/"
 related: []
 ---
@@ -12,7 +12,7 @@ related: []
 # Tailnet / Sidecar Networking（最新）
 
 NAT越え通信とプロキシ強制のアーキテクチャをまとめるドキュメント。
-> 旧 ADR `docs/adr/2026-01-17_000000_embedded-tailnet-sidecar.md` は廃止済み。ソースコードの実装 (`apps/ato-tsnetd/`, `apps/ato-cli/core/src/tsnet/`) を正本とする。
+> 旧 ADR `docs/adr/2026-01-17_000000_embedded-tailnet-sidecar.md` は廃止済み。ソースコードの実装 (`apps/ato/sidecars/ato-tsnetd/`, `apps/ato-cli/core/src/tsnet/`) を正本とする。
 
 ## 1. 目的
 

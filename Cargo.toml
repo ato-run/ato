@@ -15,6 +15,7 @@ members = [
 exclude = [
     "crates/ato-desktop/.tmp",
     "crates/ato-desktop/vendor",
+    "sidecars/ato-tsnetd",
 ]
 
 [workspace.package]
