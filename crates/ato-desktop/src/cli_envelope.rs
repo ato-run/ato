@@ -7,7 +7,8 @@
 //! `error` wrapper) and discriminated by `level: "fatal"`. Example:
 //!
 //! ```jsonc
-//! {"level":"fatal","code":"E103","name":"missing_required_env",
+//! {"level":"fatal","code":"ATO_ERR_MISSING_REQUIRED_ENV",
+//!  "name":"missing_required_env",
 //!  "phase":"inference","classification":"manifest",
 //!  "message":"missing required environment variables...",
 //!  "retryable":false,"interactive_resolution":true,
@@ -18,6 +19,12 @@
 //!    "missing_schema":[{"name":"OPENAI_API_KEY","kind":"secret","label":"OpenAI API Key"}],
 //!    "target":"main"}}
 //! ```
+//!
+//! Note: prior drafts spelled the code as `E103`. The on-the-wire form
+//! is now `ATO_ERR_MISSING_REQUIRED_ENV` (single-sourced from
+//! `capsule_core::execution_plan::error::AtoErrorCode`); consumers that
+//! need to discriminate should match on the stable `name` field
+//! (`missing_required_env`) rather than `code`.
 //!
 //! # Wire-shape source of truth
 //!
