@@ -466,13 +466,16 @@ fn start_capsule(
     let mut cmd = Command::new(&ato_bin);
     cmd.args(["app", "session", "start", handle, "--json"]);
 
-    // Inject granted secrets as ATO_SECRET_<KEY> environment variables so the
-    // capsule process can read them without the host leaking its full env.
+    // Inject granted secrets under the schema-supplied env-var name
+    // (e.g. `OPENAI_API_KEY`). The legacy `ATO_SECRET_<KEY>` prefix
+    // form was removed in CLI v0.5 (see `application/credential/
+    // backend/env.rs::EnvBackend` and `application/secrets/store.rs::
+    // legacy_ato_secret_env_is_ignored`); preflight in
+    // `adapters/runtime/executors/target_runner.rs::
+    // preflight_required_environment_variables` only inspects the bare
+    // `field.name`, so any prefix would re-trip the same E103 forever.
     for secret in secrets {
-        cmd.env(
-            format!("ATO_SECRET_{}", secret.key.to_ascii_uppercase()),
-            &secret.value,
-        );
+        cmd.env(&secret.key, &secret.value);
     }
 
     // Inject non-secret config (model name, port, etc.) directly as
