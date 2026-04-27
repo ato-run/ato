@@ -24,8 +24,11 @@ members = ["cargo:."]
 cargo-dist-version = "0.31.0"
 # CI backends to support
 ci = "github"
-# Restrict cargo-dist to the CLI binary; Desktop is owned by xtask.
-packages = ["ato-cli"]
+# Restrict cargo-dist to the CLI binary plus nacelle (the Source
+# Runtime). Desktop is owned by xtask. nacelle ships as its own
+# tarball/MSI so install.sh can fetch it from the same release as
+# ato-cli (instead of the legacy Koh0920/capsuled tag).
+packages = ["ato-cli", "nacelle"]
 # Force per-package builds so workspace-wide `cargo build` doesn't pull in
 # ato-desktop's GTK/GPUI native deps on Linux runners.
 precise-builds = true
