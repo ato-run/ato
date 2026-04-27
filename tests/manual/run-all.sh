@@ -10,6 +10,13 @@ export ATO_TEST_AUTO=1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/config.sh"
 
+# Wipe previous run artifacts so RESULTS_DIR / ATO_TEST_TMP only contain
+# the current run's output. Set ATO_TEST_KEEP_RESULTS=1 to preserve them.
+if [ "${ATO_TEST_KEEP_RESULTS:-0}" != "1" ]; then
+    rm -rf "$RESULTS_DIR" "$ATO_TEST_TMP"
+    mkdir -p "$RESULTS_DIR" "$ATO_TEST_TMP"
+fi
+
 SUITES=(
     "01-install-upgrade"
     "02-gpu-accelerator"
