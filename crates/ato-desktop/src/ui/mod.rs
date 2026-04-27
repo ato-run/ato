@@ -166,7 +166,7 @@ impl DesktopShell {
         cx: &mut Context<Self>,
         open_url_bridge: Arc<OpenUrlBridge>,
     ) -> Self {
-        let mut state = AppState::demo();
+        let mut state = AppState::initial();
         let focus_handle = cx.focus_handle();
         let omnibar = cx.new(|cx| {
             InputState::new(window, cx)
