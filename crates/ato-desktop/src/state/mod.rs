@@ -737,6 +737,94 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Boot state for end users: a single Ato Store tab pointed at
+    /// https://ato.run. `demo()` (below) is kept intact because the
+    /// rendering tests + `ui/panels/launcher_v2.rs` assertions rely
+    /// on its 3-task graph; switching the production boot path here
+    /// avoids touching that test surface.
+    pub fn initial() -> Self {
+        let store = GuestRoute::ExternalUrl(
+            url::Url::parse("https://ato.run/").expect("https://ato.run/ is a valid URL"),
+        );
+        let store_task = TaskSet {
+            id: 1,
+            title: "Ato".to_string(),
+            focused_pane: 1,
+            pane_tree: PaneTree::Leaf(1),
+            panes: vec![Pane {
+                id: 1,
+                title: store.to_string(),
+                role: PaneRole::Primary,
+                visible: true,
+                bounds: PaneBounds::empty(),
+                surface: PaneSurface::Web(WebPane {
+                    route: store.clone(),
+                    partition_id: "store".to_string(),
+                    session: WebSessionState::Launching,
+                    capabilities: vec![CapabilityGrant::OpenExternal],
+                    profile: "electron".to_string(),
+                    source_label: Some("web".to_string()),
+                    trust_state: None,
+                    restricted: false,
+                    snapshot_label: None,
+                    canonical_handle: None,
+                    session_id: None,
+                    adapter: None,
+                    manifest_path: None,
+                    runtime_label: None,
+                    display_strategy: None,
+                    log_path: None,
+                    local_url: None,
+                    healthcheck_url: None,
+                    invoke_url: None,
+                    served_by: None,
+                }),
+            }],
+            split_ratio: 0.68,
+            route_candidates: vec![store],
+            route_index: 0,
+            preview: "ato.run landing page".to_string(),
+        };
+
+        let mut state = Self {
+            shell_mode: ShellMode::Focus,
+            active_workspace: 1,
+            workspaces: vec![Workspace {
+                id: 1,
+                title: "Ato".to_string(),
+                active_task: 1,
+                tasks: vec![store_task],
+            }],
+            command_bar_text: "https://ato.run/".to_string(),
+            activity: Vec::new(),
+            capsule_logs: HashMap::new(),
+            browser_commands: VecDeque::new(),
+            pending_permission_prompt: None,
+            pending_config: None,
+            theme_mode: ThemeMode::Light,
+            desktop_auth: DesktopAuthState {
+                status: DesktopAuthStatus::SignedOut,
+                publisher_handle: None,
+                last_login_origin: None,
+            },
+            pending_post_login_target: None,
+            auth_sessions: Vec::new(),
+            auth_policy_registry: AuthPolicyRegistry::default_third_party(),
+            console_logs: Vec::new(),
+            network_logs: Vec::new(),
+            config: crate::config::load_config(),
+            secret_store: crate::config::load_secrets(),
+            capsule_config_store: crate::config::load_capsule_configs(),
+            capsule_search_results: Vec::new(),
+            capsule_search_query: String::new(),
+            next_task_id: 2,
+            next_pane_id: 2,
+            next_new_tab_index: 1,
+        };
+        state.sync_theme_from_config();
+        state
+    }
+
     pub fn demo() -> Self {
         // The demo graph intentionally mixes local capsules, a bundled welcome page, and remote URLs
         // so the shell exercises every rendering path on boot.
