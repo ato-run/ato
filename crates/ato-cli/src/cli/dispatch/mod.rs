@@ -537,6 +537,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
 
         Commands::Logout => auth::logout(),
 
+        Commands::DesktopAuthHandoff => auth::desktop_auth_handoff(),
+
         Commands::Whoami => auth::status(),
     }
 }

@@ -3,7 +3,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use reqwest::StatusCode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 
@@ -60,6 +60,15 @@ pub(super) struct StoreSessionUser {
 struct StoreSessionResponse {
     #[serde(default)]
     user: Option<StoreSessionUser>,
+}
+
+#[derive(Debug, Serialize)]
+struct DesktopAuthHandoffResponse<'a> {
+    session_token: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    publisher_handle: Option<String>,
+    site_base_url: String,
+    api_base_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,6 +193,29 @@ pub(super) fn store_session_cookie_header(session_token: &str) -> String {
         "better-auth.session_token={}; __Secure-better-auth.session_token={}",
         session_token, session_token
     )
+}
+
+pub fn desktop_auth_handoff() -> Result<()> {
+    let session_token = require_session_token()?;
+    if fetch_store_session_user(&session_token)?.is_none() {
+        anyhow::bail!("Store session is expired or unavailable. Run `ato login` again.");
+    }
+
+    let manager = AuthManager::new()?;
+    let publisher_handle = manager
+        .load()?
+        .and_then(|creds| cached_publisher_handle(&creds));
+    let response = DesktopAuthHandoffResponse {
+        session_token: &session_token,
+        publisher_handle,
+        site_base_url: store_site_base_url(),
+        api_base_url: store_api_base_url(),
+    };
+
+    serde_json::to_writer(std::io::stdout(), &response)
+        .context("Failed to write desktop auth handoff JSON")?;
+    println!();
+    Ok(())
 }
 
 fn cached_publisher_handle(creds: &Credentials) -> Option<String> {

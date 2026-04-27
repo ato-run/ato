@@ -1,6 +1,6 @@
 [package]
 name = "ato-desktop"
-version = "0.4.91"
+version = "0.4.92"
 edition = "2021"
 authors = ["ato-run"]
 description = "The universal user plane for executing and orchestrating sandboxed app capsules."
@@ -31,6 +31,7 @@ anyhow = "1.0"
 base64 = "0.22"
 capsule-core = { path = "../capsule-core" }
 capsule-wire = { path = "../capsule-wire" }
+cookie = "0.18"
 dirs = "5.0"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "15d86607" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "15d86607", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }

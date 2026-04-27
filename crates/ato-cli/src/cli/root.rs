@@ -650,6 +650,9 @@ pub(crate) enum Commands {
     #[command(hide = true, about = "Logout")]
     Logout,
 
+    #[command(hide = true, about = "Emit a desktop auth handoff for ato-desktop")]
+    DesktopAuthHandoff,
+
     #[command(
         hide = true,
         about = "Show current authentication status",
