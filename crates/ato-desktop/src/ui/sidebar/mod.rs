@@ -15,11 +15,45 @@ use crate::app::{CloseTask, MoveTask, NewTab, SelectTask, ShowSettings};
 /// handler reads `task_id` to dispatch `MoveTask { task_id, to_index }`
 /// where `to_index` is the position of the tab the payload was dropped
 /// onto. `from_index` is unused by the handler (we look up the source
-/// position in state) but kept for diagnostics.
+/// position in state) but kept for diagnostics. `title` lets the
+/// dragged ghost render a monogram following the cursor so the gesture
+/// has a visible affordance.
 #[derive(Clone, Debug)]
 pub(super) struct DraggedTaskTab {
     pub task_id: usize,
     pub from_index: usize,
+    pub title: String,
+}
+
+impl gpui::Render for DraggedTaskTab {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        _cx: &mut gpui::Context<Self>,
+    ) -> impl IntoElement {
+        let initial = self
+            .title
+            .chars()
+            .next()
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_default();
+        // 36×36 semi-transparent ghost matching the rail icon size.
+        // Colors are intentionally theme-independent so the ghost
+        // does not need access to the live Theme — sidebar render is
+        // not a method on DesktopShell, so plumbing the theme into a
+        // dragged payload entity is more trouble than it is worth.
+        div()
+            .w(px(NAV_ITEM_SIZE))
+            .h(px(NAV_ITEM_SIZE))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::hsla(220.0 / 360.0, 0.18, 0.30, 0.85))
+            .text_color(gpui::white())
+            .text_size(px(13.0))
+            .child(initial)
+    }
 }
 use crate::state::{AppState, SidebarTaskIconSpec, SidebarTaskItem, SystemPageIcon};
 
@@ -102,13 +136,16 @@ fn render_nav_item(
             DraggedTaskTab {
                 task_id: drag_id.0,
                 from_index: drag_id.1,
+                title: task.title.clone(),
             },
-            |_dragged, _offset, _window, cx| {
+            |dragged, _offset, _window, cx| {
                 // Stop propagation so the parent on_mouse_down does
                 // not steal the gesture (canonical gpui-component
-                // tab_panel.rs pattern).
+                // tab_panel.rs pattern). Render the payload itself —
+                // its Render impl produces a monogram chip that
+                // follows the cursor.
                 cx.stop_propagation();
-                cx.new(|_| EmptyDragGhost)
+                cx.new(|_| dragged.clone())
             },
         )
         .on_drop(move |dragged: &DraggedTaskTab, window, cx| {
@@ -177,16 +214,6 @@ fn render_close_button(task_id: usize, theme: &Theme) -> Stateful<Div> {
         })
 }
 
-/// Empty placeholder used as the drag ghost. GPUI's `on_drag` API
-/// requires a valid entity, but we don't render anything special
-/// during the drag — the OS / window manager already shows a cursor.
-struct EmptyDragGhost;
-
-impl gpui::Render for EmptyDragGhost {
-    fn render(&mut self, _window: &mut gpui::Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        div().w(px(0.0)).h(px(0.0))
-    }
-}
 
 fn render_app_icon(
     icon: SidebarTaskIconSpec,
