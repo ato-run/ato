@@ -829,16 +829,34 @@ fn parse_pep723_python_metadata(script_text: &str) -> Result<Pep723PythonMetadat
     Ok(Pep723PythonMetadata::default())
 }
 
+pub(crate) fn materialize_run_from_compatibility_manifest(
+    project_root: &Path,
+) -> Option<toml::Value> {
+    // The canonical-lock path historically lost packaging-only fields
+    // like `build_command` because `from_materialized` falls back to
+    // synthesizing a producer manifest from the lock when no
+    // `original_manifest` is present, and the lock contract only carries
+    // run-time semantics. When the project ships both `ato.lock.json`
+    // and `capsule.toml`, prefer the source manifest as the bridge
+    // input so the published artifact preserves the publisher's build
+    // lifecycle. Fall back to None (lock-derived synthesis) when no
+    // source manifest exists.
+    let manifest_path = project_root.join("capsule.toml");
+    let raw = fs::read_to_string(&manifest_path).ok()?;
+    toml::from_str::<toml::Value>(&raw).ok()
+}
+
 pub(crate) fn materialize_run_from_canonical_lock(
     canonical: &ResolvedCanonicalLock,
     scope: Option<&mut CleanupScope>,
     reporter: Arc<CliReporter>,
     assume_yes: bool,
 ) -> Result<RunMaterialization> {
+    let original_manifest = materialize_run_from_compatibility_manifest(&canonical.project_root);
     let adapter = MaterializationAdapter {
         workspace_root: canonical.project_root.clone(),
         project_root: canonical.project_root.clone(),
-        original_manifest: None,
+        original_manifest,
         use_global_run_state: USE_HOME_RUN_STATE,
     };
     let input = SourceInferenceInput::CanonicalLock(CanonicalLockInput {
