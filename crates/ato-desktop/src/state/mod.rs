@@ -379,6 +379,12 @@ pub struct WebPane {
     pub route: GuestRoute,
     pub partition_id: String,
     pub session: WebSessionState,
+    /// Set when this WebView is hosting the ato.run sign-in flow.
+    /// Tells the navigation handler to allow third-party OAuth
+    /// provider redirects (Google/GitHub/Microsoft) to load
+    /// in-WebView so the resulting cookies land in the shared
+    /// WebContext instead of the system browser.
+    pub auth_flow: bool,
     pub capabilities: Vec<CapabilityGrant>,
     pub profile: String,
     pub source_label: Option<String>,
@@ -650,6 +656,7 @@ pub struct ActiveWebPane {
     pub healthcheck_url: Option<String>,
     pub invoke_url: Option<String>,
     pub served_by: Option<String>,
+    pub auth_flow: bool,
     pub bounds: PaneBounds,
 }
 
@@ -782,6 +789,7 @@ impl AppState {
                     healthcheck_url: None,
                     invoke_url: None,
                     served_by: None,
+                    auth_flow: false,
                 }),
             }],
             split_ratio: 0.68,
@@ -905,6 +913,7 @@ impl AppState {
                     healthcheck_url: None,
                     invoke_url: None,
                     served_by: None,
+                    auth_flow: false,
                 }),
             }],
             split_ratio: 0.68,
@@ -952,6 +961,7 @@ impl AppState {
                     healthcheck_url: None,
                     invoke_url: None,
                     served_by: None,
+                    auth_flow: false,
                 }),
             }],
             split_ratio: 0.68,
@@ -1490,6 +1500,7 @@ impl AppState {
                     healthcheck_url: None,
                     invoke_url: None,
                     served_by: None,
+                    auth_flow: false,
                 });
                 navigated = Some(pane_id);
             }
@@ -2227,6 +2238,7 @@ impl AppState {
                 healthcheck_url: web.healthcheck_url.clone(),
                 invoke_url: web.invoke_url.clone(),
                 served_by: web.served_by.clone(),
+                auth_flow: web.auth_flow,
                 bounds: pane.bounds,
             }),
             PaneSurface::Native { .. }
@@ -2262,6 +2274,7 @@ impl AppState {
                 healthcheck_url: None,
                 invoke_url: None,
                 served_by: None,
+                auth_flow: false,
                 bounds: pane.bounds,
             }),
         }
