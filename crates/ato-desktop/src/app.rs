@@ -141,10 +141,22 @@ impl OpenUrlBridge {
         }
 
         let refresh_app = async_app.clone();
+        let bg = async_app.background_executor().clone();
         let refresh_scheduled = self.refresh_scheduled.clone();
         async_app
             .foreground_executor()
             .spawn(async move {
+                // Defer to a future tick. Without this, install_async_app
+                // and the macOS first-launch on_open_urls callback both
+                // run while GPUI's App RefCell is already mut-borrowed
+                // (we are inside application.run() / an AppKit selector
+                // when they fire). Calling refresh() right away then
+                // double-borrows and panics with
+                // "RefCell already borrowed" at gpui async_context.rs.
+                // A 16 ms timer (≈ one render frame) yields control back
+                // to the GPUI event loop so the original borrow drops
+                // before refresh() runs.
+                bg.timer(std::time::Duration::from_millis(16)).await;
                 refresh_app.refresh();
                 refresh_scheduled.store(false, Ordering::Release);
             })
