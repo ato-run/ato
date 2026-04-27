@@ -156,6 +156,10 @@ pub struct DesktopShell {
     terminal_sessions: TerminalSessionManager,
     open_url_bridge: Arc<OpenUrlBridge>,
     capsule_search_rx: Option<std::sync::mpsc::Receiver<Vec<crate::state::CapsuleSearchResult>>>,
+    /// `ato login` child-process exit signal. Non-None while the
+    /// CLI bridge auth flow is in progress; the inner bool is true
+    /// on successful exit (CLI wrote credentials), false otherwise.
+    cli_login_rx: Option<std::sync::mpsc::Receiver<bool>>,
     /// Lazy-allocated by `render` whenever `state.pending_config`
     /// flips from `None → Some` (or to a different request). Owns
     /// the per-field `InputState` entities so keystroke/cursor state
@@ -278,6 +282,7 @@ impl DesktopShell {
             terminal_sessions: TerminalSessionManager::new(),
             open_url_bridge,
             capsule_search_rx: None,
+            cli_login_rx: None,
             config_modal: None,
         }
     }
@@ -323,6 +328,27 @@ impl DesktopShell {
                 self.state.capsule_search_results = results;
                 self.capsule_search_rx = None;
             }
+        }
+    }
+
+    /// Drain the `ato login` child-process exit signal. On successful
+    /// exit the CLI credential store now holds a session token; we
+    /// trigger handle_host_route with a synthetic cloud-dock callback
+    /// so the existing verification + cookie-injection path runs.
+    fn poll_cli_login(&mut self) {
+        let ok = match self.cli_login_rx.as_ref().map(|rx| rx.try_recv()) {
+            Some(Ok(ok)) => ok,
+            _ => return,
+        };
+        self.cli_login_rx = None;
+        if ok {
+            self.state
+                .handle_host_route("ato://auth/callback/cloud-dock");
+        } else {
+            self.state.push_activity(
+                crate::state::ActivityTone::Warning,
+                "ato login exited without completing sign-in.",
+            );
         }
     }
 
@@ -624,19 +650,15 @@ impl DesktopShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Renamed-in-spirit: this no longer spawns the external
-        // browser. We sign in inside the WebView so the cookies that
-        // ato.run sets land in the shared persistent WebContext —
-        // same store the Dock tab will read after callback. The
-        // OAuth completion redirects to ato://auth/callback/..., and
-        // the WebView's navigation handler captures that URL into
-        // pending_callback_urls (drained in sync_from_state) so the
-        // existing handle_host_route path runs unchanged.
-        let Some(pane_id) = self.find_active_auth_handoff_pane_id() else {
-            cx.notify();
-            return;
-        };
-        let session_id_and_url: Option<(String, String)> =
+        // Sign in via the CLI's bridge auth flow (PKCE + browser +
+        // /v1/auth/bridge/poll + /exchange). The CLI process opens
+        // the system browser, where the user has full passkey / MFA
+        // support, then writes the resulting session token into the
+        // CLI credential store. After that finishes,
+        // verify_cli_ato_session can hand the token to the Dock
+        // WebView and we never need to embed OAuth providers in our
+        // WKWebView.
+        let Some(sid) = self.find_active_auth_handoff_pane_id().and_then(|pane_id| {
             self.state.active_panes().iter().find_map(|p| {
                 if p.id != pane_id {
                     return None;
@@ -644,13 +666,9 @@ impl DesktopShell {
                 let PaneSurface::AuthHandoff { session_id, .. } = &p.surface else {
                     return None;
                 };
-                self.state
-                    .auth_sessions
-                    .iter()
-                    .find(|s| &s.session_id == session_id)
-                    .map(|s| (session_id.clone(), s.start_url.clone()))
-            });
-        let Some((sid, url)) = session_id_and_url else {
+                Some(session_id.clone())
+            })
+        }) else {
             cx.notify();
             return;
         };
@@ -662,21 +680,47 @@ impl DesktopShell {
         {
             s.status = AuthSessionStatus::OpenedInBrowser;
         }
-        // Swap the AuthHandoff pane for a Web pane navigated to the
-        // auth URL. navigate_to_url replaces the active pane's
-        // surface in-place; we then flip auth_flow on the new
-        // WebPane so the navigation handler stops handing OAuth
-        // provider redirects (Google/GitHub/Microsoft) to the
-        // system browser.
-        self.state.navigate_to_url(&url);
-        if let Some(task) = self.state.active_task_mut() {
-            if let Some(pane) = task.focused_pane_mut() {
-                if let PaneSurface::Web(web) = &mut pane.surface {
-                    web.auth_flow = true;
-                }
+
+        let ato_bin = match crate::orchestrator::resolve_ato_binary() {
+            Ok(path) => path,
+            Err(error) => {
+                self.state.push_activity(
+                    crate::state::ActivityTone::Error,
+                    format!("Could not locate ato binary for sign-in: {error}"),
+                );
+                cx.notify();
+                return;
+            }
+        };
+        // Spawn `ato login` non-blocking — the CLI prints a URL,
+        // opens the browser, and polls /v1/auth/bridge/poll. When
+        // it exits successfully the credential store on disk has the
+        // session token. We watch the child from a thread and forward
+        // the exit status back to the render loop via cli_login_rx;
+        // poll_cli_login() then drives complete_ato_login on success.
+        match std::process::Command::new(&ato_bin).arg("login").spawn() {
+            Ok(mut child) => {
+                self.state.push_activity(
+                    crate::state::ActivityTone::Info,
+                    "Started ato login. Complete sign-in in your browser.",
+                );
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.cli_login_rx = Some(rx);
+                std::thread::spawn(move || {
+                    let ok = child
+                        .wait()
+                        .map(|status| status.success())
+                        .unwrap_or(false);
+                    let _ = tx.send(ok);
+                });
+            }
+            Err(error) => {
+                self.state.push_activity(
+                    crate::state::ActivityTone::Error,
+                    format!("Failed to start ato login: {error}"),
+                );
             }
         }
-        self.webviews.sync_from_state(window, &mut self.state);
         self.sync_omnibar_with_state(window, cx, true);
         self.sync_focus_target(window, cx);
         cx.notify();
@@ -1065,6 +1109,7 @@ impl Render for DesktopShell {
         }
         self.sync_favicons(window, cx);
         self.poll_capsule_search();
+        self.poll_cli_login();
         self.sync_config_modal(window, cx);
         let omnibar_value = self.omnibar.read(cx).value().to_string();
         self.maybe_trigger_capsule_search(&omnibar_value);
