@@ -193,9 +193,18 @@ impl DesktopShell {
         let stage = compute_stage_bounds(&state, f32::from(size.width), f32::from(size.height));
         state.set_active_bounds(stage);
         webviews.sync_from_state(window, &mut state);
-        if webviews.wants_host_focus(&state) {
-            window.focus(&focus_handle, cx);
-        }
+        // Always start with the host focus_handle in the action
+        // dispatch chain so rail clicks (NewTab / SelectTask /
+        // CloseTask / MoveTask) reach DesktopShell on the very first
+        // click. Without this, the active WebView owns the macOS
+        // first responder and the inaugural button click is consumed
+        // just to transfer focus, not run its action — users see
+        // their first click do nothing, second click finally fire.
+        // sync_focus_target will re-route the responder to the
+        // active WebView the next time the user actually clicks
+        // inside it.
+        window.focus(&focus_handle, cx);
+        let _ = webviews.wants_host_focus(&state); // kept for side effects
 
         cx.subscribe_in(
             &omnibar,
