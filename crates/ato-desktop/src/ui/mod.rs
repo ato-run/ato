@@ -31,8 +31,8 @@ use crate::app::{
     NativeCopy, NativeCut, NativePaste, NativeRedo, NativeSelectAll, NativeUndo, NavigateToUrl,
     NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, OpenCloudDock, OpenLocalRegistry,
     OpenUrlBridge, PreviousTask, PreviousWorkspace, Quit, ResumeAfterAuth, SaveConfigForm,
-    SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SplitPane, ToggleAutoDevtools,
-    ToggleDevConsole, ToggleTheme,
+    SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SignOut, SplitPane,
+    ToggleAutoDevtools, ToggleDevConsole, ToggleTheme,
 };
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
@@ -698,6 +698,11 @@ impl DesktopShell {
         cx.notify();
     }
 
+    fn on_sign_out(&mut self, _: &SignOut, _window: &mut Window, cx: &mut Context<Self>) {
+        self.state.sign_out();
+        cx.notify();
+    }
+
     fn on_cancel_auth_handoff(
         &mut self,
         _: &CancelAuthHandoff,
@@ -1130,6 +1135,7 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_open_local_registry))
             .on_action(cx.listener(Self::on_open_cloud_dock))
             .on_action(cx.listener(Self::on_sign_in_to_ato_run))
+            .on_action(cx.listener(Self::on_sign_out))
             .on_action(cx.listener(Self::on_cancel_auth_handoff))
             .on_action(cx.listener(Self::on_resume_after_auth))
             .on_action(cx.listener(Self::on_allow_permission_once))

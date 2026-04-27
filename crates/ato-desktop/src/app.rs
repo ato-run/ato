@@ -46,6 +46,7 @@ actions!(
         OpenLocalRegistry,
         OpenCloudDock,
         SignInToAtoRun,
+        SignOut,
         OpenAuthInBrowser,
         CancelAuthHandoff,
         ResumeAfterAuth,
