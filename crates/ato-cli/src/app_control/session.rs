@@ -174,12 +174,32 @@ pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Re
     // here makes the desktop launch path a strict superset of the
     // CLI launch path — both materialize node_modules and the
     // production build before invoking run_command.
-    let lifecycle_reporter = Arc::new(reporters::CliReporter::new(false));
-    futures::executor::block_on(crate::commands::run::run_v03_lifecycle_steps(
-        &plan,
-        &lifecycle_reporter,
-        &launch_ctx,
-    ))?;
+    //
+    // In `--json` mode the caller (Desktop orchestrator) parses the
+    // session envelope from stdout, so anything the lifecycle prints
+    // — both the `reporter.notify` headers ("⚙️  Provision …") and
+    // the inherited subprocess stdout (`pnpm install` progress, the
+    // `next build` route table, etc.) — must NOT land on stdout or
+    // serde_json will choke on the leading non-JSON bytes. Use
+    // `CliReporter::new_run` so reporter output goes to stderr, and
+    // dup fd 1→fd 2 around the lifecycle call so the subprocess's
+    // inherited stdout follows.
+    let lifecycle_reporter = Arc::new(reporters::CliReporter::new_run(false));
+    let stdout_guard = if json {
+        Some(redirect_stdout_to_stderr().context("failed to redirect stdout for lifecycle")?)
+    } else {
+        None
+    };
+    let lifecycle_result = futures::executor::block_on(
+        crate::commands::run::run_v03_lifecycle_steps(&plan, &lifecycle_reporter, &launch_ctx),
+    );
+    if let Some(saved_fd) = stdout_guard {
+        // Restore stdout before propagating any error or printing the
+        // session envelope. We swallow restore failures because losing
+        // stdout entirely would mask the original lifecycle error.
+        let _ = restore_stdout(saved_fd);
+    }
+    lifecycle_result?;
     let guest = parse_guest_contract(
         &manifest_value,
         manifest_path.parent().unwrap_or_else(|| Path::new(".")),
@@ -1026,6 +1046,69 @@ fn print_session_info(info: &SessionInfo) {
     }
     println!("PID: {}", info.pid);
     println!("Log: {}", info.log_path);
+}
+
+/// Save the current stdout file descriptor and redirect fd 1 to
+/// fd 2 (stderr). Returns the saved descriptor so the caller can
+/// later restore it via `restore_stdout`. Used by `start_session`
+/// in JSON mode so any output the v0.3 lifecycle hooks produce —
+/// both `reporter.notify` lines and the subprocess `Stdio::inherit`
+/// output — lands on stderr instead of corrupting the session
+/// envelope on stdout.
+#[cfg(unix)]
+fn redirect_stdout_to_stderr() -> Result<i32> {
+    // SAFETY: dup/dup2 on standard FDs; failure paths return an
+    // error and we never hold the saved FD past `restore_stdout`.
+    unsafe {
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+        let saved = libc::dup(1);
+        if saved < 0 {
+            anyhow::bail!(
+                "dup(STDOUT_FILENO) failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        if libc::dup2(2, 1) < 0 {
+            let err = std::io::Error::last_os_error();
+            libc::close(saved);
+            anyhow::bail!("dup2(STDERR_FILENO, STDOUT_FILENO) failed: {err}");
+        }
+        Ok(saved)
+    }
+}
+
+#[cfg(unix)]
+fn restore_stdout(saved: i32) -> Result<()> {
+    // SAFETY: `saved` was returned from a successful `dup` in
+    // `redirect_stdout_to_stderr`; it is a valid FD that we own.
+    unsafe {
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+        let rc = libc::dup2(saved, 1);
+        libc::close(saved);
+        if rc < 0 {
+            anyhow::bail!(
+                "dup2(saved, STDOUT_FILENO) failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn redirect_stdout_to_stderr() -> Result<i32> {
+    // Windows path: skip the FD redirect for now. The desktop is
+    // currently macOS/Linux only, so this only matters for `ato app
+    // session start --json` invoked manually on Windows. The
+    // session envelope will be correct as long as the lifecycle
+    // doesn't emit non-JSON to stdout, which is fine for our test
+    // matrix; revisit with `SetStdHandle` if Windows desktop ships.
+    Ok(-1)
+}
+
+#[cfg(not(unix))]
+fn restore_stdout(_saved: i32) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
