@@ -203,6 +203,7 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) export_request: Option<ResolvedCliExportRequest>,
     pub(crate) state_bindings: Vec<String>,
     pub(crate) inject_bindings: Vec<String>,
+    pub(crate) build_policy: crate::application::build_materialization::BuildPolicy,
     pub(crate) reporter: Arc<CliReporter>,
     pub(crate) preview_mode: bool,
 }
@@ -560,6 +561,15 @@ pub(crate) struct RunPipelineState {
     pub(crate) derived_execution: Option<PreparedDerivedExecution>,
     pub(crate) compatibility_host_mode: Option<CompatibilityHostMode>,
     pub(crate) native_nacelle: Option<PathBuf>,
+    /// Build materialization observation captured during the Build phase.
+    /// Populated by `run_build_phase`; surfaces as `digest=` / `source=`
+    /// extras on PHASE-TIMING and feeds the policy decision.
+    pub(crate) build_observation:
+        Option<crate::application::build_materialization::BuildObservation>,
+    /// Outcome of the Build phase decision: which `result_kind` to emit on
+    /// PHASE-TIMING. None until run_build_phase populates it.
+    pub(crate) build_decision_kind:
+        Option<crate::application::build_materialization::BuildResultKind>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -941,6 +951,8 @@ where
         derived_execution: None,
         compatibility_host_mode: None,
         native_nacelle: None,
+        build_observation: None,
+        build_decision_kind: None,
     })
 }
 
@@ -1324,7 +1336,45 @@ pub(crate) async fn run_build_phase<P>(
 where
     P: ConsumerRunProgress,
 {
+    use crate::application::build_materialization as bm;
+
     progress.start(HourglassPhase::Build);
+
+    state.build_observation = bm::observe_for_plan(&state.decision.plan, &state.launch_ctx)
+        .ok()
+        .flatten();
+
+    let workspace_root = state.prepared.workspace_root.clone();
+
+    let decision = match state.build_observation.as_ref() {
+        Some(observation) => bm::decide(request.build_policy, observation, &workspace_root),
+        None => bm::BuildDecision {
+            action: bm::DecisionAction::Execute,
+            result_kind: bm::BuildResultKind::NotApplicable,
+        },
+    };
+
+    let action = decision.action.clone();
+    state.build_decision_kind = Some(decision.result_kind);
+
+    match action {
+        bm::DecisionAction::Skip => {
+            progress.ok(
+                HourglassPhase::Build,
+                "build materialization reused — executor skipped",
+            );
+            return Ok(state);
+        }
+        bm::DecisionAction::Fail => {
+            let detail = decision.result_kind.as_str().to_string();
+            anyhow::bail!(
+                "{}: {} (policy=no-build)",
+                crate::utils::error::ATO_ERR_MISSING_MATERIALIZATION,
+                detail
+            );
+        }
+        bm::DecisionAction::Execute => {}
+    }
 
     if let Err(error) = crate::commands::run::run_v03_lifecycle_steps(
         &state.decision.plan,
@@ -1356,6 +1406,11 @@ where
         state.decision = rerouted_decision;
         state.launch_ctx = rerouted_launch_ctx;
         state.prepared = rerouted_prepared;
+        // Refresh observation against the rerouted plan so the persisted
+        // record matches the executor that actually ran.
+        state.build_observation = bm::observe_for_plan(&state.decision.plan, &state.launch_ctx)
+            .ok()
+            .flatten();
         crate::commands::run::run_v03_lifecycle_steps(
             &state.decision.plan,
             &request.reporter,
@@ -1363,6 +1418,45 @@ where
         )
         .await?;
     }
+
+    // Build executor succeeded; persist the materialization record.
+    if let Some(observation) = state.build_observation.as_ref() {
+        let toolchain_fp = bm::toolchain_fingerprint_for_plan(&state.decision.plan);
+        let mut file = match bm::load_state(&workspace_root) {
+            bm::LoadOutcome::Loaded(f) => f,
+            bm::LoadOutcome::Missing | bm::LoadOutcome::Invalid(_) => {
+                bm::MaterializationFile::default()
+            }
+        };
+        bm::upsert_record(&mut file, bm::record_for(observation, &toolchain_fp));
+
+        // Heuristic recommendation: emit once per (digest, heuristic).
+        let heuristic_label = observation.source.heuristic_label();
+        if heuristic_label.is_some() && !request.reporter.is_json() {
+            let emitted = bm::maybe_record_recommendation(
+                &mut file,
+                &observation.input_digest,
+                heuristic_label.as_deref(),
+            );
+            if emitted {
+                eprintln!(
+                    "ATO-RECOMMEND build inputs were inferred for \"{}\" framework. \
+                     Declare [build] inputs/outputs in capsule.toml for stable \
+                     materialization. See: docs/rfcs/draft/BUILD_MATERIALIZATION.md",
+                    heuristic_label.as_deref().unwrap_or("(unknown)")
+                );
+            }
+        }
+
+        if let Err(err) = bm::save_state(&workspace_root, &file) {
+            eprintln!(
+                "ATO-WARN failed to persist build materialization state: {}",
+                err
+            );
+        }
+    }
+
+    state.build_decision_kind = Some(bm::BuildResultKind::Executed);
 
     progress.ok(HourglassPhase::Build, "build and lifecycle hooks completed");
 
@@ -1627,6 +1721,8 @@ where
         derived_execution,
         compatibility_host_mode,
         native_nacelle,
+        build_observation: _,
+        build_decision_kind: _,
     } = state;
 
     if decision.plan.is_orchestration_mode() {
@@ -2856,6 +2952,7 @@ url = "http://127.0.0.1:8787/health"
             export_request: None,
             state_bindings: Vec::new(),
             inject_bindings: Vec::new(),
+            build_policy: crate::application::build_materialization::BuildPolicy::IfStale,
             reporter: Arc::new(CliReporter::new(false)),
             preview_mode: false,
         }
