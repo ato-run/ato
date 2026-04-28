@@ -456,6 +456,40 @@ fn resolve_capsule(handle: &str) -> Result<ResolvePayload> {
     Ok(envelope.resolution)
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct LatestEnvelope {
+    #[serde(default)]
+    schema_version: Option<String>,
+    result: LatestResult,
+}
+
+impl capsule_wire::ccp::HasSchemaVersion for LatestEnvelope {
+    fn schema_version(&self) -> Option<&str> {
+        self.schema_version.as_deref()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct LatestResult {
+    /// Surfaced for diagnostics; the desktop currently does not key on it.
+    #[allow(dead_code)]
+    scoped_id: String,
+    /// `None` when the registry advertises the capsule but has no published
+    /// release yet — treat as "no update available" rather than an error.
+    latest_version: Option<String>,
+}
+
+/// Subprocess wrapper around `ato app latest <handle> --json`. Used by the
+/// background update-check worker spawned from `WebViewManager::sync_from_state`.
+/// Returns the registry's `latest_version` (if any) so the worker can compare
+/// against the running snapshot label and decide whether to surface an update
+/// banner.
+pub fn fetch_latest_capsule_version(handle: &str) -> Result<Option<String>> {
+    let envelope: LatestEnvelope = run_ato_json(&["app", "latest", handle, "--json"])?;
+    capsule_wire::ccp::enforce_ccp_compat(&envelope, "fetch_latest")?;
+    Ok(envelope.result.latest_version)
+}
+
 fn start_capsule(
     handle: &str,
     secrets: &[SecretEntry],

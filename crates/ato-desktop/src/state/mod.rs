@@ -155,6 +155,41 @@ pub enum UpdateCheck {
     },
 }
 
+/// Result of the per-capsule "is there a newer version on the registry?"
+/// background check. Populated by `WebViewManager` after a session launches
+/// (see `webview.rs::apply_launch_session_metadata`); consumed by the
+/// route-info popover to show an "Install update" banner when an upgrade is
+/// available. The check is keyed by `PaneId` on `AppState::capsule_updates`
+/// because two tabs can run different versions of the same capsule
+/// independently.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CapsuleUpdate {
+    /// No check has been kicked off (e.g. non-capsule pane, or session is
+    /// still resolving / launching). The popover renders nothing for this
+    /// variant — silent default.
+    Idle,
+    /// Worker thread is in flight. Popover stays silent so it does not
+    /// flicker for fast network round-trips.
+    Checking,
+    /// The currently-running version (`current`) matches the registry's
+    /// latest. Popover shows a calm "v{current} (latest)" subtitle.
+    UpToDate { current: String },
+    /// Registry has a newer version. `target_handle` is the canonical handle
+    /// with the new version pinned (e.g. `capsule://ato.run/foo/bar@1.2.3`)
+    /// so the install button can dispatch a single `NavigateToUrl` without
+    /// reconstructing the URL.
+    Available {
+        current: String,
+        latest: String,
+        target_handle: String,
+    },
+    /// The check itself errored — network down, registry unreachable, or
+    /// the snapshot/latest version strings could not be parsed as semver.
+    /// Surfaced muted in the popover; never escalates to an error toast
+    /// since this is purely advisory UX.
+    Failed { message: String },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WebSessionState {
     Detached,
@@ -775,6 +810,12 @@ pub struct AppState {
     /// the sidebar to render the tab icon. Cleared when the pane
     /// closes via `prune_panes`.
     pub pane_icons: HashMap<PaneId, String>,
+    /// Per-pane registry update check. Populated by the worker thread
+    /// kicked off in `webview.rs` after `apply_launch_session_metadata`
+    /// resolves; drained into `CapsuleUpdate::{UpToDate,Available,Failed}`
+    /// by `DesktopShell::poll_capsule_updates`. The route-info popover
+    /// reads this map to render the update banner.
+    pub capsule_updates: HashMap<PaneId, CapsuleUpdate>,
     pub pending_post_login_target: Option<PendingPostLoginTarget>,
     pub auth_sessions: Vec<AuthSession>,
     pub auth_policy_registry: AuthPolicyRegistry,
@@ -873,6 +914,7 @@ impl AppState {
             settings_panel_open: false,
             update_check: UpdateCheck::Idle,
             pane_icons: HashMap::new(),
+            capsule_updates: HashMap::new(),
             pending_post_login_target: None,
             auth_sessions: Vec::new(),
             auth_policy_registry: AuthPolicyRegistry::default_third_party(),
@@ -1052,6 +1094,7 @@ impl AppState {
             settings_panel_open: false,
             update_check: UpdateCheck::Idle,
             pane_icons: HashMap::new(),
+            capsule_updates: HashMap::new(),
             pending_post_login_target: None,
             auth_sessions: Vec::new(),
             auth_policy_registry: AuthPolicyRegistry::default_third_party(),
@@ -1357,6 +1400,7 @@ impl AppState {
         }
         for pane_id in &pane_ids {
             self.pane_icons.remove(pane_id);
+            self.capsule_updates.remove(pane_id);
         }
         pane_ids
     }
@@ -1407,6 +1451,7 @@ impl AppState {
         }
 
         if let Some(title) = selected_title {
+            self.settings_panel_open = false;
             self.sync_command_bar_with_active_route();
             self.push_activity(ActivityTone::Info, format!("Switched task to {title}"));
         }
@@ -3657,6 +3702,17 @@ mod tests {
 
         assert_eq!(state.active_task().expect("task").id, 3);
         assert_eq!(state.command_bar_text, "https://ato.run/");
+    }
+
+    #[test]
+    fn select_task_closes_settings_panel() {
+        let mut state = AppState::demo();
+        state.show_settings_panel();
+
+        state.select_task(3);
+
+        assert_eq!(state.active_task().expect("task").id, 3);
+        assert!(!state.settings_panel_open);
     }
 
     #[test]
