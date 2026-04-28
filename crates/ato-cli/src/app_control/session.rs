@@ -951,7 +951,7 @@ fn wait_for_http_ready(
             anyhow::bail!("process exited before readiness with status {status}");
         }
 
-        if http_get_ok(port, path)? {
+        if http_get_ok(port, path) {
             return Ok(());
         }
 
@@ -963,23 +963,42 @@ fn wait_for_http_ready(
     }
 }
 
-fn http_get_ok(port: u16, path: &str) -> Result<bool> {
-    let mut stream = match std::net::TcpStream::connect(("127.0.0.1", port)) {
-        Ok(stream) => stream,
-        Err(_) => return Ok(false),
+fn http_get_ok(port: u16, path: &str) -> bool {
+    // Treat any I/O hiccup (EAGAIN/ECONNRESET/timeout) as "not ready
+    // yet" so the caller keeps polling. The previous version
+    // propagated `?` errors out of the probe, which surfaced the
+    // first transient socket error (EAGAIN once the listener was
+    // bound but the accept queue hadn't drained yet) as a permanent
+    // "web runtime failed to become ready" — even when the child
+    // process printed "Ready" milliseconds earlier.
+    let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
+        return false;
     };
-    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(1)))?;
-    write!(
+    if stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .is_err()
+        || stream
+            .set_write_timeout(Some(Duration::from_secs(1)))
+            .is_err()
+    {
+        return false;
+    }
+    if write!(
         stream,
         "GET {} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
         path
-    )?;
-    stream.flush()?;
+    )
+    .is_err()
+        || stream.flush().is_err()
+    {
+        return false;
+    }
 
     let mut response = String::new();
-    stream.read_to_string(&mut response)?;
-    Ok(response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200"))
+    if stream.read_to_string(&mut response).is_err() {
+        return false;
+    }
+    response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200")
 }
 
 fn print_session_info(info: &SessionInfo) {
